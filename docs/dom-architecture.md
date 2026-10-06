@@ -689,8 +689,8 @@ absolutely positioned descendants' containing block whatever its computed
 position. For an element the UA rule reaches this agrees with the computed
 value. Without the rule, a top-layer element whose `display` computes to
 `contents` generates no box and does not render; with it, the fixup
-blockifies `contents` to the fork's internal block-flow display, which
-`display_mode` panics on (open). Not
+blockifies `contents` to `flex`, the `lynx` grammar's initial display, where
+a browser computes `block`. Not
 implemented: css-anchor-position-1's top-layer acceptability clause, close
 requests and focus, and rendering a top-layer element inside skipped
 contents (the skipping ancestor still hides it). A page with an empty top

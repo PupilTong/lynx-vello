@@ -66,9 +66,8 @@
 //! an element the UA rule reaches that only agrees with the computed value.
 //! Without the rule, a top-layer element whose `display` computes to
 //! `contents` generates no box and so does not render. With it, the fixup
-//! blockifies `contents` to the fork's internal block-flow display, which
-//! [`crate::layout::display_mode`] does not lower and panics on, as it does
-//! for that display anywhere.
+//! blockifies `contents` to `flex`, the `lynx` grammar's initial display,
+//! where a browser computes `block`.
 //!
 //! # Removal
 //!

@@ -1595,14 +1595,14 @@ consequential choice about whether to follow the spec or the quirk.
   - *`Canvas`/`CanvasText` are always the light-scheme values*
     (`rgb(255, 255, 255)`/`rgb(0, 0, 0)`): the engine's device has no dark
     scheme and `color-scheme` is not authorable under `lynx`.
-  - *A `display: contents` modal dialog panics the layout.* `dialog:modal`
-    declares `-servo-top-layer: auto`, so css-position-4 §3.1's fixups run
-    (a `position` other than `absolute`/`fixed` computes to `absolute`, as in
-    a browser), and the blockification of `contents` yields the fork's
-    internal block-flow display, which `dom`'s `display_mode` refuses with a
-    panic. Open; the ignored
-    `a_display_contents_modal_dialog_is_blockified_and_renders` in
-    `tree::dialog` is the acceptance test. An element `dom` puts in the top
+  - *A `display: contents` modal dialog computes to `flex`, not `block`.*
+    `dialog:modal` declares `-servo-top-layer: auto`, so css-position-4
+    §3.1's fixups run (a `position` other than `absolute`/`fixed` computes to
+    `absolute`, as in a browser), and the blockification of `contents` yields
+    `flex`, the `lynx` grammar's initial display, where a browser computes
+    `block`. The dialog renders as a `flex` box centred in the viewport
+    (`a_display_contents_modal_dialog_is_blockified_and_renders` in
+    `tree::dialog`). An element `dom` puts in the top
     layer without such a UA rule is not adjusted: membership alone places it
     against the viewport, and a `display: contents` one renders nothing.
   - *`returnValue` is dropped.* `close(returnValue)` and

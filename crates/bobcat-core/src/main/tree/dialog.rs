@@ -21,10 +21,9 @@
 //!   `flex` when it is off — in [`super::ua_sheet`]'s display line, so both lay out. It is not in
 //!   the container-defaults block (`border-box`, `position: relative`, `overflow: clip`, …): a
 //!   browser gives `<dialog>` HTML's defaults, and so does this sheet. An author `display:
-//!   contents` on a modal dialog is blockified by §3.1's fixup (below) to the fork's internal
-//!   block-flow display, which `dom` does not lower either: `dom::layout::style::display_mode`
-//!   panics on it. Which display it should lower to is open (the ignored
-//!   `a_display_contents_modal_dialog_is_blockified_and_renders`).
+//!   contents` on a modal dialog is blockified by §3.1's fixup (below) to `flex`, the `lynx`
+//!   grammar's initial display, where a browser computes `block`; the dialog then renders as a
+//!   `flex` box centred in the viewport.
 //! - **Closed is `display: none`.** `dialog:not([open])` as in HTML, plus `dialog[open="false"]`:
 //!   `open` is a boolean attribute, this engine's `__SetAttribute` stringifies `false`, and
 //!   web-core removes an attribute whose value is `"false"` before its CSS sees it (see
@@ -496,12 +495,10 @@ mod tests {
 
     /// An author `display: contents` on a modal dialog is blockified
     /// (css-position-4 §3.1), so the dialog still generates a box and renders
-    /// centred in the viewport.
+    /// centred in the viewport. Under `lynx` the fork's adjuster blockifies it
+    /// to `flex`, the grammar's initial display, where a browser computes
+    /// `block`.
     #[test]
-    #[ignore = "BLOCKED (ruling needed): under `lynx` Stylo's top-layer adjuster blockifies \
-                `contents` through `Display::equivalent_block_display` to the fork's internal \
-                block-flow display (raw 0x0202), which `dom::layout::style::display_mode` \
-                refuses with a panic"]
     fn a_display_contents_modal_dialog_is_blockified_and_renders() {
         let mut document = document();
         let dialog = child(
@@ -511,7 +508,8 @@ mod tests {
         );
         show_modal(&mut document, dialog).expect("a closed, connected dialog");
         document.layout();
-        assert_ne!(display(&document, dialog), Display::Contents);
+        assert_eq!(display(&document, dialog), Display::Flex);
+        // 101 + 2 × 10 + 2 × 3 = 127 across, 77 down, centred by the margins.
         assert_eq!(rect(&document, dialog), (133.0, 325.0, 127.0, 77.0));
     }
 

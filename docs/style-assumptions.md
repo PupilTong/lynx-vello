@@ -1706,11 +1706,12 @@ and §D.16 with what the wire format actually permits.)*
       an element the UA rule reaches this agrees with the computed value; for
       one no rule reaches (`dom` used directly) membership alone places it,
       and a `display: contents` one renders nothing. The UA rules keep HTML's
-      `position: fixed` on `dialog:modal` and `::backdrop`. Open: the
-      blockified display of a `display: contents` modal dialog is the fork's
-      internal block-flow display, which `dom`'s `display_mode` panics on
-      (the ignored `a_display_contents_modal_dialog_is_blockified_and_renders`
-      in `tree::dialog`).
+      `position: fixed` on `dialog:modal` and `::backdrop`. A `display:
+      contents` modal dialog is blockified to `flex`, the `lynx` grammar's
+      initial display, where a browser computes `block` (lynx fork
+      `7742fa5c5`), and renders as a `flex` box centred in the viewport
+      (`a_display_contents_modal_dialog_is_blockified_and_renders` in
+      `tree::dialog`).
     - **State.** "Open" is the `open` attribute, present and not `"false"`;
       the attribute callback is the one path that flips `:open`, and its
       removal (or `"false"`) also leaves the top layer and clears `:modal`,
