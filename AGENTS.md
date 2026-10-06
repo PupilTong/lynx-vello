@@ -1285,8 +1285,9 @@ every ReactLynx Snapshot constructor except `__CreateFrame`; all six tree
 mutations; the properties and queries a Snapshot's `create`/`update` functions
 write through and read back, among them `__SetInlineStyles` and the name-based
 `__AddInlineStyle`, with `__SetCSSId` accepted and ignored; the readback pair
-`__InvokeUIMethod`, whose UI methods are `boundingClientRect` and a pager's
-`selectTab`, and `__GetComputedStyleByKey`, neither of which commits anything
+`__InvokeUIMethod`, whose UI methods are `boundingClientRect`, a pager's
+`selectTab` and a dialog's `show`/`showModal`/`close`/`requestClose`, and
+`__GetComputedStyleByKey`, neither of which commits anything
 — both read the last completed pass and leave the decision to flush to the
 caller; the event
 registration and propagation members, `__AddEvent` and `__AddEventListener`
@@ -1447,7 +1448,18 @@ coordinator a vertical scroll container, the header and slot absolutely
 positioned with the slot placed and sized by `anchor-size()` of the header and
 the toolbar, a sticky toolbar, `scroll-capture-y: nearest forward` inside the
 slot for the fold order, and the structure pinned in the cascade; no
-component, no UI method), and `tree::blur_view` (`blur-radius` reflected into a
+component, no UI method), `tree::dialog` (HTML's `<dialog>` on `dom`'s top
+layer: HTML's UA rules adapted — the display `defaultDisplayLinear` picks,
+`white`/`black` for the system colours the `lynx` build cannot parse,
+`overflow: scroll` and `top`/`bottom` on `:modal`, `::backdrop` with
+`display: flex` — a component with no per-element state whose `open`
+attribute callback is the one path that flips `:open` and, on removal or
+`"false"`, leaves the top layer; "modal" is `Document::blocks_document`; the
+four HTML methods as UI methods the runtime dispatches by tag name, an
+`InvalidStateError` answering web-core's code 4; non-bubbling `close` and
+`cancel` on the shared `ComponentEvents` queue `tree/lib.rs` defines, which
+also carries an image's `load`/`error` and which the page's epilogue posts
+once per batch), and `tree::blur_view` (`blur-radius` reflected into a
 `backdrop-filter: blur()` presentational hint, under both the native tag
 `blur-view` and web-core's `x-blur-view`, as a CSS length rather than
 web-core's `parseFloat` — the one tag module with no UA rules of its own,
@@ -1457,8 +1469,8 @@ they cascade in, and `PageConfig`; `tree/lib.rs` only mints the document they
 describe. Attribute policy stays in each tag's module. Numeric text and list
 attributes use UA `attr()` declarations and registered custom properties;
 `tail-color-convert` uses an attribute selector. Only image resources, blur
-hints, the swiper's item count and the refresh view's slot assignment need
-`dom::CustomElement` callbacks. Runtime attribute members perform
+hints, the swiper's item count, the refresh view's slot assignment and the
+dialog's `:open`/`:modal` state need `dom::CustomElement` callbacks. Runtime attribute members perform
 DOM mutations; Stylo tracks attribute dependencies and recascades on changes.
 The UA assembly order is mostly documentation, with one exception that is
 mechanism: `image`'s child suppression ties on specificity with the `display`
@@ -2067,8 +2079,9 @@ over the existing Worker messages; MTS resolves those through the document's
 selector engine, including the query root, and returns fields/path data, while
 `setNativeProps` applies CSS/attributes and commits before the next request.
 `invoke` answers `boundingClientRect` — the last layout pass's border box,
-plus the element's `id` and `dataset` as native reports them — and a pager's
-`selectTab`, and fails every other method with code 3, `METHOD_NOT_FOUND`,
+plus the element's `id` and `dataset` as native reports them — a pager's
+`selectTab` and a dialog's four methods, and fails every other method with
+code 3, `METHOD_NOT_FOUND`,
 alongside the selection failures it already delivered. No callback or document handle crosses into
 Rust's Worker transport. See `docs/node-query-runtime.md` for the supported
 fields, callback semantics and remaining boundaries.
@@ -2486,8 +2499,9 @@ would host it:
 - **The rest of the `<image>` element surface.** `src` loads; `mode`,
   `auto-size`, `placeholder` racing, `cap-insets`, `blur-radius` and the
   `load`/`error` events do not.
-- **UI methods other than `boundingClientRect` and `selectTab`.** Those two
-  dispatch by name (`selectTab` on the two pager tags only) through
+- **UI methods other than `boundingClientRect`, `selectTab` and a dialog's
+  `show`/`showModal`/`close`/`requestClose`.** Those dispatch by name
+  (`selectTab` on the two pager tags only, the dialog's on `dialog` only) through
   `__InvokeUIMethod`; every other name — `scrollIntoView`, `getScrollInfo`,
   `requestUIInfo`, `takeScreenshot` and the rest of the per-component catalog
   — answers code 3, `METHOD_NOT_FOUND`. The rect itself ignores transforms and

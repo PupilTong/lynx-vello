@@ -142,11 +142,13 @@ consequential choice about whether to follow the spec or the quirk.
   - **No transforms in anchor geometry.** The anchor box is the layout box
     (relative offsets included), not the bounding box of its transformed
     border box.
-  - **No implicit anchor elements, no top layer.** `position-anchor: auto`
-    finds nothing; `normal` behaves as `none` (as `auto`, so again nothing,
-    under a `position-area`). Every box is in one layer, so the top-layer
-    clauses of §2.3 never apply; popover, dialog and `::backdrop` anchoring
-    do not exist.
+  - **No implicit anchor elements; no top-layer clauses.** `position-anchor:
+    auto` finds nothing; `normal` behaves as `none` (as `auto`, so again
+    nothing, under a `position-area`). The top layer exists
+    ([style-assumptions.md](../style-assumptions.md) §29), but the
+    top-layer clauses of §2.3 are not implemented: every box is treated as
+    in one layer, and popover, dialog and `::backdrop` anchoring do not
+    exist.
   - **Flat tree order, and one initial containing block.** "Tree order" in
     the target lookup is the flat tree's, and the initial containing block
     is the viewport's containing block, so a `fixed` box may anchor to
@@ -1559,6 +1561,45 @@ consequential choice about whether to follow the spec or the quirk.
     only the containing block's own children
     ([style-assumptions.md](../style-assumptions.md) §28), so the outer
     header is never a candidate.
+
+- **`<dialog>` and the top layer (2026-10-07)** — W3C (bucket 1): web-core
+  hands `<dialog>` to the browser, and native Lynx has neither a dialog nor a
+  top layer. Implemented in `dom` (the layer, `::backdrop`, inertness) and
+  `bobcat-core`'s `tree::dialog`
+  ([style-assumptions.md](../style-assumptions.md) §29). What a page can
+  observe differently from a browser:
+  - *Leaving the top layer is immediate.* There is no `overlay` property and
+    so no pending removal a transition could observe.
+  - *No close requests.* Escape and the back gesture do not reach a dialog,
+    `closedby` is not parsed, and there is no light dismiss.
+  - *`cancel` is not cancelable.* There is no `preventDefault` in this
+    engine's event model, so `requestClose()` always fires `cancel` and then
+    `close`, and always closes.
+  - *A top-layer element inside skipped contents stays hidden.* Under a
+    `content-visibility: hidden` (or non-relevant `auto`) ancestor it is not
+    rendered, where css-position-4 renders it.
+  - *`dialog:modal` scrolls with `overflow: scroll`*, not HTML's
+    `overflow: auto`, which this engine deliberately lacks, and is placed by
+    `top: 0; bottom: 0` for HTML's `inset-block: 0`, which the fork disables.
+  - *`Canvas`/`CanvasText` are written as `white`/`black`*: the fork's
+    `lynx` build parses no system colour; these are the light-scheme values.
+  - *Membership stands in for css-position-4 §3.1's computed-value fixups.*
+    The fork cannot declare `-servo-top-layer`, so a top-layer element's
+    computed `position` stays the author's (a browser computes a value other
+    than `absolute`/`fixed` to `absolute`; where it renders is the same),
+    and a `display: contents` top-layer element is not blockified and
+    renders nothing.
+  - *`returnValue` is dropped.* `close(returnValue)` and
+    `requestClose(returnValue)` accept and ignore it; Lynx JS has no reader.
+  - *`InvalidStateError` is `invoke` code 4.* `show()` on a modal dialog and
+    `showModal()` on an open non-modal or a disconnected one answer
+    `PARAM_INVALID` (4), which is what web-core reports for any method that
+    throws (`createInvokeUIMethod.ts:12-44`). Native's table has a distinct
+    `7 INVALID_STATE_ERROR` (`lynx_get_ui_result.h:53-61`) but no dialog to
+    raise it; web-core is followed by default.
+  - *No toggle events, no focus.* `beforetoggle`/`toggle`, the focusing
+    steps and `autofocus` are absent, and `::backdrop` itself does not
+    animate.
 
 ## JS runtime & APIs (see [js-runtime.md](js-runtime.md), [accessibility.md](accessibility.md))
 

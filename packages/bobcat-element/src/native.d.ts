@@ -62,7 +62,8 @@ interface BobcatNative {
    * none — and answers either a status code or the method's data as text:
    *
    * - `3` (`METHOD_NOT_FOUND`): the element has no method of that name.
-   * - `4` (`PARAM_INVALID`): the method refused `params`, and did nothing.
+   * - `4` (`PARAM_INVALID`): the method refused `params`, or the element's
+   *   state (a dialog's `InvalidStateError`), and did nothing.
    * - `0` (`SUCCESS`): the method ran and has no data to answer.
    * - a string: the method ran, and this is its data. Only
    *   `boundingClientRect` has any: `"<left>,<top>,<width>,<height>"` — the
@@ -75,6 +76,10 @@ interface BobcatNative {
    * `x-viewpager-ng` only: it scrolls the pager to `index` times its
    * scrollport width, clamped to the range, smoothly unless `smooth` is
    * falsy.
+   *
+   * `show`, `showModal`, `close` and `requestClose` exist on `dialog` only:
+   * HTML's `HTMLDialogElement` methods, `params` unread. `close` and
+   * `requestClose` queue their events for an entry of their own.
    *
    * Runs no style, layout or paint: it reads the last completed pass, and
    * user code decides when to flush.
