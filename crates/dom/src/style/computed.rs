@@ -14,12 +14,15 @@
 //! table. The fork compiles a set of non-authorable longhands
 //! (`LYNX_INTERNAL_LONGHANDS` in `properties/data.py` — `writing-mode`,
 //! `float`, `mix-blend-mode`, `rotate`, `zoom`, `column-count`, …) that the
-//! cascade needs as storage but that never enter the author-facing name map.
-//! They pass [`NonCustomPropertyId`]'s `enabled_for_all_content` check and have
-//! a `name()`, so enumeration has to filter them back out by asking the author
-//! parser whether it would accept the name — which is what
-//! [`PropertyId::parse_enabled_for_all_content`] answers, and why the
-//! enumeration below round-trips every name through it.
+//! cascade needs as storage but that never enter the name map. One more,
+//! `-servo-top-layer` (`LYNX_UA_LONGHANDS`), is in the name map but parses
+//! only in a UA-origin sheet (`enabled_in = "ua"`). All of them have a
+//! `name()`, and the internal ones pass [`NonCustomPropertyId`]'s
+//! `enabled_for_all_content` check, so enumeration has to filter them back
+//! out by asking the author parser whether it would accept the name — which
+//! is what [`PropertyId::parse_enabled_for_all_content`] answers (it refuses
+//! both kinds), and why the enumeration below round-trips every name through
+//! it.
 //!
 //! Logical longhands (`margin-inline-start` and friends) stay in the
 //! enumeration under their logical names; stylo physicalizes them against the
@@ -185,7 +188,8 @@ impl<T> Document<T> {
                 let name = longhand.name();
                 // The author parser is the authority on what is author-facing:
                 // the fork's internal longhands have a name here but no entry
-                // in the name map.
+                // in the name map, and its UA-only one parses at UA origin
+                // alone.
                 PropertyId::parse_enabled_for_all_content(name).is_ok()
             })
             .map(|longhand| {
@@ -347,7 +351,8 @@ mod tests {
     }
 
     /// The fork's internal longhands pass `enabled_for_all_content` and have a
-    /// `name()`, but no author can write them; enumeration has to drop them.
+    /// `name()`, but no author can write them; enumeration has to drop them,
+    /// and the UA-only `-servo-top-layer` with them.
     #[test]
     fn enumeration_lists_author_facing_longhands_in_code_point_order() {
         let mut doc = Doc::new();
@@ -367,6 +372,7 @@ mod tests {
             "translate",
             "zoom",
             "column-count",
+            "-servo-top-layer",
         ] {
             assert!(
                 !listed.contains(&internal),

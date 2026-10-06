@@ -141,9 +141,14 @@ pub(crate) fn establishes_absolute_containing_block<T>(
     *style.get_box().get_position() != PositionProperty::Static
         // css-position-4 §3.1 computes a top-layer element's position to
         // `absolute` when it is neither `absolute` nor `fixed`. Stylo's
-        // adjuster would, but the fork's `lynx` build cannot parse the
-        // `-servo-top-layer` longhand that switches it on, so membership
-        // stands in for the computed value here (`tree::top_layer`).
+        // adjuster does so only for a style whose `-servo-top-layer` is
+        // `auto`, which a UA rule has to declare: the embedder's UA sheet
+        // does for the elements it puts in the layer (bobcat-core's
+        // `dialog:modal` and `::backdrop`), and for those the position test
+        // above already answers. The layer itself is generic — membership is
+        // the embedder's call and needs no matching rule — so membership
+        // stays the truth here for an element no such rule reaches
+        // (`tree::top_layer`).
         || node.arenas().top_layer().places_against_viewport(node.id())
         || style
             .get_box()

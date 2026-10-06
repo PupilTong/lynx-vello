@@ -54,15 +54,21 @@
 //! Stylo applies them (`StyleAdjuster::adjust_for_top_layer`: a position
 //! other than `absolute`/`fixed` computes to `absolute`, `display: contents`
 //! to its block equivalent) to a style whose `-servo-top-layer` is `auto`.
-//! The fork's `lynx` build compiles that longhand as storage but leaves it
-//! out of the property-name table (`LYNX_INTERNAL_LONGHANDS`), so no sheet,
-//! the UA sheet included, can declare it, and the fixups never run. What
-//! they would decide is taken from membership instead where this crate
-//! reads it: the position lowering answers `fixed`, and a top-layer
-//! element establishes the containing block of its absolutely positioned
-//! descendants whatever its computed position. A top-layer element whose
-//! `display` computes to `contents` generates no box and so does not render
-//! (a browser would blockify it).
+//! The fork's `lynx` build admits that longhand in a UA-origin sheet only
+//! (`LYNX_UA_LONGHANDS` in `properties/data.py`), so the fixups run for an
+//! element exactly when an embedder UA rule declares it — bobcat-core's
+//! `dialog:modal` and `::backdrop` do. Membership is not derived from that
+//! declaration and does not require it: the embedder decides what enters the
+//! layer, and an element can be in it with no such rule. So membership stays
+//! this crate's truth where it reads it — the position lowering answers
+//! `fixed`, and a top-layer element establishes the containing block of its
+//! absolutely positioned descendants whatever its computed position — and for
+//! an element the UA rule reaches that only agrees with the computed value.
+//! Without the rule, a top-layer element whose `display` computes to
+//! `contents` generates no box and so does not render. With it, the fixup
+//! blockifies `contents` to the fork's internal block-flow display, which
+//! [`crate::layout::display_mode`] does not lower and panics on, as it does
+//! for that display anywhere.
 //!
 //! # Removal
 //!

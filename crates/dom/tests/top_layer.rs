@@ -1,7 +1,8 @@
 //! The style half of the top layer (css-position-4 §3, `dom::tree::top_layer`)
 //! seen through the public API: `:modal` / `:open`, §3.1's computed-value
-//! fixups (which the fork cannot switch on, so membership stands in for
-//! them), and the displays a top-layer box lowers to.
+//! fixups (which run where a UA rule declares `-servo-top-layer`, and for
+//! which membership stands in where none does), and the displays a
+//! top-layer box lowers to.
 //!
 //! The `::backdrop` style itself is never handed out, so its cascade is
 //! tested beside it (`crates/dom/src/tree/top_layer.rs`); its geometry and
@@ -60,15 +61,12 @@ fn modal_and_open_match_their_state_bits_and_restyle_on_change() {
     assert_eq!(doc.value(dialog, "height"), "auto");
 }
 
-/// `-servo-top-layer: auto` is meant to be UA-only and to make Stylo's
-/// adjuster compute a top-layer element's `relative` position to `absolute`
-/// (css-position-4 §3.1). The fork's `lynx` build keeps the longhand out of
-/// its property-name table, so even a UA sheet's declaration is dropped.
+/// `-servo-top-layer: auto` is UA-only and makes Stylo's adjuster compute a
+/// top-layer element's `relative` position to `absolute` (css-position-4
+/// §3.1). The fork's `lynx` build admits the longhand in a UA-origin sheet
+/// (`LYNX_UA_LONGHANDS` in `vendor/stylo/style/properties/data.py`), which is
+/// the origin `add_ua_css` parses at; an author sheet still drops it.
 #[test]
-#[ignore = "BLOCKED (stylo fork): `-servo-top-layer` is in LYNX_INTERNAL_LONGHANDS \
-            (vendor/stylo/style/properties/data.py) — compiled, but absent from the \
-            property-name table, so no sheet can declare it and \
-            StyleAdjuster::adjust_for_top_layer never runs"]
 fn the_ua_top_layer_longhand_computes_a_relative_position_to_absolute() {
     let mut doc = page("dialog { position: relative; }");
     doc.add_ua_css("dialog.modal { -servo-top-layer: auto; }");
@@ -78,10 +76,12 @@ fn the_ua_top_layer_longhand_computes_a_relative_position_to_absolute() {
     assert_eq!(doc.value(dialog, "position"), "absolute");
 }
 
-/// What membership stands in for while the fixup cannot run: a top-layer
-/// element whose position computes to `relative` (or `static`) is still
-/// placed against the viewport and still generates the containing block of
-/// its absolutely positioned descendants, as a computed `absolute` would.
+/// What membership stands in for where no UA rule declares
+/// `-servo-top-layer` for an element in the layer, so the fixup does not
+/// run: a top-layer element whose position computes to `relative` (or
+/// `static`) is still placed against the viewport and still generates the
+/// containing block of its absolutely positioned descendants, as a computed
+/// `absolute` would.
 #[test]
 fn membership_stands_in_for_the_position_fixup() {
     let mut doc = page(
@@ -112,8 +112,9 @@ fn membership_stands_in_for_the_position_fixup() {
 
 /// `display_mode` panics on a display this engine does not lay out, so
 /// every box the top layer creates must compute to one it does. A
-/// `display: contents` top-layer element is not blockified (the fixup
-/// cannot run): it generates no box and renders nothing, without a panic.
+/// `display: contents` top-layer element no UA rule gives
+/// `-servo-top-layer` is not blockified (the fixup does not run): it
+/// generates no box and renders nothing, without a panic.
 #[test]
 fn top_layer_boxes_compute_to_displays_the_engine_lays_out() {
     let mut doc = page(".contents { display: contents; }");
