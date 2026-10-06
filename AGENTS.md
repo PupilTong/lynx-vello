@@ -329,8 +329,9 @@ the MTS realm made, or its release). The fence counts every command but that
 last one. The seat's `CommandSender` counts what it sends, on the embedder's
 thread; a `ModuleCallback` is sent from whichever thread drops the module's
 callback, through the weak sender `CommandSender::uncounted` hands out, so
-neither the painter's count of commands sent nor the page's count of commands
-applied (`Page::apply`) includes it, and no frame post waits for one. The
+neither the seat's count of commands sent (`CommandSender::sent`, which the
+painter reads at a frame post) nor the page's count of commands applied
+(`Page::apply`) includes it, and no frame post waits for one. The
 painter's device metrics are **not** a command: they ride a
 `watch<Option<Viewport>>` on the view's seat, `None` until a painter attaches,
 because an unbound `__FlushElementTree` parks the job it runs in on that very

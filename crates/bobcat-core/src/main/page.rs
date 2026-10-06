@@ -59,11 +59,14 @@
 //! acknowledgement. A [`ToMain::Posted`] marker in a burst adopts the
 //! painter's scroll offsets where it stands, and the frame the painter
 //! posted is applied once, after the last command of the first burst that
-//! has applied every command sent before the post (its
+//! has applied every command the seat's
+//! [`CommandSender`](crate::link::CommandSender) sent before the post (its
 //! [`FramePost::fence`]), so the events a painter pass dispatched and the
-//! host's own updates run before the frame an acknowledgement implies. Module completions,
-//! timer wakes and a sibling's checkpoint are independent tasks and may queue
-//! an entry between any two bursts.
+//! host's own updates run before the frame an acknowledgement implies. A
+//! [`ToMain::ModuleCallback`] is not sent through that sender, and neither
+//! the sender nor this page counts it, so a frame post does not wait for one
+//! sent before it. Module completions, timer wakes and a sibling's checkpoint
+//! are independent tasks and may queue an entry between any two bursts.
 //!
 //! # The end
 //!
@@ -649,10 +652,10 @@ impl Page {
             }
             page.applied.set(page.applied.get() + count);
             // Once, after the last command of a burst that reached the
-            // post's fence: every command sent before the post has run, so
-            // the events a pass dispatched and the host's updates are in
-            // the frame the acknowledgement implies, and an animation a
-            // listener armed starts on that frame.
+            // post's fence: every command `CommandSender` sent before the
+            // post has run, so the events a pass dispatched and the host's
+            // updates are in the frame the acknowledgement implies, and an
+            // animation a listener armed starts on that frame.
             if let Some(frame) = page.frame_due.get()
                 && frame.fence <= page.applied.get()
                 && !page.ended()

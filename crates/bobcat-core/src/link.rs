@@ -395,10 +395,13 @@ pub(crate) struct ScrollEntry {
 pub(crate) struct FramePost {
     pub(crate) now: f64,
     pub(crate) seq: u64,
-    /// How many commands were sent before the post ([`CommandSender::sent`]).
-    /// Main applies the frame only once it has applied that many, so the
-    /// acknowledgement implies every command sent ahead of it — even when
-    /// the marker that carries the post is older than some of them.
+    /// How many commands the seat's [`CommandSender`] had sent before the
+    /// post ([`CommandSender::sent`]). Main applies the frame only once it
+    /// has applied that many, so the acknowledgement implies every command
+    /// that sender sent ahead of it — even when the marker that carries the
+    /// post is older than some of them. A [`ToMain::ModuleCallback`] is in
+    /// neither count, so the acknowledgement does not imply one sent ahead
+    /// of the post.
     pub(crate) fence: u64,
 }
 

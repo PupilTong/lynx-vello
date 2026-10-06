@@ -1651,8 +1651,12 @@ painter has one — a host with no display to pace against posts a frame and
 waits out that post's acknowledgement, with a deadline, and ends early if the
 view's task has gone. A post that sends no marker, because one is already
 queued, still answers its own sequence number, and its fence holds it back
-until main has applied every command sent before it, so the acknowledgement
-the wait takes implies them and the wait is deterministic.
+until main has applied every command the seat's `CommandSender` sent before
+it, so the acknowledgement the wait takes implies them and the wait is
+deterministic. A native module's answer to the MTS realm
+(`ToMain::ModuleCallback`) is not sent through that sender, and the
+acknowledgement does not imply one sent before the post ("Ordering
+guarantees" below).
 
 ## Scroll composes; main adopts at the marker
 
@@ -1829,16 +1833,22 @@ without the marker.
   pass dispatched, and a `PageUpdate` or image report the host sent first,
   run before that frame, and an animation a listener starts begins on it,
   even when main collected the marker in an earlier burst than those
-  commands. A `ToMain::ModuleCallback` is outside the fence on both sides:
-  the painter's count (`CommandSender::sent`) never includes one, because a
-  native module's answer is sent through a weak handle that does not count,
-  and `Page::apply` leaves one out of the count of applied commands. So an
-  answer applied before a post does not make main apply that post's frame
-  one command early, and a frame post never waits for an answer.
+  commands. A `ToMain::ModuleCallback` is in neither count: the seat's count
+  of commands sent (`CommandSender::sent`), which the painter reads at a
+  post, never includes one, because a native module's answer is sent through
+  a weak handle that does not count, and `Page::apply` leaves one out of the
+  count of applied commands. So an answer applied before a post does not make
+  main apply that post's frame one command early, and a frame post never
+  waits for an answer.
 - The offscreen `tick` stays deterministic: post, mark, wait for
-  `begin_frame_serviced(seq)`, which the fence makes imply every command sent
-  before the tick. `tick` delivers its `Vsync` before its frame post, as it
-  always has, so its rAF callbacks run before that post's frame work.
+  `begin_frame_serviced(seq)`, which the fence makes imply every command the
+  seat's `CommandSender` sent before the tick. A native module's answer to
+  the MTS realm sent before the tick is not one of them. When the post sends
+  no marker, because one is queued, the burst that takes the post and
+  reaches its fence can be one main collected before the answer was sent;
+  main then acknowledges the post at the end of that burst and applies the
+  answer in a later one. `tick` delivers its `Vsync` before its frame post,
+  as it always has, so its rAF callbacks run before that post's frame work.
 - Reattaching a painter (unchanged): a new painter shows the committed
   `slot.offset`, which can be behind the document when an adoption inside the
   window never committed.

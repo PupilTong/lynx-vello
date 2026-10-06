@@ -1096,11 +1096,13 @@ fn a_frame_post_waits_for_the_commands_sent_before_it() {
     });
 }
 
-/// A native module's answer to the MTS realm is the one command outside the
-/// fence count: its sender does not count it, so main does not either. The
-/// burst that holds one applies it, which runs the function the realm kept
-/// for the answer, and a frame post made afterwards still waits for exactly
-/// the commands sent before it, as in
+/// A native module's answer to the MTS realm is the one command in neither
+/// count: its sender does not count it, which
+/// `an_answer_to_the_main_thread_is_sent_outside_the_command_count` pins
+/// beside `ModuleReply`, so main does not either. The burst that holds one
+/// applies it, which runs the function the realm kept for the answer, and a
+/// frame post made afterwards still waits for exactly the counted commands
+/// sent before it, as in
 /// [`a_frame_post_waits_for_the_commands_sent_before_it`]. Counting the
 /// answer here would apply that frame one command early, ahead of the tap.
 #[test]

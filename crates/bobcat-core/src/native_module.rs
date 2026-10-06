@@ -433,6 +433,7 @@ pub(crate) fn encode_table(modules: &NativeModuleTable) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::link::{CommandSender, FrameDemand};
 
     #[test]
     fn a_module_with_no_methods_still_writes_both_of_its_fields() {
@@ -528,6 +529,67 @@ mod tests {
         assert!(
             live.is_cancelled(),
             "the view's task dropped the receiving end"
+        );
+    }
+
+    /// The sending half of the rule [`CommandSender`] documents: the handle
+    /// [`FrameDemand::reply`] picks for a call the MTS realm made sends an
+    /// answer, invoked or released, into the view's command channel without
+    /// counting it, so [`CommandSender::sent`], which a frame post takes its
+    /// fence from, does not change. The receiving half is `Page::apply`, which
+    /// leaves the same command out of its count of applied commands
+    /// (`a_frame_post_behind_a_module_callback_still_waits_for_the_commands_sent_before_it`
+    /// in the page's tests).
+    ///
+    /// A sender that counted an answer would stay one above the page's count
+    /// for each one, and a frame post taken at a marker queued before it
+    /// would not be applied until that many more counted commands arrived.
+    #[test]
+    fn an_answer_to_the_main_thread_is_sent_outside_the_command_count() {
+        let (commands, mut incoming) = mpsc::unbounded_channel();
+        let sender = CommandSender::new(commands);
+        let reply = FrameDemand::default()
+            .reply(None, &sender)
+            .expect("a call the MTS realm made always has a reply handle");
+        let call = ModuleCall::assemble(
+            5,
+            "ping".to_owned(),
+            "[null,null]".to_owned(),
+            &[0, 1],
+            &reply,
+        );
+        let [invoked, released] =
+            <[_; 2]>::try_from(call.callbacks).expect("two function arguments");
+        invoked.invoke("[]".to_owned());
+        drop(released);
+        let answers: Vec<_> = std::iter::from_fn(|| incoming.try_recv().ok())
+            .map(|command| match command {
+                ToMain::ModuleCallback {
+                    call,
+                    index,
+                    arguments,
+                } => (call, index, arguments),
+                _ => panic!("a module callback is the only command here"),
+            })
+            .collect();
+        assert_eq!(
+            answers,
+            [(5, 0, Some("[]".to_owned())), (5, 1, None)],
+            "both answers went into the view's command channel"
+        );
+        assert_eq!(
+            sender.sent(),
+            0,
+            "neither answer is in the count a frame post takes its fence from"
+        );
+
+        sender
+            .send(ToMain::Posted)
+            .expect("the receiving end is held");
+        assert_eq!(
+            sender.sent(),
+            1,
+            "a command sent through the sender itself is counted"
         );
     }
 }
