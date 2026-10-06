@@ -877,6 +877,186 @@ fn a_fling_into_a_plain_edge_stops_there() {
     assert!(!engine.is_animating(), "spent against the wall");
 }
 
+/// A [`snapping_page`] whose scroller is `overscroll-behavior: circular`:
+/// five 200px cards in a 200px scrollport, so `max_offset` 800 and a
+/// period of 1000 — the last card's end meets the first card's start.
+const CIRCULAR_PERIOD: f32 = 1000.0;
+
+/// Where the painter shows `node` on a circular y axis, normalized into
+/// the period: its raw live offset may stand anywhere until the next
+/// rebase brings it back.
+fn wrapped_y(engine: &mut TestEngine, node: u64) -> f32 {
+    live_offset(engine, node).y.rem_euclid(CIRCULAR_PERIOD)
+}
+
+/// Runs display frames from `at` until nothing animates, and answers the
+/// clock reading it came to rest at.
+fn frames_until_still(engine: &mut TestEngine, mut at: f64) -> f64 {
+    let deadline = at + 10.0;
+    while engine.is_animating() {
+        at += 1.0 / 60.0;
+        assert!(at < deadline, "never came to rest");
+        frame_at(engine, at);
+    }
+    at
+}
+
+/// `overscroll-behavior: circular` with `mandatory` snapping: a gentle
+/// flick forward from the last card (800) pages on to the first card's
+/// next copy, 1000, rather than stopping at the end. The flick is 10px of
+/// finger travel per 20ms after the 8px slop — 812 at the release, a
+/// release velocity of 0.5 px/ms whose whole fling travels
+/// `−0.5/ln 0.998` ≈ 250px — so its predicted end, ≈ 1062, is nearest
+/// the periodic position 1000, 188px away: inside one scrollport, so a
+/// glide. Once posted, the document adopts 1000 modulo the period: 0.
+#[test]
+fn a_flick_forward_from_the_last_page_wraps_to_the_first() {
+    let mut engine = booted(&snapping_page(
+        "overscroll-behavior:circular; scroll-snap-type:y mandatory",
+        "scroll-snap-align:start",
+        200,
+        0,
+    ));
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 100.0),
+        dom::Vector2D::new(0.0, 800.0),
+    ));
+    assert_intent(&engine, 3, 800.0);
+    touch_at(&mut engine, 0.0, PointerPhase::Down, 150.0);
+    touch_at(&mut engine, 0.02, PointerPhase::Move, 140.0);
+    touch_at(&mut engine, 0.04, PointerPhase::Move, 130.0);
+    touch_at(&mut engine, 0.04, PointerPhase::Up, 130.0);
+    assert!(
+        (wrapped_y(&mut engine, 3) - 812.0).abs() < 0.5,
+        "released at 812, got {}",
+        wrapped_y(&mut engine, 3)
+    );
+    assert!(engine.is_animating(), "the glide owes frames");
+    let at = frames_until_still(&mut engine, 0.04);
+    let landed = live_offset(&mut engine, 3).y;
+    assert!(
+        landed.rem_euclid(CIRCULAR_PERIOD).abs() < f32::EPSILON,
+        "on the first card's next copy, got {landed}"
+    );
+    engine.painter.publish_scroll(at, None);
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::zero(),
+        "the document adopts the first card"
+    );
+}
+
+/// The other way round: a drag back from the first card (finger moving
+/// down) shows the last card's end above the seam, and the document —
+/// which never wraps — holds `max_offset` meanwhile (the user's ruling,
+/// as for a `contain-bounce` stretch). 150px of travel less the 8px slop
+/// leaves the live offset at −142, 908 in the period; let go without
+/// velocity, it is nearer the last card's previous copy (−200, 58px off)
+/// than the first card (142px off), and glides there: 800 in the period,
+/// which the document adopts at rest.
+#[test]
+fn a_drag_back_from_the_first_page_shows_the_last_and_posts_the_edge() {
+    let mut engine = booted(&snapping_page(
+        "overscroll-behavior:circular; scroll-snap-type:y mandatory",
+        "scroll-snap-align:start",
+        200,
+        0,
+    ));
+    touch_at(&mut engine, 0.0, PointerPhase::Down, 30.0);
+    touch_at(&mut engine, 0.05, PointerPhase::Move, 180.0);
+    assert!(
+        (wrapped_y(&mut engine, 3) - 858.0).abs() < 0.5,
+        "−142 in the period, got {}",
+        live_offset(&mut engine, 3).y
+    );
+    // The probe queues behind the marker the drag step sent.
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(0.0, 800.0),
+        "through the seam the document holds the edge"
+    );
+    touch_at(&mut engine, 0.4, PointerPhase::Up, 180.0);
+    let at = frames_until_still(&mut engine, 0.4);
+    assert!(
+        (wrapped_y(&mut engine, 3) - 800.0).abs() < f32::EPSILON,
+        "on the last card, got {}",
+        live_offset(&mut engine, 3).y
+    );
+    engine.painter.publish_scroll(at, None);
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(0.0, 800.0),
+        "the document adopts the last card"
+    );
+}
+
+/// `overscroll-behavior: circular` on the inner of two nested scrollers
+/// (inner `max_offset` 900, so a period of 1000): a wheel of 1500 is all
+/// the inner's — it wraps to 500 — and nothing chains out to the outer.
+#[test]
+fn a_circular_axis_never_chains_out() {
+    let mut engine = booted(&nested_scrollers_page("overscroll-behavior:circular"));
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 50.0),
+        dom::Vector2D::new(0.0, 1500.0),
+    ));
+    assert!(
+        (wrapped_y(&mut engine, 4) - 500.0).abs() < 0.5,
+        "the inner wrapped, got {}",
+        live_offset(&mut engine, 4).y
+    );
+    assert_eq!(
+        engine.painter.scroll_intents.offset_for(node_id(3)),
+        None,
+        "nothing chained out to the outer"
+    );
+    assert_eq!(
+        scroll_offset_of(&mut engine, 4),
+        dom::Vector2D::new(0.0, 500.0),
+        "the document adopts the wrapped offset"
+    );
+}
+
+/// A fling on a circular axis without snapping meets no wall: wheeled to
+/// 700, the [`flick`] adds its 52px of drag and a 3 px/ms fling's whole
+/// travel, `−3/ln 0.998` ≈ 1498px, so the scroller runs through the end
+/// and on round the circle to ≈ 2250 unwrapped — 250 in the period —
+/// ending by its decay alone. The document adopts the wrapped offset.
+#[test]
+fn a_fling_on_a_plain_circular_axis_runs_past_the_end() {
+    let mut engine = booted(&snapping_page("overscroll-behavior:circular", "", 200, 0));
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 100.0),
+        dom::Vector2D::new(0.0, 700.0),
+    ));
+    assert_intent(&engine, 3, 700.0);
+    flick(&mut engine, 0.0);
+    // Summed modulo the period frame by frame, so a rebase that brings
+    // the live offset back into the period does not lose the travel.
+    let mut previous = wrapped_y(&mut engine, 3);
+    let mut travelled = previous;
+    let mut at = 0.02;
+    while engine.is_animating() {
+        at += 1.0 / 60.0;
+        assert!(at < 10.0, "the fling never came to rest");
+        frame_at(&mut engine, at);
+        let now = wrapped_y(&mut engine, 3);
+        travelled += (now - previous).rem_euclid(CIRCULAR_PERIOD);
+        previous = now;
+    }
+    assert!(
+        (travelled - 2250.5).abs() < 3.0,
+        "through the end and round the circle, got {travelled}"
+    );
+    let rest = wrapped_y(&mut engine, 3);
+    engine.painter.publish_scroll(at, None);
+    let adopted = scroll_offset_of(&mut engine, 3);
+    assert!(
+        adopted.x == 0.0 && (adopted.y - rest).abs() < 0.5,
+        "the document adopts {rest}, got {adopted:?}"
+    );
+}
+
 /// A drag landing on a flinging scroller takes it over: a finger's down
 /// alone stops nothing (the router decides nothing before the slop), the
 /// drag's first step stops the fling where it finds the container, and a

@@ -54,7 +54,7 @@ use self::gesture::{GestureRouter, InputDecision, InputDecisions};
 pub use self::graphics::WindowTarget;
 use self::graphics::{FrameAcquisition, WindowGraphics};
 use self::inertia::{Axis, BounceBack, ChainOutcome, DragTrack, Fling, Glide};
-use self::motion::{Motion, resolve_elastic_step, stretch_of, unwind_stretch};
+use self::motion::{ElasticStep, Motion, resolve_elastic_step, stretch_of, unwind_stretch};
 use crate::clock::ClockInstant;
 use crate::link::{
     FramePost, InputEventPayload, Published, ScrollEntry, ToMain, ViewSeat, block_on_deadline,
@@ -394,7 +394,15 @@ pub(super) struct ScrollIntents {
     /// one. In range on every axis, except that a `contain-bounce` axis
     /// may stand up to one scrollport past either edge while it is
     /// stretched — a drag past the boundary, a fling's overshoot, or a
-    /// bounce back on its way home.
+    /// bounce back on its way home — and that an
+    /// `overscroll-behavior: circular` axis may stand anywhere: it has no
+    /// boundary, and its scrolling area repeats every
+    /// [`dom::ScrollSlot::wrap_period`]. Such an offset is composed, hit
+    /// tested and sampled modulo the period (`dom` normalizes it at every
+    /// entry point), posted modulo the period and then clamped
+    /// ([`Self::drain_changed`]), and brought back into `[0, period)` by
+    /// each rebase, which shifts the drag origins and glide targets that
+    /// refer to it by the same amount.
     pub(super) offsets: FxHashMap<NodeId, Vector2D<f32>>,
     rebased_commit: Option<u64>,
     generation: u64,
@@ -430,42 +438,87 @@ pub(super) struct ScrollIntents {
 
 impl ScrollIntents {
     /// Brings the intents onto a newly adopted `frame`, at `now`: re-clamps
-    /// every live offset to the frame's ranges, drops what moves a container
-    /// the frame no longer has, carries out the requests the frame brings
-    /// for the first time, and settles the snapping containers at rest.
+    /// every live offset to the frame's ranges — or, on a circular axis,
+    /// normalizes it into the period — drops what moves a container the
+    /// frame no longer has, carries out the requests the frame brings for
+    /// the first time, and settles the snapping containers at rest.
+    ///
+    /// A normalization moves the live offset by whole periods, so the
+    /// drag origins and glide targets of that container move with it
+    /// ([`Self::shift_motion`]): a release still settles from where the
+    /// drag found the container, and a glide still ends on the position it
+    /// was aimed at, in the same unwrapped frame as the offset.
     fn rebase(&mut self, frame: &CommittedFrame, now: f64) {
         if self.rebased_commit == Some(frame.commit_id()) {
             return;
         }
         self.rebased_commit = Some(frame.commit_id());
         let changed = &mut self.changed;
+        let mut shifts: SmallVec<[(NodeId, Vector2D<f32>); 2]> = SmallVec::new();
         self.offsets.retain(|node, offset| {
             let Some(slot) = frame.slot_of(*node) else {
                 return false;
             };
             let slot = &frame.scroll_slots()[slot as usize];
-            let clamped = Vector2D::new(
-                clamp_intent_axis(
+            let (period_x, period_y) = slot.wrap_period();
+            let wrapped = slot.wrap(*offset);
+            let axis = |value: f32,
+                        wrapped: f32,
+                        max: f32,
+                        extent: f32,
+                        bounces: bool,
+                        period: Option<f32>| {
+                match period {
+                    Some(_) => wrapped,
+                    None => clamp_intent_axis(value, max, extent, bounces),
+                }
+            };
+            let brought = Vector2D::new(
+                axis(
                     offset.x,
+                    wrapped.x,
                     slot.max_offset.x,
                     slot.scrollport.width,
                     slot.bounce.x,
+                    period_x,
                 ),
-                clamp_intent_axis(
+                axis(
                     offset.y,
+                    wrapped.y,
                     slot.max_offset.y,
                     slot.scrollport.height,
                     slot.bounce.y,
+                    period_y,
                 ),
             );
-            if clamped != *offset {
-                *offset = clamped;
+            if brought != *offset {
+                // Whole periods on a circular axis, which what refers to
+                // the offset moves by too; a non-finite offset was nowhere,
+                // so nothing follows it.
+                let shift = |value: f32, brought: f32, period: Option<f32>| {
+                    if period.is_some() && value.is_finite() {
+                        brought - value
+                    } else {
+                        0.0
+                    }
+                };
+                let shift = Vector2D::new(
+                    shift(offset.x, brought.x, period_x),
+                    shift(offset.y, brought.y, period_y),
+                );
+                if shift != Vector2D::zero() {
+                    shifts.push((*node, shift));
+                }
+                *offset = brought;
                 note_changed(changed, *node);
             }
             *offset != slot.offset
         });
         self.gesture_origins
             .retain(|(_, node), _| frame.slot_of(*node).is_some());
+        for (node, shift) in shifts {
+            self.shift_motion(node, shift);
+        }
         self.retain_motion(frame);
         self.apply_requests(frame, now);
         self.settle_at_rest(frame);
@@ -691,17 +744,7 @@ impl ScrollIntents {
         let consumed = drive_chain(&links, delta, |link, admitted| {
             let slot = &slots[indices[link] as usize];
             let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
-            let (snap_x, snap_y) = frame.snap_axes(slot);
-            let step = resolve_elastic_step(
-                motion,
-                offset,
-                admitted,
-                slot.max_offset,
-                slot.scrollport,
-                slot.bounce,
-                snap_x,
-                snap_y,
-            );
+            let step = slot_step(frame, slot, motion, offset, admitted);
             stretched.x |= step.stretched.x;
             stretched.y |= step.stretched.y;
             if step.applied != offset {
@@ -745,6 +788,12 @@ impl ScrollIntents {
     /// to the committed range, and `rest` where nothing holds, flings or
     /// bounces them — and forgets them. A container `frame` no longer carries
     /// is dropped. Both buffers keep their capacity.
+    ///
+    /// A circular axis is normalized into its period first and then
+    /// clamped, so while the scrollport straddles the seam — the normalized
+    /// offset past `max_offset` — main sees `max_offset`, the way it sees
+    /// the edge a `contain-bounce` stretch stands past. The document never
+    /// wraps.
     fn drain_changed(
         &mut self,
         frame: Option<&CommittedFrame>,
@@ -757,7 +806,7 @@ impl ScrollIntents {
                     continue;
                 };
                 let slot = &frame.scroll_slots()[index as usize];
-                let live = self.offsets.get(&node).copied().unwrap_or(slot.offset);
+                let live = slot.wrap(self.offsets.get(&node).copied().unwrap_or(slot.offset));
                 let offset = Vector2D::new(
                     clamp_scroll_axis(live.x, slot.max_offset.x),
                     clamp_scroll_axis(live.y, slot.max_offset.y),
@@ -798,7 +847,43 @@ fn clamp_scroll_axis(value: f32, max: f32) -> f32 {
     }
 }
 
-/// Where an intent may stand on one axis: in range, or — on a
+/// [`resolve_elastic_step`] for one chain step on `slot`'s container,
+/// standing at `offset`, over the slot's published geometry, policy and
+/// snap data.
+fn slot_step(
+    frame: &CommittedFrame,
+    slot: &dom::ScrollSlot,
+    motion: Motion,
+    offset: Vector2D<f32>,
+    admitted: Vector2D<f32>,
+) -> ElasticStep {
+    let (snap_x, snap_y) = frame.snap_axes(slot);
+    resolve_elastic_step(
+        motion,
+        offset,
+        admitted,
+        slot.max_offset,
+        slot.scrollport,
+        slot.bounce,
+        wrap_axes(slot),
+        snap_x,
+        snap_y,
+    )
+}
+
+/// The axes on which `slot` wraps: circular, with content to scroll
+/// ([`dom::ScrollSlot::wrap_period`]). Everything the intents do treats
+/// only these as boundless; a circular axis without overflow clamps like
+/// any other.
+fn wrap_axes(slot: &dom::ScrollSlot) -> ScrollAxes {
+    let (x, y) = slot.wrap_period();
+    ScrollAxes {
+        x: x.is_some(),
+        y: y.is_some(),
+    }
+}
+
+/// Where an intent may stand on one bounded axis: in range, or — on a
 /// `contain-bounce` axis — up to one scrollport past either edge.
 fn clamp_intent_axis(value: f32, max: f32, extent: f32, bounces: bool) -> f32 {
     if !value.is_finite() {
@@ -814,6 +899,11 @@ fn clamp_intent_axis(value: f32, max: f32, extent: f32, bounces: bool) -> f32 {
 /// [`settle_offset`] over an intent that may be stretched: a stretched
 /// axis keeps its stretch (its bounce back settles it when it lands), and
 /// the rest settle from an in-range `start`.
+///
+/// A wrapped axis is never stretched and its `start` is not clamped: a
+/// drag origin there may stand outside `0..=max` in the same unwrapped
+/// frame as `offset`, and the axis's snap positions repeat every period,
+/// so the settle finds the copy nearest where the gesture ended.
 fn settle_stretch_aware(
     start: Vector2D<f32>,
     offset: Vector2D<f32>,
@@ -821,12 +911,20 @@ fn settle_stretch_aware(
     snap_x: Option<dom::scroll::SnapAxis<'_>>,
     snap_y: Option<dom::scroll::SnapAxis<'_>>,
 ) -> Vector2D<f32> {
+    let wrap = wrap_axes(slot);
+    let start_axis = |value: f32, max: f32, wraps: bool| {
+        if wraps && value.is_finite() {
+            value
+        } else {
+            clamp_scroll_axis(value, max)
+        }
+    };
     let start = Vector2D::new(
-        clamp_scroll_axis(start.x, slot.max_offset.x),
-        clamp_scroll_axis(start.y, slot.max_offset.y),
+        start_axis(start.x, slot.max_offset.x, wrap.x),
+        start_axis(start.y, slot.max_offset.y, wrap.y),
     );
-    let stretched_x = stretch_of(offset.x, slot.max_offset.x) != 0.0;
-    let stretched_y = stretch_of(offset.y, slot.max_offset.y) != 0.0;
+    let stretched_x = !wrap.x && stretch_of(offset.x, slot.max_offset.x) != 0.0;
+    let stretched_y = !wrap.y && stretch_of(offset.y, slot.max_offset.y) != 0.0;
     let settled = settle_offset(
         start,
         Vector2D::new(

@@ -29,6 +29,7 @@
 //! slot's parent feeds its constraint solve.
 
 use euclid::default::Vector2D;
+use smallvec::SmallVec;
 
 use super::anchored::{AnchoredSamples, AnchoredSlot};
 use super::reach::Reach;
@@ -219,6 +220,12 @@ pub(crate) fn linear_range(
     )
 }
 
+/// Whether `space` moves with scroll slot `slot`: the slot's scroll node is
+/// on its path. What rides a circular slot is what its seam copy draws.
+pub(crate) fn rides(spaces: &[Space], space: Option<u32>, slot: u32) -> bool {
+    path(spaces, space).any(|kind| kind == SpaceKind::Scroll(slot))
+}
+
 /// The innermost scroll slot on `space`'s path.
 pub(crate) fn nearest_scroll(spaces: &[Space], space: Option<u32>) -> Option<u32> {
     path(spaces, space).find_map(|kind| match kind {
@@ -273,7 +280,62 @@ pub(crate) struct SpaceSamples<'a> {
     pub(crate) offset_of: &'a dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
 }
 
-impl SpaceSamples<'_> {
+impl<'a> SpaceSamples<'a> {
+    /// The extra copies a circular scroll container's content composes at
+    /// this instant, as `(slot, shift)`: one per slot whose scrollport
+    /// straddles its seam, with that slot's offset moved back by one period
+    /// on each straddling axis.
+    ///
+    /// A slot's offset here is already normalized into its period (the
+    /// frame's entry points wrap `offset_of`), so it straddles on an axis
+    /// exactly when the offset is past `max_offset`: the scrollport then
+    /// shows the end of the scrolling area at the offset itself and its
+    /// start one period back. Straddling both axes needs the two single-axis
+    /// copies and the diagonal one, the fourth quadrant being the slot's own
+    /// content. Empty for the overwhelmingly common frame.
+    pub(crate) fn seam_passes(&self) -> SmallVec<[(u32, Vector2D<f32>); 2]> {
+        let mut passes = SmallVec::new();
+        for (slot, index) in self.slots.iter().zip(0_u32..) {
+            let (period_x, period_y) = slot.wrap_period();
+            if period_x.is_none() && period_y.is_none() {
+                continue;
+            }
+            let offset = (self.offset_of)(slot).unwrap_or(slot.offset);
+            let x = period_x.filter(|_| offset.x > slot.max_offset.x);
+            let y = period_y.filter(|_| offset.y > slot.max_offset.y);
+            if let Some(x) = x {
+                passes.push((index, Vector2D::new(-x, 0.0)));
+            }
+            if let Some(y) = y {
+                passes.push((index, Vector2D::new(0.0, -y)));
+            }
+            if let (Some(x), Some(y)) = (x, y) {
+                passes.push((index, Vector2D::new(-x, -y)));
+            }
+        }
+        passes
+    }
+
+    /// `offset_of` with slot `slot`'s offset moved by `shift`, every other
+    /// slot's as it is: the offsets one seam pass composes with. Hand it to
+    /// a copy of these samples, `SpaceSamples { offset_of: &shifted, ..*self }`.
+    pub(crate) fn shifted_offsets(
+        &self,
+        slot: u32,
+        shift: Vector2D<f32>,
+    ) -> impl Fn(&ScrollSlot) -> Option<Vector2D<f32>> + 'a {
+        let offset_of = self.offset_of;
+        let node = self.slots[slot as usize].node;
+        move |each: &ScrollSlot| {
+            let offset = offset_of(each).unwrap_or(each.offset);
+            Some(if each.node == node {
+                offset + shift
+            } else {
+                offset
+            })
+        }
+    }
+
     /// `space`'s live map in viewport CSS px: its path's node transforms,
     /// root first.
     pub(crate) fn css(&self, space: Option<u32>) -> Affine {
@@ -388,6 +450,7 @@ mod tests {
             user_scrollable: ScrollAxes::default(),
             chains: ScrollAxes::default(),
             bounce: ScrollAxes::default(),
+            circular: ScrollAxes::default(),
             capture: CaptureAxes::default(),
             snap: SnapSlot::default(),
             offset: Vector2D::new(0.0, offset_y),

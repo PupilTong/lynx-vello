@@ -33,6 +33,15 @@
 //! [`resolve_elastic_step`] is the boundary rule itself — one chain step on
 //! a container whose axis may stretch — and is what the intents run in
 //! place of [`resolve_step`] alone.
+//!
+//! An `overscroll-behavior: circular` axis has no boundary at all, so none
+//! of the curves above ever meets an edge there: a drag, a fling or a wheel
+//! tick on it moves the offset along an unbounded line and absorbs its
+//! whole delta, so nothing stretches and nothing chains outward. The line
+//! repeats the scrolling area every [`dom::ScrollSlot::wrap_period`]; the
+//! intents normalize the offset into one period when a commit is adopted,
+//! and `dom` normalizes it wherever it composes, hit-tests or samples, so
+//! these functions never wrap anything themselves.
 
 use dom::scroll::{ScrollAxes, ScrollKind, SnapAxis, resolve_step};
 use dom::{Size2D, Vector2D};
@@ -211,6 +220,13 @@ pub(super) struct ElasticStep {
 /// capped at one scrollport, the way lynx-ui's overshoot does. A wheel tick
 /// never stretches: it first brings a stretched container back to its
 /// edge, then lands as any wheel tick does.
+///
+/// An axis in `wrap` is circular with a period: it has no edge, so a drag
+/// or fling step moves it by the whole delta and absorbs all of it, and a
+/// wheel tick lands through [`resolve_step`] with the same axis unclamped,
+/// where a snapping axis's positions repeat every period. Nothing here
+/// normalizes the result: the offset may stand outside `0..=max` on that
+/// axis, and is never reported as stretched.
 #[allow(
     clippy::too_many_arguments,
     reason = "one chain step's whole context: the motion, the geometry, the policy and the snap data"
@@ -222,11 +238,16 @@ pub(super) fn resolve_elastic_step(
     max: Vector2D<f32>,
     scrollport: Size2D<f32>,
     bounce: ScrollAxes,
+    wrap: ScrollAxes,
     snap_x: Option<SnapAxis<'_>>,
     snap_y: Option<SnapAxis<'_>>,
 ) -> ElasticStep {
     if motion == Motion::Wheel || bounce == ScrollAxes::NONE {
-        let settled = Vector2D::new(clamp_axis(offset.x, max.x), clamp_axis(offset.y, max.y));
+        // A wrapped axis has no range to bring the offset back into.
+        let settled = Vector2D::new(
+            settle_axis(offset.x, max.x, wrap.x),
+            settle_axis(offset.y, max.y, wrap.y),
+        );
         let (applied, absorbed) = resolve_step(
             motion.kind(),
             settled,
@@ -235,6 +256,7 @@ pub(super) fn resolve_elastic_step(
             scrollport,
             snap_x,
             snap_y,
+            wrap,
         );
         return ElasticStep {
             applied,
@@ -242,7 +264,10 @@ pub(super) fn resolve_elastic_step(
             stretched: ScrollAxes::NONE,
         };
     }
-    let axis = |current: f32, delta: f32, max: f32, extent: f32, bounces: bool| {
+    let axis = |current: f32, delta: f32, max: f32, extent: f32, bounces: bool, wraps: bool| {
+        if wraps {
+            return (current + delta, delta, false);
+        }
         if delta == 0.0 {
             return (current, 0.0, current < 0.0 || current > max);
         }
@@ -255,10 +280,22 @@ pub(super) fn resolve_elastic_step(
             }
         }
     };
-    let (x, absorbed_x, stretched_x) =
-        axis(offset.x, admitted.x, max.x, scrollport.width, bounce.x);
-    let (y, absorbed_y, stretched_y) =
-        axis(offset.y, admitted.y, max.y, scrollport.height, bounce.y);
+    let (x, absorbed_x, stretched_x) = axis(
+        offset.x,
+        admitted.x,
+        max.x,
+        scrollport.width,
+        bounce.x,
+        wrap.x,
+    );
+    let (y, absorbed_y, stretched_y) = axis(
+        offset.y,
+        admitted.y,
+        max.y,
+        scrollport.height,
+        bounce.y,
+        wrap.y,
+    );
     ElasticStep {
         applied: Vector2D::new(x, y),
         absorbed: Vector2D::new(absorbed_x, absorbed_y),
@@ -354,6 +391,16 @@ fn clamp_axis(value: f32, max: f32) -> f32 {
         value.clamp(0.0, max.max(0.0))
     } else {
         0.0
+    }
+}
+
+/// Where a step finds the container on one axis: clamped into range, or —
+/// on a wrapped axis, which has no range — where it stands.
+fn settle_axis(value: f32, max: f32, wraps: bool) -> f32 {
+    match (wraps, value.is_finite()) {
+        (true, true) => value,
+        (true, false) => 0.0,
+        (false, _) => clamp_axis(value, max),
     }
 }
 
@@ -499,6 +546,7 @@ mod tests {
                 x: false,
                 y: bounces,
             },
+            ScrollAxes::NONE,
             None,
             None,
         );
@@ -563,6 +611,87 @@ mod tests {
         assert!(!stretched);
         let (applied, absorbed, _) = step(Motion::Drag, 480.0, 0.0, true);
         assert_eq!((applied, absorbed), (480.0, 0.0));
+    }
+
+    /// One step on a circular y axis: `max` 500 over a 200px scrollport,
+    /// so a period of 700, with `bounce` on the x axis so a drag or fling
+    /// takes the elastic path too.
+    fn wrapped_step(
+        motion: Motion,
+        offset: f32,
+        delta: f32,
+        snap_y: Option<SnapAxis<'_>>,
+    ) -> ElasticStep {
+        resolve_elastic_step(
+            motion,
+            Vector2D::new(0.0, offset),
+            Vector2D::new(0.0, delta),
+            Vector2D::new(0.0, 500.0),
+            Size2D::new(200.0, 200.0),
+            ScrollAxes { x: true, y: false },
+            ScrollAxes { x: false, y: true },
+            None,
+            snap_y,
+        )
+    }
+
+    #[test]
+    fn a_drag_or_fling_on_a_wrapped_axis_runs_past_either_end_and_absorbs_everything() {
+        for motion in [Motion::Drag, Motion::Fling] {
+            // 480 + 50 runs 30px past the end: no clamp, no stretch.
+            let step = wrapped_step(motion, 480.0, 50.0, None);
+            assert_eq!(step.applied.y, 530.0, "{motion:?}");
+            assert_eq!(step.absorbed.y, 50.0, "{motion:?}");
+            assert_eq!(step.stretched, ScrollAxes::NONE, "{motion:?}");
+            // And back below the start from an offset already outside the
+            // range, which is where the previous step may have left it.
+            let step = wrapped_step(motion, 20.0, -260.0, None);
+            assert_eq!(step.applied.y, -240.0, "{motion:?}");
+            assert_eq!(step.absorbed.y, -260.0, "{motion:?}");
+            assert!(!step.stretched.y, "{motion:?}");
+        }
+        // The same without any bouncing axis, through `resolve_step`.
+        let plain = resolve_elastic_step(
+            Motion::Drag,
+            Vector2D::new(0.0, 900.0),
+            Vector2D::new(0.0, 150.0),
+            Vector2D::new(0.0, 500.0),
+            Size2D::new(200.0, 200.0),
+            ScrollAxes::NONE,
+            ScrollAxes { x: false, y: true },
+            None,
+            None,
+        );
+        assert_eq!(plain.applied.y, 1050.0, "an offset past the end is kept");
+        assert_eq!(plain.absorbed.y, 150.0);
+    }
+
+    #[test]
+    fn a_wheel_tick_on_a_wrapped_axis_moves_on_to_the_next_periodic_snap_position() {
+        let points = [0.0, 200.0, 400.0].map(|at| dom::scroll::SnapPoint {
+            min: at,
+            max: at,
+            stop: false,
+        });
+        let snap = SnapAxis {
+            strictness: dom::scroll::SnapStrictness::Mandatory,
+            points: &points,
+            period: Some(700.0),
+        };
+        // From the last position a forward tick reaches the first one's
+        // next copy, 700, rather than being refused at the end.
+        let step = wrapped_step(Motion::Wheel, 400.0, 30.0, Some(snap));
+        assert_eq!(step.applied.y, 700.0);
+        assert_eq!(step.absorbed.y, 30.0);
+        // Backward from the start it reaches the last position's previous
+        // copy, 400 − 700.
+        let step = wrapped_step(Motion::Wheel, 0.0, -30.0, Some(snap));
+        assert_eq!(step.applied.y, -300.0);
+        // Unsnapped it lands raw past the end.
+        let step = wrapped_step(Motion::Wheel, 490.0, 30.0, None);
+        assert_eq!(step.applied.y, 520.0);
+        assert_eq!(step.absorbed.y, 30.0);
+        assert!(!step.stretched.y);
     }
 
     #[test]

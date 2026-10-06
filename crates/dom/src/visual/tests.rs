@@ -2767,6 +2767,48 @@ fn a_scroll_self_timeline_binds_the_scrollers_own_slot() {
     assert_eq!(alpha(-80.0), Some(1.0));
 }
 
+/// A circular scroller whose scrollport straddles the seam is hit through
+/// both copies of its content: the end of the scrolling area at the offset
+/// itself, and its start one period back below it. An offset off the
+/// circle is normalized first.
+#[test]
+fn a_straddling_circular_scroller_hits_the_copy_under_the_point() {
+    use crate::visual::ScrollSlot;
+
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     overscroll-behavior-y: circular; width: 200px; height: 200px; }
+         .card { flex-shrink: 0; width: 200px; height: 200px; }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let first = h.el(scroller, "view.card");
+    let second = h.el(scroller, "view.card");
+    let frame = h.doc.dom.commit();
+    let slot = &frame.scroll_slots()[frame.slot_of(scroller).expect("a slot") as usize];
+    assert_eq!(slot.wrap_period(), (None, Some(400.0)));
+
+    let hit = |offset: f32, y: f32| {
+        let offset_of = |slot: &ScrollSlot| {
+            (slot.node == scroller).then_some(crate::Vector2D::new(0.0, offset))
+        };
+        frame
+            .hit(crate::Point2D::new(100.0, y), &offset_of, None)
+            .map(|target| target.node)
+    };
+    for offset in [300.0, 700.0, -100.0] {
+        assert_eq!(hit(offset, 50.0), Some(second), "the end, at {offset}");
+        assert_eq!(
+            hit(offset, 150.0),
+            Some(first),
+            "the start's copy below it, at {offset}"
+        );
+    }
+    assert_eq!(hit(0.0, 50.0), Some(first));
+    assert_eq!(hit(0.0, 150.0), Some(first));
+}
+
 /// An animation on an inactive timeline is not current, so it animates
 /// nothing, as the driver's bits count it: beside a clock fade, a slide on a
 /// `scroll()` whose scroller cannot scroll yet exports no transform track,

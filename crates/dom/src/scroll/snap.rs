@@ -31,6 +31,14 @@
 //!   whenever a commit publishes one — initial layout, a relayout that moved areas, a programmatic
 //!   scroll — as long as no drag is holding it.
 //!
+//! An axis with `overscroll-behavior: circular` has no boundary on the
+//! painter's side, so its snap positions repeat: a [`SnapAxis`] with a
+//! [`period`](SnapAxis::period) holds every point shifted by every whole
+//! number of periods, and the choosing rules search the copies around the
+//! query. A flick forward from the last page therefore lands on the first
+//! page's next copy instead of stopping at the end. The document never
+//! wraps, so its own axes carry no period.
+//!
 //! Deliberately absent: css-scroll-snap-2's `scrollsnapchange` and
 //! `scrollsnapchanging` events (scoped out of the request), snap
 //! *animation* in this crate (every snap the document applies is
@@ -52,7 +60,7 @@ use stylo::values::computed::{
 };
 use stylo::values::specified::box_::ScrollSnapAlignKeyword;
 
-use super::{clamp_to, is_scroll_container};
+use super::{ScrollAxes, clamp_to, is_scroll_container};
 use crate::NodeId;
 use crate::layout::{DisplayMode, StyleView, box_parent, display_mode};
 use crate::tree::document::Document;
@@ -105,7 +113,18 @@ pub struct SnapAxis<'a> {
     pub strictness: SnapStrictness,
     /// Sorted by `min`.
     pub points: &'a [SnapPoint],
+    /// The period of a circular axis (`overscroll-behavior: circular`): the
+    /// extent of the whole scrolling area on that axis. With a period every
+    /// point also exists shifted by every whole multiple of it, because the
+    /// painter's offset on such an axis stands anywhere on an unbounded
+    /// line that repeats the scrolling area. `None` on a bounded axis.
+    pub period: Option<f32>,
 }
+
+/// How many periods a query on a circular axis searches at most, counted
+/// from where it starts. Copies further away than this are never reached
+/// by one gesture, so the bound only protects against absurd offsets.
+const MAX_PERIODS: f32 = 64.0;
 
 impl SnapAxis<'_> {
     /// The distance within which `proximity` snaps, for a scrollport of
@@ -115,10 +134,54 @@ impl SnapAxis<'_> {
         extent * PROXIMITY_RATIO
     }
 
+    /// The points a query from `anchor` towards `other` may choose among.
+    ///
+    /// On a bounded axis these are the points themselves. On a circular one
+    /// they are the copies shifted by `k` periods for every `k` from the
+    /// period before the lower of the two ends through the period after the
+    /// higher one, so the nearest position on either side of each end is
+    /// always present. The span is cut to [`MAX_PERIODS`] periods away from
+    /// `anchor`, the end the query starts from.
+    fn copies(&self, anchor: f32, other: f32) -> impl Iterator<Item = SnapPoint> + '_ {
+        let (first, last, period) = match self.period {
+            Some(period) if period.is_finite() && period > 0.0 => {
+                let index = |offset: f32| {
+                    let index = (offset / period).floor();
+                    if index.is_finite() { index } else { 0.0 }
+                };
+                let from = index(anchor);
+                let to = index(other).clamp(from - MAX_PERIODS, from + MAX_PERIODS);
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "both ends are whole numbers; a float out of i32 range saturates"
+                )]
+                let (first, last) = ((from.min(to) - 1.0) as i32, (from.max(to) + 1.0) as i32);
+                (first, last, period)
+            }
+            _ => (0, 0, 0.0),
+        };
+        (first..=last).flat_map(move |k| {
+            self.points.iter().map(move |point| {
+                if k == 0 {
+                    *point
+                } else {
+                    #[allow(
+                        clippy::cast_precision_loss,
+                        reason = "k is at most a few dozen periods from the query"
+                    )]
+                    let shift = k as f32 * period;
+                    SnapPoint {
+                        min: point.min + shift,
+                        max: point.max + shift,
+                        stop: point.stop,
+                    }
+                }
+            })
+        })
+    }
+
     fn nearest(&self, offset: f32) -> Option<SnapPoint> {
-        self.points
-            .iter()
-            .copied()
+        self.copies(offset, offset)
             .min_by(|a, b| a.distance(offset).total_cmp(&b.distance(offset)))
     }
 
@@ -126,14 +189,12 @@ impl SnapAxis<'_> {
     /// order: the position an operation from `from` to `to` may not pass.
     fn stop_between(&self, from: f32, to: f32) -> Option<f32> {
         if to > from {
-            self.points
-                .iter()
+            self.copies(from, to)
                 .filter(|point| point.stop && point.min > from && point.min < to)
                 .map(|point| point.min)
                 .min_by(f32::total_cmp)
         } else if to < from {
-            self.points
-                .iter()
+            self.copies(from, to)
                 .filter(|point| point.stop && point.max < from && point.max > to)
                 .map(|point| point.max)
                 .max_by(f32::total_cmp)
@@ -176,7 +237,9 @@ impl SnapAxis<'_> {
     /// `threshold` of it. Either way an `always` stop between the two ends
     /// the step there. A `Some` equal to `current` means the container
     /// refuses the step: it stays, and [`resolve_step`] lets the delta
-    /// chain on to the container above.
+    /// chain on to the container above. A circular axis always has a next
+    /// position, so it never refuses: a tick at the last page moves on to
+    /// the first page's next copy.
     #[must_use]
     #[allow(
         clippy::float_cmp,
@@ -190,21 +253,18 @@ impl SnapAxis<'_> {
             return Some(stop);
         }
         if self
-            .points
-            .iter()
+            .copies(current, natural)
             .any(|point| point.distance(natural) == 0.0)
         {
             return Some(natural);
         }
         let next = if natural > current {
-            self.points
-                .iter()
+            self.copies(current, natural)
                 .filter(|point| point.min > current)
                 .map(|point| point.min)
                 .min_by(f32::total_cmp)
         } else {
-            self.points
-                .iter()
+            self.copies(current, natural)
                 .filter(|point| point.max < current)
                 .map(|point| point.max)
                 .max_by(f32::total_cmp)
@@ -230,6 +290,7 @@ impl SnapAxisPositions {
         SnapAxis {
             strictness: self.strictness,
             points: &self.points,
+            period: None,
         }
     }
 }
@@ -274,10 +335,20 @@ pub enum ScrollKind {
 /// on this container, and does not chain on. One snapping refused — a
 /// `mandatory` axis with no position ahead — absorbs nothing, so the tick
 /// chains on the way any boundary does.
+///
+/// An axis in `wrap` has no boundary (the painter's view of
+/// `overscroll-behavior: circular`): its natural end is not clamped, and
+/// the caller normalizes the result into the period where it consumes it.
+/// The document never wraps and passes [`ScrollAxes::NONE`].
 #[must_use]
 #[allow(
     clippy::float_cmp,
     reason = "a refused step hands back the current offset itself, bit for bit"
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one step's full inputs: the container's geometry, its snapping per axis, \
+              and the axes the caller wraps"
 )]
 pub fn resolve_step(
     kind: ScrollKind,
@@ -287,8 +358,14 @@ pub fn resolve_step(
     scrollport: Size2D<f32>,
     snap_x: Option<SnapAxis<'_>>,
     snap_y: Option<SnapAxis<'_>>,
+    wrap: ScrollAxes,
 ) -> (Vector2D<f32>, Vector2D<f32>) {
-    let natural = clamp_to(offset + admitted, max);
+    let unbounded = offset + admitted;
+    let clamped = clamp_to(unbounded, max);
+    let natural = Vector2D::new(
+        if wrap.x { unbounded.x } else { clamped.x },
+        if wrap.y { unbounded.y } else { clamped.y },
+    );
     let axis = |current: f32, natural: f32, delta: f32, snap: Option<SnapAxis<'_>>, extent: f32| {
         if delta == 0.0 {
             return (current, 0.0);
@@ -553,7 +630,11 @@ mod tests {
     }
 
     fn axis(strictness: SnapStrictness, points: &[SnapPoint]) -> SnapAxis<'_> {
-        SnapAxis { strictness, points }
+        SnapAxis {
+            strictness,
+            points,
+            period: None,
+        }
     }
 
     #[test]
@@ -654,6 +735,7 @@ mod tests {
             Size2D::new(100.0, 100.0),
             None,
             Some(mandatory),
+            ScrollAxes::NONE,
         );
         assert_eq!(applied, Vector2D::new(0.0, 100.0));
         assert_eq!(absorbed, Vector2D::new(0.0, 30.0));
@@ -666,6 +748,7 @@ mod tests {
             Size2D::new(100.0, 100.0),
             None,
             Some(mandatory),
+            ScrollAxes::NONE,
         );
         assert_eq!(applied, Vector2D::new(0.0, 100.0), "nothing ahead: stays");
         assert_eq!(absorbed, Vector2D::zero(), "and the tick chains on");
@@ -678,6 +761,7 @@ mod tests {
             Size2D::new(100.0, 100.0),
             None,
             Some(mandatory),
+            ScrollAxes::NONE,
         );
         assert_eq!(
             applied,
@@ -694,6 +778,7 @@ mod tests {
             Size2D::new(100.0, 100.0),
             None,
             Some(mandatory),
+            ScrollAxes::NONE,
         );
         assert_eq!(applied, Vector2D::new(0.0, 100.0), "a drag step is raw");
         assert_eq!(
@@ -701,6 +786,97 @@ mod tests {
             Vector2D::new(0.0, 100.0),
             "and absorbs only what it moved"
         );
+    }
+
+    /// Three pages of 200px in a 200px scrollport: offsets `0..=400`, so
+    /// the circular period is the whole 600px scrolling area.
+    fn periodic(strictness: SnapStrictness, points: &[SnapPoint]) -> SnapAxis<'_> {
+        SnapAxis {
+            strictness,
+            points,
+            period: Some(600.0),
+        }
+    }
+
+    #[test]
+    fn a_periodic_axis_settles_on_the_nearest_copy_across_the_seam() {
+        let points = [point(0.0), point(200.0), point(400.0)];
+        let mandatory = periodic(SnapStrictness::Mandatory, &points);
+        assert_eq!(
+            mandatory.settle(400.0, 560.0, 0.0),
+            600.0,
+            "past the last page, the first page's next copy is nearer",
+        );
+        assert_eq!(mandatory.settle(0.0, -40.0, 0.0), 0.0);
+        assert_eq!(
+            mandatory.settle(0.0, -150.0, 0.0),
+            -200.0,
+            "the last page, one period back",
+        );
+    }
+
+    #[test]
+    fn a_periodic_axis_always_has_a_next_position() {
+        let points = [point(0.0), point(200.0), point(400.0)];
+        let mandatory = periodic(SnapStrictness::Mandatory, &points);
+        assert_eq!(
+            mandatory.step(400.0, 450.0, 0.0),
+            Some(600.0),
+            "a tick at the last page moves on to the first page's copy",
+        );
+        assert_eq!(mandatory.step(0.0, -10.0, 0.0), Some(-200.0));
+    }
+
+    #[test]
+    fn a_periodic_always_stop_is_found_in_a_later_period() {
+        let points = [point(0.0), stop(200.0), point(400.0)];
+        let mandatory = periodic(SnapStrictness::Mandatory, &points);
+        assert_eq!(mandatory.stop_between(550.0, 850.0), Some(800.0));
+        assert_eq!(mandatory.stop_between(850.0, 550.0), Some(800.0));
+        assert_eq!(
+            mandatory.settle(-500.0, 1900.0, 0.0),
+            -400.0,
+            "a long fling stops at the first stop ahead of it",
+        );
+    }
+
+    #[test]
+    fn an_absurd_offset_searches_a_bounded_number_of_periods() {
+        let points = [point(0.0), point(200.0), point(400.0)];
+        let mandatory = periodic(SnapStrictness::Mandatory, &points);
+        assert_eq!(mandatory.copies(0.0, 1.0e9).count(), 3 * 67);
+        assert_eq!(mandatory.copies(0.0, f32::INFINITY).count(), 3 * 3);
+    }
+
+    #[test]
+    fn a_wrapped_axis_steps_past_its_maximum() {
+        let wrap = ScrollAxes { x: false, y: true };
+        let (applied, absorbed) = resolve_step(
+            ScrollKind::Gesture,
+            Vector2D::new(0.0, 380.0),
+            Vector2D::new(50.0, 50.0),
+            Vector2D::new(0.0, 400.0),
+            Size2D::new(200.0, 200.0),
+            None,
+            None,
+            wrap,
+        );
+        assert_eq!(applied, Vector2D::new(0.0, 430.0), "x clamps, y does not");
+        assert_eq!(absorbed, Vector2D::new(0.0, 50.0));
+
+        let points = [point(0.0), point(200.0), point(400.0)];
+        let (applied, absorbed) = resolve_step(
+            ScrollKind::Directed,
+            Vector2D::new(0.0, 400.0),
+            Vector2D::new(0.0, 30.0),
+            Vector2D::new(0.0, 400.0),
+            Size2D::new(200.0, 200.0),
+            None,
+            Some(periodic(SnapStrictness::Mandatory, &points)),
+            wrap,
+        );
+        assert_eq!(applied, Vector2D::new(0.0, 600.0), "a tick wraps a page");
+        assert_eq!(absorbed, Vector2D::new(0.0, 30.0));
     }
 
     fn snapping_page(

@@ -1572,7 +1572,18 @@ over, and a wheel step that moves a gliding container ends its glide where
 the wheel put it. The router decides what it always did, no event is
 involved, and nothing waits on the main thread — a stretch composes the
 edge's own content, and what the painter posts for it is the edge, since
-every posted offset is clamped to the committed range.
+every posted offset is clamped to the committed range. A slot published with
+`overscroll-behavior: circular` (the `circular` axes, on an axis whose content
+overflows) has no edge at all: its intent stands anywhere on an unbounded
+line, every drag, fling or wheel step on it is absorbed whole (so nothing
+chains past it and no fling meets a wall), its snap positions repeat every
+period (the scrolling area's extent, `ScrollSlot::wrap_period`), and each
+rebase brings it back into one period, moving the drag origins and glide
+targets that refer to it by the same whole periods. `dom` normalizes it
+wherever the frame composes, bakes, hit-tests or samples, and replays the
+container's content one period back while the scrollport straddles the
+seam; the painter posts it modulo the period and then clamped, so through
+the seam main sees `max_offset`.
 
 A script-facing scroll is a **request** the committed frame carries to the
 painter (`crates/dom/src/scroll/request.rs`, CSSOM-View's
@@ -1939,7 +1950,8 @@ the timing normalized into scroll-offset px — and after the build's walk each
 binding is bound to its source's scroll slot (an element's own slot, and a
 later-painted source's, do not exist yet when its curve is built). The
 compositor samples it at compose time from the offset it composes that slot at,
-clamped to the scroll range (a `contain-bounce` stretch is no offset) and
+clamped to the scroll range (a `contain-bounce` stretch is no offset; a
+circular offset is taken modulo its period first, then clamped) and
 unsnapped, through the `iteration_progress` main writes the sample with, then
 stylo's `sample_at` — so a drag or a fling moves it with no commit and no frame
 post, and at rest the painter owes nothing. A filter bake whose range such a

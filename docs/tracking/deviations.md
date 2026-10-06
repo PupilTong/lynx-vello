@@ -1365,10 +1365,19 @@ consequential choice about whether to follow the spec or the quirk.
     Before a centred mode's at-rest snap settles an initial `current` under
     `vertical`, the first frame can show the dot after it, for the frame
     that shows the item's start.
-  - *Not implemented:* `circular` wrap-around dragging (web-core
-    re-slots the edge items in its shadow tree, `XSwiperCircular.ts`, and
-    turns snapping off, `x-swiper.css:122-131`) — here `circular` has no
-    effect; `autoplay`, `interval` and `smooth-scroll`, deferred by the user
+  - *`circular` wraps the scroll axis itself* (user ruling 2026-10-07): a UA
+    rule sets `overscroll-behavior: circular` on `#content`'s main axis
+    (winning over `bounces` on that axis, which then has no edge to bounce),
+    so the painter keeps the offset on a circle one scrolling area long and
+    draws the seam ([style-assumptions.md](../style-assumptions.md) §25).
+    web-core re-slots the first and last items into its shadow tree around
+    the current one (`XSwiperCircular.ts`) and turns snapping off
+    (`x-swiper.css:122-131`); native loops its ViewPager
+    (`XSwiperUI.java:865-868`, `setLoop`). Here snapping stays, so a drag or
+    flick pages across the seam like any other page, and script-facing
+    offsets never leave `0..=max`: while the seam is in view the document
+    reports the end of the range.
+  - *Not implemented:* `autoplay`, `interval` and `smooth-scroll`, deferred by the user
     (web-core's `XSwiperAutoScroll.ts`; `smooth-scroll` only matters to
     autoplay); every event; every UI method; `contain: strict`/
     `content-visibility` from the twentieth item (`x-swiper.css:77-80`), a

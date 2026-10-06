@@ -36,6 +36,9 @@
 //!   finger found them, held like any the drag moves, and the release decides again.
 //! - A wheel step that moves a gliding container ends its glides ([`ScrollIntents::stop_glides`]):
 //!   the wheel's own landing position, already snapped, stands.
+//! - An `overscroll-behavior: circular` axis has no wall and no stretch: every fling step on it is
+//!   absorbed, so the fling there ends by its decay alone, and the release aims at a snap position
+//!   whatever copy of it the whole travel reaches across the seam.
 //!
 //! The drag's own holds ([`ScrollIntents::gesture_origins`]) outlive the
 //! drag for as long as its fling runs, so a commit landing mid-fling does
@@ -52,7 +55,7 @@ use super::motion::{
     fling_velocity, fling_velocity_for_travel, glide, glide_velocity, rest_threshold,
     rubber_band_slope, rubber_band_travel, stretch_of,
 };
-use super::{ScrollIntents, note_changed};
+use super::{ScrollIntents, note_changed, wrap_axes};
 
 /// How far back a release looks for its velocity: the drag's travel over
 /// the steps inside this window, divided by their span. A drag whose last
@@ -216,7 +219,9 @@ pub(super) struct Glide {
     node: NodeId,
     axis: Axis,
     /// Where the axis ends. Re-clamped to the range by every commit
-    /// ([`ScrollIntents::retain_motion`]).
+    /// ([`ScrollIntents::retain_motion`]); on a circular axis instead moved
+    /// by the whole periods a rebase takes off the offset
+    /// ([`ScrollIntents::shift_motion`]).
     target: f32,
     /// The offset less the target when the glide started.
     displacement: f32,
@@ -442,10 +447,15 @@ impl ScrollIntents {
             } {
                 // The snap position the whole fling would settle on — where
                 // the container stands, without velocity.
+                // On a circular axis the whole travel is the prediction: its
+                // positions repeat past either end, so the settle below
+                // finds the copy it reaches across the seam.
                 let current = axis.of(offset);
                 let max = axis.of(slot.max_offset);
                 let predicted = if v == 0.0 {
                     current
+                } else if axis.flag(wrap_axes(slot)) {
+                    current + fling_travel(v, FLING_DECAY_PER_MS)
                 } else {
                     (current + fling_travel(v, FLING_DECAY_PER_MS)).clamp(0.0, max)
                 };
@@ -783,13 +793,36 @@ impl ScrollIntents {
         self.glides.retain(|glide| glide.node != node);
     }
 
+    /// Moves everything that refers to `node`'s live offset by `shift`: the
+    /// origin every drag recorded for it, and the target of each glide on
+    /// an axis the shift moves. A rebase that normalizes a circular axis
+    /// into its period calls this with the whole periods it took off, so
+    /// a release still settles from where its drag found the container and
+    /// a glide still lands on the position it was aimed at. A fling carries
+    /// only a velocity and a drag track only deltas, so neither moves; a
+    /// bounce back never runs on a circular axis.
+    pub(super) fn shift_motion(&mut self, node: NodeId, shift: Vector2D<f32>) {
+        for ((_, held), origin) in &mut self.gesture_origins {
+            if *held == node {
+                *origin += shift;
+            }
+        }
+        for glide in &mut self.glides {
+            if glide.node == node {
+                glide.target += glide.axis.of(shift);
+            }
+        }
+    }
+
     /// Drops what no longer applies to `frame`: a fling whose latched slot
     /// is gone, a bounce back whose container is gone or no longer
     /// stretched, a glide whose container is gone, a drag whose slot is
     /// gone. A dropped bounce back records its container: a commit that
     /// widened the range ends one without a step, and the offset main holds
     /// clamped to the old edge is posted again, at rest. A glide's target
-    /// is re-clamped to the range the frame admits.
+    /// is re-clamped to the range the frame admits, except on a circular
+    /// axis, where it may stand a period away in the same unwrapped frame
+    /// as the offset the glide moves.
     pub(super) fn retain_motion(&mut self, frame: &CommittedFrame) {
         self.flings
             .retain(|fling| frame.slot_of(fling.from).is_some());
@@ -797,10 +830,11 @@ impl ScrollIntents {
             let Some(index) = frame.slot_of(glide.node) else {
                 return false;
             };
-            let max = glide
-                .axis
-                .of(frame.scroll_slots()[index as usize].max_offset);
-            glide.target = glide.target.clamp(0.0, max.max(0.0));
+            let slot = &frame.scroll_slots()[index as usize];
+            if !glide.axis.flag(wrap_axes(slot)) {
+                let max = glide.axis.of(slot.max_offset);
+                glide.target = glide.target.clamp(0.0, max.max(0.0));
+            }
             true
         });
         self.drags
