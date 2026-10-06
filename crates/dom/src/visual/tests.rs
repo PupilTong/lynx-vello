@@ -3260,12 +3260,12 @@ fn ignored_range_keyframes_have_no_side_effects() {
 // The top layer (css-position-4 §3, `tree::top_layer`).
 
 /// What bobcat-core's UA sheet gives a modal `<dialog>` and `::backdrop`,
-/// reduced to what these tests read: `-servo-top-layer` is UA-only, and
-/// both boxes need a display `display_mode` supports.
+/// reduced to what these tests read: both boxes need a display
+/// `display_mode` supports.
 const TOP_LAYER_UA: &str = "
     dialog { display: flex; position: absolute; }
-    dialog.modal { -servo-top-layer: auto; position: fixed; }
-    ::backdrop { -servo-top-layer: auto; display: flex; position: fixed; inset: 0; }";
+    dialog.modal { position: fixed; }
+    ::backdrop { display: flex; position: fixed; inset: 0; }";
 
 fn top_layer_harness(css: &str) -> Harness {
     let mut h = Harness::new(&format!("{PAGE} {css}"));

@@ -229,3 +229,50 @@ fn scroll_container_with_z_index_zero_keeps_its_content_below_a_sibling() {
     );
     screenshot::assert_golden(&["scroll-stacking", "z-index-zero"], &actual);
 }
+
+/// A modal top-layer element and its default `::backdrop` over a page whose
+/// `z-index: 100` box would cover anything in the root stacking context
+/// (web-elements' `basic-z-index.html`: the top layer beats any `z-index`).
+/// The dialog sits inside a faded, clipped, translated ancestor, none of
+/// which reaches it; the backdrop tints the whole viewport, the
+/// `z-index: 100` box included, and the dialog paints over it untinted.
+const TOP_LAYER_CSS: &str = "
+    page { display: flex; position: relative; width: 240px; height: 200px;
+           background-color: #e5e7eb; }
+    .high { display: flex; position: absolute; left: 10px; top: 10px;
+            width: 220px; height: 60px; z-index: 100; background-color: #ef4444; }
+    .fx { display: flex; position: absolute; left: 150px; top: 120px;
+          width: 20px; height: 20px; opacity: 0.5; overflow: clip;
+          transform: translate(30px, 30px); background-color: #2563eb; }
+    dialog { display: flex; position: fixed; inset: 0; margin: auto;
+             width: 120px; height: 80px; border: 3px solid #111827;
+             background-color: #ffffff; }
+    .inner { display: flex; width: 40px; height: 40px; margin: 10px;
+             background-color: #14b8a6; }
+";
+
+/// What bobcat-core's UA sheet gives every `::backdrop` (HTML's
+/// `dialog::backdrop` tint included).
+const TOP_LAYER_UA: &str = "
+    ::backdrop { display: flex; position: fixed; inset: 0; }
+    dialog::backdrop { background-color: rgba(0, 0, 0, 0.1); }
+";
+
+#[test]
+fn a_modal_top_layer_element_and_its_backdrop_paint_over_any_z_index() {
+    let mut doc = paint_common::Doc::with_css_sized(TOP_LAYER_CSS, 240.0, 200.0);
+    doc.dom
+        .add_stylesheet(TOP_LAYER_UA, dom::StylesheetOrigin::UserAgent);
+    let root = doc.root;
+    let fx = doc.el(root, "fx");
+    let dialog = doc.el_tag(fx, "dialog", "");
+    doc.el(dialog, "inner");
+    doc.el(root, "high");
+    doc.dom.add_to_top_layer(dialog, true);
+    let actual = screenshot::capture_prebuilt_document(
+        "a_modal_top_layer_element_and_its_backdrop_paint_over_any_z_index",
+        &mut doc.dom,
+        &dom::NoImages,
+    );
+    screenshot::assert_golden(&["top-layer", "modal-backdrop"], &actual);
+}

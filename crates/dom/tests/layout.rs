@@ -3082,3 +3082,153 @@ fn normal_alignment_leaves_replaced_lanes_items_at_their_natural_size() {
     assert_eq!(h.rect(third), (0.0, 20.0, 40.0, 20.0));
     assert_eq!(h.rect(root).3, 40.0);
 }
+
+// ---------------------------------------------------------------------------
+// The top layer (css-position-4 §3.1): a top-layer element's containing block
+// is the initial one, whatever its ancestors establish.
+
+/// The parts of bobcat-core's UA sheet these tests read.
+const TOP_LAYER_UA: &str = "
+    dialog { display: flex; position: absolute; }
+    dialog.modal { position: fixed; }
+    ::backdrop { display: flex; position: fixed; inset: 0; }";
+
+fn top_layer_harness(css: &str) -> Harness {
+    let mut h = Harness::new(&format!(
+        "page {{ display: flex; width: 800px; height: 600px; }} {css}"
+    ));
+    h.doc.add_ua_css(TOP_LAYER_UA);
+    h
+}
+
+fn viewport_rect(h: &Harness, id: NodeId) -> (f32, f32, f32, f32) {
+    let rect = h
+        .doc
+        .dom
+        .bounding_client_rect(id)
+        .expect("a rendered, connected box");
+    (
+        rect.origin.x,
+        rect.origin.y,
+        rect.size.width,
+        rect.size.height,
+    )
+}
+
+#[test]
+fn a_top_layer_element_is_positioned_against_the_viewport_not_a_transformed_ancestor() {
+    let mut h = top_layer_harness(
+        ".t { display: flex; transform: translate(5px, 5px); margin-left: 50px; margin-top: 70px;
+              width: 200px; height: 200px; }
+         .modal { left: 10px; top: 20px; width: 30px; height: 40px; }
+         .fixed { display: flex; position: fixed; left: 3px; top: 4px; width: 5px; height: 6px; }",
+    );
+    let root = h.doc.root;
+    let t = h.doc.el(root, "view.t");
+    let dialog = h.doc.el(t, "dialog.modal");
+    let fixed = h.doc.el(dialog, "view.fixed");
+    h.layout();
+    assert_eq!(viewport_rect(&h, dialog), (60.0, 90.0, 30.0, 40.0));
+    assert_eq!(viewport_rect(&h, fixed), (53.0, 74.0, 5.0, 6.0));
+
+    h.doc.dom.add_to_top_layer(dialog, true);
+    h.layout();
+    assert_eq!(viewport_rect(&h, dialog), (10.0, 20.0, 30.0, 40.0));
+    assert_eq!(
+        viewport_rect(&h, fixed),
+        (3.0, 4.0, 5.0, 6.0),
+        "a fixed descendant escapes to the viewport, not past the dialog"
+    );
+
+    h.doc.dom.remove_from_top_layer(dialog);
+    h.layout();
+    assert_eq!(viewport_rect(&h, dialog), (60.0, 90.0, 30.0, 40.0));
+}
+
+#[test]
+fn a_top_layer_elements_static_position_is_the_viewport_origin() {
+    let mut h = top_layer_harness(
+        "page { justify-content: center; align-items: flex-end; }
+         .modal { width: 30px; height: 40px; }",
+    );
+    let root = h.doc.root;
+    let dialog = h.doc.el(root, "dialog.modal");
+    h.layout();
+    // An absolutely positioned flex child's static position is where it
+    // would sit as the sole item (css-flexbox-1 §4.1).
+    assert_eq!(viewport_rect(&h, dialog), (385.0, 560.0, 30.0, 40.0));
+    h.doc.dom.add_to_top_layer(dialog, false);
+    h.layout();
+    assert_eq!(viewport_rect(&h, dialog), (0.0, 0.0, 30.0, 40.0));
+}
+
+/// HTML's modal `<dialog>` centring: `inset: 0` with `auto` margins centres
+/// the box in the viewport (css-position-3 §4.1's auto-margin resolution),
+/// whatever its ancestors' clips, groups and transforms, and a resize, or a
+/// restyle of the dialog alone, re-centres it.
+#[test]
+fn a_top_layer_element_with_auto_margins_centres_in_the_viewport() {
+    let mut h = top_layer_harness(
+        ".clip { display: flex; overflow: clip; opacity: 0.5; transform: scale(0.5);
+                 width: 10px; height: 10px; }
+         .modal { inset: 0; width: 100px; height: 50px; margin: auto; }",
+    );
+    let root = h.doc.root;
+    let clip = h.doc.el(root, "view.clip");
+    let dialog = h.doc.el(clip, "dialog.modal");
+    h.doc.dom.add_to_top_layer(dialog, true);
+    h.layout();
+    assert_eq!(viewport_rect(&h, dialog), (350.0, 275.0, 100.0, 50.0));
+
+    h.doc.dom.set_viewport(400.0, 300.0);
+    h.layout();
+    assert_eq!(viewport_rect(&h, dialog), (150.0, 125.0, 100.0, 50.0));
+
+    h.doc.set_inline(dialog, "width: 200px");
+    h.layout();
+    assert_eq!(viewport_rect(&h, dialog), (100.0, 125.0, 200.0, 50.0));
+}
+
+/// HTML's UA sheet sizes a modal dialog `fit-content` in both axes, so it
+/// shrinks to its contents and the auto margins centre it.
+#[test]
+#[ignore = "GAP (hughie): an absolutely positioned box with both insets sizes \
+            `fit-content` as `auto` (`style_size_behaves_auto`), i.e. stretch-fit; \
+            css-sizing-3 makes it fit-content (shrink-to-fit)"]
+fn a_fit_content_top_layer_element_with_auto_margins_centres_in_the_viewport() {
+    let mut h = top_layer_harness(
+        ".modal { inset: 0; width: fit-content; height: fit-content; margin: auto; }
+         .content { display: flex; width: 100px; height: 50px; }",
+    );
+    let root = h.doc.root;
+    let dialog = h.doc.el(root, "dialog.modal");
+    h.doc.el(dialog, "view.content");
+    h.doc.dom.add_to_top_layer(dialog, true);
+    h.layout();
+    assert_eq!(viewport_rect(&h, dialog), (350.0, 275.0, 100.0, 50.0));
+}
+
+/// Membership alone moves the containing block: the dialog here keeps the
+/// computed `position: absolute` it had before it entered the layer.
+#[test]
+fn a_top_layer_element_adds_nothing_to_its_parents_scrollable_overflow() {
+    let mut h = top_layer_harness(
+        ".scroller { display: flex; position: relative; overflow: scroll;
+                     width: 100px; height: 100px; }
+         dialog { left: 0; top: 500px; width: 50px; height: 50px; }",
+    );
+    let root = h.doc.root;
+    let scroller = h.doc.el(root, "view.scroller");
+    let dialog = h.doc.el(scroller, "dialog");
+    h.layout();
+    assert_eq!(h.layout_of(scroller).content_size.height, 550.0);
+
+    h.doc.dom.add_to_top_layer(dialog, true);
+    h.layout();
+    assert_eq!(h.layout_of(scroller).content_size.height, 100.0);
+    assert_eq!(viewport_rect(&h, dialog), (0.0, 500.0, 50.0, 50.0));
+
+    h.doc.dom.remove_from_top_layer(dialog);
+    h.layout();
+    assert_eq!(h.layout_of(scroller).content_size.height, 550.0);
+}
