@@ -1718,12 +1718,12 @@ and §D.16 with what the wire format actually permits.)*
       (`createInvokeUIMethod.ts:12-44`). Native has a distinct
       `7 INVALID_STATE_ERROR` (`lynx_get_ui_result.h:53-61`); web-core is
       followed (`docs/tracking/deviations.md`).
-    - **Gap.** HTML centres a modal dialog by shrink-to-fit sizing
+    - **Centring.** HTML centres a modal dialog by shrink-to-fit sizing
       (`width: fit-content; height: fit-content; margin: auto` between
-      zero insets). hughie sizes `fit-content` on an absolutely positioned
-      box with both insets set as `auto` (stretch), so a dialog with no
-      author size fills the viewport up to its `max-width`/`max-height`
-      until that is fixed (an ignored `GAP` test in `dialog.rs` and in
+      zero insets). hughie's absolute pass stretch-fits only an `auto`
+      size (css-position-3 §4.1), so a `fit-content` dialog takes its
+      fit-content size (css-sizing-3 §3.2) in the viewport and its `auto`
+      margins centre it (tests in `dialog.rs` and in
       `crates/dom/tests/layout.rs`).
     - **Out, with the reason.**
       - The `overlay` property, transitions on it, and the pending top-layer

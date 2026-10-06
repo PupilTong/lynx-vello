@@ -43,11 +43,11 @@
 //!   HTML's `rgba(0, 0, 0, 0.1)`.
 //!
 //! No rule is `!important`. HTML's `width: fit-content; height: fit-content;
-//! margin: auto` centres a modal dialog by shrink-to-fit sizing; hughie sizes
-//! `fit-content` on an absolutely positioned box with both insets set as
-//! stretch (a GAP being fixed there), so a dialog with no author size fills its
-//! inset-modified containing block up to its `max-width`/`max-height` until
-//! that lands.
+//! margin: auto` centres a modal dialog by shrink-to-fit sizing, and so it
+//! does here: hughie's absolute pass stretch-fits only an `auto` size
+//! between two insets (css-position-3 §4.1), so a dialog with no author size
+//! takes its fit-content size (css-sizing-3 §3.2) in the viewport and its
+//! `auto` margins centre it.
 //!
 //! # State
 //!
@@ -657,9 +657,10 @@ mod tests {
     }
 
     /// HTML's shrink-to-fit centring of a modal dialog with no author size.
+    /// The border box is the content plus the UA `padding: 1em` (10px) and
+    /// 3px border on each side: 101 + 20 + 6 = 127 by 51 + 20 + 6 = 77,
+    /// centred in the 393 x 727 viewport at ((393 - 127) / 2, (727 - 77) / 2).
     #[test]
-    #[ignore = "GAP (hughie): an absolutely positioned box with both insets sizes `fit-content` \
-                as `auto`, i.e. stretch-fit; css-sizing-3 makes it fit-content (shrink-to-fit)"]
     fn a_modal_dialog_with_no_size_shrinks_to_its_content_and_centres() {
         let mut document = document();
         let dialog = child(&mut document, DIALOG_TAG, "font-size: 10px");

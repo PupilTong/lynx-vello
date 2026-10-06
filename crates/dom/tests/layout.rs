@@ -3192,9 +3192,6 @@ fn a_top_layer_element_with_auto_margins_centres_in_the_viewport() {
 /// HTML's UA sheet sizes a modal dialog `fit-content` in both axes, so it
 /// shrinks to its contents and the auto margins centre it.
 #[test]
-#[ignore = "GAP (hughie): an absolutely positioned box with both insets sizes \
-            `fit-content` as `auto` (`style_size_behaves_auto`), i.e. stretch-fit; \
-            css-sizing-3 makes it fit-content (shrink-to-fit)"]
 fn a_fit_content_top_layer_element_with_auto_margins_centres_in_the_viewport() {
     let mut h = top_layer_harness(
         ".modal { inset: 0; width: fit-content; height: fit-content; margin: auto; }
