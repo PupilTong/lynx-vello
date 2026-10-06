@@ -603,7 +603,10 @@ mod tests {
             overflow(&document, swiper),
             (Overflow::Clip, Overflow::Clip)
         );
-        assert_eq!(style_of(&document, swiper).clone_display(), Display::Linear);
+        assert_eq!(
+            style_of(&document, swiper).slow_clone_display(),
+            Display::Linear
+        );
 
         let content = scroller(&document, swiper);
         assert_eq!(
@@ -626,7 +629,10 @@ mod tests {
         ] {
             assert_eq!(value(&document, content, property), expected, "{property}");
         }
-        assert_eq!(style_of(&document, content).clone_display(), Display::Flex);
+        assert_eq!(
+            style_of(&document, content).slow_clone_display(),
+            Display::Flex
+        );
         assert_eq!(rect(&document, content), (0.0, 0.0, 200.0, 100.0));
     }
 
@@ -730,9 +736,12 @@ mod tests {
         let view = element_under(&mut document, swiper, "view", "width: 10px; height: 10px");
         let wrapper = element_under(&mut document, swiper, "wrapper", "");
         document.layout();
-        assert_eq!(style_of(&document, view).clone_display(), Display::None);
         assert_eq!(
-            style_of(&document, wrapper).clone_display(),
+            style_of(&document, view).slow_clone_display(),
+            Display::None
+        );
+        assert_eq!(
+            style_of(&document, wrapper).slow_clone_display(),
             Display::Contents
         );
         assert_eq!(rect(&document, items[0]), (0.0, 0.0, 200.0, 100.0));
@@ -745,7 +754,10 @@ mod tests {
         let mut document = document();
         let item = child(&mut document, SWIPER_ITEM_TAG, "");
         document.layout();
-        assert_eq!(style_of(&document, item).clone_display(), Display::Linear);
+        assert_eq!(
+            style_of(&document, item).slow_clone_display(),
+            Display::Linear
+        );
         assert_eq!(value(&document, item, "width"), "auto");
         assert_eq!(value(&document, item, "scroll-snap-align"), "none");
     }
