@@ -633,12 +633,13 @@ rather than to a transformed ancestor outside the layer. Each entry's
 `::backdrop` is a box with no parent: a **top-layer tail** after the
 rounding tail lays it out with `compute_absolute_layout` against the
 viewport and rounds it as a subtree of its own, every run, for every entry
-whose element rendered. `hughie` itself knows nothing of the layer. One
-gap is `hughie`'s: an absolutely positioned box with both insets sizes
-`fit-content` as `auto` (stretch-fit), so HTML's modal-dialog sizing
-(`inset: 0; width: fit-content; height: fit-content; margin: auto`) fills
-the viewport instead of shrinking to its contents
-(`crates/dom/tests/layout.rs`, an ignored GAP test).
+whose element rendered. `hughie` itself knows nothing of the layer.
+HTML's modal-dialog sizing (`inset: 0; width: fit-content; height:
+fit-content; margin: auto`) needs nothing layer-specific either: the
+absolute pass stretch-fits only an `auto` size (css-position-3 §4.1), so
+a `fit-content` box between two insets takes its fit-content size
+(css-sizing-3 §3.2) in the inset-modified containing block and its `auto`
+margins centre it.
 
 `position: sticky` is resolved by the `dom` visual host at composition time.
 The retained frame stores scrollport inset and containing-block constraints;
