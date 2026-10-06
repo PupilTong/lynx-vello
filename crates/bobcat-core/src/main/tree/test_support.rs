@@ -7,7 +7,7 @@ use dom::stylo::properties::ComputedValues;
 use dom::stylo::servo_arc::Arc;
 use dom::stylo::values::computed::{Display, Overflow};
 
-use super::{ImageOutcomes, LynxDocument, PageConfig, Viewport, new_document};
+use super::{ComponentEvents, LynxDocument, PageConfig, Viewport, new_document};
 
 /// A document on a phone-shaped viewport with the default page config.
 pub(super) fn document() -> LynxDocument {
@@ -15,16 +15,16 @@ pub(super) fn document() -> LynxDocument {
 }
 
 pub(super) fn with_config(config: PageConfig) -> LynxDocument {
-    with_image_outcomes(config).0
+    with_component_events(config).0
 }
 
-/// The same document, plus the queue its `image` elements leave a `src` that
-/// settled at its bind in — what the runtime holds the other end of.
-pub(super) fn with_image_outcomes(config: PageConfig) -> (LynxDocument, ImageOutcomes) {
-    let outcomes = ImageOutcomes::default();
+/// The same document, plus the queue its components leave the events they
+/// owe script in — what the runtime holds the other end of.
+pub(super) fn with_component_events(config: PageConfig) -> (LynxDocument, ComponentEvents) {
+    let events = ComponentEvents::default();
     (
-        new_document(Viewport::new(393.0, 727.0), config, outcomes.clone()),
-        outcomes,
+        new_document(Viewport::new(393.0, 727.0), config, events.clone()),
+        events,
     )
 }
 

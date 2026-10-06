@@ -43,7 +43,9 @@ use crate::esm::{
     RUNTIME_MODULE_SPECIFIER, TIMER_MODULE_SPECIFIER, WORKER_CLASS_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
-use crate::main::tree::{self, ImageOutcomes, LynxDocument, PageConfig, new_document};
+use crate::main::tree::{
+    self, ComponentEvent, ComponentEvents, LynxDocument, PageConfig, new_document,
+};
 use crate::realm::{RealmCore, context_of, open_realm, string_argument};
 use crate::script::ScriptError;
 use crate::timers::run_due_timers;
@@ -378,13 +380,15 @@ struct DocumentSlot {
     /// not — and a newer commit published once bound drops it, so it is
     /// never published after a frame that superseded it.
     held: Option<Arc<dom::CommittedFrame>>,
-    /// The `load`s and `error`s the document's images owe, from both
-    /// producers: the `image` component, which settles a `src` inside the
-    /// `__SetAttribute` that wrote it, and [`MainThreadRuntime::apply_image_events`],
-    /// which settles one from the painting side's report. Held here rather
-    /// than inside the document because the component is the far end of it and
+    /// The events the document's components owe script: an image's `load`s
+    /// and `error`s, from the `image` component, which settles a `src` inside
+    /// the `__SetAttribute` that wrote it, and from
+    /// [`MainThreadRuntime::apply_image_events`], which settles one from the
+    /// painting side's report; and a dialog's `cancel`s and `close`s, from its
+    /// UI methods in `callElementMethod`. Held here rather than inside the
+    /// document because the `image` component is the far end of it and
     /// reaches nothing else; the runtime drains it once per entry.
-    image_outcomes: ImageOutcomes,
+    component_events: ComponentEvents,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
     /// Where committed frames leave for the painting side.
@@ -413,7 +417,7 @@ impl DocumentSlot {
             metrics,
             bound: false,
             held: None,
-            image_outcomes: ImageOutcomes::default(),
+            component_events: ComponentEvents::default(),
             removals: 0,
             outbox,
         }))
@@ -468,9 +472,9 @@ impl DocumentSlot {
             }
             None => viewport,
         };
-        let outcomes = self.image_outcomes.clone();
+        let events = self.component_events.clone();
         let document = construction_phase("building the page", || {
-            let mut document = new_document(viewport, config, outcomes);
+            let mut document = new_document(viewport, config, events);
             if let Some(pool) = style_pool {
                 document.set_style_pool(pool);
             }
@@ -1074,52 +1078,56 @@ impl MainThreadRuntime {
     pub(crate) fn apply_image_events(&mut self, events: &[dom::ImageEvent]) {
         let mut slot = self.slot.borrow_mut();
         let outcomes = slot.document_mut().apply_image_events(events);
-        slot.image_outcomes.extend(outcomes);
+        slot.component_events.extend_images(outcomes);
     }
 
-    /// Whether either producer has left an image event owing — the queue
-    /// [`Self::dispatch_image_outcomes`] drains, asked once per entry.
+    /// Whether any producer has left a component event owing — the queue
+    /// [`Self::dispatch_component_events`] drains, asked once per entry.
     ///
     /// One `is_empty`, because nearly every entry's answer is no: an entry
-    /// during which no source settled posts nothing. A `load` handler that
-    /// writes a `src` this document has already seen settle gets its outcome
-    /// at the bind, so a delivery entry can leave the queue non-empty for an
-    /// entry of its own.
-    pub(crate) fn has_image_outcomes(&self) -> bool {
-        !self.slot.borrow().image_outcomes.is_empty()
+    /// during which no source settled and no dialog closed posts nothing. A
+    /// `load` handler that writes a `src` this document has already seen
+    /// settle gets its outcome at the bind, and a `close` handler can close
+    /// another dialog, so a delivery entry can leave the queue non-empty for
+    /// an entry of its own.
+    pub(crate) fn has_component_events(&self) -> bool {
+        !self.slot.borrow().component_events.is_empty()
     }
 
-    /// Dispatches everything [`Self::apply_image_events`] and the `image`
-    /// component have queued, in the order they settled.
+    /// Dispatches everything [`Self::apply_image_events`], the `image`
+    /// component and the dialog's UI methods have queued, in the order they
+    /// formed.
     ///
     /// Called by the entry the page posts for the batch and by nothing else:
-    /// the events are tasks, not part of the entry that settled the source.
-    /// Each is one non-bubbling dispatch at the element whose own `src`
-    /// settled, which is web-core's shape for both events
-    /// (`commonEventInitConfiguration.ts`: `bubbles: false`). An element freed
-    /// between the outcome forming and this call resolves to nothing, exactly
-    /// as a routed input event at a freed target does.
+    /// the events are tasks, not part of the entry that produced them. Each
+    /// is one non-bubbling dispatch at the element it belongs to, which is
+    /// web-core's shape for an image's two events
+    /// (`commonEventInitConfiguration.ts`: `bubbles: false`) and HTML's for a
+    /// dialog's `close` and `cancel`. An element freed between the event
+    /// forming and this call resolves to nothing, exactly as a routed input
+    /// event at a freed target does.
     ///
-    /// Returns what the listeners threw. A `load` handler that throws is
-    /// nonfatal, the standing every event listener has here.
-    pub(crate) fn dispatch_image_outcomes(
+    /// Returns what the listeners threw. A handler that throws is nonfatal,
+    /// the standing every event listener has here.
+    pub(crate) fn dispatch_component_events(
         &mut self,
         js_runtime: &mut ScriptRuntime,
     ) -> Vec<MainThreadError> {
-        let outcomes = self.slot.borrow().image_outcomes.take();
+        let events = self.slot.borrow().component_events.take();
         let timestamp = self.timeline_milliseconds;
         let mut failures = Vec::new();
-        for outcome in outcomes {
+        for event in events {
             // [`EventDetail::Empty`] is the realm's `{}`, which is web-core's
-            // `error` detail exactly; a `load` carries the bitmap's
-            // *intrinsic* size, web-core's `naturalWidth`/`naturalHeight`,
-            // not the box it drew into.
-            let (target, name, detail) = match outcome {
-                dom::ImageOutcome::Loaded {
+            // `error` detail exactly, and the `Event` a dialog fires carries
+            // nothing either; a `load` carries the bitmap's *intrinsic* size,
+            // web-core's `naturalWidth`/`naturalHeight`, not the box it drew
+            // into.
+            let (target, name, detail) = match event {
+                ComponentEvent::Image(dom::ImageOutcome::Loaded {
                     node,
                     width,
                     height,
-                } => (
+                }) => (
                     node,
                     LOAD_EVENT,
                     EventDetail::Size {
@@ -1127,7 +1135,10 @@ impl MainThreadRuntime {
                         height: f64::from(height),
                     },
                 ),
-                dom::ImageOutcome::Failed { node } => (node, ERROR_EVENT, EventDetail::Empty),
+                ComponentEvent::Image(dom::ImageOutcome::Failed { node }) => {
+                    (node, ERROR_EVENT, EventDetail::Empty)
+                }
+                ComponentEvent::Plain { node, name } => (node, name, EventDetail::Empty),
             };
             if let Err(error) = self.dispatch(js_runtime, target, name, false, timestamp, &detail) {
                 failures.push(error);
@@ -1150,8 +1161,9 @@ impl MainThreadRuntime {
     /// Every routed input event bubbles — the painting side routes what a
     /// gesture produced, and Lynx has no non-bubbling input event — so this
     /// is [`Self::dispatch`] with the flag set and the payload's numbers for
-    /// a detail. The events that do not bubble are an `<image>`'s `load` and
-    /// `error`, which [`Self::dispatch_image_outcomes`] delivers.
+    /// a detail. The events that do not bubble are the components' — an
+    /// `<image>`'s `load` and `error`, a `<dialog>`'s `cancel` and `close` —
+    /// which [`Self::dispatch_component_events`] delivers.
     pub(crate) fn dispatch_input_event(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -2042,8 +2054,10 @@ const UI_METHOD_PARAM_INVALID: f64 = 4.0;
 /// left behind, and the realm decides when the next one runs by calling
 /// `__FlushElementTree` — measuring must not be able to move layout out from
 /// under the job that measures, and a card that wants current numbers says
-/// so. The one UI method that writes, `selectTab`, records a scroll request
-/// the next commit carries. Both still go through [`validate_live_element`],
+/// so. The UI methods that write record what the next commit carries:
+/// `selectTab` a scroll request, a dialog's four an attribute, a state bit
+/// and top-layer membership, and `close`/`requestClose` the events they queue
+/// for an entry of their own. Both still go through [`validate_live_element`],
 /// so a freed element is a script error rather than a zero rect or an empty
 /// style.
 fn install_readback_members(
@@ -2051,12 +2065,23 @@ fn install_readback_members(
     js_runtime: &mut ScriptRuntime,
     handle: &Rc<RefCell<DocumentSlot>>,
 ) -> Result<(), MainThreadError> {
-    tree_members! { engine, js_runtime, handle;
-        fn callElementMethod(
-            node: node_id_argument,
-            method: string_argument,
-            params: string_argument
-        ) |document| {
+    // Written out rather than generated, because a dialog's `close` and
+    // `requestClose` queue events on the slot's component-event queue beside
+    // the document.
+    let tree = Rc::clone(handle);
+    install(
+        engine,
+        js_runtime,
+        "callElementMethod",
+        3,
+        move |arguments| {
+            const NAME: &str = "bobcat-internal:host.callElementMethod";
+            let node = node_id_argument(NAME, arguments, 0)?;
+            let method = string_argument(NAME, arguments, 1)?;
+            let params = string_argument(NAME, arguments, 2)?;
+            let mut handle = borrow_slot(NAME, &tree)?;
+            let events = handle.component_events.clone();
+            let document = handle.document_mut();
             validate_live_element(document, NAME, node)?;
             // Dispatched by name, and by tag for a method only one component
             // has, because the PAPI is generic. The answer is a status code
@@ -2080,9 +2105,38 @@ fn install_readback_members(
                         Err(tree::InvalidParams) => UI_METHOD_PARAM_INVALID,
                     })
                 }
+                // `params` is not read: `close(returnValue)` and
+                // `requestClose(returnValue)` take a value no Lynx reader exists
+                // for, so it is dropped (`tree::dialog`).
+                "show" | "showModal" | "close" | "requestClose"
+                    if tree::is_dialog(document, node) =>
+                {
+                    let outcome = match method {
+                        "show" => tree::dialog::show(document, node),
+                        "showModal" => tree::dialog::show_modal(document, node),
+                        "close" => {
+                            tree::dialog::close(document, node, &events);
+                            Ok(())
+                        }
+                        _ => {
+                            tree::dialog::request_close(document, node, &events);
+                            Ok(())
+                        }
+                    };
+                    // web-core reports every method that throws as code 4
+                    // (`createInvokeUIMethod.ts`); native's
+                    // `INVALID_STATE_ERROR` is 7 (`tree::dialog`).
+                    HostValue::Number(match outcome {
+                        Ok(()) => UI_METHOD_SUCCESS,
+                        Err(tree::dialog::InvalidState) => UI_METHOD_PARAM_INVALID,
+                    })
+                }
                 _ => HostValue::Number(UI_METHOD_NOT_FOUND),
             })
-        }
+        },
+    )?;
+
+    tree_members! { engine, js_runtime, handle;
         fn getComputedStyleMap(
             node: node_id_argument,
             properties: string_argument,

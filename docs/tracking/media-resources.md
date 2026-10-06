@@ -122,8 +122,9 @@ dispatched where they form — one of the two producers is the `image`
 component's own reaction, which runs inside the `__SetAttribute` that wrote
 the `src` — and the batch is delivered by an entry of its own, posted the way
 `contentvisibilityautostatechange` is: `Page`'s epilogue asks
-`has_image_outcomes()` after its commit and queues one fresh `Page::enter`,
-behind every job already queued, with an epilogue of its own. A listener
+`has_component_events()` (the queue the image and dialog components share)
+after its commit and queues one fresh `Page::enter`, behind every job already
+queued, with an epilogue of its own. A listener
 therefore never runs inside the entry that bound the source, and what it
 mutates is committed by the delivery entry — which is what a browser does,
 since an `<img>`'s `load` is a task even for a URL the cache already holds. A

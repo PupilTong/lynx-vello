@@ -2220,6 +2220,201 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
     assert_eq!(offset(), dom::Vector2D::new(600.0, 0.0));
 }
 
+/// A `<dialog>`'s four methods through `__InvokeUIMethod` and the
+/// selector-query `invoke` (`__BobcatQueryNodes`): `showModal` opens it in
+/// the top layer, where `:modal` matches and `open` is an attribute script
+/// reads back; `show` on a modal dialog is HTML's `InvalidStateError`, code
+/// 4; `close` delivers a `close` and `requestClose` a `cancel` and then a
+/// `close`, each non-bubbling — the capture pass runs the path, the bind
+/// pass the dialog alone — with a `{}` detail, from an entry of their own.
+#[test]
+#[expect(clippy::too_many_lines, reason = "one scenario over both invoke paths")]
+fn a_dialog_opens_closes_and_fires_through_both_invoke_paths() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const outer = __CreateView(0);
+                  const dialog = __CreateElement('dialog', 0);
+                  __SetID(dialog, 'd');
+                  __AppendElement(page, outer);
+                  __AppendElement(outer, dialog);
+                  globalThis.held = [page, outer, dialog];
+                  const note = (label) => ({
+                    type: 'worklet',
+                    value: {
+                      body: (event) =>
+                        seen.push(
+                          label + ':' + event.currentTarget.uid + ':' +
+                          event.type + ':' + JSON.stringify(event.detail),
+                        ),
+                    },
+                  });
+                  for (const name of ['close', 'cancel']) {
+                    __AddEvent(dialog, 'bindEvent', name, note('dialog'));
+                    __AddEvent(outer, 'bindEvent', name, note('outer'));
+                    __AddEvent(page, 'capture-bind', name, note('page-capture'));
+                  }
+                };
+                ",
+            "app:///dialog.js",
+        )
+        .expect("main-thread script");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import {
+                  __BobcatQueryNodes,
+                  __FlushElementTree,
+                  __GetAttributeByName,
+                  __InvokeUIMethod,
+                } from 'bobcat:element';
+                __FlushElementTree();
+                globalThis.openAttribute = element => __GetAttributeByName(element, 'open');
+                globalThis.viaPapi = (element, method, params) => {
+                  let answer;
+                  __InvokeUIMethod(element, method, params, result => { answer = result; });
+                  return answer;
+                };
+                globalThis.viaQuery = (selector, method, params) => __BobcatQueryNodes({
+                  bobcat: 'runtime', method: 'nodeQuery', operation: 'invoke',
+                  token: {type: 0, identifier: selector, component_id: '',
+                          first_only: true, root_unique_id: undefined},
+                  params: {method, params},
+                });
+                globalThis.expectCode = (answer, code) => {
+                  if (answer.code !== code || answer.data !== undefined) {
+                    throw new Error('expected ' + code + ', got ' + JSON.stringify(answer));
+                  }
+                };
+                ",
+            "app:///dialog-helpers.js",
+            "helpers",
+        )
+        .expect("helpers");
+    let dialog = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let outer = tree.get(page).expect("the page").child_ids()[0];
+        tree.get(outer).expect("the outer view").child_ids()[0]
+    };
+    let steps = std::cell::Cell::new(0);
+    let run = |runtime: &mut MainThreadRuntime, js_runtime: &mut ScriptRuntime, source: &str| {
+        steps.set(steps.get() + 1);
+        let name = format!("app:///dialog-step-{}.js", steps.get());
+        runtime
+            .evaluate_module(js_runtime, source, &name, "step")
+            .expect("step");
+    };
+    let modal = || {
+        let tree = elements.tree();
+        (
+            tree.blocks_document(dialog),
+            tree.matches(dialog, ":modal").expect("a valid selector"),
+            tree.matches(dialog, ":open").expect("a valid selector"),
+        )
+    };
+
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        r"
+            expectCode(viaPapi(held[2], 'showModal', {}), 0);
+            if (openAttribute(held[2]) !== '') throw new Error('open: ' + openAttribute(held[2]));
+            ",
+    );
+    assert_eq!(modal(), (true, true, true));
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        r"
+            expectCode(viaQuery('#d', 'showModal', undefined), 0);
+            expectCode(viaPapi(held[2], 'show', {}), 4);
+            expectCode(viaQuery('#d', 'show', {}), 4);
+            ",
+    );
+    assert_eq!(
+        modal(),
+        (true, true, true),
+        "a refused `show` changes nothing"
+    );
+    assert!(!runtime.has_component_events());
+
+    // `close(returnValue)`: the value is dropped.
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        r"
+            expectCode(viaQuery('#d', 'close', {returnValue: 'kept nowhere'}), 0);
+            if (openAttribute(held[2]) !== null) throw new Error('still open');
+            ",
+    );
+    assert_eq!(modal(), (false, false, false));
+    assert!(
+        runtime.has_component_events(),
+        "owed to an entry of its own"
+    );
+    expect_seen(&mut js_runtime, &mut runtime, "");
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        "page-capture:2:close:{}|dialog:4:close:{}",
+    );
+
+    // Closing a closed dialog succeeds and owes nothing.
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        r"
+            expectCode(viaPapi(held[2], 'close', {}), 0);
+            expectCode(viaPapi(held[2], 'requestClose', {}), 0);
+            ",
+    );
+    assert!(!runtime.has_component_events());
+
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        r"
+            expectCode(viaQuery('#d', 'show', {}), 0);
+            expectCode(viaQuery('#d', 'showModal', {}), 4);
+            expectCode(viaPapi(held[2], 'requestClose', {}), 0);
+            ",
+    );
+    assert_eq!(modal(), (false, false, false));
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        "page-capture:2:cancel:{}|dialog:4:cancel:{}|page-capture:2:close:{}|dialog:4:close:{}",
+    );
+
+    // The methods belong to `dialog` alone, and `dialog` has no others.
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        r"
+            expectCode(viaPapi(held[1], 'showModal', {}), 3);
+            expectCode(viaPapi(held[2], 'selectTab', {index: 0}), 3);
+            ",
+    );
+}
+
 /// Measuring runs no pipeline step. A job that mutates and then measures
 /// sees the box the last pass produced; the new one arrives only once the
 /// realm flushes itself, or once the entry's epilogue commits for it.
@@ -2834,7 +3029,11 @@ fn an_image_load_carries_its_intrinsic_size_and_does_not_bubble() {
     expect_seen(&mut js_runtime, &mut runtime, "");
 
     runtime.apply_image_events(&[image_loaded(IMAGE_SOURCE)]);
-    assert!(runtime.dispatch_image_outcomes(&mut js_runtime).is_empty());
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
 
     expect_seen(
         &mut js_runtime,
@@ -2852,7 +3051,11 @@ fn an_image_error_carries_an_empty_detail() {
     js_set_src(&mut js_runtime, &mut runtime, IMAGE_SOURCE);
 
     runtime.apply_image_events(&[image_failed(IMAGE_SOURCE)]);
-    assert!(runtime.dispatch_image_outcomes(&mut js_runtime).is_empty());
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
 
     expect_seen(
         &mut js_runtime,
@@ -2885,7 +3088,11 @@ fn a_placeholder_settling_is_nobody_s_event() {
         image_failed(IMAGE_PLACEHOLDER),
     ] {
         runtime.apply_image_events(&[event]);
-        assert!(runtime.dispatch_image_outcomes(&mut js_runtime).is_empty());
+        assert!(
+            runtime
+                .dispatch_component_events(&mut js_runtime)
+                .is_empty()
+        );
         // A placeholder is an interim picture, not an answer to the page.
         expect_seen(&mut js_runtime, &mut runtime, "");
     }
@@ -2893,7 +3100,11 @@ fn a_placeholder_settling_is_nobody_s_event() {
     // The source behind it is still the element's own, and its failure is
     // still the element's `error` — once.
     runtime.apply_image_events(&[image_failed(IMAGE_SOURCE), image_failed(IMAGE_SOURCE)]);
-    assert!(runtime.dispatch_image_outcomes(&mut js_runtime).is_empty());
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
     expect_seen(
         &mut js_runtime,
         &mut runtime,
@@ -2911,7 +3122,9 @@ fn a_second_mount_of_a_settled_source_is_delivered_after_the_call_that_bound_it(
     let (mut js_runtime, mut runtime, _elements) = image_page("app:///image-remount.js");
     runtime.apply_image_events(&[image_loaded(IMAGE_SOURCE)]);
     assert!(
-        runtime.dispatch_image_outcomes(&mut js_runtime).is_empty(),
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty(),
         "nothing holds the source yet, so the report settles the registry alone"
     );
     expect_seen(&mut js_runtime, &mut runtime, "");
@@ -2921,7 +3134,11 @@ fn a_second_mount_of_a_settled_source_is_delivered_after_the_call_that_bound_it(
     js_set_src(&mut js_runtime, &mut runtime, IMAGE_SOURCE);
     expect_seen(&mut js_runtime, &mut runtime, "");
 
-    assert!(runtime.dispatch_image_outcomes(&mut js_runtime).is_empty());
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
     expect_seen(
         &mut js_runtime,
         &mut runtime,
@@ -2930,9 +3147,17 @@ fn a_second_mount_of_a_settled_source_is_delivered_after_the_call_that_bound_it(
 
     // Exactly once: the queue was drained, and rewriting the value already
     // there binds nothing.
-    assert!(runtime.dispatch_image_outcomes(&mut js_runtime).is_empty());
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
     js_set_src(&mut js_runtime, &mut runtime, IMAGE_SOURCE);
-    assert!(runtime.dispatch_image_outcomes(&mut js_runtime).is_empty());
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
     expect_seen(&mut js_runtime, &mut runtime, "");
 }
 
@@ -2965,7 +3190,11 @@ fn an_element_collected_before_its_load_is_delivered_gets_nothing() {
         "the image is freed before its `load` is delivered"
     );
 
-    assert!(runtime.dispatch_image_outcomes(&mut js_runtime).is_empty());
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
     expect_seen(&mut js_runtime, &mut runtime, "");
 }
 

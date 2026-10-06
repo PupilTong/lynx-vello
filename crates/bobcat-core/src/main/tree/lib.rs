@@ -11,11 +11,13 @@
 //!
 //! Each tag owns its UA rules and tests. Numeric text and list attributes
 //! flow through `attr()`; boolean flags use attribute selectors. Only `image`,
-//! `blur_view`, `swiper` and `refresh_view` need components: for image
-//! resources, blur hints, the swiper's UA shadow tree and item count, and the
-//! refresh view's UA shadow tree and its header and footer slot assignment.
+//! `blur_view`, `swiper`, `refresh_view` and `dialog` need components: for
+//! image resources, blur hints, the swiper's UA shadow tree and item count, the
+//! refresh view's UA shadow tree and its header and footer slot assignment, and
+//! the dialog's `:open`/`:modal` state and top-layer membership.
 //! `viewpager` needs none; its one UI method, `selectTab`, is here for the
-//! runtime to dispatch by tag name.
+//! runtime to dispatch by tag name, as are the dialog's four
+//! ([`dialog`]).
 //! `scroll_coordinator` needs none either, and has no UI method: its ten tags
 //! are UA rules over anchor-sized absolute boxes, a sticky toolbar and
 //! `scroll-capture-y`. `swiper` and `refresh_view` have no UI method.
@@ -23,6 +25,7 @@
 //! [`NodeId`]: dom::NodeId
 
 mod blur_view;
+pub(crate) mod dialog;
 mod image;
 mod list;
 pub(crate) mod raw_text;
@@ -38,9 +41,12 @@ mod viewpager;
 #[cfg(test)]
 mod web_text_replication;
 
-use dom::{Document, StylesheetOrigin};
+use std::cell::RefCell;
+use std::rc::Rc;
 
-pub(crate) use self::image::ImageOutcomes;
+use dom::{Document, ImageOutcome, NodeId, StylesheetOrigin};
+
+pub(crate) use self::dialog::is_dialog;
 pub use self::ua_sheet::PageConfig;
 pub(crate) use self::viewpager::{InvalidParams, is_viewpager, select_tab};
 pub(crate) use crate::view::Viewport;
@@ -53,25 +59,92 @@ pub(crate) const PAGE_TAG: &str = "page";
 /// Creates the document with its permanent `page` element, the components the
 /// engine defines, and the UA cascade.
 ///
-/// `outcomes` is the queue the `image` component leaves a `src` that settled at
+/// `events` is the queue the `image` component leaves a `src` that settled at
 /// its bind in, for the runtime to dispatch once it is out of the JavaScript
 /// call that wrote it.
 #[must_use]
 pub(crate) fn new_document(
     viewport: Viewport,
     config: PageConfig,
-    outcomes: ImageOutcomes,
+    events: ComponentEvents,
 ) -> LynxDocument {
     let mut document = Document::new(viewport.device(), PAGE_TAG, ());
     blur_view::define(&mut document);
-    image::define(&mut document, outcomes);
+    image::define(&mut document, events);
     swiper::define(&mut document);
     refresh_view::define(&mut document);
+    dialog::define(&mut document);
     document.add_stylesheet(
         &ua_sheet::ua_stylesheet(config),
         StylesheetOrigin::UserAgent,
     );
     document
+}
+
+/// One event a component owes script: always non-bubbling, at the element
+/// the component belongs to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ComponentEvent {
+    /// An `<image>`'s own `src` settled: `load`, which carries the bitmap's
+    /// intrinsic size, or `error`.
+    Image(ImageOutcome),
+    /// An event whose detail is `{}`, named by the component that queued it:
+    /// a `<dialog>`'s `close` and `cancel` ([`dialog`]).
+    Plain { node: NodeId, name: &'static str },
+}
+
+/// The events this document's components have produced and not delivered
+/// yet, in the order they formed.
+///
+/// A handle rather than a field, because the producers are on both sides of
+/// the document: the `image` component, which is inside it and reaches nothing
+/// else; the runtime's own image report path, which is outside it; and the
+/// dialog's UI methods, which the runtime calls with the document borrowed.
+/// Each holds a clone of this one queue, and the runtime drains it in an entry
+/// of its own, posted by the epilogue of the entry that filled it
+/// (`docs/runtime-architecture.md` has the entry boundary,
+/// [`crate::main::page`] the epilogue's order).
+///
+/// Every producer runs inside a JavaScript call or with the document
+/// borrowed, where nothing may dispatch, and queueing is the only thing any of
+/// them can do with an event — which is what keeps one from being dropped.
+#[derive(Clone, Default)]
+pub(crate) struct ComponentEvents(Rc<RefCell<Vec<ComponentEvent>>>);
+
+impl ComponentEvents {
+    /// Queues what an image source bind settled, if it settled anything.
+    /// `None` is the ordinary case — a source still loading, or a write that
+    /// changed nothing.
+    pub(crate) fn queue_image(&self, outcome: Option<ImageOutcome>) {
+        if let Some(outcome) = outcome {
+            self.0.borrow_mut().push(ComponentEvent::Image(outcome));
+        }
+    }
+
+    /// Queues a whole image report batch's outcomes, in the order `dom`
+    /// returned them.
+    pub(crate) fn extend_images(&self, outcomes: Vec<ImageOutcome>) {
+        self.0
+            .borrow_mut()
+            .extend(outcomes.into_iter().map(ComponentEvent::Image));
+    }
+
+    /// Queues an event with a `{}` detail at `node`.
+    pub(crate) fn queue(&self, node: NodeId, name: &'static str) {
+        self.0
+            .borrow_mut()
+            .push(ComponentEvent::Plain { node, name });
+    }
+
+    /// Takes everything queued since the last drain.
+    pub(crate) fn take(&self) -> Vec<ComponentEvent> {
+        std::mem::take(&mut *self.0.borrow_mut())
+    }
+
+    /// Whether anything is waiting for a turn to be delivered on.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.borrow().is_empty()
+    }
 }
 
 #[cfg(test)]
