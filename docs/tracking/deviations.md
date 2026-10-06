@@ -1379,6 +1379,63 @@ consequential choice about whether to follow the spec or the quirk.
     children too, but still gives a wrapped item `scroll-snap-align: start`
     (`:68-75`).
 
+- **`x-refresh-view` (2026-10-06): a component with web-core's shadow
+  `#container` scroll container, and its snap alignment is a view-timeline
+  animation.** `crates/bobcat-core/src/main/tree/refresh_view.rs` translates
+  `x-refresh-view.css` and its template (`htmlTemplates.ts:174-219`) onto
+  web-core's three tags, `x-refresh-view`, `x-refresh-header` and
+  `x-refresh-footer`. The shadow tree is web-core's: `#container` (`overflow-y:
+  scroll`, `scroll-snap-type: y mandatory`) holding a 30% placeholder, the
+  header slot, `#content` with the default slot (the one box that snaps at
+  rest, centred), the footer slot and a second placeholder. The component sets
+  `slot` on the header and the footer when they reach its default slot, where
+  web-core's header and footer set it themselves when they connect. No events
+  and no UI methods. Where it leaves a reference:
+  - *The header holds at 90% visible* (web-core: the `IntersectionObserver`
+    threshold of `XRefreshSubElementIntersectionObserver.ts`, the footer
+    alike). Native triggers when the pull reaches the header's full height
+    (iOS `headerReleased`, `LynxUIRefresh.m:268-271`).
+  - *The pull range is the 30% placeholder* (web-core), where native's bounce
+    has no such bound.
+  - *A footer, load-more, `enable-loadmore` and `enable-auto-loadmore` exist
+    in web-core only.* Native registers `refresh` and `refresh-header`
+    (Android `LynxUIRefresh.kt:42`, `LynxUIRefreshHeader.kt:14`) and no
+    footer; Android turns load-more off (`setEnableLoadMore(false)`,
+    `canLoadMore() = false`, `LynxUIRefresh.kt:184,223`) and iOS marks
+    `startLoadMore` and `footerReleased` deprecated (`LynxUIRefresh.m:264-266,
+    296-298`). This engine follows web-core: the footer shows, holds and
+    hides as the header does. `enable-auto-loadmore` and
+    `enable-footer-rebound` only change events, so they have no visible
+    effect.
+  - *The header's and the footer's snap alignment follows their visibility*:
+    `scroll-snap-align` is animated on each one's own `view(block)` timeline
+    (`start` for the header from `cover 0%` to `exit 0%`, `none` from `exit
+    20%`; the footer's mirror on `entry`), so the discrete change sits at 90%
+    visible. web-core sets `x-magnet-enable` at that threshold and keeps it
+    until `finishRefresh`/`finishLoadMore` removes it. With no events and no
+    methods here, a header that snapped in stays until the user scrolls it
+    out: a drag on the header moves the shadow scroller, a drag on the
+    content scrolls the content first. The alignment re-cascades on the
+    main thread when it adopts a scroll of `#container`; a release that
+    reaches the painter before the main thread has published the new snap
+    position settles on the content.
+  - *The content child's y-axis bounce is suppressed inside a refresh view*:
+    every content child is `overscroll-behavior-y: auto !important` (§D.15,
+    [style-assumptions.md](../style-assumptions.md)), so a pull chains from it
+    into `#container`. Native attaches the header to the inner scroller's own
+    bounce.
+  - *The shadow parts are fixed flex columns.* web-core gives `#container`,
+    `#content` and the slot the host's display mode (`--lynx-display:
+    inherit`, `x-refresh-view.css:22-26`). The header and the footer follow
+    the engine's default display policy (`display: linear` under
+    `defaultDisplayLinear`), which is web-core's linear column under its
+    default toggle (`common-css/linear.css`, the `--lynx-display-toggle`
+    list).
+  - *web-core's typed aliases are not registered*: its tag map turns
+    `<refresh>` and `<refresh-header>` into `x-refresh-view` and
+    `x-refresh-header` (`web-core/ts/constants.ts:112-113`); only the
+    `x-refresh-*` spellings are tags here.
+
 - **`<scroll-coordinator>` (2026-09-29): the authored coordinator is the
   scroll container, its slot is anchor-sized, and the fold is
   `scroll-capture`.** `crates/bobcat-core/src/main/tree/scroll_coordinator.rs`

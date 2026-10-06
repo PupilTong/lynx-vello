@@ -363,6 +363,106 @@ async fn compiled_swipers_start_on_current() {
     );
 }
 
+/// A compiled card of two `<x-refresh-view>`s, 150 by 360 each, opens on
+/// their yellow content. A pull of 150px on the left one — 142 of scroll
+/// after the 8px slop — chains from its `scroll-view`, at its top, into the
+/// shadow `#container` (108px placeholders, a 50px header, opening at 158),
+/// and shows the whole red header at 92..142 while the finger is down;
+/// released, the view settles on the header's start, so the header fills
+/// 0..50 and the content starts under it. The same pull on the right one,
+/// `enable-refresh={false}`, moves nothing.
+#[tokio::test]
+async fn compiled_refresh_view_holds_a_pulled_header() {
+    use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
+    use bobcat_core::{DrawTarget, Painter};
+
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const GREEN: [u8; 4] = [0, 128, 0, 255];
+    const YELLOW: [u8; 4] = [255, 255, 0, 255];
+
+    let page = PageSource::from_bytes(
+        &Url::parse("app:///react-refresh-view.web.bundle").unwrap(),
+        fixtures::fixture("react-refresh-view").page,
+    )
+    .unwrap();
+    let resources = Resources::new(ResourcesConfig::default(), || {});
+    page.register_with(&resources);
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto)
+        .await
+        .unwrap();
+    let (width, height) = (f32::from(COORDINATOR_WIDTH), 360.0);
+    let mut view = group
+        .create_lynx_view(
+            width,
+            height,
+            1.0,
+            resources.builder(),
+            Vec::new(),
+            page.view_sources(SCREEN),
+        )
+        .unwrap();
+    let mut painter = Painter::new(DrawTarget::Offscreen, width, height, 1.0)
+        .await
+        .unwrap();
+    painter.attach(&view).unwrap();
+
+    let mut booted = false;
+    let opened = [
+        (75, 5, YELLOW),
+        (75, 170, GREEN),
+        (225, 5, YELLOW),
+        (225, 170, GREEN),
+        (75, 355, GREEN),
+    ];
+    settle(&mut view, &mut painter, &mut booted, &opened, "boot");
+
+    let pull = |painter: &mut Painter, x: f32, phase: PointerPhase, y: f32| {
+        painter.dispatch_input(InputEvent::pointer(
+            Point2D::new(x, y),
+            1,
+            PointerKind::Touch,
+            phase,
+        ));
+    };
+    pull(&mut painter, 75.0, PointerPhase::Down, 100.0);
+    pull(&mut painter, 75.0, PointerPhase::Move, 250.0);
+    let held = [(75, 95, RED), (75, 140, RED), (75, 150, YELLOW)];
+    // The finger stays down while the main thread adopts the pull and
+    // publishes the header's snap position.
+    let until = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < until {
+        settle(&mut view, &mut painter, &mut booted, &held, "held");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    pull(&mut painter, 75.0, PointerPhase::Up, 250.0);
+    // An offscreen painter's glide advances one display frame per tick.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while painter.is_animating() {
+        assert!(Instant::now() < deadline, "the release never came to rest");
+        let _ = view.pump();
+        painter.tick(false).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    settle(
+        &mut view,
+        &mut painter,
+        &mut booted,
+        &[(75, 2, RED), (75, 48, RED), (75, 55, YELLOW)],
+        "released on the header",
+    );
+
+    pull(&mut painter, 225.0, PointerPhase::Down, 100.0);
+    pull(&mut painter, 225.0, PointerPhase::Move, 250.0);
+    pull(&mut painter, 225.0, PointerPhase::Up, 250.0);
+    settle(
+        &mut view,
+        &mut painter,
+        &mut booted,
+        &[(225, 5, YELLOW), (225, 170, GREEN), (75, 2, RED)],
+        "no header to pull",
+    );
+}
+
 /// The width of the coordinator test's view.
 const COORDINATOR_WIDTH: u16 = 300;
 
