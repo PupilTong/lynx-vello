@@ -27,6 +27,12 @@
 //! difference: with the append path reassigning the whole tree, building a
 //! 1024-row host cost 51× the same rows with no shadow root; it now costs
 //! 1.4×.
+//!
+//! Each path that changes a slot's assigned nodes — and an insertion into or
+//! removal from a slot showing its fallback content — signals a slot change
+//! (DOM §4.2.2.4 *assign slottables*, §4.2.3 *insert* and *remove*), and the
+//! signalled slots receive `slotchange` once the mutation's reactions have
+//! drained (`tree/custom.rs`).
 
 use std::sync::LazyLock;
 
@@ -384,7 +390,20 @@ impl<T> Document<T> {
                 self.assign_slots(root);
             }
         }
+        self.signal_fallback_change(parent);
         self.note_slot_set_change(parent, child);
+    }
+
+    /// *insert* and *remove*: "If parent's root is a shadow root, and parent
+    /// is a slot whose assigned nodes is the empty list, then run signal a
+    /// slot change for parent" — the fallback content it renders changed.
+    fn signal_fallback_change(&mut self, parent: NodeId) {
+        let shows_fallback = self
+            .get(parent)
+            .is_some_and(|node| node.is_slot() && node.assigned_node_ids().is_empty());
+        if shows_fallback && self.containing_shadow_root(parent).is_some() {
+            self.signal_slot_change(parent);
+        }
     }
 
     pub(crate) fn note_slot_assignment_removed(&mut self, parent: NodeId, child: NodeId) {
@@ -394,6 +413,7 @@ impl<T> Document<T> {
         if self.get(parent).and_then(Node::shadow_root_id).is_some() {
             self.unassign_slottable(child);
         }
+        self.signal_fallback_change(parent);
         let Some(root) = self.shadow_root_of(parent) else {
             return;
         };
@@ -411,6 +431,11 @@ impl<T> Document<T> {
         // fallback content anyway, so empty is also the right answer.
         for slot in departed {
             let assigned: Vec<NodeId> = self.live(slot).assigned_node_ids().to_vec();
+            if !assigned.is_empty() {
+                // *remove*'s "assign slottables for a tree with node": the
+                // departed slot finds nothing, which differs from what it had.
+                self.signal_slot_change(slot);
+            }
             for node in assigned {
                 self.live_node_mut(node).clear_assigned_slot();
             }
@@ -483,6 +508,7 @@ impl<T> Document<T> {
             .push(child_slot);
         self.live_node_mut(child).links_mut().assigned_slot = Some(slot_slot);
         self.mark_ancestors_dirty_descendants(child);
+        self.signal_slot_change(slot);
     }
 
     fn unassign_slottable(&mut self, child: NodeId) {
@@ -500,6 +526,7 @@ impl<T> Document<T> {
             links.assigned_nodes.remove(index);
         }
         self.live_node_mut(child).clear_assigned_slot();
+        self.signal_slot_change(slot);
     }
 
     fn matching_slot(&self, shadow_root: NodeId, child: NodeId) -> Option<NodeId> {
@@ -633,6 +660,9 @@ impl<T> Document<T> {
             if node.assigned_node_slots() != nodes.as_slice() {
                 node.links_mut().assigned_nodes = nodes;
                 changed = true;
+                // *assign slottables*: "If slottables and slot's assigned
+                // nodes are not identical, then run signal a slot change".
+                self.signal_slot_change(slot);
             }
         }
 

@@ -42,6 +42,15 @@
 //!   path names. A step whose node is gone — or is no longer a constructed custom element —
 //!   delivers nothing and the walk continues, which is the same "resolves to nothing rather than to
 //!   whatever took its storage" rule a script path already has.
+//! - **A shadow root delivers to its host.** In the platform a component hears the events of its
+//!   own shadow tree on `this.shadowRoot.addEventListener(…)`; that is how it hears a non-composed
+//!   event such as `slotchange`, whose path ends at the shadow root. A shadow root has no handler
+//!   here, so the step at which a non-composed event's path ends — its target's own shadow root —
+//!   calls the host's [`handle_event`](crate::CustomElement::handle_event) instead, in both passes
+//!   as any defined element on the path is called, with `element` and `currentTarget` both the
+//!   host: a shadow root as `currentTarget` is not representable when the call is the host's. Only
+//!   that step, so a host never hears one event twice: a shadow root the path crosses is followed
+//!   by its host, which is called as itself.
 //! - **Propagation stops where a handler says.** [`ElementEvent::stop_propagation`] is read after
 //!   each call, so a handler that stops during the capture pass keeps the target itself from
 //!   hearing the event.
@@ -102,10 +111,10 @@ impl EventPhase {
 
 /// What an [`ElementEvent`] is, and the payload that goes with it.
 ///
-/// One variant today. The enum is the extension point: an engine-decided
-/// event that a component must hear adds a variant here, and every handler
-/// that does not match it keeps compiling — which is what keeps the hook one
-/// method rather than one method per event.
+/// The enum is the extension point: an engine-decided event that a
+/// component must hear adds a variant here, and every handler that does not
+/// match it keeps compiling — which is what keeps the hook one method rather
+/// than one method per event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ElementEventKind {
@@ -116,6 +125,12 @@ pub enum ElementEventKind {
         /// The state the element changed **to**: `true` when it now skips.
         skipped: bool,
     },
+    /// [DOM §4.2.2.5](https://dom.spec.whatwg.org/#signal-a-slot-change): the
+    /// target slot's assigned nodes changed. Fired by the document itself,
+    /// at the end of the mutation that changed them, with `bubbles: true` and
+    /// `composed: false` — so it ends at the slot's shadow root, where the
+    /// host's own handler hears it ([`Document::dispatch_element_event`]).
+    SlotChange,
 }
 
 impl ElementEventKind {
@@ -128,6 +143,7 @@ impl ElementEventKind {
     pub fn name(self) -> &'static str {
         match self {
             Self::ContentVisibilityAutoStateChange { .. } => "contentvisibilityautostatechange",
+            Self::SlotChange => "slotchange",
         }
     }
 }
@@ -203,7 +219,8 @@ impl ElementEvent {
 impl<T> Document<T> {
     /// Fires one engine event at `target` and runs the standard's two passes
     /// over the path, calling [`CustomElement::handle_event`](crate::CustomElement::handle_event)
-    /// on every step whose node is a defined custom element.
+    /// on every step whose node is a defined custom element — and, for a
+    /// non-composed event, on the host of the shadow root its path ends at.
     ///
     /// Nothing about this reaches script: the realm's own listener
     /// registrations are not consulted, and a realm is not entered. This
@@ -227,6 +244,11 @@ impl<T> Document<T> {
         // Computed once, owning no borrow: every handler below takes the
         // document mutably, and one of them may free a node this list names.
         let steps = self.event_steps(target, bubbles, composed);
+        // The shadow root a non-composed path ends at, whose host hears the
+        // event in its place; see the module doc.
+        let boundary = (!composed)
+            .then(|| self.tree_root(target))
+            .filter(|&root| self.is_shadow_root(root));
         let mut event = ElementEvent {
             kind,
             target,
@@ -243,11 +265,21 @@ impl<T> Document<T> {
                 // handler rather than a set per phase.
                 continue;
             }
-            let Some(handler) = self.custom_element_handler(step.node) else {
-                continue;
+            let (element, handler) = match self.custom_element_handler(step.node) {
+                Some(handler) => (step.node, handler),
+                None if boundary == Some(step.node) => {
+                    let Some((host, handler)) = self.shadow_host(step.node).and_then(|host| {
+                        self.custom_element_handler(host)
+                            .map(|handler| (host, handler))
+                    }) else {
+                        continue;
+                    };
+                    (host, handler)
+                }
+                None => continue,
             };
             event.target = step.target;
-            event.current_target = step.node;
+            event.current_target = element;
             event.phase = if at_target {
                 EventPhase::AtTarget
             } else if step.capture {
@@ -259,7 +291,7 @@ impl<T> Document<T> {
             // listener invocation: what this handler's mutations raised runs
             // before the next step, not after the walk.
             let base = self.begin_reactions();
-            handler.handle_event(self, step.node, &mut event);
+            handler.handle_event(self, element, &mut event);
             self.drain_reactions(base);
             if event.stopped {
                 break;

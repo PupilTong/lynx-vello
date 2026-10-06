@@ -297,17 +297,14 @@ async fn compiled_scroll_coordinator_folds_its_header_before_the_content() {
 /// laid out by the engine's UA sheet: `current={2}` starts on its blue item,
 /// a `vertical` one with `current={1}` on its green item, a `coverflow` one
 /// with `current={1}` shows its green item centred and its red one scaled
-/// down at its left, and a one-second `autoplay` one turns from red through
-/// green to blue, where it stays. The autoplay swiper carries
-/// `smooth-scroll`, so each turn is instant: an offscreen painter advances
-/// no smooth glide, which waits for display frames. Its white current dot
-/// moves with it, from the first of its three dots, centred at
-/// (166.56, 227.2), to the third, at (193.44, 227.2) — the strip's
-/// animation runs on the main thread after each turn. The third row's dots
-/// are hidden on the left and custom-coloured on the right
-/// (`crates/bobcat-cli/src/server/capture.rs` has the geometry).
+/// down at its left, and a plain one with `current={1}` its green item, its
+/// white current dot the middle of its three, centred at (180, 227.2): the
+/// strip is three dots long because the component counted the items its
+/// slot was assigned. The third row's dots are hidden on the left and
+/// custom-coloured on the right (`crates/bobcat-cli/src/server/capture.rs`
+/// has the geometry).
 #[tokio::test]
-async fn compiled_swipers_start_on_current_and_autoplay_to_the_last_item() {
+async fn compiled_swipers_start_on_current() {
     use bobcat_core::{DrawTarget, Painter};
 
     const RED: [u8; 4] = [255, 0, 0, 255];
@@ -345,8 +342,6 @@ async fn compiled_swipers_start_on_current_and_autoplay_to_the_last_item() {
     painter.attach(&view).unwrap();
 
     let mut booted = false;
-    // The autoplay swiper is not sampled at boot: on a slow machine its
-    // first tick may come before the first matching frame.
     settle(
         &mut view,
         &mut painter,
@@ -358,18 +353,13 @@ async fn compiled_swipers_start_on_current_and_autoplay_to_the_last_item() {
             (5, 180, RED),
             (73, 107, WHITE),
             (227, 60, WHITE),
+            (180, 180, GREEN),
+            (180, 227, WHITE),
             (60, 347, RED),
             (166, 347, CYAN),
             (180, 347, YELLOW),
         ],
         "boot",
-    );
-    settle(
-        &mut view,
-        &mut painter,
-        &mut booted,
-        &[(180, 180, BLUE), (60, 60, BLUE), (193, 227, WHITE)],
-        "autoplay",
     );
 }
 

@@ -1286,8 +1286,7 @@ consequential choice about whether to follow the spec or the quirk.
     performance shortcut, not a behavior.
 
 - **`x-swiper` (2026-10-06): a component with web-core's shadow `#content`
-  scroll container and a dot strip, its layouts are UA rules, and autoplay is
-  a realm interval.** `crates/bobcat-core/src/main/tree/swiper.rs` translates
+  scroll container and a dot strip, and its layouts are UA rules.** `crates/bobcat-core/src/main/tree/swiper.rs` translates
   `x-swiper.css` and its template (`htmlTemplates.ts:225-275`) onto web-core's
   two tags, `x-swiper` and `x-swiper-item` (web-core's tag map has no `swiper`
   entry; native's tag is `swiper`, Android `XSwiperUI.java:52`). No events and
@@ -1326,25 +1325,6 @@ consequential choice about whether to follow the spec or the quirk.
     (`overscroll-behavior-x`/`-y: contain-bounce`), the `<viewpager>`
     decision; web-core shows a blank page-wide box ahead of the items only
     (`x-swiper.css:64-66`, `htmlTemplates.ts:226-232`).
-  - *Removing `autoplay` stops it.* Native removes its pending tick when
-    `autoplay` turns false (Android `XSwiperUI.java:684-691`); web-core's
-    handler only ever restarts its interval and never clears it
-    (`XSwiperAutoScroll.ts:43-70`). **Native over web-core; the architect's
-    decision, to be confirmed by the user.** Changing `interval` restarts the
-    interval, as in web-core; native reads the new value at its next tick
-    (`XSwiperUI.java:850-853`).
-  - *`smooth-scroll` present with any value makes autoplay's turn instant*,
-    `"false"` included — web-core's `getAttribute('smooth-scroll') === null`
-    (`XSwiper.ts:101`), with `smooth-scroll` exempt from its false-filtering
-    (`:28-31`). Native reads a boolean that defaults to `true`, so
-    `smooth-scroll="true"` is smooth there (`XSwiperUI.java:877-885`).
-    **web-core over native, a recorded conflict to be confirmed by the
-    user.**
-  - *Autoplay counts from the nearest snap position.* web-core picks the item
-    whose centre is nearest the scrollport's middle (`XSwiper.ts:37-91`);
-    with equal items that is the same item, but a smooth turn here leaves the
-    document's offset where it was until the painter posts it back, so a
-    tick shorter than the glide asks for the same item again.
   - *`page-margin`, `previous-margin`, `next-margin`, `duration`: no
     effect, following web-core*, where the three margins become custom
     properties on the indicator container (`XSwiperIndicator.ts:54-74`) that
@@ -1387,10 +1367,12 @@ consequential choice about whether to follow the spec or the quirk.
     that shows the item's start.
   - *Not implemented:* `circular` wrap-around dragging (web-core
     re-slots the edge items in its shadow tree, `XSwiperCircular.ts`, and
-    turns snapping off, `x-swiper.css:122-131`) — here `circular` only makes
-    autoplay wrap from the last item to the first; every event; every UI
-    method; `contain: strict`/`content-visibility` from the twentieth item
-    (`x-swiper.css:77-80`), a browser shortcut.
+    turns snapping off, `x-swiper.css:122-131`) — here `circular` has no
+    effect; `autoplay`, `interval` and `smooth-scroll`, deferred by the user
+    (web-core's `XSwiperAutoScroll.ts`; `smooth-scroll` only matters to
+    autoplay); every event; every UI method; `contain: strict`/
+    `content-visibility` from the twentieth item (`x-swiper.css:77-80`), a
+    browser shortcut.
   - *A child that is neither an `x-swiper-item` nor a `wrapper` generates no
     box* (`x-swiper.css:98-100`), as in web-core. *An item inside a `wrapper`
     gets none of the item rules*; web-core sizes only the swiper's own

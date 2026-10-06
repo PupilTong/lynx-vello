@@ -39,7 +39,7 @@ compilation, so its lazy chunks cannot be shared with another test page.
 | `web-react-scroll-timeline` | A row revealing along its list's `animation-timeline: scroll()` |
 | `web-react-viewpager` | A `<viewpager>` of four coloured pages starting on the second (`select-index`), and a tap whose selector query `selectTab`s the fourth |
 | `web-react-scroll-coordinator` | A `<scroll-coordinator>` with a translucent toolbar over a red header and a slot whose `<scroll-view>` holds eight 100px items; a forward drag in the items folds the header first |
-| `web-react-swiper` | Six `<x-swiper>`s of three coloured items: `current`, `vertical`, `mode='coverflow'`, a one-second instant `autoplay`, `indicator-dots={false}` and custom dot colours |
+| `web-react-swiper` | Six `<x-swiper>`s of three coloured items: `current`, `vertical`, `mode='coverflow'`, a second `current`, `indicator-dots={false}` and custom dot colours |
 
 Development builds select `lynx-react-reload`, `lynx-react-global-props` and
 `lynx-react-lazy-nested`, retaining the compiler's default HMR client and asset

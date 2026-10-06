@@ -2036,17 +2036,16 @@ const UI_METHOD_NOT_FOUND: f64 = 3.0;
 const UI_METHOD_PARAM_INVALID: f64 = 4.0;
 
 /// Installs the two members that read geometry and style back out of the
-/// document, one of which also runs the UI methods, and `swiperAdvance`, the
-/// `x-swiper` autoplay tick `bobcat:element`'s interval calls.
+/// document, one of which also runs the UI methods.
 ///
-/// None runs a pipeline step. Each reads what the last completed pass
+/// Neither runs a pipeline step. Both read what the last completed pass
 /// left behind, and the realm decides when the next one runs by calling
 /// `__FlushElementTree` — measuring must not be able to move layout out from
 /// under the job that measures, and a card that wants current numbers says
-/// so. The two that write, the UI method `selectTab` and `swiperAdvance`,
-/// record a scroll request the next commit carries. All three go through
-/// [`validate_live_element`], so a freed element is a script error rather
-/// than a zero rect or an empty style.
+/// so. The one UI method that writes, `selectTab`, records a scroll request
+/// the next commit carries. Both still go through [`validate_live_element`],
+/// so a freed element is a script error rather than a zero rect or an empty
+/// style.
 fn install_readback_members(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
@@ -2103,11 +2102,6 @@ fn install_readback_members(
                 write_record_field(&mut record, &value);
             }
             Ok(HostValue::String(record))
-        }
-        fn swiperAdvance(node: node_id_argument) |document| {
-            validate_live_element(document, NAME, node)?;
-            tree::advance_swiper(document, node);
-            Ok(HostValue::Undefined)
         }
     }
 

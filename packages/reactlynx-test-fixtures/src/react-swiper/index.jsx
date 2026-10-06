@@ -11,10 +11,8 @@ import './index.css';
 // - top right: `vertical`, `current={1}`, so it starts on the green item;
 // - bottom left: `mode='coverflow'`, `current={1}`: the green item centred at
 //   full size, the red one scaled down at its left;
-// - bottom right: `autoplay` every second, so it turns from red to green to
-//   blue and stays there; `smooth-scroll`, present, makes each turn instant
-//   (web-core's reading of the attribute), which an offscreen painter shows
-//   at once where a smooth glide would wait for display frames;
+// - bottom right: `current={1}`, so it starts on the green item with its
+//   middle dot the white one;
 // - third row left: `indicator-dots={false}`, so no dots;
 // - third row right: yellow dots with a cyan current one.
 function App() {
@@ -35,7 +33,7 @@ function App() {
         <x-swiper-item class='green' />
         <x-swiper-item class='blue' />
       </x-swiper>
-      <x-swiper class='swiper bottom right' autoplay interval={1000} smooth-scroll>
+      <x-swiper class='swiper bottom right' current={1}>
         <x-swiper-item class='red' />
         <x-swiper-item class='green' />
         <x-swiper-item class='blue' />

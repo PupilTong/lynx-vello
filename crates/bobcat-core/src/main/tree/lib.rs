@@ -17,9 +17,7 @@
 //! runtime to dispatch by tag name.
 //! `scroll_coordinator` needs none either, and has no UI method: its ten tags
 //! are UA rules over anchor-sized absolute boxes, a sticky toolbar and
-//! `scroll-capture-y`. `swiper` has no UI method; its one entry point, the
-//! autoplay tick [`advance_swiper`], is here for the runtime's
-//! `swiperAdvance` host member.
+//! `scroll-capture-y`. `swiper` has no UI method.
 //!
 //! [`NodeId`]: dom::NodeId
 
@@ -41,7 +39,6 @@ mod web_text_replication;
 use dom::{Document, StylesheetOrigin};
 
 pub(crate) use self::image::ImageOutcomes;
-pub(crate) use self::swiper::advance as advance_swiper;
 pub use self::ua_sheet::PageConfig;
 pub(crate) use self::viewpager::{InvalidParams, is_viewpager, select_tab};
 pub(crate) use crate::view::Viewport;

@@ -13,6 +13,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::Doc;
+use dom::event::{ElementEvent, ElementEventKind, EventPhase};
 use dom::{CustomElement, Document, NodeId, ShadowRootMode};
 
 type Log = Arc<Mutex<Vec<String>>>;
@@ -37,9 +38,6 @@ struct Probe {
     on_connected: Option<Action>,
     on_disconnected: Option<ReadAction>,
     on_attribute: Option<Action>,
-    /// Whether `children_changed` is recorded; off by default so the tests
-    /// that only watch the lifecycle callbacks keep their transcripts.
-    children: bool,
 }
 
 impl Probe {
@@ -52,13 +50,7 @@ impl Probe {
             on_connected: None,
             on_disconnected: None,
             on_attribute: None,
-            children: false,
         }
-    }
-
-    fn recording_children(mut self) -> Self {
-        self.children = true;
-        self
     }
 
     fn observing(mut self, names: &[&str]) -> Self {
@@ -135,15 +127,6 @@ impl CustomElement<()> for Probe {
         ));
         if let Some(action) = &self.on_attribute {
             action(document, element);
-        }
-    }
-
-    fn children_changed(&self, document: &mut Document<()>, element: NodeId) {
-        if self.children {
-            let count = document
-                .get(element)
-                .map_or(0, |node| node.child_ids().len());
-            self.record(&format!("children#{element} {count}"));
         }
     }
 }
@@ -1099,113 +1082,130 @@ fn a_document_with_no_definitions_behaves_exactly_as_before() {
     assert!(doc.matches(child, ":defined"));
 }
 
-#[test]
-fn children_changed_reports_each_child_list_mutation_once_after_the_lifecycle_reactions() {
-    let log = log();
-    let mut doc = Doc::new();
-    let root = doc.root;
-    define(&mut doc, Probe::new("x-list", &log).recording_children());
-    define(&mut doc, Probe::new("x-item", &log));
-    let list = doc.el(root, "x-list");
-    let other = doc.el(root, "view");
-    let _ = take(&log);
+// ---------------------------------------------------------------------------
+// `slotchange` (DOM §4.2.2.5), heard by the host through its shadow root
+// ---------------------------------------------------------------------------
 
-    let first = doc.el(list, "x-item");
-    assert_eq!(
-        take(&log),
-        vec![
-            format!("x-item:constructed#{first}"),
-            format!("x-item:connected#{first}"),
-            format!("x-list:children#{list} 1"),
-        ],
-        "an insertion reports after the child's own reactions"
-    );
+/// A component whose constructor builds a shadow tree of `slots` — `""` for
+/// the default slot, otherwise a named one — and that records every event it
+/// hears as `who:kind:phase:slot:assigned-count`.
+struct SlotHost {
+    who: &'static str,
+    log: Log,
+    slots: &'static [&'static str],
+    /// A component built inside this one's shadow tree, with one light child.
+    inner: Option<&'static str>,
+}
 
-    let text = doc.dom.create_text_node("t", ());
-    doc.dom.append_child(list, text);
-    let second = doc.el(list, "view");
-    assert_eq!(
-        take(&log),
-        vec![
-            format!("x-list:children#{list} 2"),
-            format!("x-list:children#{list} 3"),
-        ],
-        "a text node and an undefined child count as any child does"
-    );
+impl CustomElement<()> for SlotHost {
+    fn constructed(&self, document: &mut Document<()>, element: NodeId) {
+        let shadow = document.attach_shadow(element, ShadowRootMode::Open);
+        for &name in self.slots {
+            let slot = document.create_element("slot", ());
+            if !name.is_empty() {
+                document.set_attribute(slot, "name", name);
+            }
+            document.append_child(shadow, slot);
+        }
+        if let Some(inner) = self.inner {
+            let inner = document.create_element(inner, ());
+            document.append_child(shadow, inner);
+        }
+    }
 
-    doc.dom.insert_before(list, second, Some(first));
-    assert_eq!(
-        take(&log),
-        vec![format!("x-list:children#{list} 3")],
-        "a move within one parent is one change"
-    );
+    fn handle_event(&self, document: &mut Document<()>, element: NodeId, event: &mut ElementEvent) {
+        assert_eq!(event.current_target(), element);
+        let phase = match event.phase() {
+            EventPhase::Capturing => "capture",
+            EventPhase::AtTarget => "at-target",
+            EventPhase::Bubbling => "bubble",
+        };
+        let target = event.target();
+        let slot = document
+            .get(target)
+            .and_then(|node| node.attribute("name"))
+            .unwrap_or("default")
+            .to_owned();
+        let count = document.assigned_nodes(target).len();
+        self.log
+            .lock()
+            .expect("the log is never poisoned")
+            .push(format!(
+                "{}:{}:{phase}:{slot}:{count}",
+                self.who,
+                event.kind().name()
+            ));
+    }
+}
 
-    doc.dom.append_child(other, second);
-    assert_eq!(
-        take(&log),
-        vec![format!("x-list:children#{list} 2")],
-        "a move out reports for the parent it left"
-    );
-    doc.dom.append_child(list, second);
-    let _ = take(&log);
+fn slot_host(who: &'static str, log: &Log, slots: &'static [&'static str]) -> SlotHost {
+    SlotHost {
+        who,
+        log: Arc::clone(log),
+        slots,
+        inner: None,
+    }
+}
 
-    doc.dom.remove_element(text);
-    assert_eq!(take(&log), vec![format!("x-list:children#{list} 2")]);
-
-    doc.dom.drop_element(second);
-    assert_eq!(
-        take(&log),
-        vec![format!("x-list:children#{list} 1")],
-        "a freeing removal reports once the node is gone"
-    );
-
-    doc.dom.drop_subtree(first);
-    assert_eq!(
-        take(&log),
-        vec![
-            format!("x-item:disconnected#{first}"),
-            format!("x-list:children#{list} 0"),
-        ]
-    );
-
-    doc.dom.remove_element(list);
-    let detached = doc.dom.create_element("view", ());
-    doc.dom.append_child(list, detached);
-    assert_eq!(
-        take(&log),
-        vec![
-            format!("x-list:disconnected#{list}"),
-            format!("x-list:children#{list} 1"),
-        ],
-        "a disconnected parent still hears its children change"
-    );
+/// Both passes of one `slotchange` at `slot`, as the host hears them.
+fn slotchange(who: &str, slot: &str, count: usize) -> Vec<String> {
+    vec![
+        format!("{who}:slotchange:capture:{slot}:{count}"),
+        format!("{who}:slotchange:bubble:{slot}:{count}"),
+    ]
 }
 
 #[test]
-fn children_changed_ignores_the_shadow_tree_and_the_constructor() {
+fn a_host_hears_slotchange_when_its_slots_assigned_nodes_change() {
     let log = log();
     let mut doc = Doc::new();
     let root = doc.root;
-    define(
-        &mut doc,
-        Probe::new("x-host", &log)
-            .recording_children()
-            .on_constructed(Box::new(|document, element| {
-                // Inside the constructor: the element is no instance yet.
-                let light = document.create_element("view", ());
-                document.append_child(element, light);
-                let shadow = document.attach_shadow(element, ShadowRootMode::Open);
-                let inner = document.create_element("view", ());
-                document.append_child(shadow, inner);
-            })),
-    );
+    doc.dom
+        .define("x-host", Box::new(slot_host("host", &log, &["", "b"])));
+    define(&mut doc, Probe::new("x-item", &log));
     let host = doc.el(root, "x-host");
+    assert!(take(&log).is_empty(), "two empty slots changed nothing");
+
+    let first = doc.el(host, "x-item");
+    let expected: Vec<String> = [
+        format!("x-item:constructed#{first}"),
+        format!("x-item:connected#{first}"),
+    ]
+    .into_iter()
+    .chain(slotchange("host", "default", 1))
+    .collect();
     assert_eq!(
         take(&log),
-        vec![
-            format!("x-host:constructed#{host}"),
-            format!("x-host:connected#{host}"),
-        ]
+        expected,
+        "an append: after the connected reaction, the host hears both passes at its shadow root"
+    );
+
+    let text = doc.dom.create_text_node("t", ());
+    doc.dom.append_child(host, text);
+    assert_eq!(
+        take(&log),
+        slotchange("host", "default", 2),
+        "a text node is a slottable"
+    );
+
+    let second = doc.dom.create_element("view", ());
+    doc.dom.set_attribute(second, "slot", "b");
+    doc.dom.insert_before(host, second, Some(first));
+    assert_eq!(
+        take(&log),
+        slotchange("host", "b", 1),
+        "only the slot that changed"
+    );
+
+    doc.dom.set_attribute(first, "slot", "b");
+    let expected: Vec<String> = slotchange("host", "default", 1)
+        .into_iter()
+        .chain(slotchange("host", "b", 2))
+        .collect();
+    assert_eq!(
+        take(&log),
+        expected,
+        "a move between slots signals both, in tree order, once each"
     );
 
     let shadow = doc
@@ -1213,43 +1213,188 @@ fn children_changed_ignores_the_shadow_tree_and_the_constructor() {
         .shadow_root(host)
         .expect("the constructor attached one");
     doc.el(shadow, "view");
-    assert!(take(&log).is_empty(), "a shadow child is not a child");
+    assert!(
+        take(&log).is_empty(),
+        "a shadow-internal insertion assigns nothing"
+    );
 
-    doc.el(host, "view");
-    assert_eq!(take(&log), vec![format!("x-host:children#{host} 2")]);
-}
+    doc.dom.remove_element(text);
+    assert_eq!(
+        take(&log),
+        slotchange("host", "default", 0),
+        "a slot emptying"
+    );
 
-/// Writes its own child count into `data-count`.
-struct Counter;
+    doc.dom.drop_element(second);
+    assert_eq!(
+        take(&log),
+        slotchange("host", "b", 1),
+        "a freeing removal, once the node is gone"
+    );
 
-impl CustomElement<()> for Counter {
-    fn children_changed(&self, document: &mut Document<()>, element: NodeId) {
-        let count = document
-            .get(element)
-            .map_or(0, |node| node.child_ids().len());
-        document.set_attribute(element, "data-count", &count.to_string());
-    }
+    doc.dom.drop_subtree(first);
+    let expected: Vec<String> = [format!("x-item:disconnected#{first}")]
+        .into_iter()
+        .chain(slotchange("host", "b", 0))
+        .collect();
+    assert_eq!(take(&log), expected, "after the disconnected reaction");
 }
 
 #[test]
-fn a_children_changed_handler_that_mutates_drains_in_the_same_scope() {
+fn a_slot_inserted_into_a_populated_host_signals_its_first_assignment() {
     let log = log();
     let mut doc = Doc::new();
     let root = doc.root;
-    doc.dom.define("x-counter", Box::new(Counter));
-    define(&mut doc, Probe::new("x-item", &log));
-    let counter = doc.el(root, "x-counter");
-    doc.el(counter, "x-item");
-    doc.el(counter, "x-item");
-    let dropped = doc.el(counter, "x-item");
-    assert_eq!(
-        doc.dom.get(counter).unwrap().attribute("data-count"),
-        Some("3"),
-        "the reaction ran before the mutation returned"
+    doc.dom
+        .define("x-host", Box::new(slot_host("host", &log, &[])));
+    let host = doc.el(root, "x-host");
+    doc.els(host, &["view", "view"]);
+    assert!(take(&log).is_empty(), "no slot, so nothing is assigned");
+
+    let shadow = doc
+        .dom
+        .shadow_root(host)
+        .expect("the constructor attached one");
+    let slot = doc.el(shadow, "slot");
+    assert_eq!(take(&log), slotchange("host", "default", 2));
+
+    doc.el(slot, "view");
+    assert!(
+        take(&log).is_empty(),
+        "fallback content of a slot that has assigned nodes is not rendered"
     );
-    doc.dom.drop_element(dropped);
+}
+
+#[test]
+fn a_slot_showing_fallback_content_signals_when_that_content_changes() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    doc.dom
+        .define("x-host", Box::new(slot_host("host", &log, &["b"])));
+    let host = doc.el(root, "x-host");
+    let shadow = doc
+        .dom
+        .shadow_root(host)
+        .expect("the constructor attached one");
+    let slot = doc.dom.get(shadow).unwrap().child_ids()[0];
+
+    let fallback = doc.el(slot, "view");
+    assert_eq!(take(&log), slotchange("host", "b", 0));
+    doc.dom.remove_element(fallback);
+    assert_eq!(take(&log), slotchange("host", "b", 0));
+}
+
+#[test]
+fn slotchange_does_not_leave_a_nested_components_shadow_tree() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    doc.dom
+        .define("x-inner", Box::new(slot_host("inner", &log, &[""])));
+    doc.dom.define(
+        "x-outer",
+        Box::new(SlotHost {
+            who: "outer",
+            log: Arc::clone(&log),
+            slots: &[""],
+            inner: Some("x-inner"),
+        }),
+    );
+    let outer = doc.el(root, "x-outer");
+    assert!(take(&log).is_empty());
+
+    let outer_shadow = doc
+        .dom
+        .shadow_root(outer)
+        .expect("the constructor attached one");
+    let inner = doc
+        .dom
+        .get(outer_shadow)
+        .unwrap()
+        .child_ids()
+        .last()
+        .copied()
+        .expect("the inner component");
+    doc.el(inner, "view");
     assert_eq!(
-        doc.dom.get(counter).unwrap().attribute("data-count"),
-        Some("2")
+        take(&log),
+        slotchange("inner", "default", 1),
+        "composed: false — the outer host, past the inner shadow root, hears nothing"
+    );
+
+    doc.el(outer, "view");
+    assert_eq!(take(&log), slotchange("outer", "default", 1));
+}
+
+/// A `slotchange` handler that mutates: what it signals fires after the
+/// set being fired, not inside its own call.
+#[test]
+fn a_slot_signalled_by_a_slotchange_handler_fires_after_the_current_set() {
+    struct Mover {
+        log: Log,
+    }
+    impl CustomElement<()> for Mover {
+        fn constructed(&self, document: &mut Document<()>, element: NodeId) {
+            let shadow = document.attach_shadow(element, ShadowRootMode::Open);
+            for name in ["a", "b"] {
+                let slot = document.create_element("slot", ());
+                document.set_attribute(slot, "name", name);
+                document.append_child(shadow, slot);
+            }
+        }
+
+        fn handle_event(
+            &self,
+            document: &mut Document<()>,
+            _element: NodeId,
+            event: &mut ElementEvent,
+        ) {
+            if event.kind() != ElementEventKind::SlotChange || event.phase() != EventPhase::Bubbling
+            {
+                return;
+            }
+            let slot = event.target();
+            let name = document
+                .get(slot)
+                .and_then(|node| node.attribute("name"))
+                .unwrap_or_default()
+                .to_owned();
+            self.log
+                .lock()
+                .expect("the log is never poisoned")
+                .push(format!("enter {name}"));
+            if name == "a" {
+                let moved: Vec<NodeId> = document.assigned_nodes(slot).to_vec();
+                for node in moved {
+                    document.set_attribute(node, "slot", "b");
+                }
+            }
+            self.log
+                .lock()
+                .expect("the log is never poisoned")
+                .push(format!("leave {name}"));
+        }
+    }
+
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    doc.dom.define(
+        "x-mover",
+        Box::new(Mover {
+            log: Arc::clone(&log),
+        }),
+    );
+    let host = doc.el(root, "x-mover");
+    let child = doc.dom.create_element("view", ());
+    doc.dom.set_attribute(child, "slot", "a");
+    doc.dom.append_child(host, child);
+    assert_eq!(
+        take(&log),
+        [
+            "enter a", "leave a", "enter a", "leave a", "enter b", "leave b"
+        ],
+        "a's handler moves the child; a (emptied) and b fire after it returns"
     );
 }

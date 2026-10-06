@@ -101,14 +101,6 @@ interface BobcatNative {
     resolved: 0 | 1,
   ): string;
   /**
-   * One `x-swiper` autoplay tick: turns the swiper to the item after the one
-   * nearest its offset, or from the last to the first when it is `circular`,
-   * smoothly unless `smooth-scroll` is present. Records a scroll request the
-   * next commit carries; reads the last completed layout and runs no flush.
-   * Moves nothing on an element that is no laid-out `x-swiper`.
-   */
-  swiperAdvance(nodeId: number): void;
-  /**
    * The `NodeId`s of the element's element children, in tree order, joined by
    * commas — no length prefix, because a decimal id cannot contain the
    * separator. Empty when the element has no element children. Child *nodes*
@@ -280,7 +272,6 @@ declare module "bobcat-internal:host" {
   export const attributeNames: BobcatNative["attributeNames"];
   export const callElementMethod: BobcatNative["callElementMethod"];
   export const getComputedStyleMap: BobcatNative["getComputedStyleMap"];
-  export const swiperAdvance: BobcatNative["swiperAdvance"];
   export const childElementIds: BobcatNative["childElementIds"];
   export const parentNode: BobcatNative["parentNode"];
   export const insertBefore: BobcatNative["insertBefore"];

@@ -1,6 +1,6 @@
 //! The `x-swiper` and `x-swiper-item` tags: a row (or, with `vertical`, a
 //! column) of items the user swipes through one item at a time, in one of
-//! five layouts, with a strip of dots and an optional autoplay timer.
+//! five layouts, with a strip of dots.
 //!
 //! Translated from web-elements'
 //! `lynx-stack/packages/web-platform/web-elements/src/elements/XSwiper/x-swiper.css`
@@ -53,9 +53,8 @@
 //! its code see it, except the ones a component lists in
 //! `notToFilterFalseAttributes` — for the swiper `smooth-scroll` and
 //! `indicator-dots` (`XSwiper.ts:28-31`). This engine's `__SetAttribute`
-//! stringifies `false`, so `vertical`, `bounces` and `circular` match as
-//! "present and not `"false"`", and `smooth-scroll`, `autoplay` and
-//! `indicator-dots` are read below as web-core reads them.
+//! stringifies `false`, so `vertical` and `bounces` match as "present and not
+//! `"false"`", and `indicator-dots` is read below as web-core reads it.
 //!
 //! # What the attributes do
 //!
@@ -77,7 +76,6 @@
 //!   items (`x-swiper.css:64-66`, `htmlTemplates.ts:226-232`), so only the leading edge can be
 //!   pulled.
 //! - `indicator-dots`, `indicator-color`, `indicator-active-color`: the strip, below.
-//! - `autoplay`, `interval`, `smooth-scroll`, `circular`: autoplay, below.
 //!
 //! A child of the swiper that is neither an `x-swiper-item` nor a `wrapper` generates no box
 //! (`x-swiper.css:98-100`; web-core's `lynx-wrapper` keeps `display: contents !important`). An item
@@ -131,11 +129,12 @@
 //! background layers, not boxes. web-core builds one `<div>` per item into its
 //! `#indicator-container` (`XSwiperIndicator.ts:76-102`); here the count is a number the cascade
 //! reads instead. [`Swiper`] keeps the registered `<integer>` `--swiper-count` on the host equal to
-//! the number of its element children, all of them, as web-core's `childElementCount` counts them,
-//! through a presentational hint it rewrites in
-//! [`CustomElement::children_changed`](dom::CustomElement::children_changed) — the standard's
-//! `MutationObserver` on the host's child list, which web-core attaches for the same purpose
-//! (`:103-113`).
+//! the number of elements assigned to its slot — every element child, since the one slot is the
+//! default one, as web-core's `childElementCount` counts them — through a presentational hint it
+//! rewrites on the standard's `slotchange` at that slot, heard through
+//! [`CustomElement::handle_event`](dom::CustomElement::handle_event) where a script component
+//! listens on its shadow root. web-core observes the host's child list with a `MutationObserver`
+//! for the same purpose (`:103-113`).
 //!
 //! - **Geometry** (`x-swiper.css:137-178`): a dot is `--indicator-size: 0.6rem` across and the
 //!   pitch is `size × 7 / 5` — the dot plus web-core's `size / 5` margin on each side. The strip is
@@ -174,24 +173,13 @@
 //!   but `"true"` therefore agrees with both references, and `"true"` with native.
 //!   `docs/tracking/deviations.md` records each side.
 //!
-//! # Autoplay
-//!
-//! web-core's `XSwiperAutoScroll.ts`. `autoplay` present (and not `"false"`) runs an interval of
-//! `interval` ms — `parseFloat`, `5000` when missing or `NaN` (`:60-70`); changing either
-//! attribute restarts it. Removing `autoplay` stops it, which is native's behaviour (Android
-//! `XSwiperUI.java:684-691`): web-core's handler only ever starts an interval, so its autoplay
-//! never stops (`XSwiperAutoScroll.ts:60-70`). The interval lives in the realm
-//! (`packages/bobcat-element/src/element-papi.ts`, `syncAutoplay`), holds the element's handle
-//! weakly, and clears itself the first tick after the handle is collected. Each tick calls
-//! [`advance`], which turns `#content` to the next item, or from the last one to the first under
-//! `circular`.
-//!
 //! # What is not implemented
 //!
+//! - `autoplay`, `interval` and `smooth-scroll`: not implemented for now, the user deferred them;
+//!   `smooth-scroll` only matters to autoplay (web-core's `XSwiperAutoScroll.ts`).
 //! - `circular` wrap-around dragging: web-core re-slots the first and last items into its shadow
 //!   tree around the current one (`XSwiperCircular.ts`) and turns snapping off
-//!   (`x-swiper.css:122-131`). Here a `circular` swiper drags as a plain one; `circular` only makes
-//!   autoplay wrap.
+//!   (`x-swiper.css:122-131`). Here a `circular` swiper drags as a plain one.
 //! - The 3D rotation of `coverflow`, above.
 //! - `page-margin`, `previous-margin`, `next-margin` and `duration` have no rule, following
 //!   web-core, where they change nothing on screen: the three margins become custom properties on
@@ -205,8 +193,8 @@
 //!   (`x-swiper.css:77-80`), `scrollbar-width` and the per-item `view-timeline-name` rules: a
 //!   browser shortcut, a scrollbar this engine does not draw, and web-core's per-dot timelines.
 
-use dom::scroll::ScrollBehavior;
-use dom::{CustomElement, Node, NodeId, ShadowRootMode, Vector2D};
+use dom::event::{ElementEvent, ElementEventKind, EventPhase};
+use dom::{CustomElement, Node, NodeId, ShadowRootMode};
 
 use super::LynxDocument;
 
@@ -352,8 +340,8 @@ pub(super) fn define(document: &mut LynxDocument) {
 ///
 /// The shadow tree is built in `constructed`, not on connection: the element
 /// is new and detached then, and `__CreateElement` mints a swiper before
-/// anything is appended to it, so every child arrives through
-/// `children_changed`.
+/// anything is appended to it, so every child arrives as a `slotchange` at
+/// the slot.
 struct Swiper;
 
 impl CustomElement<()> for Swiper {
@@ -371,19 +359,40 @@ impl CustomElement<()> for Swiper {
         count_items(document, element);
     }
 
-    fn children_changed(&self, document: &mut LynxDocument, element: NodeId) {
-        count_items(document, element);
+    /// `slotchange` at the swiper's own slot, delivered at its shadow root,
+    /// once per pass: the capture delivery is skipped, the bubble one counts.
+    fn handle_event(&self, document: &mut LynxDocument, element: NodeId, event: &mut ElementEvent) {
+        if event.kind() == ElementEventKind::SlotChange
+            && event.phase() == EventPhase::Bubbling
+            && slot(document, element) == Some(event.target())
+        {
+            count_items(document, element);
+        }
     }
 }
 
-/// Writes the number of `swiper`'s element children, every one of them as
-/// web-core's `childElementCount` counts them, into its `--swiper-count`
-/// hint.
+/// Writes the number of elements assigned to `swiper`'s slot into its
+/// `--swiper-count` hint: web-core's `childElementCount`, which counts
+/// elements alone, so a text child — a slottable too — is not an item.
 fn count_items(document: &mut LynxDocument, swiper: NodeId) {
-    let count = document.get(swiper).map_or(0, |node| {
-        node.children().filter(|child| child.is_element()).count()
+    let count = slot(document, swiper).map_or(0, |slot| {
+        document
+            .assigned_nodes(slot)
+            .iter()
+            .filter(|&&node| document.get(node).is_some_and(Node::is_element))
+            .count()
     });
     document.set_presentational_hint(swiper, COUNT_PROPERTY, &count.to_string());
+}
+
+/// The `<slot>` in the swiper's `#content`, its only child.
+fn slot(document: &LynxDocument, swiper: NodeId) -> Option<NodeId> {
+    let content = content(document, swiper)?;
+    document
+        .get(content)?
+        .children()
+        .find(|child| child.is_element())
+        .map(Node::id)
 }
 
 /// The swiper's scroll container, `#content`, the first element of its
@@ -397,99 +406,6 @@ pub(crate) fn content(document: &LynxDocument, swiper: NodeId) -> Option<NodeId>
         .map(Node::id)
 }
 
-/// Whether `element` carries the boolean attribute `name`: present and not
-/// `"false"`, the attribute web-core's false-filtering leaves.
-fn flag(element: &Node<()>, name: &str) -> bool {
-    element
-        .attribute(name)
-        .is_some_and(|value| value != "false")
-}
-
-/// One autoplay tick on `swiper`: turns it to the item after the current
-/// one, or from the last item to the first when it is `circular`.
-///
-/// The positions are the swiper's snap positions on its main axis
-/// ([`dom::Document::snap_positions`]), one per item, in order. The current
-/// item is the one whose position is nearest the offset, the first on a tie.
-/// That is web-core's "item whose centre is nearest the scrollport's mid"
-/// (`XSwiper.ts:37-91`, the mid at 40% of the scrollport in `carousel`)
-/// restated: items are equal on the main axis, and each one's position is
-/// its centre less the same distance — half the scrollport for a centred
-/// item, half the item for a start-aligned one, which in `carousel` is the
-/// 40% web-core uses. The target is that item's snap position, which is
-/// where web-core's `#scrollToIndex` ends after its mandatory snap
-/// (`:104-129`); on the last item without `circular` nothing moves
-/// (`XSwiperAutoScroll.ts:22-33`).
-///
-/// The turn is smooth unless `smooth-scroll` is present with any value,
-/// `"false"` included, which is web-core's reading
-/// (`getAttribute('smooth-scroll') === null`, `XSwiper.ts:101`, with
-/// `smooth-scroll` exempt from its false-filtering, `:28-31`). Native reads
-/// the attribute as a boolean that defaults to `true`
-/// (`XSwiperUI.java:877-885`). A smooth turn leaves the document's offset where it was until the
-/// painter posts it back, so a tick that comes before then counts from the
-/// old item and asks for the same one again.
-///
-/// The offset, the positions and the turn are `#content`'s ([`content`]),
-/// the scroll container. Reads the last completed layout and never flushes.
-/// A swiper with no box, no snap positions or no items, or any other
-/// element, moves nothing.
-pub(crate) fn advance(document: &mut LynxDocument, swiper: NodeId) {
-    let Some(element) = document.get(swiper) else {
-        return;
-    };
-    if element.tag_name() != Some(SWIPER_TAG) {
-        return;
-    }
-    let vertical = flag(element, "vertical");
-    let circular = flag(element, "circular");
-    let behavior = if element.attribute("smooth-scroll").is_some() {
-        ScrollBehavior::Instant
-    } else {
-        ScrollBehavior::Smooth
-    };
-    let Some(content) = content(document, swiper) else {
-        return;
-    };
-    let (Some(scroll_box), Some(positions)) = (
-        document.scroll_box(content),
-        document.snap_positions(content),
-    ) else {
-        return;
-    };
-    let offset = scroll_box.offset;
-    let (axis, at) = if vertical {
-        (positions.y(), offset.y)
-    } else {
-        (positions.x(), offset.x)
-    };
-    let Some(points) = axis.map(|axis| axis.points) else {
-        return;
-    };
-    let distance = |index: usize| {
-        let point = points[index];
-        (point.min - at).max(at - point.max).max(0.0)
-    };
-    let Some(current) = (0..points.len()).min_by(|a, b| distance(*a).total_cmp(&distance(*b)))
-    else {
-        return;
-    };
-    let next = if current + 1 < points.len() {
-        current + 1
-    } else if circular {
-        0
-    } else {
-        return;
-    };
-    let target = points[next].min;
-    let to = if vertical {
-        Vector2D::new(offset.x, target)
-    } else {
-        Vector2D::new(target, offset.y)
-    };
-    document.scroll_to_with(content, to, behavior);
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::float_cmp)] // Explicit pixel sizes lay out exactly.
@@ -500,10 +416,8 @@ mod tests {
     use dom::{NodeId, StylesheetOrigin, Vector2D};
 
     use super::super::LynxDocument;
-    use super::super::test_support::{
-        child, display, document, document as fresh, element_under, overflow, style_of,
-    };
-    use super::{SWIPER_ITEM_TAG, SWIPER_TAG, advance};
+    use super::super::test_support::{child, display, document, element_under, overflow, style_of};
+    use super::{SWIPER_ITEM_TAG, SWIPER_TAG};
 
     /// One computed longhand, as CSSOM serializes it.
     fn value(document: &LynxDocument, element: NodeId, property: &str) -> String {
@@ -1148,8 +1062,6 @@ mod tests {
         );
     }
 
-    // --- advance ------------------------------------------------------------
-
     /// The scroll request the next commit carries for `swiper`.
     fn pending(
         document: &mut LynxDocument,
@@ -1163,157 +1075,6 @@ mod tests {
         frame.scroll_slots()[index as usize]
             .request
             .map(|request| (request.target, request.behavior))
-    }
-
-    /// A laid-out swiper of three items, `smooth-scroll` set so each turn
-    /// moves the document at once.
-    fn instant(mode: &str, vertical: bool, attributes: &[(&str, &str)]) -> (LynxDocument, NodeId) {
-        let (mut document, swiper, _) = mode_swiper(mode, vertical, 3);
-        document.set_attribute(swiper, "smooth-scroll", "");
-        for (name, value) in attributes {
-            document.set_attribute(swiper, name, value);
-        }
-        document.commit();
-        (document, swiper)
-    }
-
-    /// Each tick turns to the next item's snap position, in every mode and
-    /// both orientations, and the last item stays.
-    #[test]
-    fn advance_turns_to_the_next_item_and_stops_at_the_last() {
-        for case in &GEOMETRY {
-            let (mut document, swiper) = instant(case.mode, case.vertical, &[]);
-            let main = |document: &LynxDocument| {
-                let offset = document.scroll_offset(scroller(document, swiper));
-                if case.vertical { offset.y } else { offset.x }
-            };
-            let mut seen = vec![main(&document)];
-            for _ in 0..3 {
-                advance(&mut document, swiper);
-                seen.push(main(&document));
-            }
-            let [first, second, third] = case.snaps;
-            assert_eq!(
-                seen,
-                [first, second, third, third],
-                "{} vertical={}",
-                case.mode,
-                case.vertical
-            );
-        }
-    }
-
-    #[test]
-    fn advance_wraps_from_the_last_item_only_when_circular() {
-        for (circular, expected) in [("", 0.0), ("true", 0.0), ("false", 400.0)] {
-            let (mut document, swiper) = instant("normal", false, &[("circular", circular)]);
-            document.scroll_to(scroller(&document, swiper), Vector2D::new(400.0, 0.0));
-            advance(&mut document, swiper);
-            assert_eq!(
-                document.scroll_offset(scroller(&document, swiper)),
-                Vector2D::new(expected, 0.0),
-                "circular={circular:?}"
-            );
-        }
-    }
-
-    /// The current item is the one whose snap position is nearest the
-    /// offset: a swiper the user left between items counts from the nearer.
-    #[test]
-    fn advance_counts_from_the_nearest_item() {
-        for (from, to) in [(90.0, 200.0), (110.0, 400.0), (100.0, 200.0)] {
-            let (mut document, swiper) = instant("normal", false, &[]);
-            document.scroll_to(scroller(&document, swiper), Vector2D::new(from, 0.0));
-            advance(&mut document, swiper);
-            assert_eq!(
-                document.scroll_offset(scroller(&document, swiper)),
-                Vector2D::new(to, 0.0),
-                "{from}"
-            );
-        }
-    }
-
-    /// Smooth by default: the request goes to the painter and the document
-    /// stays. `smooth-scroll` with any value, `"false"` included, is instant.
-    #[test]
-    fn advance_is_smooth_unless_smooth_scroll_is_present() {
-        for (attribute, behavior) in [
-            (None, ScrollBehavior::Smooth),
-            (Some(""), ScrollBehavior::Instant),
-            (Some("true"), ScrollBehavior::Instant),
-            (Some("false"), ScrollBehavior::Instant),
-        ] {
-            let (mut document, swiper, _) = mode_swiper("normal", false, 3);
-            if let Some(attribute) = attribute {
-                document.set_attribute(swiper, "smooth-scroll", attribute);
-            }
-            document.commit();
-            advance(&mut document, swiper);
-            assert_eq!(
-                pending(&mut document, swiper),
-                Some((Vector2D::new(200.0, 0.0), behavior)),
-                "{attribute:?}"
-            );
-            let expected = if behavior == ScrollBehavior::Smooth {
-                0.0
-            } else {
-                200.0
-            };
-            assert_eq!(
-                document.scroll_offset(scroller(&document, swiper)),
-                Vector2D::new(expected, 0.0)
-            );
-        }
-    }
-
-    /// Before its first layout, without a box, or when it is no swiper,
-    /// nothing moves and no request is recorded.
-    #[test]
-    fn advance_without_a_laid_out_swiper_moves_nothing() {
-        let (mut document, swiper, _) = mode_swiper("normal", false, 3);
-        advance(&mut document, swiper);
-        assert_eq!(
-            document.pending_scroll_request(scroller(&document, swiper)),
-            None,
-            "no layout yet"
-        );
-
-        let (mut document, swiper, _) = mode_swiper("normal", false, 0);
-        document.commit();
-        advance(&mut document, swiper);
-        assert_eq!(
-            document.pending_scroll_request(scroller(&document, swiper)),
-            None,
-            "no items"
-        );
-
-        let mut document = fresh();
-        let (swiper, _) = build(&mut document, "display: none", &[], 3);
-        document.commit();
-        advance(&mut document, swiper);
-        assert_eq!(
-            document.pending_scroll_request(scroller(&document, swiper)),
-            None,
-            "no box"
-        );
-
-        let mut document = fresh();
-        let scroller = child(
-            &mut document,
-            "scroll-view",
-            "width: 100px; height: 100px; scroll-snap-type: y mandatory",
-        );
-        for _ in 0..2 {
-            element_under(
-                &mut document,
-                scroller,
-                "view",
-                "height: 100px; flex-shrink: 0; scroll-snap-align: start",
-            );
-        }
-        document.commit();
-        advance(&mut document, scroller);
-        assert_eq!(document.pending_scroll_request(scroller), None, "no swiper");
     }
 
     // --- the shadow tree ----------------------------------------------------
@@ -1370,8 +1131,9 @@ mod tests {
         assert!(document.scroll_box(content).is_some());
     }
 
-    /// `--swiper-count` is the host's element children, every one of them:
-    /// a child that is no item counts, a text node does not.
+    /// `--swiper-count` is the elements assigned to the slot — every element
+    /// child: a child that is no item counts, a text node, assigned too, does
+    /// not. Kept on `slotchange`: appends, a removal, a freeing removal.
     #[test]
     fn the_count_follows_the_element_children() {
         let mut document = document();

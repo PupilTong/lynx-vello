@@ -37,6 +37,15 @@
 //! is given, and nothing on that path reaches a realm — an `addEventListener`
 //! registration is in another layer and is not consulted for it.
 //!
+//! A shadow root is not an element and has no handler, yet it is where a
+//! component listens for its own shadow tree's non-composed events
+//! (`this.shadowRoot.addEventListener('slotchange', …)`). So the shadow root
+//! a non-composed path ends at is delivered to its host's handler, with the
+//! host as `element` and `currentTarget`: the shadow root itself as
+//! `currentTarget` is not representable in a call that is the host's. A
+//! shadow root the path crosses delivers nothing, because the host that
+//! follows it on the path is called as itself.
+//!
 //! # Shadow trees
 //!
 //! Path construction is the standard's, including its two shadow rules. The
