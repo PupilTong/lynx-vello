@@ -2252,6 +2252,21 @@ Subsystems:
   committed frame's compose program, so it reads `CommittedFrame`'s filter side
   table, while still naming no node, style, layout or paint-order type.
 
+**Vector images** (`docs/svg-vector-images-design.md`): an SVG document used
+as an image — `<image src>`, `background-image`, `mask-image` — reaches the
+document as a `VectorImage` (an `Arc<usvg::Tree>`, its natural size in whole
+CSS px and its viewport in tree units) inside `ImageEvent::LoadedVector`, which
+a host reports through `ImageReports::loaded_vector`. The registry keeps it in
+`ImageState::Ready { kind: ImageKind::Vector(..) }` and `resolve` lends it to
+the walk. `paint/svg.rs` encodes the tree into a vello scene once, cached in
+the image, and `paint/background.rs` appends that scene inline into the
+fragment for each visible tile under a clip pair, scaled by `extent /
+viewport`, so a vector image is never an image draw and `FrameImages` never
+sees it. A document with nothing drawable encodes nothing at all, not even
+the clip pair. `usvg` is built with no default features (no `text`, no
+`svgz`), and masks, filters, patterns and nested raster images are recorded
+gaps listed in `paint/painter.rs`.
+
 Rulings and limits to know before touching it:
 
 - The whole `unsafe` surface is two blocks, each with a `SAFETY` comment kept

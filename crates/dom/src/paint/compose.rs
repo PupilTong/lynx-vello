@@ -13,8 +13,13 @@
 //! transform, fragments append under the same map (`Scene::append`
 //! left-multiplies the child's transform stream), and pops are pops.
 //! Painter-internal pushes (background layers, text `SrcIn` sandwiches,
-//! inset-shadow isolation) are balanced within one item and stay inside
-//! fragments untouched.
+//! inset-shadow isolation, the clip pair around each tile of a vector image)
+//! are balanced within one item and stay inside fragments untouched.
+//!
+//! An image draw is a raster image only. A vector image (an SVG document) is
+//! encoded into the current fragment on the document thread, as a gradient
+//! is, so it is never a [`ComposeOp::Image`] and the composer never reads
+//! it.
 //!
 //! A space's map is [`SpaceSamples::css`]: its path's scroll, sticky and
 //! animation nodes, root first (see [`crate::visual::space`]).
@@ -245,7 +250,8 @@ pub(crate) enum ComposeOp {
         alpha_animation: Option<u32>,
     },
     Pop,
-    /// Draw `image_draws[index]`, whose pixels the composer supplies.
+    /// Draw `image_draws[index]`, whose pixels the composer supplies. A
+    /// raster image only: a vector image is part of a fragment.
     Image {
         index: u32,
         space: Option<u32>,
