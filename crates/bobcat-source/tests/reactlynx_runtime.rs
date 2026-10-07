@@ -233,6 +233,27 @@ async fn compiled_dialog_opens_modal_and_reports_close() {
     paint_and_tap(page, [236, 236], &[RED, YELLOW, MAGENTA], None).await;
 }
 
+/// A compiled `<overlay>` over a red page that fills the 240px view. A tap
+/// on the page sets `visible`: the overlay enters the top layer and its one
+/// child, a 200px panel, paints at the viewport's top-left above the page,
+/// with a green 120px `#close` at the panel's own top-left.
+///
+/// - At (60, 60) the second tap hits `#close`, whose `catchtap` clears `visible`; the overlay
+///   leaves the top layer and `binddismissoverlay` turns the page blue. Had the panel stayed, the
+///   point would still be green; had `dismissoverlay` not arrived, the page would still be red.
+/// - At (180, 180), on the panel outside `#close`, the panel turns from yellow to magenta once
+///   `bindshowoverlay` has run.
+#[tokio::test]
+async fn compiled_overlay_shows_its_panel_and_reports_show_and_dismiss() {
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const GREEN: [u8; 4] = [0, 128, 0, 255];
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+    const MAGENTA: [u8; 4] = [255, 0, 255, 255];
+    let page = fixtures::fixture("react-overlay").page;
+    paint_and_tap(page, [60, 60], &[RED, GREEN, BLUE], None).await;
+    paint_and_tap(page, [180, 180], &[RED, MAGENTA], None).await;
+}
+
 /// A compiled `<scroll-coordinator>` (300 by 400: a translucent blue toolbar
 /// 60 tall, a red header 200 tall, a slot of eight 100px items in a
 /// `<scroll-view>`) boots with the header under the toolbar and the first
