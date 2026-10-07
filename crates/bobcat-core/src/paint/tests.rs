@@ -872,6 +872,139 @@ fn a_stretched_offset_posts_clamped() {
     assert_eq!(entries[0].1.offset, dom::Vector2D::zero());
 }
 
+/// An `overscroll-behavior: circular` offset is the painter's alone past
+/// the end: what it posts is the live offset modulo the period (1000 here:
+/// `max_offset` 800 plus the 200px scrollport), clamped into range. Wheeled
+/// to 800, a drag of 108px (100 after the 8px slop) puts the live offset at
+/// 900 — the scrollport straddles the seam, and main is told 800, the edge.
+/// A second drag of 158px (150 after the slop) puts it at 1050, past the
+/// seam, and main is told 50.
+#[test]
+fn a_wrapped_offset_posts_the_edge_through_the_seam() {
+    use dom::input::PointerPhase::{Down, Move, Up};
+
+    let (mut painter, main, scroller) = scrolling("overscroll-behavior:circular");
+    painter.dispatch_input(dom::input::InputEvent::wheel(
+        dom::Point2D::new(100.0, 100.0),
+        dom::Vector2D::new(0.0, 800.0),
+    ));
+    let _ = take(&main);
+
+    touch(&mut painter, Down, 190.0);
+    touch(&mut painter, Move, 82.0);
+    let live = painter
+        .scroll_intents
+        .offset_for(scroller)
+        .expect("the drag moved the scroller");
+    assert!((live.y - 900.0).abs() < 0.01, "got {live:?}");
+    let (entries, _) = take(&main);
+    assert_eq!(entries[0].1.offset, dom::Vector2D::new(0.0, 800.0));
+    // Let go at one clock reading, so without velocity: at rest on the
+    // edge as main sees it.
+    touch(&mut painter, Up, 82.0);
+    let (entries, _) = take(&main);
+    assert_eq!(entries[0].1.rest, Some(dom::Vector2D::new(0.0, 800.0)));
+
+    touch(&mut painter, Down, 190.0);
+    touch(&mut painter, Move, 32.0);
+    let live = painter
+        .scroll_intents
+        .offset_for(scroller)
+        .expect("the drag moved the scroller");
+    assert!(
+        (live.y.rem_euclid(1000.0) - 50.0).abs() < 0.01,
+        "got {live:?}"
+    );
+    let (entries, _) = take(&main);
+    let posted = entries[0].1.offset;
+    assert!(
+        posted.x == 0.0 && (posted.y - 50.0).abs() < 0.01,
+        "past the seam main sees the start again, got {posted:?}"
+    );
+}
+
+/// A rebase brings a circular axis's live offset back into its period and
+/// moves the drag's origin by the same whole period, so the release still
+/// settles from where the drag found the container. Five 200px cards that
+/// each snap `mandatory` with `scroll-snap-stop: always`, in a 200px
+/// scroller: `max_offset` 800, period 1000. A drag back from 0 by 142px
+/// (150 less the 8px slop) stands at −142; a commit landing under the
+/// finger normalizes it to 858 and the origin from 0 to 1000. Released,
+/// the nearest position is the last card, 800, and no stop lies between
+/// 1000 and 858 — an origin left at 0 would instead find the stop at 200
+/// between 0 and 858, and glide the wrong way round.
+#[test]
+fn a_rebase_wraps_a_held_offset_and_its_drag_origin_together() {
+    use dom::input::PointerPhase::{Down, Move, Up};
+
+    let mut document = document();
+    let root = document.document_element().id();
+    let scroller = document.create_element("view", ());
+    document.set_inline_style(
+        scroller,
+        "display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px;\
+         overscroll-behavior:circular;scroll-snap-type:y mandatory",
+    );
+    document.append_child(root, scroller);
+    for _ in 0..5 {
+        let card = document.create_element("view", ());
+        document.set_inline_style(
+            card,
+            "flex-shrink:0;width:200px;height:200px;scroll-snap-align:start;\
+             scroll-snap-stop:always",
+        );
+        document.append_child(scroller, card);
+    }
+    let (mut painter, main) = detached();
+    main.outbox.publish_frame(document.commit());
+    painter.poll_link();
+    painter.clock.pin(0.0);
+
+    touch(&mut painter, Down, 30.0);
+    touch(&mut painter, Move, 180.0);
+    let live = painter.scroll_intents.offset_for(scroller);
+    assert_eq!(live, Some(dom::Vector2D::new(0.0, -142.0)));
+
+    document.set_inline_style(root, "background-color: teal");
+    let frame = document.commit();
+    main.outbox.publish_frame(Arc::clone(&frame));
+    painter.poll_link();
+    painter.scroll_intents.rebase(&frame, 0.0);
+    assert_eq!(
+        painter.scroll_intents.offset_for(scroller),
+        Some(dom::Vector2D::new(0.0, 858.0)),
+        "normalized into the period"
+    );
+    let origins: Vec<_> = painter
+        .scroll_intents
+        .gesture_origins
+        .iter()
+        .filter(|((_, node), _)| *node == scroller)
+        .map(|(_, origin)| *origin)
+        .collect();
+    assert_eq!(
+        origins,
+        [dom::Vector2D::new(0.0, 1000.0)],
+        "the origin moved with it"
+    );
+
+    touch(&mut painter, Up, 180.0);
+    let mut now = 0.0;
+    while painter.scroll_intents.is_animating() {
+        now += 1.0 / 60.0;
+        assert!(now < 3.0, "the glide never landed");
+        painter.service_gesture_clock(now);
+    }
+    let rest = painter
+        .scroll_intents
+        .offset_for(scroller)
+        .expect("the release left the scroller off its committed offset");
+    assert!(
+        (rest.y.rem_euclid(1000.0) - 800.0).abs() < f32::EPSILON,
+        "on the last card, got {rest:?}"
+    );
+}
+
 /// Frame posts coalesce to the latest clock and the greatest sequence, and
 /// every post answers its own sequence number whether or not it sent the
 /// marker.

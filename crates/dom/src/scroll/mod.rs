@@ -44,6 +44,11 @@
 //!   own fourth value, **`contain-bounce`**, fences the same way and is published as the
 //!   [`ScrollBox::bounce`] axes: the runtime's painter reads them off the committed frame and
 //!   stretches the boundary there. Nothing in this crate stretches — a programmatic scroll clamps.
+//!   Its fifth value, **`circular`**, also fences like `contain` and is published as the
+//!   [`ScrollBox::circular`] axes: such an axis has no boundary for the painter, which wraps its
+//!   live offset around a period of the whole scrolling area. The wrap is the painter's alone — the
+//!   document keeps clamping every offset it writes, a programmatic scroll included, and never sees
+//!   an offset outside `0..=max`.
 //! - **`scroll-capture`** is this engine's own, with no W3C or Lynx counterpart, and it changes the
 //!   *order*, not the reach. It is a shorthand over the physical longhands `scroll-capture-x` and
 //!   `scroll-capture-y` (no logical pair: a chain walks physical axes), each `auto | nearest [
@@ -88,9 +93,10 @@
 //! - The `scroll-behavior` property is absent, so a script-facing scroll names its
 //!   [`ScrollBehavior`] outright ([`Document::scroll_to_with`], module `request`). Every offset
 //!   this crate writes itself is instantaneous and clamps hard at the boundary, and a snap is a
-//!   jump. A smooth scroll, inertia and the `contain-bounce` stretch exist only on the painter's
-//!   side, over the committed frame; `overscroll-behavior: none` therefore does exactly what
-//!   `contain` does here — there is no document-side boundary effect for it to suppress.
+//!   jump. A smooth scroll, inertia, the `contain-bounce` stretch and the `circular` wrap exist
+//!   only on the painter's side, over the committed frame; `overscroll-behavior: none` therefore
+//!   does exactly what `contain` does here — there is no document-side boundary effect for it to
+//!   suppress.
 
 use euclid::default::{Size2D, Vector2D};
 use hughie::style::PositionProperty;
@@ -361,6 +367,10 @@ pub struct ScrollBox {
     /// (`overscroll-behavior: contain-bounce`). Published for the runtime's
     /// painter, which owns the stretch; the document itself always clamps.
     pub bounce: ScrollAxes,
+    /// The axes with no boundary (`overscroll-behavior: circular`). Policy
+    /// only: published for the runtime's painter, which wraps its live
+    /// offset around the scrolling area; the document itself always clamps.
+    pub circular: ScrollAxes,
     /// Whether the container above goes first, per axis
     /// (`scroll-capture-x` / `scroll-capture-y`).
     pub capture: CaptureAxes,
@@ -418,6 +428,14 @@ fn bouncing_axes(style: &ComputedValues) -> ScrollAxes {
 }
 
 #[must_use]
+fn circular_axes(style: &ComputedValues) -> ScrollAxes {
+    ScrollAxes {
+        x: *style.get_overscroll_behavior_x() == OverscrollBehavior::Circular,
+        y: *style.get_overscroll_behavior_y() == OverscrollBehavior::Circular,
+    }
+}
+
+#[must_use]
 fn scroll_capture(style: &ComputedValues) -> CaptureAxes {
     let lower = |value: ComputedScrollCapture| match value {
         ComputedScrollCapture::Auto => ScrollCapture::Auto,
@@ -466,6 +484,7 @@ pub(crate) fn resolve(
         user_scrollable: user_scrollable_axes(style),
         chains: chaining_axes(style),
         bounce: bouncing_axes(style),
+        circular: circular_axes(style),
         capture: scroll_capture(style),
     };
     scroll_box.offset = clamp_to(stored, scroll_box.max_offset());
@@ -666,6 +685,9 @@ impl<T> Document<T> {
                 scroll_box.scrollport,
                 positions.as_ref().and_then(SnapPositions::x),
                 positions.as_ref().and_then(SnapPositions::y),
+                // The document never wraps: a circular axis is the
+                // painter's, and every offset written here clamps.
+                ScrollAxes::NONE,
             );
             self.scroll_to(id, applied);
             absorbed
@@ -1064,6 +1086,36 @@ mod tests {
             document.scroll_offset(outer),
             Vector2D::new(50.0, 0.0),
             "x chains out, y is fenced and clamped",
+        );
+    }
+
+    /// `circular` is `contain`'s fence in the document too: the chain stops
+    /// and every offset the document writes clamps — the wrap is the
+    /// painter's. What the document publishes is the `circular` axis flag.
+    #[test]
+    fn circular_fences_like_contain_and_publishes_its_axes() {
+        let (mut document, outer, inner) = nested_scrollers_with(
+            ".inner { overscroll-behavior-y: circular; flex-shrink: 0; } .tall { width: 500px; }",
+        );
+        let scroll_box = document.scroll_box(inner).expect("inner is a scroll box");
+        assert_eq!(scroll_box.circular, ScrollAxes { x: false, y: true });
+        assert_eq!(scroll_box.bounce, ScrollAxes::NONE);
+        assert_eq!(scroll_box.chains, ScrollAxes { x: true, y: false });
+        assert_eq!(
+            document.scroll_chain(inner, Vector2D::new(250.0, 400.0)),
+            Some((inner, Vector2D::new(250.0, 300.0))),
+        );
+        assert_eq!(document.scroll_offset(inner), Vector2D::new(200.0, 300.0));
+        assert_eq!(
+            document.scroll_offset(outer),
+            Vector2D::new(50.0, 0.0),
+            "x chains out, y is fenced and clamped",
+        );
+        document.scroll_to(inner, Vector2D::new(0.0, 1000.0));
+        assert_eq!(
+            document.scroll_offset(inner),
+            Vector2D::new(0.0, 300.0),
+            "a programmatic scroll clamps too",
         );
     }
 

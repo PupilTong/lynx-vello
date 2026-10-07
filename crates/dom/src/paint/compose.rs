@@ -45,11 +45,25 @@
 //! only the links below them (see [`crate::paint::walker`]). So an
 //! ancestor's `overflow` clip cuts the texture, the raw fallback and the
 //! backdrop once, after the filter, and never lies inside an entry's range.
+//!
+//! A scroll container with `overscroll-behavior: circular` adds the seam
+//! pass ([`replay_seams`]). While its scrollport straddles the seam — the
+//! normalized offset is past `max_offset` — the frame shows the end of the
+//! scrolling area followed by its start, and the fragments hold the content
+//! only once. So the ops that ride the container's scroll node are replayed
+//! a second time with its offset moved back by one period, right after the
+//! last of them: the copy lands where the container's own content sits in
+//! paint order, inside the same open layers (its scrollport clip among
+//! them), and below whatever paints over the container later, such as a
+//! positioned sibling. The second replay re-encodes every push and pop it
+//! meets, so the layer stack stays balanced, but draws only what rides the
+//! container; see [`replay_ops`]'s `riding`.
 
 use std::ops::Range;
 use std::sync::Arc;
 
 use euclid::default::Vector2D;
+use smallvec::SmallVec;
 
 use crate::paint::shape::{BoxShape, with_shape};
 use crate::render::image::{ImageSizeHint, is_renderable};
@@ -777,7 +791,7 @@ pub(crate) fn replay(
     filtered: &[Option<ImageData>],
     samples: &SpaceSamples<'_>,
 ) {
-    replay_ops(
+    replay_seams(
         scene,
         Tables {
             fragments,
@@ -790,8 +804,257 @@ pub(crate) fn replay(
             samples: samples.animations,
         },
         0..program.len(),
-        &samples.device_cached(),
+        samples,
+        ReplayTarget::Frame,
     );
+}
+
+/// Where a replay draws, which decides the map each space composes under.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ReplayTarget {
+    /// The composed frame, in device px: [`SpaceSamples::device_cached`].
+    Frame,
+    /// A filter entry's bake target: [`SpaceSamples::bake_map`] for the
+    /// entry's space and its rect's origin.
+    Bake {
+        entry: Option<u32>,
+        origin: (f64, f64),
+    },
+}
+
+impl ReplayTarget {
+    /// Runs `body` with this target's space map at the instant `samples`
+    /// holds, without boxing the map.
+    fn with_map<R>(
+        self,
+        samples: &SpaceSamples<'_>,
+        body: impl FnOnce(&dyn Fn(Option<u32>) -> Affine) -> R,
+    ) -> R {
+        match self {
+            Self::Frame => body(&samples.device_cached()),
+            Self::Bake { entry, origin } => body(&samples.bake_map(entry, origin)),
+        }
+    }
+
+    /// The space everything this target draws is relative to. A seam pass
+    /// for a slot this space rides is not drawn: moving the slot moves the
+    /// whole target with it, so the copy would land on the original. The
+    /// composed frame draws that entry's texture twice instead.
+    fn within(self) -> Option<u32> {
+        match self {
+            Self::Frame => None,
+            Self::Bake { entry, .. } => entry,
+        }
+    }
+}
+
+/// The op sequence a replay over a range visits, each op with the layer
+/// depth before it: a baked filter group is one op, its range skipped, as
+/// [`replay_ops`] skips it.
+struct OpWalk {
+    ops: Vec<(usize, u32)>,
+    /// The depth after the last op.
+    depth: u32,
+}
+
+impl OpWalk {
+    fn new(tables: Tables<'_>, ops: Range<usize>) -> Self {
+        let mut walk = Vec::new();
+        let mut depth = 0_u32;
+        let mut index = ops.start;
+        while index < ops.end {
+            walk.push((index, depth));
+            index = match &tables.program[index] {
+                ComposeOp::Push { .. } => {
+                    depth += 1;
+                    index + 1
+                }
+                ComposeOp::Pop => {
+                    depth = depth.saturating_sub(1);
+                    index + 1
+                }
+                ComposeOp::PushFilter { index: group }
+                    if matches!(tables.filtered.get(*group as usize), Some(Some(_))) =>
+                {
+                    (tables.filter_groups[*group as usize].ops.end as usize).max(index + 1)
+                }
+                _ => index + 1,
+            };
+        }
+        Self { ops: walk, depth }
+    }
+
+    /// The program index replay continues at after walked op `position`.
+    fn next(&self, position: usize, end: usize) -> usize {
+        self.ops.get(position + 1).map_or(end, |&(index, _)| index)
+    }
+
+    /// The layer depth after walked op `position`.
+    fn depth_after(&self, position: usize) -> u32 {
+        self.ops
+            .get(position + 1)
+            .map_or(self.depth, |&(_, depth)| depth)
+    }
+
+    /// Where the seam copy of `slot` goes, or `None` when nothing in the
+    /// walk rides it.
+    fn seam_run(&self, tables: Tables<'_>, slot: u32, shift: Vector2D<f32>) -> Option<SeamRun> {
+        let walk = &self.ops;
+        let draws = |&(index, _): &(usize, u32)| draws_riding(tables, &tables.program[index], slot);
+        let first = walk.iter().position(draws)?;
+        let last = walk.iter().rposition(draws)?;
+        // The copy inherits the layers below its run from the original —
+        // but only layers that stay put: a layer riding the slot (a clip of
+        // the container's own content) must be re-encoded shifted with it.
+        let mut stack: SmallVec<[usize; 8]> = SmallVec::new();
+        for &(index, _) in &walk[..first] {
+            match &tables.program[index] {
+                ComposeOp::Push { .. } => stack.push(index),
+                ComposeOp::Pop => {
+                    stack.pop();
+                }
+                _ => {}
+            }
+        }
+        let riding_layer = stack.iter().position(|&index| {
+            matches!(&tables.program[index], ComposeOp::Push { space, .. }
+                if space::rides(tables.spaces, *space, slot))
+        });
+        let floor = walk[first..=last]
+            .iter()
+            .map(|&(_, depth)| depth)
+            .chain(std::iter::once(self.depth_after(last)))
+            .chain(riding_layer.and_then(|layer| u32::try_from(layer).ok()))
+            .min()
+            .unwrap_or(0);
+        let start = walk[..=first]
+            .iter()
+            .rposition(|&(_, depth)| depth == floor)
+            .unwrap_or(first);
+        let stop = (last..walk.len())
+            .find(|&position| self.depth_after(position) == floor)
+            .unwrap_or(walk.len() - 1);
+        Some(SeamRun {
+            slot,
+            shift,
+            first: start,
+            last: stop,
+            open: self.depth_after(stop).saturating_sub(floor),
+        })
+    }
+}
+
+/// One seam copy's place in the program, as positions in the walked op
+/// sequence (see [`replay_seams`]).
+struct SeamRun {
+    slot: u32,
+    shift: Vector2D<f32>,
+    /// The first walked op the copy replays.
+    first: usize,
+    /// The last one; the copy is drawn right after the original replays it.
+    last: usize,
+    /// Layers the copy's own replay leaves open, closed after it.
+    open: u32,
+}
+
+/// Replays `ops` for `target` with each op mapped by its space at the
+/// instant `samples` holds, and draws the seam copies of every circular
+/// scroll container whose scrollport straddles its seam
+/// ([`SpaceSamples::seam_passes`]). Without a straddling slot this is one
+/// [`replay_ops`] over the range, byte for byte.
+///
+/// A copy replays the ops from the start of the innermost layer run that
+/// holds every op riding its slot, and no layer riding it, to the point
+/// where the layer stack is back at that run's depth: the layers enclosing
+/// the run are the original's, still open, so the copy is clipped by the
+/// container's scrollport like its original, while a layer of the
+/// container's own content is pushed again, shifted with the copy. Ops
+/// that do not ride the slot but sit inside the run are not drawn again,
+/// so the only paint-order difference from a frame with the content really
+/// repeated is that such an op ends up below the copy.
+///
+/// A bake ([`ReplayTarget::Bake`]) draws the copies of the slots its entry
+/// does not ride: a blurred scroll container's texture holds its own seam.
+/// Nested circular containers straddling at once each draw their own copy;
+/// the outer copy shows the inner container at its original offset.
+pub(crate) fn replay_seams(
+    scene: &mut Scene,
+    tables: Tables<'_>,
+    ops: Range<usize>,
+    samples: &SpaceSamples<'_>,
+    target: ReplayTarget,
+) {
+    let within = target.within();
+    let passes: SmallVec<[(u32, Vector2D<f32>); 2]> = samples
+        .seam_passes()
+        .into_iter()
+        .filter(|&(slot, _)| !space::rides(tables.spaces, within, slot))
+        .collect();
+    if passes.is_empty() {
+        target.with_map(samples, |map| replay_ops(scene, tables, ops, map, None));
+        return;
+    }
+
+    let end = ops.end.min(tables.program.len());
+    let walk = OpWalk::new(tables, ops.start.min(end)..end);
+    let mut runs: SmallVec<[SeamRun; 2]> = passes
+        .into_iter()
+        .filter_map(|(slot, shift)| walk.seam_run(tables, slot, shift))
+        .collect();
+    runs.sort_by_key(|run| run.last);
+    let next = |position: usize| walk.next(position, end);
+    let walk = &walk.ops;
+
+    target.with_map(samples, |map| {
+        let mut cursor = ops.start.min(end);
+        for run in &runs {
+            let after = next(run.last);
+            replay_ops(scene, tables, cursor..after, map, None);
+            cursor = cursor.max(after);
+            let offsets = samples.shifted_offsets(run.slot, run.shift);
+            let shifted = SpaceSamples {
+                offset_of: &offsets,
+                ..*samples
+            };
+            target.with_map(&shifted, |shifted_map| {
+                replay_ops(
+                    scene,
+                    tables,
+                    walk[run.first].0..after,
+                    shifted_map,
+                    Some(run.slot),
+                );
+            });
+            for _ in 0..run.open {
+                scene.pop_layer();
+            }
+        }
+        replay_ops(scene, tables, cursor..end, map, None);
+    });
+}
+
+/// Whether `op` draws something that moves with scroll slot `slot`: what a
+/// seam copy of that slot's content has to draw again.
+fn draws_riding(tables: Tables<'_>, op: &ComposeOp, slot: u32) -> bool {
+    match op {
+        ComposeOp::Fragment { space, .. } | ComposeOp::Image { space, .. } => {
+            space::rides(tables.spaces, *space, slot)
+        }
+        ComposeOp::PushFilter { index } => {
+            matches!(tables.filtered.get(*index as usize), Some(Some(_)))
+                && space::rides(
+                    tables.spaces,
+                    tables.filter_groups[*index as usize].space,
+                    slot,
+                )
+        }
+        ComposeOp::PushBackdrop { index } => space::rides(
+            tables.spaces,
+            tables.filter_groups[*index as usize].space,
+            slot,
+        ),
+        ComposeOp::Push { .. } | ComposeOp::Pop | ComposeOp::PopFilter => false,
+    }
 }
 
 /// Everything one replay reads besides the transform and the op range: the
@@ -823,11 +1086,19 @@ pub(crate) struct Tables<'a> {
 /// unblurred fallback. A `PushBackdrop` with a texture draws it through the
 /// element's border box; one without encodes nothing, and the unfiltered
 /// backdrop underneath is what shows.
+///
+/// With `riding` set to a scroll slot this is a seam copy's replay
+/// ([`replay_seams`]): only what moves with that slot draws — fragments,
+/// image draws, a baked filter group's texture and a backdrop — while every
+/// push and pop is still encoded, each under its own space's map, so the
+/// layer stack stays balanced and the clips of the slot's ancestors still
+/// apply. With `None` every op draws.
 pub(crate) fn replay_ops(
     scene: &mut Scene,
     tables: Tables<'_>,
     ops: Range<usize>,
     device_transform: &dyn Fn(Option<u32>) -> Affine,
+    riding: Option<u32>,
 ) {
     let Tables {
         fragments,
@@ -839,6 +1110,7 @@ pub(crate) fn replay_ops(
         spaces,
         samples,
     } = tables;
+    let draws = |space: Option<u32>| riding.is_none_or(|slot| space::rides(spaces, space, slot));
     let end = ops.end.min(program.len());
     let mut index = ops.start.min(end);
     while index < end {
@@ -847,8 +1119,10 @@ pub(crate) fn replay_ops(
                 index: fragment,
                 space,
             } => {
-                let transform = device_transform(*space);
-                scene.append(&fragments[*fragment as usize], Some(transform));
+                if draws(*space) {
+                    let transform = device_transform(*space);
+                    scene.append(&fragments[*fragment as usize], Some(transform));
+                }
             }
             ComposeOp::Push {
                 clip_only,
@@ -881,40 +1155,22 @@ pub(crate) fn replay_ops(
                 }
             }
             ComposeOp::Image { index: draw, space } => {
-                let transform = device_transform(*space);
-                encode_draw(scene, image_draws, images, *draw, transform);
+                if draws(*space) {
+                    let transform = device_transform(*space);
+                    encode_draw(scene, image_draws, images, *draw, transform);
+                }
             }
             ComposeOp::Pop => scene.pop_layer(),
             ComposeOp::PushFilter { index: group } => {
                 let group_index = *group as usize;
                 let group = &filter_groups[group_index];
                 if let Some(Some(image)) = filtered.get(group_index) {
-                    // The texture is the group's own pixels already blurred,
-                    // in device px at `rect`'s origin; only the group's own
-                    // space is left to apply. `Extend::Pad` never fires — the
-                    // draw covers exactly the image — and nearest sampling
-                    // reproduces the texture byte for byte at the integer
-                    // offsets scroll and sticky nodes snap to. An animation
-                    // node can land it anywhere, so that case samples
-                    // bilinearly.
-                    let quality = if space::nearest_animation(spaces, group.space).is_none() {
-                        ImageQuality::Low
-                    } else {
-                        ImageQuality::Medium
-                    };
-                    scene.draw_image(
-                        ImageBrush {
-                            image,
-                            sampler: ImageSampler {
-                                x_extend: Extend::Pad,
-                                y_extend: Extend::Pad,
-                                quality,
-                                alpha: 1.0,
-                            },
-                        },
-                        device_transform(group.space)
-                            * Affine::translate((group.rect.x0, group.rect.y0)),
-                    );
+                    // A seam copy that the group does not ride skips the
+                    // texture too: it holds the group's content, none of
+                    // which the copy draws.
+                    if draws(group.space) {
+                        draw_filtered(scene, group, image, spaces, device_transform);
+                    }
                     // Straight to the matching `PopFilter`, which is a no-op.
                     index = group.ops.end as usize;
                     continue;
@@ -924,7 +1180,9 @@ pub(crate) fn replay_ops(
             ComposeOp::PushBackdrop { index: slot } => {
                 let slot = *slot as usize;
                 let entry = &filter_groups[slot];
-                if let (Some(Some(image)), Some(backdrop)) = (filtered.get(slot), &entry.backdrop) {
+                if let (Some(Some(image)), Some(backdrop)) = (filtered.get(slot), &entry.backdrop)
+                    && draws(entry.space)
+                {
                     let animated = space::nearest_animation(spaces, entry.space).is_some();
                     draw_backdrop(scene, entry, backdrop, image, animated, device_transform);
                 }
@@ -932,6 +1190,40 @@ pub(crate) fn replay_ops(
         }
         index += 1;
     }
+}
+
+/// Draws one baked `filter: blur()` group's texture in place of its ops.
+///
+/// The texture is the group's own pixels already blurred, in device px at
+/// `rect`'s origin; only the group's own space is left to apply.
+/// `Extend::Pad` never fires — the draw covers exactly the image — and
+/// nearest sampling reproduces the texture byte for byte at the integer
+/// offsets scroll and sticky nodes snap to. An animation node can land it
+/// anywhere, so that case samples bilinearly.
+fn draw_filtered(
+    scene: &mut Scene,
+    group: &FilterGroup,
+    image: &ImageData,
+    spaces: &[Space],
+    device_transform: &dyn Fn(Option<u32>) -> Affine,
+) {
+    let quality = if space::nearest_animation(spaces, group.space).is_none() {
+        ImageQuality::Low
+    } else {
+        ImageQuality::Medium
+    };
+    scene.draw_image(
+        ImageBrush {
+            image,
+            sampler: ImageSampler {
+                x_extend: Extend::Pad,
+                y_extend: Extend::Pad,
+                quality,
+                alpha: 1.0,
+            },
+        },
+        device_transform(group.space) * Affine::translate((group.rect.x0, group.rect.y0)),
+    );
 }
 
 /// Draws one baked backdrop: the texture through the element's own rounded
@@ -1170,6 +1462,151 @@ mod tests {
             },
         );
         scene
+    }
+
+    /// A 100×100 scrollport over 200 px of content, circular on `y`: max
+    /// 100, period 200. It is [`SPACES`]' scroll slot 0.
+    fn circular_slot() -> crate::visual::ScrollSlot {
+        use crate::scroll::{CaptureAxes, ScrollAxes};
+        crate::visual::ScrollSlot {
+            node: crate::NodeId::from_bits(1).expect("a handle's bits"),
+            parent: None,
+            user_scrollable: ScrollAxes { x: false, y: true },
+            chains: ScrollAxes::NONE,
+            bounce: ScrollAxes::NONE,
+            circular: ScrollAxes { x: false, y: true },
+            capture: CaptureAxes::default(),
+            snap: crate::visual::SnapSlot::default(),
+            offset: Vector2D::zero(),
+            max_offset: Vector2D::new(0.0, 100.0),
+            scrollport: euclid::default::Size2D::new(100.0, 100.0),
+            viewport_axes: [Vector2D::new(1.0, 0.0), Vector2D::new(0.0, 1.0)],
+            request: None,
+        }
+    }
+
+    /// Replays `program` over [`circular_slot`] standing at `offset`.
+    fn replay_circular(program: &[ComposeOp], offset: Vector2D<f32>) -> Scene {
+        let fragments = [fragment()];
+        let slots = [circular_slot()];
+        let offset_of = move |_: &crate::visual::ScrollSlot| Some(offset);
+        let mut scene = Scene::default();
+        replay(
+            &mut scene,
+            &fragments,
+            program,
+            &[],
+            &[],
+            &[],
+            &[],
+            &SpaceSamples {
+                spaces: &SPACES,
+                slots: &slots,
+                animations: &crate::visual::AnimationSamples::default(),
+                stickies: &crate::visual::StickySamples::default(),
+                anchored: &crate::visual::anchored::AnchoredSamples::new(),
+                ratio: 1.0,
+                offset_of: &offset_of,
+            },
+        );
+        scene
+    }
+
+    /// A circular container whose scrollport straddles the seam draws its
+    /// content twice, the second copy one period back, right after the
+    /// first and inside the same clip; one that does not draws it once.
+    #[test]
+    fn a_straddling_circular_slot_draws_its_content_again_one_period_back() {
+        let program = [
+            push(None),
+            ComposeOp::Fragment {
+                index: 0,
+                space: SCROLLED,
+            },
+            ComposeOp::Pop,
+        ];
+        let expected = |copies: &[f64]| {
+            let mut scene = Scene::default();
+            scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &Rect::ZERO);
+            for &y in copies {
+                scene.append(&fragment(), Some(Affine::translate((0.0, y))));
+            }
+            scene.pop_layer();
+            scene
+        };
+
+        crate::paint::equivalence::assert_scenes_identical(
+            &replay_circular(&program, Vector2D::new(0.0, 150.0)),
+            &expected(&[-150.0, 50.0]),
+        );
+        crate::paint::equivalence::assert_scenes_identical(
+            &replay_circular(&program, Vector2D::new(0.0, 50.0)),
+            &expected(&[-50.0]),
+        );
+    }
+
+    /// The copy is drawn where the container's content sits in paint order:
+    /// what paints over the container later — a positioned sibling, say —
+    /// still paints over the copy.
+    #[test]
+    fn a_seam_copy_is_drawn_before_what_paints_over_the_container() {
+        let program = [
+            push(None),
+            ComposeOp::Fragment {
+                index: 0,
+                space: SCROLLED,
+            },
+            ComposeOp::Pop,
+            ComposeOp::Fragment {
+                index: 0,
+                space: None,
+            },
+        ];
+        let mut expected = Scene::default();
+        expected.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &Rect::ZERO);
+        expected.append(&fragment(), Some(Affine::translate((0.0, -150.0))));
+        expected.append(&fragment(), Some(Affine::translate((0.0, 50.0))));
+        expected.pop_layer();
+        expected.append(&fragment(), Some(Affine::IDENTITY));
+        crate::paint::equivalence::assert_scenes_identical(
+            &replay_circular(&program, Vector2D::new(0.0, 150.0)),
+            &expected,
+        );
+    }
+
+    /// A layer of the container's content — a card's own clip — is part of
+    /// the copy: pushed again, shifted with it, rather than inherited from
+    /// the original at the original's place. A layer that does not ride the
+    /// container (its scrollport clip) is inherited.
+    #[test]
+    fn a_seam_copy_pushes_its_own_riding_layers_again() {
+        let program = [
+            push(None),
+            push(SCROLLED),
+            ComposeOp::Fragment {
+                index: 0,
+                space: SCROLLED,
+            },
+            ComposeOp::Pop,
+            ComposeOp::Fragment {
+                index: 0,
+                space: None,
+            },
+            ComposeOp::Pop,
+        ];
+        let mut expected = Scene::default();
+        expected.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &Rect::ZERO);
+        for y in [-150.0, 50.0] {
+            expected.push_clip_layer(Fill::NonZero, Affine::translate((0.0, y)), &Rect::ZERO);
+            expected.append(&fragment(), Some(Affine::translate((0.0, y))));
+            expected.pop_layer();
+        }
+        expected.append(&fragment(), Some(Affine::IDENTITY));
+        expected.pop_layer();
+        crate::paint::equivalence::assert_scenes_identical(
+            &replay_circular(&program, Vector2D::new(0.0, 150.0)),
+            &expected,
+        );
     }
 
     /// The bracket ops encode nothing at all when no texture was baked: the

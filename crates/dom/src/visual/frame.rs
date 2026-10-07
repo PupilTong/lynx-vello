@@ -16,6 +16,7 @@
 //! same screen-semantics staleness hit testing already accepts.
 
 use euclid::default::{Point2D, Size2D, Vector2D};
+use smallvec::SmallVec;
 use stylo::properties::animated_properties::AnimationValueMap;
 
 use super::{AnimationSample, PaintOrder, SpaceSamples};
@@ -54,6 +55,11 @@ pub struct ScrollSlot {
     /// intents may stand outside `0..=max_offset` on such an axis, while the
     /// committed `offset` never does.
     pub bounce: ScrollAxes,
+    /// The axes with no boundary: `overscroll-behavior: circular`. Policy
+    /// only: the painter's intents may stand anywhere on such an axis and
+    /// compose modulo [`Self::wrap_period`], while the committed `offset`
+    /// never leaves `0..=max_offset`.
+    pub circular: ScrollAxes,
     /// Whether the container above goes first, per axis:
     /// `scroll-capture-x` / `scroll-capture-y`.
     pub capture: CaptureAxes,
@@ -94,6 +100,16 @@ impl ScrollOffsets<'_> {
     }
 }
 
+/// `offset_of` with every offset normalized into its slot's period
+/// ([`ScrollSlot::wrap`]): what the frame's entry points hand everything
+/// they sample, so scroll timelines, stickies, anchored boxes and the space
+/// maps all read an offset inside the scrolling area's one period.
+fn wrapped_offsets(
+    offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
+) -> impl Fn(&ScrollSlot) -> Option<Vector2D<f32>> + '_ {
+    move |slot: &ScrollSlot| offset_of(slot).map(|offset| slot.wrap(offset))
+}
+
 /// One axis of a slot's snapping: its strictness and the `start..end`
 /// range of its points in the frame's snap-point table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,10 +127,13 @@ pub struct SnapSlot {
 }
 
 impl SnapSlotAxis {
-    fn axis<'frame>(&self, points: &'frame [SnapPoint]) -> SnapAxis<'frame> {
+    /// This axis over the frame's points, repeating every `period` on a
+    /// circular axis.
+    fn axis<'frame>(&self, points: &'frame [SnapPoint], period: Option<f32>) -> SnapAxis<'frame> {
         SnapAxis {
             strictness: self.strictness,
             points: &points[self.start as usize..self.end as usize],
+            period,
         }
     }
 }
@@ -135,12 +154,60 @@ impl ScrollSlot {
         self.viewport_axes[0] * offset.x + self.viewport_axes[1] * offset.y
     }
 
+    /// The period each axis wraps with: the extent of the whole scrolling
+    /// area (`max_offset` plus the scrollport) on a [`Self::circular`] axis
+    /// whose content overflows, `None` otherwise. An axis with nothing to
+    /// scroll has nothing to wrap either, so it keeps the ordinary clamp.
+    #[must_use]
+    pub fn wrap_period(&self) -> (Option<f32>, Option<f32>) {
+        let axis =
+            |circular: bool, max: f32, extent: f32| (circular && max > 0.0).then_some(max + extent);
+        (
+            axis(self.circular.x, self.max_offset.x, self.scrollport.width),
+            axis(self.circular.y, self.max_offset.y, self.scrollport.height),
+        )
+    }
+
+    /// `offset` normalized into `[0, period)` on each axis that has a
+    /// [`Self::wrap_period`], and unchanged on the others — this clamps
+    /// nothing. A non-finite offset on a wrapped axis normalizes to `0`.
+    ///
+    /// The painter's offset on a circular axis stands anywhere on an
+    /// unbounded line; this is where it is consumed. A normalized offset
+    /// above `max_offset` is one whose scrollport straddles the seam: it
+    /// shows the end of the scrolling area followed by its start.
+    #[must_use]
+    pub fn wrap(&self, offset: Vector2D<f32>) -> Vector2D<f32> {
+        let axis = |value: f32, period: Option<f32>| match period {
+            Some(period) => {
+                let wrapped = value.rem_euclid(period);
+                // `rem_euclid` of a tiny negative value rounds up to the
+                // period itself, which is the start again.
+                if wrapped.is_finite() && wrapped < period {
+                    wrapped
+                } else {
+                    0.0
+                }
+            }
+            None => value,
+        };
+        let (x, y) = self.wrap_period();
+        Vector2D::new(axis(offset.x, x), axis(offset.y, y))
+    }
+
     /// The offset range the committed encode covers on each axis — the
     /// window compose may move through without a recommit. Sized in
     /// scrollports around the committed offset, clamped to what the geometry
     /// admits. A scroll outside it recommits at once (`Document::scroll_to`);
     /// one that has used half the headroom toward an edge recommits early
     /// ([`Self::recenter_due`]), so the painter is never left at the edge.
+    ///
+    /// On an axis with a [`Self::wrap_period`] the window is the whole
+    /// scrolling area, `0..=max_offset`, whatever the committed offset: the
+    /// painter's offset moves around the circle without telling the document
+    /// until it settles, and across the seam it composes both ends at once,
+    /// so no window narrower than the whole area stays valid. That also
+    /// makes every `content-visibility: auto` box on that axis relevant.
     #[must_use]
     pub fn encode_window(&self) -> (Vector2D<f32>, Vector2D<f32>) {
         let slack = Vector2D::new(
@@ -155,13 +222,30 @@ impl ScrollSlot {
                 0.0
             },
         );
+        let (wrap_x, wrap_y) = self.wrap_period();
         let low = Vector2D::new(
-            (self.offset.x - slack.x).max(0.0),
-            (self.offset.y - slack.y).max(0.0),
+            if wrap_x.is_some() {
+                0.0
+            } else {
+                (self.offset.x - slack.x).max(0.0)
+            },
+            if wrap_y.is_some() {
+                0.0
+            } else {
+                (self.offset.y - slack.y).max(0.0)
+            },
         );
         let high = Vector2D::new(
-            (self.offset.x + slack.x).min(self.max_offset.x),
-            (self.offset.y + slack.y).min(self.max_offset.y),
+            if wrap_x.is_some() {
+                self.max_offset.x
+            } else {
+                (self.offset.x + slack.x).min(self.max_offset.x)
+            },
+            if wrap_y.is_some() {
+                self.max_offset.y
+            } else {
+                (self.offset.y + slack.y).min(self.max_offset.y)
+            },
         );
         (low, high)
     }
@@ -170,7 +254,9 @@ impl ScrollSlot {
     /// [`Self::encode_window`] leaves toward the edge it moves to, on either
     /// axis, so the commit should re-center the window on it. `offset` is
     /// clamped to the committed range first: a `contain-bounce` stretch is
-    /// composed from the edge's own content and asks for nothing.
+    /// composed from the edge's own content and asks for nothing. An axis
+    /// with a [`Self::wrap_period`] never asks: its window is already the
+    /// whole scrolling area.
     #[must_use]
     pub fn recenter_due(&self, offset: Vector2D<f32>) -> bool {
         let clamp = |value: f32, max: f32| {
@@ -190,17 +276,21 @@ impl ScrollSlot {
             }
         };
         let (low, high) = self.encode_window();
-        axis(
-            clamp(offset.x, self.max_offset.x),
-            self.offset.x,
-            low.x,
-            high.x,
-        ) || axis(
-            clamp(offset.y, self.max_offset.y),
-            self.offset.y,
-            low.y,
-            high.y,
-        )
+        let (wrap_x, wrap_y) = self.wrap_period();
+        (wrap_x.is_none()
+            && axis(
+                clamp(offset.x, self.max_offset.x),
+                self.offset.x,
+                low.x,
+                high.x,
+            ))
+            || (wrap_y.is_none()
+                && axis(
+                    clamp(offset.y, self.max_offset.y),
+                    self.offset.y,
+                    low.y,
+                    high.y,
+                ))
     }
 }
 
@@ -330,6 +420,11 @@ impl CommittedFrame {
     /// This is the compositor's per-frame path: scrolling recomposes instead
     /// of recommitting, for as long as every overridden offset stays inside
     /// its slot's [`ScrollSlot::encode_window`].
+    ///
+    /// An offset on a circular axis may stand anywhere: it is normalized into
+    /// the slot's period ([`ScrollSlot::wrap`]) before anything reads it, and
+    /// a slot whose scrollport straddles the seam draws its content a second
+    /// time, one period back.
     pub fn compose_into(
         &self,
         scene: &mut Scene,
@@ -338,6 +433,8 @@ impl CommittedFrame {
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) {
+        let wrapped = wrapped_offsets(offset_of);
+        let offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>> = &wrapped;
         let composed = &self.presentation.composed;
         let animations =
             self.order
@@ -396,6 +493,10 @@ impl CommittedFrame {
     /// backdrop pops the layers the range left open and draws its pre-blur
     /// passes over the whole bake rect, so neither lands inside a clip.
     ///
+    /// Offsets on a circular axis are normalized as [`Self::compose_into`]
+    /// normalizes them, and the seam copy of a straddling container the
+    /// entry does not ride is baked into the texture with the rest.
+    ///
     /// `filtered` must already hold the textures of every entry this one's
     /// range draws — bake in order of increasing `ops.end`.
     pub fn bake_filter(
@@ -411,6 +512,8 @@ impl CommittedFrame {
         let Some(group) = groups.get(index) else {
             return;
         };
+        let wrapped = wrapped_offsets(offset_of);
+        let offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>> = &wrapped;
         let composed = &self.presentation.composed;
         let animations = if group.samples_animations() {
             self.order
@@ -439,8 +542,7 @@ impl CommittedFrame {
         if samples.device(group.space).determinant().abs() < f64::EPSILON {
             return;
         }
-        let transform = samples.bake_map(group.space, (group.rect.x0, group.rect.y0));
-        compose::replay_ops(
+        compose::replay_seams(
             scene,
             compose::Tables {
                 fragments: &self.presentation.fragments,
@@ -453,7 +555,11 @@ impl CommittedFrame {
                 samples: &animations,
             },
             group.ops.start as usize..group.ops.end as usize,
-            &transform,
+            &samples,
+            compose::ReplayTarget::Bake {
+                entry: group.space,
+                origin: (group.rect.x0, group.rect.y0),
+            },
         );
         let Some(backdrop) = group.backdrop.as_ref() else {
             return;
@@ -611,13 +717,16 @@ impl CommittedFrame {
         self.order.snap_points()
     }
 
-    /// A slot's snapping on each axis, over the frame's points.
+    /// A slot's snapping on each axis, over the frame's points. On a
+    /// circular axis the positions repeat every [`ScrollSlot::wrap_period`],
+    /// so the painter snaps across the seam.
     #[must_use]
     pub fn snap_axes(&self, slot: &ScrollSlot) -> (Option<SnapAxis<'_>>, Option<SnapAxis<'_>>) {
         let points = self.snap_points();
+        let (period_x, period_y) = slot.wrap_period();
         (
-            slot.snap.x.as_ref().map(|axis| axis.axis(points)),
-            slot.snap.y.as_ref().map(|axis| axis.axis(points)),
+            slot.snap.x.as_ref().map(|axis| axis.axis(points, period_x)),
+            slot.snap.y.as_ref().map(|axis| axis.axis(points, period_y)),
         )
     }
 
@@ -653,6 +762,13 @@ impl CommittedFrame {
     /// The frame is baked unscrolled; `offset_of` supplies each slot's
     /// current offset (the compositor's between-commit values), falling back
     /// to the committed ones. No liveness filter — see the module doc.
+    ///
+    /// An offset on a circular axis is normalized into its period first, as
+    /// composition does. Where a slot's scrollport straddles the seam, an
+    /// item that rides the slot is tested at its original place and then at
+    /// its copy one period back, in its own place in the front-to-back
+    /// order: the two copies tile the scrollport and both are cut by its
+    /// clip, so at most one of them is under the point.
     #[must_use]
     pub fn hit(
         &self,
@@ -660,6 +776,8 @@ impl CommittedFrame {
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) -> Option<HitTarget> {
+        let wrapped = wrapped_offsets(offset_of);
+        let offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>> = &wrapped;
         let animations = self.order.sample_animations(animation_now, offset_of);
         let stickies = self
             .order
@@ -674,7 +792,40 @@ impl CommittedFrame {
             self.device_pixel_ratio,
             offset_of,
         );
-        self.order.raw_hits_at(point, &samples).next()
+        let passes = samples.seam_passes();
+        if passes.is_empty() {
+            return self.order.raw_hits_at(point, &samples).next();
+        }
+        let offsets: SmallVec<[_; 2]> = passes
+            .iter()
+            .map(|&(slot, shift)| samples.shifted_offsets(slot, shift))
+            .collect();
+        let seams: SmallVec<[(u32, SpaceSamples<'_>); 2]> = passes
+            .iter()
+            .zip(&offsets)
+            .map(|(&(slot, _), offsets)| {
+                (
+                    slot,
+                    SpaceSamples {
+                        offset_of: offsets,
+                        ..samples
+                    },
+                )
+            })
+            .collect();
+        let spaces = self.order.spaces();
+        self.order.items().iter().rev().find_map(|item| {
+            let node = self.order.item_hit(item, point, &samples).or_else(|| {
+                seams
+                    .iter()
+                    .filter(|(slot, _)| super::space::rides(spaces, item.space, *slot))
+                    .find_map(|(_, seam)| self.order.item_hit(item, point, seam))
+            })?;
+            Some(HitTarget {
+                node,
+                scroll: item.slot,
+            })
+        })
     }
 
     /// The frame's composite-animated elements; see [`AnimationSlot`].
@@ -741,9 +892,12 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp, reason = "the expectations are exact offsets")]
 mod tests {
-    use euclid::default::Point2D;
+    use euclid::default::{Point2D, Vector2D};
 
+    use super::ScrollSlot;
+    use crate::scroll::ScrollAxes;
     use crate::tree::document::tests::device;
     use crate::{Document, StylesheetOrigin};
 
@@ -763,6 +917,78 @@ mod tests {
         document.add_class(content, "content");
         document.append_child(scroller, content);
         (document, root, scroller)
+    }
+
+    /// A 100×100 scrollport over 500 px of content on both axes (max 400,
+    /// period 500), circular on `y` alone, standing at `(200, 200)`.
+    fn circular_y_slot() -> ScrollSlot {
+        ScrollSlot {
+            node: crate::tree::document::DOCUMENT_ELEMENT_NODE_ID,
+            parent: None,
+            user_scrollable: ScrollAxes { x: true, y: true },
+            chains: ScrollAxes::NONE,
+            bounce: ScrollAxes::NONE,
+            circular: ScrollAxes { x: false, y: true },
+            capture: crate::scroll::CaptureAxes::default(),
+            snap: super::SnapSlot::default(),
+            offset: Vector2D::new(200.0, 200.0),
+            max_offset: Vector2D::new(400.0, 400.0),
+            scrollport: euclid::default::Size2D::new(100.0, 100.0),
+            viewport_axes: [Vector2D::new(1.0, 0.0), Vector2D::new(0.0, 1.0)],
+            request: None,
+        }
+    }
+
+    #[test]
+    fn a_circular_axis_wraps_by_its_whole_scrolling_area() {
+        let slot = circular_y_slot();
+        assert_eq!(slot.wrap_period(), (None, Some(500.0)));
+        assert_eq!(
+            slot.wrap(Vector2D::new(-30.0, -30.0)),
+            Vector2D::new(-30.0, 470.0),
+            "the bounded axis is left alone, unclamped",
+        );
+        assert_eq!(
+            slot.wrap(Vector2D::new(0.0, 1260.0)),
+            Vector2D::new(0.0, 260.0)
+        );
+        assert_eq!(
+            slot.wrap(Vector2D::new(0.0, f32::NAN)),
+            Vector2D::new(0.0, 0.0)
+        );
+        assert_eq!(
+            slot.wrap(Vector2D::new(0.0, -1.0e-12)),
+            Vector2D::new(0.0, 0.0),
+            "a hair below the start is the start, never the period itself",
+        );
+
+        let flat = ScrollSlot {
+            max_offset: Vector2D::new(400.0, 0.0),
+            ..slot
+        };
+        assert_eq!(
+            flat.wrap_period(),
+            (None, None),
+            "nothing overflows, nothing wraps"
+        );
+        assert_eq!(
+            flat.wrap(Vector2D::new(0.0, 30.0)),
+            Vector2D::new(0.0, 30.0)
+        );
+    }
+
+    #[test]
+    fn a_circular_axis_encodes_its_whole_scrolling_area_and_never_recenters() {
+        let slot = circular_y_slot();
+        let (low, high) = slot.encode_window();
+        assert_eq!(low, Vector2D::new(100.0, 0.0), "x keeps its ±1 scrollport");
+        assert_eq!(high, Vector2D::new(300.0, 400.0), "y spans 0..=max");
+        assert!(!slot.recenter_due(Vector2D::new(200.0, 0.0)));
+        assert!(!slot.recenter_due(Vector2D::new(200.0, 400.0)));
+        assert!(
+            slot.recenter_due(Vector2D::new(290.0, 200.0)),
+            "the bounded axis still recenters"
+        );
     }
 
     #[test]

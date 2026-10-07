@@ -852,6 +852,43 @@ and §D.16 with what the wire format actually permits.)*
       All of it lives in the painter (`crates/bobcat-core/src/paint/motion.rs`
       for the curves, `paint/inertia.rs` for when they start and stop); the
       document only publishes the `bounce` axes on each scroll slot.
+    - **`overscroll-behavior: circular`** (user-directed 2026-10-07) is the
+      engine's own fifth value, declared under the fork's `lynx` feature only
+      (`OverscrollBehavior::Circular`): the axis has no boundary. Its
+      scrolling area repeats with a period of the whole scrolling area on
+      that axis (`max_offset` plus the scrollport), so scrolling past the end
+      continues from the start and back. Chaining is fenced as for `contain`:
+      a circular axis absorbs every delta, so nothing reaches the container
+      above. It is the painter's alone. The painter's live offset stands on
+      the circle: a drag, fling or wheel step never meets a wall or a
+      stretch, snap positions repeat every period (a flick forward from the
+      last page lands on the first), and the offset is normalized into the
+      period wherever it is composed, hit-tested or sampled, and at each
+      rebase. While the scrollport straddles the seam the committed frame
+      draws the container's content a second time, one period back, right
+      after the container's own content in paint order and inside the same
+      clip, so whatever paints over the container later still paints over
+      the copy; hit testing tries an item at its place and then at its copy
+      in the same front-to-back walk. The document treats the value as
+      `contain` and keeps clamping every offset it writes to `0..=max`; what
+      the painter posts is its offset modulo the period, clamped, so through
+      the seam main sees `max_offset` (a scroll timeline reads its end until
+      the wrap completes), as it sees the edge of a `contain-bounce` stretch.
+      On a circular axis the committed encode window is the whole scrolling
+      area and never re-centres, so a `content-visibility: auto` box inside
+      it is always relevant on that axis. An axis whose content does not
+      overflow wraps nothing. A programmatic scroll takes its target as the
+      document clamped it and moves there the direct way, never round the
+      seam. Known approximations of the seam copy: a sticky or anchored box
+      and an exported animation inside it sample the unshifted offset, so
+      they are positioned as in the first copy; a backdrop texture inside it
+      is the one baked for the original; nested circular containers that
+      straddle at once each draw only their own copy, not the
+      wrapped-inside-wrapped combination; and the copy's offset is snapped
+      to device pixels on its own, so with a non-integer period × device
+      pixel ratio the two copies may meet one device pixel apart.
+      `x-swiper[circular]` is wired to it
+      (`crates/bobcat-core/src/main/tree/swiper.rs`).
     - **Inertia** (user-directed 2026-09-22, the same change): a scrolling
       drag's release carries its velocity over the last 100ms of the finger
       (Android's `VelocityTracker` horizon), and the fling decays

@@ -53,8 +53,9 @@
 //! its code see it, except the ones a component lists in
 //! `notToFilterFalseAttributes` — for the swiper `smooth-scroll` and
 //! `indicator-dots` (`XSwiper.ts:28-31`). This engine's `__SetAttribute`
-//! stringifies `false`, so `vertical` and `bounces` match as "present and not
-//! `"false"`", and `indicator-dots` is read below as web-core reads it.
+//! stringifies `false`, so `vertical`, `bounces` and `circular` match as
+//! "present and not `"false"`", and `indicator-dots` is read below as web-core
+//! reads it.
 //!
 //! # What the attributes do
 //!
@@ -75,6 +76,14 @@
 //!   main axis, as for [`super::viewpager`]. web-core shows a page-wide blank box ahead of the
 //!   items (`x-swiper.css:64-66`, `htmlTemplates.ts:226-232`), so only the leading edge can be
 //!   pulled.
+//! - `circular` (present and not `"false"`): `overscroll-behavior: circular` on `#content`'s main
+//!   axis, so the axis wraps: the painter keeps its offset on a circle one scrolling area long,
+//!   draws the seam, and its periodic snap rules page across it, so a drag or flick past the last
+//!   item lands on the first and back. Its rules come after `bounces`' and win on the same axis: a
+//!   circular axis has no edge to bounce. web-core re-slots the first and last items into its
+//!   shadow tree around the current one (`XSwiperCircular.ts`) and turns snapping off
+//!   (`x-swiper.css:122-131`); native loops its `ViewPager` (`XSwiperUI.java:865-868`, `setLoop`).
+//!   Here snapping stays. `docs/tracking/deviations.md` records the difference.
 //! - `indicator-dots`, `indicator-color`, `indicator-active-color`: the strip, below.
 //!
 //! A child of the swiper that is neither an `x-swiper-item` nor a `wrapper` generates no box
@@ -177,9 +186,6 @@
 //!
 //! - `autoplay`, `interval` and `smooth-scroll`: not implemented for now, the user deferred them;
 //!   `smooth-scroll` only matters to autoplay (web-core's `XSwiperAutoScroll.ts`).
-//! - `circular` wrap-around dragging: web-core re-slots the first and last items into its shadow
-//!   tree around the current one (`XSwiperCircular.ts`) and turns snapping off
-//!   (`x-swiper.css:122-131`). Here a `circular` swiper drags as a plain one.
 //! - The 3D rotation of `coverflow`, above.
 //! - `page-margin`, `previous-margin`, `next-margin` and `duration` have no rule, following
 //!   web-core, where they change nothing on screen: the three margins become custom properties on
@@ -283,6 +289,10 @@ slot { display: contents; }
 :host([bounces]:not([bounces="false"])) #content { overscroll-behavior-x: contain-bounce; }
 :host([vertical]:not([vertical="false"])[bounces]:not([bounces="false"])) #content {
   overscroll-behavior-x: auto; overscroll-behavior-y: contain-bounce;
+}
+:host([circular]:not([circular="false"])) #content { overscroll-behavior-x: circular; }
+:host([vertical]:not([vertical="false"])[circular]:not([circular="false"])) #content {
+  overscroll-behavior-x: auto; overscroll-behavior-y: circular;
 }
 #indicator {
   --indicator-size: 0.6rem;
@@ -717,6 +727,53 @@ mod tests {
                     ),
                     y,
                     "bounces={attribute:?} vertical={vertical}"
+                );
+            }
+        }
+    }
+
+    /// `circular` wraps `#content`'s main axis, present and not `"false"`,
+    /// and wins over `bounces` on that axis when both are set: a circular
+    /// axis has no edge to bounce. The cross axis stays `auto`.
+    #[test]
+    fn circular_wraps_the_main_axis_unless_it_says_false() {
+        for (circular, bounces, main) in [
+            (None, false, "auto"),
+            (Some(""), false, "circular"),
+            (Some("true"), false, "circular"),
+            (Some("false"), false, "auto"),
+            (Some(""), true, "circular"),
+            (Some("false"), true, "contain-bounce"),
+        ] {
+            for vertical in [false, true] {
+                let mut document = document();
+                let (swiper, _) = build(&mut document, "", &[], 0);
+                if vertical {
+                    document.set_attribute(swiper, "vertical", "");
+                }
+                if bounces {
+                    document.set_attribute(swiper, "bounces", "");
+                }
+                if let Some(circular) = circular {
+                    document.set_attribute(swiper, "circular", circular);
+                }
+                document.layout();
+                let (x, y) = if vertical {
+                    ("auto", main)
+                } else {
+                    (main, "auto")
+                };
+                let content = scroller(&document, swiper);
+                let case = format!("circular={circular:?} bounces={bounces} vertical={vertical}");
+                assert_eq!(
+                    value(&document, content, "overscroll-behavior-x"),
+                    x,
+                    "{case}"
+                );
+                assert_eq!(
+                    value(&document, content, "overscroll-behavior-y"),
+                    y,
+                    "{case}"
                 );
             }
         }
