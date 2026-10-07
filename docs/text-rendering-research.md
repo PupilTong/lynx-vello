@@ -19,6 +19,16 @@ outline path encodings, `resolve_patches` still runs per frame, and 0.10's
 dependency list still has no `glifo`. The measurements below were taken on 0.9
 and have not been retaken.
 
+Dependency update, 2026-10-08: this workspace now uses Vello 0.11, whose one
+breaking change is WGPU 30 (`vello` 0.11.0 depends on `wgpu` 30.0.1). The
+structural claims still hold: `vello_encoding-0.11.0/src/glyph_cache.rs` and
+`resolve.rs` are byte-identical to 0.10.0's, and 0.11's dependency list has no
+`glifo`. The WGPU alignment notes below flip: `vello_hybrid` 0.0.9 (WGPU 29,
+§5.2) no longer shares this workspace's WGPU major, while `glyphon` 0.12's
+WGPU 30 (§5.3) now does. The one rendering change 0.11 carries is
+bitmap-glyph (`sbix`/`CBDT`) placement in `vello/src/scene.rs`; outline and
+COLR glyphs are untouched.
+
 ## Short answer
 
 Painting glyphs *correctly* is done: `dom::paint::text` already drives
