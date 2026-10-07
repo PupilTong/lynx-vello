@@ -10,13 +10,17 @@
 //! the identity contract: every [`FrameImages::read`] of one
 //! source returns a clone sharing the same `Blob`, which is what vello keys
 //! its atlas on.
+//!
+//! An SVG document published through [`TestImages::insert_svg`] is parsed
+//! here with `usvg` and reported as a [`VectorImage`]; [`FrameImages::read`]
+//! never answers for it, because the engine never asks.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use dom::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
-use dom::{Document, FrameImages, ImageEvent, ImageReports, ImageSizeHint};
+use dom::{Document, FrameImages, ImageEvent, ImageReports, ImageSizeHint, VectorImage};
 
 /// What this store answers for one source.
 ///
@@ -29,8 +33,30 @@ enum Entry {
     #[default]
     Pending,
     Ready(ImageData),
+    /// A parsed SVG document.
+    Vector(VectorImage),
     /// Named as one that will never produce pixels.
     Failed,
+}
+
+impl Entry {
+    /// The report this entry settles as, or `None` while it is pending.
+    fn settled(&self, source: &str) -> Option<ImageEvent> {
+        let source = Arc::from(source);
+        match self {
+            Entry::Pending => None,
+            Entry::Ready(image) => Some(ImageEvent::Loaded {
+                source,
+                width: image.width,
+                height: image.height,
+            }),
+            Entry::Vector(image) => Some(ImageEvent::LoadedVector {
+                source,
+                image: image.clone(),
+            }),
+            Entry::Failed => Some(ImageEvent::Failed { source }),
+        }
+    }
 }
 
 /// Decoded images keyed by the source string the paint walk asks for.
@@ -102,6 +128,27 @@ impl TestImages {
         self.insert(source, rgba8(width, height, pixels));
     }
 
+    /// Publishes the SVG document `svg` under `source`, parsed with `usvg`,
+    /// and reports it the way [`Self::insert`] reports a bitmap.
+    ///
+    /// The natural size and viewport follow the design's four cases
+    /// ([`svg_sizes`]). Parsing reads no file: an `<image>` inside the
+    /// document that names anything but a `data:` URL resolves to nothing.
+    ///
+    /// # Panics
+    ///
+    /// If `svg` does not parse.
+    pub fn insert_svg(&self, source: impl Into<String>, svg: &str) {
+        let source = source.into();
+        let image = parse_svg(svg).unwrap_or_else(|error| panic!("{source}: {error}"));
+        self.entries()
+            .insert(source.clone(), Entry::Vector(image.clone()));
+        self.report(ImageEvent::LoadedVector {
+            source: Arc::from(source.as_str()),
+            image,
+        });
+    }
+
     /// Names `source` as one that will never produce pixels, and reports the
     /// failure the way [`Self::insert`] reports a load.
     ///
@@ -128,21 +175,14 @@ impl TestImages {
     /// image already published so a store warmed before the view still
     /// reports its contents.
     pub fn attach(&self, sink: ImageReports) {
-        let published: Vec<(String, Option<(u32, u32)>)> = self
+        let published: Vec<ImageEvent> = self
             .entries()
             .iter()
-            .filter_map(|(source, entry)| match entry {
-                Entry::Pending => None,
-                Entry::Ready(image) => Some((source.clone(), Some((image.width, image.height)))),
-                Entry::Failed => Some((source.clone(), None)),
-            })
+            .filter_map(|(source, entry)| entry.settled(source))
             .collect();
         *self.sink.borrow_mut() = Some(sink);
-        for (source, loaded) in published {
-            match loaded {
-                Some((width, height)) => self.report_loaded(&source, width, height),
-                None => self.report_failed(&source),
-            }
+        for event in published {
+            self.report(event);
         }
     }
 
@@ -169,7 +209,7 @@ impl TestImages {
     pub fn len(&self) -> usize {
         self.entries()
             .values()
-            .filter(|entry| matches!(entry, Entry::Ready(_)))
+            .filter(|entry| matches!(entry, Entry::Ready(_) | Entry::Vector(_)))
             .count()
     }
 
@@ -208,6 +248,7 @@ impl TestImages {
                     width,
                     height,
                 } => sink.loaded(&source, width, height),
+                ImageEvent::LoadedVector { source, image } => sink.loaded_vector(&source, image),
                 ImageEvent::Failed { source } => sink.failed(&source),
             }
         }
@@ -231,7 +272,7 @@ impl FrameImages for TestImages {
             .push((source.to_owned(), hint));
         match self.entries().get(source)? {
             Entry::Ready(image) => Some(image.clone()),
-            Entry::Pending | Entry::Failed => None,
+            Entry::Pending | Entry::Vector(_) | Entry::Failed => None,
         }
     }
 
@@ -253,19 +294,130 @@ impl TestImages {
     pub fn request(&self, source: &str) {
         // Single-flight is trivial here: one entry per source, and a source
         // that has already settled either way starts no work.
-        let settled = {
-            let mut entries = self.entries();
-            match entries.entry(source.to_owned()).or_default() {
-                Entry::Pending => None,
-                Entry::Ready(image) => Some(Some((image.width, image.height))),
-                Entry::Failed => Some(None),
-            }
-        };
-        match settled {
-            Some(Some((width, height))) => self.report_loaded(source, width, height),
-            Some(None) => self.report_failed(source),
-            None => {}
+        let settled = self
+            .entries()
+            .entry(source.to_owned())
+            .or_default()
+            .settled(source);
+        if let Some(event) = settled {
+            self.report(event);
         }
+    }
+}
+
+/// Parses an SVG document the way a host does: one XML parse, the root's
+/// `width`, `height` and `viewBox` read for [`svg_sizes`], then the `usvg`
+/// tree built from that same parse with no filesystem access.
+fn parse_svg(svg: &str) -> Result<VectorImage, String> {
+    let document = usvg::roxmltree::Document::parse_with_options(
+        svg,
+        usvg::roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..usvg::roxmltree::ParsingOptions::default()
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let root = document.root_element();
+    let options = usvg::Options {
+        resources_dir: None,
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_string: Box::new(|_, _| None),
+            ..usvg::ImageHrefResolver::default()
+        },
+        ..usvg::Options::default()
+    };
+    let tree = usvg::Tree::from_xmltree(&document, &options).map_err(|error| error.to_string())?;
+    let (natural, viewport) = svg_sizes(
+        root.attribute("width").and_then(absolute_length),
+        root.attribute("height").and_then(absolute_length),
+        root.attribute("viewBox").and_then(view_box),
+        (tree.size().width(), tree.size().height()),
+    );
+    Ok(VectorImage::new(Arc::new(tree), natural, viewport))
+}
+
+/// The natural size and viewport of an SVG document, from its root's
+/// absolute `width` and `height`, its `viewBox` size and the parsed tree's
+/// `size()`.
+///
+/// A test-only copy of the host's rule (`docs/svg-vector-images-design.md`):
+///
+/// 1. `width` and `height` both absolute: that size.
+/// 2. One absolute plus a `viewBox`: the other from the `viewBox` ratio.
+/// 3. A `viewBox` only: the largest size with its ratio that fits 300x150.
+/// 4. Otherwise: the absolute axis if there is one, 300 wide and 150 high for the others.
+///
+/// The natural size is rounded to whole px, at least 1. The viewport is the
+/// tree's `size()` wherever a `viewBox` or both dimensions are known, which
+/// is what usvg maps the content into; in case 4 usvg leaves user units 1:1
+/// and overwrites `size()` with the content bounds, so the viewport is the
+/// natural size.
+fn svg_sizes(
+    width: Option<f32>,
+    height: Option<f32>,
+    view_box: Option<(f32, f32)>,
+    tree_size: (f32, f32),
+) -> ((u32, u32), (f32, f32)) {
+    const DEFAULT: (f32, f32) = (300.0, 150.0);
+    let (natural, from_tree) = match (width, height, view_box) {
+        (Some(width), Some(height), _) => ((width, height), true),
+        (Some(width), None, Some((box_width, box_height))) => {
+            ((width, width * box_height / box_width), true)
+        }
+        (None, Some(height), Some((box_width, box_height))) => {
+            ((height * box_width / box_height, height), true)
+        }
+        (None, None, Some((box_width, box_height))) => {
+            let scale = (DEFAULT.0 / box_width).min(DEFAULT.1 / box_height);
+            ((box_width * scale, box_height * scale), true)
+        }
+        (width, height, None) => (
+            (width.unwrap_or(DEFAULT.0), height.unwrap_or(DEFAULT.1)),
+            false,
+        ),
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "rounded and clamped to at least one before the cast"
+    )]
+    let whole = |length: f32| length.round().max(1.0) as u32;
+    let rounded = (whole(natural.0), whole(natural.1));
+    let viewport = if from_tree {
+        tree_size
+    } else {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a natural size is far below f32's exact integer range"
+        )]
+        let viewport = (rounded.0 as f32, rounded.1 as f32);
+        viewport
+    };
+    (rounded, viewport)
+}
+
+/// A root `width` or `height` that is an absolute length: a number with no
+/// unit or `px`. A percentage, or any other unit, counts as absent here.
+fn absolute_length(value: &str) -> Option<f32> {
+    let value = value.trim();
+    let number = value.strip_suffix("px").unwrap_or(value);
+    number
+        .parse::<f32>()
+        .ok()
+        .filter(|length| length.is_finite() && *length > 0.0)
+}
+
+/// A `viewBox`'s width and height, when both are positive.
+fn view_box(value: &str) -> Option<(f32, f32)> {
+    let numbers: Vec<f32> = value
+        .split(|c: char| c.is_ascii_whitespace() || c == ',')
+        .filter(|part| !part.is_empty())
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    match numbers.as_slice() {
+        [_, _, width, height] if *width > 0.0 && *height > 0.0 => Some((*width, *height)),
+        _ => None,
     }
 }
 
