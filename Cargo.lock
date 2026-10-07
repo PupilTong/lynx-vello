@@ -355,6 +355,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "usvg",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

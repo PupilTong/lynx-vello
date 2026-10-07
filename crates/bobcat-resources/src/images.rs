@@ -20,6 +20,25 @@
 //!   restore fetches and decodes synchronously and takes no decode permit: it must never wait for a
 //!   background decode.
 //!
+//! # SVG documents
+//!
+//! An SVG document is not decoded. When preprocessing says the bytes are
+//! [`ImageFormat::Svg`], the job parses them with `usvg` through
+//! [`VectorImage::parse`] instead of handing them to the platform decoder:
+//! natively inside the same blocking-pool closure that fetched and
+//! preprocessed them, with no decode permit, and inline in the browser's
+//! local task. The browser therefore no longer renders SVG through its
+//! `Image` element; every target parses it the same way. Parsing reads no
+//! file and no URL: a nested `<image>` that names anything but a `data:` URL
+//! resolves to nothing. `usvg` is built without its `svgz` feature, so a
+//! gzip-compressed `.svgz` fails to load.
+//!
+//! The parsed tree completes as [`ImageReports::loaded_vector`] and stays in
+//! an [`Entry::Vector`]. It has no bitmap, so nothing enters the memory tier,
+//! [`FrameImages::read`](bobcat_core::FrameImages::read) answers `None` for it
+//! (the engine draws the tree itself and never asks), no refinement and no
+//! restore can start for it, and the encoded bytes are dropped once parsed.
+//!
 //! The document's state never regresses, and neither does this one: an
 //! entry that failed stays failed, and one that loaded stays loaded whatever
 //! the memory tier holds for it.
@@ -27,7 +46,7 @@
 use std::sync::Arc;
 
 use bobcat_core::vello::peniko::ImageData;
-use bobcat_core::{ImageReports, ImageSizeHint, MAX_RENDERABLE_DIMENSION};
+use bobcat_core::{ImageReports, ImageSizeHint, MAX_RENDERABLE_DIMENSION, VectorImage};
 use bytes::Bytes;
 use rustc_hash::FxHashMap;
 use url::Url;
@@ -39,9 +58,49 @@ use crate::mime::ImageFormat;
 use crate::preprocess::{self, Payload};
 use crate::{Resources, Shared, SharedHandle};
 
-/// What a load job hands back: the bitmap, what the bytes were, and the
+/// What a raster load hands back: the bitmap, what the bytes were, and the
 /// bytes themselves when nothing else could restore them.
 type LoadedImage = (Bitmap, ImageFormat, Option<ImageHeader>, Option<Bytes>);
+
+/// What a load job hands back: a decoded bitmap, or a parsed SVG document.
+enum LoadOutcome {
+    Raster(LoadedImage),
+    Vector(VectorImage),
+}
+
+impl LoadOutcome {
+    /// The completion that reports this outcome for `source`.
+    fn completion(self, source: Arc<str>, url: Url) -> Completion {
+        match self {
+            Self::Raster((bitmap, format, header, encoded)) => Completion::Loaded {
+                source,
+                url,
+                bitmap,
+                format,
+                header,
+                encoded,
+            },
+            Self::Vector(image) => Completion::LoadedVector { source, image },
+        }
+    }
+}
+
+/// Parses an SVG document's bytes into the tree the engine draws.
+///
+/// The options read nothing outside the document: no resources directory,
+/// and an `<image>` naming anything but a `data:` URL resolves to nothing.
+/// The default string resolver would read the filesystem.
+fn parse_vector(bytes: &[u8]) -> Result<VectorImage, String> {
+    let options = usvg::Options {
+        resources_dir: None,
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: usvg::ImageHrefResolver::default_data_resolver(),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..usvg::Options::default()
+    };
+    VectorImage::parse(bytes, &options).map_err(|error| error.to_string())
+}
 
 /// The painter-thread half: what is known about every source asked for.
 pub(crate) struct ImageState {
@@ -57,7 +116,11 @@ enum Entry {
     Loading {
         waiters: Vec<ImageReports>,
     },
+    /// A decoded raster image.
     Loaded(Loaded),
+    /// A parsed SVG document. It has no bitmap and keeps no bytes, so the
+    /// memory tier, refinement and restore never see it.
+    Vector(VectorImage),
     Failed,
 }
 
@@ -65,6 +128,8 @@ struct Loaded {
     url: Url,
     intrinsic: (u32, u32),
     /// The container, for a decoder that wants to be told what it is given.
+    /// Never [`ImageFormat::Svg`]: an SVG document completes as
+    /// [`Entry::Vector`], so no restore or refinement ever decodes one.
     format: ImageFormat,
     header: Option<ImageHeader>,
     /// The encoded bytes, kept when no other tier can hand them back: a
@@ -84,6 +149,11 @@ pub(crate) enum Completion {
         format: ImageFormat,
         header: Option<ImageHeader>,
         encoded: Option<Bytes>,
+    },
+    /// An SVG document, parsed. Its encoded bytes are not kept.
+    LoadedVector {
+        source: Arc<str>,
+        image: VectorImage,
     },
     Refined {
         source: Arc<str>,
@@ -161,6 +231,10 @@ pub(crate) fn request(resources: &Resources, source: &str, reports: &ImageReport
     match state.entries.get_mut(source) {
         Some(Entry::Loaded(loaded)) => {
             reports.loaded(source, loaded.intrinsic.0, loaded.intrinsic.1);
+            return;
+        }
+        Some(Entry::Vector(image)) => {
+            reports.loaded_vector(source, image.clone());
             return;
         }
         Some(Entry::Failed) => {
@@ -250,6 +324,18 @@ fn apply(resources: &Resources, completion: Completion) {
                 reports.loaded(&source, intrinsic.0, intrinsic.1);
             }
         }
+        Completion::LoadedVector { source, image } => {
+            let Some(Entry::Loading { waiters }) = state.entries.remove(&source) else {
+                return;
+            };
+            state
+                .entries
+                .insert(Arc::clone(&source), Entry::Vector(image.clone()));
+            drop(state);
+            for reports in waiters {
+                reports.loaded_vector(&source, image.clone());
+            }
+        }
         Completion::Refined {
             source,
             target,
@@ -300,8 +386,12 @@ pub(crate) fn retain(resources: &Resources, frame: &[Arc<str>]) {
 pub(crate) fn read(resources: &Resources, source: &str, hint: ImageSizeHint) -> Option<ImageData> {
     let mut state = resources.local.borrow_mut();
     let state = &mut *state;
-    let Some(Entry::Loaded(loaded)) = state.entries.get_mut(source) else {
-        return None;
+    let loaded = match state.entries.get_mut(source)? {
+        Entry::Loaded(loaded) => loaded,
+        // The engine draws a vector image from its tree and never reads it
+        // here; answering `None` is what keeps every restore and refinement
+        // below unreachable for an SVG document.
+        Entry::Vector(_) | Entry::Loading { .. } | Entry::Failed => return None,
     };
     let target = bounded(hint.fit(loaded.intrinsic.0, loaded.intrinsic.1));
     if let Some(image) = state.bitmaps.get(source) {
@@ -389,19 +479,26 @@ pub(crate) fn wants_refinement(
     too_large || too_small
 }
 
-/// What a load's transport-and-preprocess step hands its decode.
+/// What a load's transport-and-preprocess step hands on.
 #[cfg(not(target_arch = "wasm32"))]
-struct Prepared {
-    format: ImageFormat,
-    header: Option<ImageHeader>,
-    bytes: Bytes,
-    /// Whether another tier can hand these bytes back, so the entry need not
-    /// keep them.
-    restorable: bool,
+enum Prepared {
+    /// Encoded raster bytes, for the decode.
+    Raster {
+        format: ImageFormat,
+        header: Option<ImageHeader>,
+        bytes: Bytes,
+        /// Whether another tier can hand these bytes back, so the entry need
+        /// not keep them.
+        restorable: bool,
+    },
+    /// An SVG document, already parsed; there is nothing left to decode.
+    Vector(VectorImage),
 }
 
-/// The blocking half of a load: fetch the bytes and run them through the
-/// preprocessing pipeline. Runs on a blocking-pool thread.
+/// The blocking half of a load: fetch the bytes, run them through the
+/// preprocessing pipeline, and parse an SVG document. Runs on a
+/// blocking-pool thread; the parse takes no decode permit, because it is not
+/// a decode and never waits on one.
 #[cfg(not(target_arch = "wasm32"))]
 fn prepare(shared: &Shared, source: &str, url: &Url) -> Result<Prepared, String> {
     let fetched = shared
@@ -417,7 +514,10 @@ fn prepare(shared: &Shared, source: &str, url: &Url) -> Result<Prepared, String>
             preprocessed.media_type
         ));
     };
-    Ok(Prepared {
+    if format == ImageFormat::Svg {
+        return parse_vector(&preprocessed.bytes).map(Prepared::Vector);
+    }
+    Ok(Prepared::Raster {
         format,
         header,
         bytes: preprocessed.bytes,
@@ -428,6 +528,7 @@ fn prepare(shared: &Shared, source: &str, url: &Url) -> Result<Prepared, String>
 /// The job behind a request: prepare on the pool, take a decode permit, then
 /// decode on the pool. The permit is held from before the decode closure is
 /// submitted until it returns, so a decode that has to wait holds no thread.
+/// An SVG document is finished once prepared and takes no permit.
 #[cfg(not(target_arch = "wasm32"))]
 async fn load(
     shared: &SharedHandle,
@@ -436,19 +537,26 @@ async fn load(
     source: &Arc<str>,
     url: &Url,
     bound: (u32, u32),
-) -> Result<LoadedImage, String> {
+) -> Result<LoadOutcome, String> {
     let prepared = {
         let shared = SharedHandle::clone(shared);
         let source = Arc::clone(source);
         let url = url.clone();
         crate::executor::blocking(handle, "load", move || prepare(&shared, &source, &url)).await??
     };
+    let (format, header, encoded, restorable) = match prepared {
+        Prepared::Vector(image) => return Ok(LoadOutcome::Vector(image)),
+        Prepared::Raster {
+            format,
+            header,
+            bytes,
+            restorable,
+        } => (format, header, bytes, restorable),
+    };
     let permit = acquire_decode(permits).await?;
-    let format = prepared.format;
-    let header = prepared.header;
     let bitmap = {
         let shared = SharedHandle::clone(shared);
-        let bytes = prepared.bytes.clone();
+        let bytes = encoded.clone();
         crate::executor::blocking(handle, "decode", move || {
             let _permit = permit;
             shared.decode_job(&bytes, format, header, bound)
@@ -456,8 +564,8 @@ async fn load(
         .await?
         .map_err(|error| error.to_string())?
     };
-    let encoded = (!prepared.restorable).then_some(prepared.bytes);
-    Ok((bitmap, format, header, encoded))
+    let encoded = (!restorable).then_some(encoded);
+    Ok(LoadOutcome::Raster((bitmap, format, header, encoded)))
 }
 
 /// One decode permit, taken before any decode closure is submitted.
@@ -481,14 +589,7 @@ fn spawn_load(resources: &Resources, source: Arc<str>, url: Url, bound: (u32, u3
         // region: a panicking closure is a `JoinError` this maps, not a
         // second completion.
         let completion = match load(&shared, &handle, &permits, &source, &url, bound).await {
-            Ok((bitmap, format, header, encoded)) => Completion::Loaded {
-                source,
-                url,
-                bitmap,
-                format,
-                header,
-                encoded,
-            },
+            Ok(outcome) => outcome.completion(source, url),
             Err(message) => Completion::Failed { source, message },
         };
         shared.complete(completion);
@@ -504,14 +605,7 @@ fn spawn_load(resources: &Resources, source: Arc<str>, url: Url, bound: (u32, u3
             .fetch(&url, crate::CachePolicy::Default, &http::HeaderMap::new())
             .await;
         let completion = match load_async(&shared, &source, &url, fetched, bound).await {
-            Ok((bitmap, format, header, encoded)) => Completion::Loaded {
-                source,
-                url,
-                bitmap,
-                format,
-                header,
-                encoded,
-            },
+            Ok(outcome) => outcome.completion(source, url),
             Err(message) => Completion::Failed { source, message },
         };
         shared.complete(completion);
@@ -525,7 +619,7 @@ async fn load_async(
     url: &Url,
     fetched: Result<crate::transport::Fetched, crate::error::Failure>,
     bound: (u32, u32),
-) -> Result<LoadedImage, String> {
+) -> Result<LoadOutcome, String> {
     let fetched = fetched.map_err(|failure| failure.to_string())?;
     let restorable = fetched.restorable;
     let preprocessed =
@@ -537,12 +631,17 @@ async fn load_async(
             source, preprocessed.media_type
         ));
     };
+    // An SVG document is parsed inline, in this task: it never reaches the
+    // main thread's `Image` element.
+    if format == ImageFormat::Svg {
+        return parse_vector(&preprocessed.bytes).map(LoadOutcome::Vector);
+    }
     let bitmap = shared
         .decode_bytes_async(&preprocessed.bytes, format, header, bound)
         .await
         .map_err(|error| error.to_string())?;
     let encoded = (!restorable).then_some(preprocessed.bytes);
-    Ok((bitmap, format, header, encoded))
+    Ok(LoadOutcome::Raster((bitmap, format, header, encoded)))
 }
 
 /// What a refinement re-decodes, and at what size.
@@ -810,6 +909,64 @@ mod job_tests {
             max.load(Ordering::SeqCst),
             1,
             "the permit is taken before the decode closure is submitted"
+        );
+    }
+
+    /// An SVG document is parsed, not decoded: it never reaches the decoder
+    /// and needs no decode permit, so it loads while every permit is held.
+    #[test]
+    fn an_svg_loads_without_the_decoder_or_a_decode_permit() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resources = Resources::new(
+            quiet(ResourcesConfig {
+                worker_threads: 2,
+                decode_parallelism: Some(1),
+                ..ResourcesConfig::default()
+            }),
+            || {},
+        );
+        resources.shared.set_decode_hook(Arc::new({
+            let calls = Arc::clone(&calls);
+            move |_bytes, _format, _header, _max| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(pixel(1, 1, (1, 1)))
+            }
+        }));
+        let _held = resources
+            .executor
+            .decode_permits()
+            .try_acquire_owned()
+            .expect("the only decode permit");
+        let (reports, inbox) = ImageInbox::new();
+        resources
+            .register(
+                "app:///icon.svg",
+                br#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="12"/>"#.to_vec(),
+                None,
+            )
+            .expect("register");
+        super::request(&resources, "app:///icon.svg", &reports);
+        let mut events = Vec::new();
+        settle(&resources, "the SVG never reported", || {
+            events.extend(inbox.drain());
+            !events.is_empty()
+        });
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ImageEvent::LoadedVector { image, .. }] if image.natural_size() == (24, 12)
+            ),
+            "{events:?}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "the decoder was never asked"
+        );
+        assert_eq!(
+            resources.memory_used_bytes(),
+            0,
+            "no bitmap and no encoded bytes"
         );
     }
 
