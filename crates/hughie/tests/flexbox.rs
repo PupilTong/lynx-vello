@@ -6,7 +6,7 @@ use hughie::compute::{compute_absolute_layout, compute_leaf_layout};
 use hughie::prelude::*;
 use hughie::style::StyleSize;
 use stylo::computed_values::{box_sizing, direction, flex_direction, flex_wrap};
-use stylo::values::computed::{Display, Margin, MaxSize, Overflow, PositionProperty};
+use stylo::values::computed::{Display, FlexBasis, Margin, MaxSize, Overflow, PositionProperty};
 use stylo::values::specified::align::AlignFlags;
 use support::*;
 
@@ -805,24 +805,36 @@ fn max_content_container_size_uses_flex_item_contributions() {
     assert_close(flexible_tree.layout(item).size.width, 200.0);
 }
 
+/// A percentage flex basis against an indefinite container behaves as
+/// `content` (css-flexbox-1 §7.2.3), not as the item's `width`: the flex base
+/// size is the 80px content. The item's max-content contribution is still
+/// its definite 50px `width` (css-sizing-3 §5.2), and a flex base size from
+/// the content neither caps nor floors it, so the container is 50 either
+/// way: the item shrinks to it, or, unable to shrink, keeps its 80px flex
+/// base size and overflows. (Chrome gives the same containers; it then
+/// resolves the percentage against the decided 50 and makes the shrinkable
+/// item 25.)
 #[test]
 fn indefinite_percentage_flex_basis_falls_back_to_content_not_width() {
-    let mut tree = TestTree::default();
-    let item = tree.push_leaf(
-        TestStyle {
-            size: Size::new(size_px(50.0), size_px(10.0)),
-            flex_basis: basis_pct(0.5),
-            overflow: Point::new(Overflow::Hidden, Overflow::Hidden),
-            ..TestStyle::default()
-        },
-        Size::new(80.0, 10.0),
-        None,
-    );
-    let root = flex_container(&mut tree, TestStyle::default(), &[item]);
+    for (flex_shrink, width) in [(1.0, 50.0), (0.0, 80.0)] {
+        let mut tree = TestTree::default();
+        let item = tree.push_leaf(
+            TestStyle {
+                size: Size::new(size_px(50.0), size_px(10.0)),
+                flex_basis: basis_pct(0.5),
+                flex_shrink: nn(flex_shrink),
+                overflow: Point::new(Overflow::Hidden, Overflow::Hidden),
+                ..TestStyle::default()
+            },
+            Size::new(80.0, 10.0),
+            None,
+        );
+        let root = flex_container(&mut tree, TestStyle::default(), &[item]);
 
-    let output = perform_layout(&tree, root, Size::NONE, Size::MAX_CONTENT);
-    assert_close(output.size.width, 80.0);
-    assert_close(tree.layout(item).size.width, 80.0);
+        let output = perform_layout(&tree, root, Size::NONE, Size::MAX_CONTENT);
+        assert_close(output.size.width, 50.0);
+        assert_close(tree.layout(item).size.width, width);
+    }
 }
 
 #[test]
@@ -1768,6 +1780,244 @@ fn absolute_fit_content_between_insets_keeps_a_narrower_flex_container_at_its_co
     assert_point(layout.location, Point::new(0.0, 250.0));
 }
 
+/// A flex item around `content` px of 10px-tall content (its min- and
+/// max-content width alike).
+fn content_item(tree: &mut TestTree, style: TestStyle, content: f32) -> TestId {
+    tree.push_leaf(style, Size::new(content, 10.0), None)
+}
+
+fn flex_item_style(grow: f32, shrink: f32, basis: FlexBasis) -> TestStyle {
+    TestStyle {
+        flex_grow: nn(grow),
+        flex_shrink: nn(shrink),
+        flex_basis: basis,
+        ..TestStyle::default()
+    }
+}
+
+/// A fit-content flex container around one item: the container's width and
+/// the item's.
+fn fit_content_around(style: TestStyle, content: f32) -> (f32, f32) {
+    let fit = sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
+    let (tree, items, layout) =
+        inset_zero_flex(fit, |tree| vec![content_item(tree, style, content)]);
+    (layout.size.width, tree.layout(items[0]).size.width)
+}
+
+/// css-flexbox-1 §9.9.3: a definite flex basis caps a non-growable item's
+/// contribution and floors a non-shrinkable one's — and is no lower bound
+/// otherwise. Three `flex: 0 1 400px` items around 50px of content
+/// contribute 50 each, so the fit-content container is 150, not the 800 its
+/// 1200px of flex bases were held to. Every number here is Chrome's.
+#[test]
+fn absolute_fit_content_between_insets_caps_contributions_at_a_definite_flex_basis() {
+    let fit = sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
+    let (tree, items, layout) = inset_zero_flex(fit, |tree| {
+        (0..3)
+            .map(|_| content_item(tree, flex_item_style(0.0, 1.0, basis_px(400.0)), 50.0))
+            .collect()
+    });
+    assert_size(layout.size, Size::new(150.0, 10.0));
+    assert_point(layout.location, Point::new(325.0, 295.0));
+    for (item, left) in items.iter().zip([0.0, 50.0, 100.0]) {
+        assert_size(tree.layout(*item).size, Size::new(50.0, 10.0));
+        assert_point(tree.layout(*item).location, Point::new(left, 0.0));
+    }
+
+    let no_min = |style: TestStyle| TestStyle {
+        min_size: Size::new(size_px(0.0), size_auto()),
+        ..style
+    };
+    for (name, style, content, expected) in [
+        (
+            "flex: 1 1 400px, growable: neither cap nor floor",
+            flex_item_style(1.0, 1.0, basis_px(400.0)),
+            50.0,
+            (50.0, 50.0),
+        ),
+        (
+            "flex: 1 0 200px, not shrinkable: floored",
+            flex_item_style(1.0, 0.0, basis_px(200.0)),
+            50.0,
+            (200.0, 200.0),
+        ),
+        (
+            "flex: 0 1 50px; min-width: 0, not growable: capped",
+            no_min(flex_item_style(0.0, 1.0, basis_px(50.0))),
+            300.0,
+            (50.0, 50.0),
+        ),
+        (
+            "flex: 0 1 50px, capped, then held by the automatic minimum",
+            flex_item_style(0.0, 1.0, basis_px(50.0)),
+            300.0,
+            (300.0, 300.0),
+        ),
+    ] {
+        assert_eq!(fit_content_around(style, content), expected, "{name}");
+    }
+}
+
+/// css-sizing-3 §5.2: the contribution of a box with a definite preferred
+/// size is that size, clamped by its min/max — for a flex item too, where
+/// css-flexbox-1 §9.9.3 would take the larger of it and the content (Blink's
+/// web-compatible algorithm, so Chrome, takes the box's own). `flex: 1 1
+/// auto; width: 100px` around 300px of content contributes 100; a definite
+/// flex basis then still caps and floors it. Chrome's numbers.
+#[test]
+fn absolute_fit_content_between_insets_takes_a_definite_preferred_size_as_the_contribution() {
+    let sized = |style: TestStyle| TestStyle {
+        size: Size::new(size_px(100.0), size_auto()),
+        ..style
+    };
+    for (name, style, content, expected) in [
+        (
+            "flex: 1 1 auto",
+            flex_item_style(1.0, 1.0, basis_auto()),
+            300.0,
+            (100.0, 100.0),
+        ),
+        (
+            "flex: 1 1 200px",
+            flex_item_style(1.0, 1.0, basis_px(200.0)),
+            50.0,
+            (100.0, 100.0),
+        ),
+        (
+            "flex: 0 0 200px",
+            flex_item_style(0.0, 0.0, basis_px(200.0)),
+            50.0,
+            (200.0, 200.0),
+        ),
+        (
+            "flex: 1 0 200px",
+            flex_item_style(1.0, 0.0, basis_px(200.0)),
+            50.0,
+            (200.0, 200.0),
+        ),
+    ] {
+        assert_eq!(
+            fit_content_around(sized(style), content),
+            expected,
+            "{name}"
+        );
+    }
+}
+
+/// `flex-basis: content` sizes the item from its content (css-flexbox-1
+/// §9.2.3 step E, `content` as `max-content`), never from its `width`: around
+/// 50px of content a `width: 100px` item is 50 wide, and around 300px of
+/// content an item that cannot shrink is 300 wide. Its contribution is still
+/// its `width` (css-sizing-3 §5.2), which a flex base size from the content
+/// neither caps nor floors, so the fit-content container is 100 each time.
+/// Chrome's numbers.
+#[test]
+fn absolute_fit_content_between_insets_sizes_a_content_flex_basis_from_the_content() {
+    let sized = |shrink: f32| TestStyle {
+        size: Size::new(size_px(100.0), size_auto()),
+        ..flex_item_style(0.0, shrink, basis_content())
+    };
+    for (name, style, content, expected) in [
+        ("content 300", sized(1.0), 300.0, (100.0, 100.0)),
+        ("content 50", sized(1.0), 50.0, (100.0, 50.0)),
+        (
+            "content 300, flex-shrink: 0",
+            sized(0.0),
+            300.0,
+            (100.0, 300.0),
+        ),
+    ] {
+        assert_eq!(fit_content_around(style, content), expected, "{name}");
+    }
+}
+
+fn column_wrap(style: TestStyle) -> TestStyle {
+    TestStyle {
+        flex_direction: flex_direction::T::Column,
+        flex_wrap: flex_wrap::T::WRAP,
+        ..style
+    }
+}
+
+fn two_tall_items(tree: &mut TestTree) -> Vec<TestId> {
+    (0..2)
+        .map(|_| {
+            tree.push_leaf(
+                TestStyle {
+                    size: Size::new(size_px(100.0), size_px(400.0)),
+                    ..TestStyle::default()
+                },
+                Size::new(100.0, 400.0),
+                None,
+            )
+        })
+        .collect()
+}
+
+/// A vertical main axis is the block axis, where css-sizing-3 §2.1 makes the
+/// min-content size the max-content size, the content's height after layout:
+/// a column `wrap` container with an automatic height takes its max-content
+/// height however little is available, and its items share one line. Two
+/// 100×400 items in 600px of available height make it 100×800 — fit-content
+/// between insets, or `flex-start` in a row container. In a column container
+/// it is an item whose §4.5 automatic minimum is that same 800, so it does
+/// not shrink to the container's 600 unless `min-height: 0` lets it, when its
+/// items break into two columns. Chrome's numbers.
+#[test]
+fn absolute_fit_content_between_insets_sizes_a_column_flex_container_at_its_max_content_height() {
+    let one_column = |tree: &TestTree, items: &[TestId]| {
+        assert_point(tree.layout(items[0]).location, Point::ZERO);
+        assert_point(tree.layout(items[1]).location, Point::new(0.0, 400.0));
+    };
+    let fit = sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
+    let (tree, items, layout) = inset_zero_flex(column_wrap(fit), two_tall_items);
+    assert_size(layout.size, Size::new(100.0, 800.0));
+    assert_point(layout.location, Point::new(350.0, -100.0));
+    one_column(&tree, &items);
+
+    let mut tree = TestTree::default();
+    let items = two_tall_items(&mut tree);
+    let column = flex_container(&mut tree, column_wrap(TestStyle::default()), &items);
+    let row = flex_container(
+        &mut tree,
+        TestStyle {
+            align_items: self::items(AlignFlags::FLEX_START),
+            ..TestStyle::default()
+        },
+        &[column],
+    );
+    definite_layout(&tree, row, 800.0, 600.0);
+    assert_size(tree.layout(column).size, Size::new(100.0, 800.0));
+    one_column(&tree, &items);
+
+    for (min_height, height, second) in [
+        (size_auto(), 800.0, Point::new(0.0, 400.0)),
+        (size_px(0.0), 600.0, Point::new(400.0, 0.0)),
+    ] {
+        let mut tree = TestTree::default();
+        let items = two_tall_items(&mut tree);
+        let column = flex_container(
+            &mut tree,
+            column_wrap(TestStyle {
+                min_size: Size::new(size_auto(), min_height),
+                ..TestStyle::default()
+            }),
+            &items,
+        );
+        let outer = flex_container(
+            &mut tree,
+            TestStyle {
+                flex_direction: flex_direction::T::Column,
+                ..TestStyle::default()
+            },
+            &[column],
+        );
+        definite_layout(&tree, outer, 800.0, 600.0);
+        assert_size(tree.layout(column).size, Size::new(800.0, height));
+        assert_point(tree.layout(items[1]).location, second);
+    }
+}
+
 /// A fit-content flex container whose content fits takes its max-content
 /// main size, so it measures no item for anything else. The container runs
 /// twice, its height unknown and then known, and each run asks the rigid
@@ -1809,6 +2059,45 @@ fn fit_content_flex_container_probes_only_the_sizes_it_reads() {
             probes(&tree, items[1], AvailableSpace::MinContent),
             min_content_probes,
             "content {content_width}"
+        );
+    }
+
+    // A definite preferred size is the contribution whatever the content
+    // (css-sizing-3 §5.2), so `flex: 1 1 auto; width: 100px` is measured for
+    // nothing with `min-width: 0` and only for its automatic minimum without.
+    // A non-growable item's definite flex basis caps its content (§9.9.3),
+    // which takes one max-content probe, in the run that decides the width,
+    // and nothing else: `flex: 0 1 400px` around 50px, beside its automatic
+    // minimum's min-content probe in each run.
+    let fit = sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
+    let (tree, items, layout) = inset_zero_flex(fit, |tree| {
+        let sized = |min_width: StyleSize| TestStyle {
+            size: Size::new(size_px(100.0), size_auto()),
+            min_size: Size::new(min_width, size_auto()),
+            ..flex_item_style(1.0, 1.0, basis_auto())
+        };
+        vec![
+            rigid_item(tree, 300.0, 100.0),
+            content_item(tree, sized(size_px(0.0)), 300.0),
+            content_item(tree, sized(size_auto()), 300.0),
+            content_item(tree, flex_item_style(0.0, 1.0, basis_px(400.0)), 50.0),
+        ]
+    });
+    assert_close(layout.size.width, 550.0);
+    // Chrome's widths: 550 is less than the 900 of hypothetical main sizes.
+    for (item, width) in items.iter().zip([300.0, 30.0, 100.0, 120.0]) {
+        assert_close(tree.layout(*item).size.width, width);
+    }
+    let runs = probes(&tree, items[0], AvailableSpace::MinContent);
+    assert_eq!(runs, 2);
+    for (item, min_content, max_content) in [(1, 0, 0), (2, runs, 0), (3, runs, 1)] {
+        assert_eq!(
+            [
+                probes(&tree, items[item], AvailableSpace::MinContent),
+                probes(&tree, items[item], AvailableSpace::MaxContent)
+            ],
+            [min_content, max_content],
+            "item {item}"
         );
     }
 }
@@ -2143,8 +2432,6 @@ fn zero_basis_items_freeze_under_gap_overflow() {
 
 #[test]
 fn intrinsic_keyword_flex_bases_use_contributions() {
-    use stylo::values::computed::FlexBasis;
-
     let width_of = |basis: FlexBasis| -> f32 {
         let mut tree = TestTree::default();
         let item = tree.push_intrinsic_leaf(

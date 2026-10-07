@@ -5,7 +5,7 @@
     reason = "each benchmark target compiles this shared fixture with a different method subset"
 )]
 
-use dom::layout::Layout;
+use dom::layout::{Layout, NaturalSize};
 use dom::{Document, Node, NodeId};
 use euclid::{Scale, Size2D};
 use hughie::geometry::Size;
@@ -131,6 +131,17 @@ impl LayoutFixture {
         first_baseline: Option<f32>,
     ) -> NodeId {
         self.push(parent, style, Some((intrinsic, first_baseline)))
+    }
+
+    /// A replaced element (an image, to layout) whose natural size is
+    /// `natural`. Unlike [`Self::leaf`], whose metrics only a box `dom` lays
+    /// out as a leaf reads, this one has min- and max-content sizes a flex
+    /// container's probes see.
+    pub(super) fn replaced(&mut self, parent: NodeId, style: &str, natural: Size<f32>) -> NodeId {
+        let node = self.push(parent, style, None);
+        self.document
+            .set_natural_size(node, NaturalSize::from_size(natural));
+        node
     }
 
     pub(super) fn leaf_with_content(

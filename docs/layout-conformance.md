@@ -61,6 +61,22 @@ unimplemented — see `style-assumptions.md` §24. A complete W3C
 conformance claim would require the future Lynx runtime/stylo adapter and the
 applicable Web Platform Tests in addition to these engine tests.
 
+Flex item main-size contributions (css-flexbox-1 §9.9.3) follow the
+web-compatible row algorithm Chrome ships (Blink's
+`ComputeMinMaxSizeOfRowContainer`) rather than the specification's wording,
+since §9.9.1.2 leaves that algorithm to be written: an item's contribution
+starts from its definite preferred main size when it has one (css-sizing-3
+§5.2's contribution of any box), not from the larger of that and its content
+size, and §9.9.3's flex-base-size cap and floor apply only to a definite flex
+basis. So `flex: 1 1 auto; width: 100px` around 300px of content contributes
+100, and `flex: 0 0 content; width: 100px` contributes 100 while keeping its
+300px flex base size. The fit-content tests beside
+`absolute_fit_content_between_insets_*` in `crates/hughie/tests/flexbox.rs`
+pin these against numbers read off Chrome 155. A percentage flex basis that
+was indefinite while the container was sized stays the content size in the
+final layout, where Chrome re-resolves it against the decided size
+(`indefinite_percentage_flex_basis_falls_back_to_content_not_width`).
+
 Linear and Relative are Lynx-only formatting contexts, so W3C conformance does
 not apply to them. Their detailed contracts live in
 `starlight-linear-layout.md` and `starlight-relative-layout.md`. Relative keeps

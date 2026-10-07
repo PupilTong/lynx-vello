@@ -129,6 +129,17 @@ fn build_flex_wrap_gaps(nodes: usize) -> BenchCase {
     fixture.prepare()
 }
 
+/// A shrink-to-fit root (`width: auto` under a definite viewport, with a
+/// `max-width`) around `flex: 0 1 Npx` items, each a replaced element whose
+/// natural width is three quarters of its basis. The root sizes from the
+/// items' max-content contributions, which css-flexbox-1 §9.9.3 caps at
+/// their definite flex basis, so it measures each item's content and is
+/// 0.75 × the sum of the bases wide, the items shrinking to their content.
+///
+/// The items used to be `leaf` views, whose test metrics a flex container
+/// never reads, so they had no content at all. While a definite flex basis
+/// floored a contribution that did not matter; once the cap replaced the
+/// floor, those empty items contributed 0 and the root collapsed to 0 wide.
 fn build_flex_at_most_root(nodes: usize) -> BenchCase {
     let count = nodes.max(1);
     let limit = count as f32 * 4.0;
@@ -140,7 +151,7 @@ fn build_flex_at_most_root(nodes: usize) -> BenchCase {
     for index in 0..count {
         let basis = 1.0 + (index % 4) as f32;
         let style = format!("height:4px; flex:0 1 {basis}px");
-        fixture.leaf(root, &style, Size::new(basis, 4.0), None);
+        fixture.replaced(root, &style, Size::new(basis * 0.75, 4.0));
     }
     fixture.prepare()
 }
