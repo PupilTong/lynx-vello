@@ -1094,9 +1094,9 @@ impl MainThreadRuntime {
         !self.slot.borrow().component_events.is_empty()
     }
 
-    /// Dispatches everything [`Self::apply_image_events`], the `image`
-    /// component and the dialog's UI methods have queued, in the order they
-    /// formed.
+    /// Dispatches everything [`Self::apply_image_events`], the `image` and
+    /// `overlay` components and the dialog's UI methods have queued, in the
+    /// order they formed.
     ///
     /// Called by the entry the page posts for the batch and by nothing else:
     /// the events are tasks, not part of the entry that produced them. Each

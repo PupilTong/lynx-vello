@@ -2415,6 +2415,120 @@ fn a_dialog_opens_closes_and_fires_through_both_invoke_paths() {
     );
 }
 
+/// An `<x-overlay-ng>` shown and hidden through `__SetAttribute(…,
+/// 'visible', …)`: the boolean `true` shows it in the top layer, blocking the
+/// document, and owes `showoverlay`; `false` (stringified to `"false"`)
+/// hides it and owes `dismissoverlay`. Each is delivered from an entry of its
+/// own, non-bubbling — the capture pass runs the path, the bind pass the
+/// overlay alone, so the outer view's `bindEvent` never runs — with a `{}`
+/// detail. A rewrite that keeps it shown owes nothing.
+#[test]
+fn an_overlay_shows_and_dismisses_through_set_attribute() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const outer = __CreateView(0);
+                  const overlay = __CreateElement('x-overlay-ng', 0);
+                  const panel = __CreateView(0);
+                  __AppendElement(page, outer);
+                  __AppendElement(outer, overlay);
+                  __AppendElement(overlay, panel);
+                  globalThis.held = [page, outer, overlay, panel];
+                  const note = (label) => ({
+                    type: 'worklet',
+                    value: {
+                      body: (event) =>
+                        seen.push(
+                          label + ':' + event.currentTarget.uid + ':' +
+                          event.type + ':' + JSON.stringify(event.detail),
+                        ),
+                    },
+                  });
+                  for (const name of ['showoverlay', 'dismissoverlay']) {
+                    __AddEvent(overlay, 'bindEvent', name, note('overlay'));
+                    __AddEvent(outer, 'bindEvent', name, note('outer'));
+                    __AddEvent(page, 'capture-bind', name, note('page-capture'));
+                  }
+                };
+                ",
+            "app:///overlay.js",
+        )
+        .expect("main-thread script");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __FlushElementTree, __SetAttribute } from 'bobcat:element';
+                __FlushElementTree();
+                globalThis.setVisible = value => __SetAttribute(held[2], 'visible', value);
+                ",
+            "app:///overlay-helpers.js",
+            "helpers",
+        )
+        .expect("helpers");
+    let overlay = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let outer = tree.get(page).expect("the page").child_ids()[0];
+        tree.get(outer).expect("the outer view").child_ids()[0]
+    };
+    let steps = std::cell::Cell::new(0);
+    let run = |runtime: &mut MainThreadRuntime, js_runtime: &mut ScriptRuntime, source: &str| {
+        steps.set(steps.get() + 1);
+        let name = format!("app:///overlay-step-{}.js", steps.get());
+        runtime
+            .evaluate_module(js_runtime, source, &name, "step")
+            .expect("step");
+    };
+    let shown = || {
+        let tree = elements.tree();
+        (tree.in_top_layer(overlay), tree.blocks_document(overlay))
+    };
+    assert_eq!(shown(), (false, false));
+    assert!(!runtime.has_component_events());
+
+    run(&mut runtime, &mut js_runtime, "setVisible(true);");
+    assert_eq!(shown(), (true, true));
+    assert!(
+        runtime.has_component_events(),
+        "owed to an entry of its own"
+    );
+    expect_seen(&mut js_runtime, &mut runtime, "");
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        "page-capture:2:showoverlay:{}|overlay:4:showoverlay:{}",
+    );
+
+    run(&mut runtime, &mut js_runtime, "setVisible('');");
+    assert_eq!(shown(), (true, true));
+    assert!(!runtime.has_component_events(), "still shown: nothing owed");
+
+    run(&mut runtime, &mut js_runtime, "setVisible(false);");
+    assert_eq!(shown(), (false, false));
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        "page-capture:2:dismissoverlay:{}|overlay:4:dismissoverlay:{}",
+    );
+}
+
 /// Measuring runs no pipeline step. A job that mutates and then measures
 /// sees the box the last pass produced; the new one arrives only once the
 /// realm flushes itself, or once the entry's epilogue commits for it.
