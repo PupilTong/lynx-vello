@@ -2992,3 +2992,321 @@ fn a_scroll_container_counts_grid_item_margin_areas() {
     let output = definite_layout(&tree, root, 100.0, 20.0);
     assert_size(output.content_size, Size::new(140.0, 20.0));
 }
+
+// ---------------------------------------------------------------------------
+// The available grid space of a container whose size is not known.
+//
+// css-grid-2 §12.1 has two cases only: the grid container's definite size,
+// or the min-/max-content constraint it is sized under. A container whose
+// size is unknown under a definite available size (an absolutely positioned
+// box that does not stretch, `fit-content`, an unstretched item) first takes
+// its css-sizing-3 §5.2.2 fit-content inline size, `min(max-content,
+// max(min-content, stretch-fit))`, and its max-content block size, and only
+// then sizes its tracks against that now-definite size.
+// ---------------------------------------------------------------------------
+
+/// A paragraph whose longest word is 500 wide and whose unbroken line is
+/// 1000: it fills any width between the two, on one 100-tall line at 1000
+/// or more and on two below that.
+fn paragraph_leaf(input: LeafMeasureInput) -> LeafMetrics {
+    let width = input
+        .known_dimensions
+        .width
+        .unwrap_or(match input.available_space.width {
+            AvailableSpace::MinContent => 500.0,
+            AvailableSpace::MaxContent => 1000.0,
+            AvailableSpace::Definite(limit) => limit.clamp(500.0, 1000.0),
+        });
+    let height =
+        input
+            .known_dimensions
+            .height
+            .unwrap_or(if width >= 1000.0 { 100.0 } else { 200.0 });
+    LeafMetrics::new(Size::new(width, height))
+}
+
+fn paragraph(tree: &mut TestTree, style: TestStyle) -> TestId {
+    tree.push_measured_leaf(style, paragraph_leaf)
+}
+
+/// `position: absolute; inset: 0; width/height: fit-content; margin: auto`
+/// (HTML's `dialog:modal`) over `style`.
+fn fit_content_box(style: TestStyle) -> TestStyle {
+    TestStyle {
+        position: PositionProperty::Absolute,
+        inset: Edges::uniform(inset_px(0.0)),
+        size: Size::new(StyleSize::FitContent, StyleSize::FitContent),
+        margin: Edges::uniform(Margin::Auto),
+        ..style
+    }
+}
+
+fn place_in_800_by_600(tree: &TestTree, target: TestId) -> Layout {
+    tree.with_layout_state(true, |tree, state| {
+        compute_absolute_layout(
+            tree,
+            state,
+            tree.node(target),
+            Size::new(800.0, 600.0),
+            Point::ZERO,
+        )
+    })
+}
+
+/// A grid container with `style`, absolutely positioned in an 800×600
+/// containing block, around the items `content` pushes.
+fn placed_grid(
+    style: TestStyle,
+    content: impl FnOnce(&mut TestTree) -> Vec<TestId>,
+) -> (TestTree, Vec<TestId>, Layout) {
+    let mut tree = TestTree::default();
+    let children = content(&mut tree);
+    let target = tree.push_grid(style, children.clone());
+    let layout = place_in_800_by_600(&tree, target);
+    (tree, children, layout)
+}
+
+fn fixed_items(count: usize) -> impl FnOnce(&mut TestTree) -> Vec<TestId> {
+    move |tree| (0..count).map(|_| fixed_leaf(tree, 100.0, 50.0)).collect()
+}
+
+/// Fixed tracks sum to the max-content size, which fits the 800 stretch-fit
+/// size; the block size is the one 50-tall row, not the 600 available, and
+/// the `auto` margins centre the 200×50 box.
+#[test]
+fn fit_content_grid_takes_its_fixed_tracks_and_centres() {
+    let style = fit_content_box(grid_style(&[px(100.0), px(100.0)], &[]));
+    let (tree, items, layout) = placed_grid(style, fixed_items(2));
+    assert_size(layout.size, Size::new(200.0, 50.0));
+    assert_point(layout.location, Point::new(300.0, 275.0));
+    assert_point(tree.layout(items[1]).location, Point::new(100.0, 0.0));
+}
+
+/// §12.7's flex fraction under a max-content constraint is the largest
+/// item's, so `1fr 1fr` over two 100-wide items is 200; `auto` tracks are
+/// their items' max-content contributions and are not stretched (§12.8)
+/// into free space a fit-content container does not have.
+#[test]
+fn fit_content_grid_sizes_flexible_and_auto_tracks_at_their_content() {
+    for columns in [vec![fr(1.0), fr(1.0)], vec![auto_track(), auto_track()]] {
+        let style = fit_content_box(grid_style(&columns, &[]));
+        let (tree, items, layout) = placed_grid(style, fixed_items(2));
+        assert_size(layout.size, Size::new(200.0, 50.0));
+        assert_point(layout.location, Point::new(300.0, 275.0));
+        assert_point(tree.layout(items[1]).location, Point::new(100.0, 0.0));
+    }
+
+    let style = fit_content_box(grid_style(&[], &[]));
+    let (_, _, layout) = placed_grid(style, fixed_items(1));
+    assert_size(layout.size, Size::new(100.0, 50.0));
+    assert_point(layout.location, Point::new(350.0, 275.0));
+}
+
+/// The other two arms of the fit-content clamp: a max-content size above the
+/// stretch-fit size is held to it, unless the min-content size is larger
+/// still.
+#[test]
+fn fit_content_grid_clamps_between_its_intrinsic_sizes() {
+    // max-content 1000, min-content 200: the stretch-fit 800.
+    let style = fit_content_box(grid_style(
+        &[
+            minmax(fixed_breadth(100.0), fixed_breadth(500.0)),
+            minmax(fixed_breadth(100.0), fixed_breadth(500.0)),
+        ],
+        &[],
+    ));
+    let (tree, items, layout) = placed_grid(style, fixed_items(2));
+    assert_size(layout.size, Size::new(800.0, 50.0));
+    assert_point(tree.layout(items[1]).location, Point::new(400.0, 0.0));
+
+    // Two paragraphs in `1fr 1fr`: max-content 2000, min-content 1000 (each
+    // column's automatic minimum is its paragraph's longest word), so 1000,
+    // where each paragraph wraps onto two lines.
+    let style = fit_content_box(grid_style(&[fr(1.0), fr(1.0)], &[]));
+    let (tree, items, layout) = placed_grid(style, |tree| {
+        vec![
+            paragraph(tree, grid_default()),
+            paragraph(tree, grid_default()),
+        ]
+    });
+    assert_size(layout.size, Size::new(1000.0, 200.0));
+    assert_size(tree.layout(items[0]).size, Size::new(500.0, 200.0));
+    assert_point(tree.layout(items[1]).location, Point::new(500.0, 0.0));
+}
+
+/// The block axis is max-content: a `1fr` row is its item's height, not the
+/// 600 the containing block offers.
+#[test]
+fn fit_content_grid_block_size_is_its_max_content_size() {
+    let style = fit_content_box(grid_style(&[], &[fr(1.0)]));
+    let (tree, items, layout) = placed_grid(style, fixed_items(1));
+    assert_size(layout.size, Size::new(100.0, 50.0));
+    assert_point(layout.location, Point::new(350.0, 275.0));
+    assert_size(tree.layout(items[0]).size, Size::new(100.0, 50.0));
+}
+
+/// `left: 0; top: 0` with `auto` sizes is shrink-to-fit as well
+/// (css-position-3 §4.1): the same fit-content path, no `fit-content`
+/// keyword needed.
+#[test]
+fn shrink_to_fit_absolute_grid_does_not_fill_the_containing_block() {
+    let style = TestStyle {
+        position: PositionProperty::Absolute,
+        inset: Edges {
+            left: inset_px(0.0),
+            top: inset_px(0.0),
+            ..Edges::uniform(support::inset_auto())
+        },
+        ..grid_style(&[fr(1.0), fr(1.0)], &[])
+    };
+    let (_, _, layout) = placed_grid(style, fixed_items(2));
+    assert_size(layout.size, Size::new(200.0, 50.0));
+    assert_point(layout.location, Point::ZERO);
+}
+
+/// §7.2.3.2: with no definite size and no maximum, `auto-fill` repeats once,
+/// whatever space the containing block offers.
+#[test]
+fn fit_content_grid_repeats_auto_fill_once() {
+    let mut style = grid_style(&[], &[]);
+    style.template_columns = track_list(vec![repeat(RepeatCount::AutoFill, vec![px(100.0)])]);
+    let (_, _, layout) = placed_grid(fit_content_box(style), fixed_items(1));
+    assert_size(layout.size, Size::new(100.0, 50.0));
+}
+
+/// A column flex container 800×600 around one item `item` pushes.
+fn in_column_flex(item: impl FnOnce(&mut TestTree) -> TestId) -> (TestTree, TestId) {
+    let mut tree = TestTree::default();
+    let child = item(&mut tree);
+    let root = tree.push_flex(
+        TestStyle {
+            flex_direction: stylo::computed_values::flex_direction::T::Column,
+            ..TestStyle::default()
+        },
+        vec![child],
+    );
+    definite_layout(&tree, root, 800.0, 600.0);
+    (tree, child)
+}
+
+/// An unstretched flex item is fit-content sized in the cross axis
+/// (css-flexbox-1 §9.4 step 7 → css-sizing-3 §5.2.2): `align-self:
+/// flex-start` leaves a `1fr 1fr` grid at its two 100-wide items, not the
+/// column flex container's 800.
+#[test]
+fn flex_start_grid_item_of_a_column_flex_container_fits_its_content() {
+    let (tree, grid) = in_column_flex(|tree| {
+        let items = fixed_items(2)(tree);
+        tree.push_grid(
+            TestStyle {
+                align_self: self_align(AlignFlags::FLEX_START),
+                ..grid_style(&[fr(1.0), fr(1.0)], &[])
+            },
+            items,
+        )
+    });
+    assert_size(tree.layout(grid).size, Size::new(200.0, 50.0));
+}
+
+/// A row flex container 600 tall measures a `flex-start` grid's cross size
+/// under that definite space: its `1fr` row is its item's 50, not 600.
+#[test]
+fn flex_start_grid_item_of_a_row_flex_container_takes_its_content_height() {
+    let mut tree = TestTree::default();
+    let item = fixed_leaf(&mut tree, 100.0, 50.0);
+    let grid = tree.push_grid(grid_style(&[], &[fr(1.0)]), vec![item]);
+    let root = tree.push_flex(
+        TestStyle {
+            align_items: ItemPlacement(AlignFlags::FLEX_START),
+            ..TestStyle::default()
+        },
+        vec![grid],
+    );
+    definite_layout(&tree, root, 800.0, 600.0);
+    assert_size(tree.layout(grid).size, Size::new(100.0, 50.0));
+}
+
+/// The track-sizing runs one layout of a grid with a single `auto` column
+/// pays for, counted off its one item: the test host caches nothing, so each
+/// run measures the item once at max-content width and twice at min-content
+/// width (its automatic minimum and the column feedback check).
+fn grid_track_sizing_runs(tree: &TestTree, item: TestId) -> usize {
+    let probes = |available: AvailableSpace| {
+        tree.measure_inputs(item)
+            .iter()
+            .filter(|input| input.available_space.width == available)
+            .count()
+    };
+    let runs = probes(AvailableSpace::MaxContent);
+    assert_eq!(probes(AvailableSpace::MinContent), 2 * runs);
+    runs
+}
+
+/// Only a container whose width is unknown under a definite available width
+/// runs intrinsic track sizing of its own. With a known width — its own, or
+/// stretched into a parent's column — one run sizes the tracks. A fit-content
+/// container runs once under a max-content constraint, then at its decided
+/// size twice (the run that decides its block size, and the rerun under the
+/// now-definite percentage basis every container of unknown size takes):
+/// one run more than before it had a fit-content size at all. The
+/// min-content run is added only when the max-content size overflows the
+/// stretch-fit size, and a block size already known saves the middle run.
+#[test]
+fn only_a_fit_content_grid_runs_intrinsic_track_sizing() {
+    let leaf = |tree: &mut TestTree, max: f32| {
+        tree.push_leaf(grid_default(), Size::new(40.0, 10.0), Size::new(max, 10.0))
+    };
+    let auto_grid = || grid_style(&[auto_track()], &[]);
+
+    let mut tree = TestTree::default();
+    let item = leaf(&mut tree, 100.0);
+    let root = tree.push_grid(auto_grid(), vec![item]);
+    definite_layout(&tree, root, 800.0, 600.0);
+    assert_eq!(grid_track_sizing_runs(&tree, item), 1);
+
+    let mut tree = TestTree::default();
+    let item = leaf(&mut tree, 100.0);
+    let grid = tree.push_grid(auto_grid(), vec![item]);
+    let root = tree.push_grid(grid_style(&[px(800.0)], &[px(600.0)]), vec![grid]);
+    definite_layout(&tree, root, 800.0, 600.0);
+    assert_size(tree.layout(grid).size, Size::new(800.0, 600.0));
+    assert_eq!(grid_track_sizing_runs(&tree, item), 1);
+
+    for (max_content, width, runs) in [(100.0, 100.0, 3), (1000.0, 800.0, 4)] {
+        let (tree, items, layout) = placed_grid(fit_content_box(auto_grid()), |tree| {
+            vec![leaf(tree, max_content)]
+        });
+        assert_close(layout.size.width, width);
+        assert_eq!(
+            grid_track_sizing_runs(&tree, items[0]),
+            runs,
+            "{max_content}"
+        );
+    }
+
+    let style = TestStyle {
+        size: Size::new(StyleSize::FitContent, size_px(300.0)),
+        ..fit_content_box(auto_grid())
+    };
+    let (tree, items, layout) = placed_grid(style, |tree| vec![leaf(tree, 100.0)]);
+    assert_size(layout.size, Size::new(100.0, 300.0));
+    assert_eq!(grid_track_sizing_runs(&tree, items[0]), 2);
+}
+
+/// A size-contained inline axis has its substituted extent as both intrinsic
+/// sizes (css-contain-2 §3.1), so a fit-content grid with `contain:
+/// inline-size` is `contain-intrinsic-width` wide with no intrinsic run of its
+/// own, and its `1fr 1fr` columns split that width; the block size is still
+/// max-content.
+#[test]
+fn fit_content_grid_with_a_contained_inline_axis_takes_its_substituted_width() {
+    let style = TestStyle {
+        containment: hughie::style::Contain::INLINE_SIZE,
+        contain_intrinsic_width: support::contain_intrinsic_px(300.0),
+        ..fit_content_box(grid_style(&[fr(1.0), fr(1.0)], &[]))
+    };
+    let (tree, items, layout) = placed_grid(style, fixed_items(2));
+    assert_size(layout.size, Size::new(300.0, 50.0));
+    assert_point(layout.location, Point::new(250.0, 275.0));
+    assert_point(tree.layout(items[1]).location, Point::new(150.0, 0.0));
+}

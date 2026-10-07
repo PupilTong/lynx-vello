@@ -39,9 +39,10 @@ use super::tracks::{
 };
 use super::types::{Axis, GridItem, Track, TrackSet, TrackSizingFunction};
 use super::{
-    ContainerPrologue, ItemDefaults, classify_item, container_prologue, final_outer_axis,
-    item_area_geometry, item_commit_independence, layout_absolute_items, refresh_item_basis,
-    relative_item_offset, resolve_grid_item, span_is_fixed,
+    ContainerPrologue, ItemDefaults, clamped_inner_axis, classify_item, container_prologue,
+    final_outer_axis, fit_content_inner_size, item_area_geometry, item_commit_independence,
+    layout_absolute_items, refresh_item_basis, relative_item_offset, resolve_grid_item,
+    span_is_fixed,
 };
 use crate::compute::hide_subtree;
 use crate::compute::single_axis::flow_to_physical;
@@ -582,6 +583,7 @@ where
 
     let ContainerPrologue {
         metrics,
+        fit_content_width,
         style_definite,
         percentage_basis,
         gap: initial_gap,
@@ -714,37 +716,75 @@ where
     let mut scratch = IntrinsicSizingScratch::default();
     let grid_basis = grid_axis.size(percentage_basis);
     let grid_alignment = grid_axis.size(content_alignment);
-    size_grid_axis(
-        tree,
-        state,
-        grid_axis,
-        &mut tracks,
-        &specs,
-        &collapsed,
-        &items,
-        &placements,
-        percentage_basis,
-        grid_axis.size(initial_gap),
-        grid_basis.map_or(
-            grid_axis.size(metrics.available_inner),
-            AvailableSpace::Definite,
-        ),
-        grid_alignment,
-        &mut scratch,
-    );
-    let grid_content = grid_axis
-        .size(contained.extents())
-        .unwrap_or_else(|| tracks.used_size());
+    // The grid axis's available grid space (css-grid-2 §12.1; see
+    // `ContainerPrologue`). Lanes down the columns with a width the container
+    // does not have under a definite available width take its fit-content
+    // width, from grid-axis track sizing under the two intrinsic constraints
+    // (or a size-contained inline axis's substituted extent), and need no
+    // provisional run at the stretch-fit size: the width is all that run
+    // would have decided. Lanes across the rows already have a max-content
+    // block axis; the stacking axis is sized by the items that stack along
+    // it, whatever space it is offered.
+    let decided_grid = fit_content_width
+        .filter(|_| grid_axis == Axis::Horizontal)
+        .map(|stretch_fit| {
+            let content = contained.width().unwrap_or_else(|| {
+                fit_content_inner_size(stretch_fit, |constraint| {
+                    size_grid_axis(
+                        tree,
+                        state,
+                        grid_axis,
+                        &mut tracks,
+                        &specs,
+                        &collapsed,
+                        &items,
+                        &placements,
+                        percentage_basis,
+                        grid_axis.size(initial_gap),
+                        constraint,
+                        grid_alignment,
+                        &mut scratch,
+                    );
+                    tracks.used_size()
+                })
+            });
+            clamped_inner_axis(&metrics, grid_axis, content)
+        });
+    let grid_content = decided_grid.unwrap_or_else(|| {
+        size_grid_axis(
+            tree,
+            state,
+            grid_axis,
+            &mut tracks,
+            &specs,
+            &collapsed,
+            &items,
+            &placements,
+            percentage_basis,
+            grid_axis.size(initial_gap),
+            grid_basis.map_or(
+                grid_axis.size(metrics.available_inner),
+                AvailableSpace::Definite,
+            ),
+            grid_alignment,
+            &mut scratch,
+        );
+        grid_axis
+            .size(contained.extents())
+            .unwrap_or_else(|| tracks.used_size())
+    });
     let grid_outer = final_outer_axis(&metrics, grid_axis, grid_content);
     let grid_inner = (grid_outer - grid_axis.size(metrics.box_inset)).max(0.0);
     let grid_gap = resolve_gap_axis(grid_axis.size(gap_value), Some(grid_inner));
     // The grid axis reruns under its now-definite basis whenever that basis
-    // was missing or the gutter it feeds came out at a different value.
+    // was missing (a decided fit-content width is one) or the gutter it feeds
+    // came out at a different value.
     #[allow(
         clippy::float_cmp,
         reason = "the rerun is keyed on the used gutter being a different value, not a near one"
     )]
-    let needs_definite_rerun = grid_basis.is_none() || grid_gap != grid_axis.size(initial_gap);
+    let needs_definite_rerun =
+        decided_grid.is_some() || grid_basis.is_none() || grid_gap != grid_axis.size(initial_gap);
     if needs_definite_rerun {
         size_grid_axis(
             tree,

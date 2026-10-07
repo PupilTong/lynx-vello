@@ -1793,3 +1793,165 @@ fn a_scrolling_grid_lanes_container_counts_its_items_margin_areas() {
     assert_point(tree.layout(last).location, Point::new(0.0, 30.0));
     assert_size(output.content_size, Size::new(20.0, 80.0));
 }
+
+// ---------------------------------------------------------------------------
+// The available grid space of a container whose size is not known.
+//
+// css-grid-2 §12.1, which the grid axis follows: with no definite size of
+// its own under a definite available size, the container takes its
+// css-sizing-3 §5.2.2 fit-content width and max-content height, and the
+// grid axis is sized against those. The stacking axis is the items' own.
+// ---------------------------------------------------------------------------
+
+/// `position: absolute; inset: 0; width/height: fit-content; margin: auto`
+/// over `style`, laid out in an 800×600 containing block around the items
+/// `content` pushes.
+fn placed_fit_content_lanes(
+    style: TestStyle,
+    content: impl FnOnce(&mut TestTree) -> Vec<TestId>,
+) -> (TestTree, Vec<TestId>, Layout) {
+    let mut tree = TestTree::default();
+    let children = content(&mut tree);
+    let target = tree.push_grid_lanes(
+        TestStyle {
+            position: PositionProperty::Absolute,
+            inset: Edges::uniform(inset_px(0.0)),
+            size: Size::new(
+                stylo::values::computed::Size::FitContent,
+                stylo::values::computed::Size::FitContent,
+            ),
+            margin: Edges::uniform(margin_auto()),
+            ..style
+        },
+        children.clone(),
+    );
+    let layout = tree.with_layout_state(true, |tree, state| {
+        hughie::compute::compute_absolute_layout(
+            tree,
+            state,
+            tree.node(target),
+            Size::new(800.0, 600.0),
+            Point::ZERO,
+        )
+    });
+    (tree, children, layout)
+}
+
+fn two_fixed(tree: &mut TestTree) -> Vec<TestId> {
+    vec![fixed(tree, 100.0, 50.0), fixed(tree, 100.0, 50.0)]
+}
+
+/// Lanes down the columns: `1fr 1fr` and `auto auto` take their items'
+/// widths (the max-content flex fraction; no `auto` stretch into space the
+/// container does not have), as fixed tracks do, and the box is centred.
+#[test]
+fn fit_content_lanes_take_their_columns_max_content_width() {
+    for columns in [
+        vec![fr(1.0), fr(1.0)],
+        vec![support::track_auto(), support::track_auto()],
+        vec![px(100.0), px(100.0)],
+    ] {
+        let (tree, items, layout) = placed_fit_content_lanes(lanes_style(&columns, &[]), two_fixed);
+        assert_size(layout.size, Size::new(200.0, 50.0));
+        assert_point(layout.location, Point::new(300.0, 275.0));
+        assert_eq!(
+            locations(&tree, &items),
+            vec![Point::ZERO, Point::new(100.0, 0.0)]
+        );
+    }
+}
+
+/// Lanes across the rows: the grid axis is the block axis, whose size is
+/// max-content, so `1fr 1fr` rows are the items' 50 each, not halves of 600;
+/// the stacking width is the one item in each row.
+#[test]
+fn fit_content_lanes_across_rows_take_their_max_content_height() {
+    let (tree, items, layout) =
+        placed_fit_content_lanes(lanes_style(&[], &[fr(1.0), fr(1.0)]), two_fixed);
+    assert_size(layout.size, Size::new(100.0, 100.0));
+    assert_point(layout.location, Point::new(350.0, 250.0));
+    assert_eq!(
+        locations(&tree, &items),
+        vec![Point::ZERO, Point::new(0.0, 50.0)]
+    );
+}
+
+/// A `flex-start` item of a column flex container is fit-content sized in
+/// the cross axis: its `1fr 1fr` lanes keep their 200 of content rather than
+/// the container's 800.
+#[test]
+fn flex_start_lanes_item_of_a_column_flex_container_fits_its_content() {
+    let mut tree = TestTree::default();
+    let items = two_fixed(&mut tree);
+    let lanes = tree.push_grid_lanes(
+        TestStyle {
+            align_self: self_align(AlignFlags::FLEX_START),
+            ..lanes_style(&[fr(1.0), fr(1.0)], &[])
+        },
+        items,
+    );
+    let root = tree.push_flex(
+        TestStyle {
+            flex_direction: stylo::computed_values::flex_direction::T::Column,
+            ..TestStyle::default()
+        },
+        vec![lanes],
+    );
+    sized_layout(&tree, root, Some(800.0), Some(600.0));
+    assert_size(tree.layout(lanes).size, Size::new(200.0, 50.0));
+}
+
+/// The grid axis's track-sizing runs, counted as max-content width probes
+/// of the one item in an `auto` lane (the test host caches nothing). A known
+/// width sizes the axis once; a fit-content width sizes it once under a
+/// max-content constraint and once at the decided width — as many runs as a
+/// container of unknown width took before it had a fit-content size — plus a
+/// min-content run only when the max-content width overflows.
+#[test]
+fn fit_content_lanes_size_the_grid_axis_once_more_only_on_overflow() {
+    let runs = |tree: &TestTree, item: TestId| {
+        tree.measure_inputs(item)
+            .iter()
+            .filter(|input| input.available_space.width == AvailableSpace::MaxContent)
+            .count()
+    };
+    let leaf = |tree: &mut TestTree, max: f32| {
+        tree.push_intrinsic_leaf(
+            TestStyle::default(),
+            Size::new(40.0, 10.0),
+            Size::new(max, 10.0),
+        )
+    };
+    let style = || lanes_style(&[support::track_auto()], &[]);
+
+    let mut tree = TestTree::default();
+    let item = leaf(&mut tree, 100.0);
+    let root = tree.push_grid_lanes(style(), vec![item]);
+    sized_layout(&tree, root, Some(800.0), Some(600.0));
+    assert_eq!(runs(&tree, item), 1);
+
+    for (max_content, width, expected) in [(100.0, 100.0, 2), (1000.0, 800.0, 3)] {
+        let (tree, items, layout) =
+            placed_fit_content_lanes(style(), |tree| vec![leaf(tree, max_content)]);
+        assert_close(layout.size.width, width);
+        assert_eq!(runs(&tree, items[0]), expected, "{max_content}");
+    }
+}
+
+/// `contain: inline-size` substitutes the grid axis's intrinsic sizes, so a
+/// fit-content container down the columns is `contain-intrinsic-width` wide
+/// and its `1fr 1fr` lanes split that.
+#[test]
+fn fit_content_lanes_with_a_contained_inline_axis_take_their_substituted_width() {
+    let style = TestStyle {
+        containment: Contain::INLINE_SIZE,
+        contain_intrinsic_width: support::contain_intrinsic_px(300.0),
+        ..lanes_style(&[fr(1.0), fr(1.0)], &[])
+    };
+    let (tree, items, layout) = placed_fit_content_lanes(style, two_fixed);
+    assert_size(layout.size, Size::new(300.0, 50.0));
+    assert_eq!(
+        locations(&tree, &items),
+        vec![Point::ZERO, Point::new(150.0, 0.0)]
+    );
+}
