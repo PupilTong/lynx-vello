@@ -45,6 +45,13 @@
 //!   `LynxUIOverlayShadowNode.kt:10-40`). Its containing block is the host, which as a top-layer
 //!   element is the initial containing block. web-core's `display: flex` on that child is not
 //!   copied: the child keeps the display its own tag gets.
+//! - **Through a `wrapper` too.** `ReactLynx` writes a `wrapper` (`__CreateWrapperElement`,
+//!   `display: contents` in [`super::ua_sheet`]) around conditional and list children, so an
+//!   `<overlay>{shown && <view/>}</overlay>` card makes the wrapper the overlay's first child and
+//!   the panel would lay out in the host's flow. `overlay > wrapper > :first-child` gets the same
+//!   `position: absolute; top: 0; left: 0`, web-core's `x-overlay-ng > lynx-wrapper >
+//!   *:first-child` (`x-overlay-ng.css:31`) with this engine's tag. The wrapper's later children
+//!   are not hidden: web-core hides only the overlay's direct children, and so does this sheet.
 //! - **Only the first child renders.** `display: none !important` on every other child, as
 //!   web-core's `x-overlay-ng > *:not(:first-child)` (`x-overlay-ng.css:27-29`), and native
 //!   measures child 0 alone. This is the sheet's one `!important` for the tag, recorded in
@@ -145,6 +152,7 @@ overlay:not([visible]), overlay[visible="false"],
 x-overlay-ng:not([visible]), x-overlay-ng[visible="false"] { display: none; }
 overlay, x-overlay-ng { -servo-top-layer: auto; position: fixed; inset: 0; }
 overlay > :first-child, x-overlay-ng > :first-child { position: absolute; top: 0; left: 0; }
+overlay > wrapper > :first-child, x-overlay-ng > wrapper > :first-child { position: absolute; top: 0; left: 0; }
 overlay > :not(:first-child), x-overlay-ng > :not(:first-child) { display: none !important; }
 overlay[events-pass-through]:not([events-pass-through="false"]),
 x-overlay-ng[events-pass-through]:not([events-pass-through="false"]) { pointer-events: none; }
@@ -334,6 +342,35 @@ mod tests {
                 document.layout();
                 assert_eq!(display(&document, overlay), Display::None, "{tag}");
             }
+        }
+    }
+
+    /// A `wrapper` as the overlay's first child: the wrapper's own first
+    /// child sits at the viewport's top-left with its own size, and the
+    /// wrapper's later children still render (web-core hides only the
+    /// overlay's direct children), in the host's flow, which the absolute
+    /// first child has left.
+    #[test]
+    fn the_first_child_through_a_wrapper_sits_at_the_viewport_s_top_left() {
+        for tag in TAGS {
+            let mut document = document();
+            let overlay = child(&mut document, tag, "");
+            let wrapper = element_under(&mut document, overlay, "wrapper", "");
+            let first = element_under(&mut document, wrapper, "view", "width: 100px; height: 50px");
+            let sibling =
+                element_under(&mut document, wrapper, "view", "width: 30px; height: 20px");
+            document.set_attribute(overlay, "visible", "");
+            document.layout();
+            assert_eq!(display(&document, wrapper), Display::Contents, "{tag}");
+            assert_eq!(rect(&document, first), (0.0, 0.0, 100.0, 50.0), "{tag}");
+            assert_ne!(display(&document, sibling), Display::None, "{tag}");
+            // The first child is out of flow, so the sibling starts the
+            // host's flow at the top-left too; in flow it would sit at y 50.
+            assert_eq!(
+                rect(&document, sibling),
+                (0.0, 0.0, 30.0, 20.0),
+                "{tag}: the sibling renders, in the host's flow"
+            );
         }
     }
 

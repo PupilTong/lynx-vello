@@ -1791,7 +1791,13 @@ and §D.16 with what the wire format actually permits.)*
       block (no `overflow: clip`, no `position: relative`). The first child
       is `position: absolute; top: 0; left: 0`, at the viewport's top-left
       (`x-overlay-ng.css:31-36`, native's window at (0, 0)); web-core's
-      `display: flex` on it is not copied. Every other child is `display:
+      `display: flex` on it is not copied. So is the first child of a
+      `wrapper` that is the overlay's first child (`overlay > wrapper >
+      :first-child`, web-core's `x-overlay-ng > lynx-wrapper >
+      *:first-child`, `x-overlay-ng.css:31`): ReactLynx writes a
+      `display: contents` wrapper around conditional and list children. The
+      wrapper's later children are not hidden, as in web-core, which hides
+      only the overlay's direct children. Every other child is `display:
       none !important` (§D.15). No `overlay::backdrop` rule: the generic
       `::backdrop` rule gives the backdrop a box and no background, web-core's
       transparent `::backdrop`. Under `events-pass-through` the host is
