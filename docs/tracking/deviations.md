@@ -1617,6 +1617,44 @@ consequential choice about whether to follow the spec or the quirk.
     steps and `autofocus` are absent, and `::backdrop` itself does not
     animate.
 
+- **`overlay` / `x-overlay-ng` (2026-10-08)** — Lynx-only (bucket 2): native
+  registers `overlay` with `x-overlay-ng` as its legacy alias, web-core maps
+  `overlay` to `x-overlay-ng` and builds it from a shadow `<dialog>` opened
+  with `showModal()`. Here the host element itself enters the top layer
+  (`bobcat-core`'s `tree::overlay`,
+  [style-assumptions.md](../style-assumptions.md) §30). Where native and
+  web-core disagree, and which side was followed:
+  - *`level` is ignored* (web-core). Native has four tiers, level 1
+    frontmost, last in first out within one; web-core's `z-index` ladder has
+    no effect under its `display: contents` host, so its overlays stack in
+    `showModal()` order. Overlays here stack in the order they were shown.
+  - *`events-pass-through` passes every gesture* (native). A pass-through
+    overlay does not block the document and its host and `::backdrop` are
+    `pointer-events: none`, so a touch outside the children reaches what is
+    below, scrolls included, as native does (`LynxOverlayContainer.m:169-214`,
+    `LynxOverlayView.kt:726-752`). web-core forwards only `click`, by closing
+    the dialog, `elementFromPoint`, a synthetic click and `showModal()` on the
+    next frame (`XOverlayAttributes.ts:69-88`): a browser workaround, not
+    copied.
+  - *No `requestclose`, no Escape, no back gesture* (nothing to send it).
+    Native Android and Harmony send `requestclose` and iOS `onRequestClose`;
+    web-core's Escape closes the browser dialog silently, with `visible`
+    still set.
+  - *`showoverlay` carries no detail* (web-core). Android sends `{errorCode,
+    errorMsg}`.
+  - *Removing a shown overlay from the document fires no `dismissoverlay`*
+    (web-core). Android fires one.
+  - *No `dismissoverlay` at mount with `visible` false* (web-core and
+    Android). iOS likely fires one.
+  - *The host's own styles paint* (Android). The host fills the viewport, so
+    an author `background-color` on it covers the screen, as on Android;
+    web-core's `display: contents` host paints nothing.
+  - *The first child's `display` is not forced to `flex`*: web-core writes
+    `display: flex` on it; here it keeps the display its own tag gets.
+  - *Events fire on transitions only.* web-core re-runs `showModal()` and
+    fires `showoverlay` for every write of a showing value (`"true"` to
+    `""`); here a rewrite that keeps the overlay shown fires nothing.
+
 ## JS runtime & APIs (see [js-runtime.md](js-runtime.md), [accessibility.md](accessibility.md))
 
 - **`lynx.createSelectorQuery()`/`NodesRef`** — modeled on WeChat Mini

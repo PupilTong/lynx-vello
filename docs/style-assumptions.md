@@ -348,6 +348,15 @@ the semantics are stylo's.** Everything below refines that sentence.
       sizes, `contain`, `overscroll-behavior` and the slot's `top`/`height`
       stay defaults; `crates/bobcat-core/src/main/tree/scroll_coordinator.rs`
       carries the full argument.
+    - The `<overlay>` first child (2026-10-08), one rule under both tags:
+      `display: none` on every child of `overlay` / `x-overlay-ng` but the
+      first. web-core pins it with its own `!important`
+      (`x-overlay-ng.css:27-29`) and native measures and shows child 0 alone
+      (`LynxUIOverlay.m:30-84`, `LynxUIOverlayShadowNode.kt:10-40`), so an
+      author `display` on a second child would make it render where neither
+      reference does. The host's and the first child's own rules stay
+      defaults (§30); `crates/bobcat-core/src/main/tree/overlay.rs` carries
+      the argument.
 
 16. **cssId scoping is a runtime-adapter concern.** The feature exists for
     pageConfig `enableRemoveCSSScope = false` (that is the exact
@@ -1659,7 +1668,7 @@ and §D.16 with what the wire format actually permits.)*
     layer is generic in `dom` (`crates/dom/src/tree/top_layer.rs`,
     `docs/dom-architecture.md` "Top layer and `::backdrop`"); `<dialog>` is
     its first user (`crates/bobcat-core/src/main/tree/dialog.rs`).
-    `<x-overlay-ng>` itself is a follow-up on this foundation.
+    `<overlay>` / `<x-overlay-ng>` is its second (§30).
     - **Implemented.** A document top layer: an ordered set with a per-entry
       "blocks the document" flag (HTML's modal dialog). A top-layer element is
       a stacking context of its own, painted after everything in the root
@@ -1753,6 +1762,65 @@ and §D.16 with what the wire format actually permits.)*
       - Animations and transitions on `::backdrop` itself: the lazy cascade
         carries no animation declarations.
       - css-anchor-position-1's top-layer clauses (§28 "Approximated").
+
+30. **`<overlay>` on the top layer (architect-decided, 2026-10-08).** Bucket
+    2: `<overlay>` is Lynx's modal layer with no W3C equivalent. Native
+    registers `overlay` with `x-overlay-ng` as its legacy alias
+    (`LynxUIOwner.m:1616`, Android `LynxUIOwner.java:1891`); web-core maps
+    `overlay` to `x-overlay-ng` (`constants.ts:111`) and builds it from a
+    shadow `<dialog>` opened with `showModal()` over a transparent
+    `::backdrop` (`htmlTemplates.ts:136-172`). Here the **host element itself
+    is the top-layer element**, on §29's generic layer: no shadow tree, no
+    inner dialog (`crates/bobcat-core/src/main/tree/overlay.rs`).
+    - **Implemented.** Both tags. `visible` (present and not `"false"`) on a
+      connected element puts the host in the top layer, blocking the
+      document unless `events-pass-through` (present and not `"false"`) is
+      set; toggling `events-pass-through` while shown re-enters the layer
+      with the new flag. Non-bubbling `showoverlay` and `dismissoverlay` with
+      a `{}` detail, on the shared component-event queue the dialog's events
+      use, on transitions only: `showoverlay` when `visible` shows a
+      connected overlay or a visible overlay connects (again after a
+      reconnect), `dismissoverlay` when `visible` stops showing it.
+      Overlays stack in the order they were shown.
+    - **UA rules.** Every selector lists both tags. Hidden (`:not([visible])`,
+      `[visible="false"]`) is `display: none`. The host is `-servo-top-layer:
+      auto; position: fixed; inset: 0`, filling the viewport like web-core's
+      `::part(dialog)` at 100% with no padding, border, margin or
+      background; it takes the display `defaultDisplayLinear` picks, beside
+      `dialog` in the display line, and nothing of the common container
+      block (no `overflow: clip`, no `position: relative`). The first child
+      is `position: absolute; top: 0; left: 0`, at the viewport's top-left
+      (`x-overlay-ng.css:31-36`, native's window at (0, 0)); web-core's
+      `display: flex` on it is not copied. Every other child is `display:
+      none !important` (§D.15). No `overlay::backdrop` rule: the generic
+      `::backdrop` rule gives the backdrop a box and no background, web-core's
+      transparent `::backdrop`. Under `events-pass-through` the host is
+      `pointer-events: none` and its children `auto`; `pointer-events`
+      inherits, so the host and its `::backdrop` are not hit-testable while
+      the children and their subtrees are.
+    - **State.** The component keeps no Rust state; the attribute and
+      connection callbacks keep membership in step, and `dom`'s unlink drops
+      the entry when the overlay leaves the document, with no event (as in
+      web-core). No element states (`:open`, `:modal`): selectors key on the
+      attributes. No UI method, nothing in `handle_event`.
+    - **Out, with the reason.**
+      - `requestclose`, Escape and the back gesture: no keyboard or back
+        input reaches the engine. `overlaytouch`, `overlaymoved`, `error`
+        and `layoutchange` are not fired.
+      - `level`: overlays stack in show order, as web-core's do (its
+        `z-index` ladder has no effect under a `display: contents` host);
+        native's four tiers are not modelled.
+      - `mode`, `status-bar-translucent(-style)`, `cut-out-mode`,
+        `custom-layout`, `always-show`, `nest-scroll`, `ignore-focus`,
+        `allow-pan-gesture`, `ios-enable-swipe-back`, the `android-*`
+        attributes, `overlay-id` and `compat-bounding-rect`: platform window
+        and gesture policy with no counterpart in a one-window view, and
+        unread by web-core.
+      - web-core's click-only pass-through re-dispatch
+        (`XOverlayAttributes.ts:69-88`), a browser workaround: a
+        pass-through overlay here passes every gesture, as native does.
+      - The native-vs-web-core conflicts and the side followed are listed in
+        `docs/tracking/deviations.md`.
 
 ## Deliberately still open (known non-decisions)
 

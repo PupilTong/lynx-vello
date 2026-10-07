@@ -1459,7 +1459,16 @@ four HTML methods as UI methods the runtime dispatches by tag name, an
 `InvalidStateError` answering web-core's code 4; non-bubbling `close` and
 `cancel` on the shared `ComponentEvents` queue `tree/lib.rs` defines, which
 also carries an image's `load`/`error` and which the page's epilogue posts
-once per batch), and `tree::blur_view` (`blur-radius` reflected into a
+once per batch), `tree::overlay` (`overlay`/`x-overlay-ng`, Lynx's modal
+layer, with the host element itself on the top layer — no shadow tree, no
+inner dialog: `visible` (present and not `"false"`) on a connected element
+enters the layer, blocking the document unless `events-pass-through` is set;
+UA rules fill the viewport with the host, place its first child at the
+viewport's top-left, hide every other child with one `!important`, and make
+a pass-through host and its `::backdrop` `pointer-events: none`;
+non-bubbling `showoverlay`/`dismissoverlay` on the same `ComponentEvents`
+queue, on transitions only; no element state, no UI method), and
+`tree::blur_view` (`blur-radius` reflected into a
 `backdrop-filter: blur()` presentational hint, under both the native tag
 `blur-view` and web-core's `x-blur-view`, as a CSS length rather than
 web-core's `parseFloat` — the one tag module with no UA rules of its own,
@@ -1469,8 +1478,9 @@ they cascade in, and `PageConfig`; `tree/lib.rs` only mints the document they
 describe. Attribute policy stays in each tag's module. Numeric text and list
 attributes use UA `attr()` declarations and registered custom properties;
 `tail-color-convert` uses an attribute selector. Only image resources, blur
-hints, the swiper's item count, the refresh view's slot assignment and the
-dialog's `:open`/`:modal` state need `dom::CustomElement` callbacks. Runtime attribute members perform
+hints, the swiper's item count, the refresh view's slot assignment, the
+dialog's `:open`/`:modal` state and the overlay's top-layer membership and
+events need `dom::CustomElement` callbacks. Runtime attribute members perform
 DOM mutations; Stylo tracks attribute dependencies and recascades on changes.
 The UA assembly order is mostly documentation, with one exception that is
 mechanism: `image`'s child suppression ties on specificity with the `display`
@@ -2329,8 +2339,8 @@ Rulings and limits to know before touching it:
   hit-tested as its element; it is never handed out. A side table, not a
   per-node bit: the layer is almost always empty and every per-box reader
   tests `is_empty` first. §3.1's computed-value fixups run where a UA rule
-  declares the UA-only `-servo-top-layer` (bobcat-core's `dialog:modal` and
-  `::backdrop`); membership, not the longhand, stays `dom`'s truth for the
+  declares the UA-only `-servo-top-layer` (bobcat-core's `dialog:modal`,
+  `::backdrop`, `overlay` and `x-overlay-ng`); membership, not the longhand, stays `dom`'s truth for the
   containing block (see `docs/dom-architecture.md` "Top layer and
   `::backdrop`").
 - Stylo's per-element style data and its traversal/invalidation flags live
