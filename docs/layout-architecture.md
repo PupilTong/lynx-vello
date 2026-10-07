@@ -1225,16 +1225,31 @@ the engine we're succeeding.
    axes from `flex_direction` × `direction` (rtl flips row axes).
 2. **Available space & flex base sizes** (§9.2) — flex base + hypothetical
    main size per item; child measurement via `compute_layout` probes
-   with `SizingMode::IgnoreSizeStyles`.
+   with `SizingMode::IgnoreSizeStyles`. `flex-basis: content` is the
+   content's size (§9.2.3 step E, `max-content`), whatever the main size
+   property says.
 3. **Container main size and line breaking** (§9.2 step 4, §9.3) — single
    line for `NoWrap`, else greedy line-fill against main available size
    including `gap`. A container whose main size is not known takes its
    §9.9.1 intrinsic main size under a min-/max-content constraint, and under
    a definite one the fit-content size between those two (css-sizing-3
-   §5.2.2: an absolutely positioned box that does not stretch,
+   §2.1: an absolutely positioned box that does not stretch,
    `fit-content`, an unstretched item), never the widest line broken at the
    available size; a wrapping container then breaks its lines again at that
-   size.
+   size. That clamp is the horizontal main axis's. A vertical main axis is
+   the block axis, whose min-content size is its max-content size
+   (css-sizing-3 §2.1), so a column container with an automatic height
+   takes its content's height on one line under any constraint, and its
+   §4.5 automatic minimum as a column item is that height too. The
+   intrinsic main sizes sum the items' §9.9.3 contributions: each starts
+   from the item's own css-sizing-3 §5.2 contribution — its definite
+   preferred main size, else its content size, as Chrome's row algorithm
+   does where §9.9.3 takes the larger of the two — is capped by a definite
+   flex basis when the item cannot grow and floored by it when it cannot
+   shrink (a flex base size from the content does neither), and is clamped
+   by the item's min/max main size, automatic minimum included. A
+   contribution the content cannot move takes no probe, and a min-content
+   one the fit-content clamp does not read is never measured.
 4. **Resolving flexible lengths** (§9.7) — the freeze/unfreeze grow/shrink
    loop per line → target main sizes.
 5. **Cross sizing** (§9.4) — hypothetical cross sizes (probes with known
