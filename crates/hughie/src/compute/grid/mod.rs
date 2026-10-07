@@ -723,9 +723,10 @@ fn relative_item_offset<N>(item: &GridItem<N>) -> Point<f32> {
 }
 
 /// One item's child sizing inputs inside an area: the dimensions the area
-/// decides for it, and the available space each axis offers. An axis whose
-/// area is `None` is indefinite — nothing stretches into it, and it offers
-/// max-content space.
+/// decides for it, and the available space each axis offers: the area, less
+/// the item's margins, whether the item stretches into it or fit-contents
+/// inside it. An axis whose area is `None` is indefinite — nothing stretches
+/// into it, and it offers max-content space.
 fn item_area_geometry<N>(
     item: &GridItem<N>,
     area: Size<Option<f32>>,
@@ -778,10 +779,12 @@ fn item_area_geometry<N>(
         IntrinsicTag::FitContent => axis
             .size(resolved_preferred)
             .map_or(AvailableSpace::MaxContent, AvailableSpace::Definite),
-        IntrinsicTag::None => match (axis.size(known), axis.size(inner)) {
-            (Some(_), Some(inner)) => AvailableSpace::Definite(inner),
-            _ => AvailableSpace::MaxContent,
-        },
+        // css-grid-2 §6.2: an item that is not stretched is sized as for
+        // `fit-content` within its area (css-sizing-3 §5.2.2), so its
+        // stretch-fit size is the area's, not a max-content constraint.
+        IntrinsicTag::None => axis
+            .size(inner)
+            .map_or(AvailableSpace::MaxContent, AvailableSpace::Definite),
     };
     (
         known,

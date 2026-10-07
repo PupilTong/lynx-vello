@@ -3226,6 +3226,48 @@ fn flex_start_grid_item_of_a_row_flex_container_takes_its_content_height() {
     assert_size(tree.layout(grid).size, Size::new(100.0, 50.0));
 }
 
+/// css-grid-2 §6.2: an item that does not stretch is fit-content sized
+/// within its area, so the available space it lays out in is the area, not a
+/// max-content constraint. A paragraph (min-content 500, max-content 1000)
+/// with `justify-self: start` in an 800px column wraps at 800; a flex
+/// container around the same paragraph does too; a `1fr 1fr` grid stays at
+/// its 200 of content.
+#[test]
+fn unstretched_grid_items_fit_content_into_their_area() {
+    let start = || TestStyle {
+        justify_self: self_align(AlignFlags::START),
+        ..grid_default()
+    };
+    let outer = || grid_style(&[px(800.0)], &[px(600.0)]);
+
+    let mut tree = TestTree::default();
+    let item = paragraph(&mut tree, start());
+    let root = tree.push_grid(outer(), vec![item]);
+    definite_layout(&tree, root, 800.0, 600.0);
+    assert_close(tree.layout(item).size.width, 800.0);
+
+    let mut tree = TestTree::default();
+    let text = paragraph(&mut tree, TestStyle::default());
+    let item = tree.push_flex(start(), vec![text]);
+    let root = tree.push_grid(outer(), vec![item]);
+    definite_layout(&tree, root, 800.0, 600.0);
+    assert_close(tree.layout(item).size.width, 800.0);
+    assert_close(tree.layout(text).size.width, 800.0);
+
+    let mut tree = TestTree::default();
+    let items = fixed_items(2)(&mut tree);
+    let item = tree.push_grid(
+        TestStyle {
+            justify_self: self_align(AlignFlags::START),
+            ..grid_style(&[fr(1.0), fr(1.0)], &[])
+        },
+        items,
+    );
+    let root = tree.push_grid(outer(), vec![item]);
+    definite_layout(&tree, root, 800.0, 600.0);
+    assert_close(tree.layout(item).size.width, 200.0);
+}
+
 /// The track-sizing runs one layout of a grid with a single `auto` column
 /// pays for, counted off its one item: the test host caches nothing, so each
 /// run measures the item once at max-content width and twice at min-content
