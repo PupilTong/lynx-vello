@@ -275,7 +275,7 @@ impl WindowGraphics {
             &output_view,
         );
         handle.queue.submit([encoder.finish()]);
-        surface_texture.present();
+        handle.queue.present(surface_texture);
         if reconfigure_after {
             context.configure_surface(surface);
         }

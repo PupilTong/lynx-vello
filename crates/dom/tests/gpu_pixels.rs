@@ -355,7 +355,8 @@ fn solid_scene() -> Scene {
 /// `Headless::render_frame`'s residency bookkeeping is what a target survives
 /// it by, and the render entry point does it, so no caller can forget.
 ///
-/// Mechanism, confirmed in vello 0.10.0's own source: an encoding with no
+/// Mechanism, confirmed in vello 0.10.0's own source and unchanged in 0.11.0
+/// (the cited files are byte-identical across the two): an encoding with no
 /// patches at all — solid paths only, so no image, no gradient ramp and no
 /// glyph run — takes `Resolver::resolve`'s early return and reports
 /// `Images::default()` (`vello_encoding/src/resolve.rs:187-191`). That

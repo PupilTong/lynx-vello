@@ -1866,7 +1866,7 @@ instantiates Wasm or owns engine state. That Worker initializes the module,
 constructs one opaque `LynxGroup` and one `LynxView` per page through
 `BobcatRenderer::load`, keeps **one `Painter` for its canvas across page
 loads** (rebuilt only when it is missing or its target has failed), permanently
-owns every thread-affine GPU object — crates.io Vello 0.10/wgpu 29 Device,
+owns every thread-affine GPU object — crates.io Vello 0.11/wgpu 30 Device,
 Queue, Surface, Renderer, and OffscreenCanvas — and uses `wasm_thread` to
 create the two Workers each group is made of: its nested Lynx main/VM Worker
 and the worker-realm Worker beside it. A `load` is `painter.detach()` → drop

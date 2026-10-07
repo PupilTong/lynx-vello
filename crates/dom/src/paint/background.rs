@@ -1003,9 +1003,10 @@ const RAMP_END: f32 = 1.0 - f32::EPSILON / 2.0;
 ///
 /// css-images-3 §3.4.2: "Before the first color stop, the gradient line is
 /// the color of the first color stop, and after the last color stop, the
-/// gradient line is the color of the last color stop." `vello_encoding` 0.10's
-/// `make_ramp` breaks both halves. It never reads the first stop's offset —
-/// its first segment always runs from 0 to the second stop — so
+/// gradient line is the color of the last color stop." `vello_encoding`'s
+/// `make_ramp` (0.10, unchanged in 0.11) breaks both halves. It never reads
+/// the first stop's offset — its first segment always runs from 0 to the
+/// second stop — so
 /// `red 50%, blue 50%` would fade over [0, 0.5]; a copy of the first stop at
 /// 0 holds its colour instead. And it advances past a stop only once a sample
 /// lies strictly beyond it, so the sample at 1, which `Extend::Pad` stretches

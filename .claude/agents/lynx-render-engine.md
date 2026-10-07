@@ -13,7 +13,7 @@ You own `crates/dom/src/visual/`, `crates/dom/src/paint/`,
 `crates/dom/src/style/timeline.rs`, and the embedder-facing painter in
 `crates/bobcat-core/src/paint/`. `dom` re-exports the one workspace `vello`;
 vello is the only wgpu dependency in this workspace, so it pins wgpu's major
-(vello 0.10 / wgpu 29) — a wgpu bump is a vello bump.
+(vello 0.11 / wgpu 30) — a wgpu bump is a vello bump.
 
 ## Read first
 
