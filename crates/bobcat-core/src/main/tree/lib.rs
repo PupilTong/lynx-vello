@@ -11,16 +11,19 @@
 //!
 //! Each tag owns its UA rules and tests. Numeric text and list attributes
 //! flow through `attr()`; boolean flags use attribute selectors. Only `image`,
-//! `blur_view`, `swiper`, `refresh_view` and `dialog` need components: for
-//! image resources, blur hints, the swiper's UA shadow tree and item count, the
-//! refresh view's UA shadow tree and its header and footer slot assignment, and
-//! the dialog's `:open`/`:modal` state and top-layer membership.
+//! `blur_view`, `swiper`, `refresh_view`, `dialog` and `overlay` need
+//! components: for image resources, blur hints, the swiper's UA shadow tree and
+//! item count, the refresh view's UA shadow tree and its header and footer slot
+//! assignment, the dialog's `:open`/`:modal` state and top-layer membership,
+//! and the overlay's top-layer membership and its `showoverlay` and
+//! `dismissoverlay` events ([`overlay`]).
 //! `viewpager` needs none; its one UI method, `selectTab`, is here for the
 //! runtime to dispatch by tag name, as are the dialog's four
 //! ([`dialog`]).
 //! `scroll_coordinator` needs none either, and has no UI method: its ten tags
 //! are UA rules over anchor-sized absolute boxes, a sticky toolbar and
-//! `scroll-capture-y`. `swiper` and `refresh_view` have no UI method.
+//! `scroll-capture-y`. `swiper`, `refresh_view` and `overlay` have no UI
+//! method.
 //!
 //! [`NodeId`]: dom::NodeId
 
@@ -28,6 +31,7 @@ mod blur_view;
 pub(crate) mod dialog;
 mod image;
 mod list;
+mod overlay;
 pub(crate) mod raw_text;
 mod refresh_view;
 mod scroll_container;
@@ -60,8 +64,9 @@ pub(crate) const PAGE_TAG: &str = "page";
 /// engine defines, and the UA cascade.
 ///
 /// `events` is the queue the `image` component leaves a `src` that settled at
-/// its bind in, for the runtime to dispatch once it is out of the JavaScript
-/// call that wrote it.
+/// its bind in, and the `overlay` component its `showoverlay` and
+/// `dismissoverlay`, for the runtime to dispatch once it is out of the
+/// JavaScript call that wrote the attribute.
 #[must_use]
 pub(crate) fn new_document(
     viewport: Viewport,
@@ -70,10 +75,11 @@ pub(crate) fn new_document(
 ) -> LynxDocument {
     let mut document = Document::new(viewport.device(), PAGE_TAG, ());
     blur_view::define(&mut document);
-    image::define(&mut document, events);
+    image::define(&mut document, events.clone());
     swiper::define(&mut document);
     refresh_view::define(&mut document);
     dialog::define(&mut document);
+    overlay::define(&mut document, events);
     document.add_stylesheet(
         &ua_sheet::ua_stylesheet(config),
         StylesheetOrigin::UserAgent,
@@ -89,7 +95,8 @@ pub(crate) enum ComponentEvent {
     /// intrinsic size, or `error`.
     Image(ImageOutcome),
     /// An event whose detail is `{}`, named by the component that queued it:
-    /// a `<dialog>`'s `close` and `cancel` ([`dialog`]).
+    /// a `<dialog>`'s `close` and `cancel` ([`dialog`]), an `<overlay>`'s
+    /// `showoverlay` and `dismissoverlay` ([`overlay`]).
     Plain { node: NodeId, name: &'static str },
 }
 
@@ -98,8 +105,9 @@ pub(crate) enum ComponentEvent {
 ///
 /// A handle rather than a field, because the producers are on both sides of
 /// the document: the `image` component, which is inside it and reaches nothing
-/// else; the runtime's own image report path, which is outside it; and the
-/// dialog's UI methods, which the runtime calls with the document borrowed.
+/// else; the runtime's own image report path, which is outside it; the
+/// dialog's UI methods, which the runtime calls with the document borrowed;
+/// and the `overlay` component, inside the document like `image`.
 /// Each holds a clone of this one queue, and the runtime drains it in an entry
 /// of its own, posted by the epilogue of the entry that filled it
 /// (`docs/runtime-architecture.md` has the entry boundary,
