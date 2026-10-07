@@ -1704,6 +1704,294 @@ fn an_image_event_queued_by_a_listener_is_delivered_by_an_entry_of_its_own() {
     });
 }
 
+/// Three `<svg>`s in a row that does not stretch them — one sized by CSS,
+/// one unsized, one `display: none` — each recording every `load` and
+/// `error` it is handed, and an `updatePage` that writes one attribute on
+/// all three.
+const LOADING_SVGS: &str = r"
+globalThis.runWorklet = (value, params) => value.body(params[0]);
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  const holder = __CreateView(0);
+  __SetInlineStyles(holder, 'display:flex;flex-direction:row;align-items:flex-start');
+  __AppendElement(page, holder);
+  globalThis.svgs = ['width:120px;height:80px', '', 'display:none'].map((style) => {
+    const svg = __CreateElement('svg', 0);
+    if (style) __SetInlineStyles(svg, style);
+    __AppendElement(holder, svg);
+    const seen = [];
+    for (const name of ['load', 'error']) {
+      __AddEvent(svg, 'bindEvent', name, {
+        type: 'worklet',
+        value: {
+          body: (event) => {
+            seen.push(event.type + ':' + JSON.stringify(event.detail));
+            __SetAttribute(svg, 'data-seen', seen.join('|'));
+          },
+        },
+      });
+    }
+    return svg;
+  });
+};
+globalThis.updatePage = (data) => {
+  for (const svg of svgs) __SetAttribute(svg, data.name, data.value);
+};
+";
+
+/// What each of [`LOADING_SVGS`]' three elements has recorded, in order.
+async fn svgs_seen(page: &Rc<Page>) -> Vec<Option<String>> {
+    let (answer, read) = std::sync::mpsc::channel();
+    page.apply(vec![ToMain::Probe(Box::new(move |document| {
+        let root = document.document_element().id();
+        let holder = document.get(root).expect("the page is live").child_ids()[0];
+        let seen = document
+            .get(holder)
+            .expect("the holder is live")
+            .child_ids()
+            .iter()
+            .map(|svg| {
+                document
+                    .get(*svg)
+                    .and_then(|node| node.attribute("data-seen"))
+                    .map(str::to_owned)
+            })
+            .collect();
+        let _ = answer.send(seen);
+    }))])
+    .await;
+    read.try_recv().expect("the probe ran")
+}
+
+/// Writes `name="value"` on every `<svg>` of [`LOADING_SVGS`].
+async fn write_on_svgs(page: &Rc<Page>, name: &str, value: &str) {
+    page.apply(vec![ToMain::PageUpdate(PageUpdate::Data {
+        data: format!(r#"{{"name":"{name}","value":"{value}"}}"#),
+        processor_name: String::new(),
+        reset: false,
+    })])
+    .await;
+}
+
+fn svg_loaded(source: &str, width: u32, height: u32) -> ToMain {
+    ToMain::ImageEvents(vec![dom::ImageEvent::Loaded {
+        source: Arc::from(source),
+        width,
+        height,
+    }])
+}
+
+/// An `<svg>`'s `load` carries the element's border-box layout size, not the
+/// size the host reported (ruled: native's detail): the CSS size when it has
+/// one, the reported natural size when it has none, and 0x0 when it has no
+/// box. It is delivered by an entry of its own, as an `<image>`'s is, and an
+/// `<svg>` whose source fails is handed nothing.
+#[test]
+fn an_svg_load_carries_its_layout_size_and_a_failure_fires_nothing() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(LOADING_SVGS).await;
+
+        write_on_svgs(&owned.page, "src", "app:///a.svg").await;
+        assert_eq!(svgs_seen(&owned.page).await, vec![None, None, None]);
+        let settled = owned.page.epilogue_count();
+        owned
+            .page
+            .apply(vec![svg_loaded("app:///a.svg", 30, 15)])
+            .await;
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 2,
+            "the report was one entry, and the three `load`s it settled another"
+        );
+        assert_eq!(
+            svgs_seen(&owned.page).await,
+            vec![
+                Some(r#"load:{"width":120,"height":80}"#.to_owned()),
+                Some(r#"load:{"width":30,"height":15}"#.to_owned()),
+                Some(r#"load:{"width":0,"height":0}"#.to_owned()),
+            ]
+        );
+
+        // `content` is a source like `src`, named by its `data:` URL.
+        write_on_svgs(&owned.page, "content", "<svg/>").await;
+        owned
+            .page
+            .apply(vec![svg_loaded(
+                "data:image/svg+xml;charset=utf-8,%3Csvg%2F%3E",
+                10,
+                5,
+            )])
+            .await;
+        assert_eq!(
+            svgs_seen(&owned.page).await,
+            vec![
+                Some(r#"load:{"width":120,"height":80}|load:{"width":120,"height":80}"#.to_owned()),
+                Some(r#"load:{"width":30,"height":15}|load:{"width":10,"height":5}"#.to_owned()),
+                Some(r#"load:{"width":0,"height":0}|load:{"width":0,"height":0}"#.to_owned()),
+            ]
+        );
+
+        // A failure is nobody's event on an `<svg>`. The `load` behind it is
+        // delivered after where an `error` would have been, so its absence
+        // is not a delivery still to come.
+        write_on_svgs(&owned.page, "src", "app:///missing.svg").await;
+        owned
+            .page
+            .apply(vec![ToMain::ImageEvents(vec![dom::ImageEvent::Failed {
+                source: Arc::from("app:///missing.svg"),
+            }])])
+            .await;
+        write_on_svgs(&owned.page, "src", "app:///c.svg").await;
+        owned
+            .page
+            .apply(vec![svg_loaded("app:///c.svg", 30, 15)])
+            .await;
+        let three = |a: &str, b: &str, c: &str| Some(format!("load:{a}|load:{b}|load:{c}"));
+        assert_eq!(
+            svgs_seen(&owned.page).await,
+            vec![
+                three(
+                    r#"{"width":120,"height":80}"#,
+                    r#"{"width":120,"height":80}"#,
+                    r#"{"width":120,"height":80}"#
+                ),
+                three(
+                    r#"{"width":30,"height":15}"#,
+                    r#"{"width":10,"height":5}"#,
+                    r#"{"width":30,"height":15}"#
+                ),
+                three(
+                    r#"{"width":0,"height":0}"#,
+                    r#"{"width":0,"height":0}"#,
+                    r#"{"width":0,"height":0}"#
+                ),
+            ]
+        );
+    });
+}
+
+/// An entry whose top-level `await` leaves boot before its first flush, with
+/// one `<svg>` written and a listed sheet that sizes it still outstanding.
+const SVG_BEFORE_THE_FIRST_FLUSH: &str = r"
+globalThis.runWorklet = (value, params) => value.body(params[0]);
+const page = __CreatePage('card', 0);
+const svg = __CreateElement('svg', 0);
+__AppendElement(page, svg);
+__AddEvent(svg, 'bindEvent', 'load', {
+  type: 'worklet',
+  value: { body: (event) => __SetAttribute(svg, 'data-seen', JSON.stringify(event.detail)) },
+});
+__SetAttribute(svg, 'src', 'app:///a.svg');
+await import('app:///dep.js');
+";
+
+/// Answers the outstanding module request for `url` with `source`, whatever
+/// else is outstanding.
+fn answer_module_at(harness: &mut Harness, url: &str, source: &str) {
+    let position = harness
+        .sources
+        .iter()
+        .position(|(request, _)| matches!(request, SourceRequest::Module(named) if named == url))
+        .expect("that module request is outstanding");
+    let (_, completion) = harness.sources.remove(position);
+    completion.complete(Ok(LoadedSource::Module {
+        source: source.to_owned(),
+        url: url.to_owned(),
+    }));
+}
+
+/// The `data-seen` attribute of the page's first child, read through a probe
+/// command.
+async fn first_child_seen(harness: &mut Harness) -> Option<String> {
+    let (probe, probed) = std::sync::mpsc::channel();
+    harness
+        .commands
+        .send(ToMain::Probe(Box::new(move |document| {
+            let page = document.document_element().id();
+            let first = document.get(page).expect("the page is live").child_ids()[0];
+            let _ = probe.send(
+                document
+                    .get(first)
+                    .and_then(|node| node.attribute("data-seen"))
+                    .map(str::to_owned),
+            );
+        })))
+        .expect("the view is serving");
+    let mut seen = None;
+    harness
+        .until("the probe never ran", |_| {
+            seen = probed.try_recv().ok();
+            seen.is_some()
+        })
+        .await;
+    seen.expect("the probe answered")
+}
+
+/// An `<svg>` source that settles while the epilogue cannot commit — a listed
+/// sheet still outstanding — is held, not delivered: delivering it then would
+/// read a box no layout has produced. The first flush settles the sheet and
+/// commits, and the epilogue of that entry posts the held `load`, which then
+/// reads the size the sheet gave the element.
+#[test]
+fn an_svg_load_settled_before_the_first_commit_waits_for_it() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::serving(
+            context,
+            workers,
+            ViewSources {
+                style_sheets: vec!["app:///a.css".to_owned()],
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+            },
+        );
+        harness
+            .until("the view never asked for its stylesheet", |h| {
+                h.wants_a_style_sheet()
+            })
+            .await;
+        answer_module_at(&mut harness, "app:///main.js", SVG_BEFORE_THE_FIRST_FLUSH);
+        harness
+            .until("the entry's import was never requested", |harness| {
+                harness.sources.iter().any(|(request, _)| {
+                    matches!(request, SourceRequest::Module(url) if url == "app:///dep.js")
+                })
+            })
+            .await;
+
+        harness
+            .commands
+            .send(svg_loaded("app:///a.svg", 30, 15))
+            .expect("the view is serving");
+        for _ in 0..16 {
+            harness.turn().await;
+        }
+        assert_eq!(
+            first_child_seen(&mut harness).await,
+            None,
+            "nothing is committed yet, so the `load` is held"
+        );
+        assert!(harness.view.published.commit().is_none());
+
+        harness.answer_style_sheet_at("app:///a.css", "svg{width:50px;height:40px}");
+        answer_module_at(&mut harness, "app:///dep.js", "export const value = 1;");
+        harness.until("boot never finished", |h| h.finished()).await;
+        let mut seen = None;
+        for _ in 0..TURNS {
+            seen = first_child_seen(&mut harness).await;
+            if seen.is_some() {
+                break;
+            }
+        }
+        assert_eq!(
+            seen.as_deref(),
+            Some(r#"{"width":50,"height":40}"#),
+            "delivered after the commit that laid the element out"
+        );
+    });
+}
+
 #[test]
 fn a_module_completion_commits_with_no_command_behind_it() {
     on_a_js_thread(|thread| async move {

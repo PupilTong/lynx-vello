@@ -1415,7 +1415,13 @@ per tag, each owning that tag's UA rules and its tests: `tree::raw_text`
 (generated-content CSS and the rules that dissolve a carrier into the `text` it
 is written inside), `tree::text` (the paragraph attribute limits and what may
 generate a box inside a run), `tree::image` (the `src`-to-replaced-content
-reflection and its UA box), `tree::scroll_container` (`scroll-view` and
+reflection and its UA box), `tree::svg` (`svg`: `src`, or `content` as a
+percent-encoded `data:image/svg+xml` URL, reflected into the same image source
+as `image`, last attribute written wins, an empty or removed `content` keeping
+the current source as web-core does, an uncontained `display: flex` box
+that takes its natural size when unsized, and a non-bubbling `load` whose
+detail is the element's border-box layout size, posted only after the commit
+that laid it out; no `error`), `tree::scroll_container` (`scroll-view` and
 `list` as scroll containers — which axis scrolls, which one clips, and which
 way the subtree stacks, from `web-elements`' own `scroll-view.css` and
 `x-list.css`; `enable-scroll="false"` leaves the box a scroll container only
@@ -1477,15 +1483,15 @@ those tags agree on, the order
 they cascade in, and `PageConfig`; `tree/lib.rs` only mints the document they
 describe. Attribute policy stays in each tag's module. Numeric text and list
 attributes use UA `attr()` declarations and registered custom properties;
-`tail-color-convert` uses an attribute selector. Only image resources, blur
-hints, the swiper's item count, the refresh view's slot assignment, the
-dialog's `:open`/`:modal` state and the overlay's top-layer membership and
+`tail-color-convert` uses an attribute selector. Only image resources (`image`
+and `svg`), blur hints, the swiper's item count, the refresh view's slot
+assignment, the dialog's `:open`/`:modal` state and the overlay's top-layer membership and
 events need `dom::CustomElement` callbacks. Runtime attribute members perform
 DOM mutations; Stylo tracks attribute dependencies and recascades on changes.
 The UA assembly order is mostly documentation, with one exception that is
-mechanism: `image`'s child suppression ties on specificity with the `display`
-rules `view`, `scroll-view`, `list`, `blur-view`, `x-blur-view` and `wrapper`
-carry, so it wins only by being assembled last.
+mechanism: `image`'s and `svg`'s child suppression ties on specificity with
+the `display` rules `view`, `scroll-view`, `list`, `blur-view`, `x-blur-view`
+and `wrapper` carry, so it wins only by being assembled after them.
 
 The native host-module functions call `dom::Document` directly. Element
 identity is the DOM `NodeId`, which is also the element's Lynx `unique_id` —

@@ -71,7 +71,8 @@ enum EventDetail<'a> {
     /// Every routed input event: the device position, the wheel delta an event
     /// may not have, and the four numbers per point the touch events carry.
     Input(&'a InputEventPayload),
-    /// An `<image>`'s `load`: the bitmap's intrinsic size, in px.
+    /// A `load`: an `<image>`'s bitmap's intrinsic size, or an `<svg>`'s
+    /// border-box layout size, in px.
     Size { width: f64, height: f64 },
     /// An `<image>`'s `error`: the realm's `{}`, and no numbers at all.
     Empty,
@@ -1094,9 +1095,22 @@ impl MainThreadRuntime {
         !self.slot.borrow().component_events.is_empty()
     }
 
-    /// Dispatches everything [`Self::apply_image_events`], the `image` and
-    /// `overlay` components and the dialog's UI methods have queued, in the
-    /// order they formed.
+    /// Whether the document holds anything the last commit did not apply.
+    ///
+    /// After the epilogue's [`Self::commit_if_dirty`] this is `true` only
+    /// when that commit was skipped — a listed author sheet still
+    /// outstanding — and `false` with no document yet.
+    pub(crate) fn needs_render(&self) -> bool {
+        self.slot
+            .borrow()
+            .document
+            .as_ref()
+            .is_some_and(LynxDocument::needs_render)
+    }
+
+    /// Dispatches everything [`Self::apply_image_events`], the `image`,
+    /// `svg` and `overlay` components and the dialog's UI methods have
+    /// queued, in the order they formed.
     ///
     /// Called by the entry the page posts for the batch and by nothing else:
     /// the events are tasks, not part of the entry that produced them. Each
@@ -1119,23 +1133,40 @@ impl MainThreadRuntime {
         for event in events {
             // [`EventDetail::Empty`] is the realm's `{}`, which is web-core's
             // `error` detail exactly, and the `Event` a dialog fires carries
-            // nothing either; a `load` carries the bitmap's *intrinsic* size,
-            // web-core's `naturalWidth`/`naturalHeight`, not the box it drew
-            // into.
+            // nothing either; an `<image>`'s `load` carries the bitmap's
+            // *intrinsic* size, web-core's `naturalWidth`/`naturalHeight`,
+            // not the box it drew into.
+            //
+            // An `<svg>` is native's shape instead (ruled): its `load` carries
+            // the element's border-box layout size, read here at delivery —
+            // after the commit that applied the natural size, because the
+            // page posts this entry only once nothing is left uncommitted —
+            // and 0x0 when the element has no box. It has no `error` at all.
             let (target, name, detail) = match event {
                 ComponentEvent::Image(dom::ImageOutcome::Loaded {
                     node,
                     width,
                     height,
-                }) => (
-                    node,
-                    LOAD_EVENT,
-                    EventDetail::Size {
-                        width: f64::from(width),
-                        height: f64::from(height),
-                    },
-                ),
+                }) => {
+                    let (width, height) = {
+                        let mut slot = self.slot.borrow_mut();
+                        let document = slot.document_mut();
+                        if tree::is_svg(document, node) {
+                            document
+                                .bounding_client_rect(node)
+                                .map_or((0.0, 0.0), |rect| {
+                                    (f64::from(rect.size.width), f64::from(rect.size.height))
+                                })
+                        } else {
+                            (f64::from(width), f64::from(height))
+                        }
+                    };
+                    (node, LOAD_EVENT, EventDetail::Size { width, height })
+                }
                 ComponentEvent::Image(dom::ImageOutcome::Failed { node }) => {
+                    if tree::is_svg(self.slot.borrow_mut().document_mut(), node) {
+                        continue;
+                    }
                     (node, ERROR_EVENT, EventDetail::Empty)
                 }
                 ComponentEvent::Plain { node, name } => (node, name, EventDetail::Empty),
