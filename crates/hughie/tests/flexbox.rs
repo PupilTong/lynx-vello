@@ -1768,6 +1768,51 @@ fn absolute_fit_content_between_insets_keeps_a_narrower_flex_container_at_its_co
     assert_point(layout.location, Point::new(0.0, 250.0));
 }
 
+/// A fit-content flex container whose content fits takes its max-content
+/// main size, so it measures no item for anything else. The container runs
+/// twice, its height unknown and then known, and each run asks the rigid
+/// item for its min-content width (its automatic minimum) and nothing more:
+/// its contributions are its own 300 whatever its content, since it neither
+/// grows nor shrinks. The content-sized item with `min-width: 0` shares its
+/// max-content probe with its flex base size, one per run, and is never
+/// asked for its min-content size. Overflowing the stretch-fit size, the
+/// first run, the one that decides the width, reads it after all.
+#[test]
+fn fit_content_flex_container_probes_only_the_sizes_it_reads() {
+    let probes = |tree: &TestTree, id: TestId, available: AvailableSpace| {
+        tree.measure_inputs(id)
+            .iter()
+            .filter(|input| input.available_space.width == available)
+            .count()
+    };
+    for (content_width, container_width, min_content_probes) in
+        [(200.0, 500.0, 0), (600.0, 800.0, 1)]
+    {
+        let fit = sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
+        let (tree, items, layout) = inset_zero_flex(fit, |tree| {
+            let content = tree.push_intrinsic_leaf(
+                TestStyle {
+                    min_size: Size::new(size_px(0.0), size_auto()),
+                    ..TestStyle::default()
+                },
+                Size::new(100.0, 100.0),
+                Size::new(content_width, 100.0),
+            );
+            vec![rigid_item(tree, 300.0, 100.0), content]
+        });
+        assert_close(layout.size.width, container_width);
+        let runs = probes(&tree, items[0], AvailableSpace::MinContent);
+        assert_eq!(runs, 2);
+        assert_eq!(probes(&tree, items[0], AvailableSpace::MaxContent), 0);
+        assert_eq!(probes(&tree, items[1], AvailableSpace::MaxContent), runs);
+        assert_eq!(
+            probes(&tree, items[1], AvailableSpace::MinContent),
+            min_content_probes,
+            "content {content_width}"
+        );
+    }
+}
+
 /// `min-content` and `max-content` on a multi-line container keep their own
 /// constraint: the largest item's width on one line each, or every item on
 /// one line, whatever the stretch-fit size.
