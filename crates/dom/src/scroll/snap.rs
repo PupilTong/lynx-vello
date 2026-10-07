@@ -34,10 +34,12 @@
 //! An axis with `overscroll-behavior: circular` has no boundary on the
 //! painter's side, so its snap positions repeat: a [`SnapAxis`] with a
 //! [`period`](SnapAxis::period) holds every point shifted by every whole
-//! number of periods, and the choosing rules search the copies around the
-//! query. A flick forward from the last page therefore lands on the first
-//! page's next copy instead of stopping at the end. The document never
-//! wraps, so its own axes carry no period.
+//! number of periods. The choosing rules normalize the query into one
+//! period and search the three copies around it — that period and its two
+//! neighbours — so their work does not depend on how far the offset has
+//! travelled. A flick forward from the last page therefore lands on the
+//! first page's next copy instead of stopping at the end. The document
+//! never wraps, so its own axes carry no period.
 //!
 //! Deliberately absent: css-scroll-snap-2's `scrollsnapchange` and
 //! `scrollsnapchanging` events (scoped out of the request), snap
@@ -117,14 +119,11 @@ pub struct SnapAxis<'a> {
     /// extent of the whole scrolling area on that axis. With a period every
     /// point also exists shifted by every whole multiple of it, because the
     /// painter's offset on such an axis stands anywhere on an unbounded
-    /// line that repeats the scrolling area. `None` on a bounded axis.
+    /// line that repeats the scrolling area; a query searches only the
+    /// copies in the period holding it and the one on either side. `None`
+    /// on a bounded axis.
     pub period: Option<f32>,
 }
-
-/// How many periods a query on a circular axis searches at most, counted
-/// from where it starts. Copies further away than this are never reached
-/// by one gesture, so the bound only protects against absurd offsets.
-const MAX_PERIODS: f32 = 64.0;
 
 impl SnapAxis<'_> {
     /// The distance within which `proximity` snaps, for a scrollport of
@@ -134,67 +133,75 @@ impl SnapAxis<'_> {
         extent * PROXIMITY_RATIO
     }
 
-    /// The points a query from `anchor` towards `other` may choose among.
+    /// The points a query at `value` may choose among.
     ///
     /// On a bounded axis these are the points themselves. On a circular one
-    /// they are the copies shifted by `k` periods for every `k` from the
-    /// period before the lower of the two ends through the period after the
-    /// higher one, so the nearest position on either side of each end is
-    /// always present. The span is cut to [`MAX_PERIODS`] periods away from
-    /// `anchor`, the end the query starts from.
-    fn copies(&self, anchor: f32, other: f32) -> impl Iterator<Item = SnapPoint> + '_ {
-        let (first, last, period) = match self.period {
-            Some(period) if period.is_finite() && period > 0.0 => {
-                let index = |offset: f32| {
-                    let index = (offset / period).floor();
-                    if index.is_finite() { index } else { 0.0 }
-                };
-                let from = index(anchor);
-                let to = index(other).clamp(from - MAX_PERIODS, from + MAX_PERIODS);
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "both ends are whole numbers; a float out of i32 range saturates"
-                )]
-                let (first, last) = ((from.min(to) - 1.0) as i32, (from.max(to) + 1.0) as i32);
-                (first, last, period)
+    /// `value` is first normalized into one period: its base is the whole
+    /// multiple of the period at or below it (`value` less its Euclidean
+    /// remainder; a non-finite `value` counts as `0`), and the points are
+    /// yielded shifted by that base and by one period either side of it.
+    /// Every point lies inside one period of the scrolling area, so these
+    /// three copies hold the nearest position on either side of `value` and
+    /// every position within one period of it, and the work stays the same
+    /// however far `value` lies from the origin.
+    ///
+    /// The copies are anchored at the caller's own `value`, so every result
+    /// stays in the caller's unwrapped coordinate frame: settling `560` on
+    /// points `0`, `200` and `400` with a period of `600` answers `600`,
+    /// not `0`, because the painter's glide from `560` must move forward
+    /// `40` px rather than jump back across the seam.
+    fn copies_around(&self, value: f32) -> impl Iterator<Item = SnapPoint> + '_ {
+        let period = self
+            .period
+            .filter(|period| period.is_finite() && *period > 0.0);
+        let base = period.map_or(0.0, |period| {
+            let value = if value.is_finite() { value } else { 0.0 };
+            let remainder = value.rem_euclid(period);
+            // `rem_euclid` rounds up to `period` itself for a value just
+            // below a multiple of it; that value belongs to the period above.
+            if remainder < period {
+                value - remainder
+            } else {
+                value - remainder + period
             }
-            _ => (0, 0, 0.0),
-        };
-        (first..=last).flat_map(move |k| {
-            self.points.iter().map(move |point| {
-                if k == 0 {
-                    *point
-                } else {
-                    #[allow(
-                        clippy::cast_precision_loss,
-                        reason = "k is at most a few dozen periods from the query"
-                    )]
-                    let shift = k as f32 * period;
+        });
+        let periods = if period.is_some() { -1..=1 } else { 0..=0 };
+        periods.flat_map(move |k: i8| {
+            self.points.iter().map(move |point| match period {
+                Some(period) => {
+                    let shift = base + f32::from(k) * period;
                     SnapPoint {
                         min: point.min + shift,
                         max: point.max + shift,
                         stop: point.stop,
                     }
                 }
+                None => *point,
             })
         })
     }
 
     fn nearest(&self, offset: f32) -> Option<SnapPoint> {
-        self.copies(offset, offset)
+        self.copies_around(offset)
             .min_by(|a, b| a.distance(offset).total_cmp(&b.distance(offset)))
     }
 
     /// The first `always` stop strictly between `from` and `to`, in travel
     /// order: the position an operation from `from` to `to` may not pass.
+    ///
+    /// On a circular axis the stops repeat every period, so the first one
+    /// the travel meets lies within one period of `from`, and the copies
+    /// around `from` hold every position within one period of it on either
+    /// side. The nearest qualifying copy is therefore the first stop met
+    /// however far `to` lies.
     fn stop_between(&self, from: f32, to: f32) -> Option<f32> {
         if to > from {
-            self.copies(from, to)
+            self.copies_around(from)
                 .filter(|point| point.stop && point.min > from && point.min < to)
                 .map(|point| point.min)
                 .min_by(f32::total_cmp)
         } else if to < from {
-            self.copies(from, to)
+            self.copies_around(from)
                 .filter(|point| point.stop && point.max < from && point.max > to)
                 .map(|point| point.max)
                 .max_by(f32::total_cmp)
@@ -253,18 +260,18 @@ impl SnapAxis<'_> {
             return Some(stop);
         }
         if self
-            .copies(current, natural)
+            .copies_around(natural)
             .any(|point| point.distance(natural) == 0.0)
         {
             return Some(natural);
         }
         let next = if natural > current {
-            self.copies(current, natural)
+            self.copies_around(current)
                 .filter(|point| point.min > current)
                 .map(|point| point.min)
                 .min_by(f32::total_cmp)
         } else {
-            self.copies(current, natural)
+            self.copies_around(current)
                 .filter(|point| point.max < current)
                 .map(|point| point.max)
                 .max_by(f32::total_cmp)
@@ -834,6 +841,12 @@ mod tests {
         assert_eq!(mandatory.stop_between(550.0, 850.0), Some(800.0));
         assert_eq!(mandatory.stop_between(850.0, 550.0), Some(800.0));
         assert_eq!(
+            mandatory.stop_between(200.0, 1000.0),
+            Some(800.0),
+            "standing on a stop, the next copy one whole period ahead still holds",
+        );
+        assert_eq!(mandatory.stop_between(800.0, 0.0), Some(200.0));
+        assert_eq!(
             mandatory.settle(-500.0, 1900.0, 0.0),
             -400.0,
             "a long fling stops at the first stop ahead of it",
@@ -841,11 +854,19 @@ mod tests {
     }
 
     #[test]
-    fn an_absurd_offset_searches_a_bounded_number_of_periods() {
+    fn a_far_query_searches_three_periods_in_its_own_frame() {
         let points = [point(0.0), point(200.0), point(400.0)];
         let mandatory = periodic(SnapStrictness::Mandatory, &points);
-        assert_eq!(mandatory.copies(0.0, 1.0e9).count(), 3 * 67);
-        assert_eq!(mandatory.copies(0.0, f32::INFINITY).count(), 3 * 3);
+        assert_eq!(mandatory.copies_around(1.0e9).count(), 3 * 3);
+        assert_eq!(mandatory.copies_around(f32::INFINITY).count(), 3 * 3);
+        assert_eq!(
+            mandatory.settle(0.0, 6_000_560.0, 0.0),
+            6_000_600.0,
+            "the nearest copy, in the caller's own frame",
+        );
+        assert_eq!(mandatory.step(60_000.0, 60_010.0, 0.0), Some(60_200.0));
+        let bounded = axis(SnapStrictness::Mandatory, &points);
+        assert_eq!(bounded.copies_around(1.0e9).count(), 3);
     }
 
     #[test]
