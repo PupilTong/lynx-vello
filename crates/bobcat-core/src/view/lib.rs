@@ -365,13 +365,16 @@ pub enum EngineEvent {
     TimerFailed(ScriptError),
     /// Code in a worker's realm threw, and the worker is still running: its
     /// script, a message delivered to it, a timer, animation or native module
-    /// callback, a module it imported or a `Future` it awaited. A script or
-    /// an imported module that could not be loaded, or was not a script, is
-    /// reported here as well: the load rejects in the worker's realm, and
-    /// the worker stays until it is terminated or collected. The BTS Worker
-    /// included. Not fatal: HTML reports such an exception at the worker and
-    /// then at the creating realm's `Worker` object without ending either,
-    /// and the owning view remains usable.
+    /// callback, a module it imported or a `Future` it awaited. The BTS
+    /// Worker included. Not fatal: HTML reports an uncaught exception at the
+    /// worker and then at the creating realm's `Worker` object without
+    /// ending either, and the owning view remains usable.
+    ///
+    /// A script or an imported module that could not be loaded, or was not a
+    /// script, is reported here as well: the load rejects in the worker's
+    /// realm, and the worker stays until it is terminated or collected. HTML
+    /// differs for the worker's own script: it never runs a worker whose
+    /// script fetch failed (`docs/tracking/deviations.md`).
     ///
     /// `source` is [`ScriptSource::Background`] or a
     /// [`ScriptSource::Worker`]. Both worker events are reported before the

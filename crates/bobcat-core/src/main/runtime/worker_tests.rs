@@ -241,8 +241,8 @@ impl Pair {
     }
 
     /// Answers the next module one of this view's realms asks for at `url`.
-    /// A compiled BTS bundle reaches its manifest paths through the host
-    /// now, and the load parks the worker's job until this answers it.
+    /// A compiled BTS bundle reaches its manifest paths through the host,
+    /// and the load parks the worker's job until this answers it.
     fn serve_module(&mut self, url: &str, source: &str) {
         self.request(url).complete(Ok(LoadedSource::Module {
             source: source.to_owned(),
@@ -1336,9 +1336,9 @@ fn worker_errors_reach_parent_and_leave_both_realms_usable() {
 /// A script the host could not load is one `error` event at the `Worker`
 /// object and one `WorkerThrew` at the embedder, named as a module load, and
 /// the worker is not over: the realm still holds it, as it holds one whose
-/// script threw, until `terminate()` ends it. The worker says nothing more:
-/// what is posted to it before the `terminate()` is dropped, and its end is
-/// reported to no one.
+/// script threw, until `terminate()` ends it. The worker sends nothing more:
+/// what is posted to it before the `terminate()` is dropped, and it reports
+/// nothing as it ends.
 #[test]
 fn a_script_that_cannot_be_fetched_dispatches_one_error_and_leaves_the_worker_terminable() {
     let mut pair = Pair::new(
@@ -1376,16 +1376,20 @@ fn a_script_that_cannot_be_fetched_dispatches_one_error_and_leaves_the_worker_te
         "if (errors.length !== 1 || !errors[0].includes('without completing')) throw Error(JSON.stringify(errors)); worker.postMessage('ignored'); worker.terminate();",
     );
     assert_eq!(pair.live_workers(), 1, "`terminate()` ended that worker");
+    // The thread has returned, so whatever the worker sent after its one
+    // error is here: an answer to the post, or a report of its own end.
     assert!(
-        worker_events(pair.notices()).is_empty(),
-        "its end is reported to no one"
+        pair.finish().is_empty(),
+        "the worker sent nothing for the post and nothing as it ended"
     );
-    assert!(pair.finish().is_empty(), "and it said nothing more");
 }
 
-/// A `Worker` constructed once `bobcat-workers` has trapped is never sent
-/// there: it fails at once, with no `WorkerCreated`, no `Start` and no
-/// request to the host.
+/// A `Worker` constructed once `bobcat-workers` has trapped fails at once:
+/// the view hears no `WorkerCreated` for it, and its end reaches the
+/// embedder as one `WorkerEnded` and the `Worker` object as one `error`
+/// event. That no `Start` is sent for it is asserted where the test holds
+/// the thread's inbox, in `main/runtime/tests.rs`
+/// (`a_worker_constructed_after_its_thread_trapped_is_sent_no_start`).
 #[test]
 fn a_worker_created_after_its_thread_trapped_fails_without_starting() {
     let mut pair = Pair::new("globalThis.errors = [];");
@@ -1401,11 +1405,10 @@ fn a_worker_created_after_its_thread_trapped_fails_without_starting() {
         worker.onerror = e => errors.push(e.message);
     ",
     );
-    assert!(
-        !asked_for_a_worker(&pair.notices()),
-        "a worker that failed at once asks the host for nothing"
-    );
     let event = pair.next_event().expect("the worker's failure");
+    // A `WorkerCreated` is sent by the constructing job itself, so reading
+    // what the realm has told its host registers one that was sent.
+    pair.pump_host();
     let (commands, _) = mpsc::unbounded_channel();
     assert!(
         pair.frame_demand
@@ -1459,12 +1462,7 @@ fn a_view_booted_after_its_worker_thread_trapped_hears_each_worker_end() {
     .unwrap();
     pair.deliver();
     pair.deliver();
-    let notices = pair.notices();
-    assert!(
-        !asked_the_host(&notices),
-        "each worker failed at once and asked the host for nothing"
-    );
-    let events = worker_events(notices);
+    let events = worker_events(pair.notices());
     let [
         crate::EngineEvent::WorkerEnded {
             source: crate::ScriptSource::Worker(_),
@@ -1876,9 +1874,12 @@ fn a_workers_script_is_requested_once() {
 }
 
 /// A script URL that does not resolve is HTML's synchronous `SyntaxError`,
-/// and nothing is started: no worker is announced to the view, nothing is
-/// asked of the host, and the realm holds no new worker. The script catches
-/// the exception, so nothing here depends on how an uncaught one is reported.
+/// and nothing is started: no worker is announced to the view, the realm
+/// holds no new worker, and no failure is queued for one.
+/// `WorkerOwner::start` does the first or the last for every worker it is
+/// handed, so it was handed none: no `Start` was sent, and only a started
+/// worker asks the host for a script. The script catches the exception, so
+/// nothing here depends on how an uncaught one is reported.
 #[test]
 fn an_unparseable_worker_url_throws_syntax_error_and_starts_nothing() {
     let mut pair = Pair::new("");
@@ -1896,11 +1897,8 @@ fn an_unparseable_worker_url_throws_syntax_error_and_starts_nothing() {
     );
     while let Ok(notice) = pair.view.notices.try_recv() {
         assert!(
-            !matches!(
-                notice,
-                ViewNotice::WorkerCreated { .. } | ViewNotice::RequestSource { .. }
-            ),
-            "a worker whose URL does not resolve starts nothing"
+            !matches!(notice, ViewNotice::WorkerCreated { .. }),
+            "a worker whose URL does not resolve is not announced to the view"
         );
     }
     assert_eq!(pair.live_workers(), live);

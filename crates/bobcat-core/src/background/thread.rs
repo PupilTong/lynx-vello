@@ -820,10 +820,15 @@ fn deliver_module_callback(worker: &Rc<Worker>, call: u64, index: u32, arguments
 /// Until the root module has finished, a post is held here rather than
 /// delivered: HTML queues what is posted before a worker's script has run and
 /// delivers it after, which is what lets the commonest shape there is —
-/// construct, then post — keep its first message. The `select!` is `biased`,
-/// messages first, so a `Terminate` that is ready when the root module
-/// finishes is read before that finishing is, and the worker ends without
-/// what it held being queued.
+/// construct, then post — keep its first message. The finishing is read at
+/// the top of the loop, before each `select!`, and the `select!` is `biased`,
+/// messages first. So a `Terminate` that is the next message when the root
+/// module finishes is read before that finishing is, and the worker ends
+/// without what it held being queued. With another message ahead of that
+/// `Terminate` the finishing is read between the two and what was held is
+/// queued; the jobs that have not run when the `Terminate` is read deliver
+/// nothing, for the reason above: a job of a worker that has ended does
+/// nothing.
 ///
 /// The script is not this task's to wait for. The realm's load of its root
 /// module is what asks the host for it, and a [`load_module`] task completes

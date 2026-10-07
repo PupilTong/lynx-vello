@@ -1,7 +1,7 @@
 use tokio::sync::mpsc;
 
 use super::*;
-use crate::background::{WorkerCommand, WorkerEvent, worker_source};
+use crate::background::{WorkerCommand, WorkerEvent, WorkerPayload, worker_source};
 use crate::esm::build_runtime;
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, detached_outbox};
@@ -387,7 +387,7 @@ fn two_view_group_with(
     let mut ends = GroupFarEnds::default();
     let (workers, inbox) = mpsc::unbounded_channel();
     ends.workers = Some(inbox);
-    let workers = WorkerFactory::new(workers, Arc::default());
+    let workers = WorkerFactory::new(workers, Arc::clone(&ends.trapped));
     let thread = JsThread::new();
     ends.thread = Some(Rc::clone(&thread));
     for startup in pages {
@@ -416,6 +416,10 @@ fn two_view_group_with(
 struct GroupFarEnds {
     views: Vec<DetachedView>,
     workers: Option<mpsc::UnboundedReceiver<WorkerCommand>>,
+    /// The flag `bobcat-workers` sets once it has trapped, which the group's
+    /// `WorkerFactory` reads at every construction. No thread reads this
+    /// group's inbox, so a test sets it by hand.
+    trapped: Arc<std::sync::atomic::AtomicBool>,
     worker_events: Vec<mpsc::UnboundedReceiver<WorkerEvent>>,
     /// The engine thread both realms were opened with, held for their life.
     thread: Option<Rc<JsThread>>,
@@ -476,6 +480,60 @@ fn constructing_a_worker_asks_the_host_for_nothing_and_only_bobcat_bts_is_named_
         assert!(
             !matches!(notice, ViewNotice::RequestSource { .. }),
             "constructing a worker asks the host for nothing, whatever its URL"
+        );
+    }
+}
+
+/// A worker constructed once `bobcat-workers` has trapped is sent nowhere: no
+/// `Start` reaches the thread's inbox, and the view hears no `WorkerCreated`
+/// for it. The realm queues the worker's `Failed` on its own channel instead,
+/// under the key the script holds, and still names the worker by its source.
+/// Boot constructs its BTS the same way once the entry has run, so two
+/// workers fail here, the entry's first.
+#[test]
+fn a_worker_constructed_after_its_thread_trapped_is_sent_no_start() {
+    let (mut js, mut first, _second, mut ends) = two_view_group();
+    ends.trapped
+        .store(true, std::sync::atomic::Ordering::Release);
+    first
+        .run_main_thread_script(
+            &mut js,
+            r"
+            import { Worker } from 'bobcat-internal';
+            globalThis.worker = new Worker('./w.js');
+            ",
+            "app:///workers.js",
+        )
+        .expect("the entry constructs its worker");
+    let events = &mut ends.worker_events[0];
+    let failed: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+        .map(|event| {
+            assert!(
+                matches!(event.payload, WorkerPayload::Failed(_)),
+                "a worker constructed on a trapped thread has failed"
+            );
+            first.workers.source_of(event.key)
+        })
+        .collect();
+    assert!(
+        matches!(
+            failed.as_slice(),
+            [
+                Some(ScriptSource::Worker(_)),
+                Some(ScriptSource::Background)
+            ]
+        ),
+        "the entry's worker failed at its construction, then boot's BTS: {failed:?}"
+    );
+    let workers = ends.workers.as_mut().expect("the group's worker inbox");
+    assert!(
+        matches!(workers.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "a thread that has trapped is sent no `Start`"
+    );
+    while let Ok(notice) = ends.views[0].notices.try_recv() {
+        assert!(
+            !matches!(notice, ViewNotice::WorkerCreated { .. }),
+            "the view is not told of a worker that was sent nowhere"
         );
     }
 }

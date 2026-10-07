@@ -480,8 +480,9 @@ postMessage(value);",
 fn what_is_posted_before_the_script_arrives_is_delivered_in_order() {
     let mut group = Group::new();
     let key = group.construct(0, "");
-    // Both posted while the fetch is still in flight, which is the ordinary
-    // shape: a card constructs a worker and posts to it in the same task.
+    // Both posted before the script has been answered, and possibly before
+    // the worker has asked for it, which is the ordinary shape: a card
+    // constructs a worker and posts to it in the same task.
     group.post(key, "first");
     group.post(key, "second");
     group.answer(
@@ -1414,8 +1415,9 @@ fn imported_worker_graph_uses_response_urls_and_queues_messages_until_entry_fini
 }
 
 /// `require` reaches the same host as an import and resolves against the same
-/// response URLs, from the boot job of a worker on the thread every worker of
-/// the group shares: no JavaScript of that thread's runs while a load is out.
+/// response URLs, from the job that completes the script of a worker on the
+/// thread every worker of the group shares: no JavaScript of that thread's
+/// runs while a load is out.
 #[test]
 fn a_worker_requires_commonjs_and_json_against_its_own_response_url() {
     let mut group = Group::new();

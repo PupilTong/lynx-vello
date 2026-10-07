@@ -200,11 +200,13 @@ pub(crate) enum WorkerPayload {
     /// Something in the worker's realm threw and the worker is still
     /// running, whichever entry into the realm it was: its script, a message
     /// delivered to it, a timer, animation or native module callback, a
-    /// module it imported, a `Future` it awaited. A script or an imported
-    /// module that could not be loaded, or was answered with something other
-    /// than a script, is reported here too: the load rejects in the realm.
-    /// HTML reports such an exception at the worker and then at its parent
-    /// without ending either. The creating realm reports it as
+    /// module it imported, a `Future` it awaited. HTML reports an uncaught
+    /// exception at the worker and then at its parent without ending either.
+    /// A script or an imported module that could not be loaded, or was
+    /// answered with something other than a script, is reported here too:
+    /// the load rejects in the realm, and the worker stays, where HTML never
+    /// runs a worker whose script fetch failed
+    /// (`docs/tracking/deviations.md`). The creating realm reports it as
     /// `EngineEvent::WorkerThrew`.
     Errored(ScriptError),
     /// The worker's realm could not be built, or the thread it runs on has
