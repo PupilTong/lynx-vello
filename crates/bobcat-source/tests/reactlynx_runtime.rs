@@ -207,6 +207,32 @@ async fn compiled_viewpager_select_tab_turns_to_the_fourth_page() {
     .await;
 }
 
+/// A compiled `<dialog>` over a red page that fills the 240px view. A tap on
+/// the page calls `showModal()` through the background thread's selector
+/// query: the dialog enters the top layer, centred by the UA sheet's
+/// shrink-to-fit sizing, with its green 120px `#close` view over the page's
+/// centre and its yellow author `::backdrop` over the rest.
+///
+/// - At the centre, the second tap hits `#close` above the inert page and calls `close()`;
+///   `catchtap` keeps it from the dialog, so only `close` fires and the page turns blue. Had it hit
+///   the page, `showModal()` on a modal dialog would change nothing; had it hit the dialog, the
+///   page would turn magenta.
+/// - At the bottom-right corner, clear of `#status`'s text, the second tap hits the backdrop, which
+///   targets the dialog, whose `catchtap` calls `requestClose()`: `cancel` then `close` fire and
+///   the page turns magenta. Had it hit the page, the dialog would stay open over the yellow
+///   backdrop.
+#[tokio::test]
+async fn compiled_dialog_opens_modal_and_reports_close() {
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const GREEN: [u8; 4] = [0, 128, 0, 255];
+    const YELLOW: [u8; 4] = [255, 255, 0, 255];
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+    const MAGENTA: [u8; 4] = [255, 0, 255, 255];
+    let page = fixtures::fixture("react-dialog").page;
+    paint_and_tap(page, [120, 120], &[RED, GREEN, BLUE], None).await;
+    paint_and_tap(page, [236, 236], &[RED, YELLOW, MAGENTA], None).await;
+}
+
 /// A compiled `<scroll-coordinator>` (300 by 400: a translucent blue toolbar
 /// 60 tall, a red header 200 tall, a slot of eight 100px items in a
 /// `<scroll-view>`) boots with the header under the toolbar and the first

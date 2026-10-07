@@ -1517,7 +1517,7 @@ fn paint_item<T>(
     let transform = scale * local;
 
     match item.kind {
-        PaintItemKind::ElementBox => {
+        PaintItemKind::ElementBox | PaintItemKind::Backdrop { .. } => {
             let Some(style) = document.paint_style(item.node) else {
                 return;
             };
@@ -2373,7 +2373,7 @@ fn layer_root_rect(layer: &RenderLayer) -> Option<Rect> {
 /// run vanishes, and nothing here bounds an author-supplied face's ink.
 fn extents<T>(document: &Document<T>, item: &PaintItem) -> Extents {
     match item.kind {
-        PaintItemKind::ElementBox => {
+        PaintItemKind::ElementBox | PaintItemKind::Backdrop { .. } => {
             let reach = document.paint_style(item.node).map_or(0.0, |style| {
                 shadow::extent(style).max(border::outline_extent(style))
             });

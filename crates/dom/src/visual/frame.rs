@@ -873,13 +873,16 @@ impl PaintOrder {
         point: Point2D<f32>,
         samples: &'frame SpaceSamples<'frame>,
     ) -> impl Iterator<Item = HitTarget> + 'frame {
-        self.items().iter().rev().filter_map(move |item| {
-            let node = self.item_hit(item, point, samples)?;
-            Some(HitTarget {
-                node,
-                scroll: item.slot,
+        self.hit_testable_items()
+            .iter()
+            .rev()
+            .filter_map(move |item| {
+                let node = self.item_hit(item, point, samples)?;
+                Some(HitTarget {
+                    node,
+                    scroll: item.slot,
+                })
             })
-        })
     }
 }
 

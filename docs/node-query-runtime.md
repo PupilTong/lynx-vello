@@ -41,7 +41,12 @@ queue without clearing it. Selection captures its root at select time.
   scroll is requested: the pager scrolls to `index` times its scrollport
   width, clamped to its range, smoothly unless `smooth` is falsy; a missing or
   non-numeric `index` fails with code 4, `PARAM_INVALID`, and moves nothing.
-  Every other method name, and `selectTab` on any other element, fails with
+  `show`, `showModal`, `close` and `requestClose` on a `dialog` are HTML's
+  `HTMLDialogElement` methods and succeed with no data; HTML's
+  `InvalidStateError` (`show` on a modal dialog, `showModal` on an open
+  non-modal or a disconnected one) fails with code 4, which is what web-core
+  answers for a method that throws, and changes nothing; `params` is not read.
+  Every other method name, and each of these on any other element, fails with
   code 3, `METHOD_NOT_FOUND` — web-core's code, where native answers its
   generic 1. A failure without a fail callback is ignored by the production
   facade. `params` crosses to the main thread as JSON text.
@@ -80,7 +85,7 @@ native numeric-length conversion remain unsupported.
 ## Remaining boundaries
 
 Legacy component-scoped roots, direct MTS selector PAPI, UI invoke methods
-other than `boundingClientRect` and `selectTab`, animation methods,
+other than `boundingClientRect`, `selectTab` and a dialog's four, animation methods,
 dataset-to-DOM reflection and cross-realm host objects remain pending.
 `boundingClientRect` takes no `relativeTo`, `androidEnableTransformProps` or
 `iOSEnableAnimationProps`: it reads nothing from its `params`, since each of

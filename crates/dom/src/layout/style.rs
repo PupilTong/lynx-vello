@@ -49,6 +49,11 @@ pub(crate) fn display_mode(display: Display) -> DisplayMode {
         Display::Linear => DisplayMode::Linear,
         Display::LynxRelative => DisplayMode::Relative,
         Display::LynxText => DisplayMode::Text,
+        // No `lynx` grammar path produces any other display today: the fork
+        // blockifies every `display: contents` fixup (root and top layer) to
+        // `flex`, never to Stylo's internal block/flow display. The panic
+        // guards a Stylo value the layout cannot express, rather than letting
+        // it silently become a leaf box.
         unsupported => panic!(
             "Bobcat does not support Stylo computed display {unsupported:?} \
              (raw={:#06x}, outside={:?}, inside={:?})",
@@ -139,6 +144,17 @@ pub(crate) fn establishes_absolute_containing_block<T>(
         return false;
     }
     *style.get_box().get_position() != PositionProperty::Static
+        // css-position-4 §3.1 computes a top-layer element's position to
+        // `absolute` when it is neither `absolute` nor `fixed`. Stylo's
+        // adjuster does so only for a style whose `-servo-top-layer` is
+        // `auto`, which a UA rule has to declare: the embedder's UA sheet
+        // does for the elements it puts in the layer (bobcat-core's
+        // `dialog:modal` and `::backdrop`), and for those the position test
+        // above already answers. The layer itself is generic — membership is
+        // the embedder's call and needs no matching rule — so membership
+        // stays the truth here for an element no such rule reaches
+        // (`tree::top_layer`).
+        || node.arenas().top_layer().places_against_viewport(node.id())
         || style
             .get_box()
             .will_change
@@ -159,6 +175,13 @@ pub(crate) fn box_parent<T>(node: &Node<T>) -> Option<&Node<T>> {
 }
 
 pub(crate) fn resolve_position<T>(node: &Node<T>, style: &ComputedValues) -> PositionProperty {
+    // css-position-4 §3.1: a top-layer element's containing block, and its
+    // `::backdrop`'s, is the initial one whatever the ancestors establish
+    // (`tree::top_layer`). Stylo's adjuster already computed the position
+    // to `absolute` or `fixed`.
+    if node.arenas().top_layer().places_against_viewport(node.id()) {
+        return PositionProperty::Fixed;
+    }
     let parent_establishes = |fixed: bool| {
         box_parent(node).is_some_and(|parent| {
             StyleView::try_of(parent).is_some_and(|parent_style| {
@@ -415,7 +438,6 @@ mod tests {
     use core::mem::size_of;
 
     use hughie::style::Display;
-    use stylo::values::specified::box_::DisplayInside;
 
     use super::{DisplayMode, StyleView, TextRunView, display_mode};
 
@@ -429,17 +451,6 @@ mod tests {
         assert_eq!(display_mode(Display::Linear), DisplayMode::Linear);
         assert_eq!(display_mode(Display::LynxRelative), DisplayMode::Relative);
         assert_eq!(display_mode(Display::LynxText), DisplayMode::Text);
-    }
-
-    #[test]
-    #[should_panic(expected = "Bobcat does not support Stylo computed display")]
-    fn unsupported_stylo_display_panics_instead_of_becoming_a_leaf() {
-        // Stylo's root `display: contents` fixup creates its private block-flow
-        // encoding, giving this test a real computed value that Lynx cannot lay out.
-        let unsupported = Display::Contents.equivalent_block_display(true);
-        assert_eq!(unsupported.inside(), DisplayInside::Flow);
-
-        let _ = display_mode(unsupported);
     }
 
     #[test]

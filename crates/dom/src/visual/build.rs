@@ -57,6 +57,7 @@ use crate::scroll::{ScrollAxes, ScrollRequest, SnapAxisPositions, SnapPoint};
 use crate::style::curve_export::ExportedComposite;
 use crate::tree::document::{Document, DocumentLayoutState, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
+use crate::tree::top_layer;
 use crate::{NodeId, scroll};
 
 /// Builds one frame's paint order into `buffers`, using and returning
@@ -122,6 +123,13 @@ pub(crate) fn build<T: Sync>(
             ClipContexts::default(),
         );
     }
+    // css-position-4 §3.1: the top layer paints after everything in the
+    // root stacking context. One test on a page with an empty layer.
+    let inert_floor = if tree.top_layer().is_empty() {
+        None
+    } else {
+        builder.build_top_layer()
+    };
     builder.scratch.scroll_stickies.clear();
     builder.scratch.assert_settled();
 
@@ -149,6 +157,7 @@ pub(crate) fn build<T: Sync>(
         auto_boxes: builder.auto_boxes,
         snap_points: builder.snap_points,
         initial_targets: builder.initial_targets,
+        inert_floor,
         commit_id,
     };
     order.bind_anchored(document);
@@ -657,6 +666,84 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         width * height <= MAX_MOVING_EXTENT_VIEWPORTS * viewport.width * viewport.height
     }
 
+    /// The top-layer tail (`tree::top_layer`): each entry whose element is
+    /// rendered, in layer order, as a stacking context of its own — its
+    /// `::backdrop` first, when it generates a box, then the element. Both
+    /// are built like the root: at their viewport position, with an
+    /// identity parent world, no clip chain, no space and no group layer,
+    /// because a top-layer box is a sibling of the root, not a descendant of
+    /// its ancestors. Emitted directly rather than as members, so no
+    /// ancestor's `perspective` reaches them.
+    ///
+    /// Returns the inert floor: the index of the first item of the topmost
+    /// entry that blocks the document, recorded whether or not that entry
+    /// paints anything, since a modal dialog makes the document inert
+    /// whether or not it renders.
+    fn build_top_layer(&mut self) -> Option<usize> {
+        debug_assert!(
+            self.current_layer.is_none(),
+            "the root context closed its layer"
+        );
+        let mut floor = None;
+        for entry in self.tree.top_layer().entries() {
+            if entry.blocks_document() {
+                floor = Some(self.items.len());
+            }
+            if !top_layer::is_rendered(self.tree, self.state, entry.element()) {
+                continue;
+            }
+            if top_layer::backdrop_generates_box(self.tree, entry.backdrop) {
+                let style = StyleView::try_of(self.node(entry.backdrop))
+                    .expect("a backdrop that generates a box has a style");
+                let location = self.rounded(entry.backdrop).location;
+                let first = self.items.len();
+                self.build_stacking_context(
+                    entry.backdrop,
+                    &style,
+                    Point2D::new(location.x, location.y),
+                    &Transform3D::identity(),
+                    None,
+                    ClipContexts::default(),
+                );
+                for item in &mut self.items[first..] {
+                    if item.node == entry.backdrop && item.kind == PaintItemKind::ElementBox {
+                        item.kind = PaintItemKind::Backdrop {
+                            element: entry.element(),
+                        };
+                    }
+                }
+            }
+            let style = StyleView::try_of(self.node(entry.element()))
+                .expect("a rendered top-layer element has a style");
+            let location = self.viewport_origin(entry.element());
+            self.build_stacking_context(
+                entry.element(),
+                &style,
+                location,
+                &Transform3D::identity(),
+                None,
+                ClipContexts::default(),
+            );
+        }
+        floor
+    }
+
+    /// `id`'s border-box origin in the frame's unscrolled viewport
+    /// coordinates: the sum of the rounded locations along its flat-tree
+    /// chain of elements, each of which the layout pass recorded relative to
+    /// its flat parent.
+    fn viewport_origin(&self, id: NodeId) -> Point2D<f32> {
+        let mut origin = Point2D::zero();
+        let mut current = Some(self.node(id));
+        while let Some(node) = current.filter(|node| node.is_element()) {
+            let location = self.rounded(node.id()).location;
+            origin.x += location.x;
+            origin.y += location.y;
+            current = node.flat_parent();
+        }
+        origin
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "one linear pass over a context's own box, then its members"
@@ -1032,6 +1119,12 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             return;
         }
         if !child_node.is_element() {
+            return;
+        }
+        // A top-layer element paints in the top-layer tail, not where its
+        // parent meets it (`build_top_layer`).
+        let top_layer = self.tree.top_layer();
+        if !top_layer.is_empty() && top_layer.contains(child_node.id()) {
             return;
         }
         let Some(child) = self.resolve_child(child_node, cursor) else {

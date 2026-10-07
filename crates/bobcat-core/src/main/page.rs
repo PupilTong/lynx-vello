@@ -218,13 +218,14 @@ pub(super) struct Page {
     /// the two would post one of its own and each would find the batch
     /// already gone. One post per batch.
     content_visibility_posted: Cell<bool>,
-    /// Whether an entry that will deliver the `<image>` `load`s and `error`s
-    /// the runtime has queued is already queued and has not run yet.
+    /// Whether an entry that will deliver the component events the runtime
+    /// has queued — `<image>` `load`s and `error`s, `<dialog>` `cancel`s and
+    /// `close`s — is already queued and has not run yet.
     ///
     /// The same latch as [`Self::content_visibility_posted`], for the same
     /// reason: the drain belongs to the delivery entry, so every entry that
     /// runs between the post and it would otherwise post one more.
-    image_outcomes_posted: Cell<bool>,
+    component_events_posted: Cell<bool>,
     /// Every task of this view, the token that ends them, the latch this thread
     /// reads, and the two numbers this realm's clock task waits on — the
     /// deadline it armed and the generation its own last entry recorded.
@@ -266,7 +267,7 @@ impl Page {
             pending_begin_frame: Cell::new(None),
             boot_reported: Cell::new(false),
             content_visibility_posted: Cell::new(false),
-            image_outcomes_posted: Cell::new(false),
+            component_events_posted: Cell::new(false),
             lifetime,
             reported: Cell::new(false),
             #[cfg(test)]
@@ -395,8 +396,9 @@ impl Page {
     ///    unstyled frame.
     /// 3. **The `contentvisibilityautostatechange` deliveries** that commit decided — posted as an
     ///    entry of their own, never run here: see [`Self::post_content_visibility_changes`].
-    /// 4. **The `<image>` `load`s and `error`s** this entry settled — posted as an entry of their
-    ///    own too: see [`Self::post_image_outcomes`].
+    /// 4. **The component events** this entry produced — `<image>` `load`s and `error`s, `<dialog>`
+    ///    `cancel`s and `close`s — posted as an entry of their own too: see
+    ///    [`Self::post_component_events`].
     /// 5. **The boot report**, once, so the frame exists before the event that implies it.
     /// 6. **The frame-post acknowledgement**, for the same reason: a host blocked on the sequence
     ///    number is blocked on that frame.
@@ -421,8 +423,8 @@ impl Page {
         {
             self.post_content_visibility_changes();
         }
-        if runtime.has_image_outcomes() && !self.image_outcomes_posted.replace(true) {
-            self.post_image_outcomes();
+        if runtime.has_component_events() && !self.component_events_posted.replace(true) {
+            self.post_component_events();
         }
         if !self.boot_reported.get() {
             // MTS boot alone: the entry module evaluated and its first flush
@@ -515,28 +517,32 @@ impl Page {
         }));
     }
 
-    /// Queues the entry that delivers one batch of `<image>` `load` and
-    /// `error` events, and waits for nothing.
+    /// Queues the entry that delivers one batch of component events —
+    /// `<image>` `load` and `error`, `<dialog>` `cancel` and `close` — and
+    /// waits for nothing.
     ///
     /// The same post as [`Self::post_content_visibility_changes`], because
     /// these events have the same standing: a browser fires an `<img>`'s
-    /// `load` from a task, even for a URL the cache already holds, so a
-    /// listener never runs inside the entry that bound the `src` and what it
-    /// mutates is committed by this entry's own epilogue rather than by that
-    /// one's. Posting is also what makes the two producers answerable the
-    /// same way at all: the `image` component settles a source from inside
-    /// the `__SetAttribute` that wrote it, and dispatching from there would
+    /// `load` from a task, even for a URL the cache already holds, and
+    /// queues a dialog's `close` as a task too, so a listener never runs
+    /// inside the entry that produced the event and what it mutates is
+    /// committed by this entry's own epilogue rather than by that one's.
+    /// Posting is also what makes every producer answerable the same way at
+    /// all: the `image` component settles a source from inside the
+    /// `__SetAttribute` that wrote it, a dialog closes inside the
+    /// `__InvokeUIMethod` that asked, and dispatching from either would
     /// re-enter the realm in the middle of a host call.
     ///
     /// The epilogue asks after its commit, beside the content-visibility
-    /// check, rather than before it. Nothing a commit does settles an image
-    /// source — the queue is filled by a bind or by the painting side's
-    /// report, both of which happen in the entry's body — so the position
-    /// cannot change what is posted; it sits with the other posted delivery
-    /// so that "what this entry owes an entry of its own" is one block.
+    /// check, rather than before it. Nothing a commit does produces a
+    /// component event — the queue is filled by a bind, a UI method or the
+    /// painting side's report, all of which happen in the entry's body — so
+    /// the position cannot change what is posted; it sits with the other
+    /// posted delivery so that "what this entry owes an entry of its own" is
+    /// one block.
     ///
-    /// Unlike that one, this delivery **does** enter JavaScript: `load` and
-    /// `error` are script events, and the dispatch is the realm's
+    /// Unlike that one, this delivery **does** enter JavaScript: these are
+    /// script events, and the dispatch is the realm's
     /// `__BobcatDispatchEvent` walk like every other one. A listener that
     /// throws is nonfatal — [`EngineEvent::ListenerFailed`], the standing
     /// every listener here has — and the rest of the batch is still
@@ -544,13 +550,13 @@ impl Page {
     ///
     /// The latch is cleared at the start of the entry, before the drain: a
     /// handler that writes a `src` this document has already seen settle gets
-    /// its outcome at the bind, which queues a new batch that owes an entry
-    /// of its own.
-    fn post_image_outcomes(self: &Rc<Self>) {
+    /// its outcome at the bind, and one that closes a dialog queues its
+    /// `close`, either of which is a new batch that owes an entry of its own.
+    fn post_component_events(self: &Rc<Self>) {
         let page = Rc::clone(self);
         drop(self.enter(move |runtime, js| {
-            page.image_outcomes_posted.set(false);
-            for failure in runtime.dispatch_image_outcomes(js) {
+            page.component_events_posted.set(false);
+            for failure in runtime.dispatch_component_events(js) {
                 page.outbox
                     .engine_event(EngineEvent::ListenerFailed(failure.into_script_error()));
             }

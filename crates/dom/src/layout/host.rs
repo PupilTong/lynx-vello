@@ -689,6 +689,47 @@ pub(super) fn run_layout<T: Sync>(
         // Every text node this pass measured but did not commit still holds
         // the probe's line break; painting reads the committed one.
         state.restore_probed_text();
+        if !tree.top_layer().is_empty() {
+            place_backdrops(tree, state, viewport, scale, rescale);
+        }
+    }
+}
+
+/// The top-layer tail: lays every rendered entry's `::backdrop` box out
+/// against the viewport and rounds it (`tree::top_layer`).
+///
+/// A backdrop node has no parent, so neither the root pass nor the rounding
+/// tail reaches it; it is placed here, after both, with the same absolute
+/// layout the tail gives any box whose containing block is the initial one
+/// and a static position of zero. Its element needs nothing here: the
+/// rounding tail already placed it against the viewport, as a box whose
+/// containing block is the initial one. Every run lays the backdrops out,
+/// which the layout cache answers unless the viewport or the backdrop's
+/// style moved.
+fn place_backdrops<T: Sync>(
+    tree: &TreeArenas<T>,
+    state: &mut DocumentLayoutState,
+    viewport: Size<f32>,
+    scale: f32,
+    rescale: bool,
+) {
+    for entry in tree.top_layer().entries() {
+        if !crate::tree::top_layer::is_rendered(tree, state, entry.element())
+            || !crate::tree::top_layer::backdrop_generates_box(tree, entry.backdrop)
+        {
+            continue;
+        }
+        let layout = compute_absolute_layout(tree, state, entry.backdrop, viewport, Point::ZERO);
+        tree.layout_mut(state, entry.backdrop).set_unrounded(layout);
+        round_with(
+            tree,
+            state,
+            entry.backdrop,
+            scale,
+            Point::ZERO,
+            rescale,
+            |_, _, _| true,
+        );
     }
 }
 
@@ -917,11 +958,17 @@ fn position_against_viewport<T: Sync>(
         return;
     };
     let parent_origin = accumulated_unrounded_origin(tree, state, parent_slot);
-    let static_position = tree.layout(state, node_id).static_position;
-    let static_in_cb = Point::new(
-        parent_origin.x + static_position.x,
-        parent_origin.y + static_position.y,
-    );
+    // css-position-4 §3.1: a top-layer element's static position is zero
+    // for `left`, `right` and `top`, not the place its parent recorded.
+    let static_in_cb = if tree.top_layer().places_against_viewport(node_id) {
+        Point::ZERO
+    } else {
+        let static_position = tree.layout(state, node_id).static_position;
+        Point::new(
+            parent_origin.x + static_position.x,
+            parent_origin.y + static_position.y,
+        )
+    };
 
     let mut layout = compute_absolute_layout(tree, state, node_id, viewport, static_in_cb);
 

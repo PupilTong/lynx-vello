@@ -1,0 +1,30 @@
+.page {
+  position: absolute;
+  left: 0px;
+  top: 0px;
+  width: 240px;
+  height: 240px;
+}
+
+.idle {
+  background-color: rgb(255, 0, 0);
+}
+
+.closed {
+  background-color: rgb(0, 0, 255);
+}
+
+.cancelled {
+  background-color: rgb(255, 0, 255);
+}
+
+.dialog::backdrop {
+  background-color: rgb(255, 255, 0);
+}
+
+.close {
+  width: 120px;
+  height: 120px;
+  flex-shrink: 0;
+  background-color: rgb(0, 128, 0);
+}

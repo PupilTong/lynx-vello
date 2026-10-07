@@ -21,8 +21,10 @@
 //! shadow trees (`anchor-name-in-shadow.html`'s second case).
 //!
 //! **Not ported, and why:** top-layer, popover, dialog and `::backdrop`
-//! cases (no top layer); pseudo-element cases (`::before` anchors and
-//! implicit anchors); `writing-mode` and `vertical-*` cases (only
+//! cases (the top layer exists, but §2.3's top-layer acceptability clause is
+//! not implemented, and `dom` has no popover or dialog element);
+//! pseudo-element cases (`::before` anchors and implicit anchors);
+//! `writing-mode` and `vertical-*` cases (only
 //! `direction` exists); multicol, inline-fragmentation, table and fieldset
 //! cases (none of those boxes exists here); `transform-*` (the layout box
 //! is the anchor box, §28); `zoom`, print and iframe cases; CSSOM, Typed OM,

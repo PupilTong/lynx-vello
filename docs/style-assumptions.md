@@ -607,8 +607,10 @@ and §D.16 with what the wire format actually permits.)*
         a revealed element's `contain-intrinsic-size` estimate was wrong, the boxes the resulting
         reflow moved into or out of the window are re-determined by the *next* commit, not this
         one — the same one-update lag browsers have.
-      - **Four of the spec's relevance conditions are N/A here**: this engine has no top layer
-        (no `dialog`, no fullscreen), no focus model, no selection, and no view transitions.
+      - **Three of the spec's relevance conditions are N/A here**: this engine has no focus
+        model, no selection, and no view transitions. The fourth is honoured: an element in the
+        top layer (§29 — a `<dialog>` opened with `showModal()`; there is no fullscreen) is
+        relevant whatever its geometry.
       - **`contentvisibilityautostatechange` (§4.4) is fired, Rust-side and engine-internal**
         *(2026-09-21, user ruling)*. The commit that determines relevance queues every element
         whose *skipping* changed — which is why the spec's "first observation" case needs no rule
@@ -1220,8 +1222,9 @@ and §D.16 with what the wire format actually permits.)*
       generating its containing block, shares the query box's original
       containing block and is in flow or an absolutely positioned box
       earlier in flat tree order. The nearest qualifying ancestor wins, else
-      the last in flat tree order. **Approximated:** the top layer does not
-      exist (every box is in one); the initial containing block and the
+      the last in flat tree order. **Approximated:** the top layer exists
+      (§29) but this clause's top-layer condition is not implemented (every
+      box is treated as in the same layer); the initial containing block and the
       viewport are one containing block, so a `fixed` box can anchor to
       anything in flow (Blink's behaviour); "tree order" is the flat tree's;
       the skipped-contents clause is subsumed by the committed-box check (an
@@ -1530,9 +1533,9 @@ and §D.16 with what the wire format actually permits.)*
     - **Out, with the reason.** Withdrawn spellings (`inset-area`,
       `inset-area()`, `position-try-options`, `@position-fallback`/`@try`,
       `anchor(implicit)`, `anchor-center` on `*-items`) do not parse — the
-      ED is the target. The top layer, popovers, dialogs and implicit
-      anchor elements: no host language here has them, so `auto` never
-      finds an anchor. Pseudo-elements (not generated in this engine),
+      ED is the target. Popovers and implicit anchor elements: no host
+      language here has them, so `auto` never finds an anchor; the top
+      layer and `<dialog>` exist (§29) but name no implicit anchor. Pseudo-elements (not generated in this engine),
       including `match-parent`'s originating-element branch. Writing modes:
       only `direction` exists, and every logical keyword maps through
       `horizontal-tb`. Fragmentation and multicol (no such boxes).
@@ -1632,7 +1635,8 @@ and §D.16 with what the wire format actually permits.)*
       `try-tactic-*`, `last-successful-*`, `at-position-try-*`,
       `mixed-dependency-chain`, `anchored-c-v-hidden`, the parse and
       computed-value files (in the fork), and a few reftests as geometry.
-      **Skipped:** top layer, popover, dialog and `::backdrop`;
+      **Skipped:** top layer, popover, dialog and `::backdrop` (the top
+      layer exists since §29, but not its anchor clauses);
       pseudo-elements; writing modes; multicol, inline fragmentation,
       tables and fieldsets; `transform-*`; `zoom`, print and iframes; CSSOM,
       Typed OM, `getComputedStyle` insets and IDL; animations, transitions
@@ -1644,6 +1648,111 @@ and §D.16 with what the wire format actually permits.)*
       root-element and initial-containing-block sizing
       (`position-area-fixed`, `position-area-overflow-icb-*`); and the
       remaining reftests.
+
+29. **The top layer, `<dialog>` and `::backdrop` (architect-decided,
+    2026-10-07): css-position-4 §3 and HTML's `<dialog>`.** Bucket 1: web-core
+    runs in a browser, so a card that writes `<dialog>` gets the browser's
+    `HTMLDialogElement`, and web-elements' `x-overlay-ng` is itself a
+    `<dialog>` opened with `showModal()` (`htmlTemplates.ts:136-172`). Native
+    Lynx has neither a dialog nor a top layer — its `<overlay>` is a
+    zero-sized box whose content is reparented into a platform window. The
+    layer is generic in `dom` (`crates/dom/src/tree/top_layer.rs`,
+    `docs/dom-architecture.md` "Top layer and `::backdrop`"); `<dialog>` is
+    its first user (`crates/bobcat-core/src/main/tree/dialog.rs`).
+    `<x-overlay-ng>` itself is a follow-up on this foundation.
+    - **Implemented.** A document top layer: an ordered set with a per-entry
+      "blocks the document" flag (HTML's modal dialog). A top-layer element is
+      a stacking context of its own, painted after everything in the root
+      stacking context in layer order, with the viewport as its containing
+      block whatever its ancestors' transforms, filters, containment, clips,
+      opacity, `z-index` or scroll offsets, a static position of zero, and no
+      contribution to its parent's flow, intrinsic size or scrollable
+      overflow. `::backdrop` is a real box for every rendered entry: painted
+      immediately below its element, inheriting from it, styled by every
+      origin's `::backdrop` rules through Stylo's lazy pseudo-element cascade,
+      and suppressed by `display: none` or `content: none`. While a modal
+      dialog blocks the document, nothing painted before its `::backdrop` is
+      hit-testable (HTML's inert subtrees), and a hit on the backdrop reports
+      the dialog. `:modal` and `:open` match. A top-layer element is relevant
+      to the user (css-contain-2 §4). `<dialog>`: HTML's UA rules, the `open`
+      attribute, `show()`, `showModal()`, `close()` and `requestClose()` as UI
+      methods (`invoke` / `__InvokeUIMethod`), and non-bubbling `close` and
+      `cancel` events with a `{}` detail, delivered from an entry of their own.
+    - **UA rules, adapted.** HTML's `dialog` rules, with: the display
+      `defaultDisplayLinear` picks for containers (`linear`, else the fork's
+      initial `flex`) for HTML's `block`, which no box here lowers to;
+      `dialog[open="false"]` closed beside `dialog:not([open])`, because
+      `__SetAttribute` stringifies `false` and web-core removes such an
+      attribute; HTML's `background-color: Canvas; color: CanvasText`, which
+      compute to `rgb(255, 255, 255)`/`rgb(0, 0, 0)` in the light scheme, the
+      only one this engine's device has;
+      `overflow: scroll` for `dialog:modal`'s `overflow: auto` (out of this
+      engine) and `top: 0; bottom: 0` for its `inset-block: 0` (disabled in
+      the fork); `-servo-top-layer: auto` on `dialog:modal` and `::backdrop`
+      (below); and `::backdrop { position: fixed; inset: 0; display: flex }`,
+      the display because the pseudo-element has no other source of one `dom`
+      lowers. No rule is `!important`.
+    - **§3.1's fixups run where the UA sheet asks; membership places the
+      box.** The `lynx` build admits the UA-only `-servo-top-layer` in a
+      UA-origin sheet (lynx fork `76f6a809b`), and `dialog:modal` and
+      `::backdrop` declare it, so Stylo's
+      `StyleAdjuster::adjust_for_top_layer` computes a modal dialog's
+      `position` other than `absolute`/`fixed` to `absolute`, as a browser
+      does, and blockifies `display: contents`. `dom` does not derive
+      membership from the longhand: the layer is generic and the embedder
+      decides what enters it, so a top-layer element and its backdrop lower
+      to `fixed` against the viewport whatever their computed `position`, and
+      a top-layer element ends its descendants' containing-block walks. For
+      an element the UA rule reaches this agrees with the computed value; for
+      one no rule reaches (`dom` used directly) membership alone places it,
+      and a `display: contents` one renders nothing. The UA rules keep HTML's
+      `position: fixed` on `dialog:modal` and `::backdrop`. A `display:
+      contents` modal dialog is blockified to `flex`, the `lynx` grammar's
+      initial display, where a browser computes `block` (lynx fork
+      `7742fa5c5`), and renders as a `flex` box centred in the viewport
+      (`a_display_contents_modal_dialog_is_blockified_and_renders` in
+      `tree::dialog`).
+    - **State.** "Open" is the `open` attribute, present and not `"false"`;
+      the attribute callback is the one path that flips `:open`, and its
+      removal (or `"false"`) also leaves the top layer and clears `:modal`,
+      without a `close` event, as HTML's attribute steps fire none. "Modal" is
+      membership with the blocking flag; a modal dialog removed from the
+      document leaves the layer (HTML's removing steps) and comes back open
+      but not modal.
+    - **Invalid states.** `show()` on a modal dialog, `showModal()` on an
+      open non-modal or a disconnected dialog: HTML throws
+      `InvalidStateError`; `invoke` answers 4 `PARAM_INVALID`, which is what
+      web-core reports for any method that throws
+      (`createInvokeUIMethod.ts:12-44`). Native has a distinct
+      `7 INVALID_STATE_ERROR` (`lynx_get_ui_result.h:53-61`); web-core is
+      followed (`docs/tracking/deviations.md`).
+    - **Centring.** HTML centres a modal dialog by shrink-to-fit sizing
+      (`width: fit-content; height: fit-content; margin: auto` between
+      zero insets). hughie's absolute pass stretch-fits only an `auto`
+      size (css-position-3 §4.1), so a `fit-content` dialog takes its
+      fit-content size (css-sizing-3 §3.2) in the viewport and its `auto`
+      margins centre it (tests in `dialog.rs` and in
+      `crates/dom/tests/layout.rs`).
+    - **Out, with the reason.**
+      - The `overlay` property, transitions on it, and the pending top-layer
+        removals: the fork has no `overlay`, so nothing could observe a
+        delayed removal; leaving the layer is immediate.
+      - A top-layer element inside skipped contents (`content-visibility:
+        hidden`, or a non-relevant `auto`) stays hidden with them, where
+        css-position-4 renders it: the hoisting, skipping and rounding paths
+        all hide it today. A `display: none` ancestor correctly hides it.
+      - Close requests (Escape, the back gesture), `closedby`, light dismiss
+        and the close watcher: no keyboard input, and `closedby` is not
+        parsed. `requestClose()` is the close watcher's `cancel` then `close`
+        without cancelability — this engine's event model has no
+        `preventDefault` — so it always closes.
+      - `beforetoggle`/`toggle`, the focusing steps and the previously
+        focused element, `autofocus`, `returnValue` (no reader exists in Lynx
+        JS; `close(returnValue)` and `requestClose(returnValue)` drop it),
+        popovers and fullscreen.
+      - Animations and transitions on `::backdrop` itself: the lazy cascade
+        carries no animation declarations.
+      - css-anchor-position-1's top-layer clauses (§28 "Approximated").
 
 ## Deliberately still open (known non-decisions)
 

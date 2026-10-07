@@ -3,8 +3,8 @@
 //!
 //! Each tag's own policy lives with that tag — [`super::scroll_container`],
 //! [`super::list`], [`super::viewpager`], [`super::swiper`],
-//! [`super::refresh_view`], [`super::scroll_coordinator`], [`super::text`],
-//! [`super::raw_text`], [`super::image`] — and this module
+//! [`super::refresh_view`], [`super::scroll_coordinator`], [`super::dialog`],
+//! [`super::text`], [`super::raw_text`], [`super::image`] — and this module
 //! only decides what they all agree on and what order they land in.
 //! [`super::blur_view`] is the one tag module with no rules of its own: a
 //! blur view is a container and nothing more, so everything it needs is here.
@@ -14,18 +14,19 @@
 //! rules `view`, `scroll-view`, `list`, `list-item`, the two spellings each of
 //! `viewpager` and `viewpager-item`, `x-swiper`, `x-swiper-item`,
 //! `x-refresh-view`, `x-refresh-header`, `x-refresh-footer`, the ten `scroll-coordinator` tags,
-//! `blur-view`, `x-blur-view` and `wrapper` carry, so it wins only by being
-//! assembled last.
+//! `blur-view`, `x-blur-view`, `dialog` and `wrapper` carry, so it wins only
+//! by being assembled last.
 //! That module's `nothing_inside_an_image_generates_a_box` is the tripwire for
 //! it.
 
 use super::blur_view::{BLUR_VIEW_TAG, X_BLUR_VIEW_TAG};
+use super::dialog::DIALOG_TAG;
 use super::refresh_view::{REFRESH_FOOTER_TAG, REFRESH_HEADER_TAG};
 use super::swiper::{SWIPER_ITEM_TAG, SWIPER_TAG};
 use super::viewpager::{VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG};
 use super::{
-    image, list, raw_text, refresh_view, scroll_container, scroll_coordinator, swiper, text,
-    viewpager,
+    dialog, image, list, raw_text, refresh_view, scroll_container, scroll_coordinator, swiper,
+    text, viewpager,
 };
 
 /// Page configuration for the Lynx runtime and UA cascade.
@@ -71,6 +72,10 @@ impl Default for PageConfig {
 /// (`docs/tracking/deviations.md`). `text` is a text block whatever the switch
 /// says, and `wrapper` generates no box — both from `web-elements`' own sheet,
 /// where the linear toggle covers container tags only.
+/// `dialog` follows the switch's display too — HTML's `block` has no box in
+/// this engine, and the switch is what picks a page's block-like container —
+/// and nothing else of the common block: a browser gives it HTML's defaults
+/// ([`super::dialog`]).
 /// Every tag that generates a box of its own — the containers, `text` and
 /// `image` — also gets the rest of that common block: `border-width: 0` with
 /// `border-style: solid`, `position: relative` (which is what makes a
@@ -145,7 +150,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     let display = if config.default_display_linear {
         format!(
             "page, view, scroll-view, list, list-item, {component_tags}, {BLUR_VIEW_TAG}, \
-             {X_BLUR_VIEW_TAG} {{ display: linear; }}\n"
+             {X_BLUR_VIEW_TAG}, {DIALOG_TAG} {{ display: linear; }}\n"
         )
     } else {
         String::new()
@@ -169,6 +174,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          {swipers}\
          {refresh_views}\
          {coordinators}\
+         {dialogs}\
          {text}\
          {carriers}\
          {images}",
@@ -178,6 +184,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
         swipers = swiper::UA_RULES,
         refresh_views = refresh_view::UA_RULES,
         coordinators = scroll_coordinator::UA_RULES,
+        dialogs = dialog::UA_RULES,
         text = text::UA_RULES,
         carriers = raw_text::UA_RULES,
         images = image::UA_RULES,

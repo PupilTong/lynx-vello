@@ -619,6 +619,28 @@ definite-inset visual nudge):
   under a subtree the host relaid in place, whose CB above it did not run
   (`compute_hoisted_layout`, the same placement).
 
+**The top layer (css-position-4 §3) is host policy over the same
+protocol.** `dom` keeps the document's top layer as an ordered side table
+(`crates/dom/src/tree/top_layer.rs`). A top-layer element lowers to
+`PositionProperty::Fixed` whatever its computed position, and the host's
+containing-block lookup answers the initial containing block for it, so
+its parent records only a static position, it contributes nothing to the
+parent's flow, intrinsic size or scrollable overflow, and the rounding
+tail places it against the viewport with a static position of zero
+(§3.1) rather than the recorded one. The containing-block walk of its own
+descendants ends at it, so a `fixed` descendant escapes to the viewport
+rather than to a transformed ancestor outside the layer. Each entry's
+`::backdrop` is a box with no parent: a **top-layer tail** after the
+rounding tail lays it out with `compute_absolute_layout` against the
+viewport and rounds it as a subtree of its own, every run, for every entry
+whose element rendered. `hughie` itself knows nothing of the layer.
+HTML's modal-dialog sizing (`inset: 0; width: fit-content; height:
+fit-content; margin: auto`) needs nothing layer-specific either: the
+absolute pass stretch-fits only an `auto` size (css-position-3 §4.1), so
+a `fit-content` box between two insets takes its fit-content size
+(css-sizing-3 §3.2) in the inset-modified containing block and its `auto`
+margins centre it.
+
 `position: sticky` is resolved by the `dom` visual host at composition time.
 The retained frame stores scrollport inset and containing-block constraints;
 live scroll offsets determine the visual displacement without changing layout.
@@ -913,7 +935,14 @@ Linear, including insertion of a fresh wrapper after an earlier layout.
 
 `compute_layout` is therefore unreachable for one: the document element
 blockifies in Stylo (`Display::equivalent_block_display`, CSS Display 3
-§2.8), and no other path reaches a box-less node. Inheritance is unaffected — it follows the DOM tree,
+§2.7), and no other path reaches a box-less node. A root `display: contents`
+computes to `flex` under the fork's `lynx` grammar (lynx fork `9648159a6`),
+where a browser gives `block`: `flex` is that grammar's block-level container,
+so the root lays out exactly as a `display: flex` root
+(`display_contents_root_blockifies_to_a_flex_container` in
+`crates/dom/tests/layout.rs`). No `lynx` path produces Stylo's internal
+block/flow display, and `display_mode` panics on it rather than treating it as
+a leaf. Inheritance is unaffected — it follows the DOM tree,
 so a text child still reads its box-less parent's font/text values.
 
 **The relayout-boundary theorem.** A box is a **relayout boundary** iff its
@@ -1197,8 +1226,15 @@ the engine we're succeeding.
 2. **Available space & flex base sizes** (§9.2) — flex base + hypothetical
    main size per item; child measurement via `compute_layout` probes
    with `SizingMode::IgnoreSizeStyles`.
-3. **Line breaking** (§9.3) — single line for `NoWrap`, else greedy
-   line-fill against main available size including `gap`.
+3. **Container main size and line breaking** (§9.2 step 4, §9.3) — single
+   line for `NoWrap`, else greedy line-fill against main available size
+   including `gap`. A container whose main size is not known takes its
+   §9.9.1 intrinsic main size under a min-/max-content constraint, and under
+   a definite one the fit-content size between those two (css-sizing-3
+   §5.2.2: an absolutely positioned box that does not stretch,
+   `fit-content`, an unstretched item), never the widest line broken at the
+   available size; a wrapping container then breaks its lines again at that
+   size.
 4. **Resolving flexible lengths** (§9.7) — the freeze/unfreeze grow/shrink
    loop per line → target main sizes.
 5. **Cross sizing** (§9.4) — hypothetical cross sizes (probes with known

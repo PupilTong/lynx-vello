@@ -1579,3 +1579,48 @@ fn a_box_that_loses_the_auto_keyword_while_it_skips_forgets_too() {
         "and the earlier removal means re-adding auto starts from the length",
     );
 }
+
+/// css-contain-2 §4: an element in the top layer is relevant to the user,
+/// wherever it is. The same box off screen skips until it enters the
+/// layer, and skips again once it leaves.
+#[test]
+fn a_top_layer_auto_box_is_relevant_wherever_it_is() {
+    let mut doc = Doc::with_device(device(200.0, VIEWPORT_HEIGHT));
+    doc.add_css(
+        "page { display: flex; width: 200px; height: 100px; font-family: Ahem; }
+         dialog { display: flex; position: absolute; left: 5000px; top: 0;
+                  width: 100px; content-visibility: auto;
+                  contain-intrinsic-size: 100px 20px; }
+         .label { display: -lynx-text; font-size: 20px; }",
+    );
+    assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+    let root = doc.root;
+    let dialog = doc.el(root, "dialog");
+    let label = doc.el(dialog, "text.label");
+    let run = doc.dom.create_text_node("x", ());
+    doc.dom.append_child(label, run);
+
+    assert!(doc.dom.render());
+    assert!(
+        doc.dom.text_block_size(label).is_none(),
+        "5000px right of a 200px viewport"
+    );
+
+    doc.dom.add_to_top_layer(dialog, true);
+    assert!(doc.dom.render());
+    assert_eq!(
+        doc.dom
+            .bounding_client_rect(dialog)
+            .map(|rect| rect.origin.x),
+        Some(5000.0),
+        "still off screen"
+    );
+    assert!(
+        doc.dom.text_block_size(label).is_some(),
+        "relevant because it is in the top layer"
+    );
+
+    doc.dom.remove_from_top_layer(dialog);
+    assert!(doc.dom.render());
+    assert!(doc.dom.text_block_size(label).is_none(), "skips again");
+}

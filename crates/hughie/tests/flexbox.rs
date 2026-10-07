@@ -4,6 +4,7 @@ mod support;
 
 use hughie::compute::{compute_absolute_layout, compute_leaf_layout};
 use hughie::prelude::*;
+use hughie::style::StyleSize;
 use stylo::computed_values::{box_sizing, direction, flex_direction, flex_wrap};
 use stylo::values::computed::{Display, Margin, MaxSize, Overflow, PositionProperty};
 use stylo::values::specified::align::AlignFlags;
@@ -1527,6 +1528,344 @@ fn absolute_aspect_ratio_uses_vertical_inset_stretch_when_horizontal_is_auto() {
     });
     assert_size(layout.size, Size::new(160.0, 80.0));
     assert_point(layout.location, Point::new(0.0, 10.0));
+}
+
+/// One `width` × `height` item that neither grows nor shrinks.
+fn rigid_item(tree: &mut TestTree, width: f32, height: f32) -> TestId {
+    tree.push_leaf(
+        TestStyle {
+            flex_shrink: nn(0.0),
+            ..fixed_leaf_style(width, height)
+        },
+        Size::new(width, height),
+        None,
+    )
+}
+
+/// A paragraph whose longest word is 500 wide and whose unbroken line is
+/// 1000: it fills any width between the two, on one 100-tall line at 1000
+/// or more and on two below that.
+fn paragraph_leaf(input: LeafMeasureInput) -> LeafMetrics {
+    let width = input
+        .known_dimensions
+        .width
+        .unwrap_or(match input.available_space.width {
+            AvailableSpace::MinContent => 500.0,
+            AvailableSpace::MaxContent => 1000.0,
+            AvailableSpace::Definite(limit) => limit.clamp(500.0, 1000.0),
+        });
+    let height =
+        input
+            .known_dimensions
+            .height
+            .unwrap_or(if width >= 1000.0 { 100.0 } else { 200.0 });
+    LeafMetrics::new(Size::new(width, height))
+}
+
+fn paragraph(tree: &mut TestTree) -> TestId {
+    tree.push_measured_leaf(TestStyle::default(), paragraph_leaf)
+}
+
+fn inset_zero(style: TestStyle) -> TestStyle {
+    TestStyle {
+        position: PositionProperty::Absolute,
+        inset: Edges::uniform(inset_px(0.0)),
+        ..style
+    }
+}
+
+/// A flex container placed with `inset: 0` in an 800×600 containing block
+/// around the one item `content` pushes.
+fn inset_zero_box(style: TestStyle, content: impl FnOnce(&mut TestTree) -> TestId) -> Layout {
+    let mut tree = TestTree::default();
+    let child = content(&mut tree);
+    let target = tree.push_flex(inset_zero(style), vec![child]);
+    place_in_800_by_600(&tree, target)
+}
+
+/// [`paragraph_leaf`] itself placed with `inset: 0` in an 800×600
+/// containing block.
+fn inset_zero_paragraph(style: TestStyle) -> Layout {
+    let mut tree = TestTree::default();
+    let target = tree.push_measured_leaf(inset_zero(style), paragraph_leaf);
+    place_in_800_by_600(&tree, target)
+}
+
+fn place_in_800_by_600(tree: &TestTree, target: TestId) -> Layout {
+    tree.with_layout_state(true, |tree, state| {
+        compute_absolute_layout(
+            tree,
+            state,
+            tree.node(target),
+            Size::new(800.0, 600.0),
+            Point::ZERO,
+        )
+    })
+}
+
+fn sized_auto_margin(width: StyleSize, height: StyleSize) -> TestStyle {
+    TestStyle {
+        size: Size::new(width, height),
+        margin: Edges::uniform(Margin::Auto),
+        ..TestStyle::default()
+    }
+}
+
+/// css-position-3 §4.1 stretch-fits only an automatic (`auto`) size between
+/// two non-`auto` insets; `fit-content` is css-sizing-3 §3.2's
+/// `min(max-content, max(min-content, stretch-fit))`, and the `auto` margins
+/// then centre the box (HTML's `dialog:modal`).
+#[test]
+fn absolute_fit_content_between_insets_shrinks_to_fit_and_centres() {
+    let small = |tree: &mut TestTree| rigid_item(tree, 100.0, 100.0);
+    let fit = sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
+    let layout = inset_zero_box(fit, small);
+    assert_size(layout.size, Size::new(100.0, 100.0));
+    assert_point(layout.location, Point::new(350.0, 250.0));
+    assert_eq!(
+        layout.margin,
+        Edges {
+            left: 350.0,
+            right: 350.0,
+            top: 250.0,
+            bottom: 250.0,
+        }
+    );
+
+    let auto_width = sized_auto_margin(size_auto(), StyleSize::FitContent);
+    let layout = inset_zero_box(auto_width, small);
+    assert_size(layout.size, Size::new(800.0, 100.0));
+    assert_point(layout.location, Point::new(0.0, 250.0));
+
+    let auto_both = sized_auto_margin(size_auto(), size_auto());
+    let layout = inset_zero_box(auto_both, small);
+    assert_size(layout.size, Size::new(800.0, 600.0));
+    assert_point(layout.location, Point::ZERO);
+}
+
+/// The fit-content clamp's other two arms: content wider than the
+/// stretch-fit size is held to it (and wraps), content whose min-content
+/// width alone exceeds it keeps that width, and the stretch-fit size is what
+/// remains of the inset-modified containing block after the non-`auto`
+/// margins, border and padding.
+#[test]
+fn absolute_fit_content_between_insets_clamps_to_the_stretch_fit_size() {
+    let fit = || sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
+    let wrapped = inset_zero_paragraph(fit());
+    assert_size(wrapped.size, Size::new(800.0, 200.0));
+    assert_point(wrapped.location, Point::new(0.0, 200.0));
+
+    let too_wide = inset_zero_box(fit(), |tree| rigid_item(tree, 1000.0, 100.0));
+    assert_size(too_wide.size, Size::new(1000.0, 100.0));
+    assert_point(too_wide.location, Point::new(0.0, 250.0));
+
+    let edged = TestStyle {
+        margin: Edges {
+            left: margin_px(50.0),
+            right: Margin::Auto,
+            top: margin_px(20.0),
+            bottom: Margin::Auto,
+        },
+        padding: Edges::uniform(npx(10.0)),
+        border: Edges::uniform(border_px(5.0)),
+        ..fit()
+    };
+    let edged = inset_zero_paragraph(edged);
+    // 800 - 50 (margin) - 30 (padding and border) leaves 720 for the
+    // paragraph; the auto end margins take the rest.
+    assert_size(edged.size, Size::new(750.0, 230.0));
+    assert_point(edged.location, Point::new(50.0, 20.0));
+}
+
+/// `min-content` and `max-content` between two insets keep sizing from
+/// their own constraint, and the `auto` margins centre what fits.
+#[test]
+fn absolute_intrinsic_keywords_between_insets_ignore_the_stretch_fit_size() {
+    let min = inset_zero_box(
+        sized_auto_margin(size_min_content(), StyleSize::FitContent),
+        paragraph,
+    );
+    assert_size(min.size, Size::new(500.0, 200.0));
+    assert_point(min.location, Point::new(150.0, 200.0));
+
+    let max = inset_zero_box(
+        sized_auto_margin(size_max_content(), StyleSize::FitContent),
+        paragraph,
+    );
+    assert_size(max.size, Size::new(1000.0, 100.0));
+    assert_point(max.location, Point::new(0.0, 250.0));
+}
+
+/// A flex container with `style` placed with `inset: 0` in an 800×600
+/// containing block around the items `content` pushes; returns the tree for
+/// reading the items back.
+fn inset_zero_flex(
+    style: TestStyle,
+    content: impl FnOnce(&mut TestTree) -> Vec<TestId>,
+) -> (TestTree, Vec<TestId>, Layout) {
+    let mut tree = TestTree::default();
+    let children = content(&mut tree);
+    let target = tree.push_flex(inset_zero(style), children.clone());
+    let layout = place_in_800_by_600(&tree, target);
+    (tree, children, layout)
+}
+
+fn wrapping(style: TestStyle) -> TestStyle {
+    TestStyle {
+        flex_wrap: flex_wrap::T::WRAP,
+        ..style
+    }
+}
+
+fn two_rigid_items(width: f32) -> impl FnOnce(&mut TestTree) -> Vec<TestId> {
+    move |tree| {
+        vec![
+            rigid_item(tree, width, 100.0),
+            rigid_item(tree, width, 100.0),
+        ]
+    }
+}
+
+/// A `fit-content` flex container's width is css-sizing-3 §3.2's
+/// `min(max-content, max(min-content, stretch-fit))` over css-flexbox-1
+/// §9.9.1's intrinsic main sizes, so content wider than the inset-modified
+/// containing block is held to it. `nowrap`: min-content 500 (the
+/// paragraph's longest word), max-content 1000 (its unbroken line), 800 in
+/// between, where the paragraph wraps onto two lines. Multi-line: two
+/// 500-wide items make max-content 1000 (one line) and min-content 500 (the
+/// largest item), so the container is 800 wide and the items still break
+/// onto two lines.
+#[test]
+fn absolute_fit_content_between_insets_limits_a_flex_container_to_the_stretch_fit_size() {
+    let fit = || sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
+
+    let (tree, items, layout) = inset_zero_flex(fit(), |tree| vec![paragraph(tree)]);
+    assert_size(layout.size, Size::new(800.0, 200.0));
+    assert_point(layout.location, Point::new(0.0, 200.0));
+    assert_size(tree.layout(items[0]).size, Size::new(800.0, 200.0));
+
+    let (tree, items, layout) = inset_zero_flex(wrapping(fit()), two_rigid_items(500.0));
+    assert_size(layout.size, Size::new(800.0, 200.0));
+    assert_point(layout.location, Point::new(0.0, 200.0));
+    assert_point(tree.layout(items[0]).location, Point::ZERO);
+    assert_point(tree.layout(items[1]).location, Point::new(0.0, 100.0));
+}
+
+/// Content narrower than the stretch-fit size keeps its max-content width
+/// (one line, centred by the `auto` margins), where `width: auto` still
+/// stretches to the inset-modified containing block (css-position-3 §4.1).
+#[test]
+fn absolute_fit_content_between_insets_keeps_a_narrower_flex_container_at_its_content() {
+    let fit = || sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
+    let (tree, items, layout) = inset_zero_flex(wrapping(fit()), two_rigid_items(300.0));
+    assert_size(layout.size, Size::new(600.0, 100.0));
+    assert_point(layout.location, Point::new(100.0, 250.0));
+    assert_point(tree.layout(items[1]).location, Point::new(300.0, 0.0));
+
+    let auto_width = sized_auto_margin(size_auto(), StyleSize::FitContent);
+    let (_, _, layout) = inset_zero_flex(wrapping(auto_width), two_rigid_items(300.0));
+    assert_size(layout.size, Size::new(800.0, 100.0));
+    assert_point(layout.location, Point::new(0.0, 250.0));
+}
+
+/// A fit-content flex container whose content fits takes its max-content
+/// main size, so it measures no item for anything else. The container runs
+/// twice, its height unknown and then known, and each run asks the rigid
+/// item for its min-content width (its automatic minimum) and nothing more:
+/// its contributions are its own 300 whatever its content, since it neither
+/// grows nor shrinks. The content-sized item with `min-width: 0` shares its
+/// max-content probe with its flex base size, one per run, and is never
+/// asked for its min-content size. Overflowing the stretch-fit size, the
+/// first run, the one that decides the width, reads it after all.
+#[test]
+fn fit_content_flex_container_probes_only_the_sizes_it_reads() {
+    let probes = |tree: &TestTree, id: TestId, available: AvailableSpace| {
+        tree.measure_inputs(id)
+            .iter()
+            .filter(|input| input.available_space.width == available)
+            .count()
+    };
+    for (content_width, container_width, min_content_probes) in
+        [(200.0, 500.0, 0), (600.0, 800.0, 1)]
+    {
+        let fit = sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
+        let (tree, items, layout) = inset_zero_flex(fit, |tree| {
+            let content = tree.push_intrinsic_leaf(
+                TestStyle {
+                    min_size: Size::new(size_px(0.0), size_auto()),
+                    ..TestStyle::default()
+                },
+                Size::new(100.0, 100.0),
+                Size::new(content_width, 100.0),
+            );
+            vec![rigid_item(tree, 300.0, 100.0), content]
+        });
+        assert_close(layout.size.width, container_width);
+        let runs = probes(&tree, items[0], AvailableSpace::MinContent);
+        assert_eq!(runs, 2);
+        assert_eq!(probes(&tree, items[0], AvailableSpace::MaxContent), 0);
+        assert_eq!(probes(&tree, items[1], AvailableSpace::MaxContent), runs);
+        assert_eq!(
+            probes(&tree, items[1], AvailableSpace::MinContent),
+            min_content_probes,
+            "content {content_width}"
+        );
+    }
+}
+
+/// `min-content` and `max-content` on a multi-line container keep their own
+/// constraint: the largest item's width on one line each, or every item on
+/// one line, whatever the stretch-fit size.
+#[test]
+fn absolute_intrinsic_keywords_between_insets_size_a_multi_line_flex_container() {
+    let (_, _, min) = inset_zero_flex(
+        wrapping(sized_auto_margin(size_min_content(), StyleSize::FitContent)),
+        two_rigid_items(500.0),
+    );
+    assert_size(min.size, Size::new(500.0, 200.0));
+    assert_point(min.location, Point::new(150.0, 200.0));
+
+    let (_, _, max) = inset_zero_flex(
+        wrapping(sized_auto_margin(size_max_content(), StyleSize::FitContent)),
+        two_rigid_items(500.0),
+    );
+    assert_size(max.size, Size::new(1000.0, 100.0));
+    assert_point(max.location, Point::new(0.0, 250.0));
+}
+
+/// A flex container whose main size its parent already knows is not
+/// fit-content sized: stretched by a column parent to 300, it stays 300 and
+/// its paragraph overflows at its 500 min-content width. Not stretched
+/// (`align-self: flex-start`), the same container is fit-content sized in
+/// the 300 available (css-flexbox-1 §9.4 step 7): its min-content 500.
+#[test]
+fn in_flow_flex_container_fit_content_follows_its_parents_stretch() {
+    for (align_self, container_width) in [
+        (AlignFlags::STRETCH, 300.0),
+        (AlignFlags::FLEX_START, 500.0),
+    ] {
+        let mut tree = TestTree::default();
+        let item = paragraph(&mut tree);
+        let row = flex_container(
+            &mut tree,
+            TestStyle {
+                align_self: self_align(align_self),
+                ..TestStyle::default()
+            },
+            &[item],
+        );
+        let root = flex_container(
+            &mut tree,
+            TestStyle {
+                flex_direction: flex_direction::T::Column,
+                ..TestStyle::default()
+            },
+            &[row],
+        );
+        definite_layout(&tree, root, 300.0, 400.0);
+        assert_size(tree.layout(row).size, Size::new(container_width, 200.0));
+        assert_size(tree.layout(item).size, Size::new(500.0, 200.0));
+    }
 }
 
 #[test]

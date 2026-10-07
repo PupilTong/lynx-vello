@@ -37,7 +37,7 @@
 //! at the bind rather than through a later report. That answer is a `load` or
 //! an `error` this element owes, and it arrives in the middle of a JavaScript
 //! call — inside the `__SetAttribute` that wrote the attribute — where nothing
-//! may dispatch. So it is queued in [`ImageOutcomes`], which the runtime drains
+//! may dispatch. So it is queued in [`ComponentEvents`], which the runtime drains
 //! in the epilogue of the entry that produced it; `docs/runtime-architecture.md`
 //! has the entry boundary, and [`super::super::page`] the epilogue's order.
 //!
@@ -168,12 +168,9 @@
 //!   neither, which is `dom`'s rule rather than this module's: [`dom::ImageOutcome`] has no variant
 //!   naming a placeholder.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use dom::{CustomElement, ImageRole, NodeId};
 
-use dom::{CustomElement, ImageOutcome, ImageRole, NodeId};
-
-use super::LynxDocument;
+use super::{ComponentEvents, LynxDocument};
 
 /// Lynx's picture tag, and the attributes this module reflects off it.
 ///
@@ -254,51 +251,10 @@ image[auto-size]:not([auto-size="false"]) { contain: none; max-width: 100%; max-
 image > * { display: none; }
 "#;
 
-/// The `load`s and `error`s this document has produced and not delivered yet.
-///
-/// A handle rather than a field, because the two producers are on opposite
-/// sides of the document: the component below, which is inside it and reaches
-/// nothing else, and the runtime's own report path, which is outside it. Both
-/// hold a clone of this one queue, and the runtime drains it in the epilogue
-/// of every entry.
-///
-/// Queueing is the only thing either producer can do with an outcome, which is
-/// what keeps one from being dropped — there is no call that both settles a
-/// source and answers somewhere else.
-#[derive(Clone, Default)]
-pub(crate) struct ImageOutcomes(Rc<RefCell<Vec<ImageOutcome>>>);
-
-impl ImageOutcomes {
-    /// Queues what a source bind settled, if it settled anything. `None` is
-    /// the ordinary case — a source still loading, or a write that changed
-    /// nothing.
-    pub(crate) fn queue(&self, outcome: Option<ImageOutcome>) {
-        if let Some(outcome) = outcome {
-            self.0.borrow_mut().push(outcome);
-        }
-    }
-
-    /// Queues a whole report batch's outcomes, in the order `dom` returned
-    /// them.
-    pub(crate) fn extend(&self, outcomes: Vec<ImageOutcome>) {
-        self.0.borrow_mut().extend(outcomes);
-    }
-
-    /// Takes everything queued since the last drain.
-    pub(crate) fn take(&self) -> Vec<ImageOutcome> {
-        std::mem::take(&mut *self.0.borrow_mut())
-    }
-
-    /// Whether anything is waiting for a turn to be delivered on.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.0.borrow().is_empty()
-    }
-}
-
 /// Installs the component, over the queue its bind-time outcomes go into. Must
 /// run before any element could carry the tag, which is
 /// [`Document::define`](dom::Document::define)'s own precondition.
-pub(super) fn define(document: &mut LynxDocument, outcomes: ImageOutcomes) {
+pub(super) fn define(document: &mut LynxDocument, outcomes: ComponentEvents) {
     document.define(IMAGE_TAG, Box::new(Image { outcomes }));
 }
 
@@ -314,7 +270,7 @@ pub(super) fn define(document: &mut LynxDocument, outcomes: ImageOutcomes) {
 struct Image {
     /// Where a `src` that settles at the bind leaves its outcome. The
     /// reaction runs inside a JavaScript call, so it cannot dispatch.
-    outcomes: ImageOutcomes,
+    outcomes: ComponentEvents,
 }
 
 impl CustomElement<()> for Image {
@@ -358,7 +314,7 @@ impl CustomElement<()> for Image {
             // middle of the call that wrote the attribute. web-core's
             // equivalent is asynchronous for the same reason — an `<img>`
             // load event is a task, even for a cached URL.
-            SRC_ATTRIBUTE => self.outcomes.queue(document.set_image_source(
+            SRC_ATTRIBUTE => self.outcomes.queue_image(document.set_image_source(
                 element,
                 ImageRole::Source,
                 source(new),

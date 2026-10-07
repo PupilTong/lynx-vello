@@ -25,6 +25,7 @@ use crate::layout::relevance::{Relevance, RelevanceTable};
 use crate::layout::text_block::TextBlockStore;
 use crate::scroll::ScrollRequest;
 use crate::tree::node::Node;
+use crate::tree::top_layer::TopLayer;
 
 /// A node's identity *and* the position its state occupies: the arena key it
 /// lives at, plus the generation that key was at when the handle was made.
@@ -132,6 +133,10 @@ pub(crate) enum PayloadSlot<T> {
     Reserved,
     Document,
     ShadowRoot,
+    /// A `::backdrop` box's node ([`crate::tree::top_layer`]): an element
+    /// node no embedder created, so it carries no payload. The variant is
+    /// also the mark that tells a backdrop node from every other element.
+    Backdrop,
     Node(T),
 }
 
@@ -173,6 +178,14 @@ pub(crate) struct TreeArenas<T> {
     /// entries are the elements that declare an anchor name, an anchor
     /// scope or position-try fallbacks; see [`crate::layout::anchors`].
     anchors: AnchorRegistry,
+    /// The document's top layer (css-position-4 §3), in insertion order.
+    /// Here rather than in `Document` because its per-box readers — the
+    /// position lowering a [`StyleView`](crate::layout::StyleView) answers
+    /// and the containing-block walk in [`crate::layout::anchors`] — reach
+    /// nothing but these arenas. A side table rather than a per-node bit,
+    /// because the layer is almost always empty and every reader tests
+    /// `is_empty` first; see [`crate::tree::top_layer`].
+    top_layer: TopLayer,
 }
 
 impl<T> TreeArenas<T> {
@@ -184,7 +197,19 @@ impl<T> TreeArenas<T> {
             relevance: RelevanceTable::default(),
             committed_boxes: CommittedBoxTable::default(),
             anchors: AnchorRegistry::default(),
+            top_layer: TopLayer::default(),
         }
+    }
+
+    /// The document's top layer; see [`crate::tree::top_layer`].
+    #[inline]
+    pub(crate) fn top_layer(&self) -> &TopLayer {
+        &self.top_layer
+    }
+
+    #[inline]
+    pub(crate) fn top_layer_mut(&mut self) -> &mut TopLayer {
+        &mut self.top_layer
     }
 
     /// The anchor-positioning registry; see [`crate::layout::anchors`].

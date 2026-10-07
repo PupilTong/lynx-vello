@@ -198,13 +198,16 @@ In parallel/subsequently, the BTS context is constructed, its `App`/`LynxProxy` 
 ### NodesRef.invoke()/fields() measurement API surface and native UIMethod catalog
 
 Bobcat now implements the structural query facade and Worker transport described
-in [node-query-runtime](../node-query-runtime.md), plus two UI methods:
+in [node-query-runtime](../node-query-runtime.md), plus these UI methods:
 `boundingClientRect` (`Document::bounding_client_rect` in
 `crates/dom/src/layout/mod.rs` under the `callElementMethod` host member, shaped
 into the result object by `__InvokeUIMethod` in
 `packages/bobcat-element/src/element-papi.ts`), which ignores transforms and
 runs no flush — see the row below and [deviations](deviations.md) — and a
-pager's `selectTab` (see its row). The rest of the UI-method catalog below
+pager's `selectTab` (see its row), and a `<dialog>`'s `show`, `showModal`,
+`close` and `requestClose` (HTML's methods, `crates/bobcat-core/src/main/tree/dialog.rs`;
+an `InvalidStateError` is code 4, web-core's code for a method that throws).
+The rest of the UI-method catalog below
 still describes the compatibility target and remains pending.
 
 **Architecture, not just an API list.** `NodesRef`/`SelectorQuery` is a dual-mechanism contract, and this matters for lynx-vello's design:

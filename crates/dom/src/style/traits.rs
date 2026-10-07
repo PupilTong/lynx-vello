@@ -606,10 +606,14 @@ impl<T: Sync> Element for &Node<T> {
         _context: &mut selectors::context::MatchingContext<Self::Impl>,
     ) -> bool {
         match pc {
+            // `:modal` and `:open` are state bits the embedder's `<dialog>`
+            // sets beside its top-layer entry (`tree::top_layer`).
             NonTSPseudoClass::Hover
             | NonTSPseudoClass::Active
             | NonTSPseudoClass::Focus
-            | NonTSPseudoClass::Defined => self.element_state.contains(pc.state_flag()),
+            | NonTSPseudoClass::Defined
+            | NonTSPseudoClass::Modal
+            | NonTSPseudoClass::Open => self.element_state.contains(pc.state_flag()),
             _ => false,
         }
     }

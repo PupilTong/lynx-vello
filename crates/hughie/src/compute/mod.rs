@@ -1193,6 +1193,8 @@ struct ResolvedAbsoluteStyle {
     padding: Edges<f32>,
     border: Edges<f32>,
     preferred_available: Size<Option<AvailableSpace>>,
+    /// Per axis, whether the preferred size is stretch-fit when the insets
+    /// and self-alignment allow it ([`absolute_size_may_stretch`]).
     auto_size: Size<bool>,
     min_size: Size<Option<f32>>,
     max_size: Size<Option<f32>>,
@@ -1455,8 +1457,8 @@ fn resolve_absolute_style(
         border,
         preferred_available,
         auto_size: Size::new(
-            style_size_behaves_auto(style_size.width) && resolved_style_size.width.is_none(),
-            style_size_behaves_auto(style_size.height) && resolved_style_size.height.is_none(),
+            absolute_size_may_stretch(style_size.width) && resolved_style_size.width.is_none(),
+            absolute_size_may_stretch(style_size.height) && resolved_style_size.height.is_none(),
         ),
         min_size,
         max_size,
@@ -1464,6 +1466,29 @@ fn resolve_absolute_style(
         direction: style.direction(),
         padding_border_size,
     }
+}
+
+/// Whether an absolutely positioned box's preferred size `value` is one the
+/// absolute pass may stretch-fit to the inset-modified containing block.
+///
+/// css-position-3 §4.1 stretch-fits only the box's *automatic* size
+/// (`auto`), and only when its self-alignment is `stretch` (or `normal` for a
+/// non-replaced box) and neither inset on the axis is `auto`; the `stretch`
+/// keywords are that size by definition. `fit-content` is not an automatic
+/// size: css-sizing-3 §3.2 makes it the fit-content size,
+/// `min(max-content, max(min-content, stretch-fit))` (§2.1), which never
+/// grows past the content's max-content size. The box therefore takes no
+/// known dimension on that axis: its own run sizes it with the
+/// inset-modified containing block as its definite available space, the
+/// way it sizes a box whose self-alignment does not stretch (§4.1's
+/// fit-content case), and its `auto` margins then share what is left.
+/// Flex and grid items do not come through here; they still read
+/// [`style_size_behaves_auto`] directly.
+#[inline]
+fn absolute_size_may_stretch(value: &StyleSize) -> bool {
+    // An anchor function's unresolvable form is a length or `auto`, never
+    // `fit-content`, so the tag test needs no anchor arm.
+    !matches!(value, StyleSize::FitContent) && style_size_behaves_auto(value)
 }
 
 #[inline]

@@ -103,6 +103,11 @@ struct FlexItem<N> {
     inner_flex_basis: f32,
     min_content_contribution: f32,
     max_content_contribution: f32,
+    /// `min_content_contribution` was left unmeasured: under a definite
+    /// available main size the container reads it only when its max-content
+    /// main size exceeds that size, and
+    /// [`resolve_deferred_min_content_contributions`] measures it then.
+    min_content_deferred: bool,
     resolved_min_main: f32,
     hypothetical_main: f32,
     target_main: f32,
@@ -275,6 +280,7 @@ where
         inner_flex_basis: 0.0,
         min_content_contribution: 0.0,
         max_content_contribution: 0.0,
+        min_content_deferred: false,
         resolved_min_main: 0.0,
         hypothetical_main: 0.0,
         target_main: 0.0,
@@ -308,6 +314,75 @@ where
     available_space: Size<AvailableSpace>,
     values: [f32; 3],
     measured: u8,
+}
+
+impl<'tree, 'state, T> MainAxisProbes<'tree, 'state, T>
+where
+    T: LayoutTree,
+{
+    /// The probes of one flex item, every one taken at the cross size the
+    /// item's main size is measured at.
+    fn for_item(
+        tree: &'tree T,
+        state: &'state mut T::State,
+        item: &FlexItem<T::NodeId>,
+        axes: Axes,
+        container_inner_size: Size<Option<f32>>,
+        available_space: Size<AvailableSpace>,
+        single_line: bool,
+    ) -> Self {
+        let inset_size = item.box_floor();
+        // css-flexbox-1 §9.8: in a single-line container with a definite cross
+        // size, the cross size of an item the container is going to stretch is
+        // the container's inner cross size, clamped to the item's own cross
+        // min/max — and it is *definite*, which means the measure that produces
+        // the item's flex base size (§9.2 steps B and E) has to be told it.
+        // Without this a replaced item with an intrinsic ratio reports its
+        // natural main size instead of the one the stretched cross size
+        // transfers, and an item whose content reflows reports a main size
+        // measured at the wrong cross size. The container's own intrinsic
+        // passes leave the cross size indefinite, which turns this back off
+        // exactly where it should be.
+        let cross_preferred = axes.cross.size(item.preferred_size).or_else(|| {
+            let stretches = single_line
+                && item.align_self == AlignFlags::STRETCH
+                && axes.cross.size(item.size_is_auto)
+                && !item.margin_auto.flow_start(axes.cross, axes.cross_reverse)
+                && !item.margin_auto.flow_end(axes.cross, axes.cross_reverse);
+            stretches
+                .then(|| axes.cross.size(container_inner_size))
+                .flatten()
+                .map(|cross| {
+                    clamp_axis(
+                        cross - axes.cross.sum(item.margin),
+                        axes.cross.size(item.min_size),
+                        axes.cross.size(item.max_size),
+                        axes.cross.size(inset_size),
+                    )
+                })
+        });
+        let mut known = Size::NONE;
+        axes.cross.set_size(&mut known, cross_preferred);
+        let mut known_is_definite = Size::new(false, false);
+        axes.cross.set_size(
+            &mut known_is_definite,
+            axes.cross.size(item.preferred_definite),
+        );
+
+        let contribution_parent_size = axes.main.pack(None, axes.cross.size(container_inner_size));
+        Self {
+            tree,
+            state,
+            node: item.key.node,
+            axes,
+            known_dimensions: known,
+            definite_dimensions: known_is_definite,
+            parent_size: contribution_parent_size,
+            available_space,
+            values: [0.0; 3],
+            measured: 0,
+        }
+    }
 }
 
 impl<T> MainAxisProbes<'_, '_, T>
@@ -361,6 +436,10 @@ where
 
     fn min_content(&mut self) -> f32 {
         self.probe(0, AvailableSpace::MinContent)
+    }
+
+    const fn has_min_content(&self) -> bool {
+        self.measured & 1 != 0
     }
 
     fn max_content(&mut self) -> f32 {
@@ -434,10 +513,13 @@ fn determine_flex_base_sizes<'tree, T>(
 {
     let container_main = axes.main.size(container_inner_size);
     let available_main = axes.main.size(available_space);
+    // A definite available main size needs both: the container's
+    // fit-content main size clamps between its min- and max-content main
+    // sizes (`determine_auto_main_size`).
     let needs_min_content_contribution =
-        needs_intrinsic_main_contributions && available_main == AvailableSpace::MinContent;
+        needs_intrinsic_main_contributions && available_main != AvailableSpace::MaxContent;
     let needs_max_content_contribution =
-        needs_intrinsic_main_contributions && available_main == AvailableSpace::MaxContent;
+        needs_intrinsic_main_contributions && available_main != AvailableSpace::MinContent;
 
     for item in items {
         let node = item.key.node;
@@ -448,56 +530,15 @@ fn determine_flex_base_sizes<'tree, T>(
         let raw_flex_basis = style.flex_basis();
         let inset_size = item.box_floor();
         let main_floor = axes.main.size(inset_size);
-        // css-flexbox-1 §9.8: in a single-line container with a definite cross
-        // size, the cross size of an item the container is going to stretch is
-        // the container's inner cross size, clamped to the item's own cross
-        // min/max — and it is *definite*, which means the measure that produces
-        // the item's flex base size (§9.2 steps B and E) has to be told it.
-        // Without this a replaced item with an intrinsic ratio reports its
-        // natural main size instead of the one the stretched cross size
-        // transfers, and an item whose content reflows reports a main size
-        // measured at the wrong cross size. The container's own intrinsic
-        // passes leave the cross size indefinite, which turns this back off
-        // exactly where it should be.
-        let cross_preferred = axes.cross.size(item.preferred_size).or_else(|| {
-            let stretches = single_line
-                && item.align_self == AlignFlags::STRETCH
-                && axes.cross.size(item.size_is_auto)
-                && !item.margin_auto.flow_start(axes.cross, axes.cross_reverse)
-                && !item.margin_auto.flow_end(axes.cross, axes.cross_reverse);
-            stretches
-                .then(|| axes.cross.size(container_inner_size))
-                .flatten()
-                .map(|cross| {
-                    clamp_axis(
-                        cross - axes.cross.sum(item.margin),
-                        axes.cross.size(item.min_size),
-                        axes.cross.size(item.max_size),
-                        axes.cross.size(inset_size),
-                    )
-                })
-        });
-        let mut known = Size::NONE;
-        axes.cross.set_size(&mut known, cross_preferred);
-        let mut known_is_definite = Size::new(false, false);
-        axes.cross.set_size(
-            &mut known_is_definite,
-            axes.cross.size(item.preferred_definite),
-        );
-
-        let contribution_parent_size = axes.main.pack(None, axes.cross.size(container_inner_size));
-        let mut probes = MainAxisProbes {
+        let mut probes = MainAxisProbes::for_item(
             tree,
-            state: &mut *state,
-            node,
+            &mut *state,
+            item,
             axes,
-            known_dimensions: known,
-            definite_dimensions: known_is_definite,
-            parent_size: contribution_parent_size,
+            container_inner_size,
             available_space,
-            values: [0.0; 3],
-            measured: 0,
-        };
+            single_line,
+        );
 
         if axes.main.size(item.preferred_size).is_none()
             && let Some(value) = probes.resolve_size(axes.main.size(raw_size), container_main)
@@ -661,38 +702,34 @@ fn determine_flex_base_sizes<'tree, T>(
             axes.main.size(item.max_size),
             main_floor,
         );
-        let margin_main = axes.main.sum(item.margin);
-        let preferred_contribution = preferred_main.unwrap_or(0.0);
-        let contribution = |content: f32| {
-            let definite_basis = (!flex_basis_is_auto).then_some(item.flex_basis);
-            let mut value = content
-                .max(preferred_contribution)
-                .max(definite_basis.unwrap_or(0.0));
-            if item.flex_grow == 0.0 {
-                value = value.min(item.flex_basis);
-            }
-            if item.flex_shrink == 0.0 {
-                value = value.max(item.flex_basis);
-            }
-            clamp_axis(
-                value,
-                Some(item.resolved_min_main),
-                axes.main.size(item.max_size),
-                main_floor,
-            ) + margin_main
-        };
-        let min_content_contribution = if needs_min_content_contribution {
-            contribution(probes.min_content())
+        // A contribution that the item's content cannot move needs no probe;
+        // a max-content one otherwise usually shares the flex basis's probe
+        // (§9.2 step E) and a min-content one the automatic minimum's.
+        let content_free = (needs_min_content_contribution || needs_max_content_contribution)
+            .then(|| content_free_main_contribution(item, axes, flex_basis_is_auto))
+            .flatten();
+        item.max_content_contribution = if needs_max_content_contribution {
+            content_free.unwrap_or_else(|| {
+                main_contribution(item, axes, flex_basis_is_auto, probes.max_content())
+            })
         } else {
             0.0
         };
-        let max_content_contribution = if needs_max_content_contribution {
-            contribution(probes.max_content())
-        } else {
-            0.0
-        };
-        item.min_content_contribution = min_content_contribution;
-        item.max_content_contribution = max_content_contribution;
+        // Under a definite available main size the min-content contribution
+        // is read only when the max-content main size overflows it, so a
+        // probe nothing else took waits for that.
+        item.min_content_deferred = needs_min_content_contribution
+            && content_free.is_none()
+            && available_main != AvailableSpace::MinContent
+            && !probes.has_min_content();
+        item.min_content_contribution =
+            if !needs_min_content_contribution || item.min_content_deferred {
+                0.0
+            } else {
+                content_free.unwrap_or_else(|| {
+                    main_contribution(item, axes, flex_basis_is_auto, probes.min_content())
+                })
+            };
         item.target_main = item.hypothetical_main;
     }
 }
@@ -770,23 +807,116 @@ fn collect_flex_lines<N>(
     lines
 }
 
-fn line_intrinsic_main<N>(items: &[FlexItem<N>], line: FlexLine, gap: f32, axes: Axes) -> f32 {
-    let line_items = &items[line.start..line.end];
-    let item_sum = line_items
-        .iter()
-        .map(|item| item.flex_basis.max(item.resolved_min_main) + axes.main.sum(item.margin))
-        .sum::<f32>();
-    item_sum + gap * line_items.len().saturating_sub(1) as f32
+/// css-flexbox-1 §9.9.1's main-size min- or max-content contribution of a
+/// flex item whose outer min- or max-content size is `content`: the larger of
+/// that and its preferred size (and a definite flex basis), clamped by the
+/// flex base size as a maximum if it is not growable and as a minimum if it is
+/// not shrinkable, then by its min/max main size, plus its main margins.
+fn main_contribution<N>(
+    item: &FlexItem<N>,
+    axes: Axes,
+    flex_basis_is_auto: bool,
+    content: f32,
+) -> f32 {
+    let definite_basis = (!flex_basis_is_auto).then_some(item.flex_basis);
+    let mut value = content
+        .max(axes.main.size(item.preferred_size).unwrap_or(0.0))
+        .max(definite_basis.unwrap_or(0.0));
+    if item.flex_grow == 0.0 {
+        value = value.min(item.flex_basis);
+    }
+    if item.flex_shrink == 0.0 {
+        value = value.max(item.flex_basis);
+    }
+    clamp_axis(
+        value,
+        Some(item.resolved_min_main),
+        axes.main.size(item.max_size),
+        axes.main.size(item.box_floor()),
+    ) + axes.main.sum(item.margin)
 }
 
-fn line_content_contribution<N>(
+/// The item's main-size contributions when its content cannot change them.
+///
+/// [`main_contribution`] never decreases as `content` grows — every step is
+/// a `max`, a `min` or a clamp against values `content` does not enter — so
+/// equal results for no content and unbounded content are the result for
+/// every content size: a non-growable item whose preferred size or definite
+/// flex basis reaches its flex base size, say, or one whose maximum main size
+/// is below its preferred size. The min- and max-content contributions are
+/// then that one value and neither needs a probe.
+#[expect(
+    clippy::float_cmp,
+    reason = "the same arithmetic on the same values: only an exact match means constant"
+)]
+fn content_free_main_contribution<N>(
+    item: &FlexItem<N>,
+    axes: Axes,
+    flex_basis_is_auto: bool,
+) -> Option<f32> {
+    let least = main_contribution(item, axes, flex_basis_is_auto, 0.0);
+    (least == main_contribution(item, axes, flex_basis_is_auto, f32::INFINITY)).then_some(least)
+}
+
+/// Measures the min-content contributions [`determine_flex_base_sizes`]
+/// deferred, for a container whose fit-content main size has turned out to
+/// read them: its max-content main size exceeds the definite available main
+/// size, so `max(min-content, available)` decides it.
+fn resolve_deferred_min_content_contributions<'tree, T>(
+    tree: &'tree T,
+    state: &mut T::State,
+    items: &mut [FlexItem<T::NodeId>],
+    axes: Axes,
+    container_inner_size: Size<Option<f32>>,
+    available_space: Size<AvailableSpace>,
+    single_line: bool,
+) where
+    T: LayoutTree + 'tree,
+    T::Style<'tree>: FlexboxStyle,
+{
+    for item in items.iter_mut().filter(|item| item.min_content_deferred) {
+        let flex_basis_is_auto = flex_basis_behaves_auto(tree.style(item.key.node).flex_basis());
+        let min_content = MainAxisProbes::for_item(
+            tree,
+            &mut *state,
+            item,
+            axes,
+            container_inner_size,
+            available_space,
+            single_line,
+        )
+        .min_content();
+        item.min_content_contribution =
+            main_contribution(item, axes, flex_basis_is_auto, min_content);
+        item.min_content_deferred = false;
+    }
+}
+
+/// css-flexbox-1 §9.9.1's intrinsic main size of a flex container's content
+/// box: with `maximum`, the max-content main size, the sum of the items'
+/// max-content contributions and the gaps between them as one line even when
+/// the container wraps; otherwise the min-content main size, that same sum
+/// of min-content contributions for a single-line container and the largest
+/// one for a multi-line container, whose every item may take a line of its
+/// own.
+fn intrinsic_main_size<N>(
     items: &[FlexItem<N>],
-    line: FlexLine,
     gap: f32,
+    single_line: bool,
     maximum: bool,
 ) -> f32 {
-    let line_items = &items[line.start..line.end];
-    let item_sum = line_items
+    debug_assert!(
+        maximum || items.iter().all(|item| !item.min_content_deferred),
+        "a deferred min-content contribution is measured before it is read"
+    );
+    if !maximum && !single_line {
+        return items
+            .iter()
+            .map(|item| item.min_content_contribution)
+            .max_by(f32::total_cmp)
+            .unwrap_or(0.0);
+    }
+    let item_sum = items
         .iter()
         .map(|item| {
             if maximum {
@@ -796,30 +926,47 @@ fn line_content_contribution<N>(
             }
         })
         .sum::<f32>();
-    item_sum + gap * line_items.len().saturating_sub(1) as f32
+    item_sum + gap * items.len().saturating_sub(1) as f32
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The outer main size of a flex container whose main size is not known
+/// (css-flexbox-1 §9.2 step 4, "using the rules of the formatting context in
+/// which it participates"), clamped by its min/max main sizes.
+///
+/// Under a min- or max-content constraint that is the matching intrinsic
+/// main size (§9.9.1, [`intrinsic_main_size`]). Under a definite available
+/// main size the box is shrink-to-fit sized — an absolutely positioned box
+/// that does not stretch (css-position-3 §4.1), `fit-content`, an unstretched
+/// flex or grid item — and css-sizing-3 §5.2.2 makes that the fit-content
+/// size, `min(max-content, max(min-content, stretch-fit))`, the stretch-fit
+/// size being `available`, the space left after the container's margins,
+/// border and padding. It comes from the container's intrinsic main sizes,
+/// not from the lines collected under `available`: a `nowrap` line's sum of
+/// flex base sizes is not limited by `available` at all, and a wrapping
+/// container's widest line is narrower than the fit-content size whenever
+/// the break leaves space at the end of every line.
 fn determine_auto_main_size<N>(
     items: &[FlexItem<N>],
-    lines: &[FlexLine],
     gap: f32,
-    axes: Axes,
+    single_line: bool,
     available_main: AvailableSpace,
     inset_main: f32,
     min_outer: Option<f32>,
     max_outer: Option<f32>,
 ) -> f32 {
-    let content = lines
-        .iter()
-        .copied()
-        .map(|line| match available_main {
-            AvailableSpace::MaxContent => line_content_contribution(items, line, gap, true),
-            AvailableSpace::MinContent => line_content_contribution(items, line, gap, false),
-            AvailableSpace::Definite(_) => line_intrinsic_main(items, line, gap, axes),
-        })
-        .max_by(f32::total_cmp)
-        .unwrap_or(0.0);
+    let content = match available_main {
+        AvailableSpace::MaxContent => intrinsic_main_size(items, gap, single_line, true),
+        AvailableSpace::MinContent => intrinsic_main_size(items, gap, single_line, false),
+        AvailableSpace::Definite(available) => {
+            let max_content = intrinsic_main_size(items, gap, single_line, true);
+            if max_content <= available {
+                max_content
+            } else {
+                let min_content = intrinsic_main_size(items, gap, single_line, false);
+                max_content.min(min_content.max(available))
+            }
+        }
+    };
     clamp_axis(content + inset_main, min_outer, max_outer, inset_main)
 }
 
@@ -1850,12 +1997,30 @@ where
     };
     let inset_main = axes.main.size(container_inset_size);
     if axes.main.size(outer_size).is_none() {
-        let outer_main = contained_outer(axes.main, inset_main).unwrap_or_else(|| {
+        let contained_main = contained_outer(axes.main, inset_main);
+        let outer_main = contained_main.unwrap_or_else(|| {
+            let single_line = flex_wrap == flex_wrap::T::NOWRAP;
+            let reads_min_content = match line_available_main {
+                AvailableSpace::Definite(available) => {
+                    intrinsic_main_size(&items, main_gap, single_line, true) > available
+                }
+                AvailableSpace::MinContent | AvailableSpace::MaxContent => false,
+            };
+            if reads_min_content {
+                resolve_deferred_min_content_contributions(
+                    tree,
+                    state,
+                    &mut items,
+                    axes,
+                    inner_size,
+                    inner_available_space,
+                    single_line,
+                );
+            }
             determine_auto_main_size(
                 &items,
-                &lines,
                 main_gap,
-                axes,
+                single_line,
                 line_available_main,
                 inset_main,
                 axes.main.size(min_size),
@@ -1868,6 +2033,32 @@ where
         let resolved_main_gap =
             resolve_gap_axis(axes.main.size(gap_value), axes.main.size(inner_size));
         axes.main.set_size(&mut gap, resolved_main_gap);
+        // css-flexbox-1 §9.3 step 5 breaks lines at the inner main size step 4
+        // just decided; the lines above broke at the available main size.
+        // When the fit-content size is the available size they are the same
+        // lines. When it is smaller it is the max-content main size, and
+        // every hypothetical outer main size is at most its item's max-content
+        // contribution (both clamp the same content size, flex basis and
+        // min/max), so all the items already shared one line and still do.
+        // When it is larger — one item's min-content contribution or the
+        // container's own minimum exceeds the available size — a wider limit
+        // can join items the narrower one split; and a percentage gap only
+        // resolves now. Breaking again is a walk over the items' sizes, so it
+        // is done whenever the container wraps rather than only in those
+        // cases. (A row container with an indefinite width re-resolves its
+        // items and breaks a third time below.)
+        if contained_main.is_none()
+            && flex_wrap != flex_wrap::T::NOWRAP
+            && line_available_main.is_definite()
+        {
+            lines = collect_flex_lines(
+                &items,
+                flex_wrap,
+                AvailableSpace::Definite((outer_main - inset_main).max(0.0)),
+                resolved_main_gap,
+                axes,
+            );
+        }
     }
     let inner_main = axes.main.size(inner_size).unwrap_or(0.0);
     let mut main_gap = axes.main.size(gap);
@@ -2221,6 +2412,7 @@ mod tests {
             inner_flex_basis: main,
             min_content_contribution: main,
             max_content_contribution: main,
+            min_content_deferred: false,
             resolved_min_main: 0.0,
             hypothetical_main: main,
             target_main: main,
@@ -2425,7 +2617,7 @@ mod tests {
             ),
             Some(100.0),
             true,
-            true,
+            false,
             true,
             None,
         );
@@ -2434,6 +2626,94 @@ mod tests {
         // in place of its main size, so the container's definite 37px available
         // main size never reaches the probe (css-flexbox-1 9.2.3 step E).
         assert_eq!(items[0].flex_basis, 23.0);
+        assert_eq!(TEST_MEASURE_CALLS.get(), 1);
+
+        // A container whose main size is not known under a definite available
+        // size is fit-content sized, `min(max-content, max(min-content,
+        // available))`. The max-content contribution shares the flex basis's
+        // probe; the min-content one, which no automatic minimum measured
+        // (`min-width: 0`), waits until the max-content main size overflows
+        // the available size.
+        let fit_content_base_sizes = |items: &mut [FlexItem<TestRef>], state: &mut TestState| {
+            determine_flex_base_sizes(
+                &tree,
+                state,
+                items,
+                axes,
+                Size::new(None, Some(20.0)),
+                Size::new(
+                    AvailableSpace::Definite(37.0),
+                    AvailableSpace::Definite(20.0),
+                ),
+                None,
+                false,
+                true,
+                true,
+                None,
+            );
+        };
+        let mut items = [item(0.0, 0.0)];
+        items[0].min_size.width = Some(0.0);
+        let mut state = TestState::default();
+        TEST_MEASURE_CALLS.set(0);
+        fit_content_base_sizes(&mut items, &mut state);
+        assert_eq!(items[0].max_content_contribution, 23.0);
+        assert!(items[0].min_content_deferred);
+        assert_eq!(TEST_MEASURE_CALLS.get(), 1);
+        let auto_main = |items: &[FlexItem<TestRef>], available: f32| {
+            determine_auto_main_size(
+                items,
+                0.0,
+                true,
+                AvailableSpace::Definite(available),
+                0.0,
+                None,
+                None,
+            )
+        };
+        assert_eq!(auto_main(&items, 37.0), 23.0);
+        assert_eq!(TEST_MEASURE_CALLS.get(), 1);
+        resolve_deferred_min_content_contributions(
+            &tree,
+            &mut state,
+            &mut items,
+            axes,
+            Size::new(None, Some(20.0)),
+            Size::new(
+                AvailableSpace::Definite(20.0),
+                AvailableSpace::Definite(20.0),
+            ),
+            true,
+        );
+        assert!(!items[0].min_content_deferred);
+        assert_eq!(items[0].min_content_contribution, 11.0);
+        assert_eq!(TEST_MEASURE_CALLS.get(), 2);
+        assert_eq!(auto_main(&items, 20.0), 20.0);
+        assert_eq!(auto_main(&items, 5.0), 11.0);
+
+        // A non-growable item whose preferred size is its flex base size
+        // contributes that size whatever its content: no probe at all.
+        let mut items = [item(0.0, 0.0)];
+        items[0].min_size.width = Some(0.0);
+        items[0].preferred_size.width = Some(10.0);
+        let mut state = TestState::default();
+        TEST_MEASURE_CALLS.set(0);
+        fit_content_base_sizes(&mut items, &mut state);
+        assert_eq!(
+            [
+                items[0].min_content_contribution,
+                items[0].max_content_contribution
+            ],
+            [10.0, 10.0]
+        );
+        assert!(!items[0].min_content_deferred);
+        assert_eq!(TEST_MEASURE_CALLS.get(), 0);
+
+        // Growable, the same item's contributions follow its content.
+        items[0].flex_grow = 1.0;
+        fit_content_base_sizes(&mut items, &mut state);
+        assert_eq!(items[0].max_content_contribution, 23.0);
+        assert!(items[0].min_content_deferred);
         assert_eq!(TEST_MEASURE_CALLS.get(), 1);
     }
 
@@ -2647,30 +2927,63 @@ mod tests {
             axes,
         );
         assert_eq!(lines.len(), 2);
-        assert_eq!(
-            line_intrinsic_main(&items, test_line(2, 0.0), 2.0, axes),
-            32.0
-        );
-        for (name, available_main, expected) in [
-            ("min content", AvailableSpace::MinContent, 16.0),
-            ("max content", AvailableSpace::MaxContent, 25.0),
-            ("definite", AvailableSpace::Definite(100.0), 21.0),
+        // Contributions 8/15 (min) and 12/24 (max), gap 2, inset 1: the
+        // max-content main size is one line, 12 + 2 + 24 = 38; the
+        // min-content main size is the largest item when wrapping (15) and the
+        // line sum without (8 + 2 + 15 = 25); a definite available size picks
+        // between them.
+        for (name, single_line, available_main, expected) in [
+            ("min content, wrap", false, AvailableSpace::MinContent, 16.0),
+            (
+                "min content, nowrap",
+                true,
+                AvailableSpace::MinContent,
+                26.0,
+            ),
+            ("max content", false, AvailableSpace::MaxContent, 39.0),
+            (
+                "definite above max",
+                false,
+                AvailableSpace::Definite(100.0),
+                39.0,
+            ),
+            (
+                "definite between",
+                false,
+                AvailableSpace::Definite(20.0),
+                21.0,
+            ),
+            (
+                "definite below min, wrap",
+                false,
+                AvailableSpace::Definite(10.0),
+                16.0,
+            ),
+            (
+                "definite below min, nowrap",
+                true,
+                AvailableSpace::Definite(10.0),
+                26.0,
+            ),
         ] {
             assert_eq!(
-                determine_auto_main_size(
-                    &items,
-                    &lines,
-                    2.0,
-                    axes,
-                    available_main,
-                    1.0,
-                    None,
-                    None
-                ),
+                determine_auto_main_size(&items, 2.0, single_line, available_main, 1.0, None, None),
                 expected,
                 "{name}"
             );
         }
+        assert_eq!(
+            determine_auto_main_size::<TestRef>(
+                &[],
+                2.0,
+                false,
+                AvailableSpace::Definite(10.0),
+                1.0,
+                None,
+                None
+            ),
+            1.0
+        );
     }
 
     #[test]

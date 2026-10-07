@@ -3255,3 +3255,316 @@ fn ignored_range_keyframes_have_no_side_effects() {
         assert_eq!(effects(&doc), expected, "{animation}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// The top layer (css-position-4 §3, `tree::top_layer`).
+
+/// What bobcat-core's UA sheet gives a modal `<dialog>` and `::backdrop`,
+/// reduced to what these tests read: both boxes need a display
+/// `display_mode` supports.
+const TOP_LAYER_UA: &str = "
+    dialog { display: flex; position: absolute; }
+    dialog.modal { position: fixed; }
+    ::backdrop { display: flex; position: fixed; inset: 0; }";
+
+fn top_layer_harness(css: &str) -> Harness {
+    let mut h = Harness::new(&format!("{PAGE} {css}"));
+    h.doc.add_ua_css(TOP_LAYER_UA);
+    h
+}
+
+fn backdrop_index(paint: &PaintOrder, element: NodeId) -> Option<usize> {
+    paint
+        .items()
+        .iter()
+        .position(|item| item.kind == PaintItemKind::Backdrop { element })
+}
+
+fn element_index(paint: &PaintOrder, element: NodeId) -> usize {
+    paint
+        .items()
+        .iter()
+        .position(|item| item.node == element && item.kind == PaintItemKind::ElementBox)
+        .expect("the element paints a box")
+}
+
+#[test]
+fn a_top_layer_element_paints_after_the_roots_highest_z_index() {
+    let mut h = top_layer_harness(&abs_box(
+        ".high { z-index: 100; } .dialog { width: 50px; height: 50px; }",
+    ));
+    let root = h.root();
+    let dialog = h.el(root, "dialog.modal.dialog");
+    let high = h.el(root, "view.box.high");
+    assert_eq!(h.element_order(), vec![root, dialog, high]);
+
+    h.doc.dom.add_to_top_layer(dialog, true);
+    assert_eq!(h.element_order(), vec![root, high, dialog]);
+    let paint = h.paint();
+    let backdrop = backdrop_index(&paint, dialog).expect("the default backdrop has a box");
+    assert_eq!(
+        backdrop + 1,
+        element_index(&paint, dialog),
+        "the backdrop paints immediately below its element"
+    );
+    assert_eq!(h.hit(25.0, 25.0), Some(dialog));
+}
+
+#[test]
+fn top_layer_entries_paint_in_insertion_order_and_a_readd_moves_to_the_top() {
+    let mut h = top_layer_harness(".dialog { width: 50px; height: 50px; }");
+    let root = h.root();
+    let first_in_tree = h.el(root, "dialog.modal.dialog");
+    let second_in_tree = h.el(root, "dialog.modal.dialog");
+    h.doc.dom.add_to_top_layer(second_in_tree, false);
+    h.doc.dom.add_to_top_layer(first_in_tree, false);
+    assert_eq!(h.element_order(), vec![root, second_in_tree, first_in_tree]);
+    assert_eq!(h.hit(25.0, 25.0), Some(first_in_tree));
+
+    h.doc.dom.add_to_top_layer(second_in_tree, false);
+    assert_eq!(h.element_order(), vec![root, first_in_tree, second_in_tree]);
+    assert_eq!(
+        h.doc
+            .dom
+            .top_layer()
+            .map(dom::TopLayerEntry::element)
+            .collect::<Vec<_>>(),
+        vec![first_in_tree, second_in_tree]
+    );
+    let paint = h.paint();
+    assert_eq!(
+        backdrop_index(&paint, second_in_tree).map(|index| index + 1),
+        Some(element_index(&paint, second_in_tree))
+    );
+    assert!(backdrop_index(&paint, first_in_tree) < Some(element_index(&paint, first_in_tree)));
+    assert_eq!(h.hit(25.0, 25.0), Some(second_in_tree));
+}
+
+/// css-position-4 §3.1: a top-layer element is a sibling of the root's
+/// stacking context, so none of its ancestors' effects, clips or
+/// transforms reach it.
+#[test]
+fn a_top_layer_element_escapes_its_ancestors_group_clip_and_transform() {
+    let mut h = top_layer_harness(
+        ".fx { display: flex; opacity: 0.5; overflow: clip; transform: translate(30px, 40px);
+               width: 20px; height: 20px; }
+         .dialog { width: 50px; height: 50px; }",
+    );
+    let root = h.root();
+    let fx = h.el(root, "view.fx");
+    let dialog = h.el(fx, "dialog.modal.dialog");
+    h.doc.dom.add_to_top_layer(dialog, false);
+    let paint = h.paint();
+    let index = element_index(&paint, dialog);
+    let item = &paint.items()[index];
+    assert_eq!(item.clip, None, "no ancestor clip chain");
+    assert_eq!(item.space, None, "no ancestor space");
+    assert_eq!(
+        item.transform,
+        euclid::default::Transform3D::identity(),
+        "no ancestor transform, and a static position of zero"
+    );
+    assert!(
+        paint
+            .layers()
+            .iter()
+            .all(|layer| !layer.items.contains(&index)),
+        "in no ancestor's group"
+    );
+    let backdrop = &paint.items()[backdrop_index(&paint, dialog).expect("has a box")];
+    assert_eq!(backdrop.size, euclid::default::Size2D::new(800.0, 600.0));
+    assert_eq!(backdrop.clip, None);
+}
+
+#[test]
+fn the_inert_floor_is_set_only_while_an_entry_blocks_the_document() {
+    let mut h = top_layer_harness(&abs_box(
+        ".dialog { left: 100px; top: 100px; width: 100px; height: 100px; }
+         .child { display: flex; width: 20px; height: 20px; }",
+    ));
+    let root = h.root();
+    let under = h.el(root, "view.box");
+    let dialog = h.el(root, "dialog.modal.dialog");
+    let child = h.el(dialog, "view.child");
+    assert_eq!(h.paint().inert_floor(), None);
+
+    h.doc.dom.add_to_top_layer(dialog, false);
+    assert_eq!(h.paint().inert_floor(), None, "a non-blocking entry");
+    // The backdrop covers the viewport and reports its element.
+    assert_eq!(h.hit(50.0, 50.0), Some(dialog));
+
+    h.doc.dom.add_to_top_layer(dialog, true);
+    assert!(h.doc.dom.blocks_document(dialog));
+    let paint = h.paint();
+    assert_eq!(paint.inert_floor(), backdrop_index(&paint, dialog));
+    assert_eq!(
+        h.hit(50.0, 50.0),
+        Some(dialog),
+        "the backdrop reports its element"
+    );
+    assert_eq!(h.hit(110.0, 110.0), Some(child));
+    assert_eq!(h.hit(150.0, 150.0), Some(dialog));
+
+    // With no backdrop box, the document below the floor is still inert.
+    h.doc.add_css("dialog::backdrop { display: none; }");
+    let paint = h.paint();
+    assert_eq!(backdrop_index(&paint, dialog), None);
+    assert_eq!(paint.inert_floor(), Some(element_index(&paint, dialog)));
+    assert_eq!(h.hit(50.0, 50.0), None, "`under` is below the floor");
+    assert_eq!(
+        h.doc
+            .dom
+            .elements_from_point(Point2D::new(50.0, 50.0))
+            .as_slice(),
+        &[] as &[NodeId]
+    );
+    let _ = under;
+}
+
+#[test]
+fn a_non_blocking_entry_above_a_blocking_one_stays_hit_testable() {
+    let mut h = top_layer_harness(
+        ".dialog { left: 0; top: 0; width: 100px; height: 100px; }
+         dialog::backdrop { display: none; }",
+    );
+    let root = h.root();
+    let modal = h.el(root, "dialog.modal.dialog");
+    let popup = h.el(root, "dialog.modal.dialog");
+    h.doc.dom.add_to_top_layer(modal, true);
+    h.doc.dom.add_to_top_layer(popup, false);
+    let paint = h.paint();
+    assert_eq!(paint.inert_floor(), Some(element_index(&paint, modal)));
+    assert_eq!(h.hit(50.0, 50.0), Some(popup));
+    h.doc.dom.remove_from_top_layer(popup);
+    assert_eq!(h.hit(50.0, 50.0), Some(modal));
+    h.doc.dom.remove_from_top_layer(modal);
+    assert_eq!(h.paint().inert_floor(), None);
+    assert!(!h.doc.dom.in_top_layer(modal));
+}
+
+#[test]
+fn a_backdrop_with_pointer_events_none_passes_hits_to_nothing_below_the_floor() {
+    let mut h = top_layer_harness(
+        ".dialog { left: 100px; top: 100px; width: 100px; height: 100px; }
+         dialog::backdrop { pointer-events: none; }",
+    );
+    let root = h.root();
+    let dialog = h.el(root, "dialog.modal.dialog");
+    h.doc.dom.add_to_top_layer(dialog, true);
+    assert_eq!(h.hit(50.0, 50.0), None);
+    h.doc.dom.add_to_top_layer(dialog, false);
+    assert_eq!(
+        h.hit(50.0, 50.0),
+        Some(root),
+        "nothing blocks, so the page answers"
+    );
+}
+
+/// Removing a top-layer element from the document takes it out of the top
+/// layer and frees its backdrop (HTML's removing steps), wherever in the
+/// removed subtree it was.
+#[test]
+fn removing_a_top_layer_element_drops_its_entry_and_frees_its_backdrop() {
+    let mut h = top_layer_harness(".dialog { width: 50px; height: 50px; }");
+    let root = h.root();
+    let wrapper = h.el(root, "view");
+    let dialog = h.el(wrapper, "dialog.modal.dialog");
+    h.doc.dom.add_to_top_layer(dialog, true);
+    let backdrop = h
+        .doc
+        .dom
+        .arenas()
+        .top_layer()
+        .entries()
+        .first()
+        .expect("one entry")
+        .backdrop;
+    assert_eq!(h.doc.dom.backdrop_origin(backdrop), Some(dialog));
+    assert!(h.doc.dom.get(backdrop).is_some());
+    h.paint();
+
+    h.doc.dom.remove_element(wrapper);
+    assert!(!h.doc.dom.in_top_layer(dialog));
+    assert_eq!(h.doc.dom.top_layer().count(), 0);
+    assert!(
+        h.doc.dom.get(backdrop).is_none(),
+        "the backdrop node is freed"
+    );
+    assert_eq!(h.doc.dom.backdrop_origin(backdrop), None);
+    assert_eq!(h.paint().inert_floor(), None);
+    // Reinsertion does not restore membership.
+    h.doc.dom.append_child(root, wrapper);
+    assert!(!h.doc.dom.in_top_layer(dialog));
+}
+
+/// A touch inside a scrolling modal dialog scrolls the dialog, and the
+/// chain ends there: nothing behind it is reachable.
+#[test]
+fn a_scrolling_modal_dialog_chains_to_nothing_behind_it() {
+    let mut h = top_layer_harness(
+        "page { overflow: scroll; }
+         .dialog { left: 0; top: 0; width: 100px; height: 100px; overflow: scroll;
+                   flex-direction: column; }
+         .tall { display: flex; flex-shrink: 0; width: 100px; height: 400px; }
+         .page-tall { display: flex; flex-shrink: 0; width: 10px; height: 2000px; }",
+    );
+    let root = h.root();
+    h.el(root, "view.page-tall");
+    let dialog = h.el(root, "dialog.modal.dialog");
+    h.el(dialog, "view.tall");
+    h.doc.dom.add_to_top_layer(dialog, true);
+    h.doc.dom.render();
+    let frame = h.doc.dom.commit();
+    let target = frame
+        .hit(Point2D::new(50.0, 50.0), &|_| None, None)
+        .expect("the dialog's content is hit");
+    let slot = target.scroll.expect("the dialog is a scroll container");
+    let slots = frame.scroll_slots();
+    assert_eq!(slots[slot as usize].node, dialog);
+    assert_eq!(
+        slots[slot as usize].parent, None,
+        "the chain ends at the dialog"
+    );
+    let outside = frame
+        .hit(Point2D::new(500.0, 500.0), &|_| None, None)
+        .expect("the backdrop is hit");
+    assert_eq!(outside.node, dialog);
+    assert_eq!(outside.scroll, None, "a backdrop hit scrolls nothing");
+}
+
+/// A top-layer element inside a scrolled scroller stays where the viewport
+/// places it: no ancestor scroll offset reaches it, in paint or in hits.
+#[test]
+fn a_top_layer_element_ignores_its_ancestors_scroll_offset() {
+    let mut h = top_layer_harness(
+        ".scroller { display: flex; flex-direction: column; position: relative;
+                     overflow: scroll; width: 200px; height: 200px; }
+         .tall { display: flex; flex-shrink: 0; width: 200px; height: 1000px; }
+         .dialog { left: 300px; top: 100px; width: 50px; height: 50px; }
+         dialog::backdrop { display: none; }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    h.el(scroller, "view.tall");
+    let dialog = h.el(scroller, "dialog.modal.dialog");
+    h.doc.dom.add_to_top_layer(dialog, true);
+    h.doc.dom.layout();
+    h.doc
+        .dom
+        .scroll_to(scroller, crate::Vector2D::new(0.0, 300.0));
+    let paint = h.paint();
+    let item = &paint.items()[element_index(&paint, dialog)];
+    assert_eq!(item.space, None);
+    assert_eq!(
+        item.transform,
+        euclid::default::Transform3D::translation(300.0, 100.0, 0.0)
+    );
+    assert_eq!(h.hit(310.0, 110.0), Some(dialog));
+    assert_eq!(
+        h.doc
+            .dom
+            .bounding_client_rect(dialog)
+            .map(|rect| (rect.origin.x, rect.origin.y)),
+        Some((300.0, 100.0))
+    );
+}
