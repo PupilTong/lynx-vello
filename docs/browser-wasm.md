@@ -121,6 +121,18 @@ what keeps the two from deadlocking, and its only cost per image is the pixel
 read-back. The resource system's diagnostics — an image that failed, a missing
 decoder — reach `console.warn`.
 
+SVG documents are the exception: the browser no longer decodes them through
+`HTMLImageElement`. Once preprocessing says the bytes are `image/svg+xml`,
+the Render Worker parses them with `usvg` inline in the load's local task,
+exactly as the native targets do on their blocking pool, and reports the
+parsed tree as a vector image the engine draws itself
+(`docs/svg-vector-images-design.md`). Nothing reaches the main thread, no
+bitmap is allocated, and an evicted SVG has nothing to restore. All three
+targets therefore render an SVG the same way. `usvg` is built without its
+`svgz` feature, so a body that is still gzip-compressed (a `.svgz` file
+served without `Content-Encoding: gzip`, or registered as is) fails to load
+on every target; this is a documented gap.
+
 `loadLynxXml(url)` similarly fetches the source envelope once and decodes it
 with the browser's replacement-mode UTF-8 `TextDecoder`, matching web-core's
 raw XML loader. Rust's `bobcat-source::xml` parser validates and extracts the sections in

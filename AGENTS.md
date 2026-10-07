@@ -1667,7 +1667,8 @@ including pending loads and failures, are shared by resolved URL within a
 resource scope. Preload hints populate that same cache; registration changes
 invalidate the affected URLs.
 
-**Platform image decoding**: no codec is compiled in — `ImageIO` on macOS
+**Platform image decoding** (raster images; SVG is parsed, below): no codec
+is compiled in — `ImageIO` on macOS
 (`CGImageSourceCreateThumbnailAtIndex` with a maximum pixel size, so a photo
 shown small is decoded small), gdk-pixbuf on Linux (loaded at runtime;
 `gdk_pixbuf_loader_set_size` from the header probe), and the main thread's
@@ -1683,6 +1684,24 @@ closure becomes that image's or source's reported failure. In the browser a
 load is a local task instead. Either way completions are delivered through the
 wakeup the embedder supplies and applied in the next `LynxView::pump` through
 `service_images`.
+
+**SVG documents are parsed, not decoded**, on every target: once
+preprocessing settles `ImageFormat::Svg`, the load calls
+`dom::VectorImage::parse` (one `roxmltree` parse, the root's `width`,
+`height` and `viewBox` read for the natural size and viewport, then
+`usvg::Tree::from_xmltree`) natively inside the same blocking-pool closure
+that fetched the bytes, with no decode permit, and inline in the browser's
+local task. The browser therefore no longer renders SVG through its `Image`
+element. The `usvg::Options` read nothing outside the document:
+`resources_dir: None` and an `image_href_resolver` whose `resolve_string`
+answers `None` (the default reads the filesystem), so only a nested `data:`
+image resolves. The result is reported through
+`ImageReports::loaded_vector` and kept as an `Entry::Vector`: no bitmap, so
+the memory tier, refinement and restore never see it, `read` answers `None`,
+`is_resident` is false, and the encoded bytes are dropped once parsed. `usvg`
+is built without its `svgz` feature, so a gzip-compressed `.svgz` fails to
+load (documented gap). A document labelled with a specific non-SVG type such
+as `text/plain` is trusted as that type and is not an image (`mime::sniff`).
 
 The frame reads each image at the size it draws it: a resident bitmap far
 larger than its draw is re-decoded at the drawn size in the background and
