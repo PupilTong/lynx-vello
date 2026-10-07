@@ -1417,7 +1417,8 @@ is written inside), `tree::text` (the paragraph attribute limits and what may
 generate a box inside a run), `tree::image` (the `src`-to-replaced-content
 reflection and its UA box), `tree::svg` (`svg`: `src`, or `content` as a
 percent-encoded `data:image/svg+xml` URL, reflected into the same image source
-as `image`, last attribute written wins, an uncontained `display: flex` box
+as `image`, last attribute written wins, an empty or removed `content` keeping
+the current source as web-core does, an uncontained `display: flex` box
 that takes its natural size when unsized, and a non-bubbling `load` whose
 detail is the element's border-box layout size, posted only after the commit
 that laid it out; no `error`), `tree::scroll_container` (`scroll-view` and

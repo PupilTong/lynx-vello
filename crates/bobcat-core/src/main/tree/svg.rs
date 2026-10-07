@@ -20,8 +20,13 @@
 //!
 //! The last attribute written wins: both callbacks write the same source, as
 //! in web-core, where both end up assigning the shadow `<img>`'s `src`. An
-//! empty value or a removal of either attribute means no source, as in
-//! [`super::image`].
+//! empty value or a removal of `src` means no source, as in
+//! [`super::image`]. An empty value or a removal of `content` leaves the
+//! element's current source as it is, whichever attribute set it: this is a
+//! web-core-vs-native difference, ruled for web-core, whose `_handleContent`
+//! (`lynx-stack/packages/web-platform/web-elements/src/elements/XSvg/XSvg.ts`)
+//! revokes its `Blob` URL on a `null` or empty `content` and does not touch
+//! the shadow `<img>`'s `src`.
 //!
 //! Cost: the full data URL is the key in `dom`'s image registry and in the
 //! host's resource entries, and neither evicts, so every distinct `content`
@@ -121,10 +126,11 @@ impl CustomElement<()> for Svg {
         let new = new.filter(|value| !value.is_empty());
         let outcome = match name {
             SRC_ATTRIBUTE => document.set_image_source(element, ImageRole::Source, new),
-            CONTENT_ATTRIBUTE => {
-                let source = new.map(content_url);
-                document.set_image_source(element, ImageRole::Source, source.as_deref())
-            }
+            // No `content` keeps the current source (web-core's
+            // `_handleContent`; see the module docs).
+            CONTENT_ATTRIBUTE => new.and_then(|content| {
+                document.set_image_source(element, ImageRole::Source, Some(&content_url(content)))
+            }),
             other => {
                 debug_assert!(false, "`svg` does not observe `{other}`");
                 None
@@ -325,33 +331,84 @@ mod tests {
         );
     }
 
-    /// An empty value or a removal names nothing, whichever attribute it is
-    /// on, as in `<image>`.
+    /// An empty value or a removal of `src` names nothing, as in `<image>`.
     #[test]
-    fn an_empty_or_removed_attribute_names_no_source() {
-        for attribute in [SRC_ATTRIBUTE, CONTENT_ATTRIBUTE] {
-            let mut document = document();
-            let element = svg(&mut document, "");
-            document.set_attribute(element, attribute, "");
-            assert!(document.take_wanted_images().is_empty(), "{attribute}");
+    fn an_empty_or_removed_src_names_no_source() {
+        let mut document = document();
+        let element = svg(&mut document, "");
+        document.set_attribute(element, SRC_ATTRIBUTE, "");
+        assert!(document.take_wanted_images().is_empty());
 
-            document.set_attribute(element, attribute, "<svg/>");
-            assert_eq!(document.take_wanted_images().len(), 1, "{attribute}");
-            document.remove_attribute(element, attribute);
+        for clear in [Some(""), None] {
+            document.set_attribute(element, SRC_ATTRIBUTE, SOURCE);
+            if let Some(value) = clear {
+                document.set_attribute(element, SRC_ATTRIBUTE, value);
+            } else {
+                document.remove_attribute(element, SRC_ATTRIBUTE);
+            }
             document.layout();
             assert!(
                 document.rounded_layout(element).is_some(),
-                "the element still has a box: {attribute}"
+                "the element still has a box: {clear:?}"
             );
-            let source = if attribute == SRC_ATTRIBUTE {
-                "<svg/>".to_owned()
-            } else {
-                content_url("<svg/>")
-            };
             assert_eq!(
-                document.apply_image_events(&[loaded(&source)]),
+                document.apply_image_events(&[loaded(SOURCE)]),
                 Vec::new(),
-                "a removed source answers for nobody: {attribute}"
+                "a cleared `src` answers for nobody: {clear:?}"
+            );
+        }
+    }
+
+    /// An empty value or a removal of `content` keeps whatever source the
+    /// element has, as web-core's `_handleContent` does: the `src` written
+    /// after it, or the `content`'s own `data:` URL.
+    #[test]
+    fn an_empty_or_removed_content_keeps_the_current_source() {
+        let outcome = |element| {
+            vec![ImageOutcome::Loaded {
+                node: element,
+                width: 30,
+                height: 15,
+            }]
+        };
+        for clear in [Some(""), None] {
+            let clear_content = |document: &mut LynxDocument, element| {
+                if let Some(value) = clear {
+                    document.set_attribute(element, CONTENT_ATTRIBUTE, value);
+                } else {
+                    document.remove_attribute(element, CONTENT_ATTRIBUTE);
+                }
+            };
+
+            let mut document = document();
+            let element = svg(&mut document, "");
+            document.set_attribute(element, CONTENT_ATTRIBUTE, "");
+            assert!(
+                document.take_wanted_images().is_empty(),
+                "an empty `content` names nothing: {clear:?}"
+            );
+
+            // `src` written after `content` stays when `content` goes.
+            document.set_attribute(element, CONTENT_ATTRIBUTE, "<svg/>");
+            document.set_attribute(element, SRC_ATTRIBUTE, SOURCE);
+            let _ = document.take_wanted_images();
+            clear_content(&mut document, element);
+            assert!(document.take_wanted_images().is_empty(), "{clear:?}");
+            assert_eq!(
+                document.apply_image_events(&[loaded(SOURCE)]),
+                outcome(element),
+                "`src` is still the source: {clear:?}"
+            );
+
+            // So does the `content`'s own source when it was the last written.
+            let mut document = super::super::test_support::document();
+            let element = svg(&mut document, "");
+            document.set_attribute(element, CONTENT_ATTRIBUTE, "<svg/>");
+            clear_content(&mut document, element);
+            assert_eq!(
+                document.apply_image_events(&[loaded(&content_url("<svg/>"))]),
+                outcome(element),
+                "the `data:` URL is still the source: {clear:?}"
             );
         }
     }
