@@ -79,6 +79,9 @@ impl Harness {
                 ImageEvent::Loaded {
                     source: reported, ..
                 }
+                | ImageEvent::LoadedVector {
+                    source: reported, ..
+                }
                 | ImageEvent::Failed { source: reported } => &**reported == source,
             }) {
                 return event;
@@ -92,6 +95,7 @@ impl Harness {
         self.view.request_image(source);
         match self.settle(source) {
             ImageEvent::Loaded { width, height, .. } => (width, height),
+            ImageEvent::LoadedVector { image, .. } => image.natural_size(),
             ImageEvent::Failed { .. } => {
                 panic!("`{source}` failed: {:?}", self.resources.take_notes())
             }

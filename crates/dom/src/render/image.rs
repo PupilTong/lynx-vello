@@ -63,16 +63,115 @@
 //! Only the element's own source produces an [`ImageOutcome`], which is what
 //! an embedder turns into a `load` or an `error`. A placeholder is an interim
 //! picture the page did not ask about, so neither of its endings is an event.
+//!
+//! # Vector images
+//!
+//! An SVG document is not pixels. The host parses it into a [`VectorImage`]
+//! (a `usvg` tree plus its natural size and viewport) and reports it through
+//! [`ImageReports::loaded_vector`]; the tree travels to the document inside
+//! [`ImageEvent::LoadedVector`] and the registry keeps it in the loaded
+//! entry. The paint walk encodes it straight into the fragment scene, the way
+//! it encodes a gradient, through the scene [`VectorImage::scene`] builds once
+//! (`paint/svg.rs`). A vector image is therefore never an image draw:
+//! [`FrameImages`] is never asked for it, and no bitmap budget applies.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use vello::peniko::ImageData;
 
 use crate::NodeId;
+use crate::vello::Scene;
+
+/// A parsed SVG document, drawable at any size.
+///
+/// Built by the host from the document's bytes and reported through
+/// [`ImageReports::loaded_vector`]. It carries two sizes, both computed by the
+/// host from the root element's `width`, `height` and `viewBox`:
+///
+/// - the **natural size**, in whole CSS px, which layout reads exactly as it reads a bitmap's
+///   intrinsic size (CSS Images 3 default sizing; see `docs/svg-vector-images-design.md`);
+/// - the **viewport**, the rectangle in tree units that a draw maps onto its destination rectangle.
+///   A draw scales by `extent / viewport` per axis, never by `extent / tree.size()`: `usvg`
+///   overwrites `size()` with the content bounding box for a root that has neither a `viewBox` nor
+///   an absolute dimension.
+///
+/// The vello scene the tree encodes to is built on the first draw and kept
+/// for the image's life, so every later draw is one `Scene::append`. Cloning
+/// shares the tree; a clone made before the first draw builds its own scene.
+#[derive(Clone)]
+pub struct VectorImage {
+    tree: Arc<usvg::Tree>,
+    natural: (u32, u32),
+    viewport: (f32, f32),
+    scene: OnceLock<Arc<Scene>>,
+}
+
+/// The tree crosses from the painter's thread to the document's inside an
+/// [`ImageEvent`], and the cached scene is published inside the registry, so
+/// both must be `Send + Sync`.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<usvg::Tree>();
+    assert_send_sync::<Scene>();
+    assert_send_sync::<VectorImage>();
+};
+
+impl VectorImage {
+    /// A vector image over `tree`, laid out at `natural` CSS px and mapping
+    /// the `viewport` rectangle of tree units onto each draw.
+    #[must_use]
+    pub fn new(tree: Arc<usvg::Tree>, natural: (u32, u32), viewport: (f32, f32)) -> Self {
+        Self {
+            tree,
+            natural,
+            viewport,
+            scene: OnceLock::new(),
+        }
+    }
+
+    /// The size layout is told, in whole CSS px.
+    #[must_use]
+    pub fn natural_size(&self) -> (u32, u32) {
+        self.natural
+    }
+
+    /// The rectangle in tree units a draw maps onto its destination.
+    #[must_use]
+    pub fn viewport(&self) -> (f32, f32) {
+        self.viewport
+    }
+
+    /// The parsed document.
+    pub(crate) fn tree(&self) -> &usvg::Tree {
+        &self.tree
+    }
+
+    /// The tree encoded as a vello scene in tree units, built on the first
+    /// call and returned from the cache after that.
+    #[must_use]
+    pub fn scene(&self) -> &Arc<Scene> {
+        self.scene.get_or_init(|| {
+            let mut scene = Scene::new();
+            crate::paint::svg::encode(&self.tree, &mut scene);
+            Arc::new(scene)
+        })
+    }
+}
+
+impl std::fmt::Debug for VectorImage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VectorImage")
+            .field("natural", &self.natural)
+            .field("viewport", &self.viewport)
+            .field("scene_built", &self.scene.get().is_some())
+            .finish_non_exhaustive()
+    }
+}
 
 /// Largest per-axis pixel count vello can render.
 ///
@@ -284,6 +383,20 @@ impl ImageReports {
         });
     }
 
+    /// `source` is an SVG document, parsed into `image`.
+    ///
+    /// The same contract as [`ImageReports::loaded`]: reported once per
+    /// source, and never retracted. The natural size the image carries is
+    /// what layout reads; a zero axis is a failure.
+    ///
+    /// Non-blocking, and it must not re-enter the store.
+    pub fn loaded_vector(&self, source: &str, image: VectorImage) {
+        self.post(ImageEvent::LoadedVector {
+            source: Arc::from(source),
+            image,
+        });
+    }
+
     /// `source` will not produce pixels. Terminal; the engine does not retry.
     pub fn failed(&self, source: &str) {
         self.post(ImageEvent::Failed {
@@ -342,19 +455,29 @@ impl ImageInbox {
 
 /// One report from the store, on its way to the document.
 ///
-/// `Send` by construction: an `Arc<str>` and integers. Unlike the sink, this
-/// really does cross a thread — the painter forwards a batch of these to the
-/// Lynx main thread — and the `Arc` is what makes that legal. There is no
-/// variant that could carry pixels, which is what makes "`ImageData` never
-/// crosses a channel" a property of the type rather than a rule to
-/// remember.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `Send` by construction: an `Arc<str>`, integers and a [`VectorImage`],
+/// whose tree is `Send + Sync`. Unlike the sink, this really does cross a
+/// thread — the painter forwards a batch of these to the Lynx main thread —
+/// and the `Arc`s are what make that legal. There is no variant that could
+/// carry pixels (a parsed vector tree is not pixels), which is what makes
+/// "`ImageData` never crosses a channel" a property of the type rather than
+/// a rule to remember.
+///
+/// Not `PartialEq`: a [`VectorImage`] has no meaningful equality, and every
+/// consumer matches events by pattern.
+#[derive(Clone, Debug)]
 pub enum ImageEvent {
     /// Pixels exist for this source, with these intrinsic dimensions.
     Loaded {
         source: Arc<str>,
         width: u32,
         height: u32,
+    },
+    /// This source is an SVG document, parsed. Its natural size is the
+    /// intrinsic size layout reads.
+    LoadedVector {
+        source: Arc<str>,
+        image: VectorImage,
     },
     /// This source will never produce pixels.
     Failed { source: Arc<str> },
@@ -364,16 +487,29 @@ pub enum ImageEvent {
 ///
 /// `Pending` is the only state with outgoing edges; both others are sinks,
 /// which is the whole of "the document's image state never regresses".
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 enum ImageState {
     /// Asked for; no pixels yet.
     #[default]
     Pending,
     /// The only drawable state — so a frame naming an image that is not
     /// loaded is unrepresentable rather than filtered out later.
-    Ready { width: u32, height: u32 },
+    Ready {
+        width: u32,
+        height: u32,
+        kind: ImageKind,
+    },
     /// Terminal.
     Failed,
+}
+
+/// What a loaded image draws from.
+#[derive(Debug)]
+enum ImageKind {
+    /// Pixels the host holds, read through [`FrameImages`] at compose time.
+    Raster,
+    /// A parsed SVG document, encoded into the frame on the document thread.
+    Vector(VectorImage),
 }
 
 /// Which of a replaced element's two sources a binding is.
@@ -398,7 +534,8 @@ pub enum ImageRole {
 /// — there is no variant naming a placeholder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageOutcome {
-    /// The element's source has pixels, with this intrinsic size.
+    /// The element's source has loaded, as pixels or as a parsed vector
+    /// document, with this intrinsic size.
     Loaded {
         node: NodeId,
         width: u32,
@@ -407,6 +544,11 @@ pub enum ImageOutcome {
     /// The element's source will never produce pixels.
     Failed { node: NodeId },
 }
+
+/// What [`ImageRegistry::resolve`] hands a draw: the source's name (the
+/// registry's own key), its intrinsic dimensions, and its parsed tree when it
+/// is a vector image.
+pub(crate) type Resolved<'a> = (Arc<str>, (f64, f64), Option<&'a VectorImage>);
 
 /// What applying one report moved.
 pub(crate) struct ImageApplied {
@@ -461,21 +603,32 @@ impl std::fmt::Debug for ImageRegistry {
 }
 
 impl ImageRegistry {
-    /// The draw name and intrinsic dimensions for `source`, requesting it if
-    /// this is the registry's first sighting.
+    /// The draw name and intrinsic dimensions for `source`, and its parsed
+    /// tree when it is a vector image, requesting it if this is the
+    /// registry's first sighting.
     ///
     /// `None` means "paint nothing this frame": pending, or failed. A pending
     /// image is the one-frame gap between a source appearing and its pixels
     /// arriving, which is what a browser shows for a not-yet-loaded image.
     ///
     /// The name handed back is the map's own key, so every draw of one source
-    /// in one frame shares one allocation.
-    pub(crate) fn resolve(&self, source: &str) -> Option<(Arc<str>, (f64, f64))> {
+    /// in one frame shares one allocation. The vector image is a borrow of
+    /// the entry's own, so a draw clones nothing.
+    pub(crate) fn resolve(&self, source: &str) -> Option<Resolved<'_>> {
         let (key, entry) = self.sight(source)?;
-        match entry.state {
-            ImageState::Ready { width, height } => {
-                Some((Arc::clone(key), (f64::from(width), f64::from(height))))
-            }
+        match &entry.state {
+            ImageState::Ready {
+                width,
+                height,
+                kind,
+            } => Some((
+                Arc::clone(key),
+                (f64::from(*width), f64::from(*height)),
+                match kind {
+                    ImageKind::Raster => None,
+                    ImageKind::Vector(image) => Some(image),
+                },
+            )),
             ImageState::Pending | ImageState::Failed => None,
         }
     }
@@ -488,7 +641,7 @@ impl ImageRegistry {
         &self,
         source: Option<&str>,
         placeholder: Option<&str>,
-    ) -> Option<(Arc<str>, (f64, f64))> {
+    ) -> Option<Resolved<'_>> {
         source
             .and_then(|source| self.resolve(source))
             .or_else(|| placeholder.and_then(|placeholder| self.resolve(placeholder)))
@@ -583,22 +736,36 @@ impl ImageRegistry {
                 ImageState::Ready {
                     width: *width,
                     height: *height,
+                    kind: ImageKind::Raster,
                 },
             ),
-            ImageEvent::Loaded { source, .. } | ImageEvent::Failed { source } => {
-                (source, ImageState::Failed)
+            ImageEvent::LoadedVector { source, image }
+                if image.natural.0 > 0 && image.natural.1 > 0 =>
+            {
+                (
+                    source,
+                    ImageState::Ready {
+                        width: image.natural.0,
+                        height: image.natural.1,
+                        kind: ImageKind::Vector(image.clone()),
+                    },
+                )
             }
+            ImageEvent::Loaded { source, .. }
+            | ImageEvent::LoadedVector { source, .. }
+            | ImageEvent::Failed { source } => (source, ImageState::Failed),
         };
         let entry = self.entry_for(source);
-        if entry.state != ImageState::Pending {
+        if !matches!(entry.state, ImageState::Pending) {
             return None;
         }
+        let loaded = match &state {
+            ImageState::Ready { width, height, .. } => Some((*width, *height)),
+            ImageState::Pending | ImageState::Failed => None,
+        };
         entry.state = state;
         Some(ImageApplied {
-            loaded: match state {
-                ImageState::Ready { width, height } => Some((width, height)),
-                ImageState::Pending | ImageState::Failed => None,
-            },
+            loaded,
             nodes: entry.nodes.clone(),
         })
     }
@@ -611,12 +778,12 @@ impl ImageRegistry {
     /// by nothing else ever again — one URL is reported once — so this is the
     /// only place a second mount of a known URL can learn what it got.
     pub(crate) fn outcome_for(&self, source: &str, node: NodeId) -> Option<ImageOutcome> {
-        match self.entries.get(source)?.state {
+        match &self.entries.get(source)?.state {
             ImageState::Pending => None,
-            ImageState::Ready { width, height } => Some(ImageOutcome::Loaded {
+            ImageState::Ready { width, height, .. } => Some(ImageOutcome::Loaded {
                 node,
-                width,
-                height,
+                width: *width,
+                height: *height,
             }),
             ImageState::Failed => Some(ImageOutcome::Failed { node }),
         }
@@ -642,8 +809,8 @@ impl ImageRegistry {
 
     /// The intrinsic dimensions already known for `source`, if it has loaded.
     fn dimensions_of(&self, source: &str) -> Option<(u32, u32)> {
-        match self.entries.get(source)?.state {
-            ImageState::Ready { width, height } => Some((width, height)),
+        match &self.entries.get(source)?.state {
+            ImageState::Ready { width, height, .. } => Some((*width, *height)),
             ImageState::Pending | ImageState::Failed => None,
         }
     }
@@ -721,18 +888,20 @@ mod tests {
         reports.loaded("app:///a.png", 4, 4);
         reports.failed("app:///b.png");
 
-        assert_eq!(
-            inbox.drain(),
-            vec![
-                super::ImageEvent::Loaded {
-                    source: Arc::from("app:///a.png"),
-                    width: 4,
-                    height: 4
-                },
-                super::ImageEvent::Failed {
-                    source: Arc::from("app:///b.png")
-                },
-            ]
+        let drained = inbox.drain();
+        assert!(
+            matches!(
+                drained.as_slice(),
+                [
+                    super::ImageEvent::Loaded {
+                        source: loaded,
+                        width: 4,
+                        height: 4
+                    },
+                    super::ImageEvent::Failed { source: failed },
+                ] if &**loaded == "app:///a.png" && &**failed == "app:///b.png"
+            ),
+            "{drained:?}"
         );
         assert!(inbox.drain().is_empty(), "a drain empties the inbox");
     }
@@ -839,7 +1008,7 @@ mod tests {
         assert!(registry.resolve("app:///a.png").is_none());
 
         registry.apply(&loaded("app:///a.png", 40, 20));
-        let (source, dimensions) = registry
+        let (source, dimensions, _) = registry
             .resolve("app:///a.png")
             .expect("a loaded image resolves");
         assert_eq!(source.as_ref(), "app:///a.png");
@@ -856,7 +1025,7 @@ mod tests {
         registry.take_wanted();
         registry.apply(&loaded("app:///huge.png", 12_000, 6_000));
 
-        let (_, dimensions) = registry
+        let (_, dimensions, _) = registry
             .resolve("app:///huge.png")
             .expect("a huge image is drawable — it is the bitmap that is bounded, not this");
         assert!((dimensions.0 - 12_000.0).abs() < f64::EPSILON);
@@ -915,7 +1084,7 @@ mod tests {
             registry.apply(&loaded("app:///a.png", 99, 99)).is_none(),
             "and a repeated report moves nothing"
         );
-        let (_, dimensions) = registry.resolve("app:///a.png").expect("still drawable");
+        let (_, dimensions, _) = registry.resolve("app:///a.png").expect("still drawable");
         assert!(
             (dimensions.0 - 10.0).abs() < f64::EPSILON,
             "the first content is the content"
@@ -1083,14 +1252,14 @@ mod tests {
         );
 
         registry.apply(&loaded("app:///p.png", 4, 4));
-        let (drawn, dimensions) = registry
+        let (drawn, dimensions, _) = registry
             .resolve_presented(source, placeholder)
             .expect("the placeholder draws while the source has nothing");
         assert_eq!(drawn.as_ref(), "app:///p.png");
         assert!((dimensions.0 - 4.0).abs() < f64::EPSILON);
 
         registry.apply(&loaded("app:///a.png", 12, 6));
-        let (drawn, _) = registry
+        let (drawn, _, _) = registry
             .resolve_presented(source, placeholder)
             .expect("the source took over");
         assert_eq!(drawn.as_ref(), "app:///a.png");

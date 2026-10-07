@@ -172,8 +172,8 @@ pub(crate) enum ToMain {
     /// painter posts meanwhile.
     Posted,
     /// The host's image reports: completed or failed loads. No variant can
-    /// carry pixels, which is what makes "`ImageData` never crosses a
-    /// channel" a property of the type.
+    /// carry pixels (a parsed vector tree is not pixels), which is what makes
+    /// "`ImageData` never crosses a channel" a property of the type.
     ImageEvents(Vec<dom::ImageEvent>),
     #[cfg(test)]
     Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),

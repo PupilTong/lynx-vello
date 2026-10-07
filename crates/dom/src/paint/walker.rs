@@ -1539,13 +1539,14 @@ fn paint_item<T>(
             // whose bitmap the node's natural size was recomputed from, so
             // `object-fit` fits the bitmap drawn here.
             let (source, placeholder) = document.image_sources(item.node);
-            if let Some((image, _)) = images.resolve_presented(source, placeholder) {
+            if let Some((image, _, vector)) = images.resolve_presented(source, placeholder) {
                 background::paint_replaced_content(
                     sink,
                     space,
                     style,
                     &fragment,
                     image,
+                    vector,
                     document.natural_size(item.node),
                 );
             }
