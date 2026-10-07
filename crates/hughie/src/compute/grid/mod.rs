@@ -503,12 +503,55 @@ fn final_outer_size(metrics: &ResolvedContainerBox, tracks: Size<f32>) -> Size<f
     )
 }
 
+/// css-sizing-3 §5.2.2's fit-content size, `min(max-content, max(min-content,
+/// stretch-fit))`, of a container's content box in its inline axis, where
+/// `intrinsic` sizes the container's tracks under the min- or max-content
+/// constraint it is handed and answers their used size.
+///
+/// The max-content size is the answer whenever it fits the stretch-fit size,
+/// so the min-content run happens only when it overflows.
+fn fit_content_inner_size(
+    stretch_fit: f32,
+    mut intrinsic: impl FnMut(AvailableSpace) -> f32,
+) -> f32 {
+    let max_content = intrinsic(AvailableSpace::MaxContent);
+    if max_content <= stretch_fit {
+        return max_content;
+    }
+    let min_content = intrinsic(AvailableSpace::MinContent);
+    max_content.min(min_content.max(stretch_fit))
+}
+
+/// The used inner size, on `axis`, of a container whose content box comes to
+/// `content`: the outer size its min/max sizes clamp, less padding and border.
+fn clamped_inner_axis(metrics: &ResolvedContainerBox, axis: Axis, content: f32) -> f32 {
+    (final_outer_axis(metrics, axis, content) - axis.size(metrics.box_inset)).max(0.0)
+}
+
 /// The container-level values a Grid-family algorithm resolves before it looks
-/// at any item: the box metrics with the intrinsic-keyword available-space
-/// override applied, which axes the style itself makes definite, and the
-/// percentage bases that templates and gutters resolve against.
+/// at any item: the box metrics with the available grid space applied (below),
+/// which axes the style itself makes definite, and the percentage bases that
+/// templates and gutters resolve against.
+///
+/// css-grid-2 §12.1's available grid space has two cases only: the grid
+/// container's size where it is definite, otherwise the min- or max-content
+/// constraint it is sized under. A definite *available* size with no size of
+/// the container's own — an absolutely positioned box that does not stretch
+/// (css-position-3 §4.1), `fit-content`, an unstretched flex or grid item
+/// (css-grid-2 §6.2) — is neither: the container is sized first, by
+/// css-sizing-3, and its tracks then against that size. In the block axis that
+/// size is the max-content size (css-sizing-3 §5.2: for a box like this one,
+/// whose min- and max-content block sizes coincide, `fit-content` and `auto`
+/// both come to it), so `metrics.available_inner.height` becomes a max-content
+/// constraint here. In the inline axis it is the fit-content size between the
+/// two intrinsic sizes, which only the algorithm's own track-sizing runs
+/// produce: `fit_content_width` hands it the stretch-fit size to resolve that
+/// against ([`fit_content_inner_size`]), and while it is `Some`,
+/// `metrics.available_inner.width` is that stretch-fit size, not the available
+/// grid space.
 struct ContainerPrologue {
     metrics: ResolvedContainerBox,
+    fit_content_width: Option<f32>,
     style_definite: Size<bool>,
     percentage_basis: Size<Option<f32>>,
     gap: Size<f32>,
@@ -541,6 +584,14 @@ fn container_prologue<S: CoreStyle>(style: &S, input: LayoutInput) -> ContainerP
                 _ => metrics.available_inner.height,
             };
         }
+    }
+    let fit_content_width = if metrics.inner.width.is_none() {
+        metrics.available_inner.width.definite_value()
+    } else {
+        None
+    };
+    if metrics.inner.height.is_none() && metrics.available_inner.height.is_definite() {
+        metrics.available_inner.height = AvailableSpace::MaxContent;
     }
     let percentage_basis = Size::new(
         outer_definite
@@ -589,6 +640,7 @@ fn container_prologue<S: CoreStyle>(style: &S, input: LayoutInput) -> ContainerP
     let repeat_count_gap = resolve_gap(gap_value, repeat_count_basis);
     ContainerPrologue {
         metrics,
+        fit_content_width,
         style_definite,
         percentage_basis,
         gap,
@@ -671,9 +723,10 @@ fn relative_item_offset<N>(item: &GridItem<N>) -> Point<f32> {
 }
 
 /// One item's child sizing inputs inside an area: the dimensions the area
-/// decides for it, and the available space each axis offers. An axis whose
-/// area is `None` is indefinite — nothing stretches into it, and it offers
-/// max-content space.
+/// decides for it, and the available space each axis offers: the area, less
+/// the item's margins, whether the item stretches into it or fit-contents
+/// inside it. An axis whose area is `None` is indefinite — nothing stretches
+/// into it, and it offers max-content space.
 fn item_area_geometry<N>(
     item: &GridItem<N>,
     area: Size<Option<f32>>,
@@ -726,10 +779,12 @@ fn item_area_geometry<N>(
         IntrinsicTag::FitContent => axis
             .size(resolved_preferred)
             .map_or(AvailableSpace::MaxContent, AvailableSpace::Definite),
-        IntrinsicTag::None => match (axis.size(known), axis.size(inner)) {
-            (Some(_), Some(inner)) => AvailableSpace::Definite(inner),
-            _ => AvailableSpace::MaxContent,
-        },
+        // css-grid-2 §6.2: an item that is not stretched is sized as for
+        // `fit-content` within its area (css-sizing-3 §5.2.2), so its
+        // stretch-fit size is the area's, not a max-content constraint.
+        IntrinsicTag::None => axis
+            .size(inner)
+            .map_or(AvailableSpace::MaxContent, AvailableSpace::Definite),
     };
     (
         known,
@@ -1367,6 +1422,7 @@ where
     };
     let ContainerPrologue {
         metrics,
+        fit_content_width,
         style_definite,
         percentage_basis: initial_percentage_basis,
         gap: initial_gap,
@@ -1467,27 +1523,70 @@ where
     let mut columns = TrackSet::default();
     let mut rows = TrackSet::default();
     let mut intrinsic_scratch = IntrinsicSizingScratch::default();
-    run_track_sizing(
-        tree,
-        state,
-        &mut columns,
-        &mut rows,
-        &column_specs,
-        &row_specs,
-        &mut items,
-        initial_percentage_basis,
-        metrics.available_inner,
-        initial_gap,
-        justify_content,
-        align_content,
-        &mut intrinsic_scratch,
-    );
+    // The available grid space (css-grid-2 §12.1; see `ContainerPrologue`).
+    // A width the container does not have under a definite available width
+    // is its fit-content width, from track-sizing runs under the two intrinsic
+    // constraints — the run a min- or max-content measurement of this
+    // container starts with, whose item probes are the same ones — or the
+    // substituted extent of a size-contained inline axis; either is then the
+    // definite size the tracks are sized against.
+    let mut grid_space = metrics.available_inner;
+    let decided_width = fit_content_width.map(|stretch_fit| {
+        let content = contained_size.width().unwrap_or_else(|| {
+            fit_content_inner_size(stretch_fit, |constraint| {
+                run_track_sizing(
+                    tree,
+                    state,
+                    &mut columns,
+                    &mut rows,
+                    &column_specs,
+                    &row_specs,
+                    &mut items,
+                    initial_percentage_basis,
+                    Size::new(constraint, grid_space.height),
+                    initial_gap,
+                    justify_content,
+                    align_content,
+                    &mut intrinsic_scratch,
+                );
+                columns.used_size()
+            })
+        });
+        clamped_inner_axis(&metrics, Axis::Horizontal, content)
+    });
+    if let Some(width) = decided_width {
+        grid_space.width = AvailableSpace::Definite(width);
+    }
+    // This run decides the block size, from rows sized at the used column
+    // widths. Once both sizes are decided without it, it is skipped: the
+    // width came from the runs above, so it is not definite as a percentage
+    // basis, and the definite rerun below sizes the tracks at the final size
+    // anyway.
+    let height_decided = metrics.outer.height.is_some() || contained_size.height().is_some();
+    if decided_width.is_none() || !height_decided {
+        run_track_sizing(
+            tree,
+            state,
+            &mut columns,
+            &mut rows,
+            &column_specs,
+            &row_specs,
+            &mut items,
+            initial_percentage_basis,
+            grid_space,
+            initial_gap,
+            justify_content,
+            align_content,
+            &mut intrinsic_scratch,
+        );
+    }
     let provisional_track_size = Size::new(columns.used_size(), rows.used_size());
-    // A contained axis reports the substituted extent instead of the tracks
-    // it just sized; an uncontained one reports the tracks.
+    // A decided width is the content width; a contained axis reports the
+    // substituted extent instead of the tracks it just sized; an uncontained
+    // one reports the tracks.
     let container_track_size = Size::new(
-        contained_size
-            .width()
+        decided_width
+            .or(contained_size.width())
             .unwrap_or(provisional_track_size.width),
         contained_size
             .height()
@@ -1503,7 +1602,8 @@ where
         gap_value,
         Size::new(Some(final_inner.width), Some(final_inner.height)),
     );
-    let needs_definite_rerun = initial_percentage_basis.width.is_none()
+    let needs_definite_rerun = decided_width.is_some()
+        || initial_percentage_basis.width.is_none()
         || initial_percentage_basis.height.is_none()
         || final_gap != initial_gap;
     if needs_definite_rerun {

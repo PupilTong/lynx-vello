@@ -1343,6 +1343,23 @@ dispatches to it.
    Grid layout phases: cyclic percentages are `auto` while finding an
    intrinsic container size, then resolve against that resulting size in a
    final Grid sizing run.
+   The space the tracks are sized against is §12.1's available grid space,
+   which has two cases only: the container's definite size, or the min- or
+   max-content constraint it is measured under. A container whose size is
+   not known under a definite available size — an absolutely positioned box
+   that does not stretch, `fit-content`, an unstretched flex or grid item —
+   is therefore sized before its tracks are (`ContainerPrologue`): its block
+   size is max-content (rows sized under a max-content constraint, so `1fr`
+   rows do not fill the available height), and its inline size is
+   css-sizing-3 §5.2.2's fit-content size, `min(max-content,
+   max(min-content, stretch-fit))`, from one track-sizing run under a
+   max-content constraint plus one under a min-content constraint only when
+   the max-content size overflows the stretch-fit size. The tracks are then
+   sized at that width as at any other; the run that decides the block size
+   is skipped when the block size is already known. A container whose size
+   is known runs no intrinsic pass of its own. An unstretched item lays out
+   with its area as its definite available space (§6.2: it is sized as
+   `fit-content` within it), never under a max-content constraint.
 4. **Alignment** (CSS Align) — `align/justify-content` position tracks with
    `gap`; `align/justify-self` place items in their areas; `Rtl` flips the
    inline axis.
@@ -1398,7 +1415,13 @@ computed `font_size`.
    minimum and the fixed-maximum clamp read them), so a group maximum would
    have to be recomputed per candidate position anyway. The axis is re-sized
    once under its now-definite basis whenever that basis was missing or the
-   gutter it feeds came out at a different value.
+   gutter it feeds came out at a different value. Its available grid space
+   follows regular Grid's rule (§12.1): with no size of its own under a
+   definite available size, a grid axis down the columns takes the
+   fit-content width from a max-content run (and a min-content one only on
+   overflow) in place of the run at the stretch-fit size, and a grid axis
+   across the rows is sized under a max-content constraint. The stacking
+   axis stays content-driven.
 4. **Placement and stacking** (§4.4 steps 1–3, §6.1) — in order-modified
    document order: choose the lane whose spanned tracks have the smallest
    maximum running position, counting everything within the `flow-tolerance`
