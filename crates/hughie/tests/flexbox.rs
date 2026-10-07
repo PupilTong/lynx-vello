@@ -1931,6 +1931,93 @@ fn absolute_fit_content_between_insets_sizes_a_content_flex_basis_from_the_conte
     }
 }
 
+fn column_wrap(style: TestStyle) -> TestStyle {
+    TestStyle {
+        flex_direction: flex_direction::T::Column,
+        flex_wrap: flex_wrap::T::WRAP,
+        ..style
+    }
+}
+
+fn two_tall_items(tree: &mut TestTree) -> Vec<TestId> {
+    (0..2)
+        .map(|_| {
+            tree.push_leaf(
+                TestStyle {
+                    size: Size::new(size_px(100.0), size_px(400.0)),
+                    ..TestStyle::default()
+                },
+                Size::new(100.0, 400.0),
+                None,
+            )
+        })
+        .collect()
+}
+
+/// A vertical main axis is the block axis, where css-sizing-3 §2.1 makes the
+/// min-content size the max-content size, the content's height after layout:
+/// a column `wrap` container with an automatic height takes its max-content
+/// height however little is available, and its items share one line. Two
+/// 100×400 items in 600px of available height make it 100×800 — fit-content
+/// between insets, or `flex-start` in a row container. In a column container
+/// it is an item whose §4.5 automatic minimum is that same 800, so it does
+/// not shrink to the container's 600 unless `min-height: 0` lets it, when its
+/// items break into two columns. Chrome's numbers.
+#[test]
+fn absolute_fit_content_between_insets_sizes_a_column_flex_container_at_its_max_content_height() {
+    let one_column = |tree: &TestTree, items: &[TestId]| {
+        assert_point(tree.layout(items[0]).location, Point::ZERO);
+        assert_point(tree.layout(items[1]).location, Point::new(0.0, 400.0));
+    };
+    let fit = sized_auto_margin(StyleSize::FitContent, StyleSize::FitContent);
+    let (tree, items, layout) = inset_zero_flex(column_wrap(fit), two_tall_items);
+    assert_size(layout.size, Size::new(100.0, 800.0));
+    assert_point(layout.location, Point::new(350.0, -100.0));
+    one_column(&tree, &items);
+
+    let mut tree = TestTree::default();
+    let items = two_tall_items(&mut tree);
+    let column = flex_container(&mut tree, column_wrap(TestStyle::default()), &items);
+    let row = flex_container(
+        &mut tree,
+        TestStyle {
+            align_items: self::items(AlignFlags::FLEX_START),
+            ..TestStyle::default()
+        },
+        &[column],
+    );
+    definite_layout(&tree, row, 800.0, 600.0);
+    assert_size(tree.layout(column).size, Size::new(100.0, 800.0));
+    one_column(&tree, &items);
+
+    for (min_height, height, second) in [
+        (size_auto(), 800.0, Point::new(0.0, 400.0)),
+        (size_px(0.0), 600.0, Point::new(400.0, 0.0)),
+    ] {
+        let mut tree = TestTree::default();
+        let items = two_tall_items(&mut tree);
+        let column = flex_container(
+            &mut tree,
+            column_wrap(TestStyle {
+                min_size: Size::new(size_auto(), min_height),
+                ..TestStyle::default()
+            }),
+            &items,
+        );
+        let outer = flex_container(
+            &mut tree,
+            TestStyle {
+                flex_direction: flex_direction::T::Column,
+                ..TestStyle::default()
+            },
+            &[column],
+        );
+        definite_layout(&tree, outer, 800.0, 600.0);
+        assert_size(tree.layout(column).size, Size::new(800.0, height));
+        assert_point(tree.layout(items[1]).location, second);
+    }
+}
+
 /// A fit-content flex container whose content fits takes its max-content
 /// main size, so it measures no item for anything else. The container runs
 /// twice, its height unknown and then known, and each run asks the rigid

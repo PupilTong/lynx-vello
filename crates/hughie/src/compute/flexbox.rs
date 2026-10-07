@@ -523,9 +523,14 @@ fn determine_flex_base_sizes<'tree, T>(
     let available_main = axes.main.size(available_space);
     // A definite available main size needs both: the container's
     // fit-content main size clamps between its min- and max-content main
-    // sizes (`determine_auto_main_size`).
-    let needs_min_content_contribution =
-        needs_intrinsic_main_contributions && available_main != AvailableSpace::MaxContent;
+    // sizes (`determine_auto_main_size`). A vertical main axis needs only
+    // the max-content one there, its min-content main size being the same.
+    let needs_min_content_contribution = needs_intrinsic_main_contributions
+        && match available_main {
+            AvailableSpace::MinContent => true,
+            AvailableSpace::MaxContent => false,
+            AvailableSpace::Definite(_) => axes.main == Axis::Horizontal,
+        };
     let needs_max_content_contribution =
         needs_intrinsic_main_contributions && available_main != AvailableSpace::MinContent;
 
@@ -947,10 +952,24 @@ fn intrinsic_main_size<N>(
 /// flex base sizes is not limited by `available` at all, and a wrapping
 /// container's widest line is narrower than the fit-content size whenever
 /// the break leaves space at the end of every line.
+///
+/// A `block_axis` main size — a column container's height, hughie laying out
+/// horizontal-tb only — is its content's height on one line under any
+/// constraint: css-sizing-3 §2.1 makes a box's min-content block size its
+/// max-content block size, the height of its content after layout, so the
+/// fit-content block size is that too, and a column `wrap` container with an
+/// automatic height runs its items down one line however little height is
+/// available (as Chrome does). Under a min-content constraint the items'
+/// min-content contributions stand in for their max-content ones, being
+/// block sizes too and so the same (§9.2.3 step C sizes the items under the
+/// container's constraint); they are summed as one line, a multi-line
+/// container included.
+#[allow(clippy::too_many_arguments)]
 fn determine_auto_main_size<N>(
     items: &[FlexItem<N>],
     gap: f32,
     single_line: bool,
+    block_axis: bool,
     available_main: AvailableSpace,
     inset_main: f32,
     min_outer: Option<f32>,
@@ -958,7 +977,12 @@ fn determine_auto_main_size<N>(
 ) -> f32 {
     let content = match available_main {
         AvailableSpace::MaxContent => intrinsic_main_size(items, gap, single_line, true),
-        AvailableSpace::MinContent => intrinsic_main_size(items, gap, single_line, false),
+        AvailableSpace::MinContent => {
+            intrinsic_main_size(items, gap, single_line || block_axis, false)
+        }
+        AvailableSpace::Definite(_) if block_axis => {
+            intrinsic_main_size(items, gap, single_line, true)
+        }
         AvailableSpace::Definite(available) => {
             let max_content = intrinsic_main_size(items, gap, single_line, true);
             if max_content <= available {
@@ -1985,7 +2009,19 @@ where
         || axes.main.size(inner_available_space),
         AvailableSpace::Definite,
     );
-    let mut lines = collect_flex_lines(&items, flex_wrap, line_available_main, main_gap, axes);
+    // A vertical main axis under a min-content constraint keeps its items on
+    // one line, as under a max-content one (`determine_auto_main_size`).
+    let mut lines = collect_flex_lines(
+        &items,
+        flex_wrap,
+        if !main_horizontal && line_available_main == AvailableSpace::MinContent {
+            AvailableSpace::MaxContent
+        } else {
+            line_available_main
+        },
+        main_gap,
+        axes,
+    );
 
     let contained_outer = |axis: Axis, inset: f32| {
         axis.size(contained.extents()).map(|extent| {
@@ -2004,7 +2040,8 @@ where
             let single_line = flex_wrap == flex_wrap::T::NOWRAP;
             let reads_min_content = match line_available_main {
                 AvailableSpace::Definite(available) => {
-                    intrinsic_main_size(&items, main_gap, single_line, true) > available
+                    main_horizontal
+                        && intrinsic_main_size(&items, main_gap, single_line, true) > available
                 }
                 AvailableSpace::MinContent | AvailableSpace::MaxContent => false,
             };
@@ -2023,6 +2060,7 @@ where
                 &items,
                 main_gap,
                 single_line,
+                !main_horizontal,
                 line_available_main,
                 inset_main,
                 axes.main.size(min_size),
@@ -2039,8 +2077,9 @@ where
         // just decided; the lines above broke at the available main size, and
         // the decided size can differ from it either way. Larger: one item's
         // min-content contribution or the container's own minimum exceeds the
-        // available size, and a wider limit can join items the narrower one
-        // split. Smaller: the max-content main size sums
+        // available size, or the main axis is vertical and takes its
+        // max-content size regardless, and a wider limit can join items the
+        // narrower one split. Smaller: the max-content main size sums
         // contributions, not hypothetical main sizes, and a growable item's
         // contribution can be below its flex base size (`flex: 1 1 400px`
         // around 50px of content contributes 50), so a narrower limit can
@@ -2666,6 +2705,7 @@ mod tests {
                 items,
                 0.0,
                 true,
+                false,
                 AvailableSpace::Definite(available),
                 0.0,
                 None,
@@ -2743,6 +2783,43 @@ mod tests {
         growable.flex_grow = 1.0;
         growable.preferred_size.width = Some(10.0);
         assert_eq!(content_free_main_contribution(&growable, axes), Some(10.0));
+    }
+
+    #[test]
+    fn block_axis_auto_main_size_is_one_line_under_any_constraint() {
+        // A vertical main axis is a block axis, whose min-content size is its
+        // max-content size (css-sizing-3 §2.1): one line whatever the
+        // constraint, wrapping or not, summing the min-content contributions
+        // under a min-content one (8 + 2 + 15, plus the inset 1) and the
+        // max-content ones otherwise (12 + 2 + 24 + 1).
+        let mut items = vec![item(10.0, 5.0), item(20.0, 7.0)];
+        items[0].min_content_contribution = 8.0;
+        items[1].min_content_contribution = 15.0;
+        items[0].max_content_contribution = 12.0;
+        items[1].max_content_contribution = 24.0;
+        for single_line in [false, true] {
+            for (available_main, expected) in [
+                (AvailableSpace::MinContent, 26.0),
+                (AvailableSpace::MaxContent, 39.0),
+                (AvailableSpace::Definite(10.0), 39.0),
+                (AvailableSpace::Definite(100.0), 39.0),
+            ] {
+                assert_eq!(
+                    determine_auto_main_size(
+                        &items,
+                        2.0,
+                        single_line,
+                        true,
+                        available_main,
+                        1.0,
+                        None,
+                        None
+                    ),
+                    expected,
+                    "{available_main:?}, single line {single_line}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2995,7 +3072,16 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                determine_auto_main_size(&items, 2.0, single_line, available_main, 1.0, None, None),
+                determine_auto_main_size(
+                    &items,
+                    2.0,
+                    single_line,
+                    false,
+                    available_main,
+                    1.0,
+                    None,
+                    None
+                ),
                 expected,
                 "{name}"
             );
@@ -3004,6 +3090,7 @@ mod tests {
             determine_auto_main_size::<TestRef>(
                 &[],
                 2.0,
+                false,
                 false,
                 AvailableSpace::Definite(10.0),
                 1.0,
