@@ -72,7 +72,7 @@ pub mod input {
 
 pub use dom::{
     FontBlob, FrameImages, ImageEvent, ImageInbox, ImageReports, ImageSizeHint,
-    MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS, NoImages, is_renderable, vello,
+    MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS, NoImages, VectorImage, is_renderable, vello,
 };
 pub use esm::{BTS_CHUNK_PREAMBLE, MTS_CHUNK_PREAMBLE};
 pub use main::tree::PageConfig;

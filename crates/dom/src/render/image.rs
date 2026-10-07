@@ -133,6 +133,64 @@ impl VectorImage {
         }
     }
 
+    /// Parses the SVG document `svg` with `options`, and computes its
+    /// natural size and viewport from the root element's `width`, `height`
+    /// and `viewBox`.
+    ///
+    /// One XML parse serves both: the root's attributes are read from the
+    /// same `roxmltree` document [`usvg::Tree::from_xmltree`] converts,
+    /// because the tree keeps neither the `viewBox` nor the raw dimensions.
+    /// The input is handled as [`usvg::Tree::from_data`] handles it without
+    /// the `svgz` feature: gzip data fails with
+    /// [`usvg::Error::SvgzFeatureNotEnabled`], anything that is not UTF-8
+    /// with [`usvg::Error::NotAnUtf8Str`], and a DTD is allowed.
+    ///
+    /// The sizes follow `docs/svg-vector-images-design.md`. A root `width`
+    /// or `height` is absolute when it is a bare number or a `px` length; any
+    /// other unit, a percentage, or a missing attribute counts as absent.
+    ///
+    /// - Both absolute: natural = that size, viewport = `tree.size()`.
+    /// - One absolute plus a `viewBox`: the other axis from the `viewBox` ratio, viewport =
+    ///   `tree.size()`.
+    /// - A `viewBox` only: natural = the largest size with the `viewBox` ratio that fits 300x150,
+    ///   viewport = `tree.size()`.
+    /// - Neither: natural and viewport 300x150. usvg leaves user units 1:1 here and overwrites
+    ///   `size()` with the content bounding box, so `size()` is not the viewport.
+    /// - One absolute and no `viewBox`: that axis, with 300 wide or 150 high for the other; the
+    ///   viewport is the natural size, for the same reason as the case above.
+    ///
+    /// The natural size is rounded to whole px, at least 1 on each axis.
+    ///
+    /// # Errors
+    ///
+    /// Whatever usvg reports for a document it cannot read.
+    pub fn parse(svg: &[u8], options: &usvg::Options<'_>) -> Result<Self, usvg::Error> {
+        if svg.starts_with(&[0x1f, 0x8b]) {
+            return Err(usvg::Error::SvgzFeatureNotEnabled);
+        }
+        let text = std::str::from_utf8(svg).map_err(|_| usvg::Error::NotAnUtf8Str)?;
+        let document = usvg::roxmltree::Document::parse_with_options(
+            text,
+            usvg::roxmltree::ParsingOptions {
+                allow_dtd: true,
+                ..usvg::roxmltree::ParsingOptions::default()
+            },
+        )
+        .map_err(usvg::Error::ParsingFailed)?;
+        let root = document.root_element();
+        let width = root.attribute("width").and_then(absolute_length);
+        let height = root.attribute("height").and_then(absolute_length);
+        let view_box = root.attribute("viewBox").and_then(view_box_size);
+        let tree = usvg::Tree::from_xmltree(&document, options)?;
+        let (natural, viewport) = vector_sizes(
+            width,
+            height,
+            view_box,
+            (tree.size().width(), tree.size().height()),
+        );
+        Ok(Self::new(Arc::new(tree), natural, viewport))
+    }
+
     /// The size layout is told, in whole CSS px.
     #[must_use]
     pub fn natural_size(&self) -> (u32, u32) {
@@ -159,6 +217,88 @@ impl VectorImage {
             crate::paint::svg::encode(&self.tree, &mut scene);
             Arc::new(scene)
         })
+    }
+}
+
+/// The default object size of CSS Images 3, in CSS px.
+const DEFAULT_OBJECT_SIZE: (f32, f32) = (300.0, 150.0);
+
+/// The natural size and viewport of an SVG document, from its root's
+/// absolute `width` and `height`, its `viewBox` size and the parsed tree's
+/// `size()`. The rule is [`VectorImage::parse`]'s.
+fn vector_sizes(
+    width: Option<f32>,
+    height: Option<f32>,
+    view_box: Option<(f32, f32)>,
+    tree_size: (f32, f32),
+) -> ((u32, u32), (f32, f32)) {
+    let (natural, viewport_is_tree) = match (width, height, view_box) {
+        (Some(width), Some(height), _) => ((width, height), true),
+        (Some(width), None, Some((box_width, box_height))) => {
+            ((width, width * box_height / box_width), true)
+        }
+        (None, Some(height), Some((box_width, box_height))) => {
+            ((height * box_width / box_height, height), true)
+        }
+        (None, None, Some((box_width, box_height))) => {
+            let scale = (DEFAULT_OBJECT_SIZE.0 / box_width).min(DEFAULT_OBJECT_SIZE.1 / box_height);
+            ((box_width * scale, box_height * scale), true)
+        }
+        (width, height, None) => (
+            (
+                width.unwrap_or(DEFAULT_OBJECT_SIZE.0),
+                height.unwrap_or(DEFAULT_OBJECT_SIZE.1),
+            ),
+            false,
+        ),
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "rounded and clamped to at least one before the cast, which saturates"
+    )]
+    let whole = |length: f32| length.round().max(1.0) as u32;
+    let rounded = (whole(natural.0), whole(natural.1));
+    let viewport = if viewport_is_tree {
+        tree_size
+    } else {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a natural size with no viewBox is an authored px length or the default"
+        )]
+        let viewport = (rounded.0 as f32, rounded.1 as f32);
+        viewport
+    };
+    (rounded, viewport)
+}
+
+/// A root `width` or `height` that is an absolute length: a bare number or a
+/// `px` length, finite and positive. Anything else counts as absent.
+fn absolute_length(value: &str) -> Option<f32> {
+    let value = value.trim();
+    let number = value.strip_suffix("px").unwrap_or(value);
+    number
+        .parse::<f32>()
+        .ok()
+        .filter(|length| length.is_finite() && *length > 0.0)
+}
+
+/// A `viewBox`'s width and height, when it is four numbers and both of those
+/// are finite and positive.
+fn view_box_size(value: &str) -> Option<(f32, f32)> {
+    let numbers: SmallVec<[f32; 4]> = value
+        .split(|c: char| c.is_ascii_whitespace() || c == ',')
+        .filter(|part| !part.is_empty())
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    match numbers.as_slice() {
+        [_, _, width, height]
+            if width.is_finite() && height.is_finite() && *width > 0.0 && *height > 0.0 =>
+        {
+            Some((*width, *height))
+        }
+        _ => None,
     }
 }
 
@@ -1309,5 +1449,76 @@ mod tests {
         assert_eq!(hint, ImageSizeHint::new(800, 900));
         assert!(!hint.is_unbounded());
         assert!(hint.union(ImageSizeHint::UNBOUNDED).is_unbounded());
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod vector_tests {
+    use super::VectorImage;
+
+    fn parse(attributes: &str) -> VectorImage {
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" {attributes}><rect x="2" y="3" width="5" height="7"/></svg>"#
+        );
+        VectorImage::parse(svg.as_bytes(), &usvg::Options::default())
+            .unwrap_or_else(|error| panic!("<svg {attributes}>: {error}"))
+    }
+
+    /// The natural size follows CSS Images 3 default sizing, and the
+    /// viewport is the tree's own size wherever the root gives usvg a size
+    /// to map into.
+    #[test]
+    fn natural_size_and_viewport_follow_the_root_attributes() {
+        let cases = [
+            // (a) Both absolute, with or without a viewBox.
+            (r#"width="40" height="30""#, (40, 30), (40.0, 30.0)),
+            (
+                r#"width="40px" height="30" viewBox="0 0 4 3""#,
+                (40, 30),
+                (40.0, 30.0),
+            ),
+            // (b) One absolute plus a viewBox.
+            (r#"width="40" viewBox="0 0 20 10""#, (40, 20), (40.0, 20.0)),
+            (r#"height="30" viewBox="0 0 20 10""#, (60, 30), (60.0, 30.0)),
+            // (c) A viewBox only, fitted into 300x150.
+            (r#"viewBox="0 0 10 10""#, (150, 150), (10.0, 10.0)),
+            (r#"viewBox="0,0,40,10""#, (300, 75), (40.0, 10.0)),
+            // (d) Neither: the default object size, which is also the viewport.
+            ("", (300, 150), (300.0, 150.0)),
+            (r#"width="50%" height="1in""#, (300, 150), (300.0, 150.0)),
+            // (e) One absolute and no viewBox.
+            (r#"width="50%" height="20""#, (300, 20), (300.0, 20.0)),
+            (r#"width="40""#, (40, 150), (40.0, 150.0)),
+            // Whole px, at least one.
+            (r#"width="10.4" height="0.2""#, (10, 1), (10.4, 0.2)),
+        ];
+        for (attributes, natural, viewport) in cases {
+            let image = parse(attributes);
+            assert_eq!(image.natural_size(), natural, "<svg {attributes}> natural");
+            assert_eq!(image.viewport(), viewport, "<svg {attributes}> viewport");
+        }
+    }
+
+    /// Failures are usvg's own errors, as `usvg::Tree::from_data` reports
+    /// them without the `svgz` feature.
+    #[test]
+    fn unreadable_documents_fail_with_the_usvg_error() {
+        let options = usvg::Options::default();
+        assert!(matches!(
+            VectorImage::parse(
+                b"<svg xmlns='http://www.w3.org/2000/svg'><rect></svg>",
+                &options
+            ),
+            Err(usvg::Error::ParsingFailed(_))
+        ));
+        assert!(matches!(
+            VectorImage::parse(b"<svg \xff/>", &options),
+            Err(usvg::Error::NotAnUtf8Str)
+        ));
+        assert!(matches!(
+            VectorImage::parse(&[0x1f, 0x8b, 0x08, 0x00], &options),
+            Err(usvg::Error::SvgzFeatureNotEnabled)
+        ));
     }
 }
