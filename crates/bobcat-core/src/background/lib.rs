@@ -40,24 +40,26 @@
 //!               ──── Post / Terminate ──▶ the worker's own task
 //!               ◀─────── WorkerEvent ────
 //!
-//!   host        ──── a worker's script ──▶ the worker's own task
+//!   host        ◀─── RequestSource ────── the worker's `HostOutbox`
+//!               ──── the answer ────────▶ the worker's own task
 //! ```
 //!
 //! Each worker owns its cancellation token. The MTS Worker object's explicit
 //! termination or JS finalizer sends `Terminate`; releasing its realm closes
 //! the sender. A view's cancellation does not race ahead of JS app cleanup.
 //!
-//! A worker's script *answer* deliberately skips `bobcat-main`: the thread
-//! that owns a view's [`ResourceFetcher`](crate::resource::ResourceFetcher) is
-//! its painter, and routing the script through the main thread would queue a
-//! worker's script behind whatever synchronous JavaScript that thread is in
-//! the middle of. The ask rides the link the realm already has, because `new
-//! Worker(...)` runs on `bobcat-main` anyway; what the host is handed is the
-//! far end of a one-shot whose receiving end already travelled here inside
-//! the `Start`, so no ordering between the two has to be arranged. A worker
-//! whose URL is an engine name has no such answer, the BTS's `bobcat:bts`
-//! among them: the host is never asked for one, and the realm's own loader
-//! loads it.
+//! A worker's script deliberately skips `bobcat-main`, the request and the
+//! answer alike: the thread that owns a view's
+//! [`ResourceFetcher`](crate::resource::ResourceFetcher) is its painter, and
+//! routing the script through the main thread would queue a worker's script
+//! behind whatever synchronous JavaScript that thread is in the middle of.
+//! `new Worker(...)` asks the host for nothing. The worker's realm loads the
+//! module at its URL as its root module when it boots, and that load is a
+//! module request like any import's: the worker sends it from this thread
+//! through its own `HostOutbox`, and a task of the worker awaits the answer
+//! and completes the module. A worker whose URL is an engine name raises no
+//! request, the BTS's `bobcat:bts` among them: the realm's own loader loads
+//! the name, or refuses it.
 //!
 //! # What is shared, and where it lives
 //!
@@ -83,10 +85,10 @@ use tokio_util::sync::CancellationToken;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
-use crate::link::SourceAnswer;
+use crate::esm::BTS_MODULE_SPECIFIER;
 use crate::script::ScriptError;
 use crate::threads::ThreadJoin;
-use crate::view::{EngineError, ScriptSource};
+use crate::view::{EngineError, ScriptSource, WorkerId};
 
 /// Names one `Worker` for the life of its group.
 ///
@@ -106,16 +108,31 @@ impl WorkerKey {
     }
 }
 
+/// What a worker's diagnostics and failures are named by, from its URL and
+/// its key: the background thread for the worker whose URL is `bobcat:bts`,
+/// and the `Worker` its key names for every other.
+///
+/// The one place the BTS is told apart from any other worker. The creating
+/// realm calls it to record the source under the key, and the worker thread
+/// calls it to name the realm it opens, so the two threads agree without
+/// either sending the other the answer.
+pub(crate) fn worker_source(url: &str, key: WorkerKey) -> ScriptSource {
+    if url == BTS_MODULE_SPECIFIER {
+        ScriptSource::Background
+    } else {
+        ScriptSource::Worker(WorkerId::from(key))
+    }
+}
+
 /// One worker to start: everything it will ever be given, in one message.
 ///
-/// No state. What it says about the worker is what the creating realm
-/// decided from its URL before sending it: the URL itself, the answer to the
-/// request for its script when the host was asked for one, and the source
-/// its diagnostics are named by. The BTS is the dedicated worker whose URL
-/// is `bobcat:bts`, and its source is all that sets its `Start` apart: the
-/// view's data reaches it in the `initialize` message the MTS realm posts to
-/// it, as any other message does. Everything else a worker has — what is
-/// posted to it, what it says back — is a channel that arrives with it.
+/// No state, and nothing the creating realm decided about the worker: its
+/// key, its name, its URL, and the channels and token below. The BTS is the
+/// dedicated worker whose URL is `bobcat:bts`, and that URL is all that sets
+/// its `Start` apart: the view's data reaches it in the `initialize` message
+/// the MTS realm posts to it, as any other message does. Everything else a
+/// worker has — what is posted to it, what it says back, what it asks the
+/// host for — is a channel that arrives with it.
 pub(crate) struct WorkerStart {
     pub(crate) key: WorkerKey,
     /// The worker's `self.name`, empty when the constructor named none.
@@ -123,18 +140,9 @@ pub(crate) struct WorkerStart {
     /// The worker's script URL: the `new Worker` specifier joined to the
     /// creating entry's response URL by URL rules, which leaves an absolute
     /// URL such as `bobcat:bts` as it is. The realm's root module is the
-    /// module at this URL, loaded by it.
+    /// module at this URL, loaded by it, and with the key it is what the
+    /// worker's diagnostics are named by.
     pub(crate) url: String,
-    /// The answer to the request for [`Self::url`], from whichever thread
-    /// owns the creating view's fetcher. `None` for a URL under
-    /// [`ENGINE_MODULE_PREFIXES`](crate::esm::ENGINE_MODULE_PREFIXES), which
-    /// the host is never asked for: the realm's own loader loads it, or
-    /// refuses it with a `ReferenceError`.
-    pub(crate) script: Option<SourceAnswer>,
-    /// What the worker's diagnostics are named by: `Background` for the
-    /// worker whose URL is `bobcat:bts`, and `Worker` with its key for every
-    /// other. The creating realm records the same value under the key.
-    pub(crate) source: ScriptSource,
     /// What the MTS Worker object posts. Its finalizer or explicit terminate
     /// sends `Terminate`; releasing the MTS realm closes the channel.
     pub(crate) messages: mpsc::UnboundedReceiver<WorkerMessage>,
@@ -143,7 +151,8 @@ pub(crate) struct WorkerStart {
     /// This worker's end signal, independent of its creating view's token.
     pub(crate) token: CancellationToken,
     /// Sources, frame demand and diagnostics reach the host directly, under
-    /// this worker's lifetime.
+    /// this worker's lifetime. The worker's own script is among the sources
+    /// asked for through it.
     pub(crate) sources: crate::link::HostOutbox,
 }
 
@@ -191,16 +200,19 @@ pub(crate) enum WorkerPayload {
     /// Something in the worker's realm threw and the worker is still
     /// running, whichever entry into the realm it was: its script, a message
     /// delivered to it, a timer, animation or native module callback, a
-    /// module it imported, a `Future` it awaited. HTML reports such an
-    /// exception at the worker and then at its parent without ending either.
-    /// The creating realm reports it as `EngineEvent::WorkerThrew`.
+    /// module it imported, a `Future` it awaited. A script or an imported
+    /// module that could not be loaded, or was answered with something other
+    /// than a script, is reported here too: the load rejects in the realm.
+    /// HTML reports such an exception at the worker and then at its parent
+    /// without ending either. The creating realm reports it as
+    /// `EngineEvent::WorkerThrew`.
     Errored(ScriptError),
-    /// The worker's script could not be fetched or was not a script, its
-    /// realm could not be built, or the thread it runs on has trapped —
-    /// while it ran, or before it was started, in which case the creating
-    /// realm queued this itself and nothing was sent to that thread. The
-    /// realm is gone with it; nothing more will ever arrive under this key.
-    /// The creating realm reports it as `EngineEvent::WorkerEnded`.
+    /// The worker's realm could not be built, or the thread it runs on has
+    /// trapped — while it ran, or before it was started, in which case the
+    /// creating realm queued this itself and nothing was sent to that
+    /// thread. The realm is gone with it; nothing more will ever arrive
+    /// under this key. The creating realm reports it as
+    /// `EngineEvent::WorkerEnded`.
     Failed(ScriptError),
     /// The worker ended itself with `close()`.
     Closed,

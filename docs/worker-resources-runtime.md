@@ -13,17 +13,18 @@ own cancellation token, which no view token is a parent of. Discovered imports
 use `SourceRequest::Module` on the view's existing notice channel.
 `LynxView::pump` calls `ResourceFetcher::request_source`; the concrete
 `SourceCompletion` answers the requesting worker directly. A worker's script is
-the one request the worker does not make itself: `createWorker` makes it on
-the creating view's thread and the `Start` carries the answer's receiving end,
-in `WorkerStart::script`. The worker's realm opens as its `Start` is served
-and loads the script as its root module, by the request URL, the way an
-`import()` of that URL would, and the worker completes that module from the
-answer, under the request URL, without asking again. Nothing is written
+a request the worker makes itself, like its imports: `createWorker` asks the
+host for nothing, and nothing of the script is in the `Start`. The worker's
+realm opens as its `Start` is served and loads the script as its root module,
+by its URL, the way an `import()` of that URL would, and that load's request
+goes out in the worker's boot job and is completed, under the request URL, on
+the path every import uses, once. A script that cannot be loaded is reported
+once, as `WorkerThrew`, and leaves the worker running until it is terminated
+or collected (`tracking/deviations.md`). Nothing is written
 around the script and no global scope is installed before it: a script that
 wants `postMessage` or `setTimeout` imports `bobcat:worker` or
 `bobcat:timers` itself. A URL that is an engine name, the BTS's `bobcat:bts` among them, is
-never requested: `WorkerStart::script` is `None`, and the realm's own loader
-loads it. A `Module` request
+never requested: the realm's own loader loads it, or refuses it. A `Module` request
 arrives absolute: an import is normalized against its importer's response URL,
 a worker script is joined to the creating view's entry URL, and a synchronous
 load is resolved against the view's `ViewSources::base_url`, which the

@@ -1,7 +1,7 @@
 use tokio::sync::mpsc;
 
 use super::*;
-use crate::background::{WorkerCommand, WorkerEvent};
+use crate::background::{WorkerCommand, WorkerEvent, worker_source};
 use crate::esm::build_runtime;
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, detached_outbox};
@@ -422,14 +422,15 @@ struct GroupFarEnds {
 }
 
 /// A realm starts every worker the same way, from the URL its specifier joins
-/// to. The BTS is the worker whose URL is `bobcat:bts`: it alone is named
-/// `Background`, and nothing else in its `Start` differs, since the view's
-/// data reaches it in the `initialize` message. The host is asked for a
-/// worker's script only when its URL is not an engine name, so neither
-/// `bobcat:bts` nor `bobcat:timers` is requested. The source recorded under
-/// each key is the one its `Start` carries.
+/// to, and asks its host for nothing as it does: a `Start` carries neither a
+/// script nor a source, and a worker's realm asks for its own script once it
+/// boots. The BTS is the worker whose URL is `bobcat:bts`: it alone is named
+/// `Background`, and nothing in its `Start` differs but that URL, since the
+/// view's data reaches it in the `initialize` message. The source the realm
+/// records under each key and the one the worker thread names the realm by
+/// are one function of the worker's URL and key.
 #[test]
-fn every_worker_starts_from_its_url_and_only_bobcat_bts_is_named_background() {
+fn constructing_a_worker_asks_the_host_for_nothing_and_only_bobcat_bts_is_named_background() {
     let (mut js, mut first, _second, mut ends) = two_view_group();
     first
         .run_main_thread_script(
@@ -454,33 +455,29 @@ fn every_worker_starts_from_its_url_and_only_bobcat_bts_is_named_background() {
     };
     let (background, fetched, engine) = (start(), start(), start());
     assert_eq!(background.url, "bobcat:bts");
-    assert!(background.script.is_none());
-    assert_eq!(background.source, ScriptSource::Background);
     assert_eq!(fetched.url, "app:///w.js");
-    assert!(fetched.script.is_some());
-    assert_eq!(
-        fetched.source,
-        ScriptSource::Worker(WorkerId::from(fetched.key))
-    );
     assert_eq!(engine.url, "bobcat:timers");
-    assert!(engine.script.is_none());
     assert_eq!(
-        engine.source,
-        ScriptSource::Worker(WorkerId::from(engine.key))
+        first.workers.source_of(background.key),
+        Some(ScriptSource::Background)
     );
-    for start in [&background, &fetched, &engine] {
-        assert_eq!(first.workers.source_of(start.key), Some(start.source));
+    assert_eq!(
+        worker_source(&background.url, background.key),
+        ScriptSource::Background
+    );
+    for start in [&fetched, &engine] {
+        let named = ScriptSource::Worker(WorkerId::from(start.key));
+        assert_eq!(first.workers.source_of(start.key), Some(named));
+        assert_eq!(worker_source(&start.url, start.key), named);
     }
-    let mut requested = Vec::new();
+    // Nothing reads this group's `Start`s but the test, so no worker has
+    // booted: whatever the host was asked for, the constructing realm asked.
     while let Ok(notice) = ends.views[0].notices.try_recv() {
-        if let ViewNotice::RequestSource { request, .. } = notice {
-            requested.push(request);
-        }
+        assert!(
+            !matches!(notice, ViewNotice::RequestSource { .. }),
+            "constructing a worker asks the host for nothing, whatever its URL"
+        );
     }
-    assert!(
-        matches!(requested.as_slice(), [crate::resource::SourceRequest::Module(url)] if url == "app:///w.js"),
-        "only the script at a URL that is not an engine name is requested"
-    );
 }
 
 /// The host's page data reaches the realm it was given to as plain strings,

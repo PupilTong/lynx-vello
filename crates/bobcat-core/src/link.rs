@@ -740,8 +740,8 @@ impl ViewOutbox {
     /// Asks the host for one source, handing back the answer's receiving end.
     ///
     /// The receiver is the destination and the only one: a module's answer
-    /// goes to the task awaiting it, and a worker's rides to the worker
-    /// thread inside its `Start`.
+    /// goes to the task awaiting it. A worker asks through its own
+    /// [`HostOutbox`], its script included.
     pub(crate) fn request_source(&self, request: SourceRequest) -> SourceAnswer {
         let (completion, answer) = SourceCompletion::new(self.token.clone());
         self.notify(ViewNotice::RequestSource {

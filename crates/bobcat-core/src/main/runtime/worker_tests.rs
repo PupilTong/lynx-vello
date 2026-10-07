@@ -25,8 +25,9 @@ const PATIENCE: Duration = Duration::from_secs(30);
 /// frame requested says so in the entry itself.
 const BTS_ENTRY_RAN: &str = "bts-entry-ran";
 
-/// The URL a `new Worker('./worker.js')` asks the host for: the specifier
-/// joined by URL rules to the entry's URL, `app:///nested/main.js`.
+/// The URL the worker of a `new Worker('./worker.js')` asks the host for its
+/// script by: the specifier joined by URL rules to the entry's URL,
+/// `app:///nested/main.js`.
 const WORKER_URL: &str = "app:///nested/worker.js";
 
 /// Whether the worker posted exactly this string.
@@ -216,11 +217,10 @@ impl Pair {
         )
     }
 
-    /// Answers the next module one of this view's realms asks for, spinning
-    /// the way an embedder's own turn does. A compiled BTS bundle reaches its
-    /// manifest paths through the host now, and the load parks the worker's
-    /// job until this answers it.
-    fn serve_module(&mut self, url: &str, source: &str) {
+    /// The next request one of this view's realms makes for the module at
+    /// `url`, waited for by spinning the way an embedder's own turn does.
+    /// Every other notice stays queued, in order.
+    fn request(&mut self, url: &str) -> SourceCompletion {
         let deadline = ClockInstant::now() + PATIENCE;
         loop {
             self.pump_host();
@@ -233,43 +233,33 @@ impl Pair {
                 && let Some(ViewNotice::RequestSource { completion, .. }) =
                     self.deferred_notices.remove(position)
             {
-                completion.complete(Ok(LoadedSource::Module {
-                    source: source.to_owned(),
-                    url: url.to_owned(),
-                }));
-                return;
+                return completion;
             }
             assert!(ClockInstant::now() < deadline, "the realm asked for {url}");
             std::thread::sleep(Duration::from_millis(1));
         }
     }
 
-    /// The next source request the realm made, which for these tests is
-    /// always a worker script: `./worker.js`, which Rust joined to the
-    /// entry's URL `app:///nested/main.js`.
+    /// Answers the next module one of this view's realms asks for at `url`.
+    /// A compiled BTS bundle reaches its manifest paths through the host
+    /// now, and the load parks the worker's job until this answers it.
+    fn serve_module(&mut self, url: &str, source: &str) {
+        self.request(url).complete(Ok(LoadedSource::Module {
+            source: source.to_owned(),
+            url: url.to_owned(),
+        }));
+    }
+
+    /// The request a `./worker.js` worker made for its own script, which
+    /// Rust joined to the entry's URL `app:///nested/main.js`. The worker's
+    /// realm makes it from `bobcat-workers`, in its boot job, so it is
+    /// waited for.
     fn source(&mut self) -> SourceCompletion {
-        self.pump_host();
-        loop {
-            let notice = self.deferred_notices.pop_front().expect("source requested");
-            if let ViewNotice::RequestSource {
-                request,
-                completion,
-            } = notice
-            {
-                assert!(
-                    matches!(&request, SourceRequest::Module(url) if url == WORKER_URL),
-                    "{request:?}"
-                );
-                return completion;
-            }
-        }
+        self.request(WORKER_URL)
     }
 
     fn answer(&mut self, source: &str) {
-        self.source().complete(Ok(LoadedSource::Module {
-            source: source.into(),
-            url: WORKER_URL.into(),
-        }));
+        self.serve_module(WORKER_URL, source);
     }
 
     /// Waits for one worker event and hands it to the realm, as the view's
@@ -1343,8 +1333,14 @@ fn worker_errors_reach_parent_and_leave_both_realms_usable() {
     "#);
 }
 
+/// A script the host could not load is one `error` event at the `Worker`
+/// object and one `WorkerThrew` at the embedder, named as a module load, and
+/// the worker is not over: the realm still holds it, as it holds one whose
+/// script threw, until `terminate()` ends it. The worker says nothing more:
+/// what is posted to it before the `terminate()` is dropped, and its end is
+/// reported to no one.
 #[test]
-fn unanswered_script_dispatches_one_error_and_ends_the_handle() {
+fn a_script_that_cannot_be_fetched_dispatches_one_error_and_leaves_the_worker_terminable() {
     let mut pair = Pair::new(
         r"
         import { Worker } from 'bobcat-internal';
@@ -1355,12 +1351,41 @@ fn unanswered_script_dispatches_one_error_and_ends_the_handle() {
     );
     drop(pair.source());
     pair.deliver();
-    pair.check("if (errors.length !== 1 || !errors[0].includes('without completing')) throw Error('lost source'); worker.postMessage('ignored'); worker.terminate();");
+    let events = worker_events(pair.notices());
+    let [
+        crate::EngineEvent::WorkerThrew {
+            source: crate::ScriptSource::Worker(_),
+            error,
+        },
+    ] = events.as_slice()
+    else {
+        panic!("one WorkerThrew from the worker: {events:?}");
+    };
+    assert!(
+        error.message.contains("loading a worker module")
+            && error.message.contains("without completing"),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        pair.live_workers(),
+        2,
+        "the worker the failed load left running, and lynx-bg"
+    );
+    pair.check(
+        "if (errors.length !== 1 || !errors[0].includes('without completing')) throw Error(JSON.stringify(errors)); worker.postMessage('ignored'); worker.terminate();",
+    );
+    assert_eq!(pair.live_workers(), 1, "`terminate()` ended that worker");
+    assert!(
+        worker_events(pair.notices()).is_empty(),
+        "its end is reported to no one"
+    );
+    assert!(pair.finish().is_empty(), "and it said nothing more");
 }
 
 /// A `Worker` constructed once `bobcat-workers` has trapped is never sent
-/// there: it fails at once, as one whose script could not be fetched does,
-/// with no `WorkerCreated`, no `Start` and no request to the host.
+/// there: it fails at once, with no `WorkerCreated`, no `Start` and no
+/// request to the host.
 #[test]
 fn a_worker_created_after_its_thread_trapped_fails_without_starting() {
     let mut pair = Pair::new("globalThis.errors = [];");
@@ -1651,24 +1676,85 @@ fn a_worker_that_closes_itself_is_forgotten_by_the_realm() {
     );
 }
 
+/// A `Worker` terminated in the job that constructed it never runs its
+/// script. Its `Start` and its `Terminate` reach `bobcat-workers` on two
+/// channels, so the worker ends either before its boot job, having asked the
+/// host for nothing, or after it, with the request for its script
+/// outstanding. So the host sees at most one request for that script, and a
+/// request it does see reads as cancelled once the worker has ended: an
+/// answer completed after that reaches nothing.
+///
+/// The surviving worker is what the test waits on. Its boot job is queued
+/// behind the terminated worker's, and each worker sends its request from
+/// its boot job on the one notice channel, so a request the terminated
+/// worker made has been read by the time the surviving worker has answered.
+/// The requests are counted again once the worker thread has returned.
 #[test]
-fn terminating_before_fetch_prevents_the_context_from_starting() {
+fn a_worker_terminated_at_construction_never_runs() {
+    const CANCELLED_URL: &str = "app:///nested/cancelled.js";
     let mut pair = Pair::new(
         r"
         import { Worker } from 'bobcat-internal';
-        const cancelled = new Worker('./worker.js');
-        cancelled.onmessage = () => { throw Error('cancelled worker ran'); };
+        const cancelled = new Worker('./cancelled.js');
         cancelled.terminate();
-        const alive = new Worker('./worker.js');
+        globalThis.alive = new Worker('./alive.js');
         globalThis.answer = null;
         alive.onmessage = e => answer = e.data;
     ",
     );
-    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('cancelled');");
-    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('alive');");
+    pair.serve_module(
+        "app:///nested/alive.js",
+        "import 'bobcat:worker'; import 'bobcat:timers'; postMessage('alive');",
+    );
     pair.deliver();
-    pair.check(
-        "if (answer !== 'alive') throw Error('termination did not discard the pending script');",
+    pair.check("if (answer !== 'alive') throw Error('the surviving worker did not run');");
+    let mut requests: Vec<SourceCompletion> = pair
+        .notices()
+        .into_iter()
+        .filter_map(|notice| match notice {
+            ViewNotice::RequestSource {
+                request: SourceRequest::Module(url),
+                completion,
+            } if url == CANCELLED_URL => Some(completion),
+            _ => None,
+        })
+        .collect();
+    let asked = requests.len();
+    if let Some(completion) = requests.pop() {
+        let deadline = ClockInstant::now() + PATIENCE;
+        while !completion.is_cancelled() {
+            assert!(
+                ClockInstant::now() < deadline,
+                "the terminated worker's request is cancelled with it"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        completion.complete(Ok(LoadedSource::Module {
+            source: "import 'bobcat:worker'; postMessage('the terminated worker ran');".into(),
+            url: CANCELLED_URL.into(),
+        }));
+    }
+    // The thread has returned, so whatever a worker said is here.
+    assert!(
+        pair.finish().is_empty(),
+        "the terminated worker never ran its script"
+    );
+    let asked_late = pair
+        .notices()
+        .iter()
+        .filter(|notice| {
+            matches!(
+                notice,
+                ViewNotice::RequestSource {
+                    request: SourceRequest::Module(url),
+                    ..
+                } if url == CANCELLED_URL
+            )
+        })
+        .count();
+    assert!(
+        asked + asked_late <= 1,
+        "a terminated worker asks for its script at most once"
     );
 }
 
@@ -1702,7 +1788,11 @@ fn unsupported_worker_options_fail_before_requesting_a_context() {
         }
     ",
     );
-    assert!(!asked_for_a_worker(&pair.notices()));
+    assert_eq!(
+        pair.live_workers(),
+        1,
+        "no refused construction started a worker: only the built-in BTS runs"
+    );
     pair.check(
         "if (typeof globalThis.Worker !== 'undefined') throw Error('Worker leaked into globals');",
     );
@@ -1710,7 +1800,10 @@ fn unsupported_worker_options_fail_before_requesting_a_context() {
 
 /// A worker's script URL is joined to the entry's URL by URL rules, not by
 /// import-specifier rules: a bare `worker.js` is a relative URL, and a
-/// query-only URL keeps the entry's path.
+/// query-only URL keeps the entry's path. Each worker asks the host for its
+/// script by that URL, from its own boot job, so the two requests are waited
+/// for, and compared without regard to which arrived first: that order is
+/// the worker thread's.
 #[test]
 fn a_worker_url_joins_the_entry_url_by_url_rules() {
     let mut pair = Pair::new(
@@ -1719,27 +1812,40 @@ fn a_worker_url_joins_the_entry_url_by_url_rules() {
         globalThis.workers = [new Worker('worker.js'), new Worker('?v=2')];
     ",
     );
-    let requested: Vec<String> = pair
-        .notices()
-        .into_iter()
-        .filter_map(|notice| match notice {
-            ViewNotice::RequestSource {
-                request: SourceRequest::Module(url),
-                ..
-            } => Some(url),
-            _ => None,
-        })
-        .collect();
+    let deadline = ClockInstant::now() + PATIENCE;
+    let mut requested: Vec<String> = Vec::new();
+    loop {
+        requested.extend(
+            pair.notices()
+                .into_iter()
+                .filter_map(|notice| match notice {
+                    ViewNotice::RequestSource {
+                        request: SourceRequest::Module(url),
+                        ..
+                    } => Some(url),
+                    _ => None,
+                }),
+        );
+        if requested.len() >= 2 {
+            break;
+        }
+        assert!(
+            ClockInstant::now() < deadline,
+            "each worker asked for its script: {requested:?}"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    requested.sort();
     assert_eq!(
         requested,
-        ["app:///nested/worker.js", "app:///nested/main.js?v=2"]
+        ["app:///nested/main.js?v=2", "app:///nested/worker.js"]
     );
 }
 
-/// A plain `Worker`'s script is asked for once, by the realm that constructed
-/// it. The worker's root module imports the script by the same URL, and the
-/// worker's own epilogue does not ask the host for it again: the answer to the
-/// first request is what completes that import.
+/// A plain `Worker`'s script is asked for once, by the worker's own realm:
+/// the load of its root module raises the request, and constructing the
+/// worker asks the host for nothing. The answer to that request is what
+/// completes the load, and nothing asks again afterwards.
 #[test]
 fn a_workers_script_is_requested_once() {
     let mut pair = Pair::new(
@@ -1750,14 +1856,22 @@ fn a_workers_script_is_requested_once() {
         worker.onmessage = event => seen.push(event.data);
     ",
     );
-    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('ran');");
-    // The worker's boot epilogue ran before its script did, so anything it
-    // asked for is on the notice channel by the time the script's message is.
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; postMessage('ran'); \
+         onmessage = event => postMessage(event.data);",
+    );
     pair.deliver();
-    pair.check(r#"if (JSON.stringify(seen) !== '["ran"]') throw Error(JSON.stringify(seen));"#);
+    // A second request would leave in the epilogue of the job that completed
+    // the script, after the script's own message. The echo is posted by a
+    // later job of the same worker, so that epilogue has run once it is here.
+    pair.check("worker.postMessage('echo');");
+    pair.deliver();
+    pair.check(
+        r#"if (JSON.stringify(seen) !== '["ran","echo"]') throw Error(JSON.stringify(seen));"#,
+    );
     assert!(
         !asked_for_a_worker(&pair.notices()),
-        "the worker asked for its own script a second time"
+        "the worker's script was asked for a second time"
     );
 }
 

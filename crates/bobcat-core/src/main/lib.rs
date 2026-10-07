@@ -9,8 +9,8 @@
 //! `bobcat-workers` is not this thread's. The group starts it beside this one
 //! and joins it after it; what arrives here is one sender and the flag that
 //! thread sets when it traps, and the three messages a realm sends on it —
-//! start a context with its script, post to one, stop one — are the whole of
-//! what this thread does to it.
+//! start a context, post to one, stop one — are the whole of what this
+//! thread does to it.
 //!
 //! Tasks rather than one state machine for all of them. A view waiting for its
 //! entry parks on its own channels, so nothing it is waiting for can hold up a

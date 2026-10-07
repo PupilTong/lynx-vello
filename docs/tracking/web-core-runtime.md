@@ -85,20 +85,21 @@ The engine now exposes `import { Worker } from "bobcat-internal"` on the main
 realm. Construction sends one `WorkerStart` from the view's task on
 `bobcat-main` to `bobcat-workers`, which spawns **one task per worker realm**;
 that message carries everything the worker will ever be given — its key, its
-name, its URL, a one-shot for its script unless that URL is an engine name
-such as `bobcat:bts`, the source its diagnostics are named by, the receiving
-end of its message channel, and the sender its events go back on, which is the
-creating view's own channel. The
+name, its URL, the receiving end of its message channel, the sender its events
+go back on, which is the creating view's own channel, its own cancellation
+token, and the `HostOutbox` it asks the view's host through. The
 worker's realm opens as that message is served and loads the module at its
 URL as its root module, the way an `import()` of the URL would; nothing is
-written around the script. The script is loaded through the view's fetcher and
-answers that one-shot directly, without a main-thread turn; the worker
-completes the root module from it. The engine installs no global scope: a
+written around the script. The worker asks the view's fetcher for the script
+itself, as its realm boots, and completes the root module from the answer as
+it does any import, without a main-thread turn; a script that cannot be
+loaded is reported as `WorkerThrew` and the worker stays
+(`deviations.md`). The engine installs no global scope: a
 worker script imports `bobcat:worker` for `self`, `postMessage` and
 `onmessage`, and `bobcat:timers` for the timer globals, and a message posted
 to a realm in which `bobcat:worker` never ran is dropped without a report. Early messages queue in the worker's own
-task until the script has run, a terminate that arrives before the script wins
-over it, and parent message/error listeners and termination are supported. This is the worker transport needed
+task until the script has run, a terminate the worker has read before the job
+that completes its script runs means the script never runs, and parent message/error listeners and termination are supported. This is the worker transport needed
 under the BTS integration above; it does not yet install the ReactLynx BTS
 bootstrap or RPC ports. The Context MVP below builds on it. Its event/lifetime model follows
 the [HTML Worker interface](https://html.spec.whatwg.org/multipage/workers.html#dedicated-workers-and-the-worker-interface),

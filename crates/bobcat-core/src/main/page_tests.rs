@@ -3035,10 +3035,10 @@ fn a_bts_worker_that_fails_reports_worker_ended_and_leaves_boot_alone() {
             })
             .await;
         let background = harness.background_worker();
-        assert!(
-            background.url == crate::esm::BTS_MODULE_SPECIFIER
-                && background.source == crate::ScriptSource::Background,
-            "boot's worker starts as the background thread"
+        assert_eq!(
+            background.url,
+            crate::esm::BTS_MODULE_SPECIFIER,
+            "boot's worker is the one at the URL that names the background thread"
         );
         // Boot is already settled when the failure arrives: it is the MTS
         // entry's own, and the BTS Worker is no part of it.
@@ -3646,7 +3646,7 @@ fn an_entry_a_worker_event_resumes_reports_its_throw_before_boots_failure() {
             throw Error('the entry threw');
             ",
         );
-        // The entry's own `Worker`, whose script this test never answers:
+        // The entry's own `Worker`, which nothing on this test's side boots:
         // the message below is the only thing it says.
         let mut worker = None;
         harness

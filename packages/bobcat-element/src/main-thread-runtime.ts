@@ -170,8 +170,9 @@ function chunkURL(name: string, bundleName: string): string {
 // Set once, at connection, and never cleared: a Worker that has ended is still
 // the Worker this view posts to, and the host is what drops those posts.
 let backgroundWorker: Worker | undefined;
-// The BTS Worker ended — it closed itself, its script failed, or its thread
-// trapped. Only disposal reads it: nothing can reply from an ended Worker.
+// The BTS Worker ended — it closed itself, its realm could not be built, or
+// its thread trapped. Only disposal reads it: nothing can reply from an ended
+// Worker.
 let backgroundEnded = false;
 let backgroundDisposal: Promise<void> | undefined;
 let acknowledgeDisposal: (() => void) | undefined;

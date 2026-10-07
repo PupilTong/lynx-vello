@@ -1004,8 +1004,9 @@ evaluation, a module load, a `Future` settle, a page update, an animation
 frame — during boot or after it), `ListenerFailed` (a listener that threw
 during event delivery), `TimerFailed` (a `setTimeout` or `setInterval`
 callback that threw when it came due), `WorkerThrew` (code in a worker's
-realm threw, BTS included, and the worker still runs), `WorkerEnded` (a
-worker ended without being told to: its script could not be loaded, its realm
+realm threw, BTS included, and the worker still runs; a worker script or
+imported module that cannot be loaded is reported here too), `WorkerEnded` (a
+worker ended without being told to: its realm
 could not be built, or the worker thread trapped), `Panicked` (the engine
 panicked while it served the view), and the two diagnostics, `ScriptReported`
 (a `lynx.reportError`, at level `"warn"`, `"error"` or `"fatal"`) and
@@ -1132,7 +1133,7 @@ document thread at the start of `Document::layout`, and nothing here sees it.
 `LynxGroup::new` starts it beside `bobcat-main`, and the group handle's drop
 joins it after `bobcat-main` has returned, so a thread that will not start
 fails the *group*. `bobcat-main` holds one sender on it and only ever sends:
-start a context with its script, post to a context, stop a context — and hears
+start a context, post to a context, stop a context — and hears
 events back. It also reads one flag the worker thread sets when it traps: the
 trap reports `Failed` to the creator of every worker still on it, and a
 `new Worker` constructed afterwards fails at once instead of being sent there.
@@ -1144,12 +1145,13 @@ since `QuickJS` binds a runtime to one thread, no path runs from a worker realm
 to a `LynxDocument` and no value of either runtime can be named by the other.
 One realm per live worker, and the group's workers take turns. **One task per
 live worker, and a worker's whole state is that task**: a `WorkerStart` carries
-its key, its name, its URL, what `createWorker` decided from that URL before it
-sent the `Start` — the one-shot its script will arrive on (`None` for a URL
-under `ENGINE_MODULE_PREFIXES`, which the host is never asked for) and its
-`ScriptSource` — the receiving end of its message channel, the sender its
-events go back on — the creating MTS realm's `WorkerEvent` channel — and the
-Worker's own cancellation token. There is no worker kind: the BTS is the
+its key, its name, its URL, the receiving end of its message channel, the
+sender its events go back on — the creating MTS realm's `WorkerEvent` channel
+— the Worker's own cancellation token, and the `HostOutbox` it asks the
+view's host through. It carries neither a script nor a `ScriptSource`: the
+worker's realm asks for its own script, and both threads derive the source
+from the URL and the key (`background::worker_source`). There is no worker
+kind: the BTS is the
 dedicated worker whose URL is `bobcat:bts`, and nothing of the view's data is
 in its `Start`: that reaches it in the `initialize` message. The
 worker's realm opens as its `Start` is served, the way a view's opens as that
@@ -1158,7 +1160,7 @@ the realm loads that module as its root, the way `import(<URL>)` loads one
 (`ScriptEngine::load_root_module` over the bridge's `Context::load_module`),
 with nothing written around it, so the BTS's root module is `bobcat:bts`
 itself and a plain worker's is its fetched script. A runtime that never came
-up fails the worker there, without waiting for its script. **The engine
+up fails the worker there, before anything is requested. **The engine
 installs no global scope in a worker realm.** `bobcat:bts` begins with
 `import "bobcat:worker"; import "bobcat:timers";`, and a plain worker script
 that wants `self`, `postMessage`, `onmessage`, `close`, `name` or `console`
@@ -1178,19 +1180,22 @@ MTS routes events through weak references to JS Worker objects; their
 finalizers and explicit `terminate()` release sending handles, and releasing
 the MTS realm closes its remaining senders. Apart from those handles, the
 realm's `WorkerOwner` records each key's public `ScriptSource` (`Background`,
-or `Worker(WorkerId)`) from the moment the key is allocated until
+or `Worker(WorkerId)`; the value is `worker_source(url, key)`, which the
+worker thread calls too) from the moment the key is allocated until
 `terminate()` or delivery of the worker's own end, so a worker that fails
 before it is started has a source too; `WorkerThrew` and `WorkerEnded` carry
 it, and a key without one reports neither — so a trap that reaches a worker
 after its own end was delivered is reported to no one. Host functions
 reference the channel owner weakly, so queued finalizers cannot keep a
-released realm's workers or group thread alive. The worker's message consumer
-waits for a worker's script in a `biased` select with the message channel
-first, so a `terminate` landing in the same instant as the script wins and a
-worker told to stop never runs its script. The consumer starts beside the
+released realm's workers or group thread alive. A worker's script is completed
+by a job, as any module it imports is, and a job of a worker that has ended
+does nothing: a `terminate` the worker's message consumer has read before
+that job runs means the script never runs, and nothing else orders the two.
+The consumer starts beside the
 worker's first job rather than after it, so a `terminate` also ends at once a
-worker whose first job is still queued behind another realm's parked job. A
-worker whose URL is an engine name has no script answer to wait for: the
+worker whose first job is still queued behind another realm's parked job;
+that job then opens no realm and requests nothing. A
+worker whose URL is an engine name raises no request: the
 realm's own loader loads a registered name, and refuses any other with a local
 `ReferenceError`, which the worker reports as `WorkerThrew` and keeps running.
 The timer machinery both
@@ -1212,15 +1217,19 @@ its three native operations — `createWorker`, `sendWorkerMessage`,
 URL rules to the `__Card__` the realm passes as its third argument (Rust does
 not keep `__Card__`; an absolute URL such as `bobcat:bts` joins to itself); a
 URL that does not resolve starts nothing and `new Worker` throws a synchronous
-`SyntaxError`. The `Start` goes out before the host is asked for anything. For
-a URL outside `ENGINE_MODULE_PREFIXES` the script is then requested as a
-`SourceRequest::Module` of the joined URL, and the host is handed the far end
-of the one-shot that already rode to `bobcat-workers` inside that `Start`, so
-the script reaches the worker without a main-thread turn; an engine name is
-never requested. The worker completes it, under the request URL its realm
-loads as its root module and from the response URL, as a module of its own
-realm: the worker's own epilogue never asks for that URL again, and posted
-messages wait until the root module has finished. `self.name` is set by
+`SyntaxError`. `createWorker` asks the host for nothing and checks no prefix.
+The worker's realm loads the module at its URL as its root when it boots; for
+a URL the realm has no source for, that load is one module request, which the
+worker's epilogue sends through its `HostOutbox` as a `SourceRequest::Module`
+and a task of the worker completes as it does any import's: under the request
+URL, from the response URL, as a module of its own realm, once, without a
+main-thread turn. An engine name is loaded or refused by the realm's loader
+and never requested. A script that cannot be loaded, or is answered with
+something other than a script, is reported once as `WorkerThrew`, under
+`loading a worker module`, the one context every completion of a module
+reports under, and the worker stays until it is terminated or collected
+(`docs/tracking/deviations.md`). Posted
+messages wait until the root module's load has settled. `self.name` is set by
 `bobcat:worker` from the host member `workerName` as it is evaluated, so a
 module the script imports statically after it reads it too. Every concurrent
 worker request is preserved.
@@ -1238,7 +1247,7 @@ transport and lifetime boundaries.
 boot creates a BTS Worker** named
 `lynx-bg` through that same class, using the engine URL `bobcat:bts`. The BTS
 is a dedicated worker like any other, started the same way: its URL is what
-makes `createWorker` name it `ScriptSource::Background`, and nothing else in
+names it `ScriptSource::Background` (`worker_source`), and nothing else in
 Rust tells it apart. That URL is a registered module (`bts.ts`) and the BTS
 realm's root module: it imports `bobcat:worker` and `bobcat:timers` (the
 BTS's global scope and timers), installs its JS initializer from
@@ -1268,7 +1277,8 @@ is a `SyntaxError`). Neither runtime installs `globalThis.lynx`. XML uses this
 identical startup path, and the bootstrap contains no application source and
 does not fetch it in advance. A
 worker carries a `HostOutbox` (`WorkerStart.sources`) that sends module
-requests directly to the view's resource host. ESM completion and timers
+requests, its own script's included, directly to the view's resource host.
+ESM completion and timers
 continue during entry TLA; posted messages wait for entry settlement, and each
 completion shares its worker's cancellation token. ReactLynx compiled module
 execution (`lynx.requireModule` and the `{init}` factory ABI in
@@ -1374,9 +1384,9 @@ stylesheet, startup-string (the module table among them), event-name and
 `invokeNativeModule` in both. The constructor has no role field; it is told
 two things about a realm: the key its display-frame demand is reported under,
 `None` for MTS and the worker's key for a worker, and the `ScriptSource` its
-diagnostics carry, `Main` for MTS and, for a worker, the one its `WorkerStart`
-carries (`Background` for the URL `bobcat:bts`, otherwise `Worker(WorkerId)`
-of its key). What it
+diagnostics carry, `Main` for MTS and, for a worker, the one `worker_source`
+derives from its URL and key (`Background` for the URL `bobcat:bts`, otherwise
+`Worker(WorkerId)` of its key). What it
 answers with, `RealmCore { engine, timers, futures }`, is the first field of
 both `MainThreadRuntime` and the worker thread's `WorkerRealm`.
 
@@ -1424,10 +1434,10 @@ the fetcher for it. `bobcat:bts` is the BTS Worker's URL, a registered module
 like the rest; `bobcat:boot` is the MTS boot module's own specifier, evaluated
 once per realm and never registered. A worker realm has no module of the
 engine's own around its script: its root module is the module at its URL,
-loaded by that URL, and for a URL outside the engine prefixes the worker
-completes that load from the answer `createWorker` asked for, under the
-request URL, as a module of its own realm — the way a view completes its MTS
-entry — so it is never registered on the runtime, keeps its own line
+loaded by that URL, and for a URL the realm has no source for that load is a
+module request the worker makes and completes as any import's, under the
+request URL, as a module of its own realm, so it is never registered on the
+runtime, keeps its own line
 numbers, and runs with its response URL as `import.meta.url`. The Element module
 imports native operations directly from `bobcat-internal:host`; no host object
 and no element member is installed on `globalThis`.

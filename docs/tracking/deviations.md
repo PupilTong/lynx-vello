@@ -1913,6 +1913,31 @@ consequential choice about whether to follow the spec or the quirk.
   that reported it, beside `"warn"` for `'warning'` and `"error"` for anything
   else, and the engine does nothing more for it — the BTS keeps taking messages
   and calls, and no realm and no view ends.
+- **A `Worker` whose script cannot be loaded is reported and stays** — HTML's
+  "run a worker" (HTML Standard, 10.2.4 Processing model) fetches the script
+  and its module graph before anything runs; when that fetch fails, or the
+  script has an error to rethrow, it fires `error` at the `Worker` object, runs
+  the environment discarding steps and stops, so the worker never runs and
+  nothing is left of it. Here a worker's realm opens as its `Start` is served
+  and loads the module at its URL as its root module, and the request that load
+  makes is an ordinary module request, sent and completed as an import's is
+  (`../runtime-architecture.md`). **Decision: no path of the root's own** (user
+  ruling): a script the fetcher could not load, or answered with something
+  other than a script, rejects that load in the realm, exactly as a module the
+  script imports does. It is one `WorkerPayload::Errored`: the `Worker` object
+  gets its one `error` event, as in HTML, and the embedder gets
+  `EngineEvent::WorkerThrew` (context `loading a worker module`), not
+  `WorkerEnded`. The realm stays allocated until `terminate()`, the collection
+  of the `Worker` object or the release of the creating realm, which is what
+  `new Worker("bobcat:nope")` leaves as well. Nothing ran in it, so what is
+  posted to it is dropped and nothing is reported for the post. Two more
+  consequences of the same rule: the request leaves `bobcat-workers` in the
+  worker's boot job, not at construction, so after
+  `new Worker(url).terminate()` the host sees no request for `url` or one,
+  which reads as cancelled once the worker has ended; and the only ordering
+  between a `terminate()` and the script is an import's, that the script does
+  not run when the worker has read the `Terminate` before the job that
+  completes the script runs.
 - **Accessibility**: Lynx has **no implicit ARIA-like semantic
   roles/focusability** (nothing is focusable/announced unless explicitly
   opted in via `accessibility-element`), and `accessibility-traits` is a flat

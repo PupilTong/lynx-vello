@@ -365,10 +365,13 @@ pub enum EngineEvent {
     TimerFailed(ScriptError),
     /// Code in a worker's realm threw, and the worker is still running: its
     /// script, a message delivered to it, a timer, animation or native module
-    /// callback, a module it imported or a `Future` it awaited. The BTS
-    /// Worker included. Not fatal: HTML reports such an exception at the
-    /// worker and then at the creating realm's `Worker` object without ending
-    /// either, and the owning view remains usable.
+    /// callback, a module it imported or a `Future` it awaited. A script or
+    /// an imported module that could not be loaded, or was not a script, is
+    /// reported here as well: the load rejects in the worker's realm, and
+    /// the worker stays until it is terminated or collected. The BTS Worker
+    /// included. Not fatal: HTML reports such an exception at the worker and
+    /// then at the creating realm's `Worker` object without ending either,
+    /// and the owning view remains usable.
     ///
     /// `source` is [`ScriptSource::Background`] or a
     /// [`ScriptSource::Worker`]. Both worker events are reported before the
@@ -381,11 +384,11 @@ pub enum EngineEvent {
         source: ScriptSource,
         error: ScriptError,
     },
-    /// A worker ended without being told to: its script could not be fetched
-    /// or was not a script, its realm could not be built, or the thread
-    /// workers run on has trapped, including before this worker was started.
-    /// Nothing more arrives from it. Not fatal: the owning view remains
-    /// usable, and a view whose BTS Worker ended goes on without a BTS.
+    /// A worker ended without being told to: its realm could not be built,
+    /// or the thread workers run on has trapped, including before this
+    /// worker was started. Nothing more arrives from it. Not fatal: the
+    /// owning view remains usable, and a view whose BTS Worker ended goes on
+    /// without a BTS.
     ///
     /// Reported under the same rules as [`EngineEvent::WorkerThrew`].
     WorkerEnded {

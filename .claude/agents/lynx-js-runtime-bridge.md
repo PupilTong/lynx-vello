@@ -44,10 +44,14 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   and its root module is the module at its URL, loaded the way `import(<URL>)`
   loads one (`ScriptEngine::load_root_module` over the bridge's
   `Context::load_module`) with nothing written around it: the BTS's root is
-  `bobcat:bts` itself, a plain worker's its script, which the worker's
-  `consume_messages` completes under the request URL from the answer
-  `createWorker` asked for; a URL under `ENGINE_MODULE_PREFIXES` is never
-  requested, and the realm's own loader loads it. The engine installs no
+  `bobcat:bts` itself, a plain worker's its script, which the realm requests
+  as its root when it boots: the worker's epilogue asks the host for it
+  through the worker's `HostOutbox`, and a `load_module` task completes it
+  under the request URL, as for any import (`createWorker` asks the host for
+  nothing). An engine name is loaded or refused by the realm's own loader
+  and never requested. A script that cannot be loaded is one `WorkerThrew`
+  (`loading a worker module`), and the worker stays until it is terminated
+  or collected, as `new Worker("bobcat:nope")` does. The engine installs no
   global scope: `bobcat:bts` imports `bobcat:worker` and `bobcat:timers`
   itself, a plain worker script imports them when it uses them (one that
   does not and uses them throws a `ReferenceError`, unguarded), and a post
@@ -55,9 +59,11 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   reported. "Has run" is `WorkerFlags::scope_installed`, set by
   `bobcat:worker`'s read of `workerName`, its last statement, never an
   instance check: a module a failed or pending graph compiled is never
-  linked, and reading its namespace crashes QuickJS. `createWorker` decides from the URL alone, and
-  only the source: `bobcat:bts` is `ScriptSource::Background`, every other URL
-  `Worker(id)`; every `Start` is otherwise built the same way. The BTS's data
+  linked, and reading its namespace crashes QuickJS. The source is derived
+  from the URL and the key by `background::worker_source`, which
+  `WorkerOwner::start` and the worker thread both call: `bobcat:bts` is
+  `ScriptSource::Background`, every other URL `Worker(id)`; every `Start` is
+  built the same way and carries neither a script nor a source. The BTS's data
   — its entry URL, the MTS realm's own `SystemInfo` and the view's native
   module table — reaches it in the `initialize` message
   `__BobcatConnectBackground` posts, beside the page data: the MTS boot

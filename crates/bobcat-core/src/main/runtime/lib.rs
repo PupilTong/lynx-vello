@@ -879,9 +879,10 @@ impl MainThreadRuntime {
         // its `Worker` object: what that worker still says reaches neither a
         // `Worker` object nor the embedder.
         let source = self.workers.source_of(key);
-        // A worker that closed itself, or whose script or realm failed, has
-        // ended: this is where the realm learns it, and so where the right to
-        // tell it to stop stops being worth keeping.
+        // A worker that closed itself, or whose realm could not be built or
+        // whose thread trapped, has ended: this is where the realm learns
+        // it, and so where the right to tell it to stop stops being worth
+        // keeping.
         if matches!(payload, WorkerPayload::Closed | WorkerPayload::Failed(_)) {
             self.workers.forget(key);
         }

@@ -134,8 +134,9 @@ member `nativeModuleTable`, beside `initData` and `globalProps`.
 `bobcat:bts-runtime` builds `NativeModules` out of it before it imports the
 BTS entry. So `initialize` carries the page's data, the BTS entry's URL, the
 MTS realm's `SystemInfo` and this record, and the BTS's `WorkerStart` carries
-none of the view's data: it differs from any other worker's only in its URL
-and its `ScriptSource`. A plain `Worker` is posted no `initialize`, so its
+none of the view's data: it differs from any other worker's only in its URL,
+which is also what names it `ScriptSource::Background`. A plain `Worker` is
+posted no `initialize`, so its
 `NativeModules` is empty. Every realm kind declares the host module
 `bobcat-internal:native-modules`, with `invokeNativeModule` alone, so the
 transport `bobcat:native-modules` links in each. The modules
@@ -215,9 +216,10 @@ QuickJS ESM graph — a worker realm, on bobcat-workers' runtime
   <URL> (the root module: the module at the worker's URL itself, loaded as
     │    the realm opens at its Start, the way import("<URL>") loads one;
     │    the engine writes nothing around it and installs no global scope)
-    ├── a URL outside the engine  completed by the worker's consume_messages
-    │   prefixes                  task, under the request URL, from the
-    │                             answer to the request createWorker made;
+    ├── a URL the realm has no    requested by the worker's epilogue through
+    │   source for                its HostOutbox and completed by a
+    │                             load_module task, under the request URL,
+    │                             as any import is;
     │                             the script runs with import.meta.url = its
     │                             response URL, and imports bobcat:worker and
     │                             bobcat:timers itself when it uses them
@@ -750,8 +752,8 @@ them, and each with its own global object and native modules.
 `bobcat-main` and joined by the group handle's drop after it — carries the
 other, with one task and one realm per live worker. It is an independent
 runtime environment rather than something `bobcat-main` offloads work to:
-`bobcat-main` holds one sender on it, sends three messages (start a context
-with its script, post to a context, stop a context) and receives events back.
+`bobcat-main` holds one sender on it, sends three messages (start a context,
+post to a context, stop a context) and receives events back.
 The one other thing that crosses is a flag `bobcat-workers` sets when it traps,
 which `bobcat-main` reads before each `Start`. Separating
 them is the whole point of a worker: script that must not stop the thread that
@@ -779,7 +781,8 @@ constructor names no realm kind. It is told two things: the key the realm's
 display-frame demand is reported under, `None` for an MTS realm and the
 worker's key for a worker realm, and the `ScriptSource` its `ScriptReported`
 and `ConsoleMessage` carry, `Main` for
-an MTS realm and, for a worker realm, the one its `WorkerStart` carries:
+an MTS realm and, for a worker realm, the one `worker_source` derives from
+its URL and key:
 `Background` for the URL `bobcat:bts`, otherwise `Worker(WorkerId)`. Since
 both runtimes register
 every built-in module, these host modules are also what decides which
@@ -824,57 +827,70 @@ cannot fail on what the same build's writer produced.
 
 ```text
 main realm: new Worker(url)
-  ├── WorkerStart { key, name, url (joined to __Card__),
-  │                 script: oneshot receiver (None for an engine name),
-  │                 source: Background (bobcat:bts) or Worker(id),
-  │                 messages: mpsc receiver, events: this view's sender }
-  │        ────────────────────────────────▶ bobcat-workers: one task per worker
+  └── WorkerStart { key, name, url (joined to __Card__),
+                    messages: mpsc receiver, events: this view's sender,
+                    token, sources: the worker's HostOutbox }
+           ────────────────────────────────▶ bobcat-workers: one task per worker
+worker realm: the load of its root module, in its boot job
   └── ViewNotice::RequestSource ──▶ LynxView::pump ──▶ request_source
-      (not for an engine name)       │ SourceRequest::Module(url)
-                                     └── SourceCompletion answers the oneshot
-                                         that already rode inside the Start
+      (through its HostOutbox; not   │ SourceRequest::Module(url)
+       for an engine name)           └── SourceCompletion answers the worker's
+                                         load_module task
 main realm: postMessage / terminate ───────────────▶ that worker's own task
 main realm: Worker message/error handler ◀── WorkerEvent { key, payload }
 ```
 
 The script URL is resolved in Rust, before anything is started: `createWorker`
-joins every specifier by URL rules — not import-specifier rules, so
-`worker.js` and `?v=2` are relative URLs, and an absolute URL such as
-`bobcat:bts` joins to itself — to the creating view's entry response URL,
-which the realm holds as `__Card__` and passes as the third argument; Rust
-does not keep it. A URL that does not resolve allocates no key, sends no
-`Start` and requests nothing, and `new Worker` throws HTML's synchronous
-`SyntaxError`. There is one kind of worker. The BTS is the dedicated worker
-whose URL is `bobcat:bts`, and the URL alone decides the two things that
-differ between workers: only a URL outside `ENGINE_MODULE_PREFIXES` is
-requested from the host, and only `bobcat:bts` is named
-`ScriptSource::Background`. No `Start` carries the view's data: the MTS realm
-posts it to the BTS in the `initialize` message.
+joins every specifier by URL rules — not import-specifier rules, so `worker.js`
+and `?v=2` are relative URLs, and an absolute URL such as `bobcat:bts` joins to
+itself — to the creating view's entry response URL, which the realm holds as
+`__Card__` and passes as the third argument; Rust does not keep it. A URL that
+does not resolve allocates no key, sends no `Start` and requests nothing, and
+`new Worker` throws HTML's synchronous `SyntaxError`. There is one kind of
+worker. The BTS is the dedicated worker whose URL is `bobcat:bts`, and the URL
+alone decides the one thing Rust tells workers apart by: only `bobcat:bts` is
+named `ScriptSource::Background`. Whether a URL is requested from the host is
+the answer of the realm's module loader, as for any import, and `createWorker`
+neither asks the host for anything nor checks a prefix. No `Start` carries the
+view's data: the MTS realm posts it to the BTS in the `initialize` message.
 Fetching and UTF-8 validation remain fetcher policy. Multiple worker requests
-are preserved without coalescing. The `WorkerStart` is sent before the host is
-asked to fetch, so messages posted during loading queue against an existing
-key. The worker's realm opens as its `Start` is served, with the view's realm
-as the model, and loads the module at the worker's URL as its root module,
-the way `import(<URL>)` loads one: the engine writes nothing around the
-script and installs no global scope before it, and the request that load
-makes is never sent again. The completion answers the worker's own message consumer
-directly: it needs no main-thread turn and cannot be held behind a long
-main-thread script. The consumer completes the module under the request URL,
-from the response URL, and holds what is posted until the root module has
-finished, which is what HTML does. A runtime that never came up fails the
-worker at its `Start`, without waiting for the answer. A worker told to
-terminate before its script arrives never runs it, because the consumer's
-wait for the script is a `biased` select with the message channel first. The
-consumer starts beside the worker's first job, the one that opens its realm,
-rather than after it: that job can be queued behind another realm's job
-parked on a synchronous wait, and a `Terminate` read meanwhile ends the
-worker and cancels its fetch at once; the job then opens nothing. A URL that
-is an engine name has no answer to wait for: the host is never asked for it,
-and the realm's own loader loads a registered name such as `bobcat:bts` or
-`bobcat:timers`, or refuses any other with a `ReferenceError`, which the
-worker reports as `WorkerThrew` and keeps running. The worker's token is
-independent of the view, so its cancellation cannot race ahead of JS
-disposal.
+are preserved without coalescing. The host is asked by the worker itself, as
+its realm boots; messages posted before the root module's load has settled are
+held by the worker. The worker's realm opens as its `Start` is served, with the
+view's realm as the model, and loads the module at the worker's URL as its root
+module, the way `import(<URL>)` loads one: the engine writes nothing around the
+script and installs no global scope before it. For a URL the realm has no
+source for, that load raises one module request, which the epilogue of the
+worker's boot job sends through the worker's `HostOutbox`, once. A task of the
+worker awaits the answer: it needs no main-thread turn and cannot be held
+behind a long main-thread script. That task completes the module under the
+request URL, from the response URL, and the worker's message consumer holds
+what is posted until the root module's load has settled, which is what HTML
+does. A script that cannot be loaded (the fetch failed, the answer was not a
+script, or the response URL cannot name a module) rejects that load in the
+realm, as a throw at the script's top level does, and is reported the same
+way: once, as `WorkerThrew`, under `loading a worker module`, the one context
+every completion of a module reports under. The worker stays until it is
+terminated or collected, as a worker constructed over an engine name nothing
+registered does; HTML never runs such a worker
+(`docs/tracking/deviations.md`). A runtime that never came up fails the worker
+at its `Start`, and nothing is requested. A worker told to terminate before its
+script arrives never runs it: the completion of the script is a job, and a job
+of a worker that has ended does nothing. That is the ordering an import has,
+and the script has no other: its completion job either ran before the worker's
+message consumer read the `Terminate`, or does nothing. The end cancels the
+worker's token, which every request the worker made carries, so the host reads
+an outstanding request as cancelled. The consumer starts beside the worker's
+first job, the one that opens its realm, rather than after it: that job can be
+queued behind another realm's job parked on a synchronous wait, and a
+`Terminate` read meanwhile ends the worker at once; the job then opens nothing
+and requests nothing. So after `new Worker(url).terminate()` the host sees no
+request for `url` or one, depending on which of the two messages the worker
+thread reads first. A URL that is an engine name raises no request: the realm's
+own loader loads a registered name such as `bobcat:bts` or `bobcat:timers`, or
+refuses any other with a `ReferenceError`, which the worker reports as
+`WorkerThrew` and keeps running. The worker's token is independent of the view,
+so its cancellation cannot race ahead of JS disposal.
 
 A worker script imports its global scope itself. `bobcat:bts` begins with
 `import "bobcat:worker"; import "bobcat:timers";`, and a plain worker script
@@ -898,9 +914,11 @@ the sending end of its message channel, and only while that worker runs — a
 worker that closed itself or failed is forgotten where the realm learns of it,
 when that event is dispatched. The other is its `ScriptSource` (`Background`
 for `bobcat:bts`, `Worker(WorkerId)` for any other URL), recorded when the key
-is allocated, before the `Start` carrying the same source is sent, and removed
+is allocated, before the `Start` is sent, and removed
 at `terminate()` or at that same dispatch; a worker that fails before it is
-started, and so never had a channel here, has one too. MTS keeps
+started, and so never had a channel here, has one too. The `Start` carries no
+source: the worker thread derives the same value from the same URL and key,
+with the same function (`worker_source`). MTS keeps
 `WeakRef<Worker>` values for event routing; a JS `FinalizationRegistry`
 releases an unreachable Worker's sending handle.
 A reachable Worker survives collection. Explicit `terminate()` uses the same
@@ -913,10 +931,11 @@ token and become cancelled when that Worker ends.
 
 Worker errors still produce a nonfatal host event, one of two. A worker's
 `Errored` — something its realm ran threw, whichever entry it was, and the
-worker still runs — is `EngineEvent::WorkerThrew`; its `Failed` — its script
-could not be loaded, its realm could not be built, or `bobcat-workers`
+worker still runs — is `EngineEvent::WorkerThrew`; its `Failed` — its realm
+could not be built, or `bobcat-workers`
 trapped, before or after it was started — is `EngineEvent::WorkerEnded`. A
-failure of a worker's root module — a throw at its top level, a dependency
+failure of a worker's root module — its own source that could not be loaded
+or was not a script, a throw at its top level, a dependency
 that could not be loaded or that threw, a rejected top-level await — is one
 `Errored`, reported by the entry it happened in (the boot job, the completion
 of the script or of a module it imports, a timer); the worker's own read of
