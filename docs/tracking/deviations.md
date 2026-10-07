@@ -934,6 +934,32 @@ consequential choice about whether to follow the spec or the quirk.
   it is connected. Accepted: a compiled ReactLynx card writes `src` and
   appends in the same render, so the two differ only for a card that holds an
   element out of the tree across a turn.
+- **SVG (2026-10-08): one vector image, rendered wherever web-core renders
+  it.** Native draws SVG only in `<svg>`, through ServalSVG at the element's
+  frame size, and its `<image>` refuses SVG
+  (`js_libraries/types/skills/image.md:268-269`); web-core's `x-svg` and
+  `x-image` are shadow `<img>`s, so the browser renders SVG in `<svg>`,
+  `<image src>`, `background-image` and `mask-image`. Here `usvg` parses the
+  document and `dom` paints it as a vello fragment, in all four places
+  (pipeline in [media-resources.md](media-resources.md), status in
+  [components.md](components.md)'s `x-svg` row). Where the references
+  disagree, and which side was followed (user rulings, 2026-10-08):
+  - *`<image src="x.svg">`, `background-image` and `mask-image` render*
+    (web-core).
+  - *Intrinsic size is CSS Images 3 §4.1 default sizing* (web-core). Native
+    sizes an `<svg>` from CSS alone (`skills/svg.md:117-118`).
+  - *`<svg>`'s `load` detail is the element's layout size* (native), not the
+    natural size web-core's `<img>` reports (`XSvg.ts:64-69`).
+  - *`src` and `content`: the last one written wins, and removing `content`
+    leaves the current picture* (web-core, `XSvg.ts:26-48`). iOS prefers
+    `src` whenever it is set and clears the image on an empty `content`
+    (`LynxUISVG.m:155-202`); Android clears it too (`LynxUISVG.kt:200-203`).
+  - *`current-color` is not implemented* (web-core lacks it; native resolves
+    `currentColor` from it).
+  - *`<text>` inside an SVG is dropped*, though native's tag subset lists it
+    and the browser renders it: `usvg` is built without text support.
+  - *An `<svg>` whose source fails fires nothing*: the typing declares
+    `bindload` alone, and web-core forwards only `load`.
 - **`<blur-view>`'s `blur-radius` is a CSS length here, where web-core and iOS
   read a number and throw the unit away.** The attribute is the whole of the
   component: it is reflected into a `backdrop-filter: blur(…)` presentational
