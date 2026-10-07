@@ -1667,7 +1667,8 @@ including pending loads and failures, are shared by resolved URL within a
 resource scope. Preload hints populate that same cache; registration changes
 invalidate the affected URLs.
 
-**Platform image decoding**: no codec is compiled in — `ImageIO` on macOS
+**Platform image decoding** (raster images; SVG is parsed, below): no codec
+is compiled in — `ImageIO` on macOS
 (`CGImageSourceCreateThumbnailAtIndex` with a maximum pixel size, so a photo
 shown small is decoded small), gdk-pixbuf on Linux (loaded at runtime;
 `gdk_pixbuf_loader_set_size` from the header probe), and the main thread's
@@ -1683,6 +1684,24 @@ closure becomes that image's or source's reported failure. In the browser a
 load is a local task instead. Either way completions are delivered through the
 wakeup the embedder supplies and applied in the next `LynxView::pump` through
 `service_images`.
+
+**SVG documents are parsed, not decoded**, on every target: once
+preprocessing settles `ImageFormat::Svg`, the load calls
+`dom::VectorImage::parse` (one `roxmltree` parse, the root's `width`,
+`height` and `viewBox` read for the natural size and viewport, then
+`usvg::Tree::from_xmltree`) natively inside the same blocking-pool closure
+that fetched the bytes, with no decode permit, and inline in the browser's
+local task. The browser therefore no longer renders SVG through its `Image`
+element. The `usvg::Options` read nothing outside the document:
+`resources_dir: None` and an `image_href_resolver` whose `resolve_string`
+answers `None` (the default reads the filesystem), so only a nested `data:`
+image resolves. The result is reported through
+`ImageReports::loaded_vector` and kept as an `Entry::Vector`: no bitmap, so
+the memory tier, refinement and restore never see it, `read` answers `None`,
+`is_resident` is false, and the encoded bytes are dropped once parsed. `usvg`
+is built without its `svgz` feature, so a gzip-compressed `.svgz` fails to
+load (documented gap). A document labelled with a specific non-SVG type such
+as `text/plain` is trusted as that type and is not an image (`mime::sniff`).
 
 The frame reads each image at the size it draws it: a resident bitmap far
 larger than its draw is re-decoded at the drawn size in the background and
@@ -2251,6 +2270,21 @@ Subsystems:
   is the one exception: a `filter: blur()` bake is a partial replay of a
   committed frame's compose program, so it reads `CommittedFrame`'s filter side
   table, while still naming no node, style, layout or paint-order type.
+
+**Vector images** (`docs/svg-vector-images-design.md`): an SVG document used
+as an image — `<image src>`, `background-image`, `mask-image` — reaches the
+document as a `VectorImage` (an `Arc<usvg::Tree>`, its natural size in whole
+CSS px and its viewport in tree units) inside `ImageEvent::LoadedVector`, which
+a host reports through `ImageReports::loaded_vector`. The registry keeps it in
+`ImageState::Ready { kind: ImageKind::Vector(..) }` and `resolve` lends it to
+the walk. `paint/svg.rs` encodes the tree into a vello scene once, cached in
+the image, and `paint/background.rs` appends that scene inline into the
+fragment for each visible tile under a clip pair, scaled by `extent /
+viewport`, so a vector image is never an image draw and `FrameImages` never
+sees it. A document with nothing drawable encodes nothing at all, not even
+the clip pair. `usvg` is built with no default features (no `text`, no
+`svgz`), and masks, filters, patterns and nested raster images are recorded
+gaps listed in `paint/painter.rs`.
 
 Rulings and limits to know before touching it:
 

@@ -19,6 +19,7 @@ mod mask;
 pub(crate) mod painter;
 mod shadow;
 pub(crate) mod shape;
+pub(crate) mod svg;
 mod text;
 pub(crate) mod walker;
 

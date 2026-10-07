@@ -10,13 +10,17 @@
 //! the identity contract: every [`FrameImages::read`] of one
 //! source returns a clone sharing the same `Blob`, which is what vello keys
 //! its atlas on.
+//!
+//! An SVG document published through [`TestImages::insert_svg`] is parsed
+//! here with `usvg` and reported as a [`VectorImage`]; [`FrameImages::read`]
+//! never answers for it, because the engine never asks.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use dom::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
-use dom::{Document, FrameImages, ImageEvent, ImageReports, ImageSizeHint};
+use dom::{Document, FrameImages, ImageEvent, ImageReports, ImageSizeHint, VectorImage};
 
 /// What this store answers for one source.
 ///
@@ -29,8 +33,30 @@ enum Entry {
     #[default]
     Pending,
     Ready(ImageData),
+    /// A parsed SVG document.
+    Vector(VectorImage),
     /// Named as one that will never produce pixels.
     Failed,
+}
+
+impl Entry {
+    /// The report this entry settles as, or `None` while it is pending.
+    fn settled(&self, source: &str) -> Option<ImageEvent> {
+        let source = Arc::from(source);
+        match self {
+            Entry::Pending => None,
+            Entry::Ready(image) => Some(ImageEvent::Loaded {
+                source,
+                width: image.width,
+                height: image.height,
+            }),
+            Entry::Vector(image) => Some(ImageEvent::LoadedVector {
+                source,
+                image: image.clone(),
+            }),
+            Entry::Failed => Some(ImageEvent::Failed { source }),
+        }
+    }
 }
 
 /// Decoded images keyed by the source string the paint walk asks for.
@@ -102,6 +128,36 @@ impl TestImages {
         self.insert(source, rgba8(width, height, pixels));
     }
 
+    /// Publishes the SVG document `svg` under `source`, parsed with `usvg`,
+    /// and reports it the way [`Self::insert`] reports a bitmap.
+    ///
+    /// Parsing and sizing are [`VectorImage::parse`]'s, the same call a
+    /// production host makes. Parsing reads no file: an `<image>` inside the
+    /// document that names anything but a `data:` URL resolves to nothing.
+    ///
+    /// # Panics
+    ///
+    /// If `svg` does not parse.
+    pub fn insert_svg(&self, source: impl Into<String>, svg: &str) {
+        let source = source.into();
+        let options = usvg::Options {
+            resources_dir: None,
+            image_href_resolver: usvg::ImageHrefResolver {
+                resolve_string: Box::new(|_, _| None),
+                ..usvg::ImageHrefResolver::default()
+            },
+            ..usvg::Options::default()
+        };
+        let image = VectorImage::parse(svg.as_bytes(), &options)
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+        self.entries()
+            .insert(source.clone(), Entry::Vector(image.clone()));
+        self.report(ImageEvent::LoadedVector {
+            source: Arc::from(source.as_str()),
+            image,
+        });
+    }
+
     /// Names `source` as one that will never produce pixels, and reports the
     /// failure the way [`Self::insert`] reports a load.
     ///
@@ -128,21 +184,14 @@ impl TestImages {
     /// image already published so a store warmed before the view still
     /// reports its contents.
     pub fn attach(&self, sink: ImageReports) {
-        let published: Vec<(String, Option<(u32, u32)>)> = self
+        let published: Vec<ImageEvent> = self
             .entries()
             .iter()
-            .filter_map(|(source, entry)| match entry {
-                Entry::Pending => None,
-                Entry::Ready(image) => Some((source.clone(), Some((image.width, image.height)))),
-                Entry::Failed => Some((source.clone(), None)),
-            })
+            .filter_map(|(source, entry)| entry.settled(source))
             .collect();
         *self.sink.borrow_mut() = Some(sink);
-        for (source, loaded) in published {
-            match loaded {
-                Some((width, height)) => self.report_loaded(&source, width, height),
-                None => self.report_failed(&source),
-            }
+        for event in published {
+            self.report(event);
         }
     }
 
@@ -169,7 +218,7 @@ impl TestImages {
     pub fn len(&self) -> usize {
         self.entries()
             .values()
-            .filter(|entry| matches!(entry, Entry::Ready(_)))
+            .filter(|entry| matches!(entry, Entry::Ready(_) | Entry::Vector(_)))
             .count()
     }
 
@@ -208,6 +257,7 @@ impl TestImages {
                     width,
                     height,
                 } => sink.loaded(&source, width, height),
+                ImageEvent::LoadedVector { source, image } => sink.loaded_vector(&source, image),
                 ImageEvent::Failed { source } => sink.failed(&source),
             }
         }
@@ -231,7 +281,7 @@ impl FrameImages for TestImages {
             .push((source.to_owned(), hint));
         match self.entries().get(source)? {
             Entry::Ready(image) => Some(image.clone()),
-            Entry::Pending | Entry::Failed => None,
+            Entry::Pending | Entry::Vector(_) | Entry::Failed => None,
         }
     }
 
@@ -253,18 +303,13 @@ impl TestImages {
     pub fn request(&self, source: &str) {
         // Single-flight is trivial here: one entry per source, and a source
         // that has already settled either way starts no work.
-        let settled = {
-            let mut entries = self.entries();
-            match entries.entry(source.to_owned()).or_default() {
-                Entry::Pending => None,
-                Entry::Ready(image) => Some(Some((image.width, image.height))),
-                Entry::Failed => Some(None),
-            }
-        };
-        match settled {
-            Some(Some((width, height))) => self.report_loaded(source, width, height),
-            Some(None) => self.report_failed(source),
-            None => {}
+        let settled = self
+            .entries()
+            .entry(source.to_owned())
+            .or_default()
+            .settled(source);
+        if let Some(event) = settled {
+            self.report(event);
         }
     }
 }
