@@ -34,10 +34,12 @@
 //! One rule comes from this crate rather than from the design: a blend
 //! layer never opens directly inside a clip layer (vello
 //! [#1198](https://github.com/linebender/vello/issues/1198); see the
-//! `walker.rs` module docs). Where a clip-only group would hold a
-//! non-`Normal` blend group with nothing isolating between them, its clip
-//! layers are full `Normal` layers instead ([`opens_blend`]). The same test
-//! decides the layer a draw of the whole image opens (`background.rs`).
+//! `walker.rs` module docs). Where a group's clip layer would hold a
+//! non-`Normal` blend group with no layer pushed between them, the innermost
+//! of its clip layers, the one that encloses the children, is a full
+//! `Normal` layer instead ([`opens_blend`]); the clip layers outside it stay
+//! clip layers. The same test decides the layer a draw of the whole image
+//! opens (`background.rs`).
 //!
 //! The segment, stroke and brush conversions follow `vello_svg` 0.11.0
 //! (`src/util.rs`, Copyright 2023 the Vello Authors, Apache-2.0 OR MIT),
@@ -60,14 +62,20 @@ pub(crate) fn encode(tree: &usvg::Tree, scene: &mut Scene) {
 
 /// Whether drawing `group`'s children opens a blend layer with no isolating
 /// layer of `group`'s own in between: a child group with a non-`Normal`
-/// blend, reached directly or through groups that push nothing.
+/// blend, reached directly or through groups that push no layer.
 ///
-/// A masked group draws nothing, so its blend does not count.
+/// A group pushes no layer when its opacity is one, its blend is `Normal`
+/// and it has no clip, whether or not it isolates: `isolation: isolate` or a
+/// `filter` alone pushes nothing ([`encode_group`]). A child with its own
+/// clip stops the search, because that child runs this test for its own
+/// clip layers. A masked group draws nothing, so its blend does not count.
 pub(crate) fn opens_blend(group: &usvg::Group) -> bool {
     group.children().iter().any(|node| match node {
         usvg::Node::Group(child) if child.mask().is_none() => {
             child.blend_mode() != usvg::BlendMode::Normal
-                || (!child.should_isolate() && opens_blend(child))
+                || (child.opacity() == usvg::Opacity::ONE
+                    && child.clip_path().is_none()
+                    && opens_blend(child))
         }
         usvg::Node::Group(_) | usvg::Node::Path(_) | usvg::Node::Image(_) | usvg::Node::Text(_) => {
             false
@@ -151,9 +159,11 @@ fn encode_group(scene: &mut Scene, group: &usvg::Group, base: Affine) {
         }
         layers += 1;
     }
+    // Only the innermost layer encloses the children directly, so only that
+    // one is promoted when they open a blend layer.
     if let Some(clip) = clip {
         if let Some(outer) = clip.clip_path() {
-            layers += push_clip_chain(scene, outer, transform, isolate_clips);
+            layers += push_clip_chain(scene, outer, transform, own_clip_pushed && isolate_clips);
         }
         if !own_clip_pushed {
             push_clip(scene, clip, transform, isolate_clips);
@@ -167,7 +177,8 @@ fn encode_group(scene: &mut Scene, group: &usvg::Group, base: Affine) {
 }
 
 /// Pushes `clip` and every `clipPath` clipping it, outermost first, and
-/// answers how many layers it pushed.
+/// answers how many layers it pushed. `isolate` applies to `clip`'s own
+/// layer, the innermost one; the layers around it stay clip layers.
 fn push_clip_chain(
     scene: &mut Scene,
     clip: &usvg::ClipPath,
@@ -176,7 +187,7 @@ fn push_clip_chain(
 ) -> usize {
     let mut layers = 0;
     if let Some(outer) = clip.clip_path() {
-        layers += push_clip_chain(scene, outer, group, isolate);
+        layers += push_clip_chain(scene, outer, group, false);
     }
     push_clip(scene, clip, group, isolate);
     layers + 1
@@ -994,6 +1005,152 @@ mod tests {
             !opens_blend(tree.root()),
             "the blend sits inside the clip's own layer, not at the image's top level"
         );
+    }
+
+    /// The only child group of `group`.
+    fn only_child_group(group: &usvg::Group) -> &usvg::Group {
+        match group.children() {
+            [usvg::Node::Group(child)] => child,
+            other => panic!("expected one child group, found {other:?}"),
+        }
+    }
+
+    /// An `isolation: isolate` group pushes no layer, so a blend group
+    /// inside it still opens directly in the clip layer around both; the
+    /// clip becomes a full `Normal` layer exactly as with no group between.
+    #[test]
+    fn a_clip_around_an_isolated_group_around_a_blend_group_is_a_full_layer() {
+        let tree = parse(
+            r##"<defs><clipPath id="c"><rect width="30" height="30"/></clipPath></defs>
+                <g clip-path="url(#c)">
+                  <g style="isolation:isolate">
+                    <g style="mix-blend-mode:screen"><rect width="20" height="20" fill="#ff0000"/></g>
+                  </g>
+                </g>"##,
+        );
+        let group = only_group(&tree);
+        let clip = group.clip_path().expect("the clip");
+        let clip_child = paths(clip.root())[0];
+        let isolated = only_child_group(group);
+        assert!(isolated.should_isolate(), "the middle group is kept");
+        let blend = only_child_group(isolated);
+        let mut expected = Scene::new();
+        expected.push_layer(
+            Fill::NonZero,
+            normal(),
+            1.0,
+            affine(clip.transform()) * affine(clip_child.abs_transform()),
+            &bez_path(clip_child.data()),
+        );
+        expected.push_layer(
+            Fill::NonZero,
+            BlendMode::new(Mix::Screen, Compose::SrcOver),
+            1.0,
+            Affine::IDENTITY,
+            &rect_of(blend.layer_bounding_box()),
+        );
+        solid_fill(
+            &mut expected,
+            Fill::NonZero,
+            Affine::IDENTITY,
+            RED,
+            paths(tree.root())[0],
+        );
+        expected.pop_layer();
+        expected.pop_layer();
+        assert_scenes_identical(&encoded(&tree), &expected);
+    }
+
+    /// At the image root, a blend group under an `isolation: isolate` group
+    /// opens in whatever layer a draw of the image pushes, so the image
+    /// counts as opening a blend (`background.rs` promotes its tile layers).
+    #[test]
+    fn a_blend_under_an_isolated_group_at_the_root_opens_a_blend() {
+        let tree = parse(
+            r##"<g style="isolation:isolate">
+                  <g style="mix-blend-mode:screen"><rect width="20" height="20" fill="#ff0000"/></g>
+                </g>"##,
+        );
+        let blend = only_child_group(only_group(&tree));
+        let mut expected = Scene::new();
+        expected.push_layer(
+            Fill::NonZero,
+            BlendMode::new(Mix::Screen, Compose::SrcOver),
+            1.0,
+            Affine::IDENTITY,
+            &rect_of(blend.layer_bounding_box()),
+        );
+        solid_fill(
+            &mut expected,
+            Fill::NonZero,
+            Affine::IDENTITY,
+            RED,
+            paths(tree.root())[0],
+        );
+        expected.pop_layer();
+        assert_scenes_identical(&encoded(&tree), &expected);
+        assert!(
+            opens_blend(tree.root()),
+            "the isolated group pushes no layer between the draw and the blend"
+        );
+    }
+
+    /// A clipped `clipPath` around a blend group promotes only the innermost
+    /// layer, the one that encloses the children: the inner clip when it is
+    /// a clip layer of its own, the outer clip when the inner one is the
+    /// group's compositing layer.
+    #[test]
+    fn only_the_innermost_clip_layer_around_a_blend_is_full() {
+        for opacity in ["1", "0.5"] {
+            let tree = parse(&format!(
+                r##"<defs>
+                      <clipPath id="outer"><rect width="15" height="40"/></clipPath>
+                      <clipPath id="inner" clip-path="url(#outer)"><rect width="40" height="15"/></clipPath>
+                    </defs>
+                    <g clip-path="url(#inner)" opacity="{opacity}">
+                      <g style="mix-blend-mode:screen"><rect width="20" height="20" fill="#ff0000"/></g>
+                    </g>"##
+            ));
+            let group = only_group(&tree);
+            let inner = group.clip_path().expect("the clip");
+            let outer = inner.clip_path().expect("the clip's clip");
+            let blend = only_child_group(group);
+            let place = |clip: &usvg::ClipPath| {
+                let child = paths(clip.root())[0];
+                (
+                    affine(clip.transform()) * affine(child.abs_transform()),
+                    bez_path(child.data()),
+                )
+            };
+            let (outer_transform, outer_shape) = place(outer);
+            let (inner_transform, inner_shape) = place(inner);
+            let mut expected = Scene::new();
+            if opacity == "1" {
+                expected.push_clip_layer(Fill::NonZero, outer_transform, &outer_shape);
+                expected.push_layer(Fill::NonZero, normal(), 1.0, inner_transform, &inner_shape);
+            } else {
+                expected.push_layer(Fill::NonZero, normal(), 0.5, inner_transform, &inner_shape);
+                expected.push_layer(Fill::NonZero, normal(), 1.0, outer_transform, &outer_shape);
+            }
+            expected.push_layer(
+                Fill::NonZero,
+                BlendMode::new(Mix::Screen, Compose::SrcOver),
+                1.0,
+                Affine::IDENTITY,
+                &rect_of(blend.layer_bounding_box()),
+            );
+            solid_fill(
+                &mut expected,
+                Fill::NonZero,
+                Affine::IDENTITY,
+                RED,
+                paths(tree.root())[0],
+            );
+            expected.pop_layer();
+            expected.pop_layer();
+            expected.pop_layer();
+            assert_scenes_identical(&encoded(&tree), &expected);
+        }
     }
 
     fn collect_images<'a>(group: &'a usvg::Group, found: &mut Vec<&'a usvg::Image>) {

@@ -1823,6 +1823,53 @@ mod tests {
         assert_close(stops[2].0, 1.5);
         assert_eq!(stops[2].1, red);
     }
+
+    fn vector(body: &str) -> VectorImage {
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">{body}</svg>"#
+        );
+        VectorImage::parse(svg.as_bytes(), &usvg::Options::default()).expect("a valid document")
+    }
+
+    /// A vector tile's clip layer is a full `Normal` layer exactly when the
+    /// image opens a blend layer at its top level, including through an
+    /// `isolation: isolate` group, which pushes no layer of its own.
+    #[test]
+    fn a_vector_tile_isolates_a_blend_under_an_isolated_root_group() {
+        let blended = vector(
+            r##"<g style="isolation:isolate">
+                  <g style="mix-blend-mode:screen"><rect width="20" height="20" fill="#ff0000"/></g>
+                </g>"##,
+        );
+        let plain = vector(r##"<rect width="20" height="20" fill="#ff0000"/>"##);
+        let clip = BoxShape::Rect(Rect::new(0.0, 0.0, 40.0, 40.0));
+        let grid = TileGrid {
+            origin: Point::ZERO,
+            tile: Size::new(40.0, 40.0),
+            repeat_x: false,
+            repeat_y: false,
+        };
+        for (image, isolate) in [(&blended, true), (&plain, false)] {
+            let mut actual = Scene::new();
+            fill_vector_tiles(&mut actual, Affine::IDENTITY, &clip, &grid, image);
+            let mut expected = Scene::new();
+            let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+            if isolate {
+                expected.push_layer(
+                    Fill::NonZero,
+                    peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::SrcOver),
+                    1.0,
+                    Affine::IDENTITY,
+                    &rect,
+                );
+            } else {
+                expected.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect);
+            }
+            expected.append(image.scene(), Some(Affine::scale(0.4)));
+            expected.pop_layer();
+            crate::paint::equivalence::assert_scenes_identical(&actual, &expected);
+        }
+    }
 }
 
 #[cfg(test)]
