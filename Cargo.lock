@@ -355,7 +355,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
- "usvg",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -1056,7 +1055,6 @@ version = "0.1.0"
 dependencies = [
  "dom",
  "png",
- "usvg",
 ]
 
 [[package]]

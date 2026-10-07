@@ -1693,12 +1693,13 @@ wakeup the embedder supplies and applied in the next `LynxView::pump` through
 
 **SVG documents are parsed, not decoded**, on every target: once
 preprocessing settles `ImageFormat::Svg`, the load calls
-`dom::VectorImage::parse` (one `roxmltree` parse, the root's `width`,
+`dom::VectorImage::parse_sealed`, which flashbulb's `TestImages::insert_svg`
+shares (one `roxmltree` parse, the root's `width`,
 `height` and `viewBox` read for the natural size and viewport, then
 `usvg::Tree::from_xmltree`) natively inside the same blocking-pool closure
 that fetched the bytes, with no decode permit, and inline in the browser's
 local task. The browser therefore no longer renders SVG through its `Image`
-element. The `usvg::Options` read nothing outside the document:
+element. Its `usvg::Options` read nothing outside the document:
 `resources_dir: None` and an `image_href_resolver` whose `resolve_string`
 answers `None` (the default reads the filesystem), so only a nested `data:`
 image resolves. The result is reported through

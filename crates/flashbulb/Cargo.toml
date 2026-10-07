@@ -16,13 +16,12 @@ bench = false
 
 [features]
 default = []
-render = ["dep:dom", "dep:usvg"]
+render = ["dep:dom"]
 
 [dependencies]
 png = { workspace = true }
 
 dom = { workspace = true, optional = true }
-usvg = { workspace = true, optional = true }
 
 [lints]
 workspace = true

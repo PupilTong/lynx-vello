@@ -146,8 +146,10 @@ impl VectorImage {
     /// with [`usvg::Error::NotAnUtf8Str`], and a DTD is allowed.
     ///
     /// The sizes follow `docs/svg-vector-images-design.md`. A root `width`
-    /// or `height` is absolute when it is a bare number or a `px` length; any
-    /// other unit, a percentage, or a missing attribute counts as absent.
+    /// or `height` is absolute when it is a bare number or a length in one of
+    /// the CSS absolute units `px`, `in`, `cm`, `mm`, `pt` or `pc`, converted
+    /// to px at 96 px per inch. A font-relative length (`em`, `ex`), a
+    /// percentage, any other unit, or a missing attribute counts as absent.
     ///
     /// - Both absolute: natural = that size, viewport = `tree.size()`.
     /// - One absolute plus a `viewBox`: the other axis from the `viewBox` ratio, viewport =
@@ -189,6 +191,30 @@ impl VectorImage {
             (tree.size().width(), tree.size().height()),
         );
         Ok(Self::new(Arc::new(tree), natural, viewport))
+    }
+
+    /// Parses the SVG document `svg` as [`Self::parse`] does, with options
+    /// that read nothing outside the document: the `<image>` string resolver
+    /// (`resolve_string`) returns `None`, so an `<image>` naming anything but
+    /// a `data:` URL resolves to nothing, and `resources_dir` is `None`.
+    /// Every other option is usvg's default; `data:` URLs still resolve.
+    ///
+    /// This is the parse every host in this workspace uses. usvg's default
+    /// string resolver would read the filesystem.
+    ///
+    /// # Errors
+    ///
+    /// Whatever usvg reports for a document it cannot read.
+    pub fn parse_sealed(svg: &[u8]) -> Result<Self, usvg::Error> {
+        let options = usvg::Options {
+            resources_dir: None,
+            image_href_resolver: usvg::ImageHrefResolver {
+                resolve_string: Box::new(|_, _| None),
+                ..usvg::ImageHrefResolver::default()
+            },
+            ..usvg::Options::default()
+        };
+        Self::parse(svg, &options)
     }
 
     /// The size layout is told, in whole CSS px.
@@ -272,14 +298,29 @@ fn vector_sizes(
     (rounded, viewport)
 }
 
-/// A root `width` or `height` that is an absolute length: a bare number or a
-/// `px` length, finite and positive. Anything else counts as absent.
+/// A root `width` or `height` that is an absolute length, in px: a bare
+/// number, or a number in one of the CSS absolute units (`px`; `in` = 96 px,
+/// `cm` = 96/2.54 px, `mm` = 96/25.4 px, `pt` = 4/3 px, `pc` = 16 px),
+/// finite and positive. Anything else, `em`, `ex` and `%` included, counts
+/// as absent.
 fn absolute_length(value: &str) -> Option<f32> {
+    const UNITS: [(&str, f32); 6] = [
+        ("px", 1.0),
+        ("in", 96.0),
+        ("cm", 96.0 / 2.54),
+        ("mm", 96.0 / 25.4),
+        ("pt", 4.0 / 3.0),
+        ("pc", 16.0),
+    ];
     let value = value.trim();
-    let number = value.strip_suffix("px").unwrap_or(value);
+    let (number, scale) = UNITS
+        .iter()
+        .find_map(|&(unit, scale)| value.strip_suffix(unit).map(|number| (number, scale)))
+        .unwrap_or((value, 1.0));
     number
         .parse::<f32>()
         .ok()
+        .map(|length| length * scale)
         .filter(|length| length.is_finite() && *length > 0.0)
 }
 
@@ -1486,9 +1527,11 @@ mod vector_tests {
             (r#"viewBox="0,0,40,10""#, (300, 75), (40.0, 10.0)),
             // (d) Neither: the default object size, which is also the viewport.
             ("", (300, 150), (300.0, 150.0)),
-            (r#"width="50%" height="1in""#, (300, 150), (300.0, 150.0)),
+            (r#"width="50%" height="2em""#, (300, 150), (300.0, 150.0)),
             // (e) One absolute and no viewBox.
             (r#"width="50%" height="20""#, (300, 20), (300.0, 20.0)),
+            (r#"width="50%" height="1in""#, (300, 96), (300.0, 96.0)),
+            (r#"width="3pc" height="1ex""#, (48, 150), (48.0, 150.0)),
             (r#"width="40""#, (40, 150), (40.0, 150.0)),
             // Whole px, at least one.
             (r#"width="10.4" height="0.2""#, (10, 1), (10.4, 0.2)),
@@ -1497,6 +1540,31 @@ mod vector_tests {
             let image = parse(attributes);
             assert_eq!(image.natural_size(), natural, "<svg {attributes}> natural");
             assert_eq!(image.viewport(), viewport, "<svg {attributes}> viewport");
+        }
+    }
+
+    /// Every CSS absolute unit converts at 96 px per inch, and the viewport
+    /// is the size usvg converted the same lengths to.
+    #[test]
+    fn absolute_units_convert_to_px() {
+        let image = parse(r#"width="10mm" height="10mm""#);
+        assert_eq!(image.natural_size(), (38, 38));
+        let size = image.tree().size();
+        assert_eq!(image.viewport(), (size.width(), size.height()));
+        for (length, px) in [
+            ("1in", 96.0),
+            ("2.54cm", 96.0),
+            ("25.4mm", 96.0),
+            ("72pt", 96.0),
+            ("6pc", 96.0),
+            ("96px", 96.0),
+            ("96", 96.0),
+        ] {
+            let converted = super::absolute_length(length).expect(length);
+            assert!((converted - px).abs() < 1e-3, "{length} is {converted} px");
+        }
+        for absent in ["1em", "1ex", "50%", "1rem", "1vw", "0in", "-2pt"] {
+            assert_eq!(super::absolute_length(absent), None, "{absent}");
         }
     }
 

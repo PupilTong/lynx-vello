@@ -58,7 +58,12 @@ gradient, and replayed by the existing `ComposeOp::Fragment` arm.
 - In the image pipeline, after preprocessing says
   `Payload::Image { format: ImageFormat::Svg, .. }`, the bytes go to usvg
   instead of the platform decoder, on the same blocking-pool thread natively
-  and inline on wasm32. One XML parse: `usvg::roxmltree::Document::parse`
+  and inline on wasm32. The parse and the sizing below live in `dom`, not
+  in this crate: `dom::VectorImage::parse(svg, &options)` does both, and
+  `dom::VectorImage::parse_sealed(svg)` calls it with the options listed
+  below. `bobcat-resources` and flashbulb's `TestImages::insert_svg` both
+  call `parse_sealed`, so the two share one implementation and neither
+  depends on `usvg` directly. One XML parse: `usvg::roxmltree::Document::parse`
   (usvg re-exports roxmltree, which is already in the lock at the version
   usvg needs), read the root's `width`, `height` and `viewBox`, then
   `usvg::Tree::from_xmltree(&doc, &options)`. `usvg::Tree` exposes neither
@@ -68,6 +73,9 @@ gradient, and replayed by the existing `ComposeOp::Fragment` arm.
   - `image_href_resolver`: `resolve_string` returns `None` (never the
     default, which reads the filesystem); `resolve_data` stays default.
   - `resources_dir: None`, everything else default.
+
+  These are `VectorImage::parse_sealed`'s options: it reads nothing outside
+  the document.
 - A parsed tree completes as `Completion::LoadedVector { source, image:
   VectorImage }`; a parse error completes as `Completion::Failed` with the
   usvg error message. Servicing reports `ImageReports::loaded_vector`.
@@ -82,12 +90,18 @@ gradient, and replayed by the existing `ComposeOp::Fragment` arm.
     minimum 1: (a) `width` and `height` both absolute → that size; (b) one
     absolute plus a `viewBox` → the other from the viewBox ratio; (c)
     `viewBox` only → the largest size with the viewBox ratio that fits
-    300×150; (d) neither → 300×150. Percentage dimensions count as absent.
+    300×150; (d) neither → 300×150; (e) one absolute and no `viewBox` →
+    that axis, with 300 wide or 150 high for the other. A dimension is
+    absolute when it is a bare number or a length in one of the CSS
+    absolute units, converted to px at 96 px per inch: `px`, `in` (96),
+    `cm` (96/2.54), `mm` (96/25.4), `pt` (4/3), `pc` (16). `em`, `ex`,
+    percentages and any other unit count as absent.
   - **viewport**, the rectangle in tree units the fragment maps onto the
     draw rectangle: `tree.size()` in cases (a), (b) and (c) (usvg folds the
     viewBox into the root transform and `size()` is the viewBox size or the
-    attribute size); the natural 300×150 in case (d), where usvg leaves user
-    units 1:1 and overwrites `size()` with the content bounding box.
+    attribute size); the natural size in cases (d) and (e), where usvg
+    leaves user units 1:1 and overwrites `size()` with the content bounding
+    box.
   The append transform is `extent / viewport`, never `extent /
   tree.size()`.
 - The browser used to decode SVG through `HTMLImageElement`; it now goes
@@ -229,10 +243,22 @@ gradient, and replayed by the existing `ComposeOp::Fragment` arm.
   let the event read a stale box. A `display: none` `<svg>` has no box and
   reports 0×0 (native reports its zero frame the same way).
 
+### Known costs
+
+- Inline `content` on `<svg>`: every distinct data URL stays resident for
+  the document's life (see the `<svg>` element section above).
+- A repeated vector background re-encodes the whole cached scene once per
+  visible tile, up to the existing `MAX_TILE_FILLS` cap
+  (`paint/background.rs`), so its cost scales with the document's path
+  count times the tile count. A 1 000-path document under
+  `background-size: 2px` is the worst case. No cap by path count is
+  applied, so the picture stays complete.
+
 ### Out of scope, documented
 
 `<text>`, `current-color`, `mask`, `filter`, `pattern`, nested raster
-`<image>`, `.svgz`, percentage `width`/`height` on the root, `clipPath`
+`<image>`, `.svgz`, percentage and font-relative `width`/`height` on the
+root, `clipPath`
 unions with overlapping opposite-winding children, `error` on `<svg>`.
 
 ## Dependency note

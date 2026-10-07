@@ -426,9 +426,11 @@ impl Page {
         }
         // Held while the commit above was skipped: an `<svg>`'s `load` reads
         // the element's layout box at delivery, which is stale until a commit
-        // applies the natural size its report set. The queue is not drained
-        // and the latch is not set while held, so the first later epilogue
-        // whose commit runs posts the batch.
+        // applies the natural size its report set. The hold covers the whole
+        // batch, so `<image>`, `<dialog>` and `<overlay>` events queued
+        // before the first flush are delayed to the first commit as well.
+        // The queue is not drained and the latch is not set while held, so
+        // the first later epilogue whose commit runs posts the batch.
         if runtime.has_component_events()
             && !runtime.needs_render()
             && !self.component_events_posted.replace(true)
@@ -558,6 +560,12 @@ impl Page {
     /// Holding drains nothing and sets no latch, so a held batch is never
     /// dropped, only delayed; after the first flush every epilogue commits
     /// and this posts exactly as it did before the hold existed.
+    ///
+    /// The hold covers the whole batch, not only `<svg>` outcomes: an
+    /// `<image>`'s `load` or `error` and a `<dialog>`'s or `<overlay>`'s
+    /// events queued before the first flush wait for the first commit as
+    /// well. Each is still delivered exactly once, in queue order; none is
+    /// lost or duplicated.
     ///
     /// Unlike that one, this delivery **does** enter JavaScript: these are
     /// script events, and the dispatch is the realm's

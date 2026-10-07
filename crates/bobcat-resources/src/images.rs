@@ -24,7 +24,7 @@
 //!
 //! An SVG document is not decoded. When preprocessing says the bytes are
 //! [`ImageFormat::Svg`], the job parses them with `usvg` through
-//! [`VectorImage::parse`] instead of handing them to the platform decoder:
+//! [`VectorImage::parse_sealed`] instead of handing them to the platform decoder:
 //! natively inside the same blocking-pool closure that fetched and
 //! preprocessed them, with no decode permit, and inline in the browser's
 //! local task. The browser therefore no longer renders SVG through its
@@ -85,21 +85,11 @@ impl LoadOutcome {
     }
 }
 
-/// Parses an SVG document's bytes into the tree the engine draws.
-///
-/// The options read nothing outside the document: no resources directory,
-/// and an `<image>` naming anything but a `data:` URL resolves to nothing.
-/// The default string resolver would read the filesystem.
+/// Parses an SVG document's bytes into the tree the engine draws, through
+/// [`VectorImage::parse_sealed`]: nothing outside the document is read, and
+/// an `<image>` naming anything but a `data:` URL resolves to nothing.
 fn parse_vector(bytes: &[u8]) -> Result<VectorImage, String> {
-    let options = usvg::Options {
-        resources_dir: None,
-        image_href_resolver: usvg::ImageHrefResolver {
-            resolve_data: usvg::ImageHrefResolver::default_data_resolver(),
-            resolve_string: Box::new(|_, _| None),
-        },
-        ..usvg::Options::default()
-    };
-    VectorImage::parse(bytes, &options).map_err(|error| error.to_string())
+    VectorImage::parse_sealed(bytes).map_err(|error| error.to_string())
 }
 
 /// The painter-thread half: what is known about every source asked for.

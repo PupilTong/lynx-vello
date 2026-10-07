@@ -131,24 +131,17 @@ impl TestImages {
     /// Publishes the SVG document `svg` under `source`, parsed with `usvg`,
     /// and reports it the way [`Self::insert`] reports a bitmap.
     ///
-    /// Parsing and sizing are [`VectorImage::parse`]'s, the same call a
-    /// production host makes. Parsing reads no file: an `<image>` inside the
-    /// document that names anything but a `data:` URL resolves to nothing.
+    /// Parsing and sizing are [`VectorImage::parse_sealed`]'s, the same call
+    /// a production host makes. Parsing reads no file: an `<image>` inside
+    /// the document that names anything but a `data:` URL resolves to
+    /// nothing.
     ///
     /// # Panics
     ///
     /// If `svg` does not parse.
     pub fn insert_svg(&self, source: impl Into<String>, svg: &str) {
         let source = source.into();
-        let options = usvg::Options {
-            resources_dir: None,
-            image_href_resolver: usvg::ImageHrefResolver {
-                resolve_string: Box::new(|_, _| None),
-                ..usvg::ImageHrefResolver::default()
-            },
-            ..usvg::Options::default()
-        };
-        let image = VectorImage::parse(svg.as_bytes(), &options)
+        let image = VectorImage::parse_sealed(svg.as_bytes())
             .unwrap_or_else(|error| panic!("{source}: {error}"));
         self.entries()
             .insert(source.clone(), Entry::Vector(image.clone()));

@@ -260,8 +260,9 @@ SVG stays a vector image from parse to paint; it never becomes a bitmap:
    instead of the platform decoder, on the same blocking-pool thread as a
    raster decode natively and inline on wasm32. The browser embedder no
    longer decodes SVG through `HTMLImageElement`, so every target parses the
-   same way. One XML parse reads the root's `width`, `height` and `viewBox`
-   and builds the tree. A string `href` inside the document is never
+   same way. The parse is `dom::VectorImage::parse_sealed`, which
+   flashbulb's test store calls as well: one XML parse reads the root's
+   `width`, `height` and `viewBox` and builds the tree. A string `href` inside the document is never
    resolved (the resolver answers `None` instead of reading the
    filesystem); `data:` hrefs keep usvg's default. A parse error completes
    the request as a failure carrying usvg's message. The encoded bytes are
@@ -269,8 +270,10 @@ SVG stays a vector image from parse to paint; it never becomes a bitmap:
 2. **Size.** The natural size reported to layout is CSS Images 3 §4.1
    default sizing (web-core), in CSS px rounded to whole px: `width` and
    `height` when both are absolute; one of them plus the viewBox ratio; the
-   largest viewBox-ratio size that fits 300×150; else 300×150. Percentage
-   root dimensions count as absent.
+   largest viewBox-ratio size that fits 300×150; else 300×150. A root
+   dimension is absolute when it is a bare number or a length in `px`, `in`,
+   `cm`, `mm`, `pt` or `pc`, converted at 96 px per inch (`10mm` is 38 px);
+   `em`, `ex`, percentages and any other unit count as absent.
 3. **Hand-off.** The parsed tree crosses to the document thread inside the
    existing `ToMain::ImageEvents` message (`ImageReports::loaded_vector`)
    and is held by `dom`'s image registry as a ready vector image. The
