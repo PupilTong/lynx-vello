@@ -31,11 +31,12 @@
 //! a fixed place among them, and a hook a role does not need is empty. The
 //! order of the steps is the contract, and [`epilogue`] lists it.
 //!
-//! The imports an entry left waiting and the futures it asked to settle are
-//! each a task the epilogue spawns — [`load_module`] and [`settle_future`] —
-//! which waits for its answer outside any job and then enters the realm to
-//! hand it over. [`module_answer`] is the one reading of a module request's
-//! answer, for those loads and for the entry a role completes itself.
+//! The module requests an entry left waiting — its imports, and a worker's
+//! load of its root module — and the futures it asked to settle are each a
+//! task the epilogue spawns — [`load_module`] and [`settle_future`] — which
+//! waits for its answer outside any job and then enters the realm to hand it
+//! over. [`module_answer`] is the one reading of a module request's answer,
+//! for those loads and for the entry a role completes itself.
 //!
 //! # The end
 //!
@@ -160,7 +161,8 @@ pub(crate) trait RealmOwner: Sized + 'static {
 
     /// The name of the one module request of this realm's that the role
     /// answers itself, from an answer it already holds. The [`epilogue`]
-    /// never asks the host for it.
+    /// never asks the host for it. Only a page names one, its MTS entry: a
+    /// worker's script is requested as any import is.
     fn entry_name(&self, _realm: &Self::Realm) -> Option<String> {
         None
     }
@@ -322,7 +324,8 @@ pub(crate) fn enter_now<O: RealmOwner, T>(
 ///    and the boot report, because a host blocked on that sequence number is blocked on the frame.
 /// 10. **The module requests** this entry produced, each asked of the host and spawned as a
 ///     [`load_module`] of its own — except the one [`RealmOwner::entry_name`] names, which the role
-///     answers itself.
+///     answers itself. A worker names none, so the request the load of its root module raised for
+///     its script is among those asked of the host.
 /// 11. **The futures** a `.then` asked this realm to settle, each spawned as a [`settle_future`] of
 ///     its own.
 /// 12. **[`RealmOwner::after_settles`]**: a page's `@font-face` loads.
@@ -393,19 +396,23 @@ fn epilogue<O: RealmOwner>(owner: &Rc<O>, realm: &mut O::Realm, js: &mut ScriptR
     lifetime.record_checkpoint(js.checkpoint_generation());
 }
 
-/// One resource load an import of `owner`'s realm produced.
+/// One resource load `owner`'s realm asked for: an import, or a worker's load
+/// of its root module.
 ///
 /// The load's outcome is the module's: a load that failed, or an answer that
 /// is not a script, completes the module with an error naming it, which
-/// rejects the import in the realm, where the code that made it can catch it.
-/// What the completion itself returns — the realm refusing it, or a rejection
-/// the code it resumed left unhandled — is reported under [`Scene::Module`],
-/// whether the realm has booted or not: the import is the app's, and so is
-/// whatever awaited it.
+/// rejects the load in the realm — an import's where the code that made it
+/// can catch it, and a root module's where nothing can, because only the
+/// host holds that load's promise. What the completion itself returns — the
+/// realm refusing it, or a rejection the code it resumed left unhandled — is
+/// reported under [`Scene::Module`], whether the realm has booted or not: the
+/// import is the app's, and so is whatever awaited it. A worker's own script
+/// is completed here too, so one that could not be loaded and one that throws
+/// as it is evaluated are both reported under that scene.
 ///
-/// A successful answer completes the module under `url`, the name the import
-/// asked for; the URL the fetcher answered from is the module's own URL — its
-/// `import.meta.url`, and the base its own imports resolve against.
+/// A successful answer completes the module under `url`, the name it was
+/// requested by; the URL the fetcher answered from is the module's own URL —
+/// its `import.meta.url`, and the base its own imports resolve against.
 async fn load_module<O: RealmOwner>(owner: Rc<O>, url: String, answer: SourceAnswer) {
     let loaded = await_source(answer)
         .await
@@ -454,11 +461,12 @@ pub(crate) async fn await_source(answer: SourceAnswer) -> Result<LoadedSource, L
 /// the fetcher answered from, and the source — or, for an answer of another
 /// kind, the text `the fetcher returned a <kind> for <requested>`.
 ///
-/// The one reading of such an answer, for every module a realm imports and
-/// for the entry a role completes itself. A load that failed is not read
-/// here: an import and a worker's script pass the fetcher's own error on as
-/// its text, and the MTS entry passes it on as the `LynxViewError` it is and
-/// makes this text a `Script` error.
+/// The one reading of such an answer, for every module [`load_module`]
+/// completes and for the entry a role completes itself. A load that failed
+/// is not read here: [`load_module`] passes the fetcher's own error on as
+/// its text, for an import and for a worker's script alike, and the MTS
+/// entry passes it on as the `LynxViewError` it is and makes this text a
+/// `Script` error.
 pub(crate) fn module_answer(
     requested: &str,
     answer: LoadedSource,
@@ -579,7 +587,8 @@ mod tests {
 
     /// Every answer that is not a script is refused the same way, naming the
     /// request and the kind it was answered with, and nothing else: the text
-    /// is what an import is rejected with and what a worker's `Failed` says.
+    /// is what the load of an import, or of a worker's script, is rejected
+    /// with.
     #[test]
     fn an_answer_of_another_kind_is_refused_naming_the_request_and_the_kind() {
         for (answer, kind) in [

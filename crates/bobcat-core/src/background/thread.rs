@@ -12,9 +12,9 @@
 //! parks and wakes them. An owner ([`serve_worker`]) waits only for the end;
 //! [`boot_worker`] opens the realm as the worker's first job, the way a view's
 //! realm opens as its first; [`consume_messages`], started beside that job,
-//! is the one ordered consumer of what is posted; one [`load_module`] task per
-//! module the realm asked its host for, its own script among them, awaits
-//! that answer and completes the module; [`serve_clock`] owns this realm's one
+//! is the one ordered consumer of what is posted; one [`owner::load_module`]
+//! task per module the realm asked its host for, its own script among them,
+//! awaits that answer and completes it; [`serve_clock`] owns this realm's one
 //! pinned sleep and watches the runtime-wide checkpoint generation, because the
 //! job queue every worker realm here drains is the runtime's and a sibling's
 //! entry can finish this realm's jobs. Every one of them reaches the realm
@@ -366,11 +366,11 @@ impl Worker {
     /// view's realm opens as that view's first job. Nothing is waited for
     /// first, and the host has been asked for nothing: the load of a URL the
     /// realm has no source for raises one module request, which this job's
-    /// own epilogue sends to the host and a [`load_module`] task completes,
-    /// as for any import, and the realm's own loader answers an engine name
-    /// such as the BTS's `bobcat:bts` at once, which then evaluates inside
-    /// this job. So a runtime that never came up fails the worker here, and
-    /// nothing is requested for it.
+    /// own epilogue sends to the host and an [`owner::load_module`] task
+    /// completes, as for any import, and the realm's own loader answers an
+    /// engine name such as the BTS's `bobcat:bts` at once, which then
+    /// evaluates inside this job. So a runtime that never came up fails the
+    /// worker here, and nothing is requested for it.
     ///
     /// The script's *own* outcome is not among the failures: by the time it
     /// runs the realm is built, so a script that throws on load is reported
@@ -507,9 +507,9 @@ impl Worker {
 
 /// What the driver in [`owner`] is told about a worker: where its realm,
 /// runtime and host are, that its reports go to the realm that created it,
-/// and what a worker adds to the epilogue — a `close()` that ends it, the
-/// root module finishing, and its script, which it completes itself. Neither
-/// the end nor the release owes anything beyond the driver's own steps.
+/// and what a worker adds to the epilogue — a `close()` that ends it, and
+/// the root module finishing. Neither the end nor the release owes anything
+/// beyond the driver's own steps.
 impl RealmOwner for Worker {
     type Realm = WorkerRealm;
     type Event = WorkerPayload;
@@ -519,10 +519,10 @@ impl RealmOwner for Worker {
     /// host holds that load's promise, so nothing in the realm can handle
     /// its rejection, and a checkpoint of this realm reports it as it
     /// reports every rejection nothing handles. The checkpoint that ends the
-    /// entry the load settled in — the boot job, the completion of the
-    /// script or of a module it imports, a timer — reports it named by that
-    /// entry, or drops it with the other leftovers of the one failure that
-    /// entry reported. So a failure of the root module is reported once,
+    /// entry the load settled in — the boot job, the driver's completion of
+    /// the script or of a module it imports, a timer — reports it named by
+    /// that entry, or drops it with the other leftovers of the one failure
+    /// that entry reported. So a failure of the root module is reported once,
     /// whichever job it is in, and the worker stays up, as HTML's "run a
     /// worker" leaves it. For the BTS the root module is `bobcat:bts`, which
     /// imports nothing of the app's as it is evaluated: the BTS entry is
@@ -725,13 +725,13 @@ fn deliver_module_callback(worker: &Rc<Worker>, call: u64, index: u32, arguments
 /// nothing.
 ///
 /// The script is not this task's to wait for. The realm's load of its root
-/// module is what asks the host for it, and a [`load_module`] task completes
-/// it, as for any import. That completion is a job, and a job of a worker
-/// that has ended does nothing: a script whose completion job runs after
-/// this task has read a `Terminate` never runs, and that is the whole of the
-/// ordering between the two, the one an import has. The end cancels the
-/// worker's token, which is the one every request it made carries, so the
-/// host reads an outstanding request as cancelled from then on.
+/// module is what asks the host for it, and an [`owner::load_module`] task
+/// completes it, as for any import. That completion is a job, and a job of a
+/// worker that has ended does nothing: a script whose completion job runs
+/// after this task has read a `Terminate` never runs, and that is the whole
+/// of the ordering between the two, the one an import has. The end cancels
+/// the worker's token, which is the one every request it made carries, so
+/// the host reads an outstanding request as cancelled from then on.
 async fn consume_messages(
     worker: Rc<Worker>,
     mut messages: mpsc::UnboundedReceiver<WorkerMessage>,

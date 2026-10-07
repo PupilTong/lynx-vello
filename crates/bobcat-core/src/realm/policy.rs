@@ -26,20 +26,20 @@
 //!   boot's own module), the entry's failed or non-script answer, an answer from a URL that is not
 //!   absolute, and naming the entry in `load_entry`, and a rejection of boot's own module seen by
 //!   the epilogue — boot's own `__FlushElementTree` failing on a listed sheet included. Worker: a
-//!   runtime that was never built or a realm that could not be opened in `Worker::boot`, and a
-//!   failed or non-script answer to the request `createWorker` made for the worker's script, in
-//!   `consume_messages`. Each caller names what failed — the epilogue by the owner's
-//!   `BOOT_REJECTION` context — so neither row adds a context. The Open failures `load_entry` meets
-//!   are not reported through [`report`]: an entry the fetcher could not load, one it answered with
-//!   something other than a script or from a URL that is not absolute, and naming the entry are
-//!   each already a `LynxViewError` — the first the fetcher's own — which `load_entry` hands to
-//!   `StartupFailed` as it is, through [`owner::terminal`], where the row takes a script's error
-//!   and converts it.
-//! - [`Scene::Boot`]: the app's startup code threw. MTS: the entry's evaluation, a module it
-//!   imports included, as `load_entry` completes it. Worker: the load of the root module in
-//!   `Worker::boot`, and a script the host was asked for as `complete_script` completes it.
-//! - [`Scene::Module`]: completing a module an import was waiting for, in the driver's
-//!   `load_module`.
+//!   runtime that was never built or a realm that could not be opened, in `Worker::boot`. Each
+//!   caller names what failed — the epilogue by the owner's `BOOT_REJECTION` context — so neither
+//!   row adds a context. The Open failures `load_entry` meets are not reported through [`report`]:
+//!   an entry the fetcher could not load, one it answered with something other than a script or
+//!   from a URL that is not absolute, and naming the entry are each already a `LynxViewError` — the
+//!   first the fetcher's own — which `load_entry` hands to `StartupFailed` as it is, through
+//!   [`owner::terminal`], where the row takes a script's error and converts it.
+//! - [`Scene::Boot`]: startup code failed where the owner itself ran it. MTS: the entry's
+//!   evaluation, a module it imports included, as `load_entry` completes it. Worker: the load of
+//!   the root module in `Worker::boot`, which is where a root that is an engine name is loaded or
+//!   refused.
+//! - [`Scene::Module`]: completing a module a load was waiting for, in the driver's `load_module`.
+//!   On a worker that includes its own script when the host was asked for it: a script that could
+//!   not be loaded, and one that throws as it is evaluated.
 //! - [`Scene::Future`]: handing a future its outcome, in the driver's `settle_future`.
 //! - [`Scene::Timer`]: a timer callback, run by the driver's epilogue.
 //! - [`Scene::Listener`]: an event delivered to the realm. MTS: an input event, a batch of
@@ -61,14 +61,16 @@
 //! boot's own flush. A worker's root module is the module at its URL, and a
 //! worker's `BOOT_REJECTION` is `None`: only the host holds that load's
 //! promise, so the checkpoint that ends the entry the load settled in
-//! reports the rejection under that entry's row — Boot for the boot job and
-//! the script's completion, Module for a module it imports, Timer for a
-//! timer — or drops it with the other leftovers of the one failure that
+//! reports the rejection under that entry's row — Boot for the boot job,
+//! Module for the completion of the script or of a module it imports, Timer
+//! for a timer — or drops it with the other leftovers of the one failure that
 //! entry reported, and the epilogue reads the load only to learn that it has
 //! settled. For the BTS that module is `bobcat:bts`, which imports nothing of
 //! the app's as it is evaluated: the BTS entry is imported later, outside the
-//! root module. In both tables, Boot is the app's startup code throwing, and
-//! Open is something the engine could not make ready.
+//! root module. In the MTS table Boot is the app's startup code throwing. In
+//! the worker table Boot is what the boot job's own load of the root module
+//! returned, and a fetched script's failure is Module. In both, Open is
+//! something the engine could not make ready.
 //!
 //! A listed stylesheet has no row of its own. It is settled by the first
 //! `__FlushElementTree`: boot's own, whose failure rejects boot and is
@@ -93,9 +95,11 @@ pub(crate) enum Scene {
     /// The realm, its entry or the engine's own startup code could not be
     /// made ready.
     Open,
-    /// The app's startup code threw.
+    /// The MTS entry's evaluation threw, or a worker's load of its root
+    /// module failed in its boot job.
     Boot,
-    /// Completing a module an import was waiting for.
+    /// Completing a module a load was waiting for: an import, or a worker's
+    /// own script.
     Module,
     /// Handing a future its outcome.
     Future,
@@ -206,10 +210,12 @@ pub(crate) fn main_thread_panic() -> Row<EngineEvent> {
 /// The worker table: what a failure in a worker's realm, the BTS's included,
 /// is reported as, to the realm that created it.
 ///
-/// A worker whose realm or script could not be made ready is over, which is
-/// `Failed`. Anything its realm threw after that is `Errored`: HTML reports an
-/// uncaught exception at the worker and then at its parent and leaves both
-/// running.
+/// A worker whose realm could not be made ready is over, which is `Failed`.
+/// Anything its realm threw after that is `Errored`: HTML reports an uncaught
+/// exception at the worker and then at its parent and leaves both running. A
+/// script that could not be loaded is `Errored` too, because the load rejects
+/// in the realm, where HTML never runs a worker whose script fetch failed
+/// (`docs/tracking/deviations.md`).
 pub(crate) fn worker(scene: Scene) -> Row<WorkerPayload> {
     let context = match scene {
         Scene::Open => {

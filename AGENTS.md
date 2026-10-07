@@ -300,9 +300,9 @@ under the borrows of the shared runtime and the realm, and then that
 operation's epilogue. The epilogue is one function;
 what only one role has is a hook of that owner's `RealmOwner` impl at a fixed
 step. For a page the order is: the timers that came due, the commit (and the
-content-visibility and `<image>` deliveries it posts as entries of their own),
-the boot report once, the frame-post acknowledgement, the module requests the
-operation left, the future settles, the `@font-face` loads, the next timer
+content-visibility and component-event deliveries it posts as entries of their
+own), the boot report once, the frame-post acknowledgement, the module requests
+the operation left, the future settles, the `@font-face` loads, the next timer
 deadline, and the checkpoint generation as of this entry. `Settles::settle` is
 the epilogue alone, for a wake carrying no operation. What a failure is
 reported as, and whether it ends the view or the worker, is the realm kind's
