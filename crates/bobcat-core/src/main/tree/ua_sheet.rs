@@ -4,21 +4,21 @@
 //! Each tag's own policy lives with that tag — [`super::scroll_container`],
 //! [`super::list`], [`super::viewpager`], [`super::swiper`],
 //! [`super::refresh_view`], [`super::scroll_coordinator`], [`super::dialog`],
-//! [`super::overlay`], [`super::text`], [`super::raw_text`], [`super::image`],
-//! [`super::svg`] — and this module
+//! [`super::overlay`], [`super::text`], [`super::raw_text`], [`super::image`] —
+//! and this module
 //! only decides what they all agree on and what order they land in.
 //! [`super::blur_view`] is the one tag module with no rules of its own: a
 //! blur view is a container and nothing more, so everything it needs is here.
 //!
 //! Order is mostly documentation, with one exception that is mechanism:
-//! [`super::image`]'s and [`super::svg`]'s child suppression ties on
-//! specificity with the `display` rules `view`, `scroll-view`, `list`, `list-item`, the two
-//! spellings each of `viewpager` and `viewpager-item`, `x-swiper`, `x-swiper-item`,
+//! [`super::image`]'s child suppression ties on specificity with the `display`
+//! rules `view`, `scroll-view`, `list`, `list-item`, the two spellings each of
+//! `viewpager` and `viewpager-item`, `x-swiper`, `x-swiper-item`,
 //! `x-refresh-view`, `x-refresh-header`, `x-refresh-footer`, the ten `scroll-coordinator` tags,
 //! `blur-view`, `x-blur-view`, `dialog`, `overlay`, `x-overlay-ng` and
 //! `wrapper` carry, so it wins only by being assembled last.
-//! Those modules' `nothing_inside_an_image_generates_a_box` and
-//! `nothing_inside_an_svg_generates_a_box` are the tripwires for it.
+//! That module's `nothing_inside_an_image_generates_a_box` is the tripwire for
+//! it.
 
 use super::blur_view::{BLUR_VIEW_TAG, X_BLUR_VIEW_TAG};
 use super::dialog::DIALOG_TAG;
@@ -28,7 +28,7 @@ use super::swiper::{SWIPER_ITEM_TAG, SWIPER_TAG};
 use super::viewpager::{VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG};
 use super::{
     dialog, image, list, overlay, raw_text, refresh_view, scroll_container, scroll_coordinator,
-    svg, swiper, text, viewpager,
+    swiper, text, viewpager,
 };
 
 /// Page configuration for the Lynx runtime and UA cascade.
@@ -171,7 +171,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     };
     format!(
         "page, view, scroll-view, list, list-item, {component_tags}, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG}, \
-         text, image, svg {{ box-sizing: border-box; border-width: 0; border-style: solid; \
+         text, image {{ box-sizing: border-box; border-width: 0; border-style: solid; \
          position: relative; overflow: clip; min-width: 0; min-height: 0; }}\n\
          {display}\
          {overflow}\
@@ -187,8 +187,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          {overlays}\
          {text}\
          {carriers}\
-         {images}\
-         {svgs}",
+         {images}",
         scrollers = scroll_container::UA_RULES,
         lists = list::UA_RULES,
         pagers = viewpager::UA_RULES,
@@ -200,7 +199,6 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
         text = text::UA_RULES,
         carriers = raw_text::UA_RULES,
         images = image::UA_RULES,
-        svgs = svg::UA_RULES,
     )
 }
 
