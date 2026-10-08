@@ -990,16 +990,16 @@ mod tests {
                 let case = format!("{mode} vertical={vertical} circular={circular:?}");
                 let placed: Vec<_> = items.iter().map(|item| rect(&document, *item)).collect();
                 let expected: Vec<_> = if packed {
-                    (0..3)
-                        .map(|k| {
-                            let at = k as f32 * item;
+                    [0.0, 1.0, 2.0]
+                        .map(|k: f32| {
+                            let at = k * item;
                             if vertical {
                                 (0.0, at, 100.0, item)
                             } else {
                                 (at, 0.0, item, 100.0)
                             }
                         })
-                        .collect()
+                        .to_vec()
                 } else {
                     GEOMETRY
                         .iter()
