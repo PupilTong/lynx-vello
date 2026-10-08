@@ -23,10 +23,11 @@ Lynx treats an SVG as one image, never as a DOM subtree:
 | Route | Own walker over `usvg` into `vello` paths. No `vello_svg` dependency, no raster fallback. |
 | `<image src="x.svg">`, `background-image: url(x.svg)`, `mask-image: url(x.svg)` | Render (web-core behaviour; native refuses). |
 | Intrinsic size | web-core: CSS Images 3 §4.1 default sizing. Both `width` and `height` absolute → that size; one absolute plus a `viewBox` → the other from the viewBox ratio; `viewBox` only → the largest size with its ratio that fits the default object size 300×150; neither → 300×150. |
-| `load` detail | native: the element's layout size, not the document's intrinsic size. |
+| `load` detail | native: the element's layout size. Superseded by revision 3: the standard `<svg>` fires no `load`; `<image src="x.svg">` keeps the `<image>` detail (natural size). |
 | `<text>` | Dropped. `usvg` is built without its `text` feature; text elements vanish at parse. |
 | `current-color` attribute | Not implemented (web-core lacks it). |
 | vello | Upgraded to 0.11 in its own PR (#364). SVG work does not depend on it. |
+| The `svg` tag (ruled 2026-10-08, revision 3) | `svg` is the browser's standard `<svg>` element, as a subset: SVG child elements are real DOM nodes, the element is replaced content sized by the standard rules, and its subtree is serialised and parsed by usvg like any other document. The Lynx `<svg src\|content\|bindload>` component is **not provided**: a compiled ReactLynx card's `<svg src>` loses that ability (recorded in `docs/tracking`). URL-loaded SVG remains `<image src="x.svg">` and CSS `url()`. |
 | Who parses (ruled 2026-10-08, revision 2) | The engine. The host protocol hands over bytes and a kind, `ImageReports::loaded_document(source, bytes, DocumentKind::Svg)`; `bobcat-core` parses, off the document thread where it has a blocking pool. The host never names `usvg` or `VectorImage`. |
 
 ## Architecture
@@ -250,52 +251,81 @@ gradient, and replayed by the existing `ComposeOp::Fragment` arm.
   no-op.
 - `bobcat-core` has no direct `usvg` dependency; it calls `dom`'s parse.
 
-### bobcat-core: the `<svg>` element
+### dom: the standard `<svg>` element (subset)
 
-- `crates/bobcat-core/src/main/tree/svg.rs`, tag `svg`, a `CustomElement`
-  following `image.rs`: observed attributes `src` and `content`.
-  - `src` → `document.set_image_source(element, ImageRole::Source, source)`.
-  - `content` → the same call with the source
-    `data:image/svg+xml;charset=utf-8,<percent-encoded content>` so the
-    whole image pipeline, including `data:` parsing, is reused with no new
-    code path. Percent-encode every byte outside RFC 3986 unreserved
-    (`A-Z a-z 0-9 - . _ ~`); the `data:` parser cuts at the first `#`, so
-    anything less is a bug. The last attribute written wins, as in web-core
-    where `src` and `content` both end up assigning `img.src` (web-core uses
-    a Blob URL for `content`; the data URL is the equivalent here).
-  - Cost to know: the full data URL is the key in both the dom registry and
-    the resources entry map, and neither evicts, so every distinct inline
-    `content` an element is ever given stays resident (tree plus cached
-    scene) for the document's life. The bitmap tier does not apply by
-    design. Acceptable for icons; recorded as a known cost.
-  - No placeholder, no `blur-radius`, no `mode`.
-- UA rules (architect's decision, mirrors
-  `lynx-stack/packages/web-platform/web-elements/src/elements/XSvg/x-svg.css`,
-  which is `x-svg { contain: content; display: flex; }` plus a shadow `img`
-  inheriting width/height with `max-width/height: 100%`): `svg { display:
-  flex; }` without `contain: size`, so an `<svg>` with no CSS size lays out
-  at its natural size and a sized one stretches (`object-fit: fill`, the
-  replaced-element default). web-core's `contain: content` is not adopted:
-  the element is a replaced leaf here and has nothing to contain. `svg > *
-  { display: none; }`. `svg` joins the shared box-rule selector list in
-  `ua_sheet.rs`.
-- Events: `load` only (the Lynx `<svg>` typing and web-core's `x-svg` both
-  expose `bindload` alone; an `svg` node's failure dispatches nothing).
-  Non-bubbling, through the existing `ImageOutcomes` path. For `svg` nodes
-  the `load` detail is the element's border-box layout size in px
-  (ruling), not the intrinsic size: `dispatch_image_outcomes` asks the
-  document for the node's tag and, for `svg`, reads
-  `bounding_client_rect(node)` at dispatch time. Ordering: the page
-  epilogue posts the outcome entry only once `needs_render()` is false, so
-  the outcome is delivered after the commit that applied the natural size;
-  without that hold, a commit skipped while stylesheets are pending would
-  let the event read a stale box. A `display: none` `<svg>` has no box and
-  reports 0×0 (native reports its zero frame the same way).
+The element lives in `dom`, the browser-DOM layer, not in `bobcat-core`: it
+is the standard element, not a Lynx component. Nothing about it is
+host-visible.
+
+- **What it is.** A node whose local name is `svg` and whose parent is not an
+  SVG element is an *inline SVG root*: replaced content
+  (`NodeContent::Replaced`, so `is_replaced()` is true from creation and
+  layout treats it as a leaf, hiding its children as it hides an `<image>`'s).
+  Its descendants are ordinary DOM nodes (`path`, `rect`, `circle`, `g`,
+  `defs`, `linearGradient`, `stop`, `clipPath`, `use`, `style`, nested
+  `svg`, …): JavaScript creates and mutates them through the element PAPI as
+  it does any element, and selectors match them. A nested `svg` is part of
+  its outer root's document, never a root of its own.
+- **How it draws.** The root's subtree is serialised to SVG markup (root tag
+  with `xmlns="http://www.w3.org/2000/svg"` added, every element's
+  attributes escaped and written as they are, including `style`, text
+  content kept so `<style>` sheets reach usvg; no namespace handling beyond
+  the root `xmlns`) and parsed through the same `ImageEvent::parse_document`
+  as a fetched document, inline on the document thread (browsers parse
+  inline SVG on the main thread as well). The result is stored in the
+  `ImageRegistry` under a synthetic source the host never sees (the entry is
+  created settled, so `wanted` never names it and no `request_image` is ever
+  made for it), and the root is bound to that source as `ImageRole::Source`.
+  From there the existing path draws it: natural size into layout,
+  `paint_replaced_content`'s vector branch, the cached scene appended per
+  frame. A superseded generation's registry entry is forgotten when the root
+  rebinds (synthetic entries are the one kind the registry removes; a host
+  source still never regresses).
+- **When it re-renders.** Any mutation inside an inline SVG root (an
+  attribute set or removed on the root or a descendant, a child inserted,
+  removed or moved, a text node changed) marks the root dirty; the next
+  `Document::commit` serialises every dirty root once before style and
+  layout. The root's own `width`/`height` attributes additionally become
+  presentational hints for CSS `width`/`height` (the SVG presentation
+  attributes they are), so `<svg width="48" height="48">` lays out at 48×48
+  through the cascade, and author CSS still overrides them.
+- **Sizing.** With no CSS size the natural size is what
+  `VectorImage::parse` reports for the serialised document: the root
+  attributes' size, or a `viewBox` ratio fitted into 300×150, or 300×150.
+  Subset deviation, recorded: a browser sizes an inline `<svg>` with a
+  `viewBox` and no `width`/`height` to its containing block's width; here it
+  gets the `<img>` rule, which keeps one sizing rule for every SVG.
+- **What the subset leaves out.** SVG descendants are not styled by the
+  engine's cascade (presentation attributes, `style` attributes and `<style>`
+  elements inside the SVG are what usvg sees); they are not hit-tested and
+  take no events; the root fires no `load`; `<text>`, masks, filters and
+  patterns follow the walker's gaps; and there are no `src`/`content`
+  attributes.
+- **UA rule.** `svg { display: flex; }` in the Lynx UA sheet, with `svg` in
+  the shared box-rule list, so an inline SVG root lays out like `<image>`
+  does. No rule hides its children: the replaced leaf already does.
+
+### Removed with revision 3 (ablation list)
+
+Everything that existed only for the Lynx `<svg src|content>` component:
+
+- `crates/bobcat-core/src/main/tree/svg.rs` as a `CustomElement` (`src`
+  binding, `content` as a percent-encoded `data:` URL and its encoder,
+  `is_svg`), and its registration in `new_document`.
+- The `svg`-specific `load` detail (layout size via `bounding_client_rect`)
+  and the `Failed`-fires-nothing arm in `dispatch_component_events`.
+- The `!needs_render()` hold on posting component events in the page
+  epilogue, introduced only so that detail could read a laid-out box.
+- The `svg > * { display: none; }` UA rule.
+- The page-level `<svg>` tests and the `react-svg` fixture's `src`/`content`
+  cases; the fixture now uses inline `<svg>` children.
+- `docs/tracking` rows that described the Lynx component as implemented.
+
+Kept: `DocumentKind`, `loaded_document`, the core off-thread parse, the
+walker, the vector branch, `<image src="x.svg">`, CSS `url()`.
 
 ### Known costs
 
-- Inline `content` on `<svg>`: every distinct data URL stays resident for
-  the document's life (see the `<svg>` element section above).
 - A repeated vector background re-encodes the whole cached scene once per
   visible tile, up to the existing `MAX_TILE_FILLS` cap
   (`paint/background.rs`), so its cost scales with the document's path
@@ -312,8 +342,9 @@ gradient, and replayed by the existing `ComposeOp::Fragment` arm.
 
 `<text>`, `current-color`, `mask`, `filter`, `pattern`, nested raster
 `<image>`, `.svgz`, percentage and font-relative `width`/`height` on the
-root, `clipPath`
-unions with overlapping opposite-winding children, `error` on `<svg>`.
+root, `clipPath` unions with overlapping opposite-winding children, the Lynx
+`<svg src|content|bindload>` component (see "Removed with revision 3"), and
+`load` on the standard `<svg>`.
 
 ## Dependency note
 
@@ -338,8 +369,6 @@ existing crate, `rkyv` pin untouched.
   decisions (object-fit, tiling) are made and where the registry lives; the
   tree is tiny and `Send + Sync`, so it rides the existing `ImageEvents`
   message.
-- `content` as a `data:` URL: the only alternative is a second registration
-  path for inline bytes, which would be a copy of what `data:` already does.
 - Bytes across the protocol, not a parsed tree: a host should not have to
   know an engine type to answer a fetch, and a second engine-drawn format
   later (a Lottie document, say) is one more `DocumentKind` arm rather than a
