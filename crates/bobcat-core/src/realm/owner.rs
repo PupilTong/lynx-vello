@@ -412,7 +412,11 @@ fn epilogue<O: RealmOwner>(owner: &Rc<O>, realm: &mut O::Realm, js: &mut ScriptR
 ///
 /// A successful answer completes the module under `url`, the name it was
 /// requested by; the URL the fetcher answered from is the module's own URL —
-/// its `import.meta.url`, and the base its own imports resolve against.
+/// its `import.meta.url`, and the base its own imports resolve against. A
+/// module completed in a realm is that realm's own source and is never named
+/// on the runtime, so two views that answer one URL with different bytes each
+/// run their own, and a worker leaves no registration behind. Nothing is
+/// written around the source, so a script keeps its own line numbers.
 async fn load_module<O: RealmOwner>(owner: Rc<O>, url: String, answer: SourceAnswer) {
     let loaded = await_source(answer)
         .await
@@ -587,8 +591,9 @@ mod tests {
 
     /// Every answer that is not a script is refused the same way, naming the
     /// request and the kind it was answered with, and nothing else: the text
-    /// is what the load of an import, or of a worker's script, is rejected
-    /// with.
+    /// is what `load_module` puts after `module '<url>': ` to reject the load
+    /// of an import, or of a worker's script, and what `load_entry` makes a
+    /// `Script` error.
     #[test]
     fn an_answer_of_another_kind_is_refused_naming_the_request_and_the_kind() {
         for (answer, kind) in [

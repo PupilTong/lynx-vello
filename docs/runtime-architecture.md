@@ -1076,12 +1076,14 @@ Module for the completion of the script or of a module it imports, Timer
 for a timer — or drops it with the other leftovers of the one failure that
 entry reported. The epilogue reads the load only to learn that it has
 settled, so a failure of the root module is reported once, and the worker
-goes on running, as HTML's "run a worker" leaves it. For the BTS that module
-is `bobcat:bts`, which imports nothing of the app's as it is evaluated: the
-BTS entry is imported later, by the loader `bobcat:bts` hands
-`bobcat:bts-runtime`, once `initialize` has arrived, and what the entry throws
-is reported through the worker global's `reportError`, not as a rejection of
-the root module.
+goes on running. For a root that throws as it is evaluated that is what HTML's
+"run a worker" does. With a script that could not be loaded the worker goes on
+too, where HTML never runs a worker whose script fetch failed
+(`docs/tracking/deviations.md`). For the BTS that module is `bobcat:bts`,
+which imports nothing of the app's as it is evaluated: the BTS entry is
+imported later, by the loader `bobcat:bts` hands `bobcat:bts-runtime`, once
+`initialize` has arrived, and what the entry throws is reported through the
+worker global's `reportError`, not as a rejection of the root module.
 
 A listed stylesheet has no row of its own. The listed sheets are settled by
 boot's first `__FlushElementTree`, one at a time in listed order, and nothing

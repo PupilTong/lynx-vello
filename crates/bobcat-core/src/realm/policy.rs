@@ -21,7 +21,7 @@
 //!
 //! # Where each row comes from
 //!
-//! - [`Scene::Open`]: the realm, its entry, or the engine's own startup code could not be made
+//! - [`Scene::Open`]: the realm, the MTS entry, or the engine's own startup code could not be made
 //!   ready. MTS: `Page::open_realm` (a runtime that was never built, the realm's construction,
 //!   boot's own module), the entry's failed or non-script answer, an answer from a URL that is not
 //!   absolute, and naming the entry in `load_entry`, and a rejection of boot's own module seen by
@@ -92,7 +92,7 @@ use crate::view::EngineEvent;
 /// table reads a [`Row`] by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Scene {
-    /// The realm, its entry or the engine's own startup code could not be
+    /// The realm, the MTS entry or the engine's own startup code could not be
     /// made ready.
     Open,
     /// The MTS entry's evaluation threw, or a worker's load of its root

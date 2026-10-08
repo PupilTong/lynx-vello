@@ -21,9 +21,9 @@
 //! through [`owner::enter`], the driver a worker shares with every view, which
 //! queues one job: it runs one synchronous operation and then the driver's
 //! epilogue, which settles what it left owing — the timers that came due, a
-//! `close()` it may have called, the root module finishing, the imports and
-//! futures it left waiting, the next deadline, and the checkpoint generation
-//! as of that entry. What a worker adds to that epilogue is its
+//! `close()` it may have called, the root module finishing, the module
+//! requests and futures it left waiting, the next deadline, and the checkpoint
+//! generation as of that entry. What a worker adds to that epilogue is its
 //! [`RealmOwner`] impl. What a failure in a worker's realm is reported as —
 //! `Errored`, or a `Failed` that ends the worker — is the worker table in
 //! [`policy`], read by the scene the failure happened in, and every report
@@ -523,11 +523,15 @@ impl RealmOwner for Worker {
     /// the script or of a module it imports, a timer — reports it named by
     /// that entry, or drops it with the other leftovers of the one failure
     /// that entry reported. So a failure of the root module is reported once,
-    /// whichever job it is in, and the worker stays up, as HTML's "run a
-    /// worker" leaves it. For the BTS the root module is `bobcat:bts`, which
-    /// imports nothing of the app's as it is evaluated: the BTS entry is
-    /// imported later, once `initialize` has arrived, and what the entry
-    /// throws reaches the worker global's `reportError` instead.
+    /// whichever job it is in, and the worker stays up. For a root that
+    /// throws as it is evaluated that is what HTML's "run a worker" does.
+    /// With a script that could not be loaded the worker stays up too, where
+    /// HTML never runs a worker whose script fetch failed
+    /// (`docs/tracking/deviations.md`). For the BTS the root module is
+    /// `bobcat:bts`, which imports nothing of the app's as it is evaluated:
+    /// the BTS entry is imported later, once `initialize` has arrived, and
+    /// what the entry throws reaches the worker global's `reportError`
+    /// instead.
     const BOOT_REJECTION: Option<(Scene, Option<&'static str>)> = None;
 
     fn lifetime(&self) -> &Lifetime {
