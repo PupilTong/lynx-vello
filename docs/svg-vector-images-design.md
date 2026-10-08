@@ -27,16 +27,17 @@ Lynx treats an SVG as one image, never as a DOM subtree:
 | `<text>` | Dropped. `usvg` is built without its `text` feature; text elements vanish at parse. |
 | `current-color` attribute | Not implemented (web-core lacks it). |
 | vello | Upgraded to 0.11 in its own PR (#364). SVG work does not depend on it. |
+| Who parses (ruled 2026-10-08, revision 2) | The engine. The host protocol hands over bytes and a kind, `ImageReports::loaded_document(source, bytes, DocumentKind::Svg)`; `bobcat-core` parses, off the document thread where it has a blocking pool. The host never names `usvg` or `VectorImage`. |
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph painter["view / painter thread"]
-        fetch["bobcat-resources\nfetch + preprocess"] --> parse["usvg::Tree::from_data\n(blocking pool natively,\ninline in the browser)"]
-        parse --> report["ImageReports::loaded_vector\n(source, VectorImage)"]
+    subgraph painter["view / painter thread (host)"]
+        fetch["bobcat-resources\nfetch + preprocess\nImageFormat::Svg"] --> report["ImageReports::loaded_document\n(source, bytes, DocumentKind::Svg)"]
     end
-    report -- "ToMain::ImageEvents" --> registry["dom ImageRegistry\nReady { natural, kind: Vector(tree) }"]
+    report -- "ToMain::ImageEvents\nLoadedDocument { bytes, kind }" --> core["bobcat-core page loop\nnatively: spawn_blocking on the\nJsThread runtime → VectorImage::parse_sealed\nwasm32: parsed inline by dom"]
+    core -- "main job: apply LoadedVector / Failed" --> registry["dom ImageRegistry\nReady { natural, kind: Vector(VectorImage) }"]
     subgraph document["document thread"]
         registry --> walk["paint: background.rs\nvector branch"]
         walk --> svg["paint/svg.rs\nusvg::Tree → vello::Scene\n(built once, cached in VectorImage)"]
@@ -45,6 +46,16 @@ flowchart LR
     frag -- "CommittedFrame" --> replay["painter: replay_ops\nFragment appended verbatim"]
 ```
 
+Parsing is the engine's: the host's whole contribution to an SVG is the
+fetched bytes and the sniffed kind. `dom` owns the parser
+(`VectorImage::parse_sealed`), the sizing rule and the walker; `bobcat-core`
+owns where the parse runs. Natively the document thread is a tokio
+`current_thread` runtime (`jobs.rs`, `JsThread`) whose blocking pool is
+idle apart from this, so `spawn_blocking` parses there and a main job applies
+the result; on wasm32 there is no blocking pool and the parse runs inline on
+the document thread, the same thread the browser build already parsed on
+before this revision. `usvg` is a dependency of `dom` alone.
+
 The painter side (`FrameImages`, `ComposeOp::Image`, the bitmap memory tier,
 atlas residency) is untouched. A vector image is never in `image_draws`; it is
 encoded into the fragment scene on the document thread, exactly like a
@@ -52,60 +63,24 @@ gradient, and replayed by the existing `ComposeOp::Fragment` arm.
 
 ### bobcat-resources
 
-- Dependency: `usvg = { version = "0.48", default-features = false }` in the
-  workspace. No `text`, `system-fonts`, `memmap-fonts`, `svgz`, `writer`
-  features. (`.svgz` therefore fails to parse; documented gap.)
-- In the image pipeline, after preprocessing says
-  `Payload::Image { format: ImageFormat::Svg, .. }`, the bytes go to usvg
-  instead of the platform decoder, on the same blocking-pool thread natively
-  and inline on wasm32. The parse and the sizing below live in `dom`, not
-  in this crate: `dom::VectorImage::parse(svg, &options)` does both, and
-  `dom::VectorImage::parse_sealed(svg)` calls it with the options listed
-  below. `bobcat-resources` and flashbulb's `TestImages::insert_svg` both
-  call `parse_sealed`, so the two share one implementation and neither
-  depends on `usvg` directly. One XML parse: `usvg::roxmltree::Document::parse`
-  (usvg re-exports roxmltree, which is already in the lock at the version
-  usvg needs), read the root's `width`, `height` and `viewBox`, then
-  `usvg::Tree::from_xmltree(&doc, &options)`. `usvg::Tree` exposes neither
-  the viewBox nor the raw dimensions, and its `size()` is the content
-  bounding box when the root has no viewBox and no absolute dimension.
-  `usvg::Options`:
-  - `image_href_resolver`: `resolve_string` returns `None` (never the
-    default, which reads the filesystem); `resolve_data` stays default.
-  - `resources_dir: None`, everything else default.
-
-  These are `VectorImage::parse_sealed`'s options: it reads nothing outside
-  the document.
-- A parsed tree completes as `Completion::LoadedVector { source, image:
-  VectorImage }`; a parse error completes as `Completion::Failed` with the
-  usvg error message. Servicing reports `ImageReports::loaded_vector`.
-- The resources-side `Entry` (`images.rs`) gains a `Vector(VectorImage)`
+- No `usvg` dependency and no parse. After preprocessing says
+  `Payload::Image { format: ImageFormat::Svg, .. }`, the load takes no decode
+  permit and hands nothing to the platform decoder: it completes as
+  `Completion::LoadedDocument { source, bytes, kind: DocumentKind::Svg }`,
+  which servicing reports as `ImageReports::loaded_document(source, bytes,
+  kind)`. The bytes are the preprocessed payload (unchanged for an image).
+- The resources-side `Entry` (`images.rs`) has a `Document { bytes, kind }`
   arm: `read` returns `None` (the painter never asks), a repeated `request`
-  re-reports `loaded_vector`, `knows_image`/`is_resident` answer as for a
-  loaded image with no resident bitmap. Nothing enters the bitmap memory
-  tier and the encoded bytes are dropped after parse.
-- Two sizes travel with the tree, both computed from the root attributes
-  (architect's decision, implements the ruling):
-  - **natural size**, what layout is told, in CSS px, rounded to whole px,
-    minimum 1: (a) `width` and `height` both absolute → that size; (b) one
-    absolute plus a `viewBox` → the other from the viewBox ratio; (c)
-    `viewBox` only → the largest size with the viewBox ratio that fits
-    300×150; (d) neither → 300×150; (e) one absolute and no `viewBox` →
-    that axis, with 300 wide or 150 high for the other. A dimension is
-    absolute when it is a bare number or a length in one of the CSS
-    absolute units, converted to px at 96 px per inch: `px`, `in` (96),
-    `cm` (96/2.54), `mm` (96/25.4), `pt` (4/3), `pc` (16). `em`, `ex`,
-    percentages and any other unit count as absent.
-  - **viewport**, the rectangle in tree units the fragment maps onto the
-    draw rectangle: `tree.size()` in cases (a), (b) and (c) (usvg folds the
-    viewBox into the root transform and `size()` is the viewBox size or the
-    attribute size); the natural size in cases (d) and (e), where usvg
-    leaves user units 1:1 and overwrites `size()` with the content bounding
-    box.
-  The append transform is `extent / viewport`, never `extent /
-  tree.size()`.
-- The browser used to decode SVG through `HTMLImageElement`; it now goes
-  through usvg like every target, so all three behave the same.
+  re-reports `loaded_document` with the same bytes, `knows_image` is true,
+  `is_resident` is false, `memory_used_bytes` counts the bytes under the
+  encoded-bytes figure (they are what a later asker is answered from; a few
+  KB for an icon). Nothing enters the bitmap memory tier.
+- A document the engine cannot parse is the engine's failure to report: the
+  host has answered correctly by handing the bytes over. `knows_image` stays
+  true on the host side; the document registry marks the source `Failed`.
+- The browser used to decode SVG through `HTMLImageElement`; the host now
+  hands the bytes over on every target, and the engine parses them the same
+  way everywhere.
 
 ### dom
 
@@ -123,13 +98,47 @@ gradient, and replayed by the existing `ComposeOp::Fragment` arm.
   document thread and the cached scene is published inside the registry.
   `Debug` is hand-written (`Scene` has none); `VectorImage` is not
   `PartialEq`.
-- `ImageEvent::LoadedVector { source, image }` and
-  `ImageReports::loaded_vector(&self, source: &str, image: VectorImage)`.
-  `ImageEvent` drops its `PartialEq`/`Eq` derives (every consumer matches by
-  pattern; none compares events). The "no variant carries pixels" comments
-  on `ImageEvent` and `ToMain::ImageEvents` gain "a parsed vector tree is not
-  pixels". `ToMain::ImageEvents` is a plain `Vec<dom::ImageEvent>` arm with
-  no derives, so the `Arc<usvg::Tree>` crosses soundly.
+- Protocol, host-facing: `#[non_exhaustive] pub enum DocumentKind { Svg }`,
+  `ImageEvent::LoadedDocument { source, bytes: bytes::Bytes, kind }` and
+  `ImageReports::loaded_document(&self, source: &str, bytes: Bytes, kind:
+  DocumentKind)`. This is the only way a host delivers an SVG; `loaded_vector`
+  is not part of the protocol.
+- Engine-internal, still public to `bobcat-core`: `ImageEvent::LoadedVector {
+  source, image: VectorImage }`, the already-parsed form `bobcat-core`
+  produces after its off-thread parse. `Document::apply_image_events` accepts
+  both: a `LoadedDocument` is parsed inline there with
+  `VectorImage::parse_sealed` (the path dom tests and the wasm32 build use,
+  where no blocking pool exists), a `LoadedVector` is stored as it is, and a
+  parse error marks the source `Failed`. `ImageEvent` drops its
+  `PartialEq`/`Eq` derives (every consumer matches by pattern; none compares
+  events). The "no variant carries pixels" comments on `ImageEvent` and
+  `ToMain::ImageEvents` gain "encoded document bytes and a parsed tree are
+  not pixels". `ToMain::ImageEvents` is a plain `Vec<dom::ImageEvent>` arm
+  with no derives, so `Bytes` and the `Arc<usvg::Tree>` cross soundly.
+- Sizing and parse: `VectorImage::parse(svg, &usvg::Options)` and
+  `VectorImage::parse_sealed(svg)` live here (`parse_sealed` reads nothing
+  outside the document: `resolve_string` returns `None`, `resources_dir` is
+  `None`). One XML parse: `usvg::roxmltree::Document::parse`, the root's
+  `width`, `height`, `viewBox` read, then `usvg::Tree::from_xmltree`.
+  `usvg::Tree` exposes neither the viewBox nor the raw dimensions, and its
+  `size()` is the content bounding box when the root has no viewBox and no
+  absolute dimension. Two sizes come out:
+  - **natural size**, what layout is told, in CSS px, rounded to whole px,
+    minimum 1: (a) `width` and `height` both absolute → that size; (b) one
+    absolute plus a `viewBox` → the other from the viewBox ratio; (c)
+    `viewBox` only → the largest size with the viewBox ratio that fits
+    300×150; (d) neither → 300×150; (e) one absolute and no `viewBox` →
+    that axis, with 300 wide or 150 high for the other. A dimension is
+    absolute when it is a bare number or a length in one of the CSS
+    absolute units, converted to px at 96 px per inch: `px`, `in` (96),
+    `cm` (96/2.54), `mm` (96/25.4), `pt` (4/3), `pc` (16). `em`, `ex`,
+    percentages and any other unit count as absent.
+  - **viewport**, the rectangle in tree units the fragment maps onto the
+    draw rectangle: `tree.size()` in cases (a), (b) and (c); the natural
+    size in cases (d) and (e), where usvg leaves user units 1:1 and
+    overwrites `size()` with the content bounding box.
+  The append transform is `extent / viewport`, never `extent /
+  tree.size()`.
 - `ImageRegistry`: `ImageState::Ready { width, height, kind }` with
   `ImageKind::Raster | Vector(VectorImage)`. `ImageState` stops being
   `Copy`/`PartialEq`; the call sites that moved it out of a borrow switch to
@@ -198,8 +207,31 @@ gradient, and replayed by the existing `ComposeOp::Fragment` arm.
   opacity, single- and multi-child clipPath, masked group skipped, nested
   svg), plus flashbulb golden screenshots for `<image src>`,
   `background-image` with repeat, `mask-image`, and the `<svg>` element.
-  `flashbulb::TestImages` gains `insert_svg(source, &str)` that parses with
-  usvg and reports `loaded_vector`.
+  `flashbulb::TestImages` gains `insert_document(source, bytes, kind)` and
+  the sugar `insert_svg(source, &str)`; both report `loaded_document`, so a
+  dom test exercises the inline parse in `apply_image_events` and flashbulb
+  has no `usvg` dependency.
+
+### bobcat-core: where the parse runs
+
+- In the page loop's `ToMain::ImageEvents(events)` arm, natively: every
+  `LoadedDocument` is taken out of the batch and parsed with
+  `tokio::task::spawn_blocking(move || VectorImage::parse_sealed(&bytes))` on
+  the `JsThread` runtime's blocking pool; the rest of the batch is applied at
+  once. When the parse returns, a main job applies one event,
+  `LoadedVector` or `Failed`, through the same `runtime.apply_image_events`
+  as the view's own batches, so the outcome, the natural-size relayout and
+  the `load` event follow the existing path. The job follows the
+  `load_font_face` precedent for reaching the runtime from an awaited
+  completion, and is cancelled by the view's `Lifetime` like every other
+  pending completion: a view that ends mid-parse applies nothing.
+- On wasm32 the batch is applied unchanged and `dom` parses the
+  `LoadedDocument` inline.
+- The registry stays `Pending` while a parse is in flight; a second
+  `LoadedDocument` for the same source (two views, or a re-request) parses
+  again and the registry's "never regresses" rule makes the later apply a
+  no-op.
+- `bobcat-core` has no direct `usvg` dependency; it calls `dom`'s parse.
 
 ### bobcat-core: the `<svg>` element
 
@@ -270,6 +302,8 @@ which satisfies the "latest available versions" policy. With
 optional, dead weight accepted), `roxmltree` (unifies), `simplecss`,
 `siphasher` (unifies), `strict-num` → `float-cmp`, `svgtypes`,
 `tiny-skia-path` → `arrayref`, `bytemuck` (unifies), `libm` (unifies).
+`usvg` is declared by `dom` only; `bobcat-core`, `bobcat-resources` and
+`flashbulb` reach the parser through `dom::VectorImage`.
 Nine crates new to the lock, each at a single version, no duplicate of an
 existing crate, `rkyv` pin untouched.
 
@@ -284,5 +318,12 @@ existing crate, `rkyv` pin untouched.
   message.
 - `content` as a `data:` URL: the only alternative is a second registration
   path for inline bytes, which would be a copy of what `data:` already does.
+- Bytes across the protocol, not a parsed tree: a host should not have to
+  know an engine type to answer a fetch, and a second engine-drawn format
+  later (a Lottie document, say) is one more `DocumentKind` arm rather than a
+  second protocol method. The cost is that the parse moved from a pool the
+  host already had to the engine's own blocking pool, which the `JsThread`
+  runtime provides natively for free; on wasm32 it is inline, as it already
+  was on the host side there.
 - Masks skipped rather than drawn unmasked: an unmasked draw is a wrong
   picture that looks right; nothing drawn is a visible gap.
