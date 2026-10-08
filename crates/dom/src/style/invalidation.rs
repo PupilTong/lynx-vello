@@ -20,6 +20,7 @@ use stylo_atoms::Atom;
 
 use crate::tree::document::{DOCUMENT_NODE_ID, Document, NodeId};
 use crate::tree::node::Node;
+use crate::tree::popover::is_popover_attribute;
 use crate::tree::shadow::is_slot_assignment_attribute;
 
 const STRUCTURE_SENSITIVE: ElementSelectorFlags = ElementSelectorFlags::HAS_SLOW_SELECTOR
@@ -434,6 +435,7 @@ impl<T> Document<T> {
             _ => {}
         }
         let slot_assignment = is_slot_assignment_attribute(name);
+        let popover = is_popover_attribute(name).then(|| self.popover_state(id));
         let attribute = name;
         let name = LocalName::from(name);
         let base = self.begin_reactions();
@@ -443,6 +445,9 @@ impl<T> Document<T> {
             .set_attr_local_name(name, value.to_owned());
         if slot_assignment {
             self.note_slot_assignment_attribute(id);
+        }
+        if let Some(old) = popover {
+            self.note_popover_attribute_change(id, old);
         }
         self.reflect_svg_size_attribute(id, attribute, Some(value));
         self.drain_reactions(base);
@@ -474,6 +479,7 @@ impl<T> Document<T> {
             _ => {}
         }
         let slot_assignment = is_slot_assignment_attribute(name);
+        let popover = is_popover_attribute(name).then(|| self.popover_state(id));
         let attribute = name;
         let name = LocalName::from(name);
         let base = self.begin_reactions();
@@ -483,24 +489,31 @@ impl<T> Document<T> {
         if slot_assignment {
             self.note_slot_assignment_attribute(id);
         }
+        if let Some(old) = popover {
+            self.note_popover_attribute_change(id, old);
+        }
         self.reflect_svg_size_attribute(id, attribute, None);
         self.drain_reactions(base);
     }
 
     pub fn add_element_state(&mut self, id: NodeId, flags: stylo_dom::ElementState) {
+        assert_settable_element_state(flags);
         self.update_element_state(id, flags, true);
     }
 
     pub fn remove_element_state(&mut self, id: NodeId, flags: stylo_dom::ElementState) {
+        assert_settable_element_state(flags);
         self.update_element_state(id, flags, false);
     }
 
-    fn update_element_state(&mut self, id: NodeId, flags: stylo_dom::ElementState, enabled: bool) {
-        assert!(
-            !flags.contains(stylo_dom::ElementState::DEFINED),
-            "Document::{{add,remove}}_element_state: `:defined` is owned by the custom element \
-             state machine and is not settable as element state"
-        );
+    /// Sets or clears element state bits, with the invalidation they owe.
+    /// The public setters' gate on the bits `dom` owns is theirs.
+    pub(crate) fn update_element_state(
+        &mut self,
+        id: NodeId,
+        flags: stylo_dom::ElementState,
+        enabled: bool,
+    ) {
         // Element state is element-only, and the gate below can skip the
         // `ensure_snapshot` that used to carry this check.
         self.live_element(id);
@@ -890,6 +903,23 @@ impl<T> Document<T> {
             snapshot
         }))
     }
+}
+
+/// The element state an embedder may not write: `:defined` belongs to the
+/// custom element state machine, and `:popover-open` to the popover
+/// algorithms (`tree::popover`), which keep it equal to top-layer membership.
+fn assert_settable_element_state(flags: stylo_dom::ElementState) {
+    assert!(
+        !flags.contains(stylo_dom::ElementState::DEFINED),
+        "Document::{{add,remove}}_element_state: `:defined` is owned by the custom element \
+         state machine and is not settable as element state"
+    );
+    assert!(
+        !flags.contains(stylo_dom::ElementState::POPOVER_OPEN),
+        "Document::{{add,remove}}_element_state: `:popover-open` is owned by the popover \
+         algorithms (`Document::show_popover`, `Document::hide_popover`) and is not settable \
+         as element state"
+    );
 }
 
 /// Whether this node's last cascade resolved a `cqw`/`cqh`.

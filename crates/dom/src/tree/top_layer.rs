@@ -57,7 +57,7 @@
 //! The fork's `lynx` build admits that longhand in a UA-origin sheet only
 //! (`LYNX_UA_LONGHANDS` in `properties/data.py`), so the fixups run for an
 //! element exactly when an embedder UA rule declares it — bobcat-core's
-//! `dialog:modal` and `::backdrop` do. Membership is not derived from that
+//! `dialog:modal`, `:popover-open` and `::backdrop` do. Membership is not derived from that
 //! declaration and does not require it: the embedder decides what enters the
 //! layer, and an element can be in it with no such rule. So membership stays
 //! this crate's truth where it reads it — the position lowering answers
@@ -278,7 +278,8 @@ impl<T> Document<T> {
     }
 
     /// HTML's removing steps for the top layer: drops every entry whose
-    /// element is no longer connected. The unlink path calls it after every
+    /// element is no longer connected, and hides it if it was a showing
+    /// popover (`tree::popover`). The unlink path calls it after every
     /// removal, so the walk is over the entries, not over what was removed.
     pub(crate) fn drop_disconnected_top_layer_entries(&mut self) {
         if self.arenas().top_layer().is_empty() {
@@ -294,6 +295,7 @@ impl<T> Document<T> {
             .collect();
         for element in disconnected {
             self.remove_from_top_layer(element);
+            self.note_popover_disconnected(element);
         }
     }
 

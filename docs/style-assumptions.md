@@ -357,6 +357,11 @@ the semantics are stylo's.** Everything below refines that sentence.
       reference does. The host's and the first child's own rules stay
       defaults (§30); `crates/bobcat-core/src/main/tree/overlay.rs` carries
       the argument.
+    - HTML's own (2026-10-08): `pointer-events: none !important` on
+      `:popover-open::backdrop`. It is in HTML's UA sheet, where a UA
+      `!important` outranks every author declaration, so a popover's
+      backdrop takes no touch whatever a page writes; the rule is HTML's,
+      not a Lynx default (§31).
 
 16. **cssId scoping is a runtime-adapter concern.** The feature exists for
     pageConfig `enableRemoveCSSScope = false` (that is the exact
@@ -1668,7 +1673,8 @@ and §D.16 with what the wire format actually permits.)*
     layer is generic in `dom` (`crates/dom/src/tree/top_layer.rs`,
     `docs/dom-architecture.md` "Top layer and `::backdrop`"); `<dialog>` is
     its first user (`crates/bobcat-core/src/main/tree/dialog.rs`).
-    `<overlay>` / `<x-overlay-ng>` is its second (§30).
+    `<overlay>` / `<x-overlay-ng>` is its second (§30), and HTML's popovers
+    (§31) are its third.
     - **Implemented.** A document top layer: an ordered set with a per-entry
       "blocks the document" flag (HTML's modal dialog). A top-layer element is
       a stacking context of its own, painted after everything in the root
@@ -1827,6 +1833,82 @@ and §D.16 with what the wire format actually permits.)*
         pass-through overlay here passes every gesture, as native does.
       - The native-vs-web-core conflicts and the side followed are listed in
         `docs/tracking/deviations.md`.
+
+31. **HTML's `popover` attribute (architect-decided, 2026-10-08).** Bucket
+    1: web-core runs in a browser, where an element with a `popover`
+    attribute is the browser's popover; native Lynx has none. The rule set
+    for this one is stricter than "W3C-correct": implement a subset of the
+    latest browsers' capability, and nothing that behaves differently from
+    them (user ruling). `dom` owns the state machine
+    (`crates/dom/src/tree/popover.rs`), because the attribute is global to
+    every element; bobcat-core owns HTML's UA rules for it
+    (`crates/bobcat-core/src/main/tree/popover.rs`).
+    - **Implemented.** The attribute's four states, as HTML's enumerated
+      attribute (`auto` and the empty string Auto, `manual` Manual, `hint`
+      Hint, any other value Manual, no attribute No Popover). The popover
+      visibility state, as `ElementState::POPOVER_OPEN`, which
+      `:popover-open` matches. HTML's *show popover* and *hide popover* for
+      the Manual state, throwing, with a null source: the same validity
+      checks, `NotSupportedError`/`InvalidStateError` and silent no-ops; a
+      showing popover is a top-layer entry that does not block the
+      document. The attribute change steps: a showing popover whose
+      attribute moves to another state is hidden, removing the attribute
+      included. The removing steps: a showing popover leaving the document
+      is hidden with no events, so it comes back hidden. `showModal()`
+      refuses a dialog showing as a popover, *show popover* a modal dialog,
+      and `close()` leaves a dialog showing as a popover in the top layer
+      (it removes only a modal one).
+    - **UA rules.** HTML's, in HTML's order:
+      `[popover]:not(:popover-open):not(dialog[open])` is `display: none`;
+      `[popover]` is fixed, centred by `inset: 0` and `auto` margins at its
+      fit-content size, with a solid medium border, `0.25em` of padding and
+      `Canvas`/`CanvasText`; `dialog:popover-open` shows; `:popover-open`
+      declares `-servo-top-layer: auto` (Gecko's
+      `:popover-open { -moz-top-layer: auto }`); `:popover-open::backdrop`
+      covers the viewport, transparent and `pointer-events: none
+      !important` (§D.15). Adapted as every HTML rule in the sheet is:
+      `display: block` is the display `defaultDisplayLinear` picks (§29),
+      and `overflow: auto` is `scroll` (no `auto` in this engine).
+    - **HTML's rules under the Lynx tags'.** Under web-core, web-elements'
+      CSS is author origin and outranks the browser's UA rules whatever the
+      specificity, so a `<view popover>` keeps its `display`, `position:
+      relative` and borderless box and is never hidden by `[popover]`, while
+      the properties web-elements leaves alone (insets, fit-content size,
+      `auto` margins, padding, colours) are the popover's. The UA sheet here
+      is one origin for both, so every HTML rule — §29's dialog rules
+      included — has its selector inside `:where()` and so no specificity,
+      which every Lynx rule outranks; among themselves the HTML rules are
+      ordered so that source order is HTML's own precedence
+      (`crates/bobcat-core/src/main/tree/ua_sheet.rs` carries the
+      argument). A cascade layer would say this directly, but an `@layer`
+      in a UA sheet trips Stylo's rule tree: its root node carries an
+      unlayered UA rule's priority, so the first layered rule under it fails
+      the ordering assertion. Fixing that in the fork (the root at
+      `LayerOrder::first()`) would let the group become `@layer html`.
+    - **The spec's text and the browsers.** HTML's attribute change steps
+      run *hide popover*, whose first check reads the state *after* the
+      change, so the spec's text would throw on a removed attribute and
+      leave the popover showing. Chromium (`UpdatePopoverAttribute`,
+      `IsPopoverReady`) and Gecko (`AfterSetPopoverAttr`,
+      `CheckPopoverValidity`) check the state they stored, the old one, and
+      hide it; so does this engine.
+    - **Out, with the reason — none of it observable as a difference.**
+      - Showing an Auto or Hint popover: their stacks, light dismiss and
+        close requests are not implemented, so `show_popover` refuses one
+        rather than showing it as a Manual popover. Nothing can be showing
+        in those states, so nothing needs hiding by those rules.
+      - `showPopover()`, `hidePopover()`, `togglePopover()`, the `popover`
+        IDL attribute, `popovertarget` and `command`: no script reaches a
+        popover. Exposing the methods needs `beforetoggle` first, which is
+        cancelable, and this engine's event model has no `preventDefault`.
+      - `beforetoggle` and `toggle`: `dom` fires none. The engine shows a
+        popover only inside a UA shadow tree (§30's pass-through overlay),
+        where both events, not composed, reach no listener.
+      - Focus (the popover focusing steps, focus restoration), popover
+        sources and triggers with the implicit anchor element, and the
+        `overlay` property with pending removals: none exists here, and a
+        browser removes a popover at once when `overlay` is not
+        transitioned, the only kind this engine can express.
 
 ## Deliberately still open (known non-decisions)
 

@@ -44,6 +44,11 @@
 //!   `dialog:modal`, and `display: flex`, because the pseudo-element's style has no other source of
 //!   a display `dom` lowers. `dialog::backdrop` is HTML's `rgba(0, 0, 0, 0.1)`.
 //!
+//! Every rule is HTML's selector inside `:where()`, so it has no specificity
+//! and every Lynx rule outranks it, as web-elements' author rules outrank a
+//! browser's UA sheet; among themselves they keep HTML's precedence by
+//! source order ([`super::ua_sheet`], "HTML's rules under the Lynx tags'").
+//!
 //! No rule is `!important`. HTML's `width: fit-content; height: fit-content;
 //! margin: auto` centres a modal dialog by shrink-to-fit sizing, and so it
 //! does here: hughie's absolute pass stretch-fits only an `auto` size
@@ -59,9 +64,10 @@
 //! - **Open** is the attribute, present and not `"false"`. The attribute callback is the one path
 //!   that sets or clears `ElementState::OPEN` (`:open`), whoever wrote the attribute — script
 //!   through `__SetAttribute` or a method below. Removing the attribute (or writing `"false"`) also
-//!   takes the dialog out of the top layer and clears `ElementState::MODAL`, without a `close`
+//!   takes a modal dialog out of the top layer and clears `ElementState::MODAL`, without a `close`
 //!   event: HTML's attribute change steps for `open` fire none, and the dialog simply stops
-//!   rendering.
+//!   rendering. A dialog showing as a popover stays in the layer: the popover is `dom`'s
+//!   (`dom::tree::popover`), and `close()` leaves it too.
 //! - **Modal** is top-layer membership with the blocks-the-document flag,
 //!   [`dom::Document::blocks_document`]. `ElementState::MODAL` (`:modal`) follows it. One case
 //!   needs the component's help: a modal dialog removed from the document leaves the top layer in
@@ -80,9 +86,9 @@
 //!
 //! - `show()`: no-op on an open non-modal dialog; [`InvalidState`] on a modal one; otherwise adds
 //!   `open`.
-//! - `showModal()`: no-op on a modal dialog; [`InvalidState`] on an open non-modal one and on a
-//!   disconnected one; otherwise adds `open`, enters the top layer blocking the document, and sets
-//!   `:modal`.
+//! - `showModal()`: no-op on a modal dialog; [`InvalidState`] on an open non-modal one, on a
+//!   disconnected one and on one showing as a popover ([`super::popover`]); otherwise adds `open`,
+//!   enters the top layer blocking the document, and sets `:modal`.
 //! - `close()`: no-op on a closed dialog; otherwise removes `open` and queues `close`.
 //! - `requestClose()`: no-op on a closed dialog; otherwise queues `cancel`, then closes as
 //!   `close()` does.
@@ -128,11 +134,12 @@ const CLOSE_EVENT: &str = "close";
 const CANCEL_EVENT: &str = "cancel";
 
 /// HTML's UA rules for `dialog` and `::backdrop`, adapted as the module
-/// documentation lists. The display `dialog` gets otherwise is
-/// [`super::ua_sheet`]'s.
+/// documentation lists, each at zero specificity under every Lynx rule
+/// ([`super::ua_sheet`], "HTML's rules under the Lynx tags'"). The display
+/// `dialog` gets otherwise is [`super::ua_sheet`]'s.
 pub(super) const UA_RULES: &str = r#"
-dialog:not([open]), dialog[open="false"] { display: none; }
-dialog {
+:where(dialog:not([open]), dialog[open="false"]) { display: none; }
+:where(dialog) {
   position: absolute;
   inset-inline-start: 0; inset-inline-end: 0;
   width: fit-content; height: fit-content;
@@ -141,7 +148,7 @@ dialog {
   padding: 1em;
   background-color: Canvas; color: CanvasText;
 }
-dialog:modal {
+:where(dialog:modal) {
   -servo-top-layer: auto;
   position: fixed;
   overflow: scroll;
@@ -150,7 +157,7 @@ dialog:modal {
   max-height: calc(100% - 6px - 2em);
 }
 ::backdrop { -servo-top-layer: auto; position: fixed; inset: 0; display: flex; }
-dialog::backdrop { background: rgba(0, 0, 0, 0.1); }
+:where(dialog)::backdrop { background: rgba(0, 0, 0, 0.1); }
 "#;
 
 /// Installs the `dialog` component. Must run before any element could carry
@@ -191,7 +198,12 @@ impl CustomElement<()> for Dialog {
             set_state(document, element, ElementState::OPEN, true);
         } else {
             set_state(document, element, ElementState::OPEN, false);
-            document.remove_from_top_layer(element);
+            // A modal dialog leaves the layer; a dialog showing as a popover
+            // is the popover's to take out (`dom::Document::hide_popover`),
+            // as HTML's `close()` leaves it.
+            if document.blocks_document(element) {
+                document.remove_from_top_layer(element);
+            }
             set_state(document, element, ElementState::MODAL, false);
         }
     }
@@ -232,7 +244,7 @@ pub(crate) fn show_modal(document: &mut LynxDocument, dialog: NodeId) -> Result<
             Err(InvalidState)
         };
     }
-    if !document.is_connected(dialog) {
+    if !document.is_connected(dialog) || document.popover_showing(dialog) {
         return Err(InvalidState);
     }
     document.set_attribute(dialog, OPEN_ATTRIBUTE, "");

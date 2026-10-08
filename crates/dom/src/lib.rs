@@ -54,6 +54,7 @@ pub use crate::tree::document::{Document, NodeId};
 #[doc(hidden)]
 pub use crate::tree::node::ChildrenIter;
 pub use crate::tree::node::Node;
+pub use crate::tree::popover::{PopoverError, PopoverState};
 pub use crate::tree::shadow::ShadowRootMode;
 pub use crate::tree::top_layer::TopLayerEntry;
 pub use crate::visual::frame::ENCODE_WINDOW_SCROLLPORTS;
