@@ -452,11 +452,11 @@ impl EngineEvent {
 ///
 /// A view runs script in its main-thread realm and in workers. The view's
 /// background thread (BTS) is a worker like any other: the one boot creates
-/// over the URL `bobcat:bts`. The engine has no other name for it and no
-/// check that tells it apart, so an embedder that needs to know whether an
-/// event came from the background thread compares `url` with `bobcat:bts`.
-/// A worker the view's script constructs over that URL carries the same
-/// `url` and an `id` of its own.
+/// over the URL `bobcat:bts`. This type has no variant for it and the engine
+/// has no check that tells it apart, so an embedder that needs to know
+/// whether an event came from the background thread compares `url` with
+/// `bobcat:bts`. A worker the view's script constructs over that URL carries
+/// the same `url` and an `id` of its own.
 ///
 /// Printed as `main`, or as `worker <id> <url>`: `worker 1 bobcat:bts`,
 /// `worker 4 app:///nested/worker.js`.

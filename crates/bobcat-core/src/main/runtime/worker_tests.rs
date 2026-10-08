@@ -1644,6 +1644,79 @@ fn a_workers_label_is_its_id_and_its_url_on_both_threads() {
     }
 }
 
+/// The URL in a worker's label is the one its `Start` names, which is the URL
+/// its realm asks the host for the script by, and not the URL that request is
+/// answered from. A fetcher that answers from another URL, as a redirect
+/// does, changes what the script runs as, its `import.meta.url`, and leaves
+/// the label as it is on both threads: the creating realm's table, the
+/// `WorkerThrew` it reports and the console output the worker's own realm
+/// sends all carry the script URL.
+#[test]
+fn a_script_answered_from_another_url_leaves_the_workers_label_at_its_script_url() {
+    const RESPONSE_URL: &str = "https://cdn.test/redirected/worker.js";
+    let mut pair = Pair::new(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.worker = new Worker('./worker.js');
+    ",
+    );
+    pair.source().complete(Ok(LoadedSource::Module {
+        source: "import 'bobcat:worker'; console.log(import.meta.url); throw Error('threw');"
+            .into(),
+        url: RESPONSE_URL.into(),
+    }));
+    // Logged before it was thrown, so the console message is with the host
+    // once the throw is here.
+    let event = pair.next_event().expect("the worker reports its throw");
+    assert!(
+        matches!(event.payload, WorkerPayload::Errored(_)),
+        "a throw is an ordinary worker error"
+    );
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .dispatch_worker_event(&mut pair.js, event.key, event.payload)
+        .unwrap();
+    let mut thrown = Vec::new();
+    let mut logged = Vec::new();
+    for notice in pair.notices() {
+        match notice {
+            ViewNotice::Engine(crate::EngineEvent::WorkerThrew { source, error }) => {
+                thrown.push((source, error.message.to_string()));
+            }
+            ViewNotice::Engine(crate::EngineEvent::ConsoleMessage {
+                source, message, ..
+            }) => logged.push((source, message)),
+            ViewNotice::Engine(crate::EngineEvent::WorkerEnded { error, .. }) => {
+                panic!("{error}")
+            }
+            _ => {}
+        }
+    }
+    // The entry's worker is the pair's first.
+    let label = worker_label(1, WORKER_URL);
+    assert_eq!(
+        pair.runtime
+            .as_ref()
+            .unwrap()
+            .workers
+            .source_of(WorkerKey::new(1)),
+        Some(label.clone()),
+        "what the creating realm recorded"
+    );
+    // The message is the URL the script ran as, and its source is the label.
+    assert_eq!(
+        logged,
+        [(label.clone(), RESPONSE_URL.to_owned())],
+        "what the worker's realm printed"
+    );
+    let [(source, message)] = thrown.as_slice() else {
+        panic!("one WorkerThrew from the worker: {thrown:?}");
+    };
+    assert_eq!(*source, label);
+    assert!(message.contains("threw"), "{message}");
+}
+
 /// A worker its script has stopped is reported to no one: an error or an end
 /// that arrives after `terminate()` reaches neither the `Worker` object nor
 /// the embedder.
