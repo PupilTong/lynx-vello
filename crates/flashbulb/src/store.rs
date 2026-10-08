@@ -11,16 +11,19 @@
 //! source returns a clone sharing the same `Blob`, which is what vello keys
 //! its atlas on.
 //!
-//! An SVG document published through [`TestImages::insert_svg`] is parsed
-//! here with `usvg` and reported as a [`VectorImage`]; [`FrameImages::read`]
-//! never answers for it, because the engine never asks.
+//! A document published through [`TestImages::insert_document`] (or its SVG
+//! sugar [`TestImages::insert_svg`]) is reported as its bytes, the way a
+//! production host reports one: this store parses nothing, and the document
+//! parses them inline in [`Document::apply_image_events`].
+//! [`FrameImages::read`] never answers for it, because the engine never asks.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use bytes::Bytes;
 use dom::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
-use dom::{Document, FrameImages, ImageEvent, ImageReports, ImageSizeHint, VectorImage};
+use dom::{Document, DocumentKind, FrameImages, ImageEvent, ImageReports, ImageSizeHint};
 
 /// What this store answers for one source.
 ///
@@ -33,8 +36,12 @@ enum Entry {
     #[default]
     Pending,
     Ready(ImageData),
-    /// A parsed SVG document.
-    Vector(VectorImage),
+    /// A document the engine parses, kept as its bytes so a later request
+    /// reports them again.
+    Document {
+        bytes: Bytes,
+        kind: DocumentKind,
+    },
     /// Named as one that will never produce pixels.
     Failed,
 }
@@ -50,9 +57,10 @@ impl Entry {
                 width: image.width,
                 height: image.height,
             }),
-            Entry::Vector(image) => Some(ImageEvent::LoadedVector {
+            Entry::Document { bytes, kind } => Some(ImageEvent::LoadedDocument {
                 source,
-                image: image.clone(),
+                bytes: bytes.clone(),
+                kind: *kind,
             }),
             Entry::Failed => Some(ImageEvent::Failed { source }),
         }
@@ -128,27 +136,40 @@ impl TestImages {
         self.insert(source, rgba8(width, height, pixels));
     }
 
-    /// Publishes the SVG document `svg` under `source`, parsed with `usvg`,
-    /// and reports it the way [`Self::insert`] reports a bitmap.
+    /// Publishes the document `bytes` of `kind` under `source`, and reports
+    /// it through [`ImageReports::loaded_document`] the way [`Self::insert`]
+    /// reports a bitmap.
     ///
-    /// Parsing and sizing are [`VectorImage::parse_sealed`]'s, the same call
-    /// a production host makes. Parsing reads no file: an `<image>` inside
-    /// the document that names anything but a `data:` URL resolves to
-    /// nothing.
-    ///
-    /// # Panics
-    ///
-    /// If `svg` does not parse.
-    pub fn insert_svg(&self, source: impl Into<String>, svg: &str) {
+    /// Nothing is parsed here, as nothing is in a production host: the
+    /// document parses the bytes inside [`Document::apply_image_events`], and
+    /// one that does not parse fails its source there. The entry keeps the
+    /// bytes, so a later request reports them again.
+    pub fn insert_document(
+        &self,
+        source: impl Into<String>,
+        bytes: impl Into<Bytes>,
+        kind: DocumentKind,
+    ) {
         let source = source.into();
-        let image = VectorImage::parse_sealed(svg.as_bytes())
-            .unwrap_or_else(|error| panic!("{source}: {error}"));
-        self.entries()
-            .insert(source.clone(), Entry::Vector(image.clone()));
-        self.report(ImageEvent::LoadedVector {
+        let bytes = bytes.into();
+        self.entries().insert(
+            source.clone(),
+            Entry::Document {
+                bytes: bytes.clone(),
+                kind,
+            },
+        );
+        self.report(ImageEvent::LoadedDocument {
             source: Arc::from(source.as_str()),
-            image,
+            bytes,
+            kind,
         });
+    }
+
+    /// Publishes the SVG document `svg` under `source`:
+    /// [`Self::insert_document`] with [`DocumentKind::Svg`].
+    pub fn insert_svg(&self, source: impl Into<String>, svg: &str) {
+        self.insert_document(source, svg.to_owned(), DocumentKind::Svg);
     }
 
     /// Names `source` as one that will never produce pixels, and reports the
@@ -211,7 +232,7 @@ impl TestImages {
     pub fn len(&self) -> usize {
         self.entries()
             .values()
-            .filter(|entry| matches!(entry, Entry::Ready(_) | Entry::Vector(_)))
+            .filter(|entry| matches!(entry, Entry::Ready(_) | Entry::Document { .. }))
             .count()
     }
 
@@ -250,7 +271,16 @@ impl TestImages {
                     width,
                     height,
                 } => sink.loaded(&source, width, height),
-                ImageEvent::LoadedVector { source, image } => sink.loaded_vector(&source, image),
+                ImageEvent::LoadedDocument {
+                    source,
+                    bytes,
+                    kind,
+                } => sink.loaded_document(&source, bytes, kind),
+                // Reported by nothing here: a host hands over bytes, and only
+                // the engine produces the parsed form.
+                ImageEvent::LoadedVector { .. } => {
+                    unreachable!("this store reports documents as bytes")
+                }
                 ImageEvent::Failed { source } => sink.failed(&source),
             }
         }
@@ -274,7 +304,7 @@ impl FrameImages for TestImages {
             .push((source.to_owned(), hint));
         match self.entries().get(source)? {
             Entry::Ready(image) => Some(image.clone()),
-            Entry::Pending | Entry::Vector(_) | Entry::Failed => None,
+            Entry::Pending | Entry::Document { .. } | Entry::Failed => None,
         }
     }
 

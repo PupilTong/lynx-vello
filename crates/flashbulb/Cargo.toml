@@ -16,11 +16,12 @@ bench = false
 
 [features]
 default = []
-render = ["dep:dom"]
+render = ["dep:bytes", "dep:dom"]
 
 [dependencies]
 png = { workspace = true }
 
+bytes = { workspace = true, optional = true }
 dom = { workspace = true, optional = true }
 
 [lints]

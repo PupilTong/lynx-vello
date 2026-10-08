@@ -2098,6 +2098,58 @@ mod tests {
         }
     }
 
+    fn document_report(source: &str, svg: &str) -> crate::ImageEvent {
+        crate::ImageEvent::LoadedDocument {
+            source: std::sync::Arc::from(source),
+            bytes: bytes::Bytes::copy_from_slice(svg.as_bytes()),
+            kind: crate::DocumentKind::Svg,
+        }
+    }
+
+    /// A host reports an SVG document as its bytes, and with no blocking
+    /// pool in front of it the document parses them inline: the source loads
+    /// at the document's natural size, a repeat report of the same bytes
+    /// moves nothing, and a document that does not parse fails its source
+    /// exactly as a failure report would.
+    #[test]
+    fn a_reported_document_is_parsed_inline_and_a_malformed_one_fails() {
+        let (mut document, image) = image_document();
+        document.set_image_source(image, ImageRole::Source, Some(SRC));
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="12"/>"#;
+
+        assert_eq!(
+            document.apply_image_events(&[document_report(SRC, svg)]),
+            vec![crate::ImageOutcome::Loaded {
+                node: image,
+                width: 24,
+                height: 12,
+            }]
+        );
+        assert_eq!(document.natural_size(image), natural_size(24, 12));
+        assert!(
+            document
+                .apply_image_events(&[document_report(SRC, svg)])
+                .is_empty(),
+            "one URL has one content, so the repeat is a no-op"
+        );
+
+        document.set_image_source(image, ImageRole::Source, Some(OTHER_SRC));
+        assert_eq!(
+            document.apply_image_events(&[document_report(
+                OTHER_SRC,
+                "<svg xmlns='http://www.w3.org/2000/svg'><rect></svg>",
+            )]),
+            vec![crate::ImageOutcome::Failed { node: image }]
+        );
+        assert_eq!(document.natural_size(image), NaturalSize::NONE);
+        assert!(
+            document
+                .apply_image_events(&[document_report(OTHER_SRC, svg)])
+                .is_empty(),
+            "a failure is terminal: well-formed bytes arriving later change nothing"
+        );
+    }
+
     /// Both sources are asked for the moment they are written, and neither
     /// waits on the other: a placeholder is not what an element reaches for
     /// after its source failed, it is a second request made alongside it.

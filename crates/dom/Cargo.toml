@@ -17,6 +17,7 @@ bench = false
 layout-test-utils = ["hughie/layout-test-utils"]
 
 [dependencies]
+bytes = { workspace = true }
 flume = { workspace = true }
 rustc-hash = { workspace = true }
 slab = { workspace = true }

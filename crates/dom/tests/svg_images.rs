@@ -1,7 +1,8 @@
 //! SVG documents as vector images: `<image src>`, `background-image` and
 //! `mask-image` naming an SVG document, over the full test pipeline —
-//! `flashbulb::TestImages::insert_svg` parses with `usvg`, the report carries
-//! the tree into the registry, and the paint walk encodes it inline.
+//! `flashbulb::TestImages::insert_svg` reports the document's bytes the way a
+//! host does, `Document::apply_image_events` parses them inline into the
+//! registry, and the paint walk encodes the tree inline.
 //!
 //! Structural tests (no GPU) pin what the encoding must and must not hold:
 //! no image read, one clip layer per visible tile, nothing at all for an

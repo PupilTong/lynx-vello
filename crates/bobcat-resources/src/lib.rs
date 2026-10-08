@@ -24,11 +24,11 @@
 //! - **Platform image decoding.** No codec is compiled in: `ImageIO` on macOS, gdk-pixbuf on Linux,
 //!   the main thread's `Image` element in the browser, each asked to downsample during decode
 //!   ([`decode`]).
-//! - **SVG documents as vector images.** An SVG is never decoded to pixels: it is parsed with
-//!   `usvg` on every target, the browser included, and reported through
-//!   [`ImageReports::loaded_vector`] as a [`bobcat_core::VectorImage`] the engine draws itself. It
-//!   holds no bitmap, so the memory tier and draw-sized decoding do not apply. A gzip-compressed
-//!   `.svgz` does not load (`usvg` is built without its `svgz` feature).
+//! - **SVG documents handed to the engine.** An SVG is neither decoded to pixels nor parsed here:
+//!   on every target, the browser included, its bytes are reported through
+//!   [`ImageReports::loaded_document`] with [`bobcat_core::DocumentKind::Svg`], and the engine
+//!   parses and draws the document itself. It holds no bitmap, so the memory tier and draw-sized
+//!   decoding do not apply; the bytes are kept to answer later requests.
 //! - **Draw-sized decoding.** The frame reads each image with the size it draws it at
 //!   ([`bobcat_core::ImageSizeHint`]); a bitmap far larger than its draw is re-decoded at the drawn
 //!   size in the background, so a photo shown as a thumbnail costs a thumbnail.
@@ -42,10 +42,10 @@
 //! protocol and carries that view's [`ImageReports`]. The painter's thread
 //! asks for a load and services what came back; the load itself is one task
 //! on the crate's own tokio runtime, whose blocking pool runs the transport,
-//! the preprocessing and then either the platform decoder or, for an SVG
-//! document, the `usvg` parse (in the browser, a local task on the Render
-//! Worker instead). A load therefore ends as a decoded bitmap, a parsed
-//! vector image, or a failure. Images wake the painter to service
+//! the preprocessing and then, for a raster image, the platform decoder (in
+//! the browser, a local task on the Render Worker instead). A load therefore
+//! ends as a decoded bitmap, the bytes of a document the engine parses, or a
+//! failure. Images wake the painter to service
 //! reports; source completions send directly to main through the concrete
 //! handle supplied with each request.
 
@@ -830,7 +830,8 @@ impl Resources {
     }
 
     /// Bytes the memory tier holds: decoded bitmaps, plus the encoded
-    /// images nothing else could restore.
+    /// images nothing else could restore and the documents (SVG) kept to
+    /// answer later requests.
     #[must_use]
     pub fn memory_used_bytes(&self) -> usize {
         let state = self.local.borrow();

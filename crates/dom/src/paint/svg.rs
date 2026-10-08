@@ -1,9 +1,9 @@
 //! SVG documents as vector images: a `usvg` tree encoded into a vello scene.
 //!
-//! The host parses an SVG document into a [`usvg::Tree`] and reports it as a
-//! [`VectorImage`](crate::render::image::VectorImage); this module turns that
-//! tree into scene commands once, in tree units, and every draw of the image
-//! appends the cached scene under its own clip and transform
+//! The engine parses the SVG document a host reported as bytes into a
+//! [`usvg::Tree`] inside a [`VectorImage`](crate::render::image::VectorImage)
+//! (`render/image.rs`); this module turns that tree into scene commands once, in tree units, and
+//! every draw of the image appends the cached scene under its own clip and transform
 //! (`background.rs`). Rules (`docs/svg-vector-images-design.md`):
 //!
 //! - A node is placed at `node.abs_transform()` as usvg resolved it. Nothing multiplies parent
