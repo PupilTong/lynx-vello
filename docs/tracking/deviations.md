@@ -966,7 +966,10 @@ consequential choice about whether to follow the spec or the quirk.
   - *A sized root stretches its picture to the box* (`object-fit: fill`, the
     replaced-element path), where a browser letterboxes it by the root's
     `preserveAspectRatio` (default `xMidYMid meet`). A root whose CSS box has
-    the `viewBox`'s ratio draws the same either way.
+    the `viewBox`'s ratio draws the same either way. The correct route, a
+    follow-up, is paint-side `preserveAspectRatio` against the CSS box (the
+    viewport set to the `viewBox`, the root's `preserveAspectRatio` stored on
+    the parsed image), not an `object-fit` UA rule.
   - *`current-color` is not implemented* (web-core lacks it; native resolves
     `currentColor` from it).
   - *`<text>` inside an SVG is dropped*, though native's tag subset lists it

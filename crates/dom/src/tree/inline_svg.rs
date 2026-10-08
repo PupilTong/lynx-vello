@@ -23,12 +23,14 @@
 //!
 //! # When a root re-renders
 //!
-//! Every mutation that can change a root's markup marks it: an attribute,
-//! class, id or `style` set or removed on the root or a descendant, a text
-//! node's data changed, a child inserted, moved or removed. The marks are a
-//! plain list, deduplicated only against the last push; the gate in front of
-//! them is the count of live `svg` elements, so a document with none pays
-//! one integer test per mutation. [`Document::refresh_inline_svgs`], at the
+//! An `svg` is marked at its creation, so one with no attribute and no child
+//! still renders at the default object size. Every mutation that can change
+//! a root's markup marks it: an attribute, class, id or `style` set or
+//! removed on the root or a descendant, a text node's data changed, a child
+//! inserted, moved or removed. The marks are a plain list, deduplicated only
+//! against the last push; the gate in front of them is the count of live
+//! `svg` elements, so a document with none pays one integer test per
+//! mutation. [`Document::refresh_inline_svgs`], at the
 //! start of every [`Document::layout`], resolves each mark to its current
 //! root (the tree may have moved since it was made), deduplicates, and
 //! renders each root once:
@@ -43,10 +45,13 @@
 //! 4. bind the root to that source as its [`ImageRole::Source`]. Its outcome is ignored: the
 //!    standard `<svg>` fires no `load`;
 //! 5. forget the previous generation's entry. Synthetic entries are the one kind the registry
-//!    removes; a host source still never regresses.
+//!    removes; a host source still never regresses;
+//! 6. release every nested `svg` the serialisation met that still holds a synthetic source from a
+//!    time it was a root of its own (it was rendered while detached, then inserted inside a subtree
+//!    whose top is not an `svg`, so no insertion marked it).
 //!
 //! From there the existing replaced-image path draws it: the natural size
-//! [`crate::VectorImage::parse`] reports goes to layout, and the vector
+//! [`crate::VectorImage::parse_sealed`] reports goes to layout, and the vector
 //! branch of the paint walk appends its cached scene. A document that does
 //! not parse settles its source `Failed`, which draws nothing and fails no
 //! commit.
@@ -91,6 +96,9 @@ impl<T> Document<T> {
         }
         self.inline_svgs.live += 1;
         self.live_node_mut(id).set_natural_size(NaturalSize::NONE);
+        // Marked now, so an `svg` that never gets an attribute or a child
+        // still renders, at the default object size.
+        self.mark_inline_svg(id);
     }
 
     /// Uncounts a freed `svg` and forgets its synthetic source.
@@ -198,7 +206,8 @@ impl<T> Document<T> {
 
     /// Serialises, parses and rebinds one root.
     fn render_inline_svg(&mut self, root: NodeId) {
-        let markup = svg_markup::serialize(self, root);
+        let mut nested = Vec::new();
+        let markup = svg_markup::serialize(self, root, &mut nested);
         self.inline_svgs.generation += 1;
         let source: Arc<str> = Arc::from(format!(
             "{SYNTHETIC_SOURCE_PREFIX}{root}:{}",
@@ -217,6 +226,11 @@ impl<T> Document<T> {
         let _ = self.set_image_source(root, ImageRole::Source, Some(&source));
         if let Some(previous) = previous {
             self.images.forget_synthetic(&previous);
+        }
+        // An `svg` that held a source as a root of its own and arrived here
+        // inside an inserted subtree, where no insertion marked it.
+        for id in nested {
+            self.release_nested_svg(id);
         }
     }
 

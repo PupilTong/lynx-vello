@@ -1,8 +1,8 @@
 # SVG as a vector image: design (2026-10-08)
 
-Status: approved design, implementation in progress. Rulings in this document
-were made by the project owner on 2026-10-08; everything else is the
-architect's decision and is marked as such.
+Status: implemented (PR #365). Rulings in this document were made by the
+project owner on 2026-10-08; everything else is the architect's decision and
+is marked as such.
 
 ## What Lynx requires
 
@@ -88,15 +88,21 @@ gradient, and replayed by the existing `ComposeOp::Fragment` arm.
 
 ### dom
 
-- Dependency: `usvg` (same spec). Public type in `dom::render::image`:
+- Dependency: `usvg` (same spec). Type in `dom::render::image`:
 
   ```rust
   pub struct VectorImage { /* Arc<usvg::Tree>, natural: (u32, u32), viewport: (f32, f32), OnceLock<Arc<vello::Scene>> */ }
   impl VectorImage {
-      pub fn new(tree: Arc<usvg::Tree>, natural: (u32, u32), viewport: (f32, f32)) -> Self;
-      pub fn natural_size(&self) -> (u32, u32);
+      pub(crate) fn new(tree: Arc<usvg::Tree>, natural: (u32, u32), viewport: (f32, f32)) -> Self;
+      pub(crate) fn parse_sealed(svg: &[u8]) -> Result<Self, usvg::Error>;
+      pub(crate) fn natural_size(&self) -> (u32, u32);
+      pub(crate) fn viewport(&self) -> (f32, f32);
+      pub(crate) fn scene(&self) -> &Arc<vello::Scene>;
   }
   ```
+  The type is `pub` only because `ImageEvent::LoadedVector` carries it; no
+  method is public, and no crate outside `dom` names it. The one public
+  entry to the parse is `ImageEvent::parse_document(source, bytes, kind)`.
   `usvg::Tree` and `vello::Scene` are `Send + Sync`; a static assertion in
   `dom` says so, because the tree crosses from the painter thread to the
   document thread and the cached scene is published inside the registry.
@@ -119,10 +125,10 @@ gradient, and replayed by the existing `ComposeOp::Fragment` arm.
   `ToMain::ImageEvents` gain "encoded document bytes and a parsed tree are
   not pixels". `ToMain::ImageEvents` is a plain `Vec<dom::ImageEvent>` arm
   with no derives, so `Bytes` and the `Arc<usvg::Tree>` cross soundly.
-- Sizing and parse: `VectorImage::parse(svg, &usvg::Options)` and
-  `VectorImage::parse_sealed(svg)` live here (`parse_sealed` reads nothing
-  outside the document: `resolve_string` returns `None`, `resources_dir` is
-  `None`). One XML parse: `usvg::roxmltree::Document::parse`, the root's
+- Sizing and parse: the crate-private `VectorImage::parse_sealed(svg)` lives
+  here, reached from outside `dom` only through `ImageEvent::parse_document`
+  (it reads nothing outside the document: `resolve_string` returns `None`,
+  `resources_dir` is `None`). One XML parse: `usvg::roxmltree::Document::parse`, the root's
   `width`, `height`, `viewBox` read, then `usvg::Tree::from_xmltree`.
   `usvg::Tree` exposes neither the viewBox nor the raw dimensions, and its
   `size()` is the content bounding box when the root has no viewBox and no
@@ -211,10 +217,10 @@ gradient, and replayed by the existing `ComposeOp::Fragment` arm.
   opacity, single- and multi-child clipPath, masked group skipped, nested
   svg), plus flashbulb golden screenshots for `<image src>`,
   `background-image` with repeat, `mask-image`, and the `<svg>` element.
-  `flashbulb::TestImages` gains `insert_document(source, bytes, kind)` and
-  the SVG-only form `insert_svg(source, &str)`; both report `loaded_document`, so a
-  dom test exercises the inline parse in `apply_image_events` and flashbulb
-  has no `usvg` dependency.
+  `flashbulb::TestImages` gains `insert_svg(source, &str)`, which reports
+  `loaded_document` with `DocumentKind::Svg`, so a dom test exercises the
+  inline parse in `apply_image_events` and flashbulb has no `usvg`
+  dependency.
 
 ### bobcat-core: where the parse runs
 
@@ -301,7 +307,7 @@ host-visible.
   is px; any other value goes to the CSS parser as written, and one it
   refuses leaves no hint.
 - **Sizing.** With no CSS size the natural size is what
-  `VectorImage::parse` reports for the serialised document: the root
+  `VectorImage::parse_sealed` reports for the serialised document: the root
   attributes' size, or a `viewBox` ratio fitted into 300×150, or 300×150.
   Subset deviation, recorded: a browser sizes an inline `<svg>` with a
   `viewBox` and no `width`/`height` to its containing block's width; here it
@@ -359,7 +365,12 @@ walker, the vector branch, `<image src="x.svg">`, CSS `url()`.
 `<image>`, `.svgz`, percentage and font-relative `width`/`height` on the
 root, `clipPath` unions with overlapping opposite-winding children, the Lynx
 `<svg src|content|bindload>` component (see "Removed with revision 3"), and
-`load` on the standard `<svg>`.
+`load` on the standard `<svg>`. The stretch of a sized root's picture to a
+CSS box without its `viewBox`'s ratio (see "Sizing") stays a known gap, and
+no `object-fit` UA rule stands in for it: the correct route, a follow-up, is
+paint-side `preserveAspectRatio` against the CSS box, with the viewport set
+to the `viewBox` and the root's `preserveAspectRatio` stored on the parsed
+image.
 
 ## Dependency note
 
@@ -370,8 +381,9 @@ which satisfies the "latest available versions" policy. With
 optional, dead weight accepted), `roxmltree` (unifies), `simplecss`,
 `siphasher` (unifies), `strict-num` → `float-cmp`, `svgtypes`,
 `tiny-skia-path` → `arrayref`, `bytemuck` (unifies), `libm` (unifies).
-`usvg` is declared by `dom` only; `bobcat-core`, `bobcat-resources` and
-`flashbulb` reach the parser through `dom::VectorImage`.
+`usvg` is declared by `dom` only; `bobcat-core` reaches the parser through
+`dom::ImageEvent::parse_document`, and `bobcat-resources` and `flashbulb`
+hand over bytes only.
 Nine crates new to the lock, each at a single version, no duplicate of an
 existing crate, `rkyv` pin untouched.
 

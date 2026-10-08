@@ -467,3 +467,57 @@ fn a_freed_root_leaves_no_registry_entry() {
     doc.dom.render();
     assert!(!doc.dom.knows_image_source(&inline));
 }
+
+/// An `svg` with no attribute and no child still renders: its creation
+/// marks it, so it lays out at the default object size of 300x150.
+#[test]
+fn an_empty_svg_lays_out_at_the_default_object_size() {
+    let mut doc = page();
+    let root = doc.root;
+    let svg = doc.dom.create_element("svg", ());
+    doc.dom.append_child(root, svg);
+    doc.dom.render();
+    assert!(doc.dom.knows_image_source(&source(&doc, svg)));
+    assert_eq!(size(&doc, svg), (300.0, 150.0));
+}
+
+/// An `svg` that held a source as a root of its own and reaches another
+/// root inside an inserted subtree whose top is not an `svg` gives that
+/// source up on the next layout, and its new root draws it.
+#[test]
+fn a_nested_svg_inside_an_inserted_subtree_gives_up_its_source() {
+    let mut doc = page();
+    let root = doc.root;
+    let a = element(
+        &mut doc,
+        root,
+        "svg",
+        &[("class", "c0"), ("width", "48"), ("height", "48")],
+    );
+    let b = doc.dom.create_element("svg", ());
+    doc.dom.set_attribute(b, "width", "48");
+    doc.dom.set_attribute(b, "height", "48");
+    element(
+        &mut doc,
+        b,
+        "rect",
+        &[("width", "48"), ("height", "48"), ("fill", "#0000ff")],
+    );
+    let group = doc.dom.create_element("g", ());
+    doc.dom.append_child(group, b);
+    doc.dom.render();
+    let detached = source(&doc, b);
+    assert!(
+        doc.dom.knows_image_source(&detached),
+        "an svg under a detached `g` is a root of its own"
+    );
+
+    doc.dom.append_child(a, group);
+    let image = capture(
+        "a_nested_svg_inside_an_inserted_subtree_gives_up_its_source",
+        &mut doc,
+    );
+    assert_eq!(doc.dom.image_source(b, ImageRole::Source), None);
+    assert!(!doc.dom.knows_image_source(&detached));
+    assert!(is_close(pixel(&image, 16 + 24, 16 + 24), BLUE));
+}

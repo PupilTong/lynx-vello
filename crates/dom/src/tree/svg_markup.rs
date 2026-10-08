@@ -32,6 +32,7 @@
 //! children, never the root as a group, and reads the root's presentation
 //! attributes only through inheritance.
 
+use crate::render::image::{ImageRole, is_synthetic_source};
 use crate::tree::document::{Document, NodeId};
 
 const ROOT_NAMESPACES: &str =
@@ -104,25 +105,37 @@ pub(crate) fn is_svg_element_name(name: &str) -> bool {
 /// One step of the serialisation walk: an element still to open, or one to
 /// close.
 enum Step<'a> {
-    Enter(NodeId),
+    /// A node to write, and whether every element between it and the root
+    /// is one `usvg` reads, which makes an `svg` there part of the root's
+    /// document rather than a root of its own.
+    Enter(NodeId, bool),
     Close(&'a str),
 }
 
 /// `root`'s subtree as an SVG document.
-pub(crate) fn serialize<T>(document: &Document<T>, root: NodeId) -> String {
+///
+/// The same walk pushes onto `nested` every `svg` below `root` that belongs
+/// to `root`'s document (by the rule `Document::inline_svg_root` follows)
+/// and still holds a synthetic source from a time it was a root of its own,
+/// so the caller can release it without a walk of its own.
+pub(crate) fn serialize<T>(
+    document: &Document<T>,
+    root: NodeId,
+    nested: &mut Vec<NodeId>,
+) -> String {
     let mut out = String::new();
     // A stack rather than recursion: the element PAPI can nest elements
     // arbitrarily deep, and the depth of this walk must not be the thread's.
-    let mut stack = vec![Step::Enter(root)];
+    let mut stack = vec![Step::Enter(root, true)];
     while let Some(step) = stack.pop() {
-        let id = match step {
+        let (id, in_document) = match step {
             Step::Close(name) => {
                 out.push_str("</");
                 out.push_str(name);
                 out.push('>');
                 continue;
             }
-            Step::Enter(id) => id,
+            Step::Enter(id, in_document) => (id, in_document),
         };
         let Some(node) = document.get(id) else {
             continue;
@@ -136,6 +149,15 @@ pub(crate) fn serialize<T>(document: &Document<T>, root: NodeId) -> String {
         };
         if !is_ncname(name) {
             continue;
+        }
+        if in_document
+            && id != root
+            && name == "svg"
+            && node
+                .image_source(ImageRole::Source)
+                .is_some_and(is_synthetic_source)
+        {
+            nested.push(id);
         }
         out.push('<');
         out.push_str(name);
@@ -159,7 +181,13 @@ pub(crate) fn serialize<T>(document: &Document<T>, root: NodeId) -> String {
         }
         out.push('>');
         stack.push(Step::Close(name));
-        stack.extend(children.iter().rev().map(|&child| Step::Enter(child)));
+        let children_in_document = in_document && is_svg_element_name(name);
+        stack.extend(
+            children
+                .iter()
+                .rev()
+                .map(|&child| Step::Enter(child, children_in_document)),
+        );
     }
     out
 }
@@ -228,8 +256,15 @@ fn is_name_char(character: char) -> bool {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{SVG_ELEMENT_NAMES, is_svg_element_name, serialize};
+    use super::{SVG_ELEMENT_NAMES, is_svg_element_name};
     use crate::test_common::Doc;
+
+    fn serialize(dom: &crate::Document<()>, root: crate::NodeId) -> String {
+        let mut nested = Vec::new();
+        let markup = super::serialize(dom, root, &mut nested);
+        assert!(nested.is_empty(), "no nested svg holds a source here");
+        markup
+    }
 
     fn svg_root(doc: &mut Doc) -> crate::NodeId {
         let root = doc.root;

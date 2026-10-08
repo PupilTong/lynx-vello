@@ -2310,15 +2310,17 @@ as an image — `<image src>`, `background-image`, `mask-image` — reaches the
 document as its bytes: a host reports `ImageReports::loaded_document(source,
 bytes, DocumentKind::Svg)`, carried by `ImageEvent::LoadedDocument`
 (`DocumentKind` is `#[non_exhaustive]`, so a second engine-drawn format is
-one more variant). `dom` owns the parse, `VectorImage::parse_sealed` (one
+one more variant). `dom` owns the parse, the crate-private
+`VectorImage::parse_sealed` (one
 `roxmltree` parse, the root's `width`, `height` and `viewBox` read for the
 natural size and viewport, then `usvg::Tree::from_xmltree`, with
 `usvg::Options` that read nothing outside the document: `resources_dir: None`
 and a `resolve_string` that answers `None`, so only a nested `data:` image
 resolves), and produces a `VectorImage` (an `Arc<usvg::Tree>`, its natural
-size in whole CSS px and its viewport in tree units).
-`ImageEvent::LoadedVector` is the engine-internal already-parsed form, which
-`bobcat-core` produces off the document thread
+size in whole CSS px and its viewport in tree units); no `VectorImage`
+method is public, and `ImageEvent::parse_document` is the only entry to the
+parse from outside `dom`. `ImageEvent::LoadedVector` is the engine-internal
+already-parsed form, which `bobcat-core` produces off the document thread
 (`ImageEvent::parse_document`); no host reports it.
 `Document::apply_image_events` accepts both: a `LoadedDocument` whose source
 is still pending is parsed inline there (the path for `dom`'s own tests,
@@ -2579,11 +2581,10 @@ this workspace, and deliberately a test double: it fetches, decodes and evicts
 nothing. `pump_images` drives one round of the document-to-host image protocol
 (every source `take_wanted_images` named, then the reports back through
 `apply_image_events`) and `render_with_images` loops that to quiescence.
-`TestImages::insert_document(source, bytes, kind)` and the SVG-only form
-`insert_svg(source, &str)` report a document as its bytes through
-`loaded_document`, as a production host does, so the document's inline parse
-is what a vector-image test exercises; flashbulb parses nothing and has no
-`usvg` dependency.
+`TestImages::insert_svg(source, &str)` reports an SVG document as its bytes
+through `loaded_document`, as a production host does, so the document's
+inline parse is what a vector-image test exercises; flashbulb parses nothing
+and has no `usvg` dependency.
 `headless` requires a usable GPU adapter and panics without one, so local and
 CI runs obey the same mandatory-GPU policy. DOM-aware screenshot suites live in
 `dom`, which also keeps the direct GPU smoke tests. Goldens are not

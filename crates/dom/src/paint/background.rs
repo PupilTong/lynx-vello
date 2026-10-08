@@ -1828,7 +1828,7 @@ mod tests {
         let svg = format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">{body}</svg>"#
         );
-        VectorImage::parse(svg.as_bytes(), &usvg::Options::default()).expect("a valid document")
+        VectorImage::parse_sealed(svg.as_bytes()).expect("a valid document")
     }
 
     /// A vector tile's clip layer is a full `Normal` layer exactly when the

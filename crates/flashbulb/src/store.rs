@@ -11,10 +11,10 @@
 //! source returns a clone sharing the same `Blob`, which is what vello keys
 //! its atlas on.
 //!
-//! A document published through [`TestImages::insert_document`] (or the
-//! SVG-only form [`TestImages::insert_svg`]) is reported as its bytes, the way a
-//! production host reports one: this store parses nothing, and the document
-//! parses them inline in [`Document::apply_image_events`].
+//! An SVG document published through [`TestImages::insert_svg`] is reported
+//! as its bytes, the way a production host reports one: this store parses
+//! nothing, and the document parses them inline in
+//! [`Document::apply_image_events`].
 //! [`FrameImages::read`] never answers for it, because the engine never asks.
 
 use std::cell::RefCell;
@@ -144,33 +144,22 @@ impl TestImages {
         self.insert(source, rgba8(width, height, pixels));
     }
 
-    /// Publishes the document `bytes` of `kind` under `source`, and reports
-    /// it through [`ImageReports::loaded_document`] the way [`Self::insert`]
-    /// reports a bitmap.
+    /// Publishes the SVG document `svg` under `source`, and reports it as its
+    /// bytes through [`ImageReports::loaded_document`] with
+    /// [`DocumentKind::Svg`], the way [`Self::insert`] reports a bitmap.
     ///
     /// Nothing is parsed here, as nothing is in a production host: the
     /// document parses the bytes inside [`Document::apply_image_events`], and
     /// one that does not parse fails its source there. The entry keeps the
     /// bytes, so a later request reports them again.
-    pub fn insert_document(
-        &self,
-        source: impl Into<String>,
-        bytes: impl Into<Bytes>,
-        kind: DocumentKind,
-    ) {
+    pub fn insert_svg(&self, source: impl Into<String>, svg: &str) {
         self.publish(
             source.into(),
             Entry::Document {
-                bytes: bytes.into(),
-                kind,
+                bytes: Bytes::from(svg.to_owned()),
+                kind: DocumentKind::Svg,
             },
         );
-    }
-
-    /// Publishes the SVG document `svg` under `source`:
-    /// [`Self::insert_document`] with [`DocumentKind::Svg`].
-    pub fn insert_svg(&self, source: impl Into<String>, svg: &str) {
-        self.insert_document(source, svg.to_owned(), DocumentKind::Svg);
     }
 
     /// Names `source` as one that will never produce pixels, and reports the

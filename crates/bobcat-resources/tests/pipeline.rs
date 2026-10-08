@@ -397,20 +397,6 @@ fn svg(attributes: &str) -> String {
     )
 }
 
-/// Percent-encodes every byte outside RFC 3986's unreserved set.
-fn percent_encode(text: &str) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::new();
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            out.push(char::from(byte));
-        } else {
-            write!(out, "%{byte:02X}").expect("writing to a String");
-        }
-    }
-    out
-}
-
 /// A registered SVG document is neither decoded nor parsed: it loads as its
 /// own bytes with [`DocumentKind::Svg`], and keeps those bytes (and no
 /// bitmap) to answer later requests. Sizing is the engine's, pinned in
@@ -432,24 +418,17 @@ fn a_registered_svg_loads_as_its_document_bytes() {
     assert!(harness.wakeups.load(Ordering::SeqCst) >= 1);
 }
 
-/// The fixtures inline SVGs as base64 `data:` URLs, and the `<svg content>`
-/// attribute becomes a percent-encoded one; both load as the document they
-/// carry.
+/// The fixtures inline SVGs as base64 `data:` URLs; one loads as the
+/// document it carries.
 #[test]
-fn svg_data_urls_load_in_base64_and_percent_encoded_forms() {
+fn svg_data_urls_load_in_base64_form() {
     let harness = Harness::new(Harness::quiet());
     let document = svg(r#"width="16" height="8" viewBox="0 0 16 8""#);
-    let base64 = format!(
+    let source = format!(
         "data:image/svg+xml;base64,{}",
         base64_encode(document.as_bytes())
     );
-    let percent = format!(
-        "data:image/svg+xml;charset=utf-8,{}",
-        percent_encode(&document)
-    );
-    for source in [base64, percent] {
-        assert_eq!(harness.load_svg(&source), document.as_bytes(), "{source}");
-    }
+    assert_eq!(harness.load_svg(&source), document.as_bytes(), "{source}");
 }
 
 /// Whether a document parses is the engine's question: the host hands over

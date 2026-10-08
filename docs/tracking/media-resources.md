@@ -277,7 +277,8 @@ at the parse:
    vector image or a failure, through the same `apply_image_events` as every
    other report; a view that ends mid-parse applies nothing. On wasm32
    `dom::Document::apply_image_events` parses inline. The parse is
-   `dom::VectorImage::parse_sealed`, with `usvg` built with
+   the crate-private `dom::VectorImage::parse_sealed`, reached through
+   `dom::ImageEvent::parse_document`, with `usvg` built with
    `default-features = false` (no `text`, no system fonts, no `svgz`): one
    XML parse reads the root's `width`, `height` and `viewBox` and builds the
    tree. A string `href` inside the document is never resolved (the resolver

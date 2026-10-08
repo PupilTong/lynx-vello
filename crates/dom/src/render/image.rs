@@ -71,7 +71,8 @@
 //! [`ImageReports::loaded_document`], which travel to the document thread
 //! inside [`ImageEvent::LoadedDocument`]. The engine parses them into a
 //! [`VectorImage`] (a `usvg` tree plus its natural size and viewport) with
-//! [`VectorImage::parse_sealed`]: natively `bobcat-core` parses on its
+//! [`VectorImage::parse_sealed`], reached from outside this crate only
+//! through [`ImageEvent::parse_document`]: natively `bobcat-core` parses on its
 //! engine thread's blocking pool and applies the result as the
 //! already-parsed [`ImageEvent::LoadedVector`]; where nothing parses first
 //! (this crate's own tests, the wasm32 build),
@@ -105,10 +106,10 @@ use crate::vello::Scene;
 
 /// A parsed SVG document, drawable at any size.
 ///
-/// Built by the engine, with [`VectorImage::parse_sealed`], from the bytes a
-/// host reported through [`ImageReports::loaded_document`]. It carries two
-/// sizes, both computed at the parse from the root element's `width`,
-/// `height` and `viewBox`:
+/// Built by the engine, with `VectorImage::parse_sealed` (reached through
+/// [`ImageEvent::parse_document`]), from the bytes a host reported through
+/// [`ImageReports::loaded_document`]. It carries two sizes, both computed
+/// at the parse from the root element's `width`, `height` and `viewBox`:
 ///
 /// - the **natural size**, in whole CSS px, which layout reads exactly as it reads a bitmap's
 ///   intrinsic size (CSS Images 3 default sizing; see `docs/svg-vector-images-design.md`);
@@ -142,7 +143,7 @@ impl VectorImage {
     /// A vector image over `tree`, laid out at `natural` CSS px and mapping
     /// the `viewport` rectangle of tree units onto each draw.
     #[must_use]
-    pub fn new(tree: Arc<usvg::Tree>, natural: (u32, u32), viewport: (f32, f32)) -> Self {
+    pub(crate) fn new(tree: Arc<usvg::Tree>, natural: (u32, u32), viewport: (f32, f32)) -> Self {
         Self {
             tree,
             natural,
@@ -151,17 +152,24 @@ impl VectorImage {
         }
     }
 
-    /// Parses the SVG document `svg` with `options`, and computes its
-    /// natural size and viewport from the root element's `width`, `height`
-    /// and `viewBox`.
+    /// Parses the SVG document `svg`, and computes its natural size and
+    /// viewport from the root element's `width`, `height` and `viewBox`.
     ///
-    /// One XML parse serves both: the root's attributes are read from the
-    /// same `roxmltree` document [`usvg::Tree::from_xmltree`] converts,
-    /// because the tree keeps neither the `viewBox` nor the raw dimensions.
-    /// The input is handled as [`usvg::Tree::from_data`] handles it without
-    /// the `svgz` feature: gzip data fails with
-    /// [`usvg::Error::SvgzFeatureNotEnabled`], anything that is not UTF-8
-    /// with [`usvg::Error::NotAnUtf8Str`], and a DTD is allowed.
+    /// The options read nothing outside the document: the `<image>` string
+    /// resolver (`resolve_string`) returns `None`, so an `<image>` naming
+    /// anything but a `data:` URL resolves to nothing, and `resources_dir` is
+    /// `None`. Every other option is usvg's default; `data:` URLs still
+    /// resolve. This is the parse the engine runs on every document a host
+    /// reports through [`ImageReports::loaded_document`]; usvg's default
+    /// string resolver would read the filesystem.
+    ///
+    /// One XML parse serves both sizes and the tree: the root's attributes
+    /// are read from the same `roxmltree` document
+    /// [`usvg::Tree::from_xmltree`] converts, because the tree keeps neither
+    /// the `viewBox` nor the raw dimensions. The input is handled as
+    /// [`usvg::Tree::from_data`] handles it without the `svgz` feature: gzip
+    /// data fails with [`usvg::Error::SvgzFeatureNotEnabled`], anything that
+    /// is not UTF-8 with [`usvg::Error::NotAnUtf8Str`], and a DTD is allowed.
     ///
     /// The sizes follow `docs/svg-vector-images-design.md`. A root `width`
     /// or `height` is absolute when it is a bare number or a length in one of
@@ -184,7 +192,7 @@ impl VectorImage {
     /// # Errors
     ///
     /// Whatever usvg reports for a document it cannot read.
-    pub fn parse(svg: &[u8], options: &usvg::Options<'_>) -> Result<Self, usvg::Error> {
+    pub(crate) fn parse_sealed(svg: &[u8]) -> Result<Self, usvg::Error> {
         if svg.starts_with(&[0x1f, 0x8b]) {
             return Err(usvg::Error::SvgzFeatureNotEnabled);
         }
@@ -201,7 +209,15 @@ impl VectorImage {
         let width = root.attribute("width").and_then(absolute_length);
         let height = root.attribute("height").and_then(absolute_length);
         let view_box = root.attribute("viewBox").and_then(view_box_size);
-        let tree = usvg::Tree::from_xmltree(&document, options)?;
+        let options = usvg::Options {
+            resources_dir: None,
+            image_href_resolver: usvg::ImageHrefResolver {
+                resolve_string: Box::new(|_, _| None),
+                ..usvg::ImageHrefResolver::default()
+            },
+            ..usvg::Options::default()
+        };
+        let tree = usvg::Tree::from_xmltree(&document, &options)?;
         let (natural, viewport) = vector_sizes(
             width,
             height,
@@ -211,40 +227,15 @@ impl VectorImage {
         Ok(Self::new(Arc::new(tree), natural, viewport))
     }
 
-    /// Parses the SVG document `svg` as [`Self::parse`] does, with options
-    /// that read nothing outside the document: the `<image>` string resolver
-    /// (`resolve_string`) returns `None`, so an `<image>` naming anything but
-    /// a `data:` URL resolves to nothing, and `resources_dir` is `None`.
-    /// Every other option is usvg's default; `data:` URLs still resolve.
-    ///
-    /// This is the parse the engine runs on every document a host reports
-    /// through [`ImageReports::loaded_document`]. usvg's default string
-    /// resolver would read the filesystem.
-    ///
-    /// # Errors
-    ///
-    /// Whatever usvg reports for a document it cannot read.
-    pub fn parse_sealed(svg: &[u8]) -> Result<Self, usvg::Error> {
-        let options = usvg::Options {
-            resources_dir: None,
-            image_href_resolver: usvg::ImageHrefResolver {
-                resolve_string: Box::new(|_, _| None),
-                ..usvg::ImageHrefResolver::default()
-            },
-            ..usvg::Options::default()
-        };
-        Self::parse(svg, &options)
-    }
-
     /// The size layout is told, in whole CSS px.
     #[must_use]
-    pub fn natural_size(&self) -> (u32, u32) {
+    pub(crate) fn natural_size(&self) -> (u32, u32) {
         self.natural
     }
 
     /// The rectangle in tree units a draw maps onto its destination.
     #[must_use]
-    pub fn viewport(&self) -> (f32, f32) {
+    pub(crate) fn viewport(&self) -> (f32, f32) {
         self.viewport
     }
 
@@ -256,7 +247,7 @@ impl VectorImage {
     /// The tree encoded as a vello scene in tree units, built on the first
     /// call and returned from the cache after that.
     #[must_use]
-    pub fn scene(&self) -> &Arc<Scene> {
+    pub(crate) fn scene(&self) -> &Arc<Scene> {
         self.scene.get_or_init(|| {
             let mut scene = Scene::new();
             crate::paint::svg::encode(&self.tree, &mut scene);
@@ -270,7 +261,7 @@ const DEFAULT_OBJECT_SIZE: (f32, f32) = (300.0, 150.0);
 
 /// The natural size and viewport of an SVG document, from its root's
 /// absolute `width` and `height`, its `viewBox` size and the parsed tree's
-/// `size()`. The rule is [`VectorImage::parse`]'s.
+/// `size()`. The rule is [`VectorImage::parse_sealed`]'s.
 fn vector_sizes(
     width: Option<f32>,
     height: Option<f32>,
@@ -667,8 +658,8 @@ impl ImageInbox {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DocumentKind {
-    /// An SVG document (`image/svg+xml`), parsed with
-    /// [`VectorImage::parse_sealed`].
+    /// An SVG document (`image/svg+xml`), parsed by
+    /// [`ImageEvent::parse_document`].
     Svg,
 }
 
@@ -719,7 +710,7 @@ impl ImageEvent {
     /// `source` with `bytes` of `kind` ends as: [`ImageEvent::LoadedVector`]
     /// when the document parses, [`ImageEvent::Failed`] when it does not.
     ///
-    /// The parse is [`VectorImage::parse_sealed`], which reads nothing
+    /// The parse is `VectorImage::parse_sealed`, which reads nothing
     /// outside the document. It runs on the calling thread and may take as
     /// long as the document is large, so a caller with a blocking pool runs
     /// it there.
@@ -752,10 +743,10 @@ fn parse_document(bytes: &[u8], kind: DocumentKind) -> Option<VectorImage> {
 }
 
 /// The state a parsed vector image settles its source in. A zero axis is a
-/// failure, as it is for a bitmap; [`VectorImage::parse`] never produces
+/// failure, as it is for a bitmap; [`VectorImage::parse_sealed`] never produces
 /// one, so the check guards [`VectorImage::new`]'s callers.
 fn vector_state(image: VectorImage) -> ImageState {
-    let (width, height) = image.natural;
+    let (width, height) = image.natural_size();
     if width > 0 && height > 0 {
         ImageState::Ready {
             width,
@@ -1643,7 +1634,7 @@ mod vector_tests {
         let svg = format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" {attributes}><rect x="2" y="3" width="5" height="7"/></svg>"#
         );
-        VectorImage::parse(svg.as_bytes(), &usvg::Options::default())
+        VectorImage::parse_sealed(svg.as_bytes())
             .unwrap_or_else(|error| panic!("<svg {attributes}>: {error}"))
     }
 
@@ -1795,20 +1786,16 @@ mod vector_tests {
     /// them without the `svgz` feature.
     #[test]
     fn unreadable_documents_fail_with_the_usvg_error() {
-        let options = usvg::Options::default();
         assert!(matches!(
-            VectorImage::parse(
-                b"<svg xmlns='http://www.w3.org/2000/svg'><rect></svg>",
-                &options
-            ),
+            VectorImage::parse_sealed(b"<svg xmlns='http://www.w3.org/2000/svg'><rect></svg>"),
             Err(usvg::Error::ParsingFailed(_))
         ));
         assert!(matches!(
-            VectorImage::parse(b"<svg \xff/>", &options),
+            VectorImage::parse_sealed(b"<svg \xff/>"),
             Err(usvg::Error::NotAnUtf8Str)
         ));
         assert!(matches!(
-            VectorImage::parse(&[0x1f, 0x8b, 0x08, 0x00], &options),
+            VectorImage::parse_sealed(&[0x1f, 0x8b, 0x08, 0x00]),
             Err(usvg::Error::SvgzFeatureNotEnabled)
         ));
     }
