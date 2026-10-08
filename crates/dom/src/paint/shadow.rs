@@ -1,14 +1,19 @@
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "CSS geometry and device blur sigma use f32"
+)]
+
 //! `box-shadow` (css-backgrounds-3 §7): outset shadows under the box,
 //! inset shadows over the background.
 //!
 //! The computed list paints **last shadow first**, so the first-specified
 //! shadow ends up on top (css-backgrounds-3 §7.4.1). CSS blur-radius is 2σ;
-//! vello's blur primitive cuts the Gaussian off at 2.5σ.
+//! vello's analytic blur cuts off at 2.5σ; the per-corner offscreen path uses 3σ.
 //!
-//! - Outset: [`Scene::draw_blurred_rounded_rect`] of the border-box rect offset by the shadow
-//!   offset and inflated by the spread, inside an even-odd clip that carves the border-box shape
-//!   out (§7.4.1: the shadow paints only outside the border box). Zero-blur shadows fill the offset
-//!   shape exactly, with per-corner radii.
+//! - Outset: [`crate::vello::Scene::draw_blurred_rounded_rect`] of the border-box rect offset by
+//!   the shadow offset and inflated by the spread, inside an even-odd clip that carves the
+//!   border-box shape out (§7.4.1: the shadow paints only outside the border box). Zero-blur
+//!   shadows fill the offset shape exactly, with per-corner radii.
 //! - Inset: inside a full `SrcOver` layer clipped to the padding-box shape (a
 //!   full layer, not a clip layer, because a blend layer sits inside —
 //!   vello [#1198](https://github.com/linebender/vello/issues/1198)), fill
@@ -20,9 +25,9 @@
 //!   clip layer instead.
 //!
 //! Recorded approximations:
-//! - vello's blur primitive takes **one uniform corner radius**: we use the average of the eight
-//!   (spread-adjusted) radius components. Zero radii average to zero, so sharp boxes keep sharp
-//!   shadows.
+//! - Uniform circular radii use Vello's analytic blur. Other radii fill their actual shape into the
+//!   existing offscreen blur pipeline. Like CSS filters, that pipeline uses the mean scale of the
+//!   transform for device-space σ (non-uniform scale/skew remain an approximation).
 //! - Spread adjusts corner radii linearly, clamped at zero, with zero components staying zero
 //!   (sharp corners stay sharp — the endpoint of the spec's easing); the nonlinear easing for radii
 //!   smaller than the spread is skipped (behavioral fidelity — see AGENTS.md).
@@ -33,15 +38,18 @@ use stylo::properties::ComputedValues;
 use stylo::values::computed::effects::BoxShadow;
 
 use crate::Size2D;
+use crate::paint::compose::FilterGroup;
 use crate::paint::shape::{BoxShape, inner_radii, normalize_radii, ring_path_into, with_shape};
+use crate::paint::walker::WalkSink;
 use crate::paint::{BoxFragment, PathScratch, convert};
-use crate::vello::Scene;
 use crate::vello::kurbo::Rect;
 use crate::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
-use crate::visual::CornerRadii;
+use crate::visual::{CornerRadii, PaintOrder};
 
 pub(crate) fn paint_outset(
-    scene: &mut Scene,
+    sink: &mut WalkSink<'_>,
+    frame: &PaintOrder,
+    space: Option<u32>,
     paths: &mut PathScratch,
     style: &ComputedValues,
     fragment: &BoxFragment,
@@ -52,12 +60,27 @@ pub(crate) fn paint_outset(
     }
     let border_shape = BoxShape::new(fragment.border_box, &fragment.radii);
     for shadow in shadows.iter().rev().filter(|shadow| !shadow.inset) {
-        paint_one_outset(scene, paths, style, fragment, &border_shape, shadow);
+        paint_one_outset(
+            sink,
+            frame,
+            space,
+            paths,
+            style,
+            fragment,
+            &border_shape,
+            shadow,
+        );
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one shadow and its shared paint context"
+)]
 fn paint_one_outset(
-    scene: &mut Scene,
+    sink: &mut WalkSink<'_>,
+    frame: &PaintOrder,
+    space: Option<u32>,
     paths: &mut PathScratch,
     style: &ComputedValues,
     fragment: &BoxFragment,
@@ -74,34 +97,33 @@ fn paint_one_outset(
     };
     let radii = adjust_radii(&fragment.radii, geometry.spread as f32);
 
-    let margin = 2.5 * geometry.sigma + geometry.dx.abs() + geometry.dy.abs();
+    let margin = 3.0 * geometry.sigma + geometry.dx.abs() + geometry.dy.abs();
     let bounds = BoxShape::Rect(rect.inflate(margin, margin));
     ring_path_into(&mut paths.ring, &bounds, border_shape);
-    scene.push_clip_layer(Fill::EvenOdd, fragment.transform, &paths.ring);
-    if geometry.sigma > 0.0 {
-        scene.draw_blurred_rounded_rect(
-            fragment.transform,
-            rect,
-            color,
-            uniform_radius(&radii, rect),
-            geometry.sigma,
-        );
-    } else {
-        let radii = normalize_radii(radii, rect.width() as f32, rect.height() as f32);
-        let shape = BoxShape::new(rect, &radii);
-        with_shape!(&shape, |s| scene.fill(
-            Fill::NonZero,
-            fragment.transform,
-            color,
-            None,
-            s
-        ));
-    }
-    scene.pop_layer();
+    // The knockout clips the blurred result, not the silhouette entering the blur.
+    sink.push_clip_box(
+        space,
+        Fill::EvenOdd,
+        fragment.transform,
+        BoxShape::Path(paths.ring.clone()),
+    );
+    draw_shadow(
+        sink,
+        frame,
+        space,
+        fragment,
+        rect,
+        radii,
+        color,
+        geometry.sigma,
+    );
+    sink.pop();
 }
 
 pub(crate) fn paint_inset(
-    scene: &mut Scene,
+    sink: &mut WalkSink<'_>,
+    frame: &PaintOrder,
+    space: Option<u32>,
     paths: &mut PathScratch,
     style: &ComputedValues,
     fragment: &BoxFragment,
@@ -114,7 +136,9 @@ pub(crate) fn paint_inset(
     let padding_shape = BoxShape::new(fragment.padding_box, &padding_radii);
     for shadow in shadows.iter().rev().filter(|shadow| shadow.inset) {
         paint_one_inset(
-            scene,
+            sink,
+            frame,
+            space,
             paths,
             style,
             fragment,
@@ -125,8 +149,14 @@ pub(crate) fn paint_inset(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one shadow and its shared paint context"
+)]
 fn paint_one_inset(
-    scene: &mut Scene,
+    sink: &mut WalkSink<'_>,
+    frame: &PaintOrder,
+    space: Option<u32>,
     paths: &mut PathScratch,
     style: &ComputedValues,
     fragment: &BoxFragment,
@@ -143,14 +173,15 @@ fn paint_one_inset(
     let hole_radii = adjust_radii(padding_radii, -geometry.spread as f32);
 
     if geometry.sigma > 0.0 {
-        with_shape!(padding_shape, |s| scene.push_layer(
+        sink.push_layer_box(
+            space,
             Fill::NonZero,
             BlendMode::new(Mix::Normal, Compose::SrcOver),
             1.0,
             fragment.transform,
-            s,
-        ));
-        with_shape!(padding_shape, |s| scene.fill(
+            padding_shape.clone(),
+        );
+        with_shape!(padding_shape, |s| sink.scene_for(space).fill(
             Fill::NonZero,
             fragment.transform,
             color,
@@ -158,37 +189,48 @@ fn paint_one_inset(
             s
         ));
         if let Some(hole) = hole_rect {
-            with_shape!(padding_shape, |s| scene.push_layer(
+            sink.push_layer_box(
+                space,
                 Fill::NonZero,
                 BlendMode::new(Mix::Normal, Compose::DestOut),
                 1.0,
                 fragment.transform,
-                s,
-            ));
-            scene.draw_blurred_rounded_rect(
-                fragment.transform,
+                padding_shape.clone(),
+            );
+            draw_shadow(
+                sink,
+                frame,
+                space,
+                fragment,
                 hole,
+                hole_radii,
                 Color::WHITE,
-                uniform_radius(&hole_radii, hole),
                 geometry.sigma,
             );
-            scene.pop_layer();
+            sink.pop();
         }
-        scene.pop_layer();
+        sink.pop();
     } else {
-        with_shape!(padding_shape, |s| scene.push_clip_layer(
+        sink.push_clip_box(
+            space,
             Fill::NonZero,
             fragment.transform,
-            s
-        ));
+            padding_shape.clone(),
+        );
         match hole_rect {
             Some(hole) => {
                 let radii = normalize_radii(hole_radii, hole.width() as f32, hole.height() as f32);
                 let hole_shape = BoxShape::new(hole, &radii);
                 ring_path_into(&mut paths.ring, padding_shape, &hole_shape);
-                scene.fill(Fill::EvenOdd, fragment.transform, color, None, &paths.ring);
+                sink.scene_for(space).fill(
+                    Fill::EvenOdd,
+                    fragment.transform,
+                    color,
+                    None,
+                    &paths.ring,
+                );
             }
-            None => with_shape!(padding_shape, |s| scene.fill(
+            None => with_shape!(padding_shape, |s| sink.scene_for(space).fill(
                 Fill::NonZero,
                 fragment.transform,
                 color,
@@ -196,7 +238,7 @@ fn paint_one_inset(
                 s
             )),
         }
-        scene.pop_layer();
+        sink.pop();
     }
 }
 
@@ -212,7 +254,7 @@ fn outset_extent(shadows: &[BoxShadow]) -> f64 {
             let geometry = ShadowGeometry::new(shadow);
             geometry.dx.abs().max(geometry.dy.abs())
                 + geometry.spread.max(0.0)
-                + 2.5 * geometry.sigma
+                + 3.0 * geometry.sigma
         })
         .fold(0.0, f64::max)
 }
@@ -264,16 +306,81 @@ fn adjust_radii(radii: &CornerRadii, delta: f32) -> CornerRadii {
     }
 }
 
-fn uniform_radius(radii: &CornerRadii, rect: Rect) -> f64 {
-    let sum = radii.top_left.width
-        + radii.top_left.height
-        + radii.top_right.width
-        + radii.top_right.height
-        + radii.bottom_right.width
-        + radii.bottom_right.height
-        + radii.bottom_left.width
-        + radii.bottom_left.height;
-    (f64::from(sum) / 8.0).min(0.5 * rect.width().min(rect.height()))
+/// Only the analytic primitive's exact geometry may take the fast path.
+#[expect(
+    clippy::float_cmp,
+    reason = "only identical radii may use the exact analytic geometry"
+)]
+fn uniform_radius(radii: &CornerRadii) -> Option<f64> {
+    let radius = radii.top_left.width;
+    [
+        radii.top_left,
+        radii.top_right,
+        radii.bottom_right,
+        radii.bottom_left,
+    ]
+    .iter()
+    .all(|corner| corner.width == radius && corner.height == radius)
+    .then_some(f64::from(radius))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one shadow and its shared paint context"
+)]
+fn draw_shadow(
+    sink: &mut WalkSink<'_>,
+    frame: &PaintOrder,
+    space: Option<u32>,
+    fragment: &BoxFragment,
+    rect: Rect,
+    radii: CornerRadii,
+    color: Color,
+    sigma: f64,
+) {
+    let radii = normalize_radii(radii, rect.width() as f32, rect.height() as f32);
+    if sigma > 0.0
+        && let Some(radius) = uniform_radius(&radii)
+    {
+        sink.scene_for(space).draw_blurred_rounded_rect(
+            fragment.transform,
+            rect,
+            color,
+            radius,
+            sigma,
+        );
+        return;
+    }
+    let shape = BoxShape::new(rect, &radii);
+    let blurred = if sigma > 0.0 {
+        let device_sigma = sigma * fragment.transform.nuclear_norm_squared().sqrt() / 2.0;
+        let bounds = fragment
+            .transform
+            .transform_rect_bbox(rect)
+            .inflate(3.0 * device_sigma, 3.0 * device_sigma);
+        sink.push_filter(FilterGroup::new(
+            device_sigma as f32,
+            Rect::new(
+                bounds.x0.floor(),
+                bounds.y0.floor(),
+                bounds.x1.ceil(),
+                bounds.y1.ceil(),
+            ),
+            space,
+        ))
+    } else {
+        false
+    };
+    with_shape!(&shape, |s| sink.scene_for(space).fill(
+        Fill::NonZero,
+        fragment.transform,
+        color,
+        None,
+        s
+    ));
+    if blurred {
+        sink.pop_filter(frame);
+    }
 }
 
 #[cfg(test)]
@@ -310,12 +417,12 @@ mod tests {
             shadow(100.0, 100.0, 100.0, 100.0, true),
             shadow(2.0, 2.0, 0.0, 0.0, false),
         ];
-        assert!((outset_extent(&shadows) - 19.0).abs() < 1e-9);
+        assert!((outset_extent(&shadows) - 21.0).abs() < 1e-9);
     }
 
     #[test]
     fn extent_ignores_negative_spread() {
-        assert!((outset_extent(&[shadow(0.0, 0.0, 4.0, -10.0, false)]) - 5.0).abs() < 1e-9);
+        assert!((outset_extent(&[shadow(0.0, 0.0, 4.0, -10.0, false)]) - 6.0).abs() < 1e-9);
     }
 
     #[test]
@@ -369,27 +476,16 @@ mod tests {
     }
 
     #[test]
-    fn uniform_radius_averages_all_components() {
-        let radii = CornerRadii {
-            top_left: Size2D::new(8.0, 4.0),
-            top_right: Size2D::new(2.0, 6.0),
-            bottom_right: Size2D::new(0.0, 0.0),
-            bottom_left: Size2D::new(3.0, 1.0),
-        };
-        let rect = Rect::new(0.0, 0.0, 100.0, 100.0);
-        assert!((uniform_radius(&radii, rect) - 3.0).abs() < 1e-9);
-        assert!(uniform_radius(&CornerRadii::ZERO, rect).abs() < 1e-9);
-    }
-
-    #[test]
-    fn uniform_radius_clamps_to_half_min_dimension() {
-        let radii = CornerRadii {
-            top_left: Size2D::new(100.0, 100.0),
-            top_right: Size2D::new(100.0, 100.0),
-            bottom_right: Size2D::new(100.0, 100.0),
-            bottom_left: Size2D::new(100.0, 100.0),
-        };
-        let rect = Rect::new(0.0, 0.0, 10.0, 40.0);
-        assert!((uniform_radius(&radii, rect) - 5.0).abs() < 1e-9);
+    fn analytic_blur_requires_identical_circular_corners() {
+        assert_eq!(uniform_radius(&CornerRadii::ZERO), Some(0.0));
+        let mut radii = CornerRadii::ZERO;
+        radii.top_right = Size2D::new(75.0, 75.0);
+        assert_eq!(uniform_radius(&radii), None);
+        radii.top_left = radii.top_right;
+        radii.bottom_left = radii.top_right;
+        radii.bottom_right = radii.top_right;
+        assert_eq!(uniform_radius(&radii), Some(75.0));
+        radii.top_left.height = 30.0;
+        assert_eq!(uniform_radius(&radii), None);
     }
 }

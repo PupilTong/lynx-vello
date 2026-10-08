@@ -45,7 +45,7 @@ impl TextClip<'_> {
 pub(crate) struct PathScratch {
     /// Ring (outer minus inner) fill/clip paths.
     pub ring: BezPath,
-    /// Border side miter quads.
+    /// Border side miter clip polygons.
     pub quad: BezPath,
 }
 

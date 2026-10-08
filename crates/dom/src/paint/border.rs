@@ -3,14 +3,14 @@
 //! Spec sketch:
 //! - Fast path: every side that paints is `solid` in one color → fill the ring between the outer
 //!   border-box shape and the inner padding-box shape (even-odd) in one draw.
-//! - General path: per side, clip to the trapezoidal side region between the outer and inner shapes
-//!   (miter lines join outer corners to inner corners per CSS2 §8.5.4; for rounded corners the
-//!   split runs along the corner region's diagonal) and paint the side's style: `solid` fills the
-//!   ring; `double` fills two sub-rings (outer third, inner third); `dashed`/`dotted` stroke the
-//!   side's centerline (2w dashes with 1w gaps, near-0-length round dots at 2w spacing — see
-//!   `dash_stroke` for why the dot length can't be exactly zero); `inset`/`outset`/`groove`/
-//!   `ridge` use the CSS2 §8.5.3 darker/lighter color split per side (`groove`/`ridge` split the
-//!   ring in half). `hidden`/`none` paint nothing (layout already zeroes their widths).
+//! - General path: per side, clip to the wedge between the extended corner miter lines (miter lines
+//!   join outer corners to inner corners per CSS2 §8.5.4; for rounded corners the split runs along
+//!   the corner region's diagonal) and paint the side's style: `solid` fills the ring; `double`
+//!   fills two sub-rings (outer third, inner third); `dashed`/`dotted` stroke the side's centerline
+//!   (2w dashes with 1w gaps, near-0-length round dots at 2w spacing — see `dash_stroke` for why
+//!   the dot length can't be exactly zero); `inset`/`outset`/`groove`/ `ridge` use the CSS2 §8.5.3
+//!   darker/lighter color split per side (`groove`/`ridge` split the ring in half). `hidden`/`none`
+//!   paint nothing (layout already zeroes their widths).
 //! - `outline`: a ring **outside** the border box, flush against it (the fork's lynx grammar
 //!   deliberately omits `outline-offset` — Lynx outlines are flush rings); `auto` paints as solid,
 //!   dashed/dotted stroke the ring centerline, other paintable styles fall back to solid. Radii
@@ -27,7 +27,7 @@ use crate::paint::convert::resolve_color;
 use crate::paint::shape::{BoxShape, inner_radii, ring_path_into, with_shape};
 use crate::paint::{BoxFragment, PathScratch};
 use crate::vello::Scene;
-use crate::vello::kurbo::{BezPath, Cap, Rect, Stroke};
+use crate::vello::kurbo::{BezPath, Cap, Point, Rect, Stroke};
 use crate::vello::peniko::{Color, Fill};
 use crate::visual::CornerRadii;
 
@@ -148,11 +148,12 @@ fn paint_side(
     side: &SidePaint,
 ) {
     let transform = fragment.transform;
-    side_quad_into(
+    side_clip_into(
         &mut paths.quad,
         side.side,
         fragment.border_box,
         fragment.padding_box,
+        &fragment.radii,
     );
     scene.push_clip_layer(Fill::NonZero, transform, &paths.quad);
     match side.line {
@@ -181,15 +182,20 @@ fn paint_side(
         BorderStyle::Dashed | BorderStyle::Dotted => {
             let centerline = inset_shape(fragment, 0.5);
             let stroke = dash_stroke(side.line, side.width);
+            // Unequal adjacent widths make the centerline elliptical. Keep the
+            // fixed-width stroke inside the actual border ring at those corners.
+            ring_path_into(&mut paths.ring, outer, inner);
+            scene.push_clip_layer(Fill::EvenOdd, transform, &paths.ring);
             with_shape!(&centerline, |shape| scene
                 .stroke(&stroke, transform, side.color, None, shape));
+            scene.pop_layer();
         }
         BorderStyle::None | BorderStyle::Hidden => {}
     }
     scene.pop_layer();
 }
 
-fn side_quad_into(path: &mut BezPath, side: Side, outer: Rect, inner: Rect) {
+fn side_clip_into(path: &mut BezPath, side: Side, outer: Rect, inner: Rect, radii: &CornerRadii) {
     let (a, b, c, d) = match side {
         Side::Top => (
             (outer.x0, outer.y0),
@@ -216,12 +222,43 @@ fn side_quad_into(path: &mut BezPath, side: Side, outer: Rect, inner: Rect) {
             (inner.x0, inner.y1),
         ),
     };
+    let (start_radius, end_radius) = match side {
+        Side::Top => (radii.top_left, radii.top_right),
+        Side::Right => (radii.top_right, radii.bottom_right),
+        Side::Bottom => (radii.bottom_right, radii.bottom_left),
+        Side::Left => (radii.bottom_left, radii.top_left),
+    };
+    // Extend each miter through its rounded corner to the first radius axis.
+    // Both endpoints are inside the convex padding shape, so their connecting
+    // chord cannot cut the border ring. Extending to infinity would also admit
+    // the opposite border, especially with unequal side widths.
+    let d = corner_join(Point::from(a), Point::from(d), start_radius);
+    let c = corner_join(Point::from(b), Point::from(c), end_radius);
     path.truncate(0);
     path.move_to(a);
     path.line_to(b);
     path.line_to(c);
     path.line_to(d);
     path.close_path();
+}
+
+fn corner_join(outer: Point, inner: Point, radius: Size2D<f32>) -> Point {
+    let delta = inner - outer;
+    if delta.x == 0.0 && delta.y == 0.0 {
+        return inner;
+    }
+    let factor = |radius: f32, width: f64| {
+        if width == 0.0 {
+            f64::INFINITY
+        } else {
+            f64::from(radius) / width.abs()
+        }
+    };
+    outer
+        + delta
+            * factor(radius.width, delta.x)
+                .min(factor(radius.height, delta.y))
+                .max(1.0)
 }
 
 fn ring_boundary_radii(radii: &CornerRadii, widths: &Edges<f32>, fraction: f32) -> CornerRadii {
@@ -526,16 +563,16 @@ mod tests {
     }
 
     #[test]
-    fn side_quads_split_corners_along_the_miter_diagonal() {
+    fn side_clips_split_corners_along_the_miter_diagonal() {
         let outer = Rect::new(0.0, 0.0, 40.0, 30.0);
         let inner = Rect::new(4.0, 6.0, 36.0, 22.0);
-        let side_quad = |side| {
+        let side_clip = |side| {
             let mut path = BezPath::new();
-            side_quad_into(&mut path, side, outer, inner);
+            side_clip_into(&mut path, side, outer, inner, &CornerRadii::ZERO);
             path
         };
-        let top = side_quad(Side::Top);
-        let left = side_quad(Side::Left);
+        let top = side_clip(Side::Top);
+        let left = side_clip(Side::Left);
         assert_ne!(top.winding(Point::new(20.0, 3.0)), 0);
         assert_eq!(left.winding(Point::new(20.0, 3.0)), 0);
         assert_eq!(top.winding(Point::new(1.0, 5.0)), 0);
@@ -543,6 +580,24 @@ mod tests {
         assert_ne!(top.winding(Point::new(3.0, 2.0)), 0);
         assert_eq!(left.winding(Point::new(3.0, 2.0)), 0);
         assert_eq!(top.winding(Point::new(20.0, 26.0)), 0);
+    }
+
+    #[test]
+    fn side_clip_includes_rounded_corner_beyond_the_padding_edge() {
+        let mut top = BezPath::new();
+        side_clip_into(
+            &mut top,
+            Side::Top,
+            Rect::new(0.0, 0.0, 150.0, 150.0),
+            Rect::new(2.0, 2.0, 150.0, 150.0),
+            &CornerRadii {
+                top_right: Size2D::new(75.0, 75.0),
+                ..CornerRadii::ZERO
+            },
+        );
+        // On the radius-75 arc at 45 degrees, far below the 2px top strip.
+        assert_ne!(top.winding(Point::new(128.0, 23.0)), 0);
+        assert_eq!(top.winding(Point::new(1.0, 100.0)), 0);
     }
 
     #[test]
