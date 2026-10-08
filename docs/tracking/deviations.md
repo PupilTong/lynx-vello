@@ -1660,8 +1660,9 @@ consequential choice about whether to follow the spec or the quirk.
 - **`overlay` / `x-overlay-ng` (2026-10-08)** — Lynx-only (bucket 2): native
   registers `overlay` with `x-overlay-ng` as its legacy alias, web-core maps
   `overlay` to `x-overlay-ng` and builds it from a shadow `<dialog>` opened
-  with `showModal()`. Here the host element itself enters the top layer
-  (`bobcat-core`'s `tree::overlay`,
+  with `showModal()`. That structure is followed: a `display: contents`
+  host and a shadow `<dialog>` that enters the top layer and carries the
+  content (`bobcat-core`'s `tree::overlay`,
   [style-assumptions.md](../style-assumptions.md) §30). Where native and
   web-core disagree, and which side was followed:
   - *`level` is ignored* (web-core). Native has four tiers, level 1
@@ -1669,13 +1670,18 @@ consequential choice about whether to follow the spec or the quirk.
     no effect under its `display: contents` host, so its overlays stack in
     `showModal()` order. Overlays here stack in the order they were shown.
   - *`events-pass-through` passes every gesture* (native). A pass-through
-    overlay does not block the document and its host and `::backdrop` are
-    `pointer-events: none`, so a touch outside the children reaches what is
-    below, scrolls included, as native does (`LynxOverlayContainer.m:169-214`,
-    `LynxOverlayView.kt:726-752`). web-core forwards only `click`, by closing
-    the dialog, `elementFromPoint`, a synthetic click and `showModal()` on the
-    next frame (`XOverlayAttributes.ts:69-88`): a browser workaround, not
-    copied.
+    overlay's shadow dialog is shown as a Manual popover instead of with
+    `showModal()` — the one top-layer element HTML does not make the
+    document inert for — and it and its `::backdrop` are `pointer-events:
+    none`, so a touch outside the content reaches what is below, scrolls
+    included, as native does (`LynxOverlayContainer.m:169-214`,
+    `LynxOverlayView.kt:726-752`). web-core shows it modally and forwards
+    only `click`, by closing the dialog, `elementFromPoint`, a synthetic
+    click and `showModal()` on the next frame (`XOverlayAttributes.ts:69-88`):
+    a browser workaround, not copied. The popover is HTML's
+    ([style-assumptions.md](../style-assumptions.md) §31), so the
+    difference is which standard API the overlay calls, not any behavior of
+    its own.
   - *No `requestclose`, no Escape, no back gesture* (nothing to send it).
     Native Android and Harmony send `requestclose` and iOS `onRequestClose`;
     web-core's Escape closes the browser dialog silently, with `visible`
@@ -1686,9 +1692,12 @@ consequential choice about whether to follow the spec or the quirk.
     (web-core). Android fires one.
   - *No `dismissoverlay` at mount with `visible` false* (web-core and
     Android). iOS likely fires one.
-  - *The host's own styles paint* (Android). The host fills the viewport, so
-    an author `background-color` on it covers the screen, as on Android;
-    web-core's `display: contents` host paints nothing.
+  - *The host's own styles paint nothing* (web-core). The host is `display:
+    contents`, and an author `display` gives it only a zero-sized box, so an
+    author `background-color` on it never covers the screen, and an author
+    `display` never shows a hidden overlay: what fills the viewport is the
+    shadow dialog, transparent, and hidden is that dialog's closed state.
+    On Android the host's own background paints over the window.
   - *The first child's `display` is not forced to `flex`*: web-core writes
     `display: flex` on it; here it keeps the display its own tag gets.
   - *Events fire on transitions only.* web-core re-runs `showModal()` and

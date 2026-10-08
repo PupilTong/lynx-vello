@@ -4,8 +4,10 @@
 //!
 //! A W3C element, so `AGENTS.md`'s standards policy puts it in the first
 //! bucket: web-core runs in a browser, where a card that writes `<dialog>`
-//! gets the browser's `HTMLDialogElement` — web-elements' `x-overlay-ng` is
-//! itself a `<dialog>` opened with `showModal()` (`htmlTemplates.ts:136-172`).
+//! gets the browser's `HTMLDialogElement` — web-elements' `x-overlay-ng`
+//! carries one in its shadow tree, opened with `showModal()`
+//! (`htmlTemplates.ts:136-172`), and so does this engine's
+//! ([`super::overlay`]).
 //! Native Lynx has no dialog and no top layer: its `<overlay>` is a zero-sized
 //! box whose content is reparented into a platform window. This module
 //! implements HTML's behaviour, reduced where the engine has no counterpart,
@@ -83,6 +85,9 @@
 //! `invoke` / `__InvokeUIMethod` as UI methods (`callElementMethod` in
 //! `main/runtime`). Each sets or removes the `open` attribute and lets the
 //! attribute callback do the state work, so there is one path for each fact.
+//! The overlay's shadow dialog ([`super::overlay`]) is driven through the
+//! same functions, as web-core drives its own through `showModal()` and
+//! `close()`.
 //!
 //! - `show()`: no-op on an open non-modal dialog; [`InvalidState`] on a modal one; otherwise adds
 //!   `open`.

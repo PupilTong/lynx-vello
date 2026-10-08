@@ -2506,13 +2506,15 @@ fn a_dialog_opens_closes_and_fires_through_both_invoke_paths() {
 }
 
 /// An `<x-overlay-ng>` shown and hidden through `__SetAttribute(…,
-/// 'visible', …)`: the boolean `true` shows it in the top layer, blocking the
-/// document, and owes `showoverlay`; `false` (stringified to `"false"`)
-/// hides it and owes `dismissoverlay`. Each is delivered from an entry of its
-/// own, non-bubbling — the capture pass runs the path, the bind pass the
-/// overlay alone, so the outer view's `bindEvent` never runs — with a `{}`
-/// detail. A rewrite that keeps it shown owes nothing.
+/// 'visible', …)`: the boolean `true` opens its shadow dialog in the top
+/// layer, blocking the document, and owes `showoverlay`; `false`
+/// (stringified to `"false"`) closes it and owes `dismissoverlay`. Each is
+/// delivered at the host from an entry of its own, non-bubbling — the capture
+/// pass runs the path, the bind pass the overlay alone, so the outer view's
+/// `bindEvent` never runs — with a `{}` detail. A rewrite that keeps it shown
+/// owes nothing.
 #[test]
+#[expect(clippy::too_many_lines, reason = "one scenario: show, rewrite, hide")]
 fn an_overlay_shows_and_dismisses_through_set_attribute() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
@@ -2562,11 +2564,12 @@ fn an_overlay_shows_and_dismisses_through_set_attribute() {
             "helpers",
         )
         .expect("helpers");
-    let overlay = {
+    let dialog = {
         let tree = elements.tree();
         let page = tree.document_element().id();
         let outer = tree.get(page).expect("the page").child_ids()[0];
-        tree.get(outer).expect("the outer view").child_ids()[0]
+        let overlay = tree.get(outer).expect("the outer view").child_ids()[0];
+        overlay_dialog(&tree, overlay)
     };
     let steps = std::cell::Cell::new(0);
     let run = |runtime: &mut MainThreadRuntime, js_runtime: &mut ScriptRuntime, source: &str| {
@@ -2578,7 +2581,7 @@ fn an_overlay_shows_and_dismisses_through_set_attribute() {
     };
     let shown = || {
         let tree = elements.tree();
-        (tree.in_top_layer(overlay), tree.blocks_document(overlay))
+        (tree.in_top_layer(dialog), tree.blocks_document(dialog))
     };
     assert_eq!(shown(), (false, false));
     assert!(!runtime.has_component_events());
@@ -2706,6 +2709,77 @@ fn an_event_at_shadow_content_reaches_script_retargeted_to_its_host() {
             .is_empty()
     );
     expect_seen(&mut js_runtime, &mut runtime, "");
+}
+
+/// A tap on a shown, blocking `<x-overlay-ng>` outside its content hits the
+/// overlay's shadow dialog, the box that fills the viewport, and reaches
+/// script as a browser reports it: at the overlay, retargeted, through its
+/// ancestors.
+#[test]
+fn a_tap_on_an_overlay_outside_its_content_reaches_script_at_the_overlay() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const outer = __CreateView(0);
+                  const overlay = __CreateElement('x-overlay-ng', 0);
+                  __AppendElement(page, outer);
+                  __AppendElement(outer, overlay);
+                  __AppendElement(overlay, __CreateView(0));
+                  __SetAttribute(overlay, 'visible', true);
+                  globalThis.held = [page, outer, overlay];
+                  const note = (label) => ({
+                    type: 'worklet',
+                    value: {
+                      body: (event) =>
+                        seen.push(
+                          label + ':' + event.currentTarget.uid + ':' +
+                          event.target.uid + ':' + event.type,
+                        ),
+                    },
+                  });
+                  __AddEvent(overlay, 'bindEvent', 'tap', note('overlay'));
+                  __AddEvent(outer, 'bindEvent', 'tap', note('outer'));
+                  __AddEvent(page, 'capture-bind', 'tap', note('page-capture'));
+                };
+                ",
+            "app:///overlay-tap.js",
+        )
+        .expect("main-thread script");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __FlushElementTree } from 'bobcat:element';
+                __FlushElementTree();
+                ",
+            "app:///overlay-tap-flush.js",
+            "flush",
+        )
+        .expect("flush");
+    let (overlay, dialog) = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let outer = tree.get(page).expect("the page").child_ids()[0];
+        let overlay = tree.get(outer).expect("the outer view").child_ids()[0];
+        let dialog = overlay_dialog(&tree, overlay);
+        assert!(tree.blocks_document(dialog), "shown, modal");
+        (overlay, dialog)
+    };
+    let uid = packed_node_id(overlay);
+    runtime
+        .dispatch_for_test(&mut js_runtime, dialog, "tap", event_point())
+        .expect("a hit on the shadow dialog is delivered");
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        &format!("page-capture:2:{uid}:tap|overlay:{uid}:{uid}:tap|outer:3:{uid}:tap"),
+    );
 }
 
 /// Measuring runs no pipeline step. A job that mutates and then measures
@@ -3285,6 +3359,15 @@ fn image_page(script_url: &str) -> (ScriptRuntime, MainThreadRuntime, DocumentPr
         )
         .expect("main-thread script");
     (js_runtime, runtime, elements)
+}
+
+/// The `<dialog>` in an `<overlay>`'s shadow tree: the element `visible`
+/// puts in the top layer.
+fn overlay_dialog(tree: &LynxDocument, overlay: dom::NodeId) -> dom::NodeId {
+    let root = tree
+        .shadow_root(overlay)
+        .expect("the overlay's shadow root");
+    tree.get(root).expect("the shadow root").child_ids()[0]
 }
 
 /// Asserts what the realm has recorded since the last check, and clears it.
