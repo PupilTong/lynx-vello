@@ -255,6 +255,18 @@ pub(super) struct Page {
     /// the two would post one of its own and each would find the batch
     /// already gone. One post per batch.
     content_visibility_posted: Cell<bool>,
+    /// Whether an entry that will deliver the entries `dom`'s intersection
+    /// observers have queued is already queued and has not run yet — the
+    /// spec's per-document `IntersectionObserverTaskQueued` flag, set where
+    /// it queues the task and cleared as that task's first step.
+    ///
+    /// The same latch as [`Self::content_visibility_posted`], for the same
+    /// reason: the queues outlive the epilogue whose update filled them —
+    /// the drain is the delivery entry's, because the point of the entry is
+    /// that no hook runs inside the commit — so without it every entry
+    /// between the two would post one more and find the queues already
+    /// taken. One post per batch.
+    intersections_posted: Cell<bool>,
     /// Whether an entry that will deliver the component events the runtime
     /// has queued — `<image>` `load`s and `error`s, `<dialog>` `cancel`s and
     /// `close`s — is already queued and has not run yet.
@@ -300,6 +312,7 @@ impl Page {
             pending_begin_frame: Cell::new(None),
             boot_reported: Cell::new(false),
             content_visibility_posted: Cell::new(false),
+            intersections_posted: Cell::new(false),
             component_events_posted: Cell::new(false),
             lifetime,
             #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -353,6 +366,56 @@ impl Page {
             // of its own, and it owes an entry of its own too.
             page.content_visibility_posted.set(false);
             runtime.dispatch_content_visibility_changes();
+        }));
+    }
+
+    /// Queues the entry that delivers what the update just queued on `dom`'s
+    /// intersection observers, and waits for nothing.
+    ///
+    /// This is the spec's "queue an intersection observer task"
+    /// ([§3.2.4](https://w3c.github.io/IntersectionObserver/#queue-intersection-observer-task)),
+    /// with [`Self::intersections_posted`] as its `IntersectionObserverTaskQueued`
+    /// flag: the update only queues entries, and the callbacks run from a
+    /// task of their own, which "notify intersection observers"
+    /// ([§3.2.5](https://w3c.github.io/IntersectionObserver/#notify-intersection-observers-algo))
+    /// is the body of. It is posted rather than run in the epilogue that updated,
+    /// for the reason [`Self::post_content_visibility_changes`] is: a hook
+    /// that mutates the tree gets a commit of its own, from this entry's own
+    /// epilogue, and a delivery never runs inside a commit. A view that ends
+    /// in between delivers nothing.
+    ///
+    /// **Nothing here enters JavaScript yet.** No observer is the realm's
+    /// today: an `Element`-owned one belongs to one of the engine's own
+    /// components, whose `intersections_changed` hook `dom` calls, and the
+    /// realm's will be the MTS `IntersectionObserver` binding's, which is
+    /// what will make this entry call into script. It goes through
+    /// [`owner::enter`] all the same, because everything that touches this
+    /// view's document does.
+    ///
+    /// One entry for every observer's queue, in creation order. The latch is
+    /// cleared at the start, before the drain, as §3.2.5's first step clears
+    /// the flag: what a hook's own mutation moves is seen by this entry's
+    /// epilogue, whose update queues a batch of its own, and that batch owes
+    /// an entry of its own too.
+    ///
+    /// The chain ends where the observations stop moving: the epilogue's
+    /// update queues an entry only where a target's `(thresholdIndex,
+    /// isIntersecting)` pair changed, so a delivery whose hook moved no
+    /// observed target across a threshold — or wrote nothing at all — posts
+    /// no other.
+    ///
+    /// A hook that panics is the view's panic, as a content-visibility
+    /// handler's is: [`run_job`] catches it, [`owner::trapped`] reports the
+    /// `Panicked`, and the view ends, with no per-notification
+    /// `catch_unwind`.
+    fn post_intersection_notifications(self: &Rc<Self>) {
+        let page = Rc::clone(self);
+        drop(owner::enter(self, move |runtime, js| {
+            // Cleared before the drain, not after: what a hook moves is a
+            // batch of this entry's own epilogue, which owes an entry of
+            // its own.
+            page.intersections_posted.set(false);
+            runtime.notify_intersection_observers(js);
         }));
     }
 
@@ -905,14 +968,21 @@ impl RealmOwner for Page {
     /// the walk discovered — skipped while any listed author sheet is
     /// outstanding, because the first `__FlushElementTree` is what waits for
     /// them and a commit without them would publish an unstyled frame. Then
-    /// the `contentvisibilityautostatechange` deliveries that commit decided
-    /// and the component events this entry produced — `<image>` `load`s and
-    /// `error`s, `<dialog>` `cancel`s and `close`s — each posted as an entry
-    /// of its own and never run here: see
+    /// the intersection observations, updated against that commit's layout
+    /// and the live scroll offsets whether or not the commit built anything —
+    /// a scroll composed inside the encode window moves an offset and commits
+    /// nothing — and their entries, the `contentvisibilityautostatechange`
+    /// deliveries that commit decided and the component events this entry
+    /// produced — `<image>` `load`s and `error`s, `<dialog>` `cancel`s and
+    /// `close`s — each posted as an entry of its own and never run here: see
+    /// [`Page::post_intersection_notifications`],
     /// [`Page::post_content_visibility_changes`] and
     /// [`Page::post_component_events`].
     fn after_timers(page: &Rc<Self>, runtime: &mut MainThreadRuntime) {
         runtime.commit_if_dirty();
+        if runtime.update_intersection_observations() && !page.intersections_posted.replace(true) {
+            page.post_intersection_notifications();
+        }
         if runtime.has_pending_content_visibility_changes()
             && !page.content_visibility_posted.replace(true)
         {

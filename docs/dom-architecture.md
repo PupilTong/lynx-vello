@@ -718,6 +718,81 @@ behavior of its own: Auto and Hint popovers are refused rather than shown
 the embedder's to fire, and there is no focus, no source or trigger, and no
 `overlay` transition.
 
+## Intersection observations
+
+The Intersection Observer primitive lives in `visual/intersection/`:
+`geometry.rs` is §3.2.7 "compute the intersection", `mod.rs` the registry
+and §3.2.10 "update intersection observations". It is Rust-only
+(user-directed 2026-10-08): no script constructor exists yet, and the
+consumers are the engine's own components and, later, a realm binding.
+
+**Registry.** `Document.intersections` is a `Vec` of observers in creation
+order — the spec's notify order — each with an owner tag
+(`IntersectionObserverOwner::Element(node)`, a constructed custom element,
+or `Host`, the embedder's), a root (`Implicit`, `Element(node)`, or `Freed`
+once that element is gone), a `RootMargin`, sorted thresholds (`[0]` when
+empty) and its registrations: a target and the `(thresholdIndex,
+isIntersecting)` pair the last update stored, `None` until the first one so
+that update always queues. Ids are monotone and never reissued; a dropped
+id is a caller bug (a panic), like a freed `NodeId`. A `Document` field, not
+a `TreeArenas` table: nothing in style, layout or paint reads it, and the
+one reader holds `&mut Document`.
+
+**The update** (`update_intersection_observations(time)`) runs no pass: it
+reads the last layout, the live scroll offsets, sticky and anchor shifts
+and each element's transform. It is gated by a stale bit set by `render`
+(a frame was built), by a `scroll_to` that moved an offset (a scroll inside
+the encode window commits nothing and still moves every answer), by
+`observe` and by freeing an element root, and it does nothing before the
+first frame. Per observer the root geometry is resolved once; per target the
+geometry gives `target_rect`, `intersection_rect` and `is_intersecting`,
+the ratio follows the spec (area ratio; 1 or 0 by `is_intersecting` for a
+zero-area target), `thresholdIndex` is the first threshold above the ratio,
+and an entry is queued iff the pair moved. A `Freed` or unrendered root
+makes every target unrendered, so each intersecting one gets one leave
+entry.
+
+**Delivery is the host's.** `take_intersection_notifications` hands out
+`(observer, owner, entries)` in creation order and drains; `dom` invokes
+nothing itself. `deliver_intersections_to_element(element, observer,
+entries)` is the `Element` owner's half: the element's
+`CustomElement::intersections_changed` hook inside one `[CEReactions]`
+scope, as `dispatch_element_event` wraps `handle_event`; an element freed or
+not constructed drops its entries. The host calls both from a posted task,
+never inside the commit — the spec's "queue an intersection observer task".
+`disconnect` unregisters the targets and keeps the queue, as `unobserve`
+does; `takeRecords` or the next delivery still hands those entries out.
+
+**Geometry** (`geometry.rs`, its module doc is the algorithm): the target's
+border box is carried up the containing-block chain — the
+`ContainingBlockChain` iterator `bounding_client_rect` now folds too — as
+one composed matrix, each box contributing the painter's own `ContextMatrix`
+(transform list, `transform-origin`, `offset-path`, the parent's
+`perspective`), its scroll offset when it is an on-chain scroll container,
+and its padding-box clip when it clips on any axis. A rect is projected only
+where a clip has to cut it (Chromium's geometry mapper), every intersection
+is edge-inclusive (a touching edge is a zero-area intersection, so
+`isIntersecting` is true), and the root rect — the viewport, or an element
+root's padding or border box — is dilated by `rootMargin` with percentages
+against its height for top/bottom and its width for left/right (every
+engine and WPT `root-margin.html`; the spec sentence says width). A target
+that reaches an element root off its chain, never reaches it, or is the
+root is "not a descendant": rendered, zero rects, root bounds reported. Not
+rendered — `display: none`/`contents`, no layout, a hidden layout slot
+(every box under a `display: none` or skipping ancestor: css-contain-2 §4.5,
+skipped contents are never intersecting), detached — reports zero rects
+throughout. Transforms are included by ruling while `bounding_client_rect`
+stays transform-free; out by design: `clip-path`, masks, rounded corners,
+`overflow-clip-margin`, `scrollMargin`, `delay`/`trackVisibility`
+(`isVisible`), a compositor-exported transform curve mid-flight, and
+`position-visibility` (a hidden box stays geometric).
+
+**Node lifetime.** `free_node` — the one retirement path — drops the
+observers an `Element(id)` owns, removes `id` from every target list, drops
+queued entries naming it, and turns an `Element(id)` root into `Freed`. A
+`Host` observer lives until `drop_intersection_observer`. An unlinked but
+live target stays observed and reports not rendered at the next update.
+
 ## Scroll, input and event paths
 
 Its `scroll` module owns CSSOM-View scrolling — scrollport/scrolling-area

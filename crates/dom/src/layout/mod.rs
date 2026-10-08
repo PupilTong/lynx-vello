@@ -572,62 +572,24 @@ impl<T> Document<T> {
             }
         };
         origin += shift(id);
-        // The position the *escaping* box was keyed on, which decides which
-        // ancestor is its containing block — and so which scroll offsets
-        // move it. It is the computed value, not hughie's parent-lowered
-        // one, so it matches what the paint walk keys its flow contexts on.
-        let mut escape = *style.values().get_box().get_position();
-        // A top-layer element's containing block is the initial one: no box
-        // above it is on its chain, nor on its descendants' past it.
-        let top_layer = self.arenas().top_layer();
-        let mut escaped = top_layer.places_against_viewport(id);
-        let mut current = node;
-        let mut top = id;
-        // `box_parent` skips `display: contents` ancestors, which hold a
-        // zero layout and contribute no offset, and stops above the document
-        // element — the node the paint order itself is rooted at.
-        while let Some(ancestor) = box_parent(current) {
-            let ancestor_style = StyleView::of(ancestor);
-            if display_mode(ancestor_style.display()) == DisplayMode::None {
-                // Nothing under a `display: none` box was laid out; whatever
-                // geometry the node still carries is from before it was
-                // hidden.
-                return None;
-            }
-            let ancestor_id = ancestor.id();
-            let ancestor_layout = self.rounded_layout(ancestor_id)?;
-            origin += Vector2D::new(ancestor_layout.location.x, ancestor_layout.location.y);
-            let on_chain = !escaped
-                && match escape {
-                    PositionProperty::Absolute => {
-                        establishes_absolute_containing_block(ancestor, ancestor_style.values())
-                    }
-                    PositionProperty::Fixed => {
-                        establishes_fixed_containing_block(ancestor, ancestor_style.values())
-                    }
-                    PositionProperty::Static
-                    | PositionProperty::Relative
-                    | PositionProperty::Sticky => true,
-                };
-            if on_chain {
-                if *ancestor_style.values().get_box().get_position() == PositionProperty::Sticky {
+        let mut chain = ContainingBlockChain::new(self, node, style.values());
+        for step in &mut chain {
+            origin += Vector2D::new(step.layout.location.x, step.layout.location.y);
+            if step.on_chain {
+                if *step.style.values().get_box().get_position() == PositionProperty::Sticky {
                     origin +=
-                        crate::visual::sticky::live_offset(self, ancestor_id, &mut sticky_offsets);
+                        crate::visual::sticky::live_offset(self, step.id, &mut sticky_offsets);
                 }
-                if self.is_scroll_container(ancestor_id) {
-                    origin -= self.scroll_offset(ancestor_id);
+                if self.is_scroll_container(step.id) {
+                    origin -= self.scroll_offset(step.id);
                 }
-                origin += shift(ancestor_id);
-                escape = *ancestor_style.values().get_box().get_position();
+                origin += shift(step.id);
             }
-            escaped |= top_layer.places_against_viewport(ancestor_id);
-            current = ancestor;
-            top = ancestor_id;
         }
         // A subtree detached from the document answers nothing, the way a
         // disconnected element does on the web: its coordinates would be
         // relative to a root that is not the viewport.
-        (top == DOCUMENT_ELEMENT_NODE_ID).then(|| Rect::new(origin, size))
+        (chain.end() == Some(ChainEnd::DocumentElement)).then(|| Rect::new(origin, size))
     }
 
     /// The measured size of the paragraph `id` establishes.
@@ -967,6 +929,148 @@ impl<T> Document<T> {
     #[doc(hidden)]
     pub fn invalidate_layout_for_testing(&mut self, id: crate::NodeId) {
         self.invalidate_layout(id);
+    }
+}
+
+/// A box's containing-block chain, walked from its box parent up to the
+/// document element: every box above it, each flagged with whether it is on
+/// the chain. [`Document::bounding_client_rect`] and the intersection
+/// geometry ([`crate::visual::intersection`]) both fold over it.
+///
+/// The walk visits *every* box ancestor, because each contributes its
+/// offset: layout records a location relative to the box parent. Only the
+/// ancestors **on** the chain contribute what a containing block does to
+/// the boxes it contains — their scroll offset, sticky and anchor shifts,
+/// clip and transform. An out-of-flow box neither moves with the scrollers
+/// between it and its containing block nor is clipped by them (CSS2
+/// §11.1.1), the rule the paint walk keys its flow contexts on.
+///
+/// Whether an ancestor is on the chain is decided by the position of the
+/// last box below it that was (the *escaping* box, the walked box first):
+/// `absolute` skips ancestors that establish no absolute containing block,
+/// `fixed` those that establish no fixed one. The position is the computed
+/// value, not hughie's parent-lowered one, as the paint walk reads it. A
+/// top-layer element (or `::backdrop`) is placed against the initial
+/// containing block: no box above it is on its chain, nor on its
+/// descendants' past it.
+///
+/// [`ContainingBlockChain::end`] answers how the walk stopped, once it has.
+pub(crate) struct ContainingBlockChain<'a, T> {
+    document: &'a Document<T>,
+    current: &'a crate::tree::node::Node<T>,
+    /// The last box the walk stood on: the box itself, then each ancestor.
+    top: crate::NodeId,
+    /// The position the escaping box was keyed on.
+    escape: PositionProperty,
+    /// A top-layer box was passed: nothing above is on the chain.
+    escaped: bool,
+    end: Option<ChainEnd>,
+}
+
+/// One box above the walked one, as [`ContainingBlockChain`] yields it.
+pub(crate) struct ChainStep<'a, T> {
+    pub(crate) node: &'a crate::tree::node::Node<T>,
+    pub(crate) id: crate::NodeId,
+    pub(crate) style: StyleView<'a, T>,
+    /// Its rounded layout; `location` is relative to its own box parent.
+    pub(crate) layout: &'a Layout,
+    /// Whether it is on the walked box's containing-block chain.
+    pub(crate) on_chain: bool,
+}
+
+/// How a [`ContainingBlockChain`] stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChainEnd {
+    /// It ran off the top of the document element: the box is in the
+    /// document, and the walk's sum is in viewport coordinates.
+    DocumentElement,
+    /// It ran off the top of a subtree that is not the document's: the box
+    /// is detached, and its coordinates are relative to nothing.
+    Detached,
+    /// An ancestor is `display: none`, or has no rounded layout: nothing
+    /// under it was laid out, so whatever geometry the box still carries is
+    /// from before.
+    Hidden,
+}
+
+impl<'a, T> ContainingBlockChain<'a, T> {
+    /// The chain above `node`, whose own computed style is `style`.
+    pub(crate) fn new(
+        document: &'a Document<T>,
+        node: &'a crate::tree::node::Node<T>,
+        style: &ComputedValues,
+    ) -> Self {
+        let id = node.id();
+        Self {
+            document,
+            current: node,
+            top: id,
+            escape: *style.get_box().get_position(),
+            escaped: document.arenas().top_layer().places_against_viewport(id),
+            end: None,
+        }
+    }
+
+    /// How the walk stopped; `None` while it has not.
+    pub(crate) fn end(&self) -> Option<ChainEnd> {
+        self.end
+    }
+}
+
+impl<'a, T> Iterator for ContainingBlockChain<'a, T> {
+    type Item = ChainStep<'a, T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.end.is_some() {
+            return None;
+        }
+        // `box_parent` skips `display: contents` ancestors, which hold a
+        // zero layout and contribute no offset, and stops above the document
+        // element — the node the paint order itself is rooted at.
+        let Some(ancestor) = box_parent(self.current) else {
+            self.end = Some(if self.top == DOCUMENT_ELEMENT_NODE_ID {
+                ChainEnd::DocumentElement
+            } else {
+                ChainEnd::Detached
+            });
+            return None;
+        };
+        let style = StyleView::of(ancestor);
+        if display_mode(style.display()) == DisplayMode::None {
+            self.end = Some(ChainEnd::Hidden);
+            return None;
+        }
+        let id = ancestor.id();
+        let Some(layout) = self.document.rounded_layout(id) else {
+            self.end = Some(ChainEnd::Hidden);
+            return None;
+        };
+        let on_chain = !self.escaped
+            && match self.escape {
+                PositionProperty::Absolute => {
+                    establishes_absolute_containing_block(ancestor, style.values())
+                }
+                PositionProperty::Fixed => {
+                    establishes_fixed_containing_block(ancestor, style.values())
+                }
+                PositionProperty::Static
+                | PositionProperty::Relative
+                | PositionProperty::Sticky => true,
+            };
+        if on_chain {
+            self.escape = *style.values().get_box().get_position();
+        }
+        let top_layer = self.document.arenas().top_layer();
+        self.escaped |= top_layer.places_against_viewport(id);
+        self.current = ancestor;
+        self.top = id;
+        Some(ChainStep {
+            node: ancestor,
+            id,
+            style,
+            layout,
+            on_chain,
+        })
     }
 }
 

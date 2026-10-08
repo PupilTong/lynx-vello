@@ -1348,14 +1348,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         if clipped.x || clipped.y {
             let (rect, radii) = {
                 let layout = self.rounded(node);
-                let padding_box = Rect::new(
-                    Point2D::new(layout.border.left, layout.border.top),
-                    Size2D::new(
-                        (layout.size.width - layout.border.horizontal_sum()).max(0.0),
-                        (layout.size.height - layout.border.vertical_sum()).max(0.0),
-                    ),
-                );
-                let rect = unclipped_axes_unbounded(padding_box, clipped);
+                let rect = unclipped_axes_unbounded(padding_box(layout), clipped);
                 let radii = if clipped.x && clipped.y {
                     let outer = resolve_corner_radii(
                         style,
@@ -1460,11 +1453,12 @@ fn member_clip_contexts(position: PositionProperty, ctx: ClipContexts) -> ClipCo
     }
 }
 
-/// Paint containment clips both axes. `node` is threaded in for the same
-/// reason [`stacking::establishes_stacking_context`] takes one: the
+/// The axes `node` clips its contents on: each axis whose `overflow` is not
+/// `visible`, and both under paint containment. `node` is threaded in for the
+/// same reason [`stacking::establishes_stacking_context`] takes one: the
 /// `skips_contents` answer must come from one place, even where — as here,
 /// which reads only `PAINT` — it cannot change the result.
-fn clipped_axes<T>(node: &Node<T>, style: &ComputedValues) -> ScrollAxes {
+pub(super) fn clipped_axes<T>(node: &Node<T>, style: &ComputedValues) -> ScrollAxes {
     if effective_containment(
         *style.get_contain(),
         *style.get_content_visibility(),
@@ -1481,7 +1475,21 @@ fn clipped_axes<T>(node: &Node<T>, style: &ComputedValues) -> ScrollAxes {
     }
 }
 
-fn unclipped_axes_unbounded(rect: Rect<f32>, clipped: ScrollAxes) -> Rect<f32> {
+/// The padding box of a laid-out box, in its own border-box coordinates:
+/// the rect an `overflow` clip (and an element intersection root) clips to.
+pub(super) fn padding_box(layout: &Layout) -> Rect<f32> {
+    Rect::new(
+        Point2D::new(layout.border.left, layout.border.top),
+        Size2D::new(
+            (layout.size.width - layout.border.horizontal_sum()).max(0.0),
+            (layout.size.height - layout.border.vertical_sum()).max(0.0),
+        ),
+    )
+}
+
+/// `rect` on the axes `clipped` names, and an unbounded strip on the others:
+/// a one-axis clip clips only that axis.
+pub(super) fn unclipped_axes_unbounded(rect: Rect<f32>, clipped: ScrollAxes) -> Rect<f32> {
     const UNBOUNDED: f32 = 1.0e7;
     let mut rect = rect;
     if !clipped.x {

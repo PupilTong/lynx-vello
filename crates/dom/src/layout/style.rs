@@ -253,7 +253,9 @@ impl<'dom, T> StyleView<'dom, T> {
         Self { node, style }
     }
 
-    pub(crate) fn values(&self) -> &ComputedValues {
+    /// The computed values, borrowed for as long as the view's own borrow
+    /// of the document, so a walk can keep them past the view.
+    pub(crate) fn values(&self) -> &'dom ComputedValues {
         self.style
     }
 }

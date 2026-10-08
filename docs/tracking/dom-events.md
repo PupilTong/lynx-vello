@@ -168,7 +168,7 @@ Contrary to the initial "genuinely absent" hypothesis, Lynx **does** have a full
 
 **`bubbles` is a recorded choice, not the spec's.** The spec is silent on propagation: it defines the interface and the firing condition and says nothing about `bubbles`, `composed` or `cancelable`, which leaves DOM's "fire an event" defaults (all false) as the literal reading. Implementations disagree — Chromium bubbles, WebKit and Gecko do not — and [w3c/csswg-drafts#11310](https://github.com/w3c/csswg-drafts/issues/11310) is open with no resolution. This engine **bubbles** (a user ruling, matching Chromium, the browser ReactLynx apps are compiled against), is **not composed** (the spec names no composed flag, so the path stops at the shadow root above the target), and is **not cancelable** (nothing this engine dispatches is).
 
-**Related §4.5 behavior not implemented here**, each for want of the feature it is about: `IntersectionObserver` and `ResizeObserver` have no implementation to make skipped contents invisible to, and the last-remembered size (css-sizing-4) is a separate pending piece.
+**Related §4.5 behavior.** The Intersection Observer primitive (`crates/dom/src/visual/intersection/`, Rust-only since 2026-10-08) treats skipped contents as never intersecting: a target under a skipping ancestor is not rendered, so it reports zero rects and one leave entry. `ResizeObserver` has no implementation to make skipped contents invisible to, and the last-remembered size (css-sizing-4) is a separate pending piece.
 
 ---
 

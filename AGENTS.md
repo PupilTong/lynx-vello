@@ -299,9 +299,10 @@ document's animation clock to the painter's, then one synchronous operation
 under the borrows of the shared runtime and the realm, and then that
 operation's epilogue. The epilogue is one function;
 what only one role has is a hook of that owner's `RealmOwner` impl at a fixed
-step. For a page the order is: the timers that came due, the commit (and the
-content-visibility and component-event deliveries it posts as entries of their
-own), the boot report once, the frame-post acknowledgement, the module requests
+step. For a page the order is: the timers that came due, the commit — then the
+intersection observations that commit or an adopted scroll moved, and the
+intersection, content-visibility and component-event deliveries it posts as
+entries of their own — the boot report once, the frame-post acknowledgement, the module requests
 the operation left, the future settles, the `@font-face` loads, the next timer
 deadline, and the checkpoint generation as of this entry. `Settles::settle` is
 the epilogue alone, for a wake carrying no operation. What a failure is
@@ -1578,6 +1579,22 @@ anywhere in the realm, `listenerNameClosed(name)` for the removal of its last,
 the count behind them kept in the realm, including the registrations a
 collected handle takes with it, which its `FinalizationRegistry` record closes.
 
+A second engine-decided path is the **W3C IntersectionObserver primitive**
+(`crates/dom/src/visual/intersection/`, user-directed 2026-10-08, Rust-only:
+no `IntersectionObserver` global and no `lynx.createIntersectionObserver`
+yet). The page's epilogue runs `Document::update_intersection_observations`
+right after its commit — whether or not that commit built a frame, because a
+scroll adopted inside the encode window commits nothing and still moves every
+answer — and, when a registration crossed a threshold, posts one fresh entry
+whose job is `take_intersection_notifications` and routing: an observer owned
+by an element is delivered through `deliver_intersections_to_element` to its
+`CustomElement::intersections_changed` hook, one reaction scope per call; a
+`Host`-owned observer has no consumer in this runtime yet (the MTS binding's
+seam). The update is the spec's §3.2.10 pass — threshold index and
+`isIntersecting` compared with the registration's previous pair — over
+transform-aware, clip-aware geometry; see `docs/dom-architecture.md`
+"Intersection observations".
+
 `__SetCSSId` is a sink rather than an implementation: it names the author-CSS
 scope an element cascades in, and no layer lowers a decoded `StyleInfo` into
 **scoped** author rules yet (ingestion has landed but mounts every fragment
@@ -2677,6 +2694,23 @@ Rulings and limits to know before touching it:
   differently (user ruling): Auto and Hint popovers are refused rather than
   shown, `beforetoggle`/`toggle` are the embedder's to fire, and no script
   reaches a popover (`docs/style-assumptions.md` §31).
+- A W3C **IntersectionObserver primitive** (`crates/dom/src/visual/intersection/`,
+  user-directed 2026-10-08, Rust-only): observers carry an owner tag
+  (`Element(node)`, a constructed custom element the observer is dropped
+  with, or `Host`), an implicit or element root, a `rootMargin`, sorted
+  thresholds and ordered targets. `update_intersection_observations(time)`
+  is §3.2.10 over the last layout and the live scroll offsets — run by the
+  host after each commit or adopted scroll, gated by a stale bit `render`, a
+  moved `scroll_to` and `observe` set — and `take_intersection_notifications`
+  hands the queued entries out in creation order for the host to route;
+  `deliver_intersections_to_element` calls `CustomElement::intersections_changed`
+  in its own reaction scope. Geometry includes transforms (the painter's
+  `ContextMatrix`), clips through every on-chain overflow-clipping ancestor's
+  padding box edge-inclusively (Chromium's `isIntersecting`), resolves
+  `rootMargin` percentages by height/width, and reports skipped contents as
+  never intersecting; `bounding_client_rect` keeps its transform-free walk.
+  A page without observers pays one `is_empty` per freed node and one bool
+  per render, moved scroll and epilogue.
 - Stylo's per-element style data and its traversal/invalidation flags live
   inline on `Node` (bench-defended 2026-08-03: no traversal regression, a
   measurably faster no-op-commit fast path).

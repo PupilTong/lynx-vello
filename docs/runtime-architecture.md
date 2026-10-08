@@ -662,7 +662,10 @@ due timers first, because whatever just ran may have armed or
 cleared one and its mutation should ride the same frame (the page's hook also
 ends the batch those callbacks ran, which runs the collection their removals
 may have made due); the commit next, so the frame exists before anything
-implying it; then the two batches of engine-decided events the entry may have
+implying it; then the intersection observations that commit — or a scroll
+adopted inside the encode window, which commits nothing — moved, updated here
+and, when a threshold was crossed, posted as one fresh entry; then the two
+batches of engine-decided events the entry may have
 left owing — the `contentvisibilityautostatechange` events that commit decided,
 and the component events the entry produced (an `<image>`'s `load`/`error`, a
 `<dialog>`'s `cancel`/`close`, an overlay's `showoverlay`/`dismissoverlay`),
@@ -671,7 +674,7 @@ mutation gets a commit of its own — the boot report, the
 frame-post acknowledgement, the module requests the operation left other than
 the MTS entry's own, the futures it asked to settle, the `@font-face` loads its
 sheets declared, the next timer deadline republished only when it moved, and
-finally the checkpoint generation as of this entry. The commit and the two
+finally the checkpoint generation as of this entry. The commit, the observation update and the three
 posts are the page's `after_timers` hook, `ScriptFinished` its `on_booted`, the
 acknowledgement its `after_boot` and the font loads its `after_settles`.
 `Settles::settle` is the epilogue alone, for a wake that carries no operation

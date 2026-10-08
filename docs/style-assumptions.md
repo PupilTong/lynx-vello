@@ -1555,9 +1555,10 @@ and §D.16 with what the wire format actually permits.)*
       only `direction` exists, and every logical keyword maps through
       `horizontal-tb`. Fragmentation and multicol (no such boxes).
       Transforms in the anchor box geometry (§2's bounding-box rule): the
-      layout box is the anchor box. CSSOM (§8), and `IntersectionObserver`/
-      `ResizeObserver` as APIs (the recording moments they time are internal
-      here). CSS `zoom`, `ident()` (not in the fork), container queries.
+      layout box is the anchor box. CSSOM (§8), and `ResizeObserver` as an
+      API (`IntersectionObserver` is a Rust primitive since §32, with no
+      script surface; the recording moments both time are internal here).
+      CSS `zoom`, `ident()` (not in the fork), container queries.
     - **Approximated or not done (engine side).** The containing block's
       direction for a box whose containing block is the initial one, and
       for a `<text>` block's own out-of-flow children, is the box's own
@@ -1962,6 +1963,43 @@ and §D.16 with what the wire format actually permits.)*
         `overlay` property with pending removals: none exists here, and a
         browser removes a popover at once when `overlay` is not
         transitioned, the only kind this engine can express.
+
+32. **The Intersection Observer primitive (user-directed, 2026-10-08).**
+    Bucket 1: web-core backs `lynx.createIntersectionObserver` with the
+    browser's W3C `IntersectionObserver`
+    (`web-core/ts/client/mainthread/IntersectionObserverService.ts`), and
+    native Lynx re-implements the same rect/threshold algorithm per platform
+    with a 50 ms poll. The primitive is the spec; the Lynx API shape is a
+    bucket-2 adapter for a later change.
+    - **Implemented, Rust-only.** `crates/dom/src/visual/intersection/`
+      (`docs/dom-architecture.md` "Intersection observations"): the
+      registry, §3.2.10's update after each commit or adopted scroll,
+      §3.2.7's geometry, and delivery as a posted task routed by owner —
+      `Element` to `CustomElement::intersections_changed`, `Host` reserved
+      for the realm binding. No script surface: neither an
+      `IntersectionObserver` global nor `lynx.createIntersectionObserver`
+      exists yet.
+    - **Rulings.** Geometry includes transforms (the painter's own matrix),
+      as a browser's does, while `invoke('boundingClientRect')` keeps its
+      transform-free engine walk (`docs/tracking/deviations.md`).
+      `isIntersecting` is Chromium's: edge-inclusive intersection through
+      every clipping ancestor and the root, not the spec's literal
+      targetRect-against-rootBounds (which would call a target clipped away
+      by an intermediate `overflow: hidden` intersecting). `rootMargin`
+      percentages resolve top/bottom against the root rect's height and
+      left/right against its width — Chromium, WebKit, Gecko and WPT
+      `root-margin.html` — where the spec's sentence says width for all
+      four. An element root's rect is its padding box when either axis
+      clips (Chromium: both); the two differ only for an
+      `overflow: clip visible` root with a border.
+    - **Out, with the reason.** `clip-path`, masks and rounded corners (no
+      clip shapes in the frame either), `overflow-clip-margin` (the frame
+      clips to the padding box), `scrollMargin`, `delay`/`trackVisibility`
+      and so `isVisible` (v2, no occlusion model here), a
+      compositor-exported transform curve mid-flight (the geometry is the
+      main thread's last cascade), and `position-visibility` (a hidden box
+      stays geometric, as for `bounding_client_rect`). `ResizeObserver`
+      stays out.
 
 ## Deliberately still open (known non-decisions)
 
