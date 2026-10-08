@@ -15,25 +15,41 @@
 // reports the exception and moves on to the next listener, which is what this
 // module does. *Where* it is reported is realm-specific, and this module can
 // import nothing realm-specific, so each runtime installs its own reporter as
-// it evaluates (`installExceptionReporter`).
+// it evaluates (`installExceptionReporter`), and `reportException` hands an
+// exception to it for any shared module that isolates callbacks the same way.
 
 const eventTargetListeners = Symbol("eventTargetListeners");
 
 /**
- * Reports a listener exception the way the realm reports an uncaught one.
+ * The realm's reporter for an exception it catches and does not propagate.
  *
  * Until a realm installs its own, rethrowing is all this can do: reporting is
  * the realm's, and a swallowed exception with nowhere to go is worse than the
  * pre-isolation behavior. Both runtimes install one as they evaluate.
  */
-let reportException: (error: unknown) => void = (error) => {
+let installedReporter: (error: unknown) => void = (error) => {
   throw error;
 };
 
 export function installExceptionReporter(
   report: (error: unknown) => void,
 ): undefined {
-  reportException = report;
+  installedReporter = report;
+  return undefined;
+}
+
+/**
+ * Reports an exception the way the realm reports an uncaught one, through
+ * the reporter its runtime installed: `_ReportError` on MTS, the global
+ * scope's `reportError` on a worker.
+ *
+ * Exported for the other shared modules that run callbacks on the realm's
+ * behalf and isolate them the way a listener is isolated, such as
+ * `bobcat:animation-frame`. The reporter is read at the call, so a module
+ * that imports this reports through whichever one is installed then.
+ */
+export function reportException(error: unknown): undefined {
+  installedReporter(error);
   return undefined;
 }
 

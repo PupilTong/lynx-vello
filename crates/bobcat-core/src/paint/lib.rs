@@ -1650,8 +1650,10 @@ impl Painter {
         if seat.commands.is_closed() {
             return None;
         }
-        // Behind every command already sent: main applies the post only
-        // once it has applied them.
+        // Behind every command the seat's sender has already sent: main
+        // applies the post only once it has applied them. A native module's
+        // answer to the MTS realm is not sent through it, so the post waits
+        // for none.
         let fence = seat.commands.sent();
         let post = (main_ticks_due || always).then(|| {
             self.begin_frames_sent += 1;

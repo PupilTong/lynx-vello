@@ -10,6 +10,10 @@
 
 import { beforeEach, describe, expect, it, rstest } from "@rstest/core";
 import type * as elementPapi from "../src/element-papi.ts";
+import * as record from "../src/record.ts";
+
+// The reader of every record the mock answers with, as the realm has it.
+rstest.mockRequire("bobcat:record", () => record);
 
 rstest.mockRequire("bobcat-internal:host", () => {
   const native = globalThis.__bobcatTestHost;
@@ -519,7 +523,7 @@ describe("installation", () => {
         "__BobcatComputedStyleMap",
         "CSSStyleValue",
         // Not a PAPI member: the lifecycle export the boot module
-        // constructs, which no entry preamble imports.
+        // constructs, which `MTS_CHUNK_PREAMBLE` does not import.
         "Document",
       ].sort(),
     );

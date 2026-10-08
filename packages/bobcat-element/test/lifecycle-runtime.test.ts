@@ -6,11 +6,18 @@ import type * as mtsRuntime from "../src/main-thread-runtime.ts";
 import type { Worker } from "../src/worker.ts";
 import * as selectorQuery from "../src/selector-query.ts";
 import type * as lynxModules from "../src/lynx-modules.ts";
+import type * as animationFrame from "../src/animation-frame.ts";
+import * as systemInfo from "../src/system-info.ts";
 // Answered lazily, as `bobcat:worker` is in native-modules.test.ts: the modules
-// table imports `bobcat-internal:host`, whose replacement below is built out of
-// this file's own bindings, so it may not be required above them.
+// table and the animation-frame module import `bobcat-internal:host`, whose
+// replacement below is built out of this file's own bindings, so neither may
+// be required above them. Both runtimes import the one animation-frame
+// instance here, where each realm has its own.
 let moduleTable: typeof lynxModules;
+let animationFrames: typeof animationFrame;
 rstest.mockRequire("bobcat:lynx-modules", () => moduleTable);
+rstest.mockRequire("bobcat:animation-frame", () => animationFrames);
+rstest.mockRequire("bobcat:system-info", () => systemInfo);
 import * as globalEventEmitter from "../src/global-event-emitter.ts";
 rstest.mockRequire("bobcat:global-event-emitter", () => globalEventEmitter);
 rstest.mockRequire("bobcat:selector-query", () => selectorQuery);
@@ -19,10 +26,15 @@ rstest.mockRequire("bobcat:element", () => ({ __BobcatQueryNodes: queryNodes }))
 
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
 rstest.mockRequire("bobcat:cross-thread-context", () => crossThreadContext);
+// The BTS runtime imports the worker realm's global scope for its effect,
+// which this suite stands in for on the global itself.
+rstest.mockRequire("bobcat:worker", () => ({}));
 // This suite drives no native module; the BTS runtime only needs the
 // transport to exist, because `callNativeModule` is what its method wrappers
 // close over.
-rstest.mockRequire("bobcat:worker", () => ({ callNativeModule: rstest.fn() }));
+rstest.mockRequire("bobcat:native-modules", () => ({ callNativeModule: rstest.fn() }));
+import * as record from "../src/record.ts";
+rstest.mockRequire("bobcat:record", () => record);
 rstest.mockRequire("bobcat:timers", () => ({}));
 import type * as sectionUrl from "../src/section-url.ts";
 import type * as bundleFetch from "../src/bundle-fetch.ts";
@@ -45,7 +57,9 @@ const preloadStyleSheet = rstest.fn();
 const adoptStyleSheet = rstest.fn();
 const reportedErrors = rstest.fn();
 const consoleMessages = rstest.fn();
-// The runtime reads the view's page data as it evaluates; this view has none.
+// The runtime reads the view's page data and native module table as it
+// evaluates; this view has no page data and one module, `Echo`, declaring one
+// method, `ping`.
 rstest.mockRequire("bobcat-internal:host", () => ({
   requestScriptFrame,
   reportScriptError: reportedErrors,
@@ -54,7 +68,7 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   initialProcessor: () => "",
   initData: () => undefined,
   globalProps: () => undefined,
-  nativeModuleTable: () => "",
+  nativeModuleTable: () => "4:Echo4:ping",
   // The two members every synchronous load is written over, stood in for as
   // in lynx-modules.test.ts: Node's own `URL`, and `new Function` for the
   // wrapper the engine compiles a body in.
@@ -159,6 +173,7 @@ beforeAll(async () => {
   futures = await import("../src/future.ts");
   bundleFetches = await import("../src/bundle-fetch.ts");
   moduleTable = await import("../src/lynx-modules.ts");
+  animationFrames = await import("../src/animation-frame.ts");
   mts = await import("../src/main-thread-runtime.ts");
   mts.__BobcatInitEntry("https://example.test/page/main.js?version=2#entry");
   scope.emptyLepusMethod = () => undefined;
@@ -279,7 +294,7 @@ describe("MTS/BTS lifecycle runtime", () => {
     expect(ran).toHaveLength(3);
     expect(ran[0]).toEqual([mts.__Card__, mts.lynx, mts.__LoadStyleSheet, queryNodes]);
     expect("chunkLocal" in scope).toBe(false);
-    // Every binding the entry preamble imports is a parameter, PAPI included.
+    // Every binding `MTS_CHUNK_PREAMBLE` imports is a parameter, PAPI included.
     const parameters = moduleLoads[0]![1].split(", ");
     expect(parameters).toEqual(expect.arrayContaining([
       "__BobcatQueryNodes", "__Card__", "lynx", "console", "SystemInfo",
@@ -348,41 +363,16 @@ describe("MTS/BTS lifecycle runtime", () => {
     delete scope.reportError;
   });
 
-  it("runs MTS frames with cancellation, nested requests and errors kept on their own frame", () => {
-    requestScriptFrame.mockClear();
-    const calls: [string, number][] = [];
-    let cancelled = 0;
-    mts.lynx.requestAnimationFrame(time => {
-      calls.push(["first", time]);
-      mts.lynx.cancelAnimationFrame(cancelled);
-      mts.lynx.requestAnimationFrame(time => calls.push(["nested", time]));
-      throw undefined;
-    });
-    cancelled = mts.lynx.requestAnimationFrame(() => { throw Error("cancelled callback ran"); });
-    mts.lynx.requestAnimationFrame(time => calls.push(["third", time]));
-    expect(requestScriptFrame.mock.calls).toEqual([[true]]);
-    mts.__BobcatBeginFrame(1250);
-    expect(calls).toEqual([["first", 1250], ["third", 1250]]);
-    expect(reportedErrors).toHaveBeenLastCalledWith("error", "undefined");
-    expect(requestScriptFrame).toHaveBeenLastCalledWith(true);
-    mts.__BobcatBeginFrame(1500);
-    expect(calls).toEqual([["first", 1250], ["third", 1250], ["nested", 1500]]);
-    expect(requestScriptFrame.mock.calls).toEqual([[true], [true]]);
-  });
-
-  it("coalesces each realm's frame demand and withdraws it when the last callback is cancelled", async () => {
+  it("asks the host for a frame through requestScriptFrame from both runtimes' lynx", async () => {
+    // What each frame does is `bobcat:animation-frame`'s, and
+    // animation-frame.test.ts pins it; this pins that both runtimes hand
+    // `lynx.requestAnimationFrame` to it.
     for (const runtime of [mts, await import("../src/background-thread-runtime.ts")]) {
+      expect(runtime.lynx.requestAnimationFrame).toBe(animationFrames.requestAnimationFrame);
+      expect(runtime.lynx.cancelAnimationFrame).toBe(animationFrames.cancelAnimationFrame);
       requestScriptFrame.mockClear();
-      const callback = rstest.fn();
-      const first = runtime.lynx.requestAnimationFrame(callback);
-      const last = runtime.lynx.requestAnimationFrame(callback);
-      expect(requestScriptFrame.mock.calls).toEqual([[true]]);
-      runtime.lynx.cancelAnimationFrame(first);
-      expect(requestScriptFrame.mock.calls).toEqual([[true]]);
-      runtime.lynx.cancelAnimationFrame(last);
-      expect(requestScriptFrame.mock.calls).toEqual([[true], [false]]);
-      runtime.__BobcatBeginFrame(1750);
-      expect(callback).not.toHaveBeenCalled();
+      const id = runtime.lynx.requestAnimationFrame(() => undefined);
+      runtime.lynx.cancelAnimationFrame(id);
       expect(requestScriptFrame.mock.calls).toEqual([[true], [false]]);
     }
   });
@@ -399,8 +389,21 @@ describe("MTS/BTS lifecycle runtime", () => {
     mts.lynx.getJSContext().dispatchEvent(contextEvent);
     mts.__BobcatPublishEvent("component", "second", { value: 3 });
     contextEvent.data = 2;
-    mts.__BobcatConnectBackground(worker as unknown as Worker, {seed: 1});
-    expect(toBackground.shift()).toMatchObject({bobcat: "runtime", method: "initialize", updateData: {seed: 1}});
+    mts.__BobcatConnectBackground(worker as unknown as Worker, {seed: 1},
+      "https://example.test/page/background.js");
+    // Everything the BTS starts with: the page's data, the entry boot named,
+    // this realm's own `SystemInfo` and the host's module table, unread.
+    const initialize = toBackground.shift()!;
+    expect(initialize).toMatchObject({
+      bobcat: "runtime", method: "initialize", updateData: {seed: 1},
+      entry: "https://example.test/page/background.js",
+      nativeModuleTable: "4:Echo4:ping",
+    });
+    expect(initialize["systemInfo"]).toEqual(mts.SystemInfo);
+    expect(Object.keys(initialize).sort()).toEqual([
+      "bobcat", "cacheData", "entry", "globalProps", "initData", "method",
+      "nativeModuleTable", "processorName", "systemInfo", "updateData",
+    ]);
     expect(toBackground.map((message) => message.method ?? message.type)).toEqual([
       "publishEvent", "custom", "publicComponentEvent",
     ]);
@@ -1136,7 +1139,7 @@ it("reports a BTS entry that throws and keeps taking messages after it", async (
   // The entry's rejection must not stop the message behind it: both are
   // delivered before either settles, as the Worker queue delivers them.
   const initializing = receiveInBackground({data: {
-    bobcat: "runtime", method: "initialize", updateData: {}, systemInfo: {},
+    bobcat: "runtime", method: "initialize", updateData: {},
   }});
   const delivering = receiveInBackground({data: {
     bobcat: "runtime", method: "sendGlobalEvent", name: "after-failure", args: [1],

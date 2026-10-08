@@ -67,8 +67,9 @@ importing its entry, its entry threw, or it ended — is no part of that, so a
 BTS entry whose top-level await never settles does not keep the view from
 becoming ready.
 A BTS entry that throws calls the worker realm's `reportError`, so it reaches
-the `Worker`'s `error` event and a nonfatal `WorkerThrew` from
-`ScriptSource::Background` like any other worker script; BTS stays up and
+the `Worker`'s `error` event and a nonfatal `WorkerThrew` from its
+`ScriptSource`, the worker whose URL is `bobcat:bts`, like any other worker
+script; BTS stays up and
 still takes messages. An animation-frame, `queueMicrotask` or
 `lynx.fetchBundle` callback of the BTS that throws is reported the same way.
 A BTS that ends without being told to — its realm could not be built, or the
@@ -106,23 +107,29 @@ and column as primitive binding arguments and creates the Worker error event
 in JS; Rust builds no diagnostic envelope of its own.
 
 Every realm has `console.log/info/debug/warn/error` and `lynx.reportError`,
-and they are one module, `bobcat:diagnostics`, in all three realm kinds. MTS
-entries receive `console` and `_ReportError` through their injected ESM
-import. The BTS exports `console` from `bobcat:bts-runtime`, where a raw BTS
-entry imports it and a bundle body's preamble binds it. A worker realm, the
-BTS included, also has `console` on its global, installed by `bobcat:worker`
-as WebIDL installs a namespace: writable, configurable and not enumerable. It
-is the same object the BTS module exports. A plain `Worker` has no
-`requestAnimationFrame`; only `bobcat:bts-runtime` has one, as an export and a
-`lynx` member. The MTS realm adds no global `console`.
+and they are one module, `bobcat:diagnostics`, in every realm. A
+card's MTS entry receives `console` and `_ReportError` through the ESM import
+`bobcat-source` prepends to its body (`MTS_CHUNK_PREAMBLE`). The BTS exports
+`console` from `bobcat:bts-runtime`, where a raw BTS entry imports it and a
+card body's `BTS_CHUNK_PREAMBLE` binds it. A worker realm whose
+script imports `bobcat:worker` — the BTS's `bobcat:bts` does — also has
+`console` on its global, installed by that module as WebIDL installs a
+namespace: writable, configurable and not enumerable. The engine itself
+installs it in no realm. It is the same object the BTS module exports.
+A plain `Worker` has no global `requestAnimationFrame`; it imports one from
+`bobcat:animation-frame`, the module `bobcat:bts-runtime` also takes its
+export and `lynx` member from. The MTS realm adds no global `console`.
 
 The module is written over two members every realm's core has under
 `bobcat-internal:host`, `reportScriptError(level, message)` and
 `logScriptMessage(level, message)`. Each sends one
 `EngineEvent::ScriptReported` or `ConsoleMessage` to the view's host through
 the realm's own `HostOutbox`, carrying the realm's `ScriptSource` — `Main`,
-`Background`, or `Worker(WorkerId)` for a `Worker` the MTS script
-constructed — from whichever thread the realm is on. No realm relays another
+or `Worker { id, url }` for a worker, the worker's id and its script URL —
+from whichever thread the realm is on. The BTS is the worker whose `url` is
+`bobcat:bts`: Rust has no check that tells it apart, and an embedder that
+needs to know compares the URL. A source prints as `main` or as
+`worker <id> <url>`, for example `worker 1 bobcat:bts`. No realm relays another
 realm's diagnostics: a BTS or `Worker` diagnostic reaches the host while MTS is
 busy, and it is not a Worker message the MTS realm dispatches. One realm's
 diagnostics arrive in the order it made them; two realms' have no order
@@ -178,7 +185,7 @@ tests cover readiness observed through `pump()`, startup failure, an entry
 that throws and still becomes ready, early-event refusal without replay, and
 refusal after cancellation. Page-owner and runtime tests verify that
 MTS boot alone settles readiness, and that a BTS failure reports one
-`WorkerEnded` from `ScriptSource::Background` and still publishes
+`WorkerEnded` named by the BTS's id and the URL `bobcat:bts` and still publishes
 `ScriptFinished`, without a `StartupFailed`, a `WorkerThrew` or a listener
 failure. Runtime tests fix which of the two worker events a throw and an end
 report, the source each names, and that a worker stopped with `terminate()`

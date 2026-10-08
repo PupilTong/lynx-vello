@@ -325,6 +325,10 @@ fn an_entry_that_throws_is_reported_and_the_view_still_becomes_ready() {
 #[test]
 fn only_fatal_events_end_the_view() {
     let error = || crate::threads::platform_script_error("failed".to_owned());
+    let background = || ScriptSource::Worker {
+        id: WorkerId::from(WorkerKey::new(1)),
+        url: "bobcat:bts".into(),
+    };
     let events = [
         (EngineEvent::ScriptFinished, false),
         (
@@ -337,14 +341,14 @@ fn only_fatal_events_end_the_view() {
         (EngineEvent::TimerFailed(error()), false),
         (
             EngineEvent::WorkerThrew {
-                source: ScriptSource::Background,
+                source: background(),
                 error: error(),
             },
             false,
         ),
         (
             EngineEvent::WorkerEnded {
-                source: ScriptSource::Background,
+                source: background(),
                 error: error(),
             },
             false,
@@ -353,7 +357,7 @@ fn only_fatal_events_end_the_view() {
         // the engine does nothing more for it than for the other levels.
         (
             EngineEvent::ScriptReported {
-                source: ScriptSource::Background,
+                source: background(),
                 level: "fatal".to_owned(),
                 message: "reported".to_owned(),
             },
@@ -371,4 +375,27 @@ fn only_fatal_events_end_the_view() {
     for (event, fatal) in events {
         assert_eq!(event.is_fatal(), fatal, "{event:?}");
     }
+}
+
+/// What an embedder prints a script event's source as: `main`, or `worker`
+/// with the worker's id and its script URL. The view's background thread is
+/// printed as the worker it is, at the URL `bobcat:bts`, and the id is what
+/// tells two workers over one URL apart.
+#[test]
+fn a_source_prints_as_main_or_as_a_workers_id_and_url() {
+    let worker = |key, url: &str| ScriptSource::Worker {
+        id: WorkerId::from(WorkerKey::new(key)),
+        url: url.into(),
+    };
+    assert_eq!(ScriptSource::Main.to_string(), "main");
+    assert_eq!(worker(1, "bobcat:bts").to_string(), "worker 1 bobcat:bts");
+    assert_eq!(
+        worker(4, "app:///nested/worker.js").to_string(),
+        "worker 4 app:///nested/worker.js"
+    );
+    assert_eq!(
+        worker(5, "app:///nested/worker.js").to_string(),
+        "worker 5 app:///nested/worker.js",
+        "a second worker over the same URL"
+    );
 }

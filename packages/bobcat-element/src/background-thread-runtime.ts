@@ -1,6 +1,11 @@
-import { callNativeModule } from "bobcat:worker";
-import { requestScriptFrame } from "bobcat-internal:host";
+// Imported for their effects, first: this module calls
+// `scope.addEventListener` and reads the timer globals as it is evaluated,
+// so the global scope and the timers are in place before it runs.
+import "bobcat:worker";
+import "bobcat:timers";
+import { callNativeModule } from "bobcat:native-modules";
 import type { WorkerGlobalScope } from "bobcat:worker";
+import { splitRecord } from "bobcat:record";
 import {
   type ContextEvent,
   createCrossThreadContext,
@@ -11,10 +16,12 @@ import { type BundleHandle, createBundleFetches } from "bobcat:bundle-fetch";
 import { GlobalEventEmitter } from "bobcat:global-event-emitter";
 import { console, reportError } from "bobcat:diagnostics";
 import type { TimerGlobals } from "bobcat:timers";
+import { cancelAnimationFrame, clearAnimationFrames, requestAnimationFrame } from "bobcat:animation-frame";
+import { createSystemInfo } from "bobcat:system-info";
 
 const timers = globalThis as unknown as TimerGlobals;
 
-// The bobcat:bts bootstrap and the BTS application's entry preamble import
+// The bobcat:bts bootstrap and every card body's `BTS_CHUNK_PREAMBLE` import
 // this runtime. Like MTS, lynx is a module binding, never a global property.
 // The bootstrap installs a message receiver, then returns so Worker messages
 // can initialize the runtime before the application entry is imported.
@@ -27,9 +34,11 @@ const emitter = new GlobalEventEmitter();
 const jsModules = new Map<string, unknown>([["GlobalEventEmitter", emitter]]);
 // The embedder's `NativeModule`s, as the objects a card calls: one property
 // per module the view was built with, filled in by `__BobcatInitializeBTS`
-// before the entry imports. A module the host does not have is `undefined`
-// — web-core's answer, a missing key on the object `createNativeModules`
-// builds, where native answers `null`.
+// out of the table the `initialize` message carries, before the entry
+// imports. A plain `Worker` is posted no `initialize`, so its object stays
+// empty. A module the host does not have is `undefined` — web-core's answer,
+// a missing key on the object `createNativeModules` builds, where native
+// answers `null`.
 //
 // The property name `nativeModuleProxy` stays although nothing is a Proxy any
 // more: it is the name ReactLynx reads (`nativeApp.nativeModuleProxy
@@ -38,11 +47,11 @@ const nativeModules: Record<string, object> = {};
 const app: {
   NativeModules: object;
   _apiList: object;
-  // Four names web-core's chunk preamble binds off the app object
+  // Names web-core's chunk wrapper passes off the app object
   // (`createBundleInitReturnObj`). Nothing in this realm ever sets one — a
   // card's `Card`/`Component` come from lynx-core, which this engine does not
-  // run — so each stays `undefined`, which is what the old wrapper's
-  // arguments carried too.
+  // run — so each stays `undefined`, and so does the export
+  // `BTS_CHUNK_PREAMBLE` imports it by.
   Card?: unknown;
   Component?: unknown;
   nativeAppId?: unknown;
@@ -79,18 +88,13 @@ const destructionRegistry = new FinalizationRegistry<() => unknown>(callback => 
 const callbacks: Map<number | undefined, (result: unknown) => void> =
   new Map();
 let nextCallbackId = 1;
-const animationCallbacks = new Map<number, (milliseconds: number) => void>();
-let nextAnimationId = 1;
 
 /**
  * What the main thread sends this realm: a runtime call, tagged
  * `bobcat: "runtime"`, or a Context event's public fields, which carry no tag.
  */
 type FromMainThread =
-  | ({ bobcat: "runtime"; method: "initialize" } & BackgroundData & {
-      systemInfo?: Record<string, unknown>;
-      nativeModules?: Record<string, string[]>;
-    })
+  | ({ bobcat: "runtime"; method: "initialize" } & InitializeOptions)
   | {
       bobcat: "runtime";
       method: "publishEvent" | "publicComponentEvent" | "updateGlobalProps" | "updateCardData" | "onAppReload" | "processCardConfig";
@@ -238,10 +242,15 @@ function noop() {
   return undefined;
 }
 
-export function __BobcatStartBTS(loadEntry: () => Promise<unknown>) {
+/**
+ * Arms this realm as the BTS: the first `initialize` message initializes it
+ * and then calls `loadEntry` with that message, which is where `bobcat:bts`
+ * reads the entry's URL from.
+ */
+export function __BobcatStartBTS(loadEntry: (options: InitializeOptions) => Promise<unknown>) {
   startBackground = async options => {
     __BobcatInitializeBTS(options);
-    await loadEntry();
+    await loadEntry(options);
   };
 }
 
@@ -307,8 +316,7 @@ function receiveMessage(message: FromMainThread): void | Promise<void> {
 }
 
 async function dispose() {
-  animationCallbacks.clear();
-  updateFrameRequest();
+  clearAnimationFrames();
   // `lynx.reportError`, not the global scope's. That one is reported when this
   // entry's checkpoint returns its rejection, after the `disposed` reply below
   // has been posted, and the main thread terminates this Worker on that reply,
@@ -322,37 +330,12 @@ async function dispose() {
   scope.postMessage({ bobcat: "runtime", method: "disposed" });
 }
 
-// The selected runtime target, independent of the compiler's minimum SDK.
-export let SystemInfo: Readonly<Record<string, unknown>> = Object.freeze({
-  platform: "headless", runtimeType: "quickjs", lynxSdkVersion: "4.1.0",
-});
-
-let frameRequested = false;
-function updateFrameRequest() {
-  const pending = animationCallbacks.size > 0;
-  if (pending === frameRequested) return;
-  frameRequested = pending;
-  requestScriptFrame(pending);
-}
-
-// Called while handling the painter's Vsync message. Callback IDs
-// and errors stay on BTS; no MTS message or acknowledgement participates.
-// A callback that throws is an uncaught exception of this worker realm, as it
-// is in a browser worker: the global scope's `reportError` reports it at the
-// parent `Worker` and to the embedder, and the frame's other callbacks run.
-export function __BobcatBeginFrame(milliseconds: number) {
-  frameRequested = false;
-  const ids = Array.from(animationCallbacks.keys());
-  for (const id of ids) {
-    const callback = animationCallbacks.get(id);
-    animationCallbacks.delete(id);
-    if (callback) {
-      try { callback(milliseconds); }
-      catch (error) { scope.reportError(error); }
-    }
-  }
-  updateFrameRequest();
-}
+// The runtime constants until `initialize` hands this realm the MTS realm's
+// own `SystemInfo`, screen included. A plain `Worker` that imports this module
+// is posted no `initialize`, and reports the constants alone. The raw BTS
+// environment has the same object as a global, beside this export and
+// `lynx.SystemInfo`.
+export let SystemInfo = createSystemInfo();
 
 // The realm's one console, which `bobcat:worker` also installs as the global
 // `console`: a raw BTS entry's import and a bundle body's preamble binding
@@ -373,17 +356,14 @@ export const lynx = {
       try { callback(); } catch (error) { scope.reportError(error); }
     });
   },
-  requestAnimationFrame(callback: (milliseconds: number) => void) {
-    if (typeof callback !== "function") throw new TypeError("requestAnimationFrame requires a function");
-    const id = nextAnimationId++;
-    animationCallbacks.set(id, callback);
-    updateFrameRequest();
-    return id;
-  },
-  cancelAnimationFrame(id: number) {
-    animationCallbacks.delete(id);
-    updateFrameRequest();
-  },
+  // `bobcat:animation-frame`'s, which runs them on this worker's vsync: IDs
+  // and errors stay on BTS, and no MTS message or acknowledgement takes part.
+  // A callback that throws is an uncaught exception of this worker realm, as
+  // it is in a browser worker: the global scope's `reportError` reports it at
+  // the parent `Worker` and to the embedder, and the frame's other callbacks
+  // run.
+  requestAnimationFrame,
+  cancelAnimationFrame,
   reload(value?: unknown, callback?: unknown) {
     // Native only parses object arguments. Primitives (including null) mean
     // an empty data table; arrays/functions do not produce a reload table.
@@ -454,10 +434,12 @@ export const lynxCoreInject = {tt: app};
 export const globDynamicComponentEntry = "__Card__";
 Object.assign(scope, {globDynamicComponentEntry});
 
-// The rest of web-core's chunk parameter list, as module exports: `PageSource`
-// prepends `BTS_CHUNK_PREAMBLE` to every bundle body it registers, and that
-// preamble imports these names from here. Each is the value the old wrapper's
-// argument list carried, so a body sees exactly what it saw before.
+// The rest of web-core's chunk parameter list, as module exports:
+// `bobcat-source` prepends `BTS_CHUNK_PREAMBLE` to every card body it
+// registers for this realm — a container's bodies and an XML page's
+// background-thread script — and that preamble imports these names from here.
+// Each is this realm's value for the parameter of that name web-core's chunk
+// wrapper passes (`createBundleInitReturnObj`).
 export const NativeModules = nativeModules;
 export const Card = app.Card;
 export const Component = app.Component;
@@ -468,8 +450,7 @@ export const setTimeout = lynx.setTimeout;
 export const setInterval = lynx.setInterval;
 export const clearTimeout = lynx.clearTimeout;
 export const clearInterval = lynx.clearInterval;
-export const requestAnimationFrame = lynx.requestAnimationFrame;
-export const cancelAnimationFrame = lynx.cancelAnimationFrame;
+export { requestAnimationFrame, cancelAnimationFrame };
 
 /**
  * One entry's bundle: the URL its template answered from, and nothing else.
@@ -485,6 +466,7 @@ export function __BobcatRegisterBundle(templateUrl?: string, entry?: string) {
   modules.registerTemplateUrl(templateUrl, entry);
 }
 
+/** The page's data, its global props and the processor name. */
 interface BackgroundData {
   initData?: unknown;
   updateData?: unknown;
@@ -494,13 +476,15 @@ interface BackgroundData {
 }
 
 /**
- * What the main thread opens this realm with: the page's data, the runtime
- * target, and the modules the embedder injected at `create_lynx_view`, as
- * `{name: methods}`.
+ * What the main thread's `initialize` message opens this realm with: the
+ * page's data, the BTS entry's URL — already absolute, `undefined` for a view
+ * that named none — the MTS realm's own `SystemInfo`, and the embedder's
+ * modules as the record the host wrote, two fields per module.
  */
 interface InitializeOptions extends BackgroundData {
+  entry?: string;
   systemInfo?: Record<string, unknown>;
-  nativeModules?: Record<string, string[]>;
+  nativeModuleTable?: string;
 }
 
 export function __BobcatInitializeBTS(options: InitializeOptions) {
@@ -508,18 +492,35 @@ export function __BobcatInitializeBTS(options: InitializeOptions) {
   app._params = { initData:params.initData ?? null, updateData:params.updateData, processorName:params.processorName ?? "", cacheData:params.cacheData ?? [] };
   lynx.__initData = Object.hasOwn(params, "updateData") ? params.updateData : params.initData;
   lynx.__globalProps = params.globalProps || {};
-  // Every declared method, and nothing else: a method a module did not
-  // declare is `undefined`, which is what native answers for one its module
-  // does not carry. Each returns `undefined` — a module answers through the
-  // callbacks among its arguments, never through a return value.
-  for (const [name, methods] of Object.entries(options.nativeModules ?? {})) {
-    nativeModules[name] = Object.fromEntries(methods.map(method =>
+  // Into the one object `NativeModules`, `app.NativeModules` and
+  // `nativeModuleProxy` all name.
+  Object.assign(nativeModules, nativeModulesFromTable(params.nativeModuleTable ?? ""));
+  SystemInfo = createSystemInfo(params.systemInfo);
+  lynx.SystemInfo = SystemInfo;
+  // Keep the raw BTS environment consistent with its module binding.
+  Object.assign(scope, { SystemInfo });
+}
+
+/**
+ * The `NativeModules` members out of the module table `initialize` carries,
+ * as the host wrote it: two record fields per module, its name and then its
+ * method names joined with commas.
+ *
+ * Every declared method, and nothing else: a method a module did not declare
+ * is `undefined`, which is what native answers for one its module does not
+ * carry. Each returns `undefined` — a module answers through the callbacks
+ * among its arguments, never through a return value.
+ */
+function nativeModulesFromTable(table: string): Record<string, object> {
+  const fields = splitRecord(table);
+  const modules: Record<string, object> = {};
+  for (let index = 0; index + 1 < fields.length; index += 2) {
+    const name = fields[index]!;
+    const methods = fields[index + 1]!;
+    modules[name] = Object.fromEntries((methods === "" ? [] : methods.split(",")).map(method =>
       [method, (...args: unknown[]) => callNativeModule(name, method, args)]));
   }
-  if (options.systemInfo) SystemInfo = Object.freeze({ ...SystemInfo, ...options.systemInfo });
-  lynx.SystemInfo = SystemInfo;
-  // Keep the raw BTS environment consistent with its module snapshot.
-  Object.assign(scope, { SystemInfo });
+  return modules;
 }
 
 __BobcatInitializeBTS({});

@@ -8,7 +8,7 @@ use bobcat_core::{
     PreparsedDeclaration, PreparsedRule, PreparsedStyleSheet, StyleThreads, ViewSources,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
-use bobcat_source::PageSource;
+use bobcat_source::{PageSource, mts_entry_source};
 
 /// The screen these tests' views report, as a host with no screen to measure
 /// names it. None of them reads `SystemInfo`.
@@ -102,7 +102,8 @@ async fn text_and_preparsed_sheets_keep_cascade_order() {
     resources
         .register(
             "app:///main.js",
-            r"
+            mts_entry_source(
+                r"
         globalThis.renderPage = () => {
             const page = __CreatePage('page', 0);
             const view = __CreateView(0);
@@ -110,6 +111,7 @@ async fn text_and_preparsed_sheets_keep_cascade_order() {
             __AppendElement(page, view);
         };
     ",
+            ),
             Some("text/javascript"),
         )
         .unwrap();
@@ -260,7 +262,8 @@ async fn a_base_named_after_construction_resolves_a_relative_source() {
     resources
         .register(
             "app:///nested/main.js",
-            r"
+            mts_entry_source(
+                r"
         globalThis.renderPage = () => {
             const page = __CreatePage('page', 0);
             const view = __CreateView(0);
@@ -269,6 +272,7 @@ async fn a_base_named_after_construction_resolves_a_relative_source() {
             __AppendElement(page, view);
         };
     ",
+            ),
             Some("text/javascript"),
         )
         .unwrap();
@@ -309,7 +313,7 @@ async fn workers_load_relative_to_entry_and_route_back_to_their_own_views() {
         (&first_resources, "blue", "app:///nested/first.js"),
         (&second_resources, "red", "app:///nested/second.js"),
     ] {
-        resources.register(entry, r"
+        resources.register(entry, mts_entry_source(r"
             import { Worker } from 'bobcat-internal';
             const page = __CreatePage();
             const box = __CreateView();
@@ -339,11 +343,14 @@ async fn workers_load_relative_to_entry_and_route_back_to_their_own_views() {
                 };
                 worker.postMessage('ready');
             }
-        ", Some("text/javascript")).unwrap();
+        "), Some("text/javascript")).unwrap();
         resources
             .register(
                 "app:///nested/worker.js",
-                format!("onmessage = () => postMessage({{name, color: '{color}'}});"),
+                format!(
+                    "import 'bobcat:worker'; import 'bobcat:timers'; \
+                     onmessage = () => postMessage({{name, color: '{color}'}});"
+                ),
                 Some("text/javascript"),
             )
             .unwrap();
@@ -410,7 +417,6 @@ async fn xml_background_loads_esm_through_the_view_fetcher() {
             lynx.getJSContext().dispatchEvent({type: 'initialize', data: null});
           ]]></script>
           <script thread="background"><![CDATA[
-            import {lynx} from 'bobcat:bts-runtime';
             const {value} = await import('app:///dep.js');
             await new Promise(resolve => setTimeout(resolve, 1));
             if (value !== 42) throw Error('source value');
@@ -470,13 +476,82 @@ async fn xml_background_loads_esm_through_the_view_fetcher() {
     assert!(view.is_ready());
 }
 
+/// The browser's XML path registers both scripts as the modules a card's
+/// bodies become, and the engine adds nothing to either: the main-thread
+/// script names the PAPI and `lynx` without importing them and fails on its
+/// own third line, reported at line 3; the background-thread script names
+/// `lynx` and the `module` its chunk wrapper gives it, also without imports.
+#[tokio::test]
+async fn a_browser_xml_response_registers_both_scripts_as_card_bodies() {
+    let (group, resources, receiver) = setup().await;
+    let registered = bobcat_source::register_lynx_xml_response(
+        &"app:///card.lynx.xml".parse().unwrap(),
+        "<lynx engine-version=\"4.2\"><script thread=\"main\"><![CDATA[\
+globalThis.renderPage = () => __AppendElement(__CreatePage('page', 0), __CreateView(0));
+lynx.getJSContext().dispatchEvent({type: 'initialize', data: null});
+throw Error('the third line');\
+]]></script><script thread=\"background\"><![CDATA[\
+if (typeof module !== 'object' || exports !== module.exports) throw Error('chunk wrapper');
+lynx.getCoreContext().addEventListener('initialize', () => lynx.reportError('BTS wrapped'));\
+]]></script></lynx>",
+        &resources,
+    )
+    .unwrap();
+    let (mut view, _painter) = view(
+        &group,
+        &resources,
+        ViewSources {
+            background_entry: registered.background_thread_url().map(ToString::to_string),
+            ..ViewSources::new("app:///", registered.entry_url().as_str(), SCREEN)
+        },
+    )
+    .await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let (mut entry_failure, mut finished, mut reported) = (None, false, false);
+    while !finished || !reported {
+        for event in view.pump() {
+            match event {
+                EngineEvent::ScriptRunError(error) => {
+                    assert!(entry_failure.is_none(), "a second failure: {error}");
+                    entry_failure = Some(error);
+                }
+                EngineEvent::ScriptFinished => finished = true,
+                EngineEvent::ScriptReported { message, .. } => {
+                    assert_eq!(message, "BTS wrapped");
+                    reported = true;
+                }
+                EngineEvent::StartupFailed(error) => panic!("startup: {error}"),
+                EngineEvent::WorkerThrew { error, .. }
+                | EngineEvent::WorkerEnded { error, .. }
+                | EngineEvent::ListenerFailed(error)
+                | EngineEvent::Panicked(error) => panic!("script: {error}"),
+                _ => {}
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the XML page did not boot both realms"
+        );
+        let _ = receiver.recv_timeout(Duration::from_millis(5));
+    }
+    let error = entry_failure.expect("the main-thread script threw");
+    assert!(error.message.contains("the third line"), "{error}");
+    let location = error.location.as_ref().expect("the throw has a location");
+    assert_eq!(
+        location.source.as_deref(),
+        Some(registered.entry_url().as_str())
+    );
+    assert_eq!(location.line, Some(3), "{error}");
+}
+
 #[tokio::test]
 async fn dynamic_import_loads_relative_static_dependencies_and_waits_for_top_level_await() {
     let (group, resources, receiver) = setup().await;
-    for (url, source) in [
-        (
+    resources
+        .register(
             "app:///page/main.js",
-            r"
+            mts_entry_source(
+                r"
             const path = './chunks/unused/../answer.js';
             const [first, second] = await Promise.all([import(path), import('./chunks/answer.js')]);
             if (first !== second || first.answer !== 42 || globalThis.moduleRuns !== 1)
@@ -488,7 +563,11 @@ async fn dynamic_import_loads_relative_static_dependencies_and_waits_for_top_lev
                 __AppendElement(page, view);
             };
         ",
-        ),
+            ),
+            Some("text/javascript"),
+        )
+        .unwrap();
+    for (url, source) in [
         (
             "app:///page/chunks/answer.js",
             r"
@@ -541,7 +620,11 @@ async fn import_failures_reject_promises_and_an_uncaught_one_is_reported_before_
             "await import('./missing.js');"
         };
         resources
-            .register("app:///main.js", source, Some("text/javascript"))
+            .register(
+                "app:///main.js",
+                mts_entry_source(source),
+                Some("text/javascript"),
+            )
             .unwrap();
         resources
             .register(
@@ -596,10 +679,12 @@ async fn sibling_views_can_import_the_same_urls_with_independent_module_instance
     resources
         .register(
             "app:///main.js",
-            r"
+            mts_entry_source(
+                r"
         const module = await import('./shared.js');
         if (module.value !== 42 || globalThis.runs !== 1) throw Error('realm isolation');
     ",
+            ),
             Some("text/javascript"),
         )
         .unwrap();
@@ -649,7 +734,8 @@ async fn imports_started_after_boot_can_commit_a_later_frame() {
     resources
         .register(
             "app:///main.js",
-            r"
+            mts_entry_source(
+                r"
         globalThis.renderPage = () => {
             const page = __CreatePage('page', 0);
             const child = __CreateView(0);
@@ -662,6 +748,7 @@ async fn imports_started_after_boot_can_commit_a_later_frame() {
             }, 25);
         };
     ",
+            ),
             Some("text/javascript"),
         )
         .unwrap();

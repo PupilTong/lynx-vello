@@ -544,18 +544,73 @@ JavaScript string can contain; this does not affect the raw UTF-8/TextDecoder
 ingestion path.
 
 `bobcat-source` implements the shared mapping and source registration for
-`bobcat-cli` and `bobcat-wasm`. They register the main-thread body as a script,
-mount a present `<style>` body as registered CSS text before starting
-that script, and construct the XML page with the fixed `false`/`false`/`true`
-display/overflow/selector defaults unless the browser host deliberately
-overrides them. Both paths register a present background body and pass its URL
-to the view. Once the main-thread entry import finishes, core starts the page's
-BTS worker with `new Worker("bobcat:bts")`. That bootstrap initializes the
-Context and awaits an import of the optional background entry URL. Application
-module loading through ResourceFetcher is deferred; the registered resource
-is not yet preloaded into QuickJS, so this import currently reports a worker
-error. Omitting the body leaves the worker running only the built-in BTS runtime;
-a present empty body is still a registered resource awaiting module loading.
+`bobcat-cli` and `bobcat-wasm`. They register the main-thread body as the
+entry module a card's root becomes, mount a present `<style>` body as
+registered CSS text before starting that script, and construct the XML page
+with the fixed `false`/`false`/`true` display/overflow/selector defaults
+unless the browser host deliberately overrides them. Both paths register a
+present background body and pass its URL to the view.
+
+Both bodies are registered with the names their realm gives a card's scripts
+already in scope, because the engine adds nothing to a script it loads:
+
+- the main-thread body prefixed with `MTS_CHUNK_PREAMBLE`, the imports of
+  `__Card__`, `lynx`, `console`, `SystemInfo` and the rest of
+  `bobcat:runtime`'s card bindings, and of the whole Element PAPI from
+  `bobcat:element`;
+- the background body as the `CommonJS` chunk web-core runs it as — web-core
+  stores it verbatim at `/app-service.js` and evaluates it inside its chunk
+  wrapper — prefixed with `BTS_CHUNK_PREAMBLE`: imports from
+  `bobcat:bts-runtime` of `lynx`, `lynxCoreInject`, `NativeModules`,
+  `console`, `SystemInfo`, `Card`, `Component`, `nativeAppId`, `Behavior`,
+  `LynxJSBI`, the four timer functions, `requestAnimationFrame` and
+  `cancelAnimationFrame` (`Card`, `Component`, `nativeAppId`, `Behavior` and
+  `LynxJSBI` hold `undefined`, since nothing in the realm sets them); `const`
+  declarations binding the wrapper's remaining names — `postMessage`,
+  `ReactLynx`, `window`, `document` and the rest of its BOM list, `webkit`,
+  `Reporter`, `print` and `global` — to `undefined`; and a `module` object
+  with its `exports`. `export default module.exports` follows the body.
+
+Either list is one physical line with the body's first line on it, so an
+error in a body reports the line it has in the body, and on any line after
+the first the column too. On the body's first line a column is offset by the
+prefix's length, which for a minified body written on one line is every
+column it has. A body uses those names without importing them, and must not
+import any of them itself: a second binding of one of them in the same module
+is a `SyntaxError`. A body may still import anything else, statically or with
+`import()`.
+
+The background body is module code, where web-core's chunk wrapper is a
+sloppy function body (`new Function(...paramNames, jsContent)` in
+`createChunkLoading.ts`), so a body web-core runs can fail here:
+
+- A top-level `var` or function declaration of a name the preamble binds —
+  `module`, `exports`, `global`, `print`, `lynx`, `Component` and the rest —
+  is a `SyntaxError` here, a second binding of that name in the module's
+  scope. In web-core it is legal: a function body may redeclare a parameter
+  that way, and `SystemInfo`, `Card` and `Component` are not parameters
+  there at all (web-core passes `Card` and `Component` only to a card whose
+  `cardType` is not `react`, and `xmlToTasmJSON` gives an XML page `react`).
+  A `let`, `const` or `class` declaration of one of web-core's parameters is
+  a `SyntaxError` in both.
+- A body's own `export default` is a second default export beside the one
+  the wrapper appends, a `SyntaxError`. (In web-core any `export` is one,
+  since a function body is not a module.)
+- The body is strict, as all module code is: an assignment to an undeclared
+  name throws a `ReferenceError` instead of creating a global, and the
+  top-level `this` is `undefined` instead of the global object.
+
+Once the main-thread entry import finishes, core starts the page's
+BTS worker with `new Worker("bobcat:bts")`. That bootstrap is the worker's
+root module, as a worker's root module is the module at its URL: it imports
+the worker's global scope and timers itself, initializes the Context and
+awaits an import of the optional background entry URL, which the worker
+requests through the view's ResourceFetcher, where the registered body
+answers it. Omitting the body leaves the worker running only the built-in BTS
+runtime; a present empty body is an entry module with nothing in it but that
+wrapper. Nothing reads what the background body leaves in `module.exports`:
+the body is the view's BTS entry itself, where web-core's lynx-core loads its
+`/app-service.js` through `requireModule` and initializes an exported `init`.
 
 The MTS `lynx.getJSContext()` and BTS `lynx.getCoreContext()` expose the MVP
 context protocol: `dispatchEvent({ type, data })` sends a named event to
@@ -563,9 +618,10 @@ listeners registered with `addEventListener` on the other side, and
 `removeEventListener` removes those listeners. The transport uses the existing
 Worker structured clone. Context `postMessage` remains inert, matching
 web-core.
-This raw-module entry path does not initialize compiled background chunks from
-binary bundles: their Lynx Core `lynxCoreInject`/`init`/`requireModule` wrapper
-remains pending.
+Compiled background chunks from binary bundles do not take this XML entry
+path: their BTS entry is the boot script `PageSource` writes, which
+`lynx.requireModule`s the container's `/app-service.js`, and
+`bobcat:lynx-modules` initializes the `{init}` object that body answers with.
 
 Raw source CSS is evaluated by Stylo, so standard at-rules fall under this
 repo's W3C-correctness policy. Lynx-only selector, unit, and declaration

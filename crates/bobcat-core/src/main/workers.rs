@@ -18,14 +18,13 @@ use tokio_util::sync::CancellationToken;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::background::{
-    WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerRole, WorkerStart,
+    WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart,
 };
-use crate::esm::{BTS_ENTRY_PREAMBLE, BTS_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER};
+use crate::esm::HOST_MODULE_SPECIFIER;
 use crate::link::{ViewNotice, ViewOutbox};
-use crate::resource::{LoadedSource, SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::platform_script_error;
-use crate::view::ScriptSource;
+use crate::view::{ScriptSource, WorkerId};
 
 /// Issued on bobcat-main, once per group. No cross-thread allocator or lock:
 /// the one thing it reads across threads is the worker thread's trap flag.
@@ -58,7 +57,6 @@ impl WorkerFactory {
         engine: &mut ScriptEngine,
         runtime: &mut ScriptRuntime,
         outbox: ViewOutbox,
-        background_entry: Option<String>,
     ) -> Result<(Rc<WorkerOwner>, mpsc::UnboundedReceiver<WorkerEvent>), ScriptError> {
         let (events, incoming) = mpsc::unbounded_channel();
         // The MTS runtime owns the channels. Host functions borrow that owner
@@ -78,77 +76,49 @@ impl WorkerFactory {
             "createWorker",
             3,
             Box::new(move |arguments| {
-                let creator = creator.upgrade().ok_or("the creating realm has been released")?;
+                let creator = creator
+                    .upgrade()
+                    .ok_or("the creating realm has been released")?;
                 let specifier = string(arguments, 0)?;
                 let name = string(arguments, 1)?.to_owned();
                 // Where the specifier resolves from: the MTS entry's response
                 // URL, which the realm holds as `__Card__` and hands over with
-                // every construction. Rust joins the specifier to it by URL
-                // rules and still does not remember it.
+                // every construction. It is absolute: an entry answered from
+                // one that is not fails the view's startup before it runs.
+                // Rust joins the specifier to it by URL rules and still does
+                // not remember it. An absolute URL joins to itself,
+                // `bobcat:bts` included. A specifier that does not resolve
+                // starts nothing: no id, no `Start`, and `null` back, which
+                // the realm throws as a `SyntaxError`.
                 let base_url = string(arguments, 2)?;
-                // The built-in background script is told apart before any
-                // join, because `bobcat:bts` parses as an absolute URL of its
-                // own. A specifier that does not resolve starts nothing: no
-                // id, no `Start`, no request, and `null` back, which the realm
-                // throws as a `SyntaxError`.
-                let url = if specifier == BTS_MODULE_SPECIFIER {
-                    None
-                } else {
-                    let Ok(url) = url::Url::parse(base_url).and_then(|base| base.join(specifier))
-                    else {
-                        return Ok(HostValue::Null);
-                    };
-                    Some(String::from(url))
+                let Ok(url) = url::Url::parse(base_url).and_then(|base| base.join(specifier))
+                else {
+                    return Ok(HostValue::Null);
                 };
+                let url = String::from(url);
                 let id = creator.factory.next.get();
                 creator
                     .factory
                     .next
                     .set(id.checked_add(1).ok_or("worker ids exhausted")?);
                 let key = WorkerKey::new(id);
-                // The specifier has already said which kind of worker this is,
-                // and the source is recorded before anything is sent, so a
-                // worker that fails at once below has one too.
-                let role = if url.is_some() {
-                    WorkerRole::Dedicated
-                } else {
-                    WorkerRole::Background
+                // Each worker's own end signal, which every request it makes
+                // of the host is cancelled with as well. The host is asked
+                // for nothing here: the worker's realm loads the module at
+                // `url` itself, and asks through `sources` below when that
+                // load needs the host.
+                let token = CancellationToken::new();
+                let (messages, incoming) = mpsc::unbounded_channel();
+                let start = WorkerStart {
+                    key,
+                    name,
+                    url,
+                    messages: incoming,
+                    events: creator.events.clone(),
+                    sources: creator.outbox.host_outbox(token.clone()),
+                    token,
                 };
-                creator.sources.borrow_mut().insert(key, role.source(key));
-                // A worker that has already failed is still a worker to the
-                // script that named it: its `error` event arrives with the
-                // `Failed` the owner queued, and nothing is asked of the host.
-                let Some(script) = creator.start(key, name, role) else {
-                    return Ok(HostValue::String(id.to_string()));
-                };
-                let Some(url) = url else {
-                    let mut source = BTS_ENTRY_PREAMBLE.to_owned();
-                    source.push_str("import { __BobcatStartBTS } from \"bobcat:bts-runtime\";\n__BobcatStartBTS(async () => {\n");
-                    if let Some(background) = &background_entry {
-                        let background = serde_json::to_string(background)
-                            .expect("a string is JSON serializable");
-                        source.push_str("\nawait import(");
-                        source.push_str(&background);
-                        source.push_str(");\n");
-                    }
-                    source.push_str("});\n");
-                    // The built-in background script is this thread's own, so
-                    // it answers its own request rather than asking a host
-                    // that has no bytes for it.
-                    script.complete(Ok(LoadedSource::Module {
-                        source,
-                        url: BTS_MODULE_SPECIFIER.to_owned(),
-                    }));
-                    return Ok(HostValue::String(id.to_string()));
-                };
-                // The answer travels to the worker task without another turn
-                // here: what the host is handed is the far end of the
-                // one-shot that already rode to `bobcat-workers` with the
-                // `Start` above.
-                creator.outbox.notify(ViewNotice::RequestSource {
-                    request: SourceRequest::Module(url),
-                    completion: script,
-                });
+                creator.start(start, messages);
                 Ok(HostValue::String(id.to_string()))
             }),
         )?;
@@ -208,46 +178,43 @@ pub(super) struct WorkerOwner {
 }
 
 impl WorkerOwner {
-    /// Names one worker on `bobcat-workers` and hands back the right to
-    /// answer its script.
+    /// Sends `start` to `bobcat-workers` and keeps `messages`, the sending
+    /// end of its message channel, while the worker runs.
     ///
-    /// Source requests share this worker's own token. Neither a source
-    /// completion nor a Worker inherits the view's cancellation token.
+    /// The worker's source is recorded before anything is sent, so a worker
+    /// that fails at once has one too. It is the id of the worker's key and
+    /// the worker's URL, whatever that URL is, and the worker thread writes
+    /// the same value from the same `Start` when it opens the realm, so the
+    /// `Start` carries no source. Neither a Worker nor a request it makes of
+    /// the host inherits the view's cancellation token: both end with the
+    /// token `start` carries.
     ///
-    /// `None` is a worker thread that has trapped, or one whose inbox is
-    /// closed: the worker fails at once, as one whose script could not be
-    /// fetched does. Its `Failed` is queued on this realm's own channel and
-    /// reaches the script as an `error` event, and nothing is sent to the
-    /// thread or kept in `live`.
-    fn start(&self, key: WorkerKey, name: String, role: WorkerRole) -> Option<SourceCompletion> {
+    /// A worker thread that has trapped, or one whose inbox is closed, fails
+    /// the worker at once. A worker that has already failed is still a
+    /// worker to the script that named it: its `Failed` is queued on this
+    /// realm's own channel and reaches the script as an `error` event.
+    /// Nothing is sent to the thread or kept in `live`.
+    fn start(&self, start: WorkerStart, messages: mpsc::UnboundedSender<WorkerMessage>) {
+        let key = start.key;
+        self.sources.borrow_mut().insert(
+            key,
+            ScriptSource::Worker {
+                id: WorkerId::from(key),
+                url: Arc::from(start.url.as_str()),
+            },
+        );
         if !self.factory.trapped.load(Ordering::Acquire) {
-            let (messages, incoming) = mpsc::unbounded_channel();
-            let token = CancellationToken::new();
-            let (script, awaiting) = SourceCompletion::new(token.clone());
-            let sources = self.outbox.host_outbox(token.clone());
             self.outbox.notify(ViewNotice::WorkerCreated {
                 key,
                 messages: messages.downgrade(),
             });
-            let started = self
-                .factory
-                .commands
-                .send(WorkerCommand::Start(WorkerStart {
-                    key,
-                    name,
-                    role,
-                    script: awaiting,
-                    messages: incoming,
-                    events: self.events.clone(),
-                    token,
-                    sources,
-                }));
+            let started = self.factory.commands.send(WorkerCommand::Start(start));
             // On a refused send `messages` drops at the end of this block, so
             // the handle `WorkerCreated` registered no longer upgrades and the
             // view sweeps it.
             if started.is_ok() {
                 self.live.borrow_mut().insert(key, messages);
-                return Some(script);
+                return;
             }
         }
         let _ = self.events.send(WorkerEvent {
@@ -256,7 +223,6 @@ impl WorkerOwner {
                 "the worker thread has ended".to_owned(),
             )),
         });
-        None
     }
 
     fn post(&self, key: WorkerKey, message: WorkerMessage) {
@@ -290,8 +256,8 @@ impl WorkerOwner {
     ///
     /// Reported from here because this is the realm's side of its workers:
     /// `WorkerThrew` and `WorkerEnded` are the only lifecycle events a worker
-    /// produces, and the outbox they go out on is the one this side already
-    /// holds for asking the host to fetch a worker's script.
+    /// produces, and the outbox they go out on is the view's own, which this
+    /// side already holds: every worker's `HostOutbox` is made from it.
     pub(super) fn report_failure(&self, source: ScriptSource, ended: bool, error: ScriptError) {
         self.outbox.engine_event(if ended {
             crate::EngineEvent::WorkerEnded { source, error }
@@ -301,8 +267,8 @@ impl WorkerOwner {
     }
 
     /// Drops what this side kept of a worker that ended on its own — it
-    /// called `close()`, or its script or realm failed — so `live` goes on
-    /// naming only the workers still running.
+    /// called `close()`, its realm could not be built, or its thread trapped
+    /// — so `live` goes on naming only the workers still running.
     ///
     /// The sender goes with the entry, which closes that channel. Harmless
     /// either way: there is nothing left listening on it.
@@ -314,7 +280,7 @@ impl WorkerOwner {
     /// Which realm the worker under `key` is, while the script still holds
     /// that key.
     pub(super) fn source_of(&self, key: WorkerKey) -> Option<ScriptSource> {
-        self.sources.borrow().get(&key).copied()
+        self.sources.borrow().get(&key).cloned()
     }
 
     /// How many workers this realm still has running.

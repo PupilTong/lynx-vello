@@ -366,12 +366,18 @@ pub enum EngineEvent {
     /// Code in a worker's realm threw, and the worker is still running: its
     /// script, a message delivered to it, a timer, animation or native module
     /// callback, a module it imported or a `Future` it awaited. The BTS
-    /// Worker included. Not fatal: HTML reports such an exception at the
-    /// worker and then at the creating realm's `Worker` object without ending
-    /// either, and the owning view remains usable.
+    /// Worker included. Not fatal: HTML reports an uncaught exception at the
+    /// worker and then at the creating realm's `Worker` object without
+    /// ending either, and the owning view remains usable.
     ///
-    /// `source` is [`ScriptSource::Background`] or a
-    /// [`ScriptSource::Worker`]. Both worker events are reported before the
+    /// A script or an imported module that could not be loaded, or was not a
+    /// script, is reported here as well: the load rejects in the worker's
+    /// realm, and the worker stays until it is terminated or collected. HTML
+    /// differs for the worker's own script: it never runs a worker whose
+    /// script fetch failed (`docs/tracking/deviations.md`).
+    ///
+    /// `source` is a [`ScriptSource::Worker`], whose URL is `bobcat:bts` for
+    /// the BTS Worker. Both worker events are reported before the
     /// creating realm's `Worker` object dispatches its `error` event, so a
     /// listener there, `preventDefault()` included, has no effect on them.
     /// Neither is reported for a worker its script has already let go of,
@@ -381,11 +387,11 @@ pub enum EngineEvent {
         source: ScriptSource,
         error: ScriptError,
     },
-    /// A worker ended without being told to: its script could not be fetched
-    /// or was not a script, its realm could not be built, or the thread
-    /// workers run on has trapped, including before this worker was started.
-    /// Nothing more arrives from it. Not fatal: the owning view remains
-    /// usable, and a view whose BTS Worker ended goes on without a BTS.
+    /// A worker ended without being told to: its realm could not be built,
+    /// or the thread workers run on has trapped, including before this
+    /// worker was started. Nothing more arrives from it. Not fatal: the
+    /// owning view remains usable, and a view whose BTS Worker ended goes on
+    /// without a BTS.
     ///
     /// Reported under the same rules as [`EngineEvent::WorkerThrew`].
     WorkerEnded {
@@ -444,25 +450,38 @@ impl EngineEvent {
 
 /// The realm of a view that a script event came from.
 ///
-/// A view runs script in three kinds of realm: its main-thread realm, its
-/// background thread (BTS), which boot creates as a built-in `Worker`, and
-/// each `Worker` its main-thread script constructs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// A view runs script in its main-thread realm and in workers. The view's
+/// background thread (BTS) is a worker like any other: the one boot creates
+/// over the URL `bobcat:bts`. This type has no variant for it and the engine
+/// has no check that tells it apart, so an embedder that needs to know
+/// whether an event came from the background thread compares `url` with
+/// `bobcat:bts`. A worker the view's script constructs over that URL carries
+/// the same `url` and an `id` of its own.
+///
+/// Printed as `main`, or as `worker <id> <url>`: `worker 1 bobcat:bts`,
+/// `worker 4 app:///nested/worker.js`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ScriptSource {
     /// The view's main-thread realm.
     Main,
-    /// The view's background thread.
-    Background,
-    /// A `Worker` the view's main-thread script constructed.
-    Worker(WorkerId),
+    /// A worker's realm: the view's background thread, or a `Worker` the
+    /// view's main-thread script constructed.
+    Worker {
+        /// Tells this worker from every other of its group, including one
+        /// constructed over the same URL.
+        id: WorkerId,
+        /// The worker's script URL as `new Worker` resolved it: the
+        /// specifier joined by URL rules to the response URL of the view's
+        /// entry. A script answered from another URL leaves it as it is.
+        url: Arc<str>,
+    },
 }
 
 impl fmt::Display for ScriptSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Main => formatter.write_str("main"),
-            Self::Background => formatter.write_str("background"),
-            Self::Worker(id) => write!(formatter, "worker {id}"),
+            Self::Worker { id, url } => write!(formatter, "worker {id} {url}"),
         }
     }
 }
@@ -625,17 +644,25 @@ pub struct ViewSources {
     /// and the realm's boot import name the result, in its WHATWG
     /// serialization. The fetcher may answer from another URL, which becomes
     /// the entry's `import.meta.url`.
+    ///
+    /// The entry is the module the fetcher answers, with nothing added to it.
+    /// A card's MTS body is registered prefixed with
+    /// [`crate::MTS_CHUNK_PREAMBLE`] by `bobcat-source`; any other entry
+    /// imports what it uses itself.
     pub entry: String,
-    /// Optional URL of the BTS application module `bobcat:bts` imports,
-    /// resolved against [`Self::base_url`] like [`Self::entry`].
-    /// The view always starts a BTS context; without this it runs only the
-    /// built-in environment. Its imports load through the view's resource fetcher.
+    /// Optional URL of the BTS application module the engine's `bobcat:bts`
+    /// bootstrap imports, resolved against [`Self::base_url`] like
+    /// [`Self::entry`]. The MTS realm posts it to the BTS in the BTS's first
+    /// message, `initialize`, and the BTS imports it once that message has
+    /// initialized it. The view always starts a BTS context;
+    /// without this it runs only the built-in environment. The entry and its
+    /// imports load through the view's resource fetcher.
     /// Neither MTS evaluation nor [`EngineEvent::ScriptFinished`] waits for it:
     /// a host update accepted while the BTS entry is still importing is
     /// forwarded to the Worker, which queues it behind that import. An entry
-    /// that throws is reported as [`EngineEvent::WorkerThrew`] from
-    /// [`ScriptSource::Background`], like any worker script, and leaves the
-    /// view and the BTS Worker running.
+    /// that throws is reported as [`EngineEvent::WorkerThrew`] from the
+    /// [`ScriptSource::Worker`] whose URL is `bobcat:bts`, like any worker
+    /// script, and leaves the view and the BTS Worker running.
     pub background_entry: Option<String>,
     /// Initial page data, as JSON text. The engine hands it to the view's
     /// realm unread, as a plain string; `bobcat:runtime` parses it there and
@@ -1281,20 +1308,22 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                     }
                 }
                 // Assembled here, because here is where the handle a callback
-                // answers through already is: `WorkerCreated` registered it,
-                // and it precedes every call that worker makes on this one
-                // FIFO — so a sender this turn cannot find is a worker that
-                // has since gone, and there is nobody left to answer.
+                // answers through already is: the view's own command sender
+                // for a call the MTS realm made, and for a worker's the
+                // handle `WorkerCreated` registered, which precedes every
+                // call that worker makes on this one FIFO — so a handle this
+                // turn cannot find is a worker that has since gone, and there
+                // is nobody left to answer.
                 //
                 // A module nothing here is named for, or a method its module
                 // did not declare, is no error either: the realm's
                 // `NativeModules` object never carried that name, so such a
-                // call can only come from a script importing the host member
-                // directly. The call is assembled and dropped rather than
-                // invoked, and dropping it releases each of its functions in
-                // the realm that is waiting on them.
+                // call can only come from a script calling
+                // `bobcat:native-modules` directly. The call is assembled and
+                // dropped rather than invoked, and dropping it releases each
+                // of its functions in the realm that is waiting on them.
                 ViewNotice::NativeModuleCall {
-                    worker,
+                    caller,
                     call,
                     module,
                     method,
@@ -1305,7 +1334,11 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                         // A statement of its own, so the borrow ends here: a
                         // module may drive this view's painter inside
                         // `invoke`, and the painter borrows the same cell.
-                        let reply = self.seat.frame_demand.borrow().sender(worker);
+                        let reply = self
+                            .seat
+                            .frame_demand
+                            .borrow()
+                            .reply(caller, &self.seat.commands);
                         if let Some(reply) = reply {
                             let call = crate::native_module::ModuleCall::assemble(
                                 call, method, arguments, &callbacks, &reply,
@@ -1455,8 +1488,10 @@ pub(crate) struct ViewAttachment {
     pub(crate) text_context: Option<dom::TextContext>,
     /// The answers to the requests `create_lynx_view` already made.
     pub(crate) startup: StartupSources,
-    /// The embedder's native modules as the realm hears about them: one
-    /// `<utf16Length>:<text>` record of names and comma-joined method lists.
+    /// The embedder's native modules as the BTS realm hears about them: one
+    /// `<utf16Length>:<text>` record of names and comma-joined method lists,
+    /// which the MTS realm reads as a startup member and posts to its BTS
+    /// Worker in the `initialize` message.
     /// The modules themselves stay on the view, on the embedder's thread.
     pub(crate) native_modules: String,
     pub(crate) commands: mpsc::UnboundedReceiver<ToMain>,

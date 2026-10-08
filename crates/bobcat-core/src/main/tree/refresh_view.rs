@@ -67,7 +67,7 @@
 //! # Attributes
 //!
 //! Attribute values arrive as strings: this engine's `__SetAttribute` stringifies a value
-//! (`packages/bobcat-element/src/element-papi.ts:1608`), so `enable-refresh={false}` in JSX is
+//! (`packages/bobcat-element/src/element-papi.ts`), so `enable-refresh={false}` in JSX is
 //! the attribute `"false"`. web-core keeps `"false"` for this component's three attributes
 //! (`notToFilterFalseAttributes`, `XRefreshView.ts:19-23`) and matches it in its CSS, as here:
 //!

@@ -9,8 +9,8 @@
 //! `bobcat-workers` is not this thread's. The group starts it beside this one
 //! and joins it after it; what arrives here is one sender and the flag that
 //! thread sets when it traps, and the three messages a realm sends on it —
-//! start a context with its script, post to one, stop one — are the whole of
-//! what this thread does to it.
+//! start a context, post to one, stop one — are the whole of what this
+//! thread does to it.
 //!
 //! Tasks rather than one state machine for all of them. A view waiting for its
 //! entry parks on its own channels, so nothing it is waiting for can hold up a
@@ -308,8 +308,10 @@ struct AttachedView {
     /// The answers to the startup requests `create_lynx_view` already made:
     /// the author sheets in the order the view listed them, and the entry.
     startup: StartupSources,
-    /// The embedder's native modules, as the realm is told about them: the
-    /// record `create_lynx_view` encoded out of their names and methods.
+    /// The embedder's native modules, as the BTS realm is told about them:
+    /// the record `create_lynx_view` encoded out of their names and methods,
+    /// which the MTS realm reads as a startup member and posts to its BTS
+    /// Worker in the `initialize` message.
     native_modules: String,
     commands: mpsc::UnboundedReceiver<ToMain>,
     /// The metrics an attached painter names, `None` until one binds. Not a

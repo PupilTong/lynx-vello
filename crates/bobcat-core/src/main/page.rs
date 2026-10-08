@@ -59,11 +59,14 @@
 //! acknowledgement. A [`ToMain::Posted`] marker in a burst adopts the
 //! painter's scroll offsets where it stands, and the frame the painter
 //! posted is applied once, after the last command of the first burst that
-//! has applied every command sent before the post (its
+//! has applied every command the seat's
+//! [`CommandSender`](crate::link::CommandSender) sent before the post (its
 //! [`FramePost::fence`]), so the events a painter pass dispatched and the
-//! host's own updates run before the frame an acknowledgement implies. Module completions,
-//! timer wakes and a sibling's checkpoint are independent tasks and may queue
-//! an entry between any two bursts.
+//! host's own updates run before the frame an acknowledgement implies. A
+//! [`ToMain::ModuleCallback`] is not sent through that sender, and neither
+//! the sender nor this page counts it, so a frame post does not wait for one
+//! sent before it. Module completions, timer wakes and a sibling's checkpoint
+//! are independent tasks and may queue an entry between any two bursts.
 //!
 //! # The end
 //!
@@ -97,7 +100,7 @@
 //!
 //! # Waits
 //!
-//! After this module every `select!` in this crate is one of five kinds, and
+//! After this module every `select!` in this crate is one of six kinds, and
 //! each is a wait rather than a dispatcher:
 //!
 //! - **the top loop's turn** — one per engine thread, inside
@@ -108,15 +111,15 @@
 //!   versus the next task of that object to finish;
 //! - **a realm's clock** — one [`serve_clock`] per live realm, a view's and a worker's alike,
 //!   waiting on its deadline, the re-arm that moves it, and a sibling's checkpoint;
-//! - **the worker's pre-boot wait** — its script versus termination, channel closure, or its own
-//!   cancellation;
+//! - **a worker's message consumer** — one `consume_messages` per worker, waiting on what is
+//!   posted, termination included, versus the worker's root module finishing until it has;
 //! - **the painter's metrics** — one [`consume_metrics`] per view, waiting on the end versus the
 //!   next value the view's seat publishes.
 //!
 //! How many there are is the group's shape rather than a constant: one of the
 //! first two kinds per engine thread, one of the third and one of the sixth
 //! per live view, one of the third per live worker, one of the fourth per
-//! live realm, one of the fifth per worker that has not booted yet.
+//! live realm, one of the fifth per live worker.
 //! `link.rs`'s `block_on_deadline` is a hand-rolled poll loop rather than a
 //! select, and the only one left. The synchronous host members are a wait of
 //! their own shape — this view's token against the answer — parked on inside
@@ -199,7 +202,9 @@ pub(super) struct Page {
     /// the last command of the first burst that reaches its fence.
     frame_due: Cell<Option<FramePost>>,
     /// How many commands this view has been sent and has applied, counted
-    /// the way [`crate::link::CommandSender`] counts them.
+    /// the way [`crate::link::CommandSender`] counts them: a
+    /// [`ToMain::ModuleCallback`] is sent outside that sender and is not
+    /// counted here either.
     applied: Cell<u64>,
     /// The newest frame-post sequence taken and not yet acknowledged.
     ///
@@ -619,10 +624,17 @@ impl Page {
         if self.ended() {
             return;
         }
+        // What `CommandSender` counted of this burst: every command but a
+        // native module's answer, which is sent outside that sender, so no
+        // fence includes it. Counted before the seam below is taken out,
+        // which the sender counted like any other command.
+        let count = commands
+            .iter()
+            .filter(|command| !matches!(command, ToMain::ModuleCallback { .. }))
+            .count() as u64;
         // Taken here rather than in the job, because what the seam spawns has
         // to trap the way any other task of this view does, rather than into
         // the `catch_unwind` an entry runs under.
-        let count = commands.len() as u64;
         #[cfg(test)]
         let commands = self.take_test_seams(commands);
         let page = Rc::clone(self);
@@ -639,10 +651,10 @@ impl Page {
             }
             page.applied.set(page.applied.get() + count);
             // Once, after the last command of a burst that reached the
-            // post's fence: every command sent before the post has run, so
-            // the events a pass dispatched and the host's updates are in
-            // the frame the acknowledgement implies, and an animation a
-            // listener armed starts on that frame.
+            // post's fence: every command `CommandSender` sent before the
+            // post has run, so the events a pass dispatched and the host's
+            // updates are in the frame the acknowledgement implies, and an
+            // animation a listener armed starts on that frame.
             if let Some(frame) = page.frame_due.get()
                 && frame.fence <= page.applied.get()
                 && !page.ended()
@@ -706,6 +718,18 @@ impl Page {
                 }
             }
             ToMain::Posted => self.adopt_posted(runtime),
+            ToMain::ModuleCallback {
+                call,
+                index,
+                arguments,
+            } => {
+                if let Err(error) =
+                    runtime.deliver_module_callback(js, call, index, arguments.as_deref())
+                {
+                    self.outbox
+                        .engine_event(EngineEvent::ScriptRunError(error.into_script_error()));
+                }
+            }
             #[cfg(not(target_arch = "wasm32"))]
             ToMain::ImageEvents(events) => self.apply_image_events(runtime, events),
             // No blocking pool to parse on: `dom` parses a reported document
@@ -1253,8 +1277,9 @@ async fn consume_metrics(page: Rc<Page>, mut metrics: watch::Receiver<Option<Vie
 ///
 /// The entry is read here, before any of it runs, so an entry that cannot be
 /// loaded fails the boot: a load the fetcher could not make is reported as
-/// the fetcher's own error, and an answer that is not a script as a `Script`
-/// error naming the URL, each as `StartupFailed`. The module is not completed
+/// the fetcher's own error, and an answer that is not a script, or a script
+/// whose response URL is not an absolute URL, as a `Script` error naming the
+/// URL, each as `StartupFailed`. The module is not completed
 /// then — the view has ended, and boot's `import` of it is released with the
 /// realm. The entry's *evaluation* is the app's code: boot catches what it
 /// throws, so a failure there, or in a module it imports, is reported as
@@ -1299,9 +1324,24 @@ async fn load_entry(page: Rc<Page>, entry: StartupSource) {
 /// The script an answer to the entry request carries — its response URL and
 /// its source — or, for an answer of another kind, the startup failure that
 /// is: a `Script` error naming `url`, the URL the entry was requested by.
+///
+/// A response URL that is not an absolute URL is a failure of the same kind.
+/// It becomes `__Card__`, the base every `new Worker` URL is joined to by URL
+/// rules, and a join to a base that does not parse fails for every
+/// specifier, boot's own `bobcat:bts` included.
 fn entry_script(url: &str, answer: LoadedSource) -> Result<(String, String), LynxViewError> {
     let kind = match answer {
-        LoadedSource::Module { source, url } => return Ok((url, source)),
+        LoadedSource::Module {
+            source,
+            url: response,
+        } => {
+            return match url::Url::parse(&response) {
+                Ok(_) => Ok((response, source)),
+                Err(_) => Err(LynxViewError::Script(platform_script_error(format!(
+                    "the fetcher answered {url} from {response:?}, which is not an absolute URL"
+                )))),
+            };
+        }
         LoadedSource::StyleSheet(_) => "stylesheet",
         LoadedSource::Font(_) => "font",
         LoadedSource::Fetched => "plain fetch",

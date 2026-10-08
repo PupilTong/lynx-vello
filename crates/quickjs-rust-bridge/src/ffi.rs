@@ -115,6 +115,10 @@ unsafe extern "C" {
         error: *const c_char,
     ) -> c_int;
     pub(crate) fn qjs_context_resume_module_loads(context: *mut QjsContext);
+    pub(crate) fn qjs_context_load_module(
+        context: *mut QjsContext,
+        name: *const c_char,
+    ) -> *mut QjsValue;
     pub(crate) fn qjs_runtime_run_gc(runtime: *mut QjsRuntime);
     pub(crate) fn qjs_runtime_set_memory_limit(runtime: *mut QjsRuntime, limit: usize);
     pub(crate) fn qjs_runtime_set_max_stack_size(runtime: *mut QjsRuntime, size: usize);

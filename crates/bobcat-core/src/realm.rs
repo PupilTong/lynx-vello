@@ -10,11 +10,13 @@
 //! What differs between realm kinds is the host modules installed after the
 //! core, and those are the caller's: [`open_realm`] takes them as a closure.
 //! An MTS realm's are its document, style, startup and `Worker` members; a
-//! worker realm's is `bobcat-internal:worker`. Nothing here names a kind or
-//! branches on one. The core is told two things about its realm: the key its
-//! display-frame demand is reported under — `None` for a view's MTS realm and
-//! the worker's own key for a worker realm — and the [`ScriptSource`] its
-//! diagnostics name.
+//! worker realm's are the members of `bobcat-internal:worker`. Both kinds
+//! also install `bobcat-internal:native-modules` through
+//! [`crate::native_module::install`], the same member in each. Nothing here
+//! names a kind or branches on one. The core is told two things about its
+//! realm: the key its display-frame demand is reported under — `None` for a
+//! view's MTS realm and the worker's own key for a worker realm — and the
+//! [`ScriptSource`] its diagnostics name.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -134,7 +136,10 @@ fn install_diagnostics(
     host: &HostOutbox,
     source: ScriptSource,
 ) -> Result<(), ScriptError> {
-    for (name, is_error) in [("reportScriptError", true), ("logScriptMessage", false)] {
+    for (name, is_error, source) in [
+        ("reportScriptError", true, source.clone()),
+        ("logScriptMessage", false, source),
+    ] {
         let reporting = host.clone();
         engine.register_host_module_function(
             js,
@@ -144,6 +149,10 @@ fn install_diagnostics(
             Box::new(move |arguments| {
                 let level = string_argument(name, arguments, 0)?.to_owned();
                 let message = string_argument(name, arguments, 1)?.to_owned();
+                // The event owns its source and leaves this thread, so each
+                // takes a clone, which for a worker shares the URL rather
+                // than copying it.
+                let source = source.clone();
                 reporting.engine_event(if is_error {
                     EngineEvent::ScriptReported {
                         source,

@@ -3,18 +3,23 @@ import * as eventTarget from "../src/event-target.ts";
 import * as crossThreadContext from "../src/cross-thread-context.ts";
 import type * as btsRuntime from "../src/background-thread-runtime.ts";
 import type * as workerRuntime from "../src/worker-runtime.ts";
+import type * as nativeModulesRuntime from "../src/native-modules.ts";
 import * as selectorQuery from "../src/selector-query.ts";
 import * as lynxModules from "../src/lynx-modules.ts";
 import * as globalEventEmitter from "../src/global-event-emitter.ts";
 
-// The worker realm's own module is the one under test here, so it is loaded
-// rather than mocked; only the host functions below it are stood in for.
+// The transport, `bobcat:native-modules`, is the module under test here, so
+// it is loaded rather than mocked; only the host functions below it are stood
+// in for.
 const invokeNativeModule = rstest.fn();
 rstest.mockRequire("bobcat-internal:worker", () => ({
   postWorkerMessage: rstest.fn(),
   closeWorker: rstest.fn(),
-  invokeNativeModule,
+  workerName: () => "",
 }));
+rstest.mockRequire("bobcat-internal:native-modules", () => ({ invokeNativeModule }));
+import * as record from "../src/record.ts";
+rstest.mockRequire("bobcat:record", () => record);
 rstest.mockRequire("bobcat:lynx-modules", () => lynxModules);
 import * as sectionUrl from "../src/section-url.ts";
 import * as future from "../src/future.ts";
@@ -26,10 +31,15 @@ rstest.mockRequire("bobcat:event-target", () => eventTarget);
 rstest.mockRequire("bobcat:cross-thread-context", () => crossThreadContext);
 rstest.mockRequire("bobcat:timers", () => ({}));
 rstest.mockRequire("bobcat:element", () => ({ __BobcatQueryNodes: rstest.fn() }));
-// The worker realm's global scope, as the BTS runtime imports it — the real
-// module, because the transport under test lives in it. Answered lazily: the
-// mock registrations are hoisted above this file's own bindings, and both
-// runtimes are imported from `beforeAll` once those exist.
+import * as animationFrame from "../src/animation-frame.ts";
+import * as systemInfo from "../src/system-info.ts";
+rstest.mockRequire("bobcat:animation-frame", () => animationFrame);
+rstest.mockRequire("bobcat:system-info", () => systemInfo);
+// The transport and the worker realm's global scope, as the BTS runtime
+// imports them — the real modules. Answered lazily: the mock registrations are
+// hoisted above this file's own bindings, and the modules are imported from
+// `beforeAll` once those exist.
+rstest.mockRequire("bobcat:native-modules", () => transport);
 rstest.mockRequire("bobcat:worker", () => worker);
 rstest.mockRequire("bobcat:section-url", () => sectionUrl);
 rstest.mockRequire("bobcat:future", () => future);
@@ -44,7 +54,6 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   initialProcessor: () => "",
   initData: () => undefined,
   globalProps: () => undefined,
-  nativeModuleTable: () => "",
   // The modules table imports both; every suite below serves registered
   // sources, so nothing here reaches an external load.
   resolveModuleUrl: () => { throw new Error("no module resolution in this suite"); },
@@ -67,29 +76,26 @@ type Invocation = [
   callbacks: string,
 ];
 
-/** The worker realm's global, as this suite stands in for it. */
-interface TestScope {
-  postMessage(message: unknown): void;
-  addEventListener(name: string, callback: (event: { data: unknown }) => void): void;
-  reportError?: (error: unknown) => void;
-}
-
-const scope = globalThis as unknown as TestScope;
+let transport: typeof nativeModulesRuntime;
 let worker: typeof workerRuntime;
 let bts: typeof btsRuntime;
 // The real worker scope defines the realm's own `console` on the global it
 // runs against, which here is Node's: this is Node's, put back afterwards.
 const nodeConsole = Object.getOwnPropertyDescriptor(globalThis, "console")!;
 
+// Nothing stands in for the global's `postMessage` and `addEventListener`:
+// the real `bobcat:worker` defines both on Node's global, and the BTS runtime
+// hears `initialize` through the second.
 beforeAll(async () => {
-  scope.postMessage = () => undefined;
-  scope.addEventListener = () => undefined;
+  transport = await import("../src/native-modules.ts");
   worker = await import("../src/worker-runtime.ts");
   bts = await import("../src/background-thread-runtime.ts");
 });
 
 afterAll(() => {
   Object.defineProperty(globalThis, "console", nodeConsole);
+  // The BTS runtime's own global, which it defines on Node's.
+  delete (globalThis as { SystemInfo?: unknown }).SystemInfo;
 });
 
 /** The most recent call the host was handed. */
@@ -101,7 +107,7 @@ function lastInvocation(): Invocation {
 describe("NativeModules transport", () => {
   it("sends the arguments as JSON with each function argument as null", () => {
     const callback = rstest.fn();
-    expect(worker.callNativeModule("Echo", "ping", [1, { x: 1 }, callback, "s"]))
+    expect(transport.callNativeModule("Echo", "ping", [1, { x: 1 }, callback, "s"]))
       .toBeUndefined();
     const [call, module, method, args, callbacks] = lastInvocation();
     expect([module, method]).toEqual(["Echo", "ping"]);
@@ -111,78 +117,119 @@ describe("NativeModules transport", () => {
   });
 
   it("names every function argument and nothing else", () => {
-    worker.callNativeModule("Echo", "pair", [() => undefined, 0, () => undefined]);
+    transport.callNativeModule("Echo", "pair", [() => undefined, 0, () => undefined]);
     expect(lastInvocation()[4]).toBe("0,2");
-    worker.callNativeModule("Echo", "none", ["only text"]);
+    transport.callNativeModule("Echo", "none", ["only text"]);
     expect(lastInvocation()[4]).toBe("");
   });
 
   it("invokes a callback once, with the spread JSON answer", () => {
     const callback = rstest.fn();
-    worker.callNativeModule("Echo", "ping", [callback]);
+    transport.callNativeModule("Echo", "ping", [callback]);
     const call = lastInvocation()[0];
-    worker.__BobcatNativeModuleCallback(call, 0, '["pong",2]');
+    transport.__BobcatNativeModuleCallback(call, 0, '["pong",2]');
     expect(callback.mock.calls).toEqual([["pong", 2]]);
     // Single-shot, as native's CallbackImpl is: the slot was cleared before
     // the function ran, so a second answer finds nothing.
-    worker.__BobcatNativeModuleCallback(call, 0, '["again"]');
+    transport.__BobcatNativeModuleCallback(call, 0, '["again"]');
     expect(callback.mock.calls).toEqual([["pong", 2]]);
   });
 
   it("keeps each function argument of one call apart", () => {
     const success = rstest.fn();
     const failure = rstest.fn();
-    worker.callNativeModule("Echo", "pair", [success, failure]);
+    transport.callNativeModule("Echo", "pair", [success, failure]);
     const call = lastInvocation()[0];
-    worker.__BobcatNativeModuleCallback(call, 1, '["no"]');
+    transport.__BobcatNativeModuleCallback(call, 1, '["no"]');
     expect(failure.mock.calls).toEqual([["no"]]);
     expect(success).not.toHaveBeenCalled();
-    worker.__BobcatNativeModuleCallback(call, 0, "[]");
+    transport.__BobcatNativeModuleCallback(call, 0, "[]");
     expect(success.mock.calls).toEqual([[]]);
   });
 
   it("releases a function without calling it when the module answers nothing", () => {
     const callback = rstest.fn();
-    worker.callNativeModule("Echo", "drop", [callback]);
+    transport.callNativeModule("Echo", "drop", [callback]);
     const call = lastInvocation()[0];
-    worker.__BobcatNativeModuleCallback(call, 0, undefined);
+    transport.__BobcatNativeModuleCallback(call, 0, undefined);
     expect(callback).not.toHaveBeenCalled();
-    worker.__BobcatNativeModuleCallback(call, 0, '["late"]');
+    transport.__BobcatNativeModuleCallback(call, 0, '["late"]');
     expect(callback).not.toHaveBeenCalled();
   });
 
   it("registers nothing for a call whose arguments will not serialize", () => {
     invokeNativeModule.mockClear();
     const stranded = rstest.fn();
-    expect(() => worker.callNativeModule("Echo", "ping", [1n, stranded]))
+    expect(() => transport.callNativeModule("Echo", "ping", [1n, stranded]))
       .toThrow(TypeError);
     expect(invokeNativeModule).not.toHaveBeenCalled();
     // The next call gets the id the failed one never took, and answering it
     // reaches its own function rather than the stranded one.
     const callback = rstest.fn();
-    worker.callNativeModule("Echo", "ping", [callback]);
+    transport.callNativeModule("Echo", "ping", [callback]);
     expect(invokeNativeModule).toHaveBeenCalledTimes(1);
     const call = lastInvocation()[0];
     expect(typeof call).toBe("number");
-    worker.__BobcatNativeModuleCallback(call, 0, "[]");
+    transport.__BobcatNativeModuleCallback(call, 0, "[]");
     expect(callback).toHaveBeenCalledTimes(1);
     expect(stranded).not.toHaveBeenCalled();
   });
 
   it("reports a throwing callback the way an uncaught exception is reported", () => {
+    // Through the reporter the realm's runtime installed, which the transport
+    // reads at the call: `bobcat:worker` installed the value its global's
+    // `reportError` had as it was evaluated, so replacing that property now
+    // would not reach it.
     const reportError = rstest.fn();
-    scope.reportError = reportError;
+    eventTarget.installExceptionReporter(reportError);
     const failure = Error("module callback failed");
-    worker.callNativeModule("Echo", "ping", [() => { throw failure; }]);
-    worker.__BobcatNativeModuleCallback(lastInvocation()[0], 0, "[]");
+    transport.callNativeModule("Echo", "ping", [() => { throw failure; }]);
+    transport.__BobcatNativeModuleCallback(lastInvocation()[0], 0, "[]");
     expect(reportError).toHaveBeenCalledWith(failure);
   });
 });
 
 describe("the BTS NativeModules object", () => {
+  // The object `app.NativeModules` named as the runtime evaluated, its keys
+  // then, and what the entry saw as it ran.
+  let evaluated: object;
+  let keysBeforeInitialize: string[];
+  const seen: unknown[] = [];
+
+  // The one `initialize` a BTS is posted, delivered once for every test
+  // below: the table the MTS realm posts for a view built with one module,
+  // `Foo`, declaring one method, `bar`, beside that realm's own `SystemInfo`.
+  beforeAll(() => {
+    evaluated = bts.lynx.getApp().NativeModules;
+    keysBeforeInitialize = Object.keys(evaluated);
+    bts.__BobcatStartBTS(async () => {
+      seen.push(Object.keys(bts.NativeModules), bts.SystemInfo["pixelRatio"]);
+    });
+    worker.__BobcatDeliverWorkerMessage({
+      bobcat: "runtime", method: "initialize", updateData: {},
+      systemInfo: systemInfo.createSystemInfo({ pixelRatio: 1.1, pixelWidth: 1287, pixelHeight: 2785 }),
+      nativeModuleTable: "3:Foo3:bar",
+    });
+  });
+
+  it("is empty until `initialize` arrives", () => {
+    // Which is all a plain `Worker` that imports the runtime ever sees:
+    // nothing posts one an `initialize`.
+    expect(keysBeforeInitialize).toEqual([]);
+  });
+
+  it("is built out of the table `initialize` carries, before the entry runs", () => {
+    // The entry ran with both in place, and the object it saw is the one
+    // every name for `NativeModules` already held.
+    expect(seen).toEqual([["Foo"], 1.1]);
+    expect(bts.NativeModules).toBe(evaluated);
+    expect(bts.lynx.SystemInfo).toBe(bts.SystemInfo);
+    expect((globalThis as { SystemInfo?: unknown }).SystemInfo).toBe(bts.SystemInfo);
+  });
+
   it("carries exactly the methods the embedder declared", () => {
-    bts.__BobcatInitializeBTS({ nativeModules: { Foo: ["bar"] } });
     const modules = bts.lynx.getApp().NativeModules as Record<string, Record<string, Function>>;
+    expect(Object.keys(modules)).toEqual(["Foo"]);
     invokeNativeModule.mockClear();
     expect(modules["Foo"]!["bar"]!("x")).toBeUndefined();
     expect(lastInvocation().slice(1)).toEqual(["Foo", "bar", '["x"]', ""]);

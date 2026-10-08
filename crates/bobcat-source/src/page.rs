@@ -24,19 +24,33 @@
 //! stays a **plain script resource**, registered verbatim at `named_chunk_url`
 //! and loaded — through the same synchronous host loader a `require` uses — by
 //! `__LoadLepusChunk`, which builds that URL itself and runs the chunk again
-//! on every call, as native's `TemplateEntry` does. Nothing is prefixed to the
-//! root script: it is the container's own text.
+//! on every call, as native's `TemplateEntry` does. The root script is the
+//! container's own text after the one line of imports below: neither an
+//! import of a chunk nor a call registering one is prefixed to it.
 //!
-//! A BTS body is wrapped in a preamble, one physical line long so the body
-//! keeps its own line numbering: [`bobcat_core::BTS_CHUNK_PREAMBLE`], which is
-//! every name web-core's chunk wrapper would have had as a parameter, plus —
-//! for a [`BundleTarget::Web`] body, which is a `CommonJS` file — a `module`
-//! object of its own and an `export default` of what it left there. A
-//! [`BundleTarget::Lynx`] body is one expression, whose value native's host
-//! keeps as a script completion value and which is `export default`'d here. A
-//! Lepus chunk is wrapped in nothing at all: the realm compiles it as a
-//! function body, whose parameters are the bindings the entry preamble gives
-//! the entry, so an `import` could not appear in it anyway.
+//! Every card body registered here is wrapped in a preamble, one physical
+//! line long so the body keeps its own line numbering; only a column on the
+//! body's first line is offset, by the preamble's length. This crate is what
+//! wraps it, because the engine adds nothing to a script: it loads each as the
+//! fetcher answered it. A body is wrapped in the list of names its realm
+//! gives a card, which `bobcat-core` keeps:
+//!
+//! - An MTS body — the root Lepus script of a `.web.bundle` or a `.lynx.bundle`, and an XML page's
+//!   main-thread script — is [`bobcat_core::MTS_CHUNK_PREAMBLE`] and then the body
+//!   ([`mts_entry_source`]).
+//! - A BTS body is [`bobcat_core::BTS_CHUNK_PREAMBLE`], which is every name web-core's chunk
+//!   wrapper would have had as a parameter, plus — for a [`BundleTarget::Web`] body, which is a
+//!   `CommonJS` file — a `module` object of its own and an `export default` of what it left there.
+//!   A [`BundleTarget::Lynx`] body is one expression, whose value native's host keeps as a script
+//!   completion value and which is `export default`'d here ([`bts_module_source`]). An XML page's
+//!   background-thread script is a `Web` body, because web-core runs it through that same chunk
+//!   wrapper.
+//! - A named Lepus chunk is wrapped in nothing at all: the realm compiles it as a function body,
+//!   whose parameters are the bindings `MTS_CHUNK_PREAMBLE` gives a card's root, so an `import`
+//!   could not appear in it anyway.
+//!
+//! The BTS boot script `PageSource::from_template_with_background` writes is
+//! no card body: it is this crate's own module, and imports what it uses.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -53,11 +67,15 @@ use url::Url;
 pub struct PageSource {
     input_url: Url,
     script_url: Url,
+    /// The view's entry: the root Lepus script, or an XML page's main-thread
+    /// script, as the module [`mts_entry_source`] writes for it.
     script: Arc<str>,
     /// Every Lepus chunk other than `root`, verbatim, at the URL
     /// `__LoadLepusChunk` names it by. A script resource, not a module: the
     /// realm loads it on demand and compiles it as a function body.
     lepus_chunks: Vec<(Url, Arc<str>)>,
+    /// The view's BTS entry: a container's boot script, or an XML page's
+    /// background-thread script as a [`BundleTarget::Web`] body.
     background_script: Option<(Url, Arc<str>)>,
     /// The bundle's own bodies — its manifest paths and its string custom
     /// sections — beside the input URL, which is the base the BTS realm
@@ -203,9 +221,11 @@ enum LynxXmlUrlPolicy {
 
 #[derive(Debug)]
 struct MappedLynxXml<'source> {
-    main_thread: (Url, &'source str),
+    /// The main-thread script, as the module registered for it.
+    main_thread: (Url, String),
     style: Option<(Url, &'source str)>,
-    background_thread: Option<(Url, &'source str)>,
+    /// The background-thread script, as the BTS entry registered for it.
+    background_thread: Option<(Url, String)>,
 }
 
 impl LynxXmlSectionUrls {
@@ -296,7 +316,8 @@ impl PageSource {
         // verbatim at the URL `__LoadLepusChunk` builds for its name. Nothing
         // is prefixed to it and nothing imports it: the realm asks the host
         // for that URL at the call, and compiles what comes back as a function
-        // body. The root, likewise, is the container's own text.
+        // body. The root is the entry, a module, and so the container's own
+        // text after the imports a card's MTS body is given.
         let lepus_chunks: Vec<(Url, Arc<str>)> = template
             .lepus_code
             .iter()
@@ -362,7 +383,7 @@ impl PageSource {
         Ok(Self {
             input_url: input.clone(),
             script_url,
-            script: Arc::from(source),
+            script: Arc::from(mts_entry_source(&source)),
             lepus_chunks,
             background_script,
             background_sources,
@@ -594,7 +615,12 @@ pub enum BundleTarget {
 /// Both shapes answer through the module's **default export**, which is the
 /// one thing `bobcat:lynx-modules` reads, and both keep the body starting on
 /// the line it started on: every prefix is one physical line, and only the
-/// `CommonJS` suffix adds one, after the body.
+/// `CommonJS` suffix adds one, after the body. So an error reports the line
+/// it had in the container, and on any line after the first the column too.
+/// On the body's first line the column is offset by the prefix's length —
+/// [`bobcat_core::BTS_CHUNK_PREAMBLE`] and then `export default ` or the
+/// `CommonJS` declarations — which for a minified body written on one line
+/// is every column it has.
 ///
 /// - [`BundleTarget::Lynx`]: `export default <body>`. The body is one expression, so what native
 ///   would have kept as its script's completion value — normally the `{init}` object the compiler's
@@ -629,6 +655,45 @@ pub fn bts_module_source(target: BundleTarget, body: &str) -> String {
         }
     }
     source
+}
+
+/// A card's MTS body as the module registered for it:
+/// [`bobcat_core::MTS_CHUNK_PREAMBLE`], then the body.
+///
+/// This is where a card's main-thread script gets the bindings it expects to
+/// find in scope — the runtime names and the Element PAPI — because the engine
+/// adds nothing to an entry: it completes the entry with what the fetcher
+/// answered. Every MTS body this crate registers as a module is written by
+/// this, or, for a lazy container's `main-thread` section, by the same
+/// preamble in front of an `export default`.
+///
+/// The preamble is one physical line and the body starts on it, as in
+/// [`bts_module_source`], so every line of the body keeps the number it had
+/// in the container, and an error on any line after the first reports the
+/// column it had there too. An error on the body's first line reports a
+/// column offset by the preamble's length, which for a minified body written
+/// on one line is every column it has. A body's leading `"use strict"` stops
+/// being a directive prologue, because something precedes it. Nothing is
+/// lost: a module is strict already.
+#[must_use]
+pub fn mts_entry_source(body: &str) -> String {
+    let mut source = String::with_capacity(bobcat_core::MTS_CHUNK_PREAMBLE.len() + body.len());
+    source.push_str(bobcat_core::MTS_CHUNK_PREAMBLE);
+    source.push_str(body);
+    source
+}
+
+/// An XML page's background-thread script as the BTS entry registered for it:
+/// a [`BundleTarget::Web`] body, through [`bts_module_source`].
+///
+/// web-core's `xmlToTasmJSON` puts the script, verbatim, at its bundle's
+/// `/app-service.js`, and its `createChunkLoading` runs every BTS chunk inside
+/// its chunk wrapper, so the script sees the names that wrapper passes, a
+/// `module` object among them. This is that wrapper here. The script is the
+/// view's BTS entry rather than a manifest path, so nothing reads the
+/// `module.exports` it leaves.
+fn xml_background_source(body: &str) -> String {
+    bts_module_source(BundleTarget::Web, body)
 }
 
 /// The BTS boot script: the container's own URL, then the card.
@@ -701,7 +766,11 @@ pub(crate) fn named_style_url(entry: &Url, key: &str) -> Url {
 /// response URL so relative imports and CSS URLs retain the browser-observed
 /// redirect base. `source` is already Unicode: replacement characters emitted
 /// by the browser's UTF-8 decoder are ordinary contents here. Both script bodies
-/// and author CSS are copied into `resources` for the view to load.
+/// and author CSS are copied into `resources` for the view to load: each script
+/// as the module a card body becomes here — the main-thread script through
+/// [`mts_entry_source`], the background-thread script as a
+/// [`BundleTarget::Web`] body — and the CSS as it is, exactly as
+/// [`PageSource::register_with`] registers an XML page's.
 pub fn register_lynx_xml_response(
     input: &Url,
     source: &str,
@@ -709,14 +778,14 @@ pub fn register_lynx_xml_response(
 ) -> Result<LynxXmlResponseRegistration, SourceError> {
     let mapped = map_lynx_xml(input, source, LynxXmlUrlPolicy::ResponseFragments)?;
     let background_thread_url = mapped.background_thread.map(|(url, source)| {
-        register_text(resources, &url, source, "text/javascript; charset=utf-8");
+        register_text(resources, &url, &source, "text/javascript; charset=utf-8");
         url
     });
     let (entry_url, main_thread_script) = mapped.main_thread;
     register_text(
         resources,
         &entry_url,
-        main_thread_script,
+        &main_thread_script,
         "text/javascript; charset=utf-8",
     );
 
@@ -753,12 +822,13 @@ fn map_lynx_xml<'source>(
         style,
         background_thread,
     } = section_urls;
+    // Both scripts are card bodies, wrapped here for both URL policies.
     Ok(MappedLynxXml {
-        main_thread: (main_thread, xml.main_thread_script),
+        main_thread: (main_thread, mts_entry_source(xml.main_thread_script)),
         style: xml.style.map(|source| (style, source)),
         background_thread: xml
             .background_thread_script
-            .map(|source| (background_thread, source)),
+            .map(|source| (background_thread, xml_background_source(source))),
     })
 }
 
@@ -1137,6 +1207,82 @@ mod tests {
         );
     }
 
+    /// A body of three lines, to read line numbers off.
+    const THREE_LINES: &str = "first();\nsecond();\nthird();";
+
+    /// `source` is `MTS_CHUNK_PREAMBLE` and then [`THREE_LINES`], with the
+    /// body's first line on the preamble's own: line 1 of the module.
+    fn assert_mts_entry_of_three_lines(source: &str, what: &str) {
+        assert_eq!(
+            source,
+            format!("{}{THREE_LINES}", bobcat_core::MTS_CHUNK_PREAMBLE),
+            "{what}"
+        );
+        let lines: Vec<&str> = source.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                format!("{}first();", bobcat_core::MTS_CHUNK_PREAMBLE).as_str(),
+                "second();",
+                "third();"
+            ],
+            "{what}: every line of the body keeps its number"
+        );
+    }
+
+    /// The engine adds nothing to an entry, so a container's root Lepus
+    /// script is registered with the imports a card's MTS body is given in
+    /// front of it, on its own first line — whichever compiler built the
+    /// container. A `.lynx.bundle` reaches this through
+    /// `from_native_bundle`, which names its entry `root` first.
+    #[test]
+    fn a_bundle_root_is_the_mts_preamble_and_its_body_from_line_one() {
+        let web = PageSource::from_bytes(&input_url(), &web_bundle(Some(THREE_LINES)))
+            .expect("a web bundle");
+        assert_mts_entry_of_three_lines(&web.script, "web bundle");
+
+        let template = crate::web::decode(&web_bundle(Some(THREE_LINES))).unwrap();
+        let native =
+            PageSource::from_template_with_background(&input_url(), template, BundleTarget::Lynx)
+                .expect("a native bundle's template");
+        assert_mts_entry_of_three_lines(&native.script, "native bundle");
+    }
+
+    /// Both XML paths register the main-thread script the way a container's
+    /// root is registered, and the background-thread script as the `Web`
+    /// body web-core's chunk wrapper would have run it as.
+    #[test]
+    fn both_xml_paths_wrap_both_scripts() {
+        let xml = format!(
+            "<lynx engine-version=\"4.2\"><script thread=\"main\">{THREE_LINES}</script>\
+             <script thread=\"background\">lynx.getCoreContext();</script></lynx>"
+        );
+        let page = PageSource::from_bytes(&input_url(), xml.as_bytes()).expect("an XML page");
+        assert_mts_entry_of_three_lines(&page.script, "XML page");
+        assert_eq!(
+            page.background_script
+                .as_ref()
+                .map(|(_, source)| source.as_ref()),
+            Some(bts_module_source(BundleTarget::Web, "lynx.getCoreContext();").as_str())
+        );
+
+        // `register_lynx_xml_response` registers what this maps, unchanged.
+        let mapped = map_lynx_xml(&input_url(), &xml, LynxXmlUrlPolicy::ResponseFragments)
+            .expect("an XML response");
+        assert_eq!(
+            mapped.main_thread.0.as_str(),
+            "file:///tmp/card.lynx.xml#main-thread"
+        );
+        assert_mts_entry_of_three_lines(&mapped.main_thread.1, "XML response");
+        assert_eq!(
+            mapped.background_thread.map(|(_, source)| source),
+            Some(bts_module_source(
+                BundleTarget::Web,
+                "lynx.getCoreContext();"
+            ))
+        );
+    }
+
     #[test]
     fn non_root_lepus_chunks_register_beside_the_root_script() {
         let mut template = crate::web::decode(&web_bundle(Some("export {};"))).unwrap();
@@ -1158,10 +1304,10 @@ mod tests {
             )],
             "a chunk is registered verbatim: no preamble, nothing to import"
         );
-        // The root is the container's own text. Nothing is prefixed to it —
-        // not an import of a chunk, not a call registering one — so every line
-        // of it keeps the number it had in the container.
-        assert_eq!(page.script.as_ref(), "export {};");
+        // The root is the container's own text after `MTS_CHUNK_PREAMBLE`.
+        // Nothing else is prefixed to it: not an import of a chunk, not a call
+        // registering one.
+        assert_eq!(page.script.as_ref(), mts_entry_source("export {};"));
 
         let resources = resources();
         page.register_with(&resources);
@@ -1348,9 +1494,10 @@ mod tests {
             page.style_sheet.as_ref(),
             Some((_, PageStyleSheet::Text(source))) if source.is_empty()
         ));
+        // Present and empty: a `Web` body with nothing in it.
         assert!(matches!(
             page.background_script.as_ref(),
-            Some((_, source)) if source.is_empty()
+            Some((_, source)) if **source == *bts_module_source(BundleTarget::Web, "")
         ));
         let sources = page.view_sources(SCREEN);
         assert_eq!(sources.base_url, page.input_url().as_str());

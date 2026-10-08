@@ -55,6 +55,7 @@ use crate::background::{WorkerKey, WorkerMessage};
 use crate::clock::ClockInstant;
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
+use crate::native_module::ModuleReply;
 use crate::paint::RouterHost;
 use crate::resource::{FetchProbe, LoadedSource, SourceCompletion, SourceRequest};
 use crate::view::{EngineEvent, EventRequester, LynxViewError, Viewport};
@@ -177,6 +178,20 @@ pub(crate) enum ToMain {
     /// pixels), which is what makes "`ImageData` never crosses a channel" a
     /// property of the type.
     ImageEvents(Vec<dom::ImageEvent>),
+    /// An embedder's native module answering one function argument of one
+    /// call the MTS realm made, sent by a
+    /// [`ModuleCallback`](crate::native_module::ModuleCallback) as it drops:
+    /// the call the realm numbered, which argument it was, and the JSON array
+    /// text to spread — or `None`, which releases the function uninvoked.
+    /// What [`WorkerMessage::ModuleCallback`] is for a worker realm.
+    ///
+    /// The one command sent outside the seat's [`CommandSender`], and so the
+    /// one a frame post's fence does not count, on either side.
+    ModuleCallback {
+        call: u64,
+        index: u32,
+        arguments: Option<String>,
+    },
     #[cfg(test)]
     Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
     /// The one command that is not the realm's: it spawns a task of the view
@@ -279,20 +294,24 @@ pub(crate) enum ViewNotice {
         request: SourceRequest,
         completion: SourceCompletion,
     },
-    /// One `NativeModules.<module>.<method>(...)` the BTS realm made, for the
-    /// embedder's own module of that name to serve.
+    /// One `NativeModules.<module>.<method>(...)` a realm of this view made,
+    /// for the embedder's own module of that name to serve.
     ///
     /// Raw fields rather than a built
     /// [`ModuleCall`](crate::native_module::ModuleCall): a callback answers
-    /// through the calling worker's inbox, and the handle on that inbox is
-    /// the one the view already registered from
-    /// [`ViewNotice::WorkerCreated`] — so the call is assembled where that
-    /// handle is, in `LynxView::pump`, rather than carrying a second copy of
-    /// it across. A view that has failed or been released assembles nothing,
-    /// which leaves the realm's functions released the way a dropped
-    /// [`SourceCompletion`] answers its request with nothing.
+    /// through the calling realm's own channel, and the view already holds
+    /// the handle on it — its command sender for the MTS realm, the handle it
+    /// registered from [`ViewNotice::WorkerCreated`] for a worker — so the
+    /// call is assembled where that handle is, in `LynxView::pump`, rather
+    /// than carrying a second copy of it across. A view that has failed or
+    /// been released assembles nothing, which leaves the realm's functions
+    /// released the way a dropped [`SourceCompletion`] answers its request
+    /// with nothing.
     NativeModuleCall {
-        worker: WorkerKey,
+        /// The realm that made the call, as [`ViewNotice::ScriptFrameDemand`]
+        /// names one: `None` for the MTS realm, the worker's key for a
+        /// worker.
+        caller: Option<WorkerKey>,
         call: u64,
         module: String,
         method: String,
@@ -376,10 +395,13 @@ pub(crate) struct ScrollEntry {
 pub(crate) struct FramePost {
     pub(crate) now: f64,
     pub(crate) seq: u64,
-    /// How many commands were sent before the post ([`CommandSender::sent`]).
-    /// Main applies the frame only once it has applied that many, so the
-    /// acknowledgement implies every command sent ahead of it — even when
-    /// the marker that carries the post is older than some of them.
+    /// How many commands the seat's [`CommandSender`] had sent before the
+    /// post ([`CommandSender::sent`]). Main applies the frame only once it
+    /// has applied that many, so the acknowledgement implies every command
+    /// that sender sent ahead of it — even when the marker that carries the
+    /// post is older than some of them. A [`ToMain::ModuleCallback`] is in
+    /// neither count, so the acknowledgement does not imply one sent ahead
+    /// of the post.
     pub(crate) fence: u64,
 }
 
@@ -481,6 +503,14 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 ///
 /// Every sender of a view's commands — the painter, the view's own host
 /// calls — sends through the seat's one instance, on the embedder's thread.
+///
+/// One command is sent outside it and is in no count: a native module's
+/// answer to the MTS realm, [`ToMain::ModuleCallback`]. A
+/// [`ModuleCallback`](crate::native_module::ModuleCallback) sends it as it
+/// drops, on whichever thread that is, through the weak sender
+/// [`Self::uncounted`] hands out. [`Self::sent`] does not count it and
+/// neither does the page's count of applied commands, so a frame post
+/// neither waits for one nor is applied earlier because of one.
 pub(crate) struct CommandSender {
     sender: mpsc::UnboundedSender<ToMain>,
     sent: Cell<u64>,
@@ -510,6 +540,14 @@ impl CommandSender {
     pub(crate) fn is_closed(&self) -> bool {
         self.sender.is_closed()
     }
+
+    /// The same channel, held weakly and outside the count, for the one
+    /// command that is sent that way: [`ToMain::ModuleCallback`]. Any other
+    /// command sent through it would be counted by main and not by
+    /// [`Self::sent`].
+    pub(crate) fn uncounted(&self) -> mpsc::WeakUnboundedSender<ToMain> {
+        self.sender.downgrade()
+    }
 }
 
 /// Host-side script demand contributing to the painter's existing frame request.
@@ -529,16 +567,27 @@ impl FrameDemand {
         self.workers.insert(key, (messages, false));
     }
 
-    /// The registered handle on one worker's inbox, for the other thing a
-    /// view sends a worker: a native module's answer to a call that worker
-    /// made. `None` is a worker this view never heard of — every
+    /// The channel a native module's answer to a call `caller` made goes
+    /// back through: `main`, the view's command sender, held weakly, for the
+    /// MTS realm, and the registered handle on a worker's inbox for that
+    /// worker. `None` is a worker this view never heard of — every
     /// `WorkerCreated` precedes that worker's own traffic on the one notice
     /// FIFO — or one whose entry a frame demand has already swept.
-    pub(crate) fn sender(
+    ///
+    /// The MTS realm's handle is [`CommandSender::uncounted`]: the answer is
+    /// a command of the view's FIFO that a frame post's fence does not count.
+    pub(crate) fn reply(
         &self,
-        key: WorkerKey,
-    ) -> Option<mpsc::WeakUnboundedSender<WorkerMessage>> {
-        self.workers.get(&key).map(|(messages, _)| messages.clone())
+        caller: Option<WorkerKey>,
+        main: &CommandSender,
+    ) -> Option<ModuleReply> {
+        match caller {
+            Some(key) => self
+                .workers
+                .get(&key)
+                .map(|(messages, _)| ModuleReply::Worker(messages.clone())),
+            None => Some(ModuleReply::Main(main.uncounted())),
+        }
     }
 
     pub(crate) fn set(&mut self, worker: Option<WorkerKey>, pending: bool) {
@@ -691,8 +740,8 @@ impl ViewOutbox {
     /// Asks the host for one source, handing back the answer's receiving end.
     ///
     /// The receiver is the destination and the only one: a module's answer
-    /// goes to the task awaiting it, and a worker's rides to the worker
-    /// thread inside its `Start`.
+    /// goes to the task awaiting it. A worker asks through its own
+    /// [`HostOutbox`], its script included.
     pub(crate) fn request_source(&self, request: SourceRequest) -> SourceAnswer {
         let (completion, answer) = SourceCompletion::new(self.token.clone());
         self.notify(ViewNotice::RequestSource {

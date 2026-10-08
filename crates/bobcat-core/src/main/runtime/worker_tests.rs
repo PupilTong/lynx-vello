@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use super::*;
-use crate::background::{WorkerEvent, WorkerHome, WorkerPayload};
+use crate::background::{WorkerEvent, WorkerHome, WorkerKey, WorkerPayload};
 use crate::esm::build_runtime;
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, ViewNotice, block_on_deadline, detached_outbox};
@@ -25,9 +25,23 @@ const PATIENCE: Duration = Duration::from_secs(30);
 /// frame requested says so in the entry itself.
 const BTS_ENTRY_RAN: &str = "bts-entry-ran";
 
-/// The URL a `new Worker('./worker.js')` asks the host for: the specifier
-/// joined by URL rules to the entry's URL, `app:///nested/main.js`.
+/// The URL the worker of a `new Worker('./worker.js')` asks the host for its
+/// script by: the specifier joined by URL rules to the entry's URL,
+/// `app:///nested/main.js`.
 const WORKER_URL: &str = "app:///nested/worker.js";
+
+/// What a worker's failures and diagnostics are named by: the id of its key
+/// and its script URL, which is `bobcat:bts` for the BTS.
+///
+/// A pair is a group of its own, so its keys count from 1 in the order its
+/// realm constructs workers: the entry's, then the BTS boot creates once the
+/// entry has run.
+fn worker_label(key: u64, url: &str) -> crate::ScriptSource {
+    crate::ScriptSource::Worker {
+        id: crate::WorkerId::from(WorkerKey::new(key)),
+        url: url.into(),
+    }
+}
 
 /// Whether the worker posted exactly this string.
 ///
@@ -111,7 +125,9 @@ impl Pair {
 
     /// Waits for the next native-module call the BTS realm made, and
     /// assembles it out of the reply handle this test registered from
-    /// `WorkerCreated` — which is exactly what `LynxView::pump` does.
+    /// `WorkerCreated` — which is exactly what `LynxView::pump` does. The
+    /// command sender stands in for the view's own, which only a call the
+    /// MTS realm made is answered through.
     fn module_call(&mut self) -> (String, crate::native_module::ModuleCall) {
         let deadline = ClockInstant::now() + PATIENCE;
         loop {
@@ -122,7 +138,7 @@ impl Pair {
                 .position(|notice| matches!(notice, ViewNotice::NativeModuleCall { .. }));
             if let Some(position) = waiting
                 && let Some(ViewNotice::NativeModuleCall {
-                    worker,
+                    caller,
                     call,
                     module,
                     method,
@@ -130,9 +146,10 @@ impl Pair {
                     callbacks,
                 }) = self.deferred_notices.remove(position)
             {
+                let (commands, _) = mpsc::unbounded_channel();
                 let reply = self
                     .frame_demand
-                    .sender(worker)
+                    .reply(caller, &crate::link::CommandSender::new(commands))
                     .expect("the worker announced itself before it called");
                 return (
                     module,
@@ -213,11 +230,10 @@ impl Pair {
         )
     }
 
-    /// Answers the next module one of this view's realms asks for, spinning
-    /// the way an embedder's own turn does. A compiled BTS bundle reaches its
-    /// manifest paths through the host now, and the load parks the worker's
-    /// job until this answers it.
-    fn serve_module(&mut self, url: &str, source: &str) {
+    /// The next request one of this view's realms makes for the module at
+    /// `url`, waited for by spinning the way an embedder's own turn does.
+    /// Every other notice stays queued, in order.
+    fn request(&mut self, url: &str) -> SourceCompletion {
         let deadline = ClockInstant::now() + PATIENCE;
         loop {
             self.pump_host();
@@ -230,43 +246,33 @@ impl Pair {
                 && let Some(ViewNotice::RequestSource { completion, .. }) =
                     self.deferred_notices.remove(position)
             {
-                completion.complete(Ok(LoadedSource::Module {
-                    source: source.to_owned(),
-                    url: url.to_owned(),
-                }));
-                return;
+                return completion;
             }
             assert!(ClockInstant::now() < deadline, "the realm asked for {url}");
             std::thread::sleep(Duration::from_millis(1));
         }
     }
 
-    /// The next source request the realm made, which for these tests is
-    /// always a worker script: `./worker.js`, which Rust joined to the
-    /// entry's URL `app:///nested/main.js`.
+    /// Answers the next module one of this view's realms asks for at `url`.
+    /// A compiled BTS bundle reaches its manifest paths through the host,
+    /// and the load parks the worker's job until this answers it.
+    fn serve_module(&mut self, url: &str, source: &str) {
+        self.request(url).complete(Ok(LoadedSource::Module {
+            source: source.to_owned(),
+            url: url.to_owned(),
+        }));
+    }
+
+    /// The request a `./worker.js` worker made for its own script, which
+    /// Rust joined to the entry's URL `app:///nested/main.js`. The worker's
+    /// realm makes it from `bobcat-workers`, in its boot job, so it is
+    /// waited for.
     fn source(&mut self) -> SourceCompletion {
-        self.pump_host();
-        loop {
-            let notice = self.deferred_notices.pop_front().expect("source requested");
-            if let ViewNotice::RequestSource {
-                request,
-                completion,
-            } = notice
-            {
-                assert!(
-                    matches!(&request, SourceRequest::Module(url) if url == WORKER_URL),
-                    "{request:?}"
-                );
-                return completion;
-            }
-        }
+        self.request(WORKER_URL)
     }
 
     fn answer(&mut self, source: &str) {
-        self.source().complete(Ok(LoadedSource::Module {
-            source: source.into(),
-            url: WORKER_URL.into(),
-        }));
+        self.serve_module(WORKER_URL, source);
     }
 
     /// Waits for one worker event and hands it to the realm, as the view's
@@ -452,6 +458,7 @@ fn bts_entry_receives_processed_initial_data_before_it_installs_app_hooks() {
     let mut pair = Pair::unbooted_with_data(
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const params = lynx.getApp()._params;
         if (params.initData !== null || !Array.isArray(params.cacheData) || params.cacheData.length) throw Error('native initial slots');
         const data = params.updateData;
@@ -562,6 +569,7 @@ fn lifecycle_hooks_and_bts_snapshots_precede_queued_mts_jobs() {
         let mut pair = Pair::unbooted_with_data(
             Some(
                 r"
+            import { lynx } from 'bobcat:bts-runtime';
             const app = lynx.getApp();
             const reply = (kind, data) => lynx.getCoreContext().dispatchEvent({type:'reply', data:[kind,data]});
             reply('initial', app._params.updateData);
@@ -654,6 +662,7 @@ fn global_props_initialize_bts_before_hooks_and_notify_before_mts_events() {
     let mut pair = Pair::unbooted_with_data(
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const props=lynx.__globalProps;
         if (props.seed!==1 || props.keep!==1 || props.nested.value!==2) throw Error('BTS initial props');
         lynx.getApp().updateGlobalProps=data=>{
@@ -727,6 +736,7 @@ fn initial_processor_preserves_its_string_and_reads_the_page_config_switch() {
         let mut pair = Pair::unbooted_with_config(
             Some(&format!(
                 r"
+                import {{ lynx }} from 'bobcat:bts-runtime';
                 const params=lynx.getApp()._params;
                 if (params.processorName !== {expected_name} || params.updateData.value !== {expected_value}) throw Error('BTS processor parameters');
                 lynx.getCoreContext().dispatchEvent({{type:'reply',data:params.updateData.value}});
@@ -787,6 +797,7 @@ fn initial_processor_non_tables_and_exceptions_preserve_host_data_in_both_realms
         let mut pair = Pair::unbooted_with_data(
             Some(
                 r"
+            import { lynx } from 'bobcat:bts-runtime';
             const params = lynx.getApp()._params;
         if (params.initData !== null || !Array.isArray(params.cacheData) || params.cacheData.length) throw Error('native initial slots');
         const data = params.updateData;
@@ -836,6 +847,7 @@ fn engine_render_delivers_lifecycle_to_the_current_background_app_hook() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const app = lynx.getApp();
         app.OnLifecycleEvent = function(data) {
             if (this !== app) throw Error('wrong app receiver');
@@ -883,6 +895,7 @@ fn string_handlers_reach_background_with_event_snapshots() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const app = lynx.getApp();
         app.publishEvent = function(name, event) {
             if (this !== app) throw Error('wrong publish receiver');
@@ -947,6 +960,7 @@ fn context_events_carry_structured_values_in_both_directions() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const core = lynx.getCoreContext();
         core.addEventListener('request', event => {
             const d = event.data;
@@ -995,7 +1009,10 @@ fn posting_a_function_to_a_worker_throws_in_the_poster_and_sends_nothing() {
         worker.postMessage('fine');
         ",
     );
-    pair.answer("onmessage = event => postMessage(event.data);");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         onmessage = event => postMessage(event.data);",
+    );
     pair.deliver();
     pair.check(
         r#"
@@ -1024,6 +1041,7 @@ fn a_published_dom_event_carries_values_only_and_no_propagation_methods() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         lynx.getApp().publishEvent = (name, event) => {
             lynx.getCoreContext().dispatchEvent({ type: 'reply', data: {
                 keys: Object.keys(event).sort().join(','),
@@ -1077,6 +1095,7 @@ fn publish_hooks_install_lazily_and_component_ids_stay_opaque() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const app = lynx.getApp();
         const core = lynx.getCoreContext();
         const reply = data => core.dispatchEvent({ type: 'reply', data });
@@ -1118,6 +1137,7 @@ fn a_late_publish_hook_failure_does_not_discard_later_queued_events() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const core = lynx.getCoreContext();
         core.addEventListener('install', () => {
             lynx.getApp().publishEvent = name => {
@@ -1150,6 +1170,7 @@ fn lepus_calls_return_async_results_to_the_matching_background_callback() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const native = lynx.getNativeApp();
         if (native !== lynx.getNativeApp()) throw Error('unstable native app');
         let calls = 0;
@@ -1190,6 +1211,7 @@ fn lepus_failures_report_without_success_callbacks_and_leave_bts_usable() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const core = lynx.getCoreContext();
         lynx.getNativeApp().callLepusMethod('failSync', {}, () => {
             core.dispatchEvent({ type: 'reply', data: 'unexpected callback' });
@@ -1238,7 +1260,7 @@ fn constructor_creates_distinct_contexts_and_queues_messages_in_order() {
     );
     for _ in 0..2 {
         pair.answer(
-            r"
+            r"import 'bobcat:worker'; import 'bobcat:timers';
             if (typeof globalThis.counter !== 'undefined') throw Error('shared context');
             if (typeof globalThis.lynx !== 'undefined') throw Error('ordinary worker has BTS globals');
             globalThis.counter = 0;
@@ -1270,7 +1292,7 @@ fn terminate_discards_events_already_queued_on_main() {
         worker.onmessage = () => { throw Error('late delivery'); };
     ",
     );
-    pair.answer("postMessage('already queued');");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('already queued');");
     // Waiting for the worker's response proves it has run before terminate.
     let event = pair.next_event().expect("the worker answered");
     pair.check("worker.terminate(); worker.terminate(); worker.postMessage('ignored');");
@@ -1297,7 +1319,10 @@ fn worker_errors_reach_parent_and_leave_both_realms_usable() {
         worker.postMessage('ping');
     ",
     );
-    pair.answer("onmessage = e => postMessage(e.data); throw Error('worker boom');");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         onmessage = e => postMessage(e.data); throw Error('worker boom');",
+    );
     let mut event = pair.next_event().expect("worker error");
     let WorkerPayload::Errored(error) = &mut event.payload else {
         panic!("expected a recoverable worker error");
@@ -1321,8 +1346,14 @@ fn worker_errors_reach_parent_and_leave_both_realms_usable() {
     "#);
 }
 
+/// A script the host could not load is one `error` event at the `Worker`
+/// object and one `WorkerThrew` at the embedder, named as a module load, and
+/// the worker is not over: the realm still holds it, as it holds one whose
+/// script threw, until `terminate()` ends it. The worker sends nothing more:
+/// what is posted to it before the `terminate()` is dropped, and it reports
+/// nothing as it ends.
 #[test]
-fn unanswered_script_dispatches_one_error_and_ends_the_handle() {
+fn a_script_that_cannot_be_fetched_dispatches_one_error_and_leaves_the_worker_terminable() {
     let mut pair = Pair::new(
         r"
         import { Worker } from 'bobcat-internal';
@@ -1333,12 +1364,41 @@ fn unanswered_script_dispatches_one_error_and_ends_the_handle() {
     );
     drop(pair.source());
     pair.deliver();
-    pair.check("if (errors.length !== 1 || !errors[0].includes('without completing')) throw Error('lost source'); worker.postMessage('ignored'); worker.terminate();");
+    let events = worker_events(pair.notices());
+    let [crate::EngineEvent::WorkerThrew { source, error }] = events.as_slice() else {
+        panic!("one WorkerThrew from the worker: {events:?}");
+    };
+    // The entry's worker is the pair's first.
+    assert_eq!(*source, worker_label(1, WORKER_URL));
+    assert!(
+        error.message.contains("loading a worker module")
+            && error.message.contains("without completing"),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        pair.live_workers(),
+        2,
+        "the worker the failed load left running, and lynx-bg"
+    );
+    pair.check(
+        "if (errors.length !== 1 || !errors[0].includes('without completing')) throw Error(JSON.stringify(errors)); worker.postMessage('ignored'); worker.terminate();",
+    );
+    assert_eq!(pair.live_workers(), 1, "`terminate()` ended that worker");
+    // The thread has returned, so whatever the worker sent after its one
+    // error is here: an answer to the post, or a report of its own end.
+    assert!(
+        pair.finish().is_empty(),
+        "the worker sent nothing for the post and nothing as it ended"
+    );
 }
 
-/// A `Worker` constructed once `bobcat-workers` has trapped is never sent
-/// there: it fails at once, as one whose script could not be fetched does,
-/// with no `WorkerCreated`, no `Start` and no request to the host.
+/// A `Worker` constructed once `bobcat-workers` has trapped fails at once:
+/// the view hears no `WorkerCreated` for it, and its end reaches the
+/// embedder as one `WorkerEnded` and the `Worker` object as one `error`
+/// event. That no `Start` is sent for it is asserted where the test holds
+/// the thread's inbox, in `main/runtime/tests.rs`
+/// (`a_worker_constructed_after_its_thread_trapped_is_sent_no_start`).
 #[test]
 fn a_worker_created_after_its_thread_trapped_fails_without_starting() {
     let mut pair = Pair::new("globalThis.errors = [];");
@@ -1354,13 +1414,15 @@ fn a_worker_created_after_its_thread_trapped_fails_without_starting() {
         worker.onerror = e => errors.push(e.message);
     ",
     );
-    assert!(
-        !asked_for_a_worker(&pair.notices()),
-        "a worker that failed at once asks the host for nothing"
-    );
     let event = pair.next_event().expect("the worker's failure");
+    // A `WorkerCreated` is sent by the constructing job itself, so reading
+    // what the realm has told its host registers one that was sent.
+    pair.pump_host();
+    let (commands, _) = mpsc::unbounded_channel();
     assert!(
-        pair.frame_demand.sender(event.key).is_none(),
+        pair.frame_demand
+            .reply(Some(event.key), &crate::link::CommandSender::new(commands))
+            .is_none(),
         "the view never heard of the worker"
     );
     pair.runtime
@@ -1369,15 +1431,10 @@ fn a_worker_created_after_its_thread_trapped_fails_without_starting() {
         .dispatch_worker_event(&mut pair.js, event.key, event.payload)
         .unwrap();
     let events = worker_events(pair.notices());
-    let [
-        crate::EngineEvent::WorkerEnded {
-            source: crate::ScriptSource::Worker(_),
-            error,
-        },
-    ] = events.as_slice()
-    else {
+    let [crate::EngineEvent::WorkerEnded { source, error }] = events.as_slice() else {
         panic!("one WorkerEnded from the worker: {events:?}");
     };
+    assert_eq!(*source, worker_label(event.key.get(), WORKER_URL));
     assert!(
         error.message.contains("the worker thread has ended"),
         "{}",
@@ -1409,25 +1466,19 @@ fn a_view_booted_after_its_worker_thread_trapped_hears_each_worker_end() {
     .unwrap();
     pair.deliver();
     pair.deliver();
-    let notices = pair.notices();
-    assert!(
-        !asked_the_host(&notices),
-        "each worker failed at once and asked the host for nothing"
-    );
-    let events = worker_events(notices);
+    let events = worker_events(pair.notices());
     let [
+        crate::EngineEvent::WorkerEnded { source: worker, .. },
         crate::EngineEvent::WorkerEnded {
-            source: crate::ScriptSource::Worker(_),
-            ..
-        },
-        crate::EngineEvent::WorkerEnded {
-            source: crate::ScriptSource::Background,
-            ..
+            source: background, ..
         },
     ] = events.as_slice()
     else {
         panic!("one WorkerEnded for the Worker, then one for the BTS: {events:?}");
     };
+    // In construction order: the entry's worker, then boot's BTS.
+    assert_eq!(*worker, worker_label(1, WORKER_URL));
+    assert_eq!(*background, worker_label(2, "bobcat:bts"));
     assert_eq!(pair.live_workers(), 0);
 }
 
@@ -1447,22 +1498,18 @@ fn a_bts_that_throws_reports_worker_threw_from_the_background() {
         .dispatch_worker_event(&mut pair.js, event.key, event.payload)
         .unwrap();
     let events = worker_events(pair.notices());
-    let [
-        crate::EngineEvent::WorkerThrew {
-            source: crate::ScriptSource::Background,
-            error,
-        },
-    ] = events.as_slice()
-    else {
+    let [crate::EngineEvent::WorkerThrew { source, error }] = events.as_slice() else {
         panic!("one WorkerThrew from the BTS: {events:?}");
     };
+    assert_eq!(*source, worker_label(event.key.get(), "bobcat:bts"));
     assert!(error.message.contains("BTS threw"), "{}", error.message);
     assert_eq!(pair.live_workers(), 1, "the BTS that threw still runs");
 }
 
-/// A `Worker` is named by the key its `Worker` object holds: the printed
-/// `WorkerId` is the key string the realm routed the event by, and the
-/// `error` event reaching that object is what shows the realm holds it.
+/// A `Worker` is named by the key its `Worker` object holds and by its URL:
+/// the printed `WorkerId` is the key string the realm routed the event by,
+/// the URL is the one its specifier joined to, and the `error` event
+/// reaching that object is what shows the realm holds it.
 #[test]
 fn a_worker_is_named_by_the_key_its_worker_object_holds() {
     let mut pair = Pair::new(
@@ -1473,7 +1520,7 @@ fn a_worker_is_named_by_the_key_its_worker_object_holds() {
         worker.onerror = e => errors.push(e.message);
     ",
     );
-    pair.answer("throw Error('worker threw');");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; throw Error('worker threw');");
     let event = pair.next_event().expect("the worker reports its throw");
     let key = event.key.get().to_string();
     pair.runtime
@@ -1484,7 +1531,7 @@ fn a_worker_is_named_by_the_key_its_worker_object_holds() {
     let events = worker_events(pair.notices());
     let [
         crate::EngineEvent::WorkerThrew {
-            source: crate::ScriptSource::Worker(id),
+            source: crate::ScriptSource::Worker { id, url },
             error,
         },
     ] = events.as_slice()
@@ -1492,10 +1539,182 @@ fn a_worker_is_named_by_the_key_its_worker_object_holds() {
         panic!("one WorkerThrew from the worker: {events:?}");
     };
     assert_eq!(id.to_string(), key);
+    assert_eq!(&**url, WORKER_URL);
     assert!(error.message.contains("worker threw"), "{}", error.message);
     pair.check(
         "if (errors.length !== 1 || !errors[0].includes('worker threw')) throw Error(JSON.stringify(errors));",
     );
+}
+
+/// A worker's label is the id of its key and its script URL, and both
+/// threads write that one value from the worker's `Start`: the creating realm
+/// records it under the key and reports the worker's throw with it, and the
+/// worker's own realm names its console output with it. The BTS is labelled
+/// by the same rule, with the URL `bobcat:bts`, and two workers constructed
+/// over one URL carry that URL and differ in their ids.
+#[test]
+fn a_workers_label_is_its_id_and_its_url_on_both_threads() {
+    const SCRIPT: &str = "import 'bobcat:worker'; \
+         console.log(`${name} logged`); throw Error(`${name} threw`);";
+    let mut pair = Pair::with_background(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.workers = [
+            new Worker('./worker.js', { name: 'first' }),
+            new Worker('./worker.js', { name: 'second' }),
+        ];
+        ",
+        Some(
+            r"
+        import { console } from 'bobcat:bts-runtime';
+        console.log('lynx-bg logged');
+        throw Error('lynx-bg threw');
+        ",
+        ),
+    );
+    // Each of the two asks for the script at its URL.
+    pair.answer(SCRIPT);
+    pair.answer(SCRIPT);
+    // In construction order: the entry's two, then the BTS boot created once
+    // the entry had run.
+    let labels = [
+        ("first", worker_label(1, WORKER_URL)),
+        ("second", worker_label(2, WORKER_URL)),
+        ("lynx-bg", worker_label(3, "bobcat:bts")),
+    ];
+    // One throw each, in no order between the three workers. Each was logged
+    // before it was thrown, so the three console messages are with the host
+    // once the three throws are here.
+    for _ in &labels {
+        let event = pair.next_event().expect("each worker reports its throw");
+        assert!(
+            matches!(event.payload, WorkerPayload::Errored(_)),
+            "a throw is an ordinary worker error"
+        );
+        pair.runtime
+            .as_mut()
+            .unwrap()
+            .dispatch_worker_event(&mut pair.js, event.key, event.payload)
+            .unwrap();
+    }
+    let mut thrown = Vec::new();
+    let mut logged = Vec::new();
+    for notice in pair.notices() {
+        match notice {
+            ViewNotice::Engine(crate::EngineEvent::WorkerThrew { source, error }) => {
+                thrown.push((source, error.message.to_string()));
+            }
+            ViewNotice::Engine(crate::EngineEvent::ConsoleMessage {
+                source, message, ..
+            }) => logged.push((source, message)),
+            ViewNotice::Engine(crate::EngineEvent::WorkerEnded { error, .. }) => {
+                panic!("{error}")
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(thrown.len(), 3, "{thrown:?}");
+    assert_eq!(logged.len(), 3, "{logged:?}");
+    let workers = &pair.runtime.as_ref().unwrap().workers;
+    for (key, (name, label)) in (1..).zip(&labels) {
+        assert_eq!(
+            workers.source_of(WorkerKey::new(key)).as_ref(),
+            Some(label),
+            "what the creating realm recorded for {name}"
+        );
+        let threw: Vec<_> = thrown
+            .iter()
+            .filter(|(source, _)| source == label)
+            .map(|(_, message)| message.as_str())
+            .collect();
+        assert!(
+            matches!(threw.as_slice(), [message] if message.contains(&format!("{name} threw"))),
+            "the throw the creating realm reported for {name}: {thrown:?}"
+        );
+        let said: Vec<_> = logged
+            .iter()
+            .filter(|(source, _)| source == label)
+            .map(|(_, message)| message.as_str())
+            .collect();
+        assert_eq!(
+            said,
+            [format!("{name} logged")],
+            "what the realm of {name} printed: {logged:?}"
+        );
+    }
+}
+
+/// The URL in a worker's label is the one its `Start` names, which is the URL
+/// its realm asks the host for the script by, and not the URL that request is
+/// answered from. A fetcher that answers from another URL, as a redirect
+/// does, changes what the script runs as, its `import.meta.url`, and leaves
+/// the label as it is on both threads: the creating realm's table, the
+/// `WorkerThrew` it reports and the console output the worker's own realm
+/// sends all carry the script URL.
+#[test]
+fn a_script_answered_from_another_url_leaves_the_workers_label_at_its_script_url() {
+    const RESPONSE_URL: &str = "https://cdn.test/redirected/worker.js";
+    let mut pair = Pair::new(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.worker = new Worker('./worker.js');
+    ",
+    );
+    pair.source().complete(Ok(LoadedSource::Module {
+        source: "import 'bobcat:worker'; console.log(import.meta.url); throw Error('threw');"
+            .into(),
+        url: RESPONSE_URL.into(),
+    }));
+    // Logged before it was thrown, so the console message is with the host
+    // once the throw is here.
+    let event = pair.next_event().expect("the worker reports its throw");
+    assert!(
+        matches!(event.payload, WorkerPayload::Errored(_)),
+        "a throw is an ordinary worker error"
+    );
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .dispatch_worker_event(&mut pair.js, event.key, event.payload)
+        .unwrap();
+    let mut thrown = Vec::new();
+    let mut logged = Vec::new();
+    for notice in pair.notices() {
+        match notice {
+            ViewNotice::Engine(crate::EngineEvent::WorkerThrew { source, error }) => {
+                thrown.push((source, error.message.to_string()));
+            }
+            ViewNotice::Engine(crate::EngineEvent::ConsoleMessage {
+                source, message, ..
+            }) => logged.push((source, message)),
+            ViewNotice::Engine(crate::EngineEvent::WorkerEnded { error, .. }) => {
+                panic!("{error}")
+            }
+            _ => {}
+        }
+    }
+    // The entry's worker is the pair's first.
+    let label = worker_label(1, WORKER_URL);
+    assert_eq!(
+        pair.runtime
+            .as_ref()
+            .unwrap()
+            .workers
+            .source_of(WorkerKey::new(1)),
+        Some(label.clone()),
+        "what the creating realm recorded"
+    );
+    // The message is the URL the script ran as, and its source is the label.
+    assert_eq!(
+        logged,
+        [(label.clone(), RESPONSE_URL.to_owned())],
+        "what the worker's realm printed"
+    );
+    let [(source, message)] = thrown.as_slice() else {
+        panic!("one WorkerThrew from the worker: {thrown:?}");
+    };
+    assert_eq!(*source, label);
+    assert!(message.contains("threw"), "{message}");
 }
 
 /// A worker its script has stopped is reported to no one: an error or an end
@@ -1511,7 +1730,7 @@ fn a_worker_failure_arriving_after_terminate_is_reported_to_no_one() {
         worker.onerror = e => errors.push(e.message);
     ",
     );
-    pair.answer("postMessage('started');");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('started');");
     let started = pair.next_event().expect("the worker answered");
     pair.check("worker.terminate();");
     for payload in [
@@ -1552,7 +1771,9 @@ fn dropping_the_view_cancels_io_without_keeping_the_worker_thread_alive() {
         "nobody is waiting for this script any more"
     );
     completion.complete(Ok(LoadedSource::Module {
-        source: "throw Error('cancelled worker ran');".into(),
+        source:
+            "import 'bobcat:worker'; import 'bobcat:timers'; throw Error('cancelled worker ran');"
+                .into(),
         url: "app:///late.js".into(),
     }));
     assert!(pair.events.try_recv().is_err());
@@ -1565,7 +1786,10 @@ fn releasing_a_realm_ends_a_worker_that_would_never_end_on_its_own() {
     let mut pair = Pair::new(
         "import { Worker } from 'bobcat-internal'; globalThis.worker = new Worker('./worker.js');",
     );
-    pair.answer("setInterval(() => postMessage('tick'), 1);");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         setInterval(() => postMessage('tick'), 1);",
+    );
     // The first tick proves the realm booted and its interval is running, so
     // what the drop below has to stop is a live worker.
     pair.next_event().expect("the worker's interval fires");
@@ -1601,7 +1825,7 @@ fn a_worker_that_closes_itself_is_forgotten_by_the_realm() {
     let mut pair = Pair::new(
         "import { Worker } from 'bobcat-internal'; globalThis.worker = new Worker('./worker.js');",
     );
-    pair.answer("close();");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; close();");
     // Boot creates the BTS worker beside the entry's own, so the realm has
     // two of them and this close accounts for exactly one.
     assert_eq!(pair.live_workers(), 2, "the entry's worker and lynx-bg");
@@ -1621,24 +1845,85 @@ fn a_worker_that_closes_itself_is_forgotten_by_the_realm() {
     );
 }
 
+/// A `Worker` terminated in the job that constructed it never runs its
+/// script. Its `Start` and its `Terminate` reach `bobcat-workers` on two
+/// channels, so the worker ends either before its boot job, having asked the
+/// host for nothing, or after it, with the request for its script
+/// outstanding. So the host sees at most one request for that script, and a
+/// request it does see reads as cancelled once the worker has ended: an
+/// answer completed after that reaches nothing.
+///
+/// The surviving worker is what the test waits on. Its boot job is queued
+/// behind the terminated worker's, and each worker sends its request from
+/// its boot job on the one notice channel, so a request the terminated
+/// worker made has been read by the time the surviving worker has answered.
+/// The requests are counted again once the worker thread has returned.
 #[test]
-fn terminating_before_fetch_prevents_the_context_from_starting() {
+fn a_worker_terminated_at_construction_never_runs() {
+    const CANCELLED_URL: &str = "app:///nested/cancelled.js";
     let mut pair = Pair::new(
         r"
         import { Worker } from 'bobcat-internal';
-        const cancelled = new Worker('./worker.js');
-        cancelled.onmessage = () => { throw Error('cancelled worker ran'); };
+        const cancelled = new Worker('./cancelled.js');
         cancelled.terminate();
-        const alive = new Worker('./worker.js');
+        globalThis.alive = new Worker('./alive.js');
         globalThis.answer = null;
         alive.onmessage = e => answer = e.data;
     ",
     );
-    pair.answer("postMessage('cancelled');");
-    pair.answer("postMessage('alive');");
+    pair.serve_module(
+        "app:///nested/alive.js",
+        "import 'bobcat:worker'; import 'bobcat:timers'; postMessage('alive');",
+    );
     pair.deliver();
-    pair.check(
-        "if (answer !== 'alive') throw Error('termination did not discard the pending script');",
+    pair.check("if (answer !== 'alive') throw Error('the surviving worker did not run');");
+    let mut requests: Vec<SourceCompletion> = pair
+        .notices()
+        .into_iter()
+        .filter_map(|notice| match notice {
+            ViewNotice::RequestSource {
+                request: SourceRequest::Module(url),
+                completion,
+            } if url == CANCELLED_URL => Some(completion),
+            _ => None,
+        })
+        .collect();
+    let asked = requests.len();
+    if let Some(completion) = requests.pop() {
+        let deadline = ClockInstant::now() + PATIENCE;
+        while !completion.is_cancelled() {
+            assert!(
+                ClockInstant::now() < deadline,
+                "the terminated worker's request is cancelled with it"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        completion.complete(Ok(LoadedSource::Module {
+            source: "import 'bobcat:worker'; postMessage('the terminated worker ran');".into(),
+            url: CANCELLED_URL.into(),
+        }));
+    }
+    // The thread has returned, so whatever a worker said is here.
+    assert!(
+        pair.finish().is_empty(),
+        "the terminated worker never ran its script"
+    );
+    let asked_late = pair
+        .notices()
+        .iter()
+        .filter(|notice| {
+            matches!(
+                notice,
+                ViewNotice::RequestSource {
+                    request: SourceRequest::Module(url),
+                    ..
+                } if url == CANCELLED_URL
+            )
+        })
+        .count();
+    assert!(
+        asked + asked_late <= 1,
+        "a terminated worker asks for its script at most once"
     );
 }
 
@@ -1652,7 +1937,7 @@ fn worker_close_keeps_its_last_message_and_disables_future_posts() {
         worker.onmessage = e => answer = e.data;
     ",
     );
-    pair.answer("postMessage('last'); close();");
+    pair.answer("import 'bobcat:worker'; import 'bobcat:timers'; postMessage('last'); close();");
     pair.deliver();
     pair.deliver();
     pair.check("if (answer !== 'last') throw Error('lost final message'); worker.postMessage('ignored'); worker.terminate();");
@@ -1672,7 +1957,11 @@ fn unsupported_worker_options_fail_before_requesting_a_context() {
         }
     ",
     );
-    assert!(!asked_for_a_worker(&pair.notices()));
+    assert_eq!(
+        pair.live_workers(),
+        1,
+        "no refused construction started a worker: only the built-in BTS runs"
+    );
     pair.check(
         "if (typeof globalThis.Worker !== 'undefined') throw Error('Worker leaked into globals');",
     );
@@ -1680,7 +1969,10 @@ fn unsupported_worker_options_fail_before_requesting_a_context() {
 
 /// A worker's script URL is joined to the entry's URL by URL rules, not by
 /// import-specifier rules: a bare `worker.js` is a relative URL, and a
-/// query-only URL keeps the entry's path.
+/// query-only URL keeps the entry's path. Each worker asks the host for its
+/// script by that URL, from its own boot job, so the two requests are waited
+/// for, and compared without regard to which arrived first: that order is
+/// the worker thread's.
 #[test]
 fn a_worker_url_joins_the_entry_url_by_url_rules() {
     let mut pair = Pair::new(
@@ -1689,27 +1981,76 @@ fn a_worker_url_joins_the_entry_url_by_url_rules() {
         globalThis.workers = [new Worker('worker.js'), new Worker('?v=2')];
     ",
     );
-    let requested: Vec<String> = pair
-        .notices()
-        .into_iter()
-        .filter_map(|notice| match notice {
-            ViewNotice::RequestSource {
-                request: SourceRequest::Module(url),
-                ..
-            } => Some(url),
-            _ => None,
-        })
-        .collect();
+    let deadline = ClockInstant::now() + PATIENCE;
+    let mut requested: Vec<String> = Vec::new();
+    loop {
+        requested.extend(
+            pair.notices()
+                .into_iter()
+                .filter_map(|notice| match notice {
+                    ViewNotice::RequestSource {
+                        request: SourceRequest::Module(url),
+                        ..
+                    } => Some(url),
+                    _ => None,
+                }),
+        );
+        if requested.len() >= 2 {
+            break;
+        }
+        assert!(
+            ClockInstant::now() < deadline,
+            "each worker asked for its script: {requested:?}"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    requested.sort();
     assert_eq!(
         requested,
-        ["app:///nested/worker.js", "app:///nested/main.js?v=2"]
+        ["app:///nested/main.js?v=2", "app:///nested/worker.js"]
+    );
+}
+
+/// A plain `Worker`'s script is asked for once, by the worker's own realm:
+/// the load of its root module raises the request, and constructing the
+/// worker asks the host for nothing. The answer to that request is what
+/// completes the load, and nothing asks again afterwards.
+#[test]
+fn a_workers_script_is_requested_once() {
+    let mut pair = Pair::new(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.seen = [];
+        globalThis.worker = new Worker('./worker.js');
+        worker.onmessage = event => seen.push(event.data);
+    ",
+    );
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; postMessage('ran'); \
+         onmessage = event => postMessage(event.data);",
+    );
+    pair.deliver();
+    // A second request would leave in the epilogue of the job that completed
+    // the script, after the script's own message. The echo is posted by a
+    // later job of the same worker, so that epilogue has run once it is here.
+    pair.check("worker.postMessage('echo');");
+    pair.deliver();
+    pair.check(
+        r#"if (JSON.stringify(seen) !== '["ran","echo"]') throw Error(JSON.stringify(seen));"#,
+    );
+    assert!(
+        !asked_for_a_worker(&pair.notices()),
+        "the worker's script was asked for a second time"
     );
 }
 
 /// A script URL that does not resolve is HTML's synchronous `SyntaxError`,
-/// and nothing is started: no worker is announced to the view, nothing is
-/// asked of the host, and the realm holds no new worker. The script catches
-/// the exception, so nothing here depends on how an uncaught one is reported.
+/// and nothing is started: no worker is announced to the view, the realm
+/// holds no new worker, and no failure is queued for one.
+/// `WorkerOwner::start` does the first or the last for every worker it is
+/// handed, so it was handed none: no `Start` was sent, and only a started
+/// worker asks the host for a script. The script catches the exception, so
+/// nothing here depends on how an uncaught one is reported.
 #[test]
 fn an_unparseable_worker_url_throws_syntax_error_and_starts_nothing() {
     let mut pair = Pair::new("");
@@ -1727,20 +2068,36 @@ fn an_unparseable_worker_url_throws_syntax_error_and_starts_nothing() {
     );
     while let Ok(notice) = pair.view.notices.try_recv() {
         assert!(
-            !matches!(
-                notice,
-                ViewNotice::WorkerCreated { .. } | ViewNotice::RequestSource { .. }
-            ),
-            "a worker whose URL does not resolve starts nothing"
+            !matches!(notice, ViewNotice::WorkerCreated { .. }),
+            "a worker whose URL does not resolve is not announced to the view"
         );
     }
     assert_eq!(pair.live_workers(), live);
     assert!(pair.events.try_recv().is_err(), "and fails nothing");
 }
 
+/// A plain `Worker` may import the BTS runtime, and is posted no
+/// `initialize`: the view here was built with a screen and a native module,
+/// and the worker reports neither — `SystemInfo` is the runtime constants
+/// alone, and `NativeModules` is empty.
 #[test]
 fn an_ordinary_worker_can_install_bts_through_its_own_import() {
-    let mut pair = Pair::new(
+    let mut pair = Pair::unbooted_with_data(
+        None,
+        RealmStartup {
+            screen: crate::ScreenMetrics {
+                pixel_ratio: 3.0,
+                pixel_width: 1170.0,
+                pixel_height: 2532.0,
+            },
+            native_modules: crate::native_module::encode_table(&vec![(
+                "Echo".to_owned(),
+                vec!["ping".to_owned()],
+            )]),
+            ..RealmStartup::default()
+        },
+    );
+    pair.boot(
         r"
         import { Worker } from 'bobcat-internal';
         globalThis.result = null;
@@ -1748,20 +2105,71 @@ fn an_ordinary_worker_can_install_bts_through_its_own_import() {
         worker.onmessage = event => result = event.data;
         worker.postMessage({type: 'request', data: 42});
         ",
-    );
+    )
+    .unwrap();
     pair.answer(
-        r"
-        import { lynx } from 'bobcat:bts-runtime';
+        r"import 'bobcat:worker'; import 'bobcat:timers';
+        import { lynx, NativeModules, SystemInfo } from 'bobcat:bts-runtime';
         if ('lynx' in globalThis) throw Error('BTS lynx leaked into globals');
         const core = lynx.getCoreContext();
         core.addEventListener('request', event => {
-            core.dispatchEvent({type: 'reply', data: [name, event.data]});
+            core.dispatchEvent({type: 'reply', data: [
+                name, event.data, Object.keys(SystemInfo), Object.keys(NativeModules),
+            ]});
         });
         ",
     );
     pair.deliver();
     pair.check(
-        "if (JSON.stringify(result) !== '{\"type\":\"reply\",\"data\":[\"ordinary\",42],\"origin\":\"JSContext\"}') throw Error(JSON.stringify(result));",
+        "if (JSON.stringify(result) !== '{\"type\":\"reply\",\"data\":[\"ordinary\",42,[\"platform\",\"runtimeType\",\"lynxSdkVersion\"],[]],\"origin\":\"JSContext\"}') throw Error(JSON.stringify(result));",
+    );
+}
+
+/// The BTS reports the MTS realm's own `SystemInfo`, which boot posts to it
+/// in `initialize`, so the two serialize alike, a ratio an `f32` cannot hold
+/// included. `NativeModules` is built out of the module table the same
+/// message carries before the BTS entry is imported, so the entry's top level
+/// already finds the view's module on it.
+#[test]
+fn the_bts_reports_the_mts_system_info_and_has_its_native_modules_before_its_entry() {
+    let mut pair = Pair::unbooted_with_data(
+        Some(
+            r"
+        import { lynx, NativeModules, SystemInfo } from 'bobcat:bts-runtime';
+        lynx.getCoreContext().dispatchEvent({type: 'reply', data: [
+            JSON.stringify(SystemInfo), Object.keys(NativeModules), typeof NativeModules.Echo.ping,
+        ]});
+        ",
+        ),
+        RealmStartup {
+            screen: crate::ScreenMetrics {
+                pixel_ratio: 1.1,
+                pixel_width: 1287.0,
+                pixel_height: 2785.0,
+            },
+            native_modules: crate::native_module::encode_table(&vec![(
+                "Echo".to_owned(),
+                vec!["ping".to_owned()],
+            )]),
+            ..RealmStartup::default()
+        },
+    );
+    pair.boot(
+        r"
+        globalThis.mtsSystemInfo = JSON.stringify(SystemInfo);
+        globalThis.results = [];
+        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+        ",
+    )
+    .unwrap();
+    pair.deliver();
+    pair.check(
+        r#"
+        const [system, modules, ping] = results[0];
+        if (system !== mtsSystemInfo) throw Error(system + ' !== ' + mtsSystemInfo);
+        if (JSON.parse(system).pixelRatio !== 1.1) throw Error(system);
+        if (JSON.stringify(modules) !== '["Echo"]' || ping !== 'function') throw Error(JSON.stringify(results));
+        "#,
     );
 }
 
@@ -1792,6 +2200,7 @@ fn background_contexts_exchange_native_events_and_flush_early_payload_references
     ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         import { EventTarget } from 'bobcat:event-target';
         export const ready = await Promise.resolve(true);
         if ('lynx' in globalThis) throw Error('BTS lynx leaked into globals');
@@ -1836,7 +2245,9 @@ fn background_starts_only_after_the_awaited_main_entry_finishes() {
         await Promise.resolve();
         finished = true;
         ",
-        Some("lynx.getCoreContext().dispatchEvent({ type: 'ready', data: undefined });"),
+        Some(
+            "import { lynx } from 'bobcat:bts-runtime'; lynx.getCoreContext().dispatchEvent({ type: 'ready', data: undefined });",
+        ),
     );
     pair.check("if (!connected) throw Error('BTS was not connected');");
     pair.deliver();
@@ -1854,6 +2265,7 @@ fn context_post_message_delivers_message_events_in_both_directions() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const core = lynx.getCoreContext();
         core.addEventListener('message', e => {
             if (e.origin !== 'CoreContext') throw Error('wrong origin');
@@ -1878,6 +2290,7 @@ fn background_listener_failure_is_nonfatal_and_later_context_events_still_arrive
     ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const core = lynx.getCoreContext();
         core.addEventListener('request', event => {
             if (event.data === 0) throw Error('BTS listener boom');
@@ -1916,10 +2329,14 @@ fn an_omitted_background_entry_boots_without_host_io() {
         worker.postMessage('barrier');
     ",
     );
-    // The built-in BTS worker is started before this one and answers its own
-    // script without the host, so an ordinary worker that replies proves the
+    // The built-in BTS worker is started before this one and asks the host
+    // for nothing: its root module imports the registered `bobcat:bts`, and
+    // the view named no entry. So an ordinary worker that replies proves the
     // thread served both.
-    pair.answer("onmessage = event => postMessage(event.data);");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         onmessage = event => postMessage(event.data);",
+    );
     pair.deliver();
     pair.check("if (answer !== 'barrier') throw Error('worker barrier failed');");
     let notices = pair.notices();
@@ -1935,6 +2352,7 @@ fn an_omitted_background_entry_boots_without_host_io() {
 fn a_rejected_main_entry_still_connects_its_background_context() {
     let mut pair = Pair::unbooted(Some(
         r"
+        import { lynx } from 'bobcat:bts-runtime';
         const core = lynx.getCoreContext();
         core.addEventListener('queued', event => core.dispatchEvent({type: 'reply', data: event.data}));
     ",
@@ -1988,6 +2406,7 @@ fn bts_node_queries_read_real_nodes_and_retain_native_tokens_and_statuses() {
     ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         void (async () => {
         const read = (nodes, fields) => new Promise(resolve => nodes.fields(fields, (data, status) => resolve({data,status})).exec());
         const query = lynx.createSelectorQuery();
@@ -2044,6 +2463,7 @@ fn bts_native_props_mutate_the_document_before_the_next_query() {
     ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const query = lynx.createSelectorQuery();
         const props = {width:'20px', 'background-color':'green', role:'changed'};
         query.select('#item').setNativeProps(props).exec();
@@ -2093,6 +2513,7 @@ fn bts_invoke_measures_the_committed_tree_and_keeps_its_node_resolution_codes() 
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         void (async () => {
             const query = lynx.createSelectorQuery();
             const invoke = nodes => new Promise(resolve => nodes.invoke({
@@ -2141,6 +2562,7 @@ fn each_realm_reports_its_own_diagnostics_with_its_source() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         import {console} from 'bobcat:bts-runtime';
         if (globalThis.console !== console) throw Error('the global console is another object');
         lynx.reportError(new Error('BTS fatal label'), {level:'fatal'});
@@ -2189,7 +2611,8 @@ fn each_realm_reports_its_own_diagnostics_with_its_source() {
     assert!(main[0].2.contains("MTS warning"));
     assert!(main[0].2.contains("app:///nested/main.js"));
     assert_eq!(main[1], (false, "info", "MTS {\"value\":1}"));
-    let background = from(crate::ScriptSource::Background);
+    // The entry constructed no worker, so the BTS is the pair's first.
+    let background = from(worker_label(1, "bobcat:bts"));
     assert_eq!(background.len(), 2, "{background:?}");
     assert_eq!((background[0].0, background[0].1), (true, "fatal"));
     assert!(background[0].2.contains("BTS fatal label"));
@@ -2198,7 +2621,7 @@ fn each_realm_reports_its_own_diagnostics_with_its_source() {
 
 /// A plain `Worker` has a global `console`, not enumerable, whose output
 /// reaches the embedder from the worker itself, named by the key its
-/// `Worker` object holds. It has no `requestAnimationFrame`.
+/// `Worker` object holds and by its URL. It has no `requestAnimationFrame`.
 #[test]
 fn a_workers_global_console_reports_from_the_worker() {
     let mut pair = Pair::new(
@@ -2208,7 +2631,7 @@ fn a_workers_global_console_reports_from_the_worker() {
     ",
     );
     pair.answer(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         if (typeof requestAnimationFrame !== 'undefined') throw Error('a Worker has requestAnimationFrame');
         if (Object.keys(globalThis).includes('console')) throw Error('the global console is enumerable');
         console.log('from the worker', {value:1});
@@ -2234,10 +2657,11 @@ fn a_workers_global_console_reports_from_the_worker() {
             _ => None,
         })
         .collect();
-    let [(crate::ScriptSource::Worker(id), level, message)] = logged.as_slice() else {
+    let [(crate::ScriptSource::Worker { id, url }, level, message)] = logged.as_slice() else {
         panic!("one console message from the worker: {logged:?}");
     };
     assert_eq!(id.to_string(), key);
+    assert_eq!(&**url, WORKER_URL);
     assert_eq!(level, "log");
     assert_eq!(message, "from the worker {\"value\":1}");
 }
@@ -2252,6 +2676,7 @@ fn a_throwing_bts_frame_or_microtask_callback_is_a_worker_throw() {
         "__CreatePage();",
         Some(&format!(
             r"
+            import {{ lynx }} from 'bobcat:bts-runtime';
             lynx.requestAnimationFrame(() => {{ throw Error('frame callback threw'); }});
             lynx.queueMicrotask(() => {{ throw Error('microtask threw'); }});
             postMessage('{BTS_ENTRY_RAN}');
@@ -2275,17 +2700,21 @@ fn a_throwing_bts_frame_or_microtask_callback_is_a_worker_throw() {
     let events = worker_events(notices);
     let [
         crate::EngineEvent::WorkerThrew {
-            source: crate::ScriptSource::Background,
+            source: microtask_source,
             error: microtask,
         },
         crate::EngineEvent::WorkerThrew {
-            source: crate::ScriptSource::Background,
+            source: frame_source,
             error: frame,
         },
     ] = events.as_slice()
     else {
         panic!("two WorkerThrew from the BTS: {events:?}");
     };
+    // The entry constructed no worker, so the BTS is the pair's first.
+    let background = worker_label(1, "bobcat:bts");
+    assert_eq!(*microtask_source, background);
+    assert_eq!(*frame_source, background);
     assert!(microtask.message.contains("microtask threw"), "{microtask}");
     assert!(
         frame.message.starts_with("running animation callbacks: ")
@@ -2303,6 +2732,7 @@ fn a_misused_bts_selector_query_is_reported_from_the_background() {
         "__CreatePage();",
         Some(&format!(
             r"
+            import {{ lynx }} from 'bobcat:bts-runtime';
             const late = lynx.createSelectorQuery().select('#x').fields({{id:true}}).selectReactRef('ref');
             if (late !== undefined) throw Error('a late selectReactRef answered a node');
             postMessage('{BTS_ENTRY_RAN}');
@@ -2326,9 +2756,11 @@ fn a_misused_bts_selector_query_is_reported_from_the_background() {
             _ => None,
         })
         .collect();
-    let [(crate::ScriptSource::Background, level, message)] = reports.as_slice() else {
+    let [(source, level, message)] = reports.as_slice() else {
         panic!("one report from the BTS: {reports:?}");
     };
+    // The entry constructed no worker, so the BTS is the pair's first.
+    assert_eq!(*source, worker_label(1, "bobcat:bts"));
     assert_eq!(level, "error");
     assert!(
         message.contains("selectReactRef() should be called before any other"),
@@ -2346,6 +2778,7 @@ fn host_global_events_reach_the_bts_emitter_in_order_after_a_listener_throws() {
         ",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         const emitter = lynx.getJSModule('GlobalEventEmitter');
         if (emitter !== lynx.getApp().GlobalEventEmitter) throw Error('emitter identity');
         emitter.addListener('host-event', function (value, extra) {
@@ -2403,7 +2836,7 @@ fn a_throwing_bts_entry_reports_at_the_worker_and_leaves_bts_running() {
 globalThis.results = [];
 lynx.getJSContext().addEventListener('reply', e => results.push(e.data));",
         Some(
-            r"lynx.getJSModule('GlobalEventEmitter').addListener('host-event', value => lynx.getCoreContext().dispatchEvent({type:'reply', data:value}));
+            r"import { lynx } from 'bobcat:bts-runtime'; lynx.getJSModule('GlobalEventEmitter').addListener('host-event', value => lynx.getCoreContext().dispatchEvent({type:'reply', data:value}));
 throw Error('BTS entry failed');",
         ),
     );
@@ -2521,6 +2954,7 @@ fn mts_disposal_calls_the_current_bts_hook_once_before_js_terminates_the_worker(
             "lynx.getJSContext().addEventListener('repeat-dispose', () => lynx.getEngine().dispatchEvent({type:'__DestroyLifetime'}));",
             Some(&format!(
                 r"
+                import {{ lynx }} from 'bobcat:bts-runtime';
                 const app = lynx.getApp();
                 app.callDestroyLifetimeFun = () => postMessage('stale-hook');
                 app.callDestroyLifetimeFun = function(...args) {{
@@ -2582,6 +3016,7 @@ fn disposal_remains_deliverable_while_the_bts_entry_is_loading() {
         "",
         Some(
             r"
+        import { lynx } from 'bobcat:bts-runtime';
         lynx.getApp().callDestroyLifetimeFun = () => postMessage('cleanup');
         await import('app:///pending.js');
         postMessage('late-entry');
@@ -2635,7 +3070,8 @@ fn unreachable_mts_worker_is_collected_without_releasing_the_view() {
     ",
     );
     pair.answer(
-        "onmessage = e => postMessage(e.data); setInterval(() => {}, 1000); postMessage('ready');",
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         onmessage = e => postMessage(e.data); setInterval(() => {}, 1000); postMessage('ready');",
     );
     pair.deliver();
     pair.runtime
@@ -2692,7 +3128,9 @@ fn a_message_for_a_collected_worker_handle_is_dropped() {
         }
     ",
     );
-    pair.answer("onmessage = () => postMessage('answer');");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; onmessage = () => postMessage('answer');",
+    );
     let event = pair.next_event().expect("the worker answers");
     // QuickJS discovers the cycle in one collection and processes its weak
     // registrations in the next, so the handle is released by the second.
@@ -2733,7 +3171,9 @@ fn a_named_worker_survives_a_collection_and_still_delivers() {
         }
     ",
     );
-    pair.answer("onmessage = () => postMessage('answer');");
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; onmessage = () => postMessage('answer');",
+    );
     let event = pair.next_event().expect("the worker answers");
     for _ in 0..2 {
         pair.runtime
@@ -2782,7 +3222,7 @@ fn ordinary_worker_does_not_acquire_app_teardown_by_importing_bts_or_using_its_n
     ",
     );
     pair.answer(
-        r"
+        r"import 'bobcat:worker'; import 'bobcat:timers';
         import {lynx} from 'bobcat:bts-runtime';
         lynx.getApp().callDestroyLifetimeFun = () => postMessage('cleanup');
         postMessage('ready');
@@ -2816,6 +3256,7 @@ fn vsync_can_resume_mts_and_bts_entries_awaiting_their_first_frame() {
         "globalThis.firstFrame = await new Promise(resolve => lynx.requestAnimationFrame(resolve));",
         Some(
             r"
+            import { lynx } from 'bobcat:bts-runtime';
             const time = await new Promise(resolve => {
                 lynx.requestAnimationFrame(resolve);
                 globalThis.postMessage('waiting for vsync');
@@ -2837,12 +3278,78 @@ fn vsync_can_resume_mts_and_bts_entries_awaiting_their_first_frame() {
     assert!(worker_failures(pair.notices()).is_empty());
 }
 
+/// A plain `Worker` that imports `bobcat:animation-frame` and nothing of the
+/// BTS gets its frame: a vsync is delivered to the realm's own animation-frame
+/// module, not to a runtime module only the BTS imports.
+#[test]
+fn a_plain_worker_gets_a_frame_from_the_shared_animation_frame_module() {
+    let mut pair = Pair::new(
+        r"
+        import {Worker} from 'bobcat-internal';
+        globalThis.worker = new Worker('./worker.js');
+    ",
+    );
+    pair.answer(
+        r"import 'bobcat:worker'; import 'bobcat:timers';
+        import {requestAnimationFrame} from 'bobcat:animation-frame';
+        requestAnimationFrame(time => postMessage(`frame ${time}`));
+        postMessage('requested');
+    ",
+    );
+    // The demand is sent before the message behind it, so the frame below
+    // finds it registered.
+    assert!(matches!(pair.next_event().unwrap().payload,
+        WorkerPayload::Message(ref value) if posted(value, "requested")));
+    pair.frame(1250.0);
+    assert!(matches!(pair.next_event().unwrap().payload,
+        WorkerPayload::Message(ref value) if posted(value, "frame 1250")));
+    assert!(worker_failures(pair.notices()).is_empty());
+    pair.check("worker.terminate();");
+    assert!(pair.finish().is_empty());
+}
+
+/// The native module transport is `bobcat:native-modules`, and the global
+/// scope module exports none of it: a plain `Worker` whose script imports
+/// `callNativeModule` from `bobcat:worker` fails at link, as an ordinary
+/// worker error, and runs nothing.
+#[test]
+fn a_plain_worker_cannot_import_the_transport_from_the_global_scope_module() {
+    let mut pair = Pair::new(
+        r"
+        import {Worker} from 'bobcat-internal';
+        globalThis.worker = new Worker('./worker.js');
+    ",
+    );
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         import { callNativeModule } from 'bobcat:worker'; postMessage('linked');",
+    );
+    let event = pair.next_event().expect("the script's link failure");
+    let WorkerPayload::Errored(error) = &event.payload else {
+        panic!("a link failure is an ordinary worker error");
+    };
+    assert!(
+        error.message.contains("SyntaxError") && error.message.contains("callNativeModule"),
+        "{}",
+        error.message
+    );
+    pair.check("worker.terminate();");
+    assert!(
+        !pair.finish().iter().any(|event| matches!(
+            event.payload,
+            WorkerPayload::Message(ref value) if posted(value, "linked")
+        )),
+        "a script that failed to link ran nothing"
+    );
+}
+
 #[test]
 fn animation_callbacks_use_display_timestamps_and_defer_nested_requests() {
     let mut pair = Pair::with_background(
         "globalThis.frames = []; lynx.getJSContext().addEventListener('frame', e => frames.push(e.data));",
         Some(
             r"
+            import { lynx } from 'bobcat:bts-runtime';
             const send = (label, time) => lynx.getCoreContext().dispatchEvent({type:'frame', data:[label,time]});
             lynx.requestAnimationFrame(time => {
                 send('first', time);
@@ -2885,6 +3392,7 @@ fn animation_callbacks_use_display_timestamps_and_defer_nested_requests() {
 fn bts_animation_frames_continue_while_an_mts_callback_is_blocked() {
     let mut pair = Pair::unbooted(Some(
         r"
+        import { lynx } from 'bobcat:bts-runtime';
         function frame(time) {
             lynx.requestAnimationFrame(frame);
             globalThis.postMessage({frame:time});
@@ -2971,6 +3479,7 @@ fn mts_animation_frames_continue_while_a_bts_callback_is_busy() {
         } lynx.requestAnimationFrame(frame);",
         Some(
             r"
+            import { lynx } from 'bobcat:bts-runtime';
             lynx.requestAnimationFrame(() => {
                 globalThis.postMessage('busy');
                 const until = Date.now() + 4000;
@@ -3039,7 +3548,7 @@ fn a_compiled_react_list_receives_its_cells_and_a_tap_edits_them() {
     let bytes = fixtures::fixture("react-list").page;
     let template = bobcat_source::native::decode(bytes).unwrap();
     let background = format!(
-        "import {{__BobcatRegisterBundle}} from 'bobcat:bts-runtime';\n\
+        "import {{lynx, __BobcatRegisterBundle}} from 'bobcat:bts-runtime';\n\
          __BobcatRegisterBundle({url});\n\
          lynx.requireModule('/app-service.js');",
         url = serde_json::to_string(BUNDLE_URL).unwrap(),
@@ -3218,11 +3727,8 @@ fn verify_react_teardown(reload: bool, development: bool) {
     // own URL as the base every path of it resolves against, then the
     // `requireModule` that loads and starts the card. Nothing of the
     // container's bodies is in it.
-    //
-    // `lynx` is the test entry preamble's own import; only the registration
-    // is named here, as `PageSource`'s own boot script names it.
     let background = format!(
-        "import {{__BobcatRegisterBundle}} from 'bobcat:bts-runtime';\n\
+        "import {{lynx, __BobcatRegisterBundle}} from 'bobcat:bts-runtime';\n\
          __BobcatRegisterBundle({url});\n\
          lynx.requireModule('/app-service.js');",
         url = serde_json::to_string(BUNDLE_URL).unwrap(),
@@ -3283,13 +3789,14 @@ fn verify_react_teardown(reload: bool, development: bool) {
     // The cleanup logs from the BTS itself, before the `disposed` reply the
     // disposal above waited for, so the host already has it.
     let notices = pair.notices();
+    // The card's main-thread script constructs no worker, so the BTS is the
+    // pair's first.
+    let background = worker_label(1, "bobcat:bts");
     assert!(
         !notices.iter().any(|notice| matches!(
             notice,
-            ViewNotice::Engine(crate::EngineEvent::ScriptReported {
-                source: crate::ScriptSource::Background,
-                ..
-            })
+            ViewNotice::Engine(crate::EngineEvent::ScriptReported { source, .. })
+                if *source == background
         )),
         "the BTS reported an error during disposal"
     );
@@ -3297,10 +3804,10 @@ fn verify_react_teardown(reload: bool, development: bool) {
         .iter()
         .filter_map(|notice| match notice {
             ViewNotice::Engine(crate::EngineEvent::ConsoleMessage {
-                source: crate::ScriptSource::Background,
-                message,
-                ..
-            }) if message.starts_with("reload-cleanup ") => Some(message.as_str()),
+                source, message, ..
+            }) if *source == background && message.starts_with("reload-cleanup ") => {
+                Some(message.as_str())
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -3327,6 +3834,7 @@ fn a_background_module_call_reaches_the_embedder_and_its_callback_answers_the_re
         lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
         ",
         r"
+        import { lynx } from 'bobcat:bts-runtime';
         const answered = lynx.getApp().NativeModules.Echo.ping(1, {x:1}, (...args) => {
             lynx.getCoreContext().dispatchEvent({ type: 'reply', data: args });
         }, 's');
@@ -3362,6 +3870,7 @@ fn a_callback_released_uninvoked_never_runs_and_fails_nothing() {
         lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
         ",
         r"
+        import { lynx } from 'bobcat:bts-runtime';
         const core = lynx.getCoreContext();
         const modules = lynx.getApp().NativeModules;
         modules.Echo.ping(() => core.dispatchEvent({ type: 'reply', data: 'released' }));
@@ -3391,6 +3900,7 @@ fn a_module_the_view_lacks_and_a_method_it_did_not_declare_are_both_undefined() 
         "",
         &format!(
             r"
+            import {{ lynx }} from 'bobcat:bts-runtime';
             const modules = lynx.getApp().NativeModules;
             if (modules.Missing !== undefined) throw Error('an absent module is undefined');
             if (modules.Echo.nope !== undefined) throw Error('an undeclared method is undefined');
@@ -3408,7 +3918,7 @@ fn a_module_the_view_lacks_and_a_method_it_did_not_declare_are_both_undefined() 
 fn a_callback_for_a_worker_that_has_ended_says_so_and_invoking_it_does_nothing() {
     let mut pair = Pair::with_native_modules(
         "",
-        r"lynx.getApp().NativeModules.Echo.ping(() => postMessage('unreachable'));",
+        r"import { lynx } from 'bobcat:bts-runtime'; lynx.getApp().NativeModules.Echo.ping(() => postMessage('unreachable'));",
         &[("Echo", &["ping"])],
     );
     let (_, call) = pair.module_call();

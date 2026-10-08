@@ -219,6 +219,11 @@ pub enum LoadedSource {
     StyleSheet(StyleSheetSource),
     Module {
         source: String,
+        /// The response URL, after any redirect, which must be an absolute
+        /// URL: it is the script's `import.meta.url` and the base its own
+        /// relative imports resolve against. The entry's is also `__Card__`,
+        /// the base every `new Worker` URL is joined to, and an entry
+        /// answered from one that is not absolute fails the view's startup.
         url: String,
     },
     /// One `@font-face` source's bytes, unvalidated: a font file is binary,
@@ -236,8 +241,9 @@ pub enum LoadedSource {
 /// This is neither a closure nor a trait object, and it names no destination:
 /// it holds one end of the one-shot channel that was minted with the request,
 /// and whoever awaits the other end is where the source goes. That is what
-/// lets a worker's script skip `bobcat-main` entirely while a stylesheet's
-/// reaches the task that asked for it, with one type and no routing.
+/// lets a worker's script be asked for and answered on `bobcat-workers`,
+/// without `bobcat-main`, while a stylesheet's reaches the task that asked
+/// for it, with one type and no routing.
 ///
 /// It cannot be cloned; consuming it permits at most one result. An unanswered
 /// drop reports failure, so a lost worker cannot leave startup waiting forever.

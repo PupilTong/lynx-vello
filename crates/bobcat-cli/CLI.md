@@ -55,7 +55,6 @@ outpaces the GPU cannot pile up work.
 Current `bobcat-core` QuickJS limits still apply. In particular, most real
 ReactLynx bundles currently stop at an unimplemented main-thread global before
 rendering. Component-scoped bundle CSS is currently mounted globally and is
-reported as a warning. A present XML background-thread section is retained at
-the conventional `/app-service.js` URL (including a present empty section),
-but background-thread JavaScript is not executed yet; the CLI warns explicitly
-when such a section is present.
+reported as a warning. A present XML background-thread section is registered
+at the conventional `/app-service.js` URL (including a present empty section)
+and runs as the view's BTS entry.
