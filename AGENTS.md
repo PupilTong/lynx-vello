@@ -1066,7 +1066,9 @@ source stays
 `Pending` meanwhile; a second report for it parses again, and the registry's
 never-regresses rule makes the later apply a no-op. On wasm32 there is no
 blocking pool and the batch applies unchanged: `dom` parses the document
-inline. `bobcat-core` has no direct `usvg` dependency.
+inline. `bobcat-core` has no direct `usvg` dependency. An inline `<svg>`
+root is not a reported document: `dom` serialises and parses it inline on the
+document thread at the start of `Document::layout`, and nothing here sees it.
 
 #### Workers, the BTS and cross-thread messages
 
@@ -1443,13 +1445,7 @@ per tag, each owning that tag's UA rules and its tests: `tree::raw_text`
 (generated-content CSS and the rules that dissolve a carrier into the `text` it
 is written inside), `tree::text` (the paragraph attribute limits and what may
 generate a box inside a run), `tree::image` (the `src`-to-replaced-content
-reflection and its UA box), `tree::svg` (`svg`: `src`, or `content` as a
-percent-encoded `data:image/svg+xml` URL, reflected into the same image source
-as `image`, last attribute written wins, an empty or removed `content` keeping
-the current source as web-core does, an uncontained `display: flex` box
-that takes its natural size when unsized, and a non-bubbling `load` whose
-detail is the element's border-box layout size, posted only after the commit
-that laid it out; no `error`), `tree::scroll_container` (`scroll-view` and
+reflection and its UA box), `tree::scroll_container` (`scroll-view` and
 `list` as scroll containers — which axis scrolls, which one clips, and which
 way the subtree stacks, from `web-elements`' own `scroll-view.css` and
 `x-list.css`; `enable-scroll="false"` leaves the box a scroll container only
@@ -1511,15 +1507,19 @@ those tags agree on, the order
 they cascade in, and `PageConfig`; `tree/lib.rs` only mints the document they
 describe. Attribute policy stays in each tag's module. Numeric text and list
 attributes use UA `attr()` declarations and registered custom properties;
-`tail-color-convert` uses an attribute selector. Only image resources (`image`
-and `svg`), blur hints, the swiper's item count, the refresh view's slot
+`tail-color-convert` uses an attribute selector. Only image resources, blur
+hints, the swiper's item count, the refresh view's slot
 assignment, the dialog's `:open`/`:modal` state and the overlay's top-layer membership and
 events need `dom::CustomElement` callbacks. Runtime attribute members perform
 DOM mutations; Stylo tracks attribute dependencies and recascades on changes.
 The UA assembly order is mostly documentation, with one exception that is
-mechanism: `image`'s and `svg`'s child suppression ties on specificity with
-the `display` rules `view`, `scroll-view`, `list`, `blur-view`, `x-blur-view`
-and `wrapper` carry, so it wins only by being assembled after them.
+mechanism: `image`'s child suppression ties on specificity with the `display`
+rules `view`, `scroll-view`, `list`, `blur-view`, `x-blur-view` and `wrapper`
+carry, so it wins only by being assembled last. `svg` has no tag module: it is
+the standard element, implemented in `dom` (below), and the sheet gives it
+only `svg { display: flex; }` and the shared box block. The Lynx
+`<svg src|content|bindload>` component is deliberately not provided
+(`docs/svg-vector-images-design.md`, revision 3).
 
 The native host-module functions call `dom::Document` directly. Element
 identity is the DOM `NodeId`, which is also the element's Lynx `unique_id` —
@@ -2333,6 +2333,32 @@ sees it. A document with nothing drawable encodes nothing at all, not even
 the clip pair. `usvg` is built with no default features (no `text`, no
 `svgz`), and masks, filters, patterns and nested raster images are recorded
 gaps listed in `paint/painter.rs`.
+
+**The standard `<svg>` element** (a subset; `tree/inline_svg.rs`,
+`tree/svg_markup.rs`) is the second producer of vector images. An element
+named `svg` is replaced content from `create_element`, so layout treats it as a
+leaf; its descendants are ordinary DOM nodes. A node's inline SVG root is the
+topmost `svg` on the walk up from it through elements whose names usvg reads
+(the 53 names of usvg 0.48's `EId`; a text node starts at its parent), so a
+nested `svg` belongs to its outer root, and an `svg` under a Lynx `<text>` or
+`<image>` (both names are in that set) is still a root. Every mutation inside
+a root (attribute, class, id or `style` on the root or a descendant, a text
+node's data, a child inserted, moved or removed) marks it, gated by a count of
+live `svg` elements so a document with none pays one integer test. The start
+of `Document::layout` (not only `commit`: everything that reads layout comes
+through it) re-resolves the marks to their current roots and, per root,
+serialises the subtree (root `xmlns` and `xmlns:xlink`, escaped values and
+text, names that would fail the XML parse skipped, shadow trees excluded),
+parses it with `ImageEvent::parse_document` inline on the document thread,
+files the result with `ImageRegistry::insert_synthetic` under
+`inline-svg:<node>:<generation>` (created settled, so no walk or bind ever
+asks the host for it), binds the root to it as `ImageRole::Source` (no `load`
+is fired), and `forget_synthetic`s the previous generation; a freed root
+forgets its source. Synthetic entries are the one kind the registry removes.
+The root's `width`/`height` attributes are presentational hints (a bare
+number is px). SVG descendants are not styled by the engine's cascade, not
+hit-tested and take no events. `Document::image_source` reads the bound
+source; `knows_image_source` is a test-only registry probe.
 
 Rulings and limits to know before touching it:
 

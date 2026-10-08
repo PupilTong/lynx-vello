@@ -257,20 +257,28 @@ The element lives in `dom`, the browser-DOM layer, not in `bobcat-core`: it
 is the standard element, not a Lynx component. Nothing about it is
 host-visible.
 
-- **What it is.** A node whose local name is `svg` and whose parent is not an
-  SVG element is an *inline SVG root*: replaced content
-  (`NodeContent::Replaced`, so `is_replaced()` is true from creation and
-  layout treats it as a leaf, hiding its children as it hides an `<image>`'s).
+- **What it is.** Every element named `svg` is replaced content from its
+  creation (`NodeContent::Replaced`, so `is_replaced()` is true from creation
+  and layout treats it as a leaf, hiding its children as it hides an
+  `<image>`'s). A node's *inline SVG root* is the topmost `svg` on the walk up
+  from it (a text node starts at its parent) for as long as each element's
+  name is one usvg 0.48 reads (its `EId` list, 53 names); a mutation under an
+  element usvg does not know is not tracked, since usvg drops that element
+  with its subtree. That list contains `text` and `image`, so an `svg` under
+  a Lynx `<text>` or `<image>` is still a root of its own.
   Its descendants are ordinary DOM nodes (`path`, `rect`, `circle`, `g`,
   `defs`, `linearGradient`, `stop`, `clipPath`, `use`, `style`, nested
   `svg`, …): JavaScript creates and mutates them through the element PAPI as
   it does any element, and selectors match them. A nested `svg` is part of
   its outer root's document, never a root of its own.
 - **How it draws.** The root's subtree is serialised to SVG markup (root tag
-  with `xmlns="http://www.w3.org/2000/svg"` added, every element's
+  with `xmlns="http://www.w3.org/2000/svg"` and
+  `xmlns:xlink="http://www.w3.org/1999/xlink"` added, every element's
   attributes escaped and written as they are, including `style`, text
-  content kept so `<style>` sheets reach usvg; no namespace handling beyond
-  the root `xmlns`) and parsed through the same `ImageEvent::parse_document`
+  content kept so `<style>` sheets reach usvg; author `xmlns`/`xmlns:*`
+  attributes dropped, and an attribute or element whose name would fail the
+  XML parse skipped, the element with its subtree; no other namespace
+  handling; shadow trees excluded) and parsed through the same `ImageEvent::parse_document`
   as a fetched document, inline on the document thread (browsers parse
   inline SVG on the main thread as well). The result is stored in the
   `ImageRegistry` under a synthetic source the host never sees (the entry is
@@ -283,18 +291,25 @@ host-visible.
   source still never regresses).
 - **When it re-renders.** Any mutation inside an inline SVG root (an
   attribute set or removed on the root or a descendant, a child inserted,
-  removed or moved, a text node changed) marks the root dirty; the next
-  `Document::commit` serialises every dirty root once before style and
-  layout. The root's own `width`/`height` attributes additionally become
+  removed or moved, a text node changed) marks the root dirty, gated by a
+  count of live `svg` elements; the start of the next `Document::layout`
+  (which `render` and `commit` run, and which every caller that reads layout
+  goes through) serialises every dirty root once before style and layout. The root's own `width`/`height` attributes additionally become
   presentational hints for CSS `width`/`height` (the SVG presentation
   attributes they are), so `<svg width="48" height="48">` lays out at 48×48
-  through the cascade, and author CSS still overrides them.
+  through the cascade, and author CSS still overrides them. A bare number
+  is px; any other value goes to the CSS parser as written, and one it
+  refuses leaves no hint.
 - **Sizing.** With no CSS size the natural size is what
   `VectorImage::parse` reports for the serialised document: the root
   attributes' size, or a `viewBox` ratio fitted into 300×150, or 300×150.
   Subset deviation, recorded: a browser sizes an inline `<svg>` with a
   `viewBox` and no `width`/`height` to its containing block's width; here it
-  gets the `<img>` rule, which keeps one sizing rule for every SVG.
+  gets the `<img>` rule, which keeps one sizing rule for every SVG. A
+  second, from the same replaced-element path: a root whose CSS box does not
+  have its `viewBox`'s ratio stretches the picture to the box
+  (`object-fit: fill`, the initial value), where a browser letterboxes it by
+  the root's `preserveAspectRatio` (default `xMidYMid meet`).
 - **What the subset leaves out.** SVG descendants are not styled by the
   engine's cascade (presentation attributes, `style` attributes and `<style>`
   elements inside the SVG are what usvg sees); they are not hit-tested and

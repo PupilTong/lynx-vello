@@ -935,32 +935,42 @@ consequential choice about whether to follow the spec or the quirk.
   appends in the same render, so the two differ only for a card that holds an
   element out of the tree across a turn.
 - **SVG (2026-10-08): one vector image, rendered wherever web-core renders
-  it.** Native draws SVG only in `<svg>`, through ServalSVG at the element's
-  frame size, and its `<image>` refuses SVG
-  (`js_libraries/types/skills/image.md:268-269`); web-core's `x-svg` and
-  `x-image` are shadow `<img>`s, so the browser renders SVG in `<svg>`,
-  `<image src>`, `background-image` and `mask-image`. Here the engine parses
-  the document with `usvg` from the bytes the host hands over, and `dom`
-  paints it as a vello fragment, in all four places
-  (pipeline in [media-resources.md](media-resources.md), status in
+  it; `<svg>` is the standard element, not the Lynx component.** Native draws
+  SVG only in `<svg>`, through ServalSVG at the element's frame size, and its
+  `<image>` refuses SVG (`js_libraries/types/skills/image.md:268-269`);
+  web-core's `x-svg` and `x-image` are shadow `<img>`s, so the browser renders
+  SVG in `<svg src|content>`, `<image src>`, `background-image` and
+  `mask-image`. Here the engine parses the document with `usvg` and `dom`
+  paints it as a vello fragment (pipeline in
+  [media-resources.md](media-resources.md), status in
   [components.md](components.md)'s `x-svg` row). Where the references
   disagree, and which side was followed (user rulings, 2026-10-08):
   - *`<image src="x.svg">`, `background-image` and `mask-image` render*
     (web-core).
   - *Intrinsic size is CSS Images 3 §4.1 default sizing* (web-core). Native
     sizes an `<svg>` from CSS alone (`skills/svg.md:117-118`).
-  - *`<svg>`'s `load` detail is the element's layout size* (native), not the
-    natural size web-core's `<img>` reports (`XSvg.ts:64-69`).
-  - *`src` and `content`: the last one written wins, and removing `content`
-    leaves the current picture* (web-core, `XSvg.ts:26-48`). iOS prefers
-    `src` whenever it is set and clears the image on an empty `content`
-    (`LynxUISVG.m:155-202`); Android clears it too (`LynxUISVG.kt:200-203`).
+  - *The Lynx `<svg src|content|bindload>` component is not provided*
+    (revision 3; neither reference). `svg` is the browser's standard element
+    as a subset: its children are DOM nodes and the root's subtree is
+    serialised and parsed into a vector image (`crates/dom/src/tree/inline_svg.rs`).
+    A compiled ReactLynx card's `<svg src>` and `<svg content>` draw nothing,
+    and its `bindload` never fires; such a card has to move the URL to
+    `<image src>` or write the markup as JSX children.
+  - *SVG descendants are not styled by the cascade, not hit-tested and take
+    no events* (a subset of the browser's inline SVG): presentation
+    attributes, `style` attributes and `<style>` elements inside the SVG are
+    what `usvg` sees.
+  - *A root with a `viewBox` and no `width`/`height` takes the `<img>` rule*
+    (the viewBox ratio fitted into 300×150), where a browser gives an inline
+    `<svg>` its containing block's width; one sizing rule for every SVG.
+  - *A sized root stretches its picture to the box* (`object-fit: fill`, the
+    replaced-element path), where a browser letterboxes it by the root's
+    `preserveAspectRatio` (default `xMidYMid meet`). A root whose CSS box has
+    the `viewBox`'s ratio draws the same either way.
   - *`current-color` is not implemented* (web-core lacks it; native resolves
     `currentColor` from it).
   - *`<text>` inside an SVG is dropped*, though native's tag subset lists it
     and the browser renders it: `usvg` is built without text support.
-  - *An `<svg>` whose source fails fires nothing*: the typing declares
-    `bindload` alone, and web-core forwards only `load`.
 - **`<blur-view>`'s `blur-radius` is a CSS length here, where web-core and iOS
   read a number and throw the unit away.** The attribute is the whole of the
   component: it is reflected into a `backdrop-filter: blur(…)` presentational
