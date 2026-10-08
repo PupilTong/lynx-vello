@@ -234,24 +234,49 @@ async fn compiled_dialog_opens_modal_and_reports_close() {
 }
 
 /// A compiled `<overlay>` over a red page that fills the 240px view. A tap
-/// on the page sets `visible`: the overlay enters the top layer and its one
-/// child, a 200px panel, paints at the viewport's top-left above the page,
-/// with a green 120px `#close` at the panel's own top-left.
+/// on the page sets `visible`: the overlay's shadow dialog enters the top
+/// layer and the overlay's one child, a 200px panel, paints at the viewport's
+/// top-left above the page, with a green 120px `#close` at the panel's own
+/// top-left. The overlay element carries an author `display: flex` and a
+/// translucent green background, which must show nothing: every first round
+/// is the bare red page, and every later colour is exact.
 ///
 /// - At (60, 60) the second tap hits `#close`, whose `catchtap` clears `visible`; the overlay
 ///   leaves the top layer and `binddismissoverlay` turns the page blue. Had the panel stayed, the
 ///   point would still be green; had `dismissoverlay` not arrived, the page would still be red.
 /// - At (180, 180), on the panel outside `#close`, the panel turns from yellow to magenta once
 ///   `bindshowoverlay` has run.
+/// - At (220, 220), on the page outside the panel, `bindshowoverlay` turns the page orange, seen
+///   through the overlay's transparent dialog and `::backdrop`: a host background painted over the
+///   viewport, or `dialog::backdrop`'s tint, would shift the colour.
 #[tokio::test]
 async fn compiled_overlay_shows_its_panel_and_reports_show_and_dismiss() {
     const RED: [u8; 4] = [255, 0, 0, 255];
     const GREEN: [u8; 4] = [0, 128, 0, 255];
     const BLUE: [u8; 4] = [0, 0, 255, 255];
     const MAGENTA: [u8; 4] = [255, 0, 255, 255];
+    const ORANGE: [u8; 4] = [255, 165, 0, 255];
     let page = fixtures::fixture("react-overlay").page;
     paint_and_tap(page, [60, 60], &[RED, GREEN, BLUE], None).await;
     paint_and_tap(page, [180, 180], &[RED, MAGENTA], None).await;
+    paint_and_tap(page, [220, 220], &[RED, ORANGE], None).await;
+}
+
+/// A compiled `events-pass-through` `<overlay>` over a red page with a blue
+/// 60px `#below` square at its bottom-right. Every tap is at (210, 210), on
+/// `#below`: the first reaches it and bubbles to the page, which shows the
+/// overlay, and `#below` turns cyan once `bindshowoverlay` has run. With the
+/// overlay shown — its shadow dialog filling the viewport as a popover —
+/// the second tap still reaches `#below`, which turns magenta. A blocking
+/// overlay would take that tap and leave it cyan; an overlay that never
+/// showed would turn it green, then yellow.
+#[tokio::test]
+async fn compiled_pass_through_overlay_lets_a_tap_outside_its_content_through() {
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+    const CYAN: [u8; 4] = [0, 255, 255, 255];
+    const MAGENTA: [u8; 4] = [255, 0, 255, 255];
+    let page = fixtures::fixture("react-overlay-pass-through").page;
+    paint_and_tap(page, [210, 210], &[BLUE, CYAN, MAGENTA], None).await;
 }
 
 /// A compiled `<scroll-coordinator>` (300 by 400: a translucent blue toolbar

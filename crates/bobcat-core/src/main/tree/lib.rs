@@ -15,8 +15,9 @@
 //! components: for image resources, blur hints, the swiper's UA shadow tree and
 //! item count, the refresh view's UA shadow tree and its header and footer slot
 //! assignment, the dialog's `:open`/`:modal` state and top-layer membership,
-//! and the overlay's top-layer membership and its `showoverlay` and
-//! `dismissoverlay` events ([`overlay`]).
+//! and the overlay's UA shadow tree, the top-layer membership of the
+//! `dialog` in it, and its `showoverlay` and `dismissoverlay` events
+//! ([`overlay`]).
 //! `viewpager` needs none; its one UI method, `selectTab`, is here for the
 //! runtime to dispatch by tag name, as are the dialog's four
 //! ([`dialog`]).
@@ -80,6 +81,7 @@ pub(crate) fn new_document(
     swiper::define(&mut document);
     refresh_view::define(&mut document);
     dialog::define(&mut document);
+    // After `dialog`: every overlay builds one in its shadow tree.
     overlay::define(&mut document, events);
     document.add_stylesheet(
         &ua_sheet::ua_stylesheet(config),

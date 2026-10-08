@@ -51,13 +51,12 @@
 //! spellings each of `viewpager` and `viewpager-item`, `x-swiper`,
 //! `x-swiper-item`, `x-refresh-view`, `x-refresh-header`, `x-refresh-footer`,
 //! the ten `scroll-coordinator` tags, `blur-view`, `x-blur-view`, `overlay`,
-//! `x-overlay-ng` and `wrapper` carry, so it wins only by being assembled
-//! last. That module's `nothing_inside_an_image_generates_a_box` is the
-//! tripwire for it.
+//! `x-overlay-ng` (their hosts' `display: contents`) and `wrapper` carry, so
+//! it wins only by being assembled last. That module's `nothing_inside_an_image_generates_a_box` is
+//! the tripwire for it.
 
 use super::blur_view::{BLUR_VIEW_TAG, X_BLUR_VIEW_TAG};
 use super::dialog::DIALOG_TAG;
-use super::overlay::{OVERLAY_TAG, X_OVERLAY_TAG};
 use super::refresh_view::{REFRESH_FOOTER_TAG, REFRESH_HEADER_TAG};
 use super::swiper::{SWIPER_ITEM_TAG, SWIPER_TAG};
 use super::viewpager::{VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG};
@@ -116,10 +115,9 @@ impl Default for PageConfig {
 /// HTML's other rules, at zero specificity, for `dialog` and for
 /// `dialog:popover-open` ([`super::popover`]), rather than in the Lynx
 /// display line.
-/// `overlay` and `x-overlay-ng` follow the switch's display the same way and
-/// take nothing else of the common block either: the host is `position:
-/// fixed` on the top layer, and native never clips an overlay
-/// ([`super::overlay`]).
+/// `overlay` and `x-overlay-ng` are in neither: their host is `display:
+/// contents`, as web-core's, and what renders is the `dialog` in their shadow
+/// tree, which takes the switch's display as `dialog` ([`super::overlay`]).
 /// Every tag that generates a box of its own — the containers, `text` and
 /// `image` — also gets the rest of that common block: `border-width: 0` with
 /// `border-style: solid`, `position: relative` (which is what makes a
@@ -199,7 +197,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     let display = if config.default_display_linear {
         format!(
             "page, view, scroll-view, list, list-item, {component_tags}, {BLUR_VIEW_TAG}, \
-             {X_BLUR_VIEW_TAG}, {OVERLAY_TAG}, {X_OVERLAY_TAG} {{ display: linear; }}\n"
+             {X_BLUR_VIEW_TAG} {{ display: linear; }}\n"
         )
     } else {
         String::new()
@@ -260,6 +258,7 @@ mod tests {
     use dom::stylo::values::computed::{BorderStyle, CSSPixelLength, Display, Overflow, Size};
 
     use super::super::LynxDocument;
+    use super::super::overlay::{OVERLAY_TAG, X_OVERLAY_TAG};
     use super::super::scroll_coordinator::{
         SCROLL_COORDINATOR_HEADER_TAG, SCROLL_COORDINATOR_SLOT_DRAG_TAG,
         SCROLL_COORDINATOR_SLOT_TAG, SCROLL_COORDINATOR_TAG, SCROLL_COORDINATOR_TOOLBAR_TAG,
@@ -268,9 +267,9 @@ mod tests {
     };
     use super::super::test_support::{child, document, overflow, style_of, with_config};
     use super::{
-        BLUR_VIEW_TAG, DIALOG_TAG, OVERLAY_TAG, PageConfig, REFRESH_FOOTER_TAG, REFRESH_HEADER_TAG,
+        BLUR_VIEW_TAG, DIALOG_TAG, PageConfig, REFRESH_FOOTER_TAG, REFRESH_HEADER_TAG,
         SWIPER_ITEM_TAG, SWIPER_TAG, VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_BLUR_VIEW_TAG,
-        X_OVERLAY_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG, ua_stylesheet,
+        X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG, ua_stylesheet,
     };
 
     /// The tags that get `web-elements`' common container block and keep
@@ -496,10 +495,12 @@ mod tests {
         }
     }
 
-    /// The two top-layer component tags, `dialog` and the overlay's two, take
-    /// the display `defaultDisplayLinear` picks once they show, and nothing
-    /// of the common container block: no border box, no `position:
-    /// relative`, no `overflow: clip`.
+    /// The top-layer component tags take nothing of the common container
+    /// block: no border box, no `position: relative`, no `overflow: clip`.
+    /// `dialog` takes the display `defaultDisplayLinear` picks once it
+    /// shows; the overlay's two hosts are `display: contents` under either
+    /// switch, since their shadow `dialog` is what renders
+    /// ([`super::super::overlay`]).
     #[test]
     fn the_display_page_config_switch_reaches_the_top_layer_tags() {
         for (linear, expected) in [(true, Display::Linear), (false, Display::Flex)] {
@@ -509,18 +510,18 @@ mod tests {
                 ..PageConfig::default()
             });
             let shown = [
-                (DIALOG_TAG, "open"),
-                (OVERLAY_TAG, "visible"),
-                (X_OVERLAY_TAG, "visible"),
+                (DIALOG_TAG, "open", expected),
+                (OVERLAY_TAG, "visible", Display::Contents),
+                (X_OVERLAY_TAG, "visible", Display::Contents),
             ]
-            .map(|(tag, attribute)| {
+            .map(|(tag, attribute, display)| {
                 let element = child(&mut document, tag, "");
                 document.set_attribute(element, attribute, "");
-                (tag, element)
+                (tag, element, display)
             });
             document.layout();
 
-            for (tag, element) in shown {
+            for (tag, element, expected) in shown {
                 let style = style_of(&document, element);
                 assert_eq!(*style.get_display(), expected, "{tag}: linear {linear}");
                 assert_eq!(*style.get_box_sizing(), box_sizing::T::ContentBox, "{tag}");
