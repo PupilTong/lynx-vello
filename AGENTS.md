@@ -2099,7 +2099,8 @@ after the reading, in the same change that moves the card to `verified!`.
 A first screen is not the whole of most cases, so `web_core_e2e/driven.rs`
 restates, per card, what upstream's Playwright spec drives — a tap, a drag or
 a wheel turn at a viewport point, `updateData`, `updateGlobalProps`, `reload`,
-`sendGlobalEvent`, a wait for a console line — and the suite pins one more
+`sendGlobalEvent`, a wait for a console line, a fresh start where upstream
+opens one card in several tests — and the suite pins one more
 golden per frame of that script (`<case>.<label>.png`). A script is not a
 verdict: a pending card may carry one and still has no golden. The harness
 boots every card the way upstream's shell does

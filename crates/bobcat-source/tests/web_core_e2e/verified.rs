@@ -380,8 +380,12 @@ verified! {
     basic_element_x_swiper_indicator_color => "basic-element-x-swiper-indicator-color",
     // The dot strip shows with no `indicator-dots` attribute and is gone for a present value that is not `true` (here the literal string `{{false}}`). Showing by default is web-core's; native hides it by default.
     basic_element_x_swiper_indicator_dots => "basic-element-x-swiper-indicator-dots",
-    // A `circular` swiper in the default mode, turned through all four items and back to the first by `current`. `circular` has no effect here, and nothing in these frames could show one: at rest a wrapped turn and a plain one are the same picture.
+    // A `circular` swiper in the default mode, turned through all four items and back to the first by `current`. Nothing in these frames shows the wrap itself: at rest a wrapped turn and a plain one are the same picture.
     basic_element_x_swiper_circular_normal => "basic-element-x-swiper-circular-normal",
     // The same turn through four items and back in `carry` mode, where the current item is at full scale and fills the swiper. As in `circular-normal`, no frame at rest shows the wrap.
     basic_element_x_swiper_circular_carry => "basic-element-x-swiper-circular-carry",
+    // A blocking overlay: a tap on the page's blue box shows it — its translucent wrapper tints the page and a red panel sits 300px down with its scroll-views laid out — and a tap on the wrapper above the panel hides it again once the card's 250 ms timer has run.
+    basic_element_x_overlay_ng_demo => "basic-element-x-overlay-ng-demo",
+    // Four pass-through overlays, one per upstream test, each from a fresh page: a tap on overlay content stays there and a tap beside it reaches the button underneath; an overlay created by a conditional fills the viewport and goes when it is removed; `showoverlay` and `dismissoverlay` are each logged once; a viewport-sized first child takes a tap meant for the page. The first overlay's red panel starts at the top instead of being centred: the card centres it with `linear-gravity`, which this engine drops as deprecated (user decision, 2026-07).
+    basic_element_x_overlay_ng_playground_test => "basic-element-x-overlay-ng-playground-test",
 }
