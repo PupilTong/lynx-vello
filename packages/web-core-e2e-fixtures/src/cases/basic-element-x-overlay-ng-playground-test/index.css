@@ -81,21 +81,17 @@
   width: 100px;
   height: 100px;
   background-color: grey;
-  /* justify-content: center; */
   align-items: center;
   overflow: visible;
-  linear-gravity: center;
-  /* linear-cross-gravity: center; */
+  justify-content: center;
 }
 
 .dialog {
   background-color: red;
   width: 200px;
   height: 400px;
-  /* align-items: center; */
-  /* justify-content: center; */
-  linear-gravity: center;
-  linear-cross-gravity: center;
+  justify-content: center;
+  align-items: center;
 }
 
 .dialog-text {
