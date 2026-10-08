@@ -1002,7 +1002,8 @@ impl ImageRegistry {
     /// tests, the wasm32 build). A document that does not parse is a
     /// failure, exactly as a [`ImageEvent::Failed`] report would be.
     pub(crate) fn apply(&mut self, event: &ImageEvent) -> Option<ImageApplied> {
-        if !matches!(self.entry_for(event.source()).state, ImageState::Pending) {
+        let entry = self.entry_for(event.source());
+        if !matches!(entry.state, ImageState::Pending) {
             return None;
         }
         let state = match event {
@@ -1025,7 +1026,6 @@ impl ImageRegistry {
             }
             ImageEvent::Loaded { .. } | ImageEvent::Failed { .. } => ImageState::Failed,
         };
-        let entry = self.entry_for(event.source());
         let loaded = match &state {
             ImageState::Ready { width, height, .. } => Some((*width, *height)),
             ImageState::Pending | ImageState::Failed => None,

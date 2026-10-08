@@ -52,9 +52,12 @@ fetched bytes and the sniffed kind. `dom` owns the parser
 owns where the parse runs. Natively the document thread is a tokio
 `current_thread` runtime (`jobs.rs`, `JsThread`) whose blocking pool is
 idle apart from this, so `spawn_blocking` parses there and a main job applies
-the result; on wasm32 there is no blocking pool and the parse runs inline on
-the document thread, the same thread the browser build already parsed on
-before this revision. `usvg` is a dependency of `dom` alone.
+the result. On wasm32 there is no blocking pool: `Document::apply_image_events`
+parses the document inline on the group's Lynx-main Worker and blocks that
+Worker for the parse's duration. Before this revision the browser build parsed
+in `bobcat-resources`' local task on the Render Worker, so this is a move of
+the parse onto the thread that runs the document and the MTS realm (see Known
+costs). `usvg` is a dependency of `dom` alone.
 
 The painter side (`FrameImages`, `ComposeOp::Image`, the bitmap memory tier,
 atlas residency) is untouched. A vector image is never in `image_draws`; it is
@@ -208,7 +211,7 @@ gradient, and replayed by the existing `ComposeOp::Fragment` arm.
   svg), plus flashbulb golden screenshots for `<image src>`,
   `background-image` with repeat, `mask-image`, and the `<svg>` element.
   `flashbulb::TestImages` gains `insert_document(source, bytes, kind)` and
-  the sugar `insert_svg(source, &str)`; both report `loaded_document`, so a
+  the SVG-only form `insert_svg(source, &str)`; both report `loaded_document`, so a
   dom test exercises the inline parse in `apply_image_events` and flashbulb
   has no `usvg` dependency.
 
@@ -229,8 +232,18 @@ gradient, and replayed by the existing `ComposeOp::Fragment` arm.
   `load_font_face` precedent for reaching the runtime from an awaited
   completion, and is cancelled by the view's `Lifetime` like every other
   pending completion: a view that ends mid-parse applies nothing.
+- Group teardown does not wait for a parse in flight. `JsThread` shuts its
+  runtime down with `shutdown_background` once the queue and the `LocalSet`
+  are gone, so a blocking parse still running is detached rather than joined
+  and finishes on its own pool thread, its result dropped there. A plain
+  runtime drop joins every blocking-pool thread, and `bobcat-main` is joined
+  by `LynxGroup`'s release on the embedder's thread, so one slow parse would
+  stall the embedder. The parse closure owns only the bytes (`Bytes`) and
+  the source URL (`Arc<str>`), so a detached parse holds nothing of the
+  group.
 - On wasm32 the batch is applied unchanged and `dom` parses the
-  `LoadedDocument` inline.
+  `LoadedDocument` inline in `Document::apply_image_events`, on the Lynx-main
+  Worker, which the parse blocks for its duration.
 - The registry stays `Pending` while a parse is in flight; a second
   `LoadedDocument` for the same source (two views, or a re-request) parses
   again and the registry's "never regresses" rule makes the later apply a
@@ -289,6 +302,11 @@ gradient, and replayed by the existing `ComposeOp::Fragment` arm.
   count times the tile count. A 1 000-path document under
   `background-size: 2px` is the worst case. No cap by path count is
   applied, so the picture stays complete.
+- On wasm32 the parse blocks the Lynx-main Worker: `Document::apply_image_events`
+  parses inline there, so the document, the MTS realm and every other view of
+  the group wait for the parse's duration. Before this revision the browser
+  build parsed in `bobcat-resources`' local task on the Render Worker, which
+  runs neither the document nor a realm.
 
 ### Out of scope, documented
 
@@ -327,7 +345,9 @@ existing crate, `rkyv` pin untouched.
   later (a Lottie document, say) is one more `DocumentKind` arm rather than a
   second protocol method. The cost is that the parse moved from a pool the
   host already had to the engine's own blocking pool, which the `JsThread`
-  runtime provides natively for free; on wasm32 it is inline, as it already
-  was on the host side there.
+  runtime provides natively for free. On wasm32 it moved from
+  `bobcat-resources`' local task on the Render Worker to an inline parse in
+  `Document::apply_image_events` on the Lynx-main Worker, which blocks that
+  Worker for the parse's duration (see Known costs).
 - Masks skipped rather than drawn unmasked: an unmasked draw is a wrong
   picture that looks right; nothing drawn is a visible gap.

@@ -241,6 +241,11 @@ pub(super) struct Page {
     /// wakes a page answers.
     #[cfg(test)]
     epilogues: Cell<u64>,
+    /// How many entries found the view ended and ran nothing, for the tests
+    /// that tell an entry that was queued and refused from one that was never
+    /// queued.
+    #[cfg(test)]
+    refused_entries: Cell<u64>,
     /// What the next document parse waits on before it starts, for the test
     /// that ends a view while a parse is in flight.
     #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -276,6 +281,8 @@ impl Page {
             reported: Cell::new(false),
             #[cfg(test)]
             epilogues: Cell::new(0),
+            #[cfg(test)]
+            refused_entries: Cell::new(0),
             #[cfg(all(test, not(target_arch = "wasm32")))]
             parse_gate: RefCell::new(None),
         })
@@ -370,6 +377,8 @@ impl Page {
         operation: impl FnOnce(&mut MainThreadRuntime, &mut ScriptRuntime) -> T,
     ) -> Option<T> {
         if self.ended() {
+            #[cfg(test)]
+            self.refused_entries.set(self.refused_entries.get() + 1);
             return None;
         }
         // Both borrows are held for the whole entry, a synchronous wait inside
@@ -1044,6 +1053,12 @@ impl Page {
         self.epilogues.get()
     }
 
+    /// How many entries have found the view ended and run nothing.
+    #[cfg(test)]
+    pub(super) fn refused_entry_count(&self) -> u64 {
+        self.refused_entries.get()
+    }
+
     /// Makes the next document parse wait on `gate` before it starts.
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(super) fn hold_next_parse(&self, gate: ParseGate) {
@@ -1417,7 +1432,10 @@ async fn load_font_face(page: Rc<Page>, request: dom::FontFaceRequest) {
 /// This is a task of the view's [`Lifetime`] like [`load_font_face`]: a view
 /// that ends while the parse runs aborts it with its others, and an entry
 /// into an ended view runs nothing, so nothing is applied. The parse itself
-/// runs to its end on the pool, and its result is dropped.
+/// runs to its end on the pool, and its result is dropped. A parse still
+/// running when the group is released is detached, not joined: the closure
+/// owns only its bytes and source URL, and the thread's runtime is shut down
+/// without waiting for its blocking pool (see `crate::jobs`).
 #[cfg(not(target_arch = "wasm32"))]
 async fn parse_document(
     page: Rc<Page>,

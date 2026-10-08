@@ -1057,8 +1057,12 @@ every other report takes. The task belongs to the view's `Lifetime`, as
 `load_font_face` does: a view that ends mid-parse aborts it, and an entry into
 an ended view runs nothing, so nothing is applied; the parse runs to its end
 on the pool and its result is dropped. The builder sets no
-`max_blocking_threads`, so tokio's default cap applies, and dropping the
-runtime at group teardown waits for a parse in flight. The source stays
+`max_blocking_threads`, so tokio's default cap applies. Group teardown does
+not wait for a parse in flight: `JsThread` shuts its runtime down with
+`shutdown_background`, so the parse is detached rather than joined (the
+closure owns only the bytes and the source URL), and `LynxGroup`'s release,
+which joins `bobcat-main` on the embedder's thread, does not stall on it. The
+source stays
 `Pending` meanwhile; a second report for it parses again, and the registry's
 never-regresses rule makes the later apply a no-op. On wasm32 there is no
 blocking pool and the batch applies unchanged: `dom` parses the document
@@ -2549,7 +2553,7 @@ this workspace, and deliberately a test double: it fetches, decodes and evicts
 nothing. `pump_images` drives one round of the document-to-host image protocol
 (every source `take_wanted_images` named, then the reports back through
 `apply_image_events`) and `render_with_images` loops that to quiescence.
-`TestImages::insert_document(source, bytes, kind)` and its sugar
+`TestImages::insert_document(source, bytes, kind)` and the SVG-only form
 `insert_svg(source, &str)` report a document as its bytes through
 `loaded_document`, as a production host does, so the document's inline parse
 is what a vector-image test exercises; flashbulb parses nothing and has no

@@ -43,6 +43,20 @@
 //! Pushing onto a thread that is gone drops the job, and the future that was
 //! waiting for its answer resolves to `None`.
 //!
+//! # Teardown
+//!
+//! Releasing the thread drops what is still queued, then the `LocalSet` with
+//! every task on it, and then shuts the runtime down with
+//! `shutdown_background`, which does **not** join the runtime's blocking
+//! pool. Blocking work still running at that point — a reported SVG
+//! document being parsed by `spawn_blocking` (`main::page::parse_document`)
+//! — is detached: it runs to its end on its pool thread and its result is
+//! dropped there. A plain runtime drop would join that thread instead, and
+//! `bobcat-main` is joined by `LynxGroup`'s release on the embedder's thread,
+//! so one slow parse would stall the embedder for its whole duration. A
+//! detached parse holds only its own bytes and source URL, nothing of the
+//! group.
+//!
 //! # The tokio trap
 //!
 //! The free `tokio::task::spawn_local` and `JoinSet::spawn_local` panic when
@@ -64,11 +78,21 @@ type Job = Box<dyn FnOnce()>;
 
 /// One engine thread: its scheduler, and the jobs it runs between two turns of
 /// it.
+///
+/// Releasing it does not wait for blocking work: a `spawn_blocking` task
+/// still running on the runtime's pool when the last `Rc` goes is detached,
+/// not joined. It runs to its end on its own pool thread and its result is
+/// dropped there. The thread is released on the way to `LynxGroup`'s release
+/// returning on the embedder's thread, so a join would hold the embedder for
+/// as long as the slowest parse in flight, and what such a task owns — a
+/// reported document's bytes and its source URL — is nothing of the group.
 pub(crate) struct JsThread {
     /// **Field order is the release order.** The queue goes first, so a job
     /// that was never run — and the `Rc`s it captured — is dropped while the
     /// `LocalSet` and the runtime it may name are still standing; the
-    /// `LocalSet` next, which drops every task; the runtime last.
+    /// `LocalSet` next, which drops every task; the runtime last, shut down
+    /// without joining its blocking pool (see "Teardown" in the module
+    /// documentation).
     queue: RefCell<VecDeque<Job>>,
     /// What brings the top loop back out of `block_on` to run a job.
     ///
@@ -82,7 +106,7 @@ pub(crate) struct JsThread {
     /// exhaustion before every park.
     pushed: Notify,
     local: LocalSet,
-    runtime: tokio::runtime::Runtime,
+    runtime: DetachingRuntime,
 }
 
 impl JsThread {
@@ -98,9 +122,11 @@ impl JsThread {
             queue: RefCell::new(VecDeque::new()),
             pushed: Notify::new(),
             local: LocalSet::new(),
-            runtime: builder
-                .build()
-                .expect("a current-thread runtime asks the platform for nothing"),
+            runtime: DetachingRuntime(Some(
+                builder
+                    .build()
+                    .expect("a current-thread runtime asks the platform for nothing"),
+            )),
         })
     }
 
@@ -166,6 +192,36 @@ impl JsThread {
     /// runtime started from within a runtime, and tokio says so.
     fn wait<F: Future>(&self, future: F) -> F::Output {
         self.runtime.block_on(self.local.run_until(future))
+    }
+}
+
+/// A thread's tokio runtime, shut down on drop with `shutdown_background`
+/// rather than dropped: a plain drop joins every thread of the blocking pool,
+/// and this does not (see "Teardown" in the module documentation).
+///
+/// The `Option` is only ever `None` inside `drop`, which is what takes the
+/// runtime to hand it to `shutdown_background` by value.
+struct DetachingRuntime(Option<tokio::runtime::Runtime>);
+
+impl std::ops::Deref for DetachingRuntime {
+    type Target = tokio::runtime::Runtime;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+            .as_ref()
+            .expect("the runtime is taken only when it is dropped")
+    }
+}
+
+impl Drop for DetachingRuntime {
+    /// Runs as the last field of [`JsThread`] is released, after the queue
+    /// and the `LocalSet`. The last strong `Rc<JsThread>` is the top loop's,
+    /// dropped outside any `block_on`, so this never runs from inside the
+    /// runtime it shuts down.
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown_background();
+        }
     }
 }
 
@@ -389,6 +445,44 @@ mod tests {
         };
         thread.run(body);
         assert_eq!(*log.borrow(), ["main ran"]);
+    }
+
+    /// Releasing a thread does not wait for blocking work still running on
+    /// its runtime's pool: the release returns while the task is still
+    /// blocked, and the task, detached, then runs to its end. A plain runtime
+    /// drop would join it, and the release below would never return before
+    /// the task is let go.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn releasing_the_thread_detaches_blocking_work_still_running() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (released_tx, released) = mpsc::channel();
+        let (let_go, held) = mpsc::channel::<()>();
+        let (finished_tx, finished) = mpsc::channel();
+        let home = std::thread::spawn(move || {
+            let thread = JsThread::new();
+            thread.run(async move {
+                let (started_tx, started) = mpsc::channel();
+                drop(tokio::task::spawn_blocking(move || {
+                    let _ = started_tx.send(());
+                    let _ = held.recv();
+                    let _ = finished_tx.send(());
+                }));
+                started.recv().expect("the blocking task started");
+            });
+            drop(thread);
+            let _ = released_tx.send(());
+        });
+        released
+            .recv_timeout(Duration::from_secs(10))
+            .expect("releasing the thread did not wait for the blocking task");
+        let_go.send(()).expect("the blocking task is still waiting");
+        finished
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the detached task ran to its end");
+        home.join().expect("the thread returned");
     }
 
     /// A task spawned from job context reaches the set, which is the whole

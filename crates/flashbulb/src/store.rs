@@ -11,8 +11,8 @@
 //! source returns a clone sharing the same `Blob`, which is what vello keys
 //! its atlas on.
 //!
-//! A document published through [`TestImages::insert_document`] (or its SVG
-//! sugar [`TestImages::insert_svg`]) is reported as its bytes, the way a
+//! A document published through [`TestImages::insert_document`] (or the
+//! SVG-only form [`TestImages::insert_svg`]) is reported as its bytes, the way a
 //! production host reports one: this store parses nothing, and the document
 //! parses them inline in [`Document::apply_image_events`].
 //! [`FrameImages::read`] never answers for it, because the engine never asks.
@@ -48,7 +48,7 @@ enum Entry {
 
 impl Entry {
     /// The report this entry settles as, or `None` while it is pending.
-    fn settled(&self, source: &str) -> Option<ImageEvent> {
+    fn event(&self, source: &str) -> Option<ImageEvent> {
         let source = Arc::from(source);
         match self {
             Entry::Pending => None,
@@ -63,6 +63,17 @@ impl Entry {
                 kind: *kind,
             }),
             Entry::Failed => Some(ImageEvent::Failed { source }),
+        }
+    }
+
+    /// Makes the same report as [`Entry::event`] through `sink`. A pending
+    /// entry has settled as nothing and reports nothing.
+    fn report_to(&self, source: &str, sink: &ImageReports) {
+        match self {
+            Entry::Pending => {}
+            Entry::Ready(image) => sink.loaded(source, image.width, image.height),
+            Entry::Document { bytes, kind } => sink.loaded_document(source, bytes.clone(), *kind),
+            Entry::Failed => sink.failed(source),
         }
     }
 }
@@ -110,10 +121,7 @@ impl TestImages {
     /// still has to change what it answers afterwards. If a sink is
     /// installed, the load is reported through it immediately.
     pub fn insert(&self, source: impl Into<String>, image: ImageData) {
-        let source = source.into();
-        let (width, height) = (image.width, image.height);
-        self.entries().insert(source.clone(), Entry::Ready(image));
-        self.report_loaded(&source, width, height);
+        self.publish(source.into(), Entry::Ready(image));
     }
 
     /// Publishes tightly packed, row-major, straight-alpha RGBA8 pixels.
@@ -150,20 +158,13 @@ impl TestImages {
         bytes: impl Into<Bytes>,
         kind: DocumentKind,
     ) {
-        let source = source.into();
-        let bytes = bytes.into();
-        self.entries().insert(
-            source.clone(),
+        self.publish(
+            source.into(),
             Entry::Document {
-                bytes: bytes.clone(),
+                bytes: bytes.into(),
                 kind,
             },
         );
-        self.report(ImageEvent::LoadedDocument {
-            source: Arc::from(source.as_str()),
-            bytes,
-            kind,
-        });
     }
 
     /// Publishes the SVG document `svg` under `source`:
@@ -179,9 +180,7 @@ impl TestImages {
     /// answer the same failure, which is how a test failing a source before
     /// the view exists still fails it for the bind that comes later.
     pub fn fail(&self, source: impl Into<String>) {
-        let source = source.into();
-        self.entries().insert(source.clone(), Entry::Failed);
-        self.report_failed(&source);
+        self.publish(source.into(), Entry::Failed);
     }
 
     /// Drops the pixels for `source`, so later reads miss.
@@ -198,14 +197,9 @@ impl TestImages {
     /// image already published so a store warmed before the view still
     /// reports its contents.
     pub fn attach(&self, sink: ImageReports) {
-        let published: Vec<ImageEvent> = self
-            .entries()
-            .iter()
-            .filter_map(|(source, entry)| entry.settled(source))
-            .collect();
         *self.sink.borrow_mut() = Some(sink);
-        for event in published {
-            self.report(event);
+        for (source, entry) in self.entries().iter() {
+            self.report(source, entry);
         }
     }
 
@@ -245,44 +239,23 @@ impl TestImages {
         self.entries.lock().expect("test image store")
     }
 
-    fn report_loaded(&self, source: &str, width: u32, height: u32) {
-        self.report(ImageEvent::Loaded {
-            source: Arc::from(source),
-            width,
-            height,
-        });
+    /// Reports `entry` for `source`, then makes it the entry for `source`,
+    /// replacing any previous one.
+    fn publish(&self, source: String, entry: Entry) {
+        self.report(&source, &entry);
+        self.entries().insert(source, entry);
     }
 
-    fn report_failed(&self, source: &str) {
-        self.report(ImageEvent::Failed {
-            source: Arc::from(source),
-        });
-    }
-
-    fn report(&self, event: ImageEvent) {
-        self.pending
-            .lock()
-            .expect("test image reports")
-            .push(event.clone());
+    /// Logs the report `entry` settles as for [`Self::drain_events`] and
+    /// makes it through the sink if one is installed. A pending entry reports
+    /// nothing.
+    fn report(&self, source: &str, entry: &Entry) {
+        let Some(event) = entry.event(source) else {
+            return;
+        };
+        self.pending.lock().expect("test image reports").push(event);
         if let Some(sink) = self.sink.borrow().as_ref() {
-            match event {
-                ImageEvent::Loaded {
-                    source,
-                    width,
-                    height,
-                } => sink.loaded(&source, width, height),
-                ImageEvent::LoadedDocument {
-                    source,
-                    bytes,
-                    kind,
-                } => sink.loaded_document(&source, bytes, kind),
-                // Reported by nothing here: a host hands over bytes, and only
-                // the engine produces the parsed form.
-                ImageEvent::LoadedVector { .. } => {
-                    unreachable!("this store reports documents as bytes")
-                }
-                ImageEvent::Failed { source } => sink.failed(&source),
-            }
+            entry.report_to(source, sink);
         }
     }
 
@@ -326,14 +299,9 @@ impl TestImages {
     pub fn request(&self, source: &str) {
         // Single-flight is trivial here: one entry per source, and a source
         // that has already settled either way starts no work.
-        let settled = self
-            .entries()
-            .entry(source.to_owned())
-            .or_default()
-            .settled(source);
-        if let Some(event) = settled {
-            self.report(event);
-        }
+        let mut entries = self.entries();
+        let entry = entries.entry(source.to_owned()).or_default();
+        self.report(source, entry);
     }
 }
 
