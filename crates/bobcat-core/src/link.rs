@@ -171,9 +171,11 @@ pub(crate) enum ToMain {
     /// a frame post, or both. Queued once per take, however many passes the
     /// painter posts meanwhile.
     Posted,
-    /// The host's image reports: completed or failed loads. No variant can
-    /// carry pixels (a parsed vector tree is not pixels), which is what makes
-    /// "`ImageData` never crosses a channel" a property of the type.
+    /// The host's image reports: completed or failed loads, and documents
+    /// handed over as their bytes for the engine to parse. No variant can
+    /// carry pixels (encoded document bytes and a parsed tree are not
+    /// pixels), which is what makes "`ImageData` never crosses a channel" a
+    /// property of the type.
     ImageEvents(Vec<dom::ImageEvent>),
     #[cfg(test)]
     Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
