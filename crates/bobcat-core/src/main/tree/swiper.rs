@@ -68,9 +68,12 @@
 //!   scale (`:205-267`). `carry` — items 100%, centre-aligned, plus a scroll-driven scale
 //!   (`:299-317`). Each margin sits on the main axis; web-core writes the carousel's as
 //!   `margin-right` in both orientations (`:193-195`), here it is `margin-bottom` under `vertical`.
-//!   A percentage margin resolves against `#content`'s width on every side, as CSS resolves it, so
-//!   under `vertical` the 20% is of the width, as in web-core; native offsets by 20% of the main
-//!   axis (`XSwiperUI.java:582-604`).
+//!   Under `circular` there is no margin (web-core's margin rules all carry `:not([circular])`,
+//!   `:193`, `:235-250`, `:280-297`): the items pack edge to edge, so the seam the painter draws
+//!   joins the last item to the first, not to the swiper's own background. A percentage margin
+//!   resolves against `#content`'s width on every side, as CSS resolves it, so under `vertical` the
+//!   20% is of the width, as in web-core; native offsets by 20% of the main axis
+//!   (`XSwiperUI.java:582-604`).
 //! - `current`: the item the swiper starts on. See below.
 //! - `bounces` (present and not `"false"`): `overscroll-behavior` `contain-bounce` on `#content`'s
 //!   main axis, as for [`super::viewpager`]. web-core shows a page-wide blank box ahead of the
@@ -80,10 +83,11 @@
 //!   axis, so the axis wraps: the painter keeps its offset on a circle one scrolling area long,
 //!   draws the seam, and its periodic snap rules page across it, so a drag or flick past the last
 //!   item lands on the first and back. Its rules come after `bounces`' and win on the same axis: a
-//!   circular axis has no edge to bounce. web-core re-slots the first and last items into its
-//!   shadow tree around the current one (`XSwiperCircular.ts`) and turns snapping off
-//!   (`x-swiper.css:122-131`); native loops its `ViewPager` (`XSwiperUI.java:865-868`, `setLoop`).
-//!   Here snapping stays. `docs/tracking/deviations.md` records the difference.
+//!   circular axis has no edge to bounce. The mode margins are off (above), so the period is the
+//!   items' extent alone. web-core re-slots the first and last items into its shadow tree around
+//!   the current one (`XSwiperCircular.ts`) and turns snapping off (`x-swiper.css:122-131`); native
+//!   loops its `ViewPager` (`XSwiperUI.java:865-868`, `setLoop`). Here snapping stays.
+//!   `docs/tracking/deviations.md` records the difference.
 //! - `indicator-dots`, `indicator-color`, `indicator-active-color`: the strip, below.
 //!
 //! A child of the swiper that is neither an `x-swiper-item` nor a `wrapper` generates no box
@@ -238,13 +242,13 @@ x-swiper[mode="carousel"]:is(:not([vertical]), [vertical="false"]) > x-swiper-it
 x-swiper[mode="carousel"][vertical]:not([vertical="false"]) > x-swiper-item { height: 80% !important; }
 x-swiper:is([mode="flat-coverflow"], [mode="coverflow"]):is(:not([vertical]), [vertical="false"]) > x-swiper-item { width: 60% !important; }
 x-swiper:is([mode="flat-coverflow"], [mode="coverflow"])[vertical]:not([vertical="false"]) > x-swiper-item { height: 60% !important; }
-x-swiper:is([mode="flat-coverflow"], [mode="coverflow"]):is(:not([vertical]), [vertical="false"])
+x-swiper:is([mode="flat-coverflow"], [mode="coverflow"]):is(:not([circular]), [circular="false"]):is(:not([vertical]), [vertical="false"])
   > x-swiper-item:first-child { margin-left: 20%; }
-x-swiper:is([mode="flat-coverflow"], [mode="coverflow"])[vertical]:not([vertical="false"])
+x-swiper:is([mode="flat-coverflow"], [mode="coverflow"]):is(:not([circular]), [circular="false"])[vertical]:not([vertical="false"])
   > x-swiper-item:first-child { margin-top: 20%; }
-x-swiper:is([mode="carousel"], [mode="flat-coverflow"], [mode="coverflow"]):is(:not([vertical]), [vertical="false"])
+x-swiper:is([mode="carousel"], [mode="flat-coverflow"], [mode="coverflow"]):is(:not([circular]), [circular="false"]):is(:not([vertical]), [vertical="false"])
   > x-swiper-item:last-child { margin-right: 20%; }
-x-swiper:is([mode="carousel"], [mode="flat-coverflow"], [mode="coverflow"])[vertical]:not([vertical="false"])
+x-swiper:is([mode="carousel"], [mode="flat-coverflow"], [mode="coverflow"]):is(:not([circular]), [circular="false"])[vertical]:not([vertical="false"])
   > x-swiper-item:last-child { margin-bottom: 20%; }
 x-swiper:is([mode="flat-coverflow"], [mode="coverflow"], [mode="carry"]) > x-swiper-item {
   scroll-snap-align: center;
@@ -959,6 +963,65 @@ mod tests {
         document.layout();
         assert_eq!(rect(&document, items[1]), (200.0, 0.0, 200.0, 100.0));
         assert_eq!(snap_points(&document, swiper, false), [0.0, 200.0]);
+    }
+
+    /// Under `circular` the mode margins are off, as in web-core, whose
+    /// margin rules all carry `:not([circular])`: the items pack edge to
+    /// edge and the scroll range — the period the painter wraps on — is
+    /// their extent alone, so the seam joins the last item to the first
+    /// instead of showing the swiper's own background. `circular="false"`
+    /// keeps the margins.
+    #[test]
+    fn circular_packs_the_items_without_the_mode_margins() {
+        // The main-axis item size, and the maximum offset packed and with
+        // the margins, of a 200px x 100px (100px x 200px) swiper of three.
+        for (mode, vertical, item, packed_max, margined_max) in [
+            ("carousel", false, 160.0, 280.0, 320.0),
+            ("carousel", true, 160.0, 280.0, 300.0),
+            ("flat-coverflow", false, 120.0, 160.0, 240.0),
+            ("flat-coverflow", true, 120.0, 160.0, 200.0),
+            ("coverflow", false, 120.0, 160.0, 240.0),
+            ("coverflow", true, 120.0, 160.0, 200.0),
+        ] {
+            for (circular, packed) in [("", true), ("true", true), ("false", false)] {
+                let (mut document, swiper, items) = mode_swiper(mode, vertical, 3);
+                document.set_attribute(swiper, "circular", circular);
+                document.layout();
+                let case = format!("{mode} vertical={vertical} circular={circular:?}");
+                let placed: Vec<_> = items.iter().map(|item| rect(&document, *item)).collect();
+                let expected: Vec<_> = if packed {
+                    [0.0, 1.0, 2.0]
+                        .map(|k: f32| {
+                            let at = k * item;
+                            if vertical {
+                                (0.0, at, 100.0, item)
+                            } else {
+                                (at, 0.0, item, 100.0)
+                            }
+                        })
+                        .to_vec()
+                } else {
+                    GEOMETRY
+                        .iter()
+                        .find(|case| case.mode == mode && case.vertical == vertical)
+                        .expect("a listed mode")
+                        .rects
+                        .to_vec()
+                };
+                assert_eq!(placed, expected, "{case}");
+                let max = document
+                    .scroll_box(scroller(&document, swiper))
+                    .expect("a scroll container")
+                    .max_offset();
+                let along = if packed { packed_max } else { margined_max };
+                let expected_max = if vertical {
+                    Vector2D::new(0.0, along)
+                } else {
+                    Vector2D::new(along, 0.0)
+                };
+                assert_eq!(max, expected_max, "{case}");
+            }
+        }
     }
 
     /// `coverflow` and `carry` export their scale to the painter as a curve
