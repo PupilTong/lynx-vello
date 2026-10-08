@@ -939,8 +939,9 @@ consequential choice about whether to follow the spec or the quirk.
   frame size, and its `<image>` refuses SVG
   (`js_libraries/types/skills/image.md:268-269`); web-core's `x-svg` and
   `x-image` are shadow `<img>`s, so the browser renders SVG in `<svg>`,
-  `<image src>`, `background-image` and `mask-image`. Here `usvg` parses the
-  document and `dom` paints it as a vello fragment, in all four places
+  `<image src>`, `background-image` and `mask-image`. Here the engine parses
+  the document with `usvg` from the bytes the host hands over, and `dom`
+  paints it as a vello fragment, in all four places
   (pipeline in [media-resources.md](media-resources.md), status in
   [components.md](components.md)'s `x-svg` row). Where the references
   disagree, and which side was followed (user rulings, 2026-10-08):

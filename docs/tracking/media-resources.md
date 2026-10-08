@@ -254,32 +254,43 @@ renders SVG in `<svg>`, `<image src>`, `background-image` and `mask-image`,
 following web-core for the last three (native's `<image>` refuses SVG). An
 SVG stays a vector image from parse to paint; it never becomes a bitmap:
 
-1. **Parse, in `bobcat-resources`.** When the MIME preprocessing step
-   classifies a payload as `ImageFormat::Svg`, the bytes go to `usvg` (built
-   with `default-features = false`: no `text`, no system fonts, no `svgz`)
-   instead of the platform decoder, on the same blocking-pool thread as a
-   raster decode natively and inline on wasm32. The browser embedder no
-   longer decodes SVG through `HTMLImageElement`, so every target parses the
-   same way. The parse is `dom::VectorImage::parse_sealed`, which
-   flashbulb's test store calls as well: one XML parse reads the root's
-   `width`, `height` and `viewBox` and builds the tree. A string `href` inside the document is never
-   resolved (the resolver answers `None` instead of reading the
-   filesystem); `data:` hrefs keep usvg's default. A parse error completes
-   the request as a failure carrying usvg's message. The encoded bytes are
-   dropped after parse and nothing enters the bitmap memory tier.
-2. **Size.** The natural size reported to layout is CSS Images 3 §4.1
+1. **Fetch, in `bobcat-resources`.** When the MIME preprocessing step
+   classifies a payload as `ImageFormat::Svg`, the host neither decodes nor
+   parses it: the load takes no decode permit, skips the platform decoder,
+   and reports the preprocessed bytes (an image's bytes, unchanged) through
+   `ImageReports::loaded_document(source, bytes, DocumentKind::Svg)`. The
+   browser embedder does not decode SVG through `HTMLImageElement`, so every
+   target hands over the same bytes. The resources entry keeps the bytes to
+   answer a repeated request with the same report; they count toward
+   `memory_used_bytes` as encoded bytes, and nothing enters the bitmap
+   memory tier.
+2. **Parse, in the engine.** The bytes cross to the Lynx main thread inside
+   the existing `ToMain::ImageEvents` message as
+   `ImageEvent::LoadedDocument`. Natively `bobcat-core` takes each one out of
+   the batch and parses it with `tokio::task::spawn_blocking` on that
+   thread's blocking pool, then one entry applies the outcome, a parsed
+   vector image or a failure, through the same `apply_image_events` as every
+   other report; a view that ends mid-parse applies nothing. On wasm32
+   `dom::Document::apply_image_events` parses inline. The parse is
+   `dom::VectorImage::parse_sealed`, with `usvg` built with
+   `default-features = false` (no `text`, no system fonts, no `svgz`): one
+   XML parse reads the root's `width`, `height` and `viewBox` and builds the
+   tree. A string `href` inside the document is never resolved (the resolver
+   answers `None` instead of reading the filesystem); `data:` hrefs keep
+   usvg's default. A document that does not parse fails its source in the
+   document's registry (`error` on `<image>`, nothing on `<svg>`).
+3. **Size.** The natural size reported to layout is CSS Images 3 §4.1
    default sizing (web-core), in CSS px rounded to whole px: `width` and
    `height` when both are absolute; one of them plus the viewBox ratio; the
    largest viewBox-ratio size that fits 300×150; else 300×150. A root
    dimension is absolute when it is a bare number or a length in `px`, `in`,
    `cm`, `mm`, `pt` or `pc`, converted at 96 px per inch (`10mm` is 38 px);
    `em`, `ex`, percentages and any other unit count as absent.
-3. **Hand-off.** The parsed tree crosses to the document thread inside the
-   existing `ToMain::ImageEvents` message (`ImageReports::loaded_vector`)
-   and is held by `dom`'s image registry as a ready vector image. The
-   painter's `FrameImages`, the atlas and `ImageSizeHint` never see it, so
-   native's "decode to the view size" has nothing to do here.
-4. **Paint, in `dom`.** `paint/svg.rs` encodes the tree into a vello scene
+4. **Registry.** The parsed tree is held by `dom`'s image registry as a
+   ready vector image. The painter's `FrameImages`, the atlas and
+   `ImageSizeHint` never see it, so native's "decode to the view size" has
+   nothing to do here.
+5. **Paint, in `dom`.** `paint/svg.rs` encodes the tree into a vello scene
    once and caches it. Where `paint/background.rs` would emit an image draw
    (replaced content for `<image>`/`<svg>`, a background layer, a mask
    layer), a vector appends that scene into the frame's fragment under a
@@ -287,7 +298,7 @@ SVG stays a vector image from parse to paint; it never becomes a bitmap:
    `object-fit`/`object-position`, `background-size`, position and repeat
    come from the same code as for a raster. The painter replays the fragment
    unchanged.
-5. **Events.** `<image>` with an SVG `src` fires `load` with the natural size,
+6. **Events.** `<image>` with an SVG `src` fires `load` with the natural size,
    as for a raster. `<svg>` fires `load` with its border-box layout size
    (native's detail, ruled 2026-10-08) and nothing on failure.
 

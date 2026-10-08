@@ -216,9 +216,13 @@ gradient, and replayed by the existing `ComposeOp::Fragment` arm.
 
 - In the page loop's `ToMain::ImageEvents(events)` arm, natively: every
   `LoadedDocument` is taken out of the batch and parsed with
-  `tokio::task::spawn_blocking(move || VectorImage::parse_sealed(&bytes))` on
-  the `JsThread` runtime's blocking pool; the rest of the batch is applied at
-  once. When the parse returns, a main job applies one event,
+  `tokio::task::spawn_blocking(move || ImageEvent::parse_document(source,
+  &bytes, kind))` on the `JsThread` runtime's blocking pool; the rest of the
+  batch is applied at once. `ImageEvent::parse_document` is `dom`'s: it
+  matches on the `#[non_exhaustive]` `DocumentKind` (so `bobcat-core` needs
+  no wildcard arm), runs `VectorImage::parse_sealed` for `Svg`, and answers
+  `LoadedVector` or `Failed`. A parse that panics (a `JoinError`) applies
+  `Failed`. When the parse returns, a main job applies one event,
   `LoadedVector` or `Failed`, through the same `runtime.apply_image_events`
   as the view's own batches, so the outcome, the natural-size relayout and
   the `load` event follow the existing path. The job follows the
