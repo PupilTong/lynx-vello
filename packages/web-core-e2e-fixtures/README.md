@@ -21,8 +21,9 @@ scope decision, will not. Upstream's own `dist/` is built without an
 this engine has no intention of serving. Compiled here at `4.1.0`, the same
 sources exercise the path it does.
 
-The cards, their CSS and their assets are otherwise upstream's, with two
-rewrites applied to the vendored text by user ruling on 2026-09-25:
+The cards, their CSS and their assets are otherwise upstream's, with three
+rewrites applied to the vendored text by user ruling (the first two on
+2026-09-25, the third on 2026-10-08):
 
 - **`direction: lynx-rtl` becomes `direction: rtl`** (24 files). `lynx-rtl` is
   a value the fork's grammar rejects, so upstream's own spelling left every
@@ -32,9 +33,17 @@ rewrites applied to the vendored text by user ruling on 2026-09-25:
   for the Lynx tag; written literally in JSX it reaches this engine as a tag
   no sheet has a rule for, and the run disappears. `<x-textarea>` is a
   different tag and is untouched.
+- **`linear-gravity` and `linear-cross-gravity` become `justify-content` and
+  `align-items` in `basic-element-x-overlay-ng-playground-test`** (1 file, the
+  value `center` in each). The two are deprecated longhands this engine drops
+  (`docs/tracking/deviations.md`), and that card is about overlays: its
+  panel only has to be centred. Upstream's own sheet carries the modern
+  spellings beside them, commented out. The cards whose subject *is* the
+  deprecated family — the `basic-linear-*-graverty-*`, `*-cross-gravity` and
+  `*-layout-gravity` ones — keep it, and are judged as dropping it.
 
-Both are recorded here rather than absorbed silently, because a re-sync from
-upstream will bring the original spellings back.
+All three are recorded here rather than absorbed silently, because a re-sync
+from upstream will bring the original spellings back.
 
 ## Building
 
