@@ -316,6 +316,10 @@ enum Step {
     /// The host's `sendGlobalEvent`: the event's name, then its argument list
     /// as JSON text.
     SendGlobalEvent(&'static str, &'static str),
+    /// Starts the card again from nothing. Upstream opens some cards in
+    /// several tests, each on a fresh page; the frames after this step are
+    /// the next of those tests.
+    Fresh,
     /// Lets this many milliseconds pass. The settle before every capture
     /// already covers a spec's short `wait`; this is for a card that does
     /// something on a timer of its own, later than that.
@@ -587,6 +591,12 @@ impl Card {
                 .view
                 .send_global_event(name, arguments.to_owned())
                 .map_err(|error| refused("sendGlobalEvent", error))?,
+            Step::Fresh => {
+                // The new card is up before the old one is let go of, so two
+                // views overlap for a moment; neither knows of the other.
+                let case = self.case.clone();
+                *self = Self::boot(&case).await;
+            }
             Step::Wait(milliseconds) => {
                 let until = Instant::now() + Duration::from_millis(milliseconds);
                 while Instant::now() < until {
