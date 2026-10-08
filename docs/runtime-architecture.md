@@ -853,7 +853,7 @@ difference.
 | `NativeModules` | `bobcat-internal:native-modules` with `invokeNativeModule` alone; `NativeModules` is `undefined`, and there is no native module API over the transport (see `docs/tracking/deviations.md`). The view's module table is the startup member `nativeModuleTable`, which `bobcat:runtime` posts to the BTS unread | the same host module. The BTS's table is the one `initialize` carries, which `bobcat:bts-runtime` builds `NativeModules` from before the BTS entry is imported; a worker at any other URL is posted none, and its `NativeModules` is empty |
 | `console` | a module binding: `bobcat:runtime` re-exports the `console` of `bobcat:diagnostics` | the global `console` `bobcat:worker` installs; `bobcat:bts-runtime` exports the same object |
 | Creates Workers | yes: `createWorker`, `sendWorkerMessage`, `terminateWorker`, and the `bobcat-internal` class over them | no |
-| Frame demand key, `ScriptSource` | `None`, `Main` | the worker's key; what `worker_source` computes from the URL and the key on both threads: `Background` for `bobcat:bts`, `Worker(WorkerId)` for any other URL |
+| Frame demand key, `ScriptSource` | `None`, `Main` | the worker's key; `ScriptSource::Worker { id, url }`, the id of that key and the worker's script URL, which `WorkerOwner::start` on `bobcat-main` and `Worker::boot` on `bobcat-workers` each write from the key and the URL. Rust has no check that tells the BTS apart: its `url` is `bobcat:bts` |
 
 The native module transport is the same in every realm. A call names the realm
 that made it, and `LynxView::pump` answers it through the view's command FIFO
