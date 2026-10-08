@@ -411,9 +411,8 @@ impl Page {
     ///    unstyled frame.
     /// 3. **The `contentvisibilityautostatechange` deliveries** that commit decided — posted as an
     ///    entry of their own, never run here: see [`Self::post_content_visibility_changes`].
-    /// 4. **The component events** this entry produced — `<image>` `load`s and `error`s, `<svg>`
-    ///    `load`s, `<dialog>` `cancel`s and `close`s — posted as an entry of their own too, and
-    ///    only once the commit has run, so nothing is left uncommitted when they are delivered: see
+    /// 4. **The component events** this entry produced — `<image>` `load`s and `error`s, `<dialog>`
+    ///    `cancel`s and `close`s — posted as an entry of their own too: see
     ///    [`Self::post_component_events`].
     /// 5. **The boot report**, once, so the frame exists before the event that implies it.
     /// 6. **The frame-post acknowledgement**, for the same reason: a host blocked on the sequence
@@ -439,17 +438,7 @@ impl Page {
         {
             self.post_content_visibility_changes();
         }
-        // Held while the commit above was skipped: an `<svg>`'s `load` reads
-        // the element's layout box at delivery, which is stale until a commit
-        // applies the natural size its report set. The hold covers the whole
-        // batch, so `<image>`, `<dialog>` and `<overlay>` events queued
-        // before the first flush are delayed to the first commit as well.
-        // The queue is not drained and the latch is not set while held, so
-        // the first later epilogue whose commit runs posts the batch.
-        if runtime.has_component_events()
-            && !runtime.needs_render()
-            && !self.component_events_posted.replace(true)
-        {
+        if runtime.has_component_events() && !self.component_events_posted.replace(true) {
             self.post_component_events();
         }
         if !self.boot_reported.get() {
@@ -563,24 +552,9 @@ impl Page {
     /// check, rather than before it. Nothing a commit does produces a
     /// component event — the queue is filled by a bind, a UI method or the
     /// painting side's report, all of which happen in the entry's body — so
-    /// the position cannot change what is posted.
-    ///
-    /// It posts only when that commit left nothing uncommitted
-    /// ([`MainThreadRuntime::needs_render`] is `false`). An `<svg>`'s `load`
-    /// detail is the element's layout size read at delivery, so the
-    /// delivery has to follow the commit that applied the natural size its
-    /// report set. The commit is skipped only while a listed author sheet is
-    /// outstanding, which ends at the first `__FlushElementTree`: it settles
-    /// the sheets and commits, and its entry's epilogue posts what was held.
-    /// Holding drains nothing and sets no latch, so a held batch is never
-    /// dropped, only delayed; after the first flush every epilogue commits
-    /// and this posts exactly as it did before the hold existed.
-    ///
-    /// The hold covers the whole batch, not only `<svg>` outcomes: an
-    /// `<image>`'s `load` or `error` and a `<dialog>`'s or `<overlay>`'s
-    /// events queued before the first flush wait for the first commit as
-    /// well. Each is still delivered exactly once, in queue order; none is
-    /// lost or duplicated.
+    /// the position cannot change what is posted; it sits with the other
+    /// posted delivery so that "what this entry owes an entry of its own" is
+    /// one block.
     ///
     /// Unlike that one, this delivery **does** enter JavaScript: these are
     /// script events, and the dispatch is the realm's

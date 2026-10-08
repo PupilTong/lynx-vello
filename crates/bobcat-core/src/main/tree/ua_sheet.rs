@@ -9,6 +9,11 @@
 //! only decides what they all agree on and what order they land in.
 //! [`super::blur_view`] is the one tag module with no rules of its own: a
 //! blur view is a container and nothing more, so everything it needs is here.
+//! `svg` has no tag module either: it is the standard element, implemented
+//! in `dom` (an inline SVG root, replaced content whose subtree is parsed as
+//! one vector image), and its one rule here, `svg { display: flex; }` with
+//! `svg` in the shared box block, makes it lay out the way `<image>` does.
+//! Nothing hides its children: being replaced content already does.
 //!
 //! Order is mostly documentation, with one exception that is mechanism:
 //! [`super::image`]'s child suppression ties on specificity with the `display`
@@ -171,12 +176,13 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     };
     format!(
         "page, view, scroll-view, list, list-item, {component_tags}, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG}, \
-         text, image {{ box-sizing: border-box; border-width: 0; border-style: solid; \
+         text, image, svg {{ box-sizing: border-box; border-width: 0; border-style: solid; \
          position: relative; overflow: clip; min-width: 0; min-height: 0; }}\n\
          {display}\
          {overflow}\
          page {{ width: 100%; height: 100%; font-family: sans-serif; }}\n\
          wrapper {{ display: contents; }}\n\
+         svg {{ display: flex; }}\n\
          {scrollers}\
          {lists}\
          {pagers}\
@@ -274,6 +280,45 @@ mod tests {
         }
     }
 
+    /// `svg` is a flex box under either display configuration (it is outside
+    /// the `defaultDisplayLinear` list), and an inline root lays out at its
+    /// `width`/`height` attributes with no box for anything inside it.
+    #[test]
+    fn an_svg_is_a_flex_leaf_sized_by_its_attributes() {
+        for linear in [true, false] {
+            let mut document = with_config(PageConfig {
+                default_display_linear: linear,
+                ..PageConfig::default()
+            });
+            let svg = child(&mut document, "svg", "");
+            document.set_attribute(svg, "viewBox", "0 0 24 24");
+            document.set_attribute(svg, "width", "48");
+            document.set_attribute(svg, "height", "32");
+            let path = document.create_element("path", ());
+            document.set_attribute(path, "d", "M0 0 H24 V24 Z");
+            document.append_child(svg, path);
+            document.layout();
+
+            assert_eq!(
+                *style_of(&document, svg).get_display(),
+                Display::Flex,
+                "linear={linear}"
+            );
+            let layout = document.rounded_layout(svg).expect("the svg is laid out");
+            assert_eq!(
+                (layout.size.width, layout.size.height),
+                (48.0, 32.0),
+                "linear={linear}"
+            );
+            assert!(
+                document
+                    .rounded_layout(path)
+                    .is_none_or(|layout| layout.size.width == 0.0 && layout.size.height == 0.0),
+                "a replaced svg's children generate no box: linear={linear}"
+            );
+        }
+    }
+
     /// A definite `min-width`/`min-height` in pixels, `None` for anything else.
     fn px(size: &Size) -> Option<f32> {
         match size {
@@ -293,9 +338,14 @@ mod tests {
         let mut boxes = containers(&mut document);
         boxes.push(child(&mut document, "text", ""));
         boxes.push(child(&mut document, "image", ""));
+        boxes.push(child(&mut document, "svg", ""));
         document.layout();
 
-        for (tag, element) in CONTAINER_TAGS.iter().chain(&["text", "image"]).zip(boxes) {
+        for (tag, element) in CONTAINER_TAGS
+            .iter()
+            .chain(&["text", "image", "svg"])
+            .zip(boxes)
+        {
             let style = style_of(&document, element);
             assert_eq!(*style.get_box_sizing(), box_sizing::T::BorderBox, "{tag}");
             let border = style.get_border();
