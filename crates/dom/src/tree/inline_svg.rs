@@ -239,11 +239,15 @@ impl<T> Document<T> {
         let Some(value) = value else {
             return;
         };
-        let trimmed = value.trim();
-        if trimmed.parse::<f32>().is_ok_and(f32::is_finite) {
-            self.set_presentational_hint(id, name, &format!("{trimmed}px"));
-        } else {
-            self.set_presentational_hint(id, name, value);
+        // A bare number is written from the parsed value, not by appending
+        // `px` to the text: `5.` parses as a number and is no CSS one, and
+        // `inf` or `NaN` must never reach a declaration. `<blur-view>`'s
+        // `blur-radius` reflection in `bobcat-core` does the same.
+        match value.trim().parse::<f32>() {
+            Ok(number) if number.is_finite() => {
+                self.set_presentational_hint(id, name, &format!("{number}px"));
+            }
+            _ => self.set_presentational_hint(id, name, value),
         }
     }
 }

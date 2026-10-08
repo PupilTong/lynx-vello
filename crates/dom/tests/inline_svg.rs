@@ -358,6 +358,14 @@ fn the_size_attributes_are_hints_over_the_natural_size() {
         "a CSS length is handed to the parser as written, an invalid one leaves no hint"
     );
 
+    doc.dom.set_attribute(svg, "width", " 100. ");
+    doc.dom.render();
+    assert_eq!(
+        size(&doc, svg),
+        (100.0, 32.0),
+        "a bare number is px, written from the parsed value"
+    );
+
     doc.dom.set_inline_style(svg, "width: 20px; height: 30px");
     doc.dom.render();
     assert_eq!(size(&doc, svg), (20.0, 30.0), "author CSS wins");
