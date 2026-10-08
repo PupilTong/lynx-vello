@@ -61,6 +61,15 @@ const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
 const LOAD_EVENT: &str = "load";
 const ERROR_EVENT: &str = "error";
 
+/// The two flags of the event a dispatch carries: whether it bubbles, which
+/// the realm narrows its passes by, and whether it is composed, which shapes
+/// the path ([`MainThreadRuntime::dispatch`]).
+#[derive(Clone, Copy)]
+struct DispatchFlags {
+    bubbles: bool,
+    composed: bool,
+}
+
 /// What one dispatch's `detail` is made of, as it crosses the boundary: a
 /// discriminator and the numbers that kind spends. The object itself is built
 /// in the realm, because its shape is JavaScript's.
@@ -1180,7 +1189,13 @@ impl MainThreadRuntime {
                 }
                 ComponentEvent::Plain { node, name } => (node, name, EventDetail::Empty),
             };
-            if let Err(error) = self.dispatch(js_runtime, target, name, false, timestamp, &detail) {
+            // Not composed, as HTML and web-core fire every one of them: one
+            // queued at a UA shadow tree's node stays inside that tree.
+            let flags = DispatchFlags {
+                bubbles: false,
+                composed: false,
+            };
+            if let Err(error) = self.dispatch(js_runtime, target, name, flags, timestamp, &detail) {
                 failures.push(error);
             }
         }
@@ -1199,11 +1214,12 @@ impl MainThreadRuntime {
     /// here, where the document is, and the dispatch over it is the realm's.
     ///
     /// Every routed input event bubbles — the painting side routes what a
-    /// gesture produced, and Lynx has no non-bubbling input event — so this
-    /// is [`Self::dispatch`] with the flag set and the payload's numbers for
-    /// a detail. The events that do not bubble are the components' — an
-    /// `<image>`'s `load` and `error`, a `<dialog>`'s `cancel` and `close` —
-    /// which [`Self::dispatch_component_events`] delivers.
+    /// gesture produced, and Lynx has no non-bubbling input event — and is
+    /// composed, as every UI event is, so this is [`Self::dispatch`] with
+    /// both flags set and the payload's numbers for a detail. The events that
+    /// do neither are the components' — an `<image>`'s `load` and `error`, a
+    /// `<dialog>`'s `cancel` and `close` — which
+    /// [`Self::dispatch_component_events`] delivers.
     pub(crate) fn dispatch_input_event(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -1215,7 +1231,10 @@ impl MainThreadRuntime {
             js_runtime,
             target,
             name,
-            true,
+            DispatchFlags {
+                bubbles: true,
+                composed: true,
+            },
             payload.timestamp,
             &EventDetail::Input(payload),
         )
@@ -1248,6 +1267,16 @@ impl MainThreadRuntime {
     /// (`WASMJSBinding.ts:254-258`). Sending a narrowed path instead would
     /// lose the capture pass.
     ///
+    /// `composed` is the event's own flag too, and it shapes the path here,
+    /// where the tree is: a non-composed event's path ends at the root of the
+    /// tree its target is in (DOM's *get the parent*). The path then loses
+    /// every step at a UA shadow tree's content, because script names no
+    /// node of one — no handle, no listener — and a browser reports exactly
+    /// that to every listener outside the tree: the host, retargeted, as the
+    /// first step that remains says. An event at shadow content therefore
+    /// starts at its host, and a non-composed one there reaches no step at
+    /// all.
+    ///
     /// Everything else crosses as numbers, and the realm builds the objects:
     /// the `timestamp`, then [`EventDetail`]'s discriminator and whatever
     /// numbers that kind spends. No JSON is formatted here and none is parsed
@@ -1263,21 +1292,27 @@ impl MainThreadRuntime {
         js_runtime: &mut ScriptRuntime,
         target: dom::NodeId,
         name: &str,
-        bubbles: bool,
+        flags: DispatchFlags,
         timestamp: f64,
         detail: &EventDetail<'_>,
     ) -> Result<bool, MainThreadError> {
-        let steps = {
+        let steps: SmallVec<[dom::event::EventStep; 16]> = {
             let mut slot = self.slot.borrow_mut();
             let document = slot.document_mut();
             if document.get(target).is_none() {
                 return Ok(false);
             }
-            document.event_steps(target, true, true)
+            let steps = document.event_steps(target, true, flags.composed);
+            steps
+                .steps()
+                .iter()
+                .filter(|step| !step.capture && document.shadow_root_of(step.node).is_none())
+                .copied()
+                .collect()
         };
         let mut nodes = String::new();
         let mut targets = String::new();
-        for step in steps.steps().iter().filter(|step| !step.capture) {
+        for step in &steps {
             if !nodes.is_empty() {
                 nodes.push(',');
                 targets.push(',');
@@ -1293,7 +1328,7 @@ impl MainThreadRuntime {
         arguments.push(HostArgument::String(&nodes));
         arguments.push(HostArgument::String(&targets));
         arguments.push(HostArgument::String(name));
-        arguments.push(HostArgument::Boolean(bubbles));
+        arguments.push(HostArgument::Boolean(flags.bubbles));
         arguments.push(HostArgument::Number(timestamp));
         arguments.push(HostArgument::Number(detail.kind()));
         detail.push_numbers(&mut arguments);

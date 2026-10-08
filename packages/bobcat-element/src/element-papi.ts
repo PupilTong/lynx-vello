@@ -2264,10 +2264,10 @@ export function __UpdateListCallbacks(
  * would be better than saying so.
  *
  * The one node kind that is connected and yet unnameable is a UA component's
- * shadow content, which script never sees. No component has a shadow root
- * today; the first one with hit-testable chrome owes the host a retarget to
- * its host element before the path is built, which is also what a browser
- * reports as the target.
+ * shadow content, which script never sees. The host never sends one: it
+ * drops every step at shadow content from the path, so an event at a shadow
+ * node starts at its host, retargeted, which is also what a browser reports
+ * as the target to every listener outside the shadow tree.
  */
 function targetInfo(
   nodeId: number,
