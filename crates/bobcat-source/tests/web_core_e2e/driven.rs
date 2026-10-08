@@ -10,7 +10,7 @@
 // goldens: `<case>.png` for the first screen, `<case>.<label>.png` after it.
 
 use Step::{
-    Drag, Logged, Reload, SendGlobalEvent, Tap, UpdateData, UpdateGlobalProps, Wait, Wheel,
+    Drag, Fresh, Logged, Reload, SendGlobalEvent, Tap, UpdateData, UpdateGlobalProps, Wait, Wheel,
 };
 
 driven! {
@@ -156,6 +156,45 @@ driven! {
     // `#tap`, clicked once.
     "basic-element-x-foldview-ng-method-setFoldExpanded-overflow" => [
         "folded-to-limit": [Tap(141.5, 450.0)],
+    ],
+    // Two upstream tests. `-could-show-all`: the four show buttons, clicked at
+    // x 300, to the right of every overlay's square, with the spec's own 100 ms
+    // between them; then the close-all button the same way. `-event-correct`: each
+    // overlay shown, its square clicked, and closed again, the count going 1, 3, 6, 10.
+    "basic-element-x-overlay-ng-counter-test2" => [
+        "all-shown": [Tap(300.0, 400.0), Wait(100), Tap(300.0, 450.0), Wait(100), Tap(300.0, 500.0), Wait(100), Tap(300.0, 550.0)],
+        "all-closed": [Tap(300.0, 350.0)],
+        "count-1": [Fresh, Tap(300.0, 380.0), Wait(50), Tap(50.0, 300.0), Wait(50), Tap(300.0, 380.0)],
+        "count-3": [Tap(300.0, 450.0), Wait(50), Tap(50.0, 300.0), Wait(50), Tap(300.0, 450.0)],
+        "count-6": [Tap(300.0, 500.0), Wait(50), Tap(50.0, 300.0), Wait(50), Tap(300.0, 500.0)],
+        "count-10": [Tap(300.0, 550.0), Wait(50), Tap(50.0, 270.0), Wait(50), Tap(300.0, 550.0)],
+    ],
+    // Upstream clicks page points: (10, 10), on the blue 50x50 box whose `bindtap`
+    // shows the overlay, then (200, 50), on the overlay's wrapper above its red
+    // panel, whose `bindtap` slides the panel away and hides the overlay 250 ms on.
+    "basic-element-x-overlay-ng-demo" => [
+        "overlay-shown": [Tap(10.0, 10.0)],
+        "overlay-hidden": [Tap(200.0, 50.0)],
+    ],
+    // Four upstream tests open this card, each from a fresh page, one per button
+    // (`#toggleModal1`..`4`, stacked at x 21..372 from y 182, 54.5px each).
+    // 1: the button shows a pass-through overlay; a click at (63, 200), on its red
+    //    panel, must change nothing; one at (300, 200), beside the panel, must reach
+    //    the button under the overlay and close it.
+    // 2: an overlay created by a conditional, shown and closed.
+    // 3: an overlay closed from inside, by the `catchtap` of its own blue view.
+    // 4: an overlay over a backdrop view of its own.
+    "basic-element-x-overlay-ng-playground-test" => [
+        "overlay-1-shown": [Tap(196.5, 209.25)],
+        "panel-tapped": [Tap(63.0, 200.0)],
+        "overlay-1-closed": [Tap(300.0, 200.0)],
+        "overlay-2-shown": [Fresh, Tap(196.5, 263.75)],
+        "overlay-2-closed": [Tap(20.0, 700.0)],
+        "overlay-3-shown": [Fresh, Tap(196.5, 318.25)],
+        "overlay-3-closed": [Tap(100.0, 400.0)],
+        "overlay-4-shown": [Fresh, Tap(0.0, 0.0), Tap(196.5, 372.75)],
+        "overlay-4-kept": [Tap(100.0, 330.0)],
+        "overlay-4-closed": [Tap(50.0, 50.0)],
     ],
     // Upstream drags the content down 100px and screenshots with the finger held, then
     // again 2 s after letting go; then the same upward by 200px. A drag here lifts at
@@ -314,13 +353,12 @@ driven! {
         "tapped": [Tap(50.0, 50.0)],
         "tapped-again": [Tap(50.0, 50.0)],
     ],
-    // Upstream opens this card under two test names: one clicks `#target1` (the
-    // 400x400 box, at a point clear of its child), the other `#target2`, the 50x50
-    // child at the origin. Both run from a fresh page; here the second tap follows
-    // the first, so its text is appended.
+    // Upstream opens this card under two test names, each from a fresh page: one
+    // clicks `#target1` (the 400x400 box, at a point clear of its child), the other
+    // `#target2`, the 50x50 child at the origin.
     "basic-event-trigger" => [
         "target1-tapped": [Tap(200.0, 200.0)],
-        "target2-tapped": [Tap(25.0, 25.0)],
+        "target2-tapped": [Fresh, Tap(25.0, 25.0)],
     ],
     // `#target`, clicked twice.
     "basic-global-bind" => [
