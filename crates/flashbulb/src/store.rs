@@ -10,13 +10,20 @@
 //! the identity contract: every [`FrameImages::read`] of one
 //! source returns a clone sharing the same `Blob`, which is what vello keys
 //! its atlas on.
+//!
+//! An SVG document published through [`TestImages::insert_svg`] is reported
+//! as its bytes, the way a production host reports one: this store parses
+//! nothing, and the document parses them inline in
+//! [`Document::apply_image_events`].
+//! [`FrameImages::read`] never answers for it, because the engine never asks.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use bytes::Bytes;
 use dom::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
-use dom::{Document, FrameImages, ImageEvent, ImageReports, ImageSizeHint};
+use dom::{Document, DocumentKind, FrameImages, ImageEvent, ImageReports, ImageSizeHint};
 
 /// What this store answers for one source.
 ///
@@ -29,8 +36,46 @@ enum Entry {
     #[default]
     Pending,
     Ready(ImageData),
+    /// A document the engine parses, kept as its bytes so a later request
+    /// reports them again.
+    Document {
+        bytes: Bytes,
+        kind: DocumentKind,
+    },
     /// Named as one that will never produce pixels.
     Failed,
+}
+
+impl Entry {
+    /// The report this entry settles as, or `None` while it is pending.
+    fn event(&self, source: &str) -> Option<ImageEvent> {
+        let source = Arc::from(source);
+        match self {
+            Entry::Pending => None,
+            Entry::Ready(image) => Some(ImageEvent::Loaded {
+                source,
+                width: image.width,
+                height: image.height,
+            }),
+            Entry::Document { bytes, kind } => Some(ImageEvent::LoadedDocument {
+                source,
+                bytes: bytes.clone(),
+                kind: *kind,
+            }),
+            Entry::Failed => Some(ImageEvent::Failed { source }),
+        }
+    }
+
+    /// Makes the same report as [`Entry::event`] through `sink`. A pending
+    /// entry has settled as nothing and reports nothing.
+    fn report_to(&self, source: &str, sink: &ImageReports) {
+        match self {
+            Entry::Pending => {}
+            Entry::Ready(image) => sink.loaded(source, image.width, image.height),
+            Entry::Document { bytes, kind } => sink.loaded_document(source, bytes.clone(), *kind),
+            Entry::Failed => sink.failed(source),
+        }
+    }
 }
 
 /// Decoded images keyed by the source string the paint walk asks for.
@@ -76,10 +121,7 @@ impl TestImages {
     /// still has to change what it answers afterwards. If a sink is
     /// installed, the load is reported through it immediately.
     pub fn insert(&self, source: impl Into<String>, image: ImageData) {
-        let source = source.into();
-        let (width, height) = (image.width, image.height);
-        self.entries().insert(source.clone(), Entry::Ready(image));
-        self.report_loaded(&source, width, height);
+        self.publish(source.into(), Entry::Ready(image));
     }
 
     /// Publishes tightly packed, row-major, straight-alpha RGBA8 pixels.
@@ -102,6 +144,24 @@ impl TestImages {
         self.insert(source, rgba8(width, height, pixels));
     }
 
+    /// Publishes the SVG document `svg` under `source`, and reports it as its
+    /// bytes through [`ImageReports::loaded_document`] with
+    /// [`DocumentKind::Svg`], the way [`Self::insert`] reports a bitmap.
+    ///
+    /// Nothing is parsed here, as nothing is in a production host: the
+    /// document parses the bytes inside [`Document::apply_image_events`], and
+    /// one that does not parse fails its source there. The entry keeps the
+    /// bytes, so a later request reports them again.
+    pub fn insert_svg(&self, source: impl Into<String>, svg: &str) {
+        self.publish(
+            source.into(),
+            Entry::Document {
+                bytes: Bytes::from(svg.to_owned()),
+                kind: DocumentKind::Svg,
+            },
+        );
+    }
+
     /// Names `source` as one that will never produce pixels, and reports the
     /// failure the way [`Self::insert`] reports a load.
     ///
@@ -109,9 +169,7 @@ impl TestImages {
     /// answer the same failure, which is how a test failing a source before
     /// the view exists still fails it for the bind that comes later.
     pub fn fail(&self, source: impl Into<String>) {
-        let source = source.into();
-        self.entries().insert(source.clone(), Entry::Failed);
-        self.report_failed(&source);
+        self.publish(source.into(), Entry::Failed);
     }
 
     /// Drops the pixels for `source`, so later reads miss.
@@ -128,21 +186,9 @@ impl TestImages {
     /// image already published so a store warmed before the view still
     /// reports its contents.
     pub fn attach(&self, sink: ImageReports) {
-        let published: Vec<(String, Option<(u32, u32)>)> = self
-            .entries()
-            .iter()
-            .filter_map(|(source, entry)| match entry {
-                Entry::Pending => None,
-                Entry::Ready(image) => Some((source.clone(), Some((image.width, image.height)))),
-                Entry::Failed => Some((source.clone(), None)),
-            })
-            .collect();
         *self.sink.borrow_mut() = Some(sink);
-        for (source, loaded) in published {
-            match loaded {
-                Some((width, height)) => self.report_loaded(&source, width, height),
-                None => self.report_failed(&source),
-            }
+        for (source, entry) in self.entries().iter() {
+            self.report(source, entry);
         }
     }
 
@@ -169,7 +215,7 @@ impl TestImages {
     pub fn len(&self) -> usize {
         self.entries()
             .values()
-            .filter(|entry| matches!(entry, Entry::Ready(_)))
+            .filter(|entry| matches!(entry, Entry::Ready(_) | Entry::Document { .. }))
             .count()
     }
 
@@ -182,34 +228,23 @@ impl TestImages {
         self.entries.lock().expect("test image store")
     }
 
-    fn report_loaded(&self, source: &str, width: u32, height: u32) {
-        self.report(ImageEvent::Loaded {
-            source: Arc::from(source),
-            width,
-            height,
-        });
+    /// Reports `entry` for `source`, then makes it the entry for `source`,
+    /// replacing any previous one.
+    fn publish(&self, source: String, entry: Entry) {
+        self.report(&source, &entry);
+        self.entries().insert(source, entry);
     }
 
-    fn report_failed(&self, source: &str) {
-        self.report(ImageEvent::Failed {
-            source: Arc::from(source),
-        });
-    }
-
-    fn report(&self, event: ImageEvent) {
-        self.pending
-            .lock()
-            .expect("test image reports")
-            .push(event.clone());
+    /// Logs the report `entry` settles as for [`Self::drain_events`] and
+    /// makes it through the sink if one is installed. A pending entry reports
+    /// nothing.
+    fn report(&self, source: &str, entry: &Entry) {
+        let Some(event) = entry.event(source) else {
+            return;
+        };
+        self.pending.lock().expect("test image reports").push(event);
         if let Some(sink) = self.sink.borrow().as_ref() {
-            match event {
-                ImageEvent::Loaded {
-                    source,
-                    width,
-                    height,
-                } => sink.loaded(&source, width, height),
-                ImageEvent::Failed { source } => sink.failed(&source),
-            }
+            entry.report_to(source, sink);
         }
     }
 
@@ -231,7 +266,7 @@ impl FrameImages for TestImages {
             .push((source.to_owned(), hint));
         match self.entries().get(source)? {
             Entry::Ready(image) => Some(image.clone()),
-            Entry::Pending | Entry::Failed => None,
+            Entry::Pending | Entry::Document { .. } | Entry::Failed => None,
         }
     }
 
@@ -253,19 +288,9 @@ impl TestImages {
     pub fn request(&self, source: &str) {
         // Single-flight is trivial here: one entry per source, and a source
         // that has already settled either way starts no work.
-        let settled = {
-            let mut entries = self.entries();
-            match entries.entry(source.to_owned()).or_default() {
-                Entry::Pending => None,
-                Entry::Ready(image) => Some(Some((image.width, image.height))),
-                Entry::Failed => Some(None),
-            }
-        };
-        match settled {
-            Some(Some((width, height))) => self.report_loaded(source, width, height),
-            Some(None) => self.report_failed(source),
-            None => {}
-        }
+        let mut entries = self.entries();
+        let entry = entries.entry(source.to_owned()).or_default();
+        self.report(source, entry);
     }
 }
 

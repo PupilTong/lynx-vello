@@ -3,9 +3,10 @@
 // other half.
 //
 // Decoding is the platform's: an `Image` element fed a Blob URL, which is
-// the browser's codecs, its EXIF orientation handling and its SVG rasterizer,
-// and a 2D canvas to resize with and read the pixels out of. Nothing here
-// parses an image container.
+// the browser's codecs and its EXIF orientation handling, and a 2D canvas to
+// resize with and read the pixels out of. Nothing here parses an image
+// container. SVG never arrives here: `bobcat-resources` hands its bytes to
+// the engine, which parses it with usvg, as it does on every target.
 //
 // The Render Worker and this thread share the Wasm memory. Every job has a
 // mailbox of eight Int32 words at an address in that memory:
@@ -136,8 +137,8 @@ export class ImageDecoder {
 
   async #decode(message: DecodeMessage): Promise<void> {
     const { id, mailbox, bytes, maxWidth, maxHeight, mediaType } = message
-    // The type matters for SVG, which an Image only renders when told what
-    // it is; every raster container is sniffed from its bytes regardless.
+    // Every raster container is sniffed from its bytes; the type is passed
+    // along as the Render Worker settled it.
     const url = URL.createObjectURL(new Blob([bytes], { type: mediaType }))
     try {
       const image = new Image()

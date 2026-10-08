@@ -20,7 +20,7 @@ Both commands set `NODE_ENV` explicitly so the fixture matrix and compiler
 use the same mode.
 
 The default build produces eight native production pages, three native development
-variants and thirteen web pages. Each native environment has its own
+variants and fourteen web pages. Each native environment has its own
 compilation, so its lazy chunks cannot be shared with another test page.
 
 | Environment | Fixture behavior |
@@ -43,6 +43,7 @@ compilation, so its lazy chunks cannot be shared with another test page.
 | `web-react-refresh-view` | Two `<x-refresh-view>`s side by side, each a red header (author `position: absolute`), a yellow `scroll-view` of green items and a red footer; the right one `enable-refresh={false}` |
 | `web-react-dialog` | A red page whose tap opens a `<dialog>` with `showModal()` (selector query `invoke`) over a yellow author `::backdrop`; a tap on its green `#close` calls `close()`, a tap on the backdrop `requestClose()`, and `bindclose`/`bindcancel` recolour the page |
 | `web-react-overlay` | A red page whose tap sets `visible` on an `<overlay>`: its one child, a yellow 200px panel at the viewport's top-left, paints above the page and turns magenta on `bindshowoverlay`; a tap on its green `#close` (`catchtap`) clears `visible`, and `binddismissoverlay` turns the page blue |
+| `web-react-svg` | A white 240px page in bands: three inline `<svg>`s built from child elements with presentation attributes only (a `viewBox` picture sized by CSS, a `<linearGradient>` fill through `url(#fade)`, and one sized by its own `width`/`height` attributes); `<image mode="aspectFit">` of a bundled `shape.svg` letterboxed on magenta; a `<view>` tiling `tile.svg` with `background-repeat: repeat`. Both assets are inlined as `data:` URLs |
 
 Development builds select `lynx-react-reload`, `lynx-react-global-props` and
 `lynx-react-lazy-nested`, retaining the compiler's default HMR client and asset

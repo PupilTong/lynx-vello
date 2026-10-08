@@ -50,6 +50,12 @@
 //!   nearest sampling.
 //! - The grammar has no `image-orientation`; the embedder's resource system is expected to apply
 //!   EXIF orientation before it reports natural size and serves pixels.
+//! - An SVG document used as an image (`<image src>`, `background-image`, `mask-image`) is a `usvg`
+//!   tree encoded as vector paths (`paint/svg.rs`), never a bitmap, and `image-rendering` does not
+//!   apply to it. Groups with a `mask` are skipped, `filter`s draw unfiltered, patterns and nested
+//!   raster images paint nothing, a `clipPath` with several children clips with their concatenation
+//!   rather than their union, and `<text>` is dropped at parse
+//!   (`docs/svg-vector-images-design.md`).
 
 use std::sync::Arc;
 

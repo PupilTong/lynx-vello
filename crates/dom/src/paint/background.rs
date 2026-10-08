@@ -13,6 +13,11 @@
 //!   (`auto`/`cover`/`contain`/lengths), `background-position`, and `background-repeat` per axis.
 //!   `url(…)` layers look up [`ImageRegistry::resolve`](crate::render::image) (not yet loaded, or a
 //!   zero intrinsic axis → skip); gradients resolve via [`gradient_brush`].
+//! - A `url(…)` that names an SVG document resolves to a vector image. Its tile grid, or a replaced
+//!   element's `object-fit` destination, is computed by the same code as a bitmap's, from the
+//!   natural size the registry holds; then each visible tile appends the image's cached scene
+//!   (`paint/svg.rs`) inline, scaled by `extent / viewport`, between a clip pair for that tile's
+//!   share of the clip shape. It is never an image draw, so the painter never reads it.
 //! - Repeat via `peniko::Extend::Repeat` on the image sampler where the tile grid is uniform;
 //!   gradients restart per tile, so when more than one tile is visible they are drawn as an
 //!   explicit tile loop. `space` is approximated as `repeat` (recorded v1 limit) and `round`
@@ -48,8 +53,8 @@ use crate::paint::compose::{ImageArea, ImageDraw};
 use crate::paint::convert::resolve_color;
 use crate::paint::shape::{BoxShape, inner_radii, with_shape};
 use crate::paint::walker::WalkSink;
-use crate::paint::{BoxFragment, TextClip};
-use crate::render::image::ImageRegistry;
+use crate::paint::{BoxFragment, TextClip, svg};
+use crate::render::image::{ImageRegistry, VectorImage};
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect, Size, Vec2};
 use crate::vello::peniko::{self, BrushRef, Color, Extend, Fill, ImageQuality, ImageSampler};
@@ -184,6 +189,38 @@ fn paint_raster_layer(
     }
 }
 
+/// One `url(...)` layer naming an SVG document: every visible tile appends
+/// the image's cached scene, inside the `background-clip: text` sandwich
+/// when there is one.
+fn paint_vector_layer(
+    sink: &mut WalkSink<'_>,
+    space: Option<u32>,
+    fragment: &BoxFragment,
+    layer: &PatternLayer<'_>,
+    text_clip: Option<&TextClip<'_>>,
+    grid: &TileGrid,
+    vector: &VectorImage,
+) {
+    if !is_drawable(vector) {
+        return;
+    }
+    let opened = open_text_clip_ops(sink, space, fragment, text_clip);
+    if text_clip.is_some() && !opened {
+        return;
+    }
+    fill_vector_tiles(
+        sink.scene_for(space),
+        fragment.transform,
+        &layer.clip,
+        grid,
+        vector,
+    );
+    if opened {
+        sink.pop();
+        sink.pop();
+    }
+}
+
 /// `background-color` under `background-clip: text`: the colour fills the
 /// glyph silhouettes rather than the box.
 fn paint_text_clipped_color(
@@ -253,17 +290,20 @@ fn open_text_clip_ops(
     true
 }
 
-/// Draws the bitmap `image` names into the element's content box.
+/// Draws the image `image` names into the element's content box: a bitmap
+/// as an image draw, or `vector`, when the source is an SVG document, encoded
+/// inline.
 ///
 /// Which of a replaced element's two sources that is, is the registry's
 /// choice — see `ImageRegistry::resolve_presented` — and `natural` is the
-/// dimensions of that same bitmap.
+/// dimensions of that same image.
 pub(crate) fn paint_replaced_content(
     sink: &mut WalkSink<'_>,
     space: Option<u32>,
     style: &ComputedValues,
     fragment: &BoxFragment,
     image: Arc<str>,
+    vector: Option<&VectorImage>,
     natural: NaturalSize,
 ) {
     let content = fragment.content_box;
@@ -297,6 +337,19 @@ pub(crate) fn paint_replaced_content(
     );
 
     let shape = level_shape(fragment, BoxLevel::Content);
+    if let Some(vector) = vector {
+        if is_drawable(vector) {
+            append_vector(
+                sink.scene_for(space),
+                fragment.transform,
+                &shape,
+                destination,
+                vector,
+                svg::opens_blend(vector.tree().root()),
+            );
+        }
+        return;
+    }
     let Some(area) = image_area(&shape, destination) else {
         return;
     };
@@ -431,7 +484,7 @@ pub(super) fn paint_pattern_layer(
         return;
     };
     let intrinsic = match &source {
-        Source::Raster(_, intrinsic) => Some(*intrinsic),
+        Source::Raster(_, intrinsic) | Source::Vector(_, intrinsic) => Some(*intrinsic),
         Source::Gradient(_) | Source::Solid(_) => None,
     };
     let area = layer.origin;
@@ -472,8 +525,17 @@ pub(super) fn paint_pattern_layer(
         return;
     }
 
+    // A vector layer encodes inline, but tile by tile rather than as one
+    // brush fill.
+    if let Source::Vector(vector, _) = &source {
+        paint_vector_layer(sink, space, fragment, layer, text_clip, &grid, vector);
+        return;
+    }
+
     let inline = |scene: &mut Scene| match &source {
-        Source::Raster(..) => unreachable!("the raster case returned above"),
+        Source::Raster(..) | Source::Vector(..) => {
+            unreachable!("the raster and vector cases returned above")
+        }
         Source::Solid(color) => fill_area(
             scene,
             fragment.transform,
@@ -563,19 +625,25 @@ enum Source<'a> {
     /// store's load report, so the whole tile grid resolves here without any
     /// bitmap being reachable.
     Raster(std::sync::Arc<str>, (f64, f64)),
+    /// A parsed SVG document and its natural size, borrowed from the
+    /// registry's entry.
+    Vector(&'a VectorImage, (f64, f64)),
     Gradient(&'a Gradient),
     Solid(Color),
 }
 
 fn resolve_source<'a>(
     style: &ComputedValues,
-    images: &ImageRegistry,
+    images: &'a ImageRegistry,
     image: &'a Image,
 ) -> Option<Source<'a>> {
     match image {
         Image::Url(url) => images
             .resolve(image_url(url))
-            .map(|(reference, intrinsic)| Source::Raster(reference, intrinsic)),
+            .map(|(reference, intrinsic, vector)| match vector {
+                Some(vector) => Source::Vector(vector, intrinsic),
+                None => Source::Raster(reference, intrinsic),
+            }),
         Image::Gradient(gradient) => Some(Source::Gradient(gradient)),
         Image::Image(color) => {
             let color = resolve_color(style, color);
@@ -615,6 +683,30 @@ impl TileGrid {
             (self.origin.y, self.origin.y + self.tile.height)
         };
         Rect::new(x0, y0, x1, y1)
+    }
+
+    /// The first visible tile's indices and the tile count per axis over
+    /// `bounds`, `(x_first, x_count, y_first, y_count)`, with the row count
+    /// cut so no more than `MAX_TILE_FILLS` tiles are drawn.
+    fn span(&self, bounds: Rect) -> (f64, f64, f64, f64) {
+        let (x_first, x_count) = tile_span(
+            self.origin.x,
+            self.tile.width,
+            bounds.x0,
+            bounds.x1,
+            self.repeat_x,
+        );
+        let (y_first, mut y_count) = tile_span(
+            self.origin.y,
+            self.tile.height,
+            bounds.y0,
+            bounds.y1,
+            self.repeat_y,
+        );
+        if x_count * y_count > MAX_TILE_FILLS {
+            y_count = (MAX_TILE_FILLS / x_count).floor().max(1.0);
+        }
+        (x_first, x_count, y_first, y_count)
     }
 
     fn tile_rect(&self, ix: f64, iy: f64) -> Rect {
@@ -730,21 +822,7 @@ fn fill_gradient_tiles(
     gradient: &peniko::Gradient,
     local: Affine,
 ) {
-    let bounds = clip.bounding_box();
-    let (x_first, x_count) = tile_span(
-        grid.origin.x,
-        grid.tile.width,
-        bounds.x0,
-        bounds.x1,
-        grid.repeat_x,
-    );
-    let (y_first, mut y_count) = tile_span(
-        grid.origin.y,
-        grid.tile.height,
-        bounds.y0,
-        bounds.y1,
-        grid.repeat_y,
-    );
+    let (x_first, x_count, y_first, y_count) = grid.span(clip.bounding_box());
     if x_count <= 0.0 || y_count <= 0.0 {
         return;
     }
@@ -760,9 +838,6 @@ fn fill_gradient_tiles(
             Some(brush_transform),
         );
         return;
-    }
-    if x_count * y_count > MAX_TILE_FILLS {
-        y_count = (MAX_TILE_FILLS / x_count).floor().max(1.0);
     }
     let rect_clip = if let BoxShape::Rect(rect) = clip {
         Some(*rect)
@@ -793,6 +868,110 @@ fn fill_gradient_tiles(
     }
     if rect_clip.is_none() {
         scene.pop_layer();
+    }
+}
+
+/// Whether a vector image has anything to draw.
+///
+/// An empty cached scene encodes nothing at all, not even its clip pair:
+/// `Encoding::append` copies the appended scene's `flags`, so appending an
+/// empty scene would clear the `FORCE_NEXT_TRANSFORM | FORCE_NEXT_STYLE`
+/// bits a preceding glyph run set, and the next path's transform could be
+/// wrongly deduplicated. A degenerate viewport has no scale to draw at.
+fn is_drawable(vector: &VectorImage) -> bool {
+    let (width, height) = vector.viewport();
+    width > 0.0
+        && height > 0.0
+        && width.is_finite()
+        && height.is_finite()
+        && !vector.scene().encoding().is_empty()
+}
+
+/// Appends `vector` once per visible tile of `grid` inside `clip`.
+fn fill_vector_tiles(
+    scene: &mut Scene,
+    transform: Affine,
+    clip: &BoxShape,
+    grid: &TileGrid,
+    vector: &VectorImage,
+) {
+    let (x_first, x_count, y_first, y_count) = grid.span(clip.bounding_box());
+    let isolate = svg::opens_blend(vector.tree().root());
+    let mut iy = 0.0;
+    while iy < y_count {
+        let mut ix = 0.0;
+        while ix < x_count {
+            let tile = grid.tile_rect(x_first + ix, y_first + iy);
+            append_vector(scene, transform, clip, tile, vector, isolate);
+            ix += 1.0;
+        }
+        iy += 1.0;
+    }
+}
+
+/// Appends `vector` scaled onto `tile`, clipped to the share of `clip` that
+/// `tile` covers: the [`ImageArea`] a raster draw of `tile` would fill.
+///
+/// The clip layers and their pops are encoded in this one call, so a
+/// fragment cut can never land between them (see [`ImageArea`]). When the
+/// image's own scene opens a blend layer at its top level, the layers are
+/// full `Normal` layers instead of clip layers, per the vello #1198 rule in
+/// `walker.rs`; that also keeps the image's blending inside the image.
+fn append_vector(
+    scene: &mut Scene,
+    transform: Affine,
+    clip: &BoxShape,
+    tile: Rect,
+    vector: &VectorImage,
+    isolate: bool,
+) {
+    let layers = match fill_plan(clip, tile) {
+        FillPlan::None => return,
+        FillPlan::Shape => {
+            with_shape!(clip, |s| push_tile_layer(scene, isolate, transform, s));
+            1
+        }
+        FillPlan::Rect(both) => {
+            push_tile_layer(scene, isolate, transform, &both);
+            1
+        }
+        FillPlan::Clipped(rect) => {
+            with_shape!(clip, |s| push_tile_layer(scene, isolate, transform, s));
+            push_tile_layer(scene, isolate, transform, &rect);
+            2
+        }
+    };
+    let (width, height) = vector.viewport();
+    let placement = transform
+        * Affine::translate(tile.origin().to_vec2())
+        * Affine::scale_non_uniform(
+            tile.width() / f64::from(width),
+            tile.height() / f64::from(height),
+        );
+    scene.append(vector.scene(), Some(placement));
+    for _ in 0..layers {
+        scene.pop_layer();
+    }
+}
+
+/// One clip layer of a vector tile: a clip layer, or a full `Normal` layer
+/// when `isolate`.
+fn push_tile_layer(
+    scene: &mut Scene,
+    isolate: bool,
+    transform: Affine,
+    shape: &impl crate::vello::kurbo::Shape,
+) {
+    if isolate {
+        scene.push_layer(
+            Fill::NonZero,
+            peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::SrcOver),
+            1.0,
+            transform,
+            shape,
+        );
+    } else {
+        scene.push_clip_layer(Fill::NonZero, transform, shape);
     }
 }
 
@@ -1643,6 +1822,53 @@ mod tests {
         assert_eq!(stops[1].1, blue);
         assert_close(stops[2].0, 1.5);
         assert_eq!(stops[2].1, red);
+    }
+
+    fn vector(body: &str) -> VectorImage {
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">{body}</svg>"#
+        );
+        VectorImage::parse_sealed(svg.as_bytes()).expect("a valid document")
+    }
+
+    /// A vector tile's clip layer is a full `Normal` layer exactly when the
+    /// image opens a blend layer at its top level, including through an
+    /// `isolation: isolate` group, which pushes no layer of its own.
+    #[test]
+    fn a_vector_tile_isolates_a_blend_under_an_isolated_root_group() {
+        let blended = vector(
+            r##"<g style="isolation:isolate">
+                  <g style="mix-blend-mode:screen"><rect width="20" height="20" fill="#ff0000"/></g>
+                </g>"##,
+        );
+        let plain = vector(r##"<rect width="20" height="20" fill="#ff0000"/>"##);
+        let clip = BoxShape::Rect(Rect::new(0.0, 0.0, 40.0, 40.0));
+        let grid = TileGrid {
+            origin: Point::ZERO,
+            tile: Size::new(40.0, 40.0),
+            repeat_x: false,
+            repeat_y: false,
+        };
+        for (image, isolate) in [(&blended, true), (&plain, false)] {
+            let mut actual = Scene::new();
+            fill_vector_tiles(&mut actual, Affine::IDENTITY, &clip, &grid, image);
+            let mut expected = Scene::new();
+            let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+            if isolate {
+                expected.push_layer(
+                    Fill::NonZero,
+                    peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::SrcOver),
+                    1.0,
+                    Affine::IDENTITY,
+                    &rect,
+                );
+            } else {
+                expected.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect);
+            }
+            expected.append(image.scene(), Some(Affine::scale(0.4)));
+            expected.pop_layer();
+            crate::paint::equivalence::assert_scenes_identical(&actual, &expected);
+        }
     }
 }
 

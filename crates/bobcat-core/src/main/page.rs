@@ -241,6 +241,15 @@ pub(super) struct Page {
     /// wakes a page answers.
     #[cfg(test)]
     epilogues: Cell<u64>,
+    /// How many entries found the view ended and ran nothing, for the tests
+    /// that tell an entry that was queued and refused from one that was never
+    /// queued.
+    #[cfg(test)]
+    refused_entries: Cell<u64>,
+    /// What the next document parse waits on before it starts, for the test
+    /// that ends a view while a parse is in flight.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    parse_gate: RefCell<Option<ParseGate>>,
 }
 
 impl Page {
@@ -272,6 +281,10 @@ impl Page {
             reported: Cell::new(false),
             #[cfg(test)]
             epilogues: Cell::new(0),
+            #[cfg(test)]
+            refused_entries: Cell::new(0),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            parse_gate: RefCell::new(None),
         })
     }
 
@@ -364,6 +377,8 @@ impl Page {
         operation: impl FnOnce(&mut MainThreadRuntime, &mut ScriptRuntime) -> T,
     ) -> Option<T> {
         if self.ended() {
+            #[cfg(test)]
+            self.refused_entries.set(self.refused_entries.get() + 1);
             return None;
         }
         // Both borrows are held for the whole entry, a synchronous wait inside
@@ -661,7 +676,7 @@ impl Page {
     /// there for the next command. A panic is the view's, as anywhere else in
     /// an entry: [`run_job`] catches it and [`Self::trapped`] reports it.
     fn apply_command(
-        &self,
+        self: &Rc<Self>,
         runtime: &mut MainThreadRuntime,
         js: &mut ScriptRuntime,
         command: ToMain,
@@ -691,12 +706,48 @@ impl Page {
                 }
             }
             ToMain::Posted => self.adopt_posted(runtime),
+            #[cfg(not(target_arch = "wasm32"))]
+            ToMain::ImageEvents(events) => self.apply_image_events(runtime, events),
+            // No blocking pool to parse on: `dom` parses a reported document
+            // inline, on this thread.
+            #[cfg(target_arch = "wasm32")]
             ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
             #[cfg(test)]
             ToMain::Probe(probe) => runtime.with_document(probe),
             #[cfg(test)]
             ToMain::Trap(_) => unreachable!("the trap seam is taken before the entry"),
         }
+    }
+
+    /// Applies one batch of the host's image reports.
+    ///
+    /// A reported document is not parsed on this thread: each
+    /// [`dom::ImageEvent::LoadedDocument`] is taken out of the batch and
+    /// parsed on this engine thread's blocking pool by a task of this view
+    /// ([`parse_document`]), whose own entry applies the outcome later, and
+    /// the rest of the batch applies at once. Until then the source stays
+    /// pending in the document's registry.
+    ///
+    /// Native only: wasm32 has no blocking pool, so there the batch applies
+    /// as it is and `dom` parses a document inline.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_image_events(
+        self: &Rc<Self>,
+        runtime: &mut MainThreadRuntime,
+        events: Vec<dom::ImageEvent>,
+    ) {
+        let mut rest = Vec::with_capacity(events.len());
+        for event in events {
+            match event {
+                dom::ImageEvent::LoadedDocument {
+                    source,
+                    bytes,
+                    kind,
+                } => self.spawn(parse_document(Rc::clone(self), source, bytes, kind)),
+                event => rest.push(event),
+            }
+        }
+        runtime.apply_image_events(&rest);
     }
 
     /// Opens this view's realm and runs its entry, then starts the waits that
@@ -974,6 +1025,18 @@ impl Page {
     #[cfg(test)]
     pub(super) fn epilogue_count(&self) -> u64 {
         self.epilogues.get()
+    }
+
+    /// How many entries have found the view ended and run nothing.
+    #[cfg(test)]
+    pub(super) fn refused_entry_count(&self) -> u64 {
+        self.refused_entries.get()
+    }
+
+    /// Makes the next document parse wait on `gate` before it starts.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(super) fn hold_next_parse(&self, gate: ParseGate) {
+        *self.parse_gate.borrow_mut() = Some(gate);
     }
 
     /// Leaves a frame post taken and unacknowledged, which is the state a
@@ -1326,6 +1389,65 @@ async fn load_font_face(page: Rc<Page>, request: dom::FontFaceRequest) {
     // layout of every run that names it.
     page.enter(move |runtime, _| runtime.register_font_face(&family, blob))
         .await;
+}
+
+/// One document a host reported, parsed off this thread.
+///
+/// The parse is [`dom::ImageEvent::parse_document`], run with
+/// `spawn_blocking` on the blocking pool of this engine thread's runtime, so
+/// no job and no other task waits on it. When it returns, one entry applies
+/// its outcome — [`dom::ImageEvent::LoadedVector`] or
+/// [`dom::ImageEvent::Failed`] — through the same
+/// [`MainThreadRuntime::apply_image_events`] a batch from the painter goes
+/// through, so the registry, the natural-size relayout and the `load` or
+/// `error` follow the path every other report takes, and the entry's own
+/// epilogue commits. A parse that panicked is a failure of the source.
+///
+/// This is a task of the view's [`Lifetime`] like [`load_font_face`]: a view
+/// that ends while the parse runs aborts it with its others, and an entry
+/// into an ended view runs nothing, so nothing is applied. The parse itself
+/// runs to its end on the pool, and its result is dropped. A parse still
+/// running when the group is released is detached, not joined: the closure
+/// owns only its bytes and source URL, and the thread's runtime is shut down
+/// without waiting for its blocking pool (see `crate::jobs`).
+#[cfg(not(target_arch = "wasm32"))]
+async fn parse_document(
+    page: Rc<Page>,
+    source: Arc<str>,
+    bytes: bytes::Bytes,
+    kind: dom::DocumentKind,
+) {
+    let parsing = Arc::clone(&source);
+    #[cfg(test)]
+    let gate = page.parse_gate.take();
+    let event = tokio::task::spawn_blocking(move || {
+        // Held until the parse has returned, so a test sees it go when the
+        // parse is over.
+        #[cfg(test)]
+        let _gate = gate.inspect(ParseGate::hold);
+        dom::ImageEvent::parse_document(parsing, &bytes, kind)
+    })
+    .await
+    .unwrap_or_else(|_| dom::ImageEvent::Failed { source });
+    page.enter(move |runtime, _| runtime.apply_image_events(&[event]))
+        .await;
+}
+
+/// The test seam [`parse_document`] waits on: on its pool thread it says
+/// that the parse has started, waits for the test to let it go, and is
+/// dropped once the parse has returned, which disconnects `started`.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(super) struct ParseGate {
+    pub(super) started: std::sync::mpsc::Sender<()>,
+    pub(super) release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+impl ParseGate {
+    fn hold(&self) {
+        let _ = self.started.send(());
+        let _ = self.release.recv();
+    }
 }
 
 /// The one ordered consumer of everything this view's workers say.

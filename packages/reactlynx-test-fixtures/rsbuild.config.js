@@ -33,11 +33,16 @@ export default defineConfig(({ env }) => {
         ...Object.fromEntries(['react-bts-query', 'basic-bindtap', 'basic-class-selector',
           'basic-performance-large-css', 'basic-mts-run-on-main-thread', 'basic-mts-run-on-background',
           'react-scroll-timeline', 'react-viewpager', 'react-scroll-coordinator', 'react-swiper',
-          'react-refresh-view', 'react-dialog', 'react-overlay']
+          'react-refresh-view', 'react-dialog', 'react-overlay', 'react-svg']
           .map(fixture => [`web-${fixture}`, {
             source: { entry: { [fixture]: fixture === 'react-bts-query'
               ? `./src/${fixture}.jsx` : `./src/${fixture}/index.jsx` } },
-            output: { distPath: { root: `dist/${fixture}` } },
+            output: {
+              distPath: { root: `dist/${fixture}` },
+              // `dist/index.rs` carries bundles alone, so a fixture's SVG
+              // assets are inlined as `data:` URLs whatever their size.
+              ...(fixture === 'react-svg' ? { dataUriLimit: { svg: Number.MAX_SAFE_INTEGER } } : {}),
+            },
           }])),
       } : {}),
     },

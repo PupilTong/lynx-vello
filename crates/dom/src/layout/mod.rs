@@ -73,7 +73,15 @@ impl<T: Sync> Document<T> {
     /// nobody here: it waits for whatever flush comes next, which an animation
     /// tick can precede, so that one is spelled the way
     /// [`Document::mark_subtree_recascade`] spells it.
+    ///
+    /// Before any of it, every inline SVG root a mutation marked since the
+    /// last call is serialised and parsed again
+    /// ([`crate::tree::inline_svg`]), so the natural size the pass reads and
+    /// the picture the next paint draws describe the subtree as it is now.
+    /// Here rather than in `render` because every caller that reads layout
+    /// comes through this.
     pub fn layout(&mut self) {
+        self.refresh_inline_svgs();
         let mut resized = Vec::new();
         for pass in 0..committed_box::CONTAINER_PASSES {
             self.layout_pass(&mut resized);
@@ -363,6 +371,25 @@ impl<T> Document<T> {
                 })
         };
         self.set_natural_size(id, natural);
+    }
+
+    /// The source `id` holds in `role`, if it is replaced content holding
+    /// one.
+    ///
+    /// For an inline SVG root ([`crate::tree::inline_svg`]) this is the
+    /// synthetic source its subtree was last parsed under, which changes
+    /// with every refresh.
+    #[must_use]
+    pub fn image_source(&self, id: crate::NodeId, role: ImageRole) -> Option<&str> {
+        self.get(id)?.image_source(role)
+    }
+
+    /// Whether the document's image registry holds an entry for `source`.
+    /// For tests: a freed inline SVG root must leave none behind.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn knows_image_source(&self, source: &str) -> bool {
+        self.images.knows(source)
     }
 
     /// Both sources of a replaced element, in the order the paint walk
@@ -2096,6 +2123,58 @@ mod tests {
         crate::ImageEvent::Failed {
             source: std::sync::Arc::from(source),
         }
+    }
+
+    fn document_report(source: &str, svg: &str) -> crate::ImageEvent {
+        crate::ImageEvent::LoadedDocument {
+            source: std::sync::Arc::from(source),
+            bytes: bytes::Bytes::copy_from_slice(svg.as_bytes()),
+            kind: crate::DocumentKind::Svg,
+        }
+    }
+
+    /// A host reports an SVG document as its bytes, and with no blocking
+    /// pool in front of it the document parses them inline: the source loads
+    /// at the document's natural size, a repeat report of the same bytes
+    /// moves nothing, and a document that does not parse fails its source
+    /// exactly as a failure report would.
+    #[test]
+    fn a_reported_document_is_parsed_inline_and_a_malformed_one_fails() {
+        let (mut document, image) = image_document();
+        document.set_image_source(image, ImageRole::Source, Some(SRC));
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="12"/>"#;
+
+        assert_eq!(
+            document.apply_image_events(&[document_report(SRC, svg)]),
+            vec![crate::ImageOutcome::Loaded {
+                node: image,
+                width: 24,
+                height: 12,
+            }]
+        );
+        assert_eq!(document.natural_size(image), natural_size(24, 12));
+        assert!(
+            document
+                .apply_image_events(&[document_report(SRC, svg)])
+                .is_empty(),
+            "one URL has one content, so the repeat is a no-op"
+        );
+
+        document.set_image_source(image, ImageRole::Source, Some(OTHER_SRC));
+        assert_eq!(
+            document.apply_image_events(&[document_report(
+                OTHER_SRC,
+                "<svg xmlns='http://www.w3.org/2000/svg'><rect></svg>",
+            )]),
+            vec![crate::ImageOutcome::Failed { node: image }]
+        );
+        assert_eq!(document.natural_size(image), NaturalSize::NONE);
+        assert!(
+            document
+                .apply_image_events(&[document_report(OTHER_SRC, svg)])
+                .is_empty(),
+            "a failure is terminal: well-formed bytes arriving later change nothing"
+        );
     }
 
     /// Both sources are asked for the moment they are written, and neither

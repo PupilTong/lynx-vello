@@ -1704,6 +1704,382 @@ fn an_image_event_queued_by_a_listener_is_delivered_by_an_entry_of_its_own() {
     });
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+/// Three `<image>`s in a row that does not stretch them — one sized by CSS,
+/// one unsized, one `display: none` — each recording every `load` and
+/// `error` it is handed, and an `updatePage` that writes one attribute on
+/// all three.
+const LOADING_IMAGES: &str = r"
+globalThis.runWorklet = (value, params) => value.body(params[0]);
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  const holder = __CreateView(0);
+  __SetInlineStyles(holder, 'display:flex;flex-direction:row;align-items:flex-start');
+  __AppendElement(page, holder);
+  globalThis.images = ['width:120px;height:80px', '', 'display:none'].map((style) => {
+    const image = __CreateImage(0);
+    if (style) __SetInlineStyles(image, style);
+    __AppendElement(holder, image);
+    const seen = [];
+    for (const name of ['load', 'error']) {
+      __AddEvent(image, 'bindEvent', name, {
+        type: 'worklet',
+        value: {
+          body: (event) => {
+            seen.push(event.type + ':' + JSON.stringify(event.detail));
+            __SetAttribute(image, 'data-seen', seen.join('|'));
+          },
+        },
+      });
+    }
+    return image;
+  });
+};
+globalThis.updatePage = (data) => {
+  for (const image of images) __SetAttribute(image, data.name, data.value);
+};
+";
+
+#[cfg(not(target_arch = "wasm32"))]
+/// What each of [`LOADING_IMAGES`]' three elements has recorded, in order.
+async fn images_seen(page: &Rc<Page>) -> Vec<Option<String>> {
+    let (answer, read) = std::sync::mpsc::channel();
+    page.apply(vec![ToMain::Probe(Box::new(move |document| {
+        let root = document.document_element().id();
+        let holder = document.get(root).expect("the page is live").child_ids()[0];
+        let seen = document
+            .get(holder)
+            .expect("the holder is live")
+            .child_ids()
+            .iter()
+            .map(|image| {
+                document
+                    .get(*image)
+                    .and_then(|node| node.attribute("data-seen"))
+                    .map(str::to_owned)
+            })
+            .collect();
+        let _ = answer.send(seen);
+    }))])
+    .await;
+    read.try_recv().expect("the probe ran")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Writes `name="value"` on every `<image>` of [`LOADING_IMAGES`].
+async fn write_on_images(page: &Rc<Page>, name: &str, value: &str) {
+    page.apply(vec![ToMain::PageUpdate(PageUpdate::Data {
+        data: format!(r#"{{"name":"{name}","value":"{value}"}}"#),
+        processor_name: String::new(),
+        reset: false,
+    })])
+    .await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// An SVG document `width` x `height` px with nothing drawable in it.
+fn svg_markup(width: u32, height: u32) -> String {
+    format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"/>"#)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// A batch reporting `svg` as the document at `source`, the way a host
+/// reports one: as its bytes.
+fn svg_document(source: &str, svg: &str) -> ToMain {
+    ToMain::ImageEvents(vec![dom::ImageEvent::LoadedDocument {
+        source: Arc::from(source),
+        bytes: bytes::Bytes::copy_from_slice(svg.as_bytes()),
+        kind: dom::DocumentKind::Svg,
+    }])
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Waits until `released` reads `true`, letting this thread's tasks and
+/// jobs run and the blocking pool make progress in between.
+async fn until_parsed(what: &str, mut released: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !released() {
+        assert!(std::time::Instant::now() < deadline, "{what}");
+        task::yield_now().await;
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Reports `svg` as the document at `source` and waits for the entry that
+/// applies its parse: the report's own entry parses nothing, and the
+/// parse's outcome is applied by one entry more.
+async fn report_svg(page: &Rc<Page>, source: &str, svg: &str) {
+    page.apply(vec![svg_document(source, svg)]).await;
+    let reported = page.epilogue_count();
+    until_parsed(&format!("the parse of {source} was never applied"), || {
+        page.epilogue_count() > reported
+    })
+    .await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// An `<image src="x.svg">`'s `load` carries the document's natural size,
+/// as it carries a bitmap's, whatever box the element lays out at. The host
+/// reports the document as bytes; they are parsed off this thread, one entry
+/// applies the outcome, and the `load`s are delivered by an entry of their
+/// own.
+#[test]
+fn an_svg_document_parses_off_thread_and_an_image_load_carries_its_natural_size() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(LOADING_IMAGES).await;
+
+        write_on_images(&owned.page, "src", "app:///a.svg").await;
+        assert_eq!(images_seen(&owned.page).await, vec![None, None, None]);
+        let settled = owned.page.epilogue_count();
+        report_svg(&owned.page, "app:///a.svg", &svg_markup(30, 15)).await;
+        for _ in 0..TURNS {
+            task::yield_now().await;
+        }
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 3,
+            "the report was one entry, the parse's outcome another, and the \
+             three `load`s it settled were delivered by one more"
+        );
+        let natural = Some(r#"load:{"width":30,"height":15}"#.to_owned());
+        assert_eq!(
+            images_seen(&owned.page).await,
+            vec![natural.clone(), natural.clone(), natural]
+        );
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// An `<image>` recording every `load` and `error` it is handed.
+const BROKEN_IMAGE: &str = r"
+globalThis.runWorklet = (value, params) => value.body(params[0]);
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  const image = __CreateImage(0);
+  __AppendElement(page, image);
+  const seen = [];
+  for (const name of ['load', 'error']) {
+    __AddEvent(image, 'bindEvent', name, {
+      type: 'worklet',
+      value: {
+        body: (event) => {
+          seen.push(event.type);
+          __SetAttribute(image, 'data-seen', seen.join('|'));
+        },
+      },
+    });
+  }
+  __SetAttribute(image, 'src', 'app:///broken.svg');
+};
+";
+
+#[cfg(not(target_arch = "wasm32"))]
+/// What each child of the page has recorded, in order.
+async fn page_children_seen(page: &Rc<Page>) -> Vec<Option<String>> {
+    let (answer, read) = std::sync::mpsc::channel();
+    page.apply(vec![ToMain::Probe(Box::new(move |document| {
+        let root = document.document_element().id();
+        let seen = document
+            .get(root)
+            .expect("the page is live")
+            .child_ids()
+            .iter()
+            .map(|child| {
+                document
+                    .get(*child)
+                    .and_then(|node| node.attribute("data-seen"))
+                    .map(str::to_owned)
+            })
+            .collect();
+        let _ = answer.send(seen);
+    }))])
+    .await;
+    read.try_recv().expect("the probe ran")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// A reported document that does not parse fails its source: an `<image>`
+/// on it is handed an `error`.
+#[test]
+fn a_malformed_svg_document_fails_its_source() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(BROKEN_IMAGE).await;
+        assert_eq!(page_children_seen(&owned.page).await, vec![None]);
+
+        report_svg(
+            &owned.page,
+            "app:///broken.svg",
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><rect></svg>"#,
+        )
+        .await;
+        // The probe's entry is queued behind the delivery the parse's
+        // outcome posted, so it reads what that delivery left.
+        assert_eq!(
+            page_children_seen(&owned.page).await,
+            vec![Some("error".to_owned())]
+        );
+    });
+}
+
+/// Holds the next document parse of `page` on its pool thread, reports
+/// `source` as an SVG document, and returns once the parse has started:
+/// what the test sends on the first channel lets it go, and the second
+/// disconnects once the parse has returned.
+#[cfg(not(target_arch = "wasm32"))]
+async fn report_held_parse(
+    page: &Rc<Page>,
+    source: &str,
+) -> (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>) {
+    let (started, parse_started) = std::sync::mpsc::channel();
+    let (release, parse_released) = std::sync::mpsc::channel();
+    page.hold_next_parse(ParseGate {
+        started,
+        release: parse_released,
+    });
+    page.apply(vec![svg_document(source, &svg_markup(30, 15))])
+        .await;
+    until_parsed("the parse never started", || {
+        parse_started.try_recv().is_ok()
+    })
+    .await;
+    (release, parse_started)
+}
+
+/// Whether `source` is still pending in `page`'s document, read without an
+/// entry (the view may have ended): a failure applied now settles it for
+/// every one of `bound` elements only if no earlier report has.
+#[cfg(not(target_arch = "wasm32"))]
+fn still_pending(page: &Page, source: &str, bound: usize) -> bool {
+    let mut realm = page.realm.borrow_mut();
+    let runtime = realm.as_deref_mut().expect("the realm is still open");
+    runtime.with_document(|document| {
+        document
+            .apply_image_events(&[dom::ImageEvent::Failed {
+                source: Arc::from(source),
+            }])
+            .len()
+            == bound
+    })
+}
+
+/// The view ends while one of its documents is still parsing (the parse is
+/// held on its pool thread until after the release). This proves three
+/// things: the task waiting on the parse is aborted and reclaimed with the
+/// view's others; the parse still runs to its end on the pool; and the
+/// aborted task queues no entry for the outcome, so not even a refused one
+/// runs, and nothing panics. It does not reach the outcome's entry at all;
+/// [`a_parse_that_returns_after_the_view_ended_applies_nothing`] is the
+/// ordering that does.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_view_released_while_a_document_parses_reclaims_the_waiting_task() {
+    on_a_js_thread(|thread| async move {
+        let (context, mut workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(LOADING_IMAGES).await;
+        write_on_images(&owned.page, "src", "app:///a.svg").await;
+        let (release, parse_started) = report_held_parse(&owned.page, "app:///a.svg").await;
+
+        let Some(WorkerCommand::Start(mut background)) = workers.recv().await else {
+            panic!("BTS starts")
+        };
+        owned.token.cancel();
+        tokio::join!(owned.page.run_owner(), answer_disposal(&mut background));
+        assert_eq!(
+            owned.page.task_count(),
+            0,
+            "the task waiting on the parse was reclaimed with the view"
+        );
+        let refused = owned.page.refused_entry_count();
+
+        release.send(()).expect("the parse is waiting to be let go");
+        // The gate is dropped once the parse has returned.
+        assert!(parse_started.recv().is_err(), "the parse ran to its end");
+        for _ in 0..TURNS {
+            task::yield_now().await;
+        }
+        assert_eq!(
+            owned.page.refused_entry_count(),
+            refused,
+            "the aborted task queued no entry for the parse's outcome"
+        );
+        assert!(
+            !owned
+                .events()
+                .iter()
+                .any(|event| matches!(event, EngineEvent::Panicked(_))),
+            "nothing panicked"
+        );
+    });
+}
+
+/// The parse returns first and the view ends after it, before the task
+/// waiting on the parse is polled again: that task is still alive (the end
+/// is the latch, and nothing has reclaimed it yet), so it queues the entry
+/// that would apply the outcome, and that entry finds the view ended. This
+/// proves that the entry is queued and refused — one refused entry, no
+/// epilogue — and that the document saw no apply: the source is still
+/// pending afterwards.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_parse_that_returns_after_the_view_ended_applies_nothing() {
+    on_a_js_thread(|thread| async move {
+        let (context, mut workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(LOADING_IMAGES).await;
+        write_on_images(&owned.page, "src", "app:///a.svg").await;
+        let Some(WorkerCommand::Start(mut background)) = workers.recv().await else {
+            panic!("BTS starts")
+        };
+        let (release, parse_started) = report_held_parse(&owned.page, "app:///a.svg").await;
+        let settled = owned.page.epilogue_count();
+        let refused = owned.page.refused_entry_count();
+
+        release.send(()).expect("the parse is waiting to be let go");
+        // Blocks this thread, so no task runs until the parse has returned.
+        assert!(parse_started.recv().is_err(), "the parse ran to its end");
+        // No yield since the parse returned: the task waiting on it has not
+        // been polled, so its entry is queued after this end.
+        assert!(owned.page.end(), "this is what ends the view");
+        until_parsed("the parse's entry was never refused", || {
+            owned.page.refused_entry_count() > refused
+        })
+        .await;
+        for _ in 0..TURNS {
+            task::yield_now().await;
+        }
+        assert_eq!(
+            owned.page.refused_entry_count(),
+            refused + 1,
+            "the parse's entry, and only it, was queued and refused"
+        );
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled,
+            "no epilogue ran for the parse's outcome"
+        );
+        assert!(
+            still_pending(&owned.page, "app:///a.svg", 3),
+            "the document saw no apply: the source is still pending"
+        );
+
+        tokio::join!(owned.page.run_owner(), answer_disposal(&mut background));
+        assert_eq!(owned.page.task_count(), 0);
+        assert!(
+            !owned
+                .events()
+                .iter()
+                .any(|event| matches!(event, EngineEvent::Panicked(_))),
+            "nothing panicked"
+        );
+    });
+}
+
 #[test]
 fn a_module_completion_commits_with_no_command_behind_it() {
     on_a_js_thread(|thread| async move {

@@ -1,0 +1,48 @@
+.page {
+  position: absolute;
+  left: 0px;
+  top: 0px;
+  width: 240px;
+  height: 240px;
+  background-color: rgb(255, 255, 255);
+}
+
+.cell {
+  position: absolute;
+  top: 0px;
+  width: 120px;
+  height: 60px;
+}
+
+.left {
+  left: 0px;
+}
+
+.right {
+  left: 120px;
+}
+
+.band {
+  position: absolute;
+  left: 0px;
+  top: 60px;
+}
+
+.fit {
+  position: absolute;
+  left: 0px;
+  top: 120px;
+  width: 120px;
+  height: 120px;
+  background-color: rgb(255, 0, 255);
+}
+
+.tiles {
+  position: absolute;
+  left: 120px;
+  top: 120px;
+  width: 120px;
+  height: 120px;
+  background-image: url(./tile.svg);
+  background-repeat: repeat;
+}

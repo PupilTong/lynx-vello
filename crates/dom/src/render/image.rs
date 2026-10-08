@@ -63,16 +63,306 @@
 //! Only the element's own source produces an [`ImageOutcome`], which is what
 //! an embedder turns into a `load` or an `error`. A placeholder is an interim
 //! picture the page did not ask about, so neither of its endings is an event.
+//!
+//! # Vector images
+//!
+//! An SVG document is not pixels, and a host does not parse it. It reports
+//! the fetched bytes and their [`DocumentKind`] through
+//! [`ImageReports::loaded_document`], which travel to the document thread
+//! inside [`ImageEvent::LoadedDocument`]. The engine parses them into a
+//! [`VectorImage`] (a `usvg` tree plus its natural size and viewport) with
+//! [`VectorImage::parse_sealed`], reached from outside this crate only
+//! through [`ImageEvent::parse_document`]: natively `bobcat-core` parses on its
+//! engine thread's blocking pool and applies the result as the
+//! already-parsed [`ImageEvent::LoadedVector`]; where nothing parses first
+//! (this crate's own tests, the wasm32 build),
+//! [`Document::apply_image_events`](crate::Document::apply_image_events)
+//! parses inline. The registry keeps the tree in the loaded entry, and a
+//! document that does not parse marks its source failed. The paint walk
+//! encodes the tree straight into the fragment scene, the way
+//! it encodes a gradient, through the scene [`VectorImage::scene`] builds once
+//! (`paint/svg.rs`). A vector image is therefore never an image draw:
+//! [`FrameImages`] is never asked for it, and no bitmap budget applies.
+//!
+//! The document is the second producer of vector images: an inline `<svg>`
+//! root's subtree is serialised and parsed through the same
+//! [`ImageEvent::parse_document`] inline on the document thread, and filed
+//! under a synthetic source ([`SYNTHETIC_SOURCE_PREFIX`]) the registry
+//! creates already settled, so the host never sees it
+//! (`tree/inline_svg.rs`). Synthetic entries are the only ones the registry
+//! ever removes.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
+use bytes::Bytes;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use vello::peniko::ImageData;
 
 use crate::NodeId;
+use crate::vello::Scene;
+
+/// A parsed SVG document, drawable at any size.
+///
+/// Built by the engine, with `VectorImage::parse_sealed` (reached through
+/// [`ImageEvent::parse_document`]), from the bytes a host reported through
+/// [`ImageReports::loaded_document`]. It carries two sizes, both computed
+/// at the parse from the root element's `width`, `height` and `viewBox`:
+///
+/// - the **natural size**, in whole CSS px, which layout reads exactly as it reads a bitmap's
+///   intrinsic size (CSS Images 3 default sizing; see `docs/svg-vector-images-design.md`);
+/// - the **viewport**, the rectangle in tree units that a draw maps onto its destination rectangle.
+///   A draw scales by `extent / viewport` per axis, never by `extent / tree.size()`: `usvg`
+///   overwrites `size()` with the content bounding box for a root that has neither a `viewBox` nor
+///   an absolute dimension.
+///
+/// The vello scene the tree encodes to is built on the first draw and kept
+/// for the image's life, so every later draw is one `Scene::append`. Cloning
+/// shares the tree; a clone made before the first draw builds its own scene.
+#[derive(Clone)]
+pub struct VectorImage {
+    tree: Arc<usvg::Tree>,
+    natural: (u32, u32),
+    viewport: (f32, f32),
+    scene: OnceLock<Arc<Scene>>,
+}
+
+/// The tree crosses from the thread that parsed it (natively a blocking-pool
+/// thread) to the document's inside an [`ImageEvent`], and the cached scene
+/// is published inside the registry, so both must be `Send + Sync`.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<usvg::Tree>();
+    assert_send_sync::<Scene>();
+    assert_send_sync::<VectorImage>();
+};
+
+impl VectorImage {
+    /// A vector image over `tree`, laid out at `natural` CSS px and mapping
+    /// the `viewport` rectangle of tree units onto each draw.
+    #[must_use]
+    pub(crate) fn new(tree: Arc<usvg::Tree>, natural: (u32, u32), viewport: (f32, f32)) -> Self {
+        Self {
+            tree,
+            natural,
+            viewport,
+            scene: OnceLock::new(),
+        }
+    }
+
+    /// Parses the SVG document `svg`, and computes its natural size and
+    /// viewport from the root element's `width`, `height` and `viewBox`.
+    ///
+    /// The options read nothing outside the document: the `<image>` string
+    /// resolver (`resolve_string`) returns `None`, so an `<image>` naming
+    /// anything but a `data:` URL resolves to nothing, and `resources_dir` is
+    /// `None`. Every other option is usvg's default; `data:` URLs still
+    /// resolve. This is the parse the engine runs on every document a host
+    /// reports through [`ImageReports::loaded_document`]; usvg's default
+    /// string resolver would read the filesystem.
+    ///
+    /// One XML parse serves both sizes and the tree: the root's attributes
+    /// are read from the same `roxmltree` document
+    /// [`usvg::Tree::from_xmltree`] converts, because the tree keeps neither
+    /// the `viewBox` nor the raw dimensions. The input is handled as
+    /// [`usvg::Tree::from_data`] handles it without the `svgz` feature: gzip
+    /// data fails with [`usvg::Error::SvgzFeatureNotEnabled`], anything that
+    /// is not UTF-8 with [`usvg::Error::NotAnUtf8Str`], and a DTD is allowed.
+    ///
+    /// The sizes follow `docs/svg-vector-images-design.md`. A root `width`
+    /// or `height` is absolute when it is a bare number or a length in one of
+    /// the CSS absolute units `px`, `in`, `cm`, `mm`, `pt` or `pc`, converted
+    /// to px at 96 px per inch. A font-relative length (`em`, `ex`), a
+    /// percentage, any other unit, or a missing attribute counts as absent.
+    ///
+    /// - Both absolute: natural = that size, viewport = `tree.size()`.
+    /// - One absolute plus a `viewBox`: the other axis from the `viewBox` ratio, viewport =
+    ///   `tree.size()`.
+    /// - A `viewBox` only: natural = the largest size with the `viewBox` ratio that fits 300x150,
+    ///   viewport = `tree.size()`.
+    /// - Neither: natural and viewport 300x150. usvg leaves user units 1:1 here and overwrites
+    ///   `size()` with the content bounding box, so `size()` is not the viewport.
+    /// - One absolute and no `viewBox`: that axis, with 300 wide or 150 high for the other; the
+    ///   viewport is the natural size, for the same reason as the case above.
+    ///
+    /// The natural size is rounded to whole px, at least 1 on each axis.
+    ///
+    /// # Errors
+    ///
+    /// Whatever usvg reports for a document it cannot read.
+    pub(crate) fn parse_sealed(svg: &[u8]) -> Result<Self, usvg::Error> {
+        if svg.starts_with(&[0x1f, 0x8b]) {
+            return Err(usvg::Error::SvgzFeatureNotEnabled);
+        }
+        let text = std::str::from_utf8(svg).map_err(|_| usvg::Error::NotAnUtf8Str)?;
+        let document = usvg::roxmltree::Document::parse_with_options(
+            text,
+            usvg::roxmltree::ParsingOptions {
+                allow_dtd: true,
+                ..usvg::roxmltree::ParsingOptions::default()
+            },
+        )
+        .map_err(usvg::Error::ParsingFailed)?;
+        let root = document.root_element();
+        let width = root.attribute("width").and_then(absolute_length);
+        let height = root.attribute("height").and_then(absolute_length);
+        let view_box = root.attribute("viewBox").and_then(view_box_size);
+        let options = usvg::Options {
+            resources_dir: None,
+            image_href_resolver: usvg::ImageHrefResolver {
+                resolve_string: Box::new(|_, _| None),
+                ..usvg::ImageHrefResolver::default()
+            },
+            ..usvg::Options::default()
+        };
+        let tree = usvg::Tree::from_xmltree(&document, &options)?;
+        let (natural, viewport) = vector_sizes(
+            width,
+            height,
+            view_box,
+            (tree.size().width(), tree.size().height()),
+        );
+        Ok(Self::new(Arc::new(tree), natural, viewport))
+    }
+
+    /// The size layout is told, in whole CSS px.
+    #[must_use]
+    pub(crate) fn natural_size(&self) -> (u32, u32) {
+        self.natural
+    }
+
+    /// The rectangle in tree units a draw maps onto its destination.
+    #[must_use]
+    pub(crate) fn viewport(&self) -> (f32, f32) {
+        self.viewport
+    }
+
+    /// The parsed document.
+    pub(crate) fn tree(&self) -> &usvg::Tree {
+        &self.tree
+    }
+
+    /// The tree encoded as a vello scene in tree units, built on the first
+    /// call and returned from the cache after that.
+    #[must_use]
+    pub(crate) fn scene(&self) -> &Arc<Scene> {
+        self.scene.get_or_init(|| {
+            let mut scene = Scene::new();
+            crate::paint::svg::encode(&self.tree, &mut scene);
+            Arc::new(scene)
+        })
+    }
+}
+
+/// The default object size of CSS Images 3, in CSS px.
+const DEFAULT_OBJECT_SIZE: (f32, f32) = (300.0, 150.0);
+
+/// The natural size and viewport of an SVG document, from its root's
+/// absolute `width` and `height`, its `viewBox` size and the parsed tree's
+/// `size()`. The rule is [`VectorImage::parse_sealed`]'s.
+fn vector_sizes(
+    width: Option<f32>,
+    height: Option<f32>,
+    view_box: Option<(f32, f32)>,
+    tree_size: (f32, f32),
+) -> ((u32, u32), (f32, f32)) {
+    let (natural, viewport_is_tree) = match (width, height, view_box) {
+        (Some(width), Some(height), _) => ((width, height), true),
+        (Some(width), None, Some((box_width, box_height))) => {
+            ((width, width * box_height / box_width), true)
+        }
+        (None, Some(height), Some((box_width, box_height))) => {
+            ((height * box_width / box_height, height), true)
+        }
+        (None, None, Some((box_width, box_height))) => {
+            let scale = (DEFAULT_OBJECT_SIZE.0 / box_width).min(DEFAULT_OBJECT_SIZE.1 / box_height);
+            ((box_width * scale, box_height * scale), true)
+        }
+        (width, height, None) => (
+            (
+                width.unwrap_or(DEFAULT_OBJECT_SIZE.0),
+                height.unwrap_or(DEFAULT_OBJECT_SIZE.1),
+            ),
+            false,
+        ),
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "rounded and clamped to at least one before the cast, which saturates"
+    )]
+    let whole = |length: f32| length.round().max(1.0) as u32;
+    let rounded = (whole(natural.0), whole(natural.1));
+    let viewport = if viewport_is_tree {
+        tree_size
+    } else {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a natural size with no viewBox is an authored px length or the default"
+        )]
+        let viewport = (rounded.0 as f32, rounded.1 as f32);
+        viewport
+    };
+    (rounded, viewport)
+}
+
+/// A root `width` or `height` that is an absolute length, in px: a bare
+/// number, or a number in one of the CSS absolute units (`px`; `in` = 96 px,
+/// `cm` = 96/2.54 px, `mm` = 96/25.4 px, `pt` = 4/3 px, `pc` = 16 px),
+/// finite and positive. Anything else, `em`, `ex` and `%` included, counts
+/// as absent.
+fn absolute_length(value: &str) -> Option<f32> {
+    const UNITS: [(&str, f32); 6] = [
+        ("px", 1.0),
+        ("in", 96.0),
+        ("cm", 96.0 / 2.54),
+        ("mm", 96.0 / 25.4),
+        ("pt", 4.0 / 3.0),
+        ("pc", 16.0),
+    ];
+    let value = value.trim();
+    let (number, scale) = UNITS
+        .iter()
+        .find_map(|&(unit, scale)| value.strip_suffix(unit).map(|number| (number, scale)))
+        .unwrap_or((value, 1.0));
+    number
+        .parse::<f32>()
+        .ok()
+        .map(|length| length * scale)
+        .filter(|length| length.is_finite() && *length > 0.0)
+}
+
+/// A `viewBox`'s width and height, when it is four numbers and both of those
+/// are finite and positive.
+fn view_box_size(value: &str) -> Option<(f32, f32)> {
+    let numbers: SmallVec<[f32; 4]> = value
+        .split(|c: char| c.is_ascii_whitespace() || c == ',')
+        .filter(|part| !part.is_empty())
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    match numbers.as_slice() {
+        [_, _, width, height]
+            if width.is_finite() && height.is_finite() && *width > 0.0 && *height > 0.0 =>
+        {
+            Some((*width, *height))
+        }
+        _ => None,
+    }
+}
+
+impl std::fmt::Debug for VectorImage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VectorImage")
+            .field("natural", &self.natural)
+            .field("viewport", &self.viewport)
+            .field("scene_built", &self.scene.get().is_some())
+            .finish_non_exhaustive()
+    }
+}
 
 /// Largest per-axis pixel count vello can render.
 ///
@@ -284,6 +574,26 @@ impl ImageReports {
         });
     }
 
+    /// `source` is a document of `kind` the engine draws itself, and `bytes`
+    /// are its encoded bytes as fetched (after any preprocessing that leaves
+    /// an image's bytes unchanged).
+    ///
+    /// The host does not parse: the engine does, and a document it cannot
+    /// read becomes a failure of the source on the engine's side. Otherwise
+    /// the same contract as [`ImageReports::loaded`]: reported once per
+    /// source, never retracted. A host may answer a later request for the
+    /// same source with the same bytes again; the document's registry makes
+    /// the repeat a no-op.
+    ///
+    /// Non-blocking, and it must not re-enter the store.
+    pub fn loaded_document(&self, source: &str, bytes: Bytes, kind: DocumentKind) {
+        self.post(ImageEvent::LoadedDocument {
+            source: Arc::from(source),
+            bytes,
+            kind,
+        });
+    }
+
     /// `source` will not produce pixels. Terminal; the engine does not retry.
     pub fn failed(&self, source: &str) {
         self.post(ImageEvent::Failed {
@@ -340,15 +650,32 @@ impl ImageInbox {
     }
 }
 
+/// Which kind of document a host reported through
+/// [`ImageReports::loaded_document`]: what the engine parses the bytes as.
+///
+/// Non-exhaustive so that a second engine-drawn format is one more variant
+/// rather than a second protocol method.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocumentKind {
+    /// An SVG document (`image/svg+xml`), parsed by
+    /// [`ImageEvent::parse_document`].
+    Svg,
+}
+
 /// One report from the store, on its way to the document.
 ///
-/// `Send` by construction: an `Arc<str>` and integers. Unlike the sink, this
-/// really does cross a thread — the painter forwards a batch of these to the
-/// Lynx main thread — and the `Arc` is what makes that legal. There is no
-/// variant that could carry pixels, which is what makes "`ImageData` never
-/// crosses a channel" a property of the type rather than a rule to
-/// remember.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `Send` by construction: an `Arc<str>`, integers, [`Bytes`] and a
+/// [`VectorImage`], whose tree is `Send + Sync`. Unlike the sink, this really
+/// does cross a thread — the painter forwards a batch of these to the Lynx
+/// main thread — and the `Arc`s are what make that legal. There is no variant
+/// that could carry pixels (encoded document bytes and a parsed tree are not
+/// pixels), which is what makes "`ImageData` never crosses a channel" a
+/// property of the type rather than a rule to remember.
+///
+/// Not `PartialEq`: a [`VectorImage`] has no meaningful equality, and every
+/// consumer matches events by pattern.
+#[derive(Clone, Debug)]
 pub enum ImageEvent {
     /// Pixels exist for this source, with these intrinsic dimensions.
     Loaded {
@@ -356,24 +683,108 @@ pub enum ImageEvent {
         width: u32,
         height: u32,
     },
+    /// This source is a document of `kind` the engine draws itself, and
+    /// these are its encoded bytes. What a host reports
+    /// ([`ImageReports::loaded_document`]); the engine parses it, and it ends
+    /// as [`ImageEvent::LoadedVector`] or [`ImageEvent::Failed`].
+    LoadedDocument {
+        source: Arc<str>,
+        bytes: Bytes,
+        kind: DocumentKind,
+    },
+    /// This source is an SVG document, already parsed. Engine-internal: no
+    /// host reports it. `bobcat-core` produces it from a
+    /// [`ImageEvent::LoadedDocument`] it parsed off the document thread
+    /// ([`ImageEvent::parse_document`]). Its natural size is the intrinsic
+    /// size layout reads.
+    LoadedVector {
+        source: Arc<str>,
+        image: VectorImage,
+    },
     /// This source will never produce pixels.
     Failed { source: Arc<str> },
+}
+
+impl ImageEvent {
+    /// The already-parsed event a [`ImageEvent::LoadedDocument`] for
+    /// `source` with `bytes` of `kind` ends as: [`ImageEvent::LoadedVector`]
+    /// when the document parses, [`ImageEvent::Failed`] when it does not.
+    ///
+    /// The parse is `VectorImage::parse_sealed`, which reads nothing
+    /// outside the document. It runs on the calling thread and may take as
+    /// long as the document is large, so a caller with a blocking pool runs
+    /// it there.
+    #[must_use]
+    pub fn parse_document(source: Arc<str>, bytes: &[u8], kind: DocumentKind) -> Self {
+        match parse_document(bytes, kind) {
+            Some(image) => Self::LoadedVector { source, image },
+            None => Self::Failed { source },
+        }
+    }
+
+    /// The source this event reports on.
+    fn source(&self) -> &Arc<str> {
+        match self {
+            Self::Loaded { source, .. }
+            | Self::LoadedDocument { source, .. }
+            | Self::LoadedVector { source, .. }
+            | Self::Failed { source } => source,
+        }
+    }
+}
+
+/// Parses `bytes` as a document of `kind`; `None` for one that does not
+/// parse. The error itself goes nowhere: the source's failure is what the
+/// document records, and the engine has no log to write the message to.
+fn parse_document(bytes: &[u8], kind: DocumentKind) -> Option<VectorImage> {
+    match kind {
+        DocumentKind::Svg => VectorImage::parse_sealed(bytes).ok(),
+    }
+}
+
+/// The state a parsed vector image settles its source in. A zero axis is a
+/// failure, as it is for a bitmap; [`VectorImage::parse_sealed`] never produces
+/// one, so the check guards [`VectorImage::new`]'s callers.
+fn vector_state(image: VectorImage) -> ImageState {
+    let (width, height) = image.natural_size();
+    if width > 0 && height > 0 {
+        ImageState::Ready {
+            width,
+            height,
+            kind: ImageKind::Vector(image),
+        }
+    } else {
+        ImageState::Failed
+    }
 }
 
 /// What the document knows about one image. Never any pixels.
 ///
 /// `Pending` is the only state with outgoing edges; both others are sinks,
 /// which is the whole of "the document's image state never regresses".
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 enum ImageState {
     /// Asked for; no pixels yet.
     #[default]
     Pending,
     /// The only drawable state — so a frame naming an image that is not
     /// loaded is unrepresentable rather than filtered out later.
-    Ready { width: u32, height: u32 },
+    Ready {
+        width: u32,
+        height: u32,
+        kind: ImageKind,
+    },
     /// Terminal.
     Failed,
+}
+
+/// What a loaded image draws from.
+#[derive(Debug)]
+enum ImageKind {
+    /// Pixels the host holds, read through [`FrameImages`] at compose time.
+    Raster,
+    /// A parsed SVG document, encoded into the frame on the document thread.
+    Vector(VectorImage),
 }
 
 /// Which of a replaced element's two sources a binding is.
@@ -398,7 +809,8 @@ pub enum ImageRole {
 /// — there is no variant naming a placeholder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageOutcome {
-    /// The element's source has pixels, with this intrinsic size.
+    /// The element's source has loaded, as pixels or as a parsed vector
+    /// document, with this intrinsic size.
     Loaded {
         node: NodeId,
         width: u32,
@@ -408,6 +820,11 @@ pub enum ImageOutcome {
     Failed { node: NodeId },
 }
 
+/// What [`ImageRegistry::resolve`] hands a draw: the source's name (the
+/// registry's own key), its intrinsic dimensions, and its parsed tree when it
+/// is a vector image.
+pub(crate) type Resolved<'a> = (Arc<str>, (f64, f64), Option<&'a VectorImage>);
+
 /// What applying one report moved.
 pub(crate) struct ImageApplied {
     /// The intrinsic size the source ended up with, or `None` for one that
@@ -416,6 +833,20 @@ pub(crate) struct ImageApplied {
     pub(crate) loaded: Option<(u32, u32)>,
     /// Every replaced node holding this source, in whichever role.
     pub(crate) nodes: SmallVec<[(NodeId, ImageRole); 1]>,
+}
+
+/// The prefix of every synthetic source: the one an inline SVG root is bound
+/// to (`tree::inline_svg`), `inline-svg:<node>:<generation>`. The registry
+/// creates such an entry already settled, so the host is never asked for
+/// it, and removes it when the root rebinds or is freed.
+///
+/// A host URL that happened to start with this prefix would be forgotten
+/// with the node that last presented it; no host scheme does.
+pub(crate) const SYNTHETIC_SOURCE_PREFIX: &str = "inline-svg:";
+
+/// Whether `source` is a synthetic source ([`SYNTHETIC_SOURCE_PREFIX`]).
+pub(crate) fn is_synthetic_source(source: &str) -> bool {
+    source.starts_with(SYNTHETIC_SOURCE_PREFIX)
 }
 
 /// What the registry holds for one source.
@@ -440,7 +871,10 @@ struct Entry {
 ///
 /// The invariant that makes it work: **an entry exists exactly when the
 /// source has been asked for.** There is no window in which a source is known
-/// but has no key, because the key *is* the source.
+/// but has no key, because the key *is* the source. A synthetic source
+/// ([`SYNTHETIC_SOURCE_PREFIX`]) is the one exception: its entry is created
+/// settled by the document itself ([`ImageRegistry::insert_synthetic`]), and
+/// existing is exactly what keeps it from ever being asked for.
 #[derive(Default)]
 pub(crate) struct ImageRegistry {
     entries: FxHashMap<Arc<str>, Entry>,
@@ -461,21 +895,32 @@ impl std::fmt::Debug for ImageRegistry {
 }
 
 impl ImageRegistry {
-    /// The draw name and intrinsic dimensions for `source`, requesting it if
-    /// this is the registry's first sighting.
+    /// The draw name and intrinsic dimensions for `source`, and its parsed
+    /// tree when it is a vector image, requesting it if this is the
+    /// registry's first sighting.
     ///
     /// `None` means "paint nothing this frame": pending, or failed. A pending
     /// image is the one-frame gap between a source appearing and its pixels
     /// arriving, which is what a browser shows for a not-yet-loaded image.
     ///
     /// The name handed back is the map's own key, so every draw of one source
-    /// in one frame shares one allocation.
-    pub(crate) fn resolve(&self, source: &str) -> Option<(Arc<str>, (f64, f64))> {
+    /// in one frame shares one allocation. The vector image is a borrow of
+    /// the entry's own, so a draw clones nothing.
+    pub(crate) fn resolve(&self, source: &str) -> Option<Resolved<'_>> {
         let (key, entry) = self.sight(source)?;
-        match entry.state {
-            ImageState::Ready { width, height } => {
-                Some((Arc::clone(key), (f64::from(width), f64::from(height))))
-            }
+        match &entry.state {
+            ImageState::Ready {
+                width,
+                height,
+                kind,
+            } => Some((
+                Arc::clone(key),
+                (f64::from(*width), f64::from(*height)),
+                match kind {
+                    ImageKind::Raster => None,
+                    ImageKind::Vector(image) => Some(image),
+                },
+            )),
             ImageState::Pending | ImageState::Failed => None,
         }
     }
@@ -488,7 +933,7 @@ impl ImageRegistry {
         &self,
         source: Option<&str>,
         placeholder: Option<&str>,
-    ) -> Option<(Arc<str>, (f64, f64))> {
+    ) -> Option<Resolved<'_>> {
         source
             .and_then(|source| self.resolve(source))
             .or_else(|| placeholder.and_then(|placeholder| self.resolve(placeholder)))
@@ -566,39 +1011,44 @@ impl ImageRegistry {
     ///
     /// `None` when nothing moved — a source reported twice, which one URL
     /// with one content makes a no-op.
+    ///
+    /// A [`ImageEvent::LoadedDocument`] is parsed here, on the calling
+    /// thread, and only when its source is still pending: this is the path
+    /// for a caller with no blocking pool to parse on first (this crate's
+    /// tests, the wasm32 build). A document that does not parse is a
+    /// failure, exactly as a [`ImageEvent::Failed`] report would be.
     pub(crate) fn apply(&mut self, event: &ImageEvent) -> Option<ImageApplied> {
-        let (source, state) = match event {
+        let entry = self.entry_for(event.source());
+        if !matches!(entry.state, ImageState::Pending) {
+            return None;
+        }
+        let state = match event {
             // Well-formedness, not the atlas bound: an image with a zero axis
             // has neither an intrinsic size nor an aspect ratio, so it would
             // stretch an unknown bitmap over the whole content box, and it is
             // refused as a failure. `MAX_RENDERABLE_DIMENSION` is deliberately
             // not tested here — see `is_renderable`, which tests the bitmap
             // instead.
-            ImageEvent::Loaded {
-                source,
-                width,
-                height,
-            } if *width > 0 && *height > 0 => (
-                source,
+            ImageEvent::Loaded { width, height, .. } if *width > 0 && *height > 0 => {
                 ImageState::Ready {
                     width: *width,
                     height: *height,
-                },
-            ),
-            ImageEvent::Loaded { source, .. } | ImageEvent::Failed { source } => {
-                (source, ImageState::Failed)
+                    kind: ImageKind::Raster,
+                }
             }
+            ImageEvent::LoadedVector { image, .. } => vector_state(image.clone()),
+            ImageEvent::LoadedDocument { bytes, kind, .. } => {
+                parse_document(bytes, *kind).map_or(ImageState::Failed, vector_state)
+            }
+            ImageEvent::Loaded { .. } | ImageEvent::Failed { .. } => ImageState::Failed,
         };
-        let entry = self.entry_for(source);
-        if entry.state != ImageState::Pending {
-            return None;
-        }
+        let loaded = match &state {
+            ImageState::Ready { width, height, .. } => Some((*width, *height)),
+            ImageState::Pending | ImageState::Failed => None,
+        };
         entry.state = state;
         Some(ImageApplied {
-            loaded: match state {
-                ImageState::Ready { width, height } => Some((width, height)),
-                ImageState::Pending | ImageState::Failed => None,
-            },
+            loaded,
             nodes: entry.nodes.clone(),
         })
     }
@@ -611,12 +1061,12 @@ impl ImageRegistry {
     /// by nothing else ever again — one URL is reported once — so this is the
     /// only place a second mount of a known URL can learn what it got.
     pub(crate) fn outcome_for(&self, source: &str, node: NodeId) -> Option<ImageOutcome> {
-        match self.entries.get(source)?.state {
+        match &self.entries.get(source)?.state {
             ImageState::Pending => None,
-            ImageState::Ready { width, height } => Some(ImageOutcome::Loaded {
+            ImageState::Ready { width, height, .. } => Some(ImageOutcome::Loaded {
                 node,
-                width,
-                height,
+                width: *width,
+                height: *height,
             }),
             ImageState::Failed => Some(ImageOutcome::Failed { node }),
         }
@@ -642,10 +1092,40 @@ impl ImageRegistry {
 
     /// The intrinsic dimensions already known for `source`, if it has loaded.
     fn dimensions_of(&self, source: &str) -> Option<(u32, u32)> {
-        match self.entries.get(source)?.state {
-            ImageState::Ready { width, height } => Some((width, height)),
+        match &self.entries.get(source)?.state {
+            ImageState::Ready { width, height, .. } => Some((*width, *height)),
             ImageState::Pending | ImageState::Failed => None,
         }
+    }
+
+    /// Files a synthetic source ([`SYNTHETIC_SOURCE_PREFIX`]) already
+    /// settled by `event`, before any node binds it: an entry that exists
+    /// is never queued as wanted, so no paint walk and no bind asks the host
+    /// for it.
+    pub(crate) fn insert_synthetic(&mut self, event: &ImageEvent) {
+        debug_assert!(
+            is_synthetic_source(event.source()),
+            "only a synthetic source is inserted settled"
+        );
+        self.entries
+            .insert(Arc::clone(event.source()), Entry::default());
+        let _ = self.apply(event);
+    }
+
+    /// Removes a synthetic source's entry: a superseded generation of an
+    /// inline SVG root, or the source of a freed one. The one removal the
+    /// registry makes; a host source never regresses.
+    pub(crate) fn forget_synthetic(&mut self, source: &str) {
+        debug_assert!(
+            is_synthetic_source(source),
+            "only a synthetic source is ever removed: {source}"
+        );
+        self.entries.remove(source);
+    }
+
+    /// Whether the registry holds an entry for `source`.
+    pub(crate) fn knows(&self, source: &str) -> bool {
+        self.entries.contains_key(source)
     }
 
     fn entry_for(&mut self, source: &str) -> &mut Entry {
@@ -721,18 +1201,20 @@ mod tests {
         reports.loaded("app:///a.png", 4, 4);
         reports.failed("app:///b.png");
 
-        assert_eq!(
-            inbox.drain(),
-            vec![
-                super::ImageEvent::Loaded {
-                    source: Arc::from("app:///a.png"),
-                    width: 4,
-                    height: 4
-                },
-                super::ImageEvent::Failed {
-                    source: Arc::from("app:///b.png")
-                },
-            ]
+        let drained = inbox.drain();
+        assert!(
+            matches!(
+                drained.as_slice(),
+                [
+                    super::ImageEvent::Loaded {
+                        source: loaded,
+                        width: 4,
+                        height: 4
+                    },
+                    super::ImageEvent::Failed { source: failed },
+                ] if &**loaded == "app:///a.png" && &**failed == "app:///b.png"
+            ),
+            "{drained:?}"
         );
         assert!(inbox.drain().is_empty(), "a drain empties the inbox");
     }
@@ -839,7 +1321,7 @@ mod tests {
         assert!(registry.resolve("app:///a.png").is_none());
 
         registry.apply(&loaded("app:///a.png", 40, 20));
-        let (source, dimensions) = registry
+        let (source, dimensions, _) = registry
             .resolve("app:///a.png")
             .expect("a loaded image resolves");
         assert_eq!(source.as_ref(), "app:///a.png");
@@ -856,7 +1338,7 @@ mod tests {
         registry.take_wanted();
         registry.apply(&loaded("app:///huge.png", 12_000, 6_000));
 
-        let (_, dimensions) = registry
+        let (_, dimensions, _) = registry
             .resolve("app:///huge.png")
             .expect("a huge image is drawable — it is the bitmap that is bounded, not this");
         assert!((dimensions.0 - 12_000.0).abs() < f64::EPSILON);
@@ -915,7 +1397,7 @@ mod tests {
             registry.apply(&loaded("app:///a.png", 99, 99)).is_none(),
             "and a repeated report moves nothing"
         );
-        let (_, dimensions) = registry.resolve("app:///a.png").expect("still drawable");
+        let (_, dimensions, _) = registry.resolve("app:///a.png").expect("still drawable");
         assert!(
             (dimensions.0 - 10.0).abs() < f64::EPSILON,
             "the first content is the content"
@@ -1083,14 +1565,14 @@ mod tests {
         );
 
         registry.apply(&loaded("app:///p.png", 4, 4));
-        let (drawn, dimensions) = registry
+        let (drawn, dimensions, _) = registry
             .resolve_presented(source, placeholder)
             .expect("the placeholder draws while the source has nothing");
         assert_eq!(drawn.as_ref(), "app:///p.png");
         assert!((dimensions.0 - 4.0).abs() < f64::EPSILON);
 
         registry.apply(&loaded("app:///a.png", 12, 6));
-        let (drawn, _) = registry
+        let (drawn, _, _) = registry
             .resolve_presented(source, placeholder)
             .expect("the source took over");
         assert_eq!(drawn.as_ref(), "app:///a.png");
@@ -1140,5 +1622,181 @@ mod tests {
         assert_eq!(hint, ImageSizeHint::new(800, 900));
         assert!(!hint.is_unbounded());
         assert!(hint.union(ImageSizeHint::UNBOUNDED).is_unbounded());
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod vector_tests {
+    use super::VectorImage;
+
+    fn parse(attributes: &str) -> VectorImage {
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" {attributes}><rect x="2" y="3" width="5" height="7"/></svg>"#
+        );
+        VectorImage::parse_sealed(svg.as_bytes())
+            .unwrap_or_else(|error| panic!("<svg {attributes}>: {error}"))
+    }
+
+    /// The natural size follows CSS Images 3 default sizing, and the
+    /// viewport is the tree's own size wherever the root gives usvg a size
+    /// to map into.
+    #[test]
+    fn natural_size_and_viewport_follow_the_root_attributes() {
+        let cases = [
+            // (a) Both absolute, with or without a viewBox.
+            (r#"width="40" height="30""#, (40, 30), (40.0, 30.0)),
+            (r#"width="40" height="30px""#, (40, 30), (40.0, 30.0)),
+            (
+                r#"width="40px" height="30" viewBox="0 0 4 3""#,
+                (40, 30),
+                (40.0, 30.0),
+            ),
+            // (b) One absolute plus a viewBox.
+            (r#"width="40" viewBox="0 0 20 10""#, (40, 20), (40.0, 20.0)),
+            (r#"height="30" viewBox="0 0 20 10""#, (60, 30), (60.0, 30.0)),
+            // (c) A viewBox only, fitted into 300x150.
+            (r#"viewBox="0 0 10 10""#, (150, 150), (10.0, 10.0)),
+            (r#"viewBox="0 0 40 10""#, (300, 75), (40.0, 10.0)),
+            (r#"viewBox="0,0,40,10""#, (300, 75), (40.0, 10.0)),
+            // (d) Neither: the default object size, which is also the viewport.
+            ("", (300, 150), (300.0, 150.0)),
+            (r#"width="50%" height="2em""#, (300, 150), (300.0, 150.0)),
+            // (e) One absolute and no viewBox.
+            (r#"width="50%" height="20""#, (300, 20), (300.0, 20.0)),
+            (r#"width="50%" height="1in""#, (300, 96), (300.0, 96.0)),
+            (r#"width="3pc" height="1ex""#, (48, 150), (48.0, 150.0)),
+            (r#"width="40""#, (40, 150), (40.0, 150.0)),
+            // Whole px, at least one.
+            (r#"width="10.4" height="0.2""#, (10, 1), (10.4, 0.2)),
+        ];
+        for (attributes, natural, viewport) in cases {
+            let image = parse(attributes);
+            assert_eq!(image.natural_size(), natural, "<svg {attributes}> natural");
+            assert_eq!(image.viewport(), viewport, "<svg {attributes}> viewport");
+        }
+    }
+
+    /// Every CSS absolute unit converts at 96 px per inch, and the viewport
+    /// is the size usvg converted the same lengths to.
+    #[test]
+    fn absolute_units_convert_to_px() {
+        let image = parse(r#"width="10mm" height="10mm""#);
+        assert_eq!(image.natural_size(), (38, 38));
+        let size = image.tree().size();
+        assert_eq!(image.viewport(), (size.width(), size.height()));
+        for (length, px) in [
+            ("1in", 96.0),
+            ("2.54cm", 96.0),
+            ("25.4mm", 96.0),
+            ("72pt", 96.0),
+            ("6pc", 96.0),
+            ("96px", 96.0),
+            ("96", 96.0),
+        ] {
+            let converted = super::absolute_length(length).expect(length);
+            assert!((converted - px).abs() < 1e-3, "{length} is {converted} px");
+        }
+        for absent in ["1em", "1ex", "50%", "1rem", "1vw", "0in", "-2pt"] {
+            assert_eq!(super::absolute_length(absent), None, "{absent}");
+        }
+    }
+
+    /// The parse the engine runs on a reported document reads no file an
+    /// `<image>` inside it names. A nested SVG document renders its own
+    /// tree, so the same document reached through a `data:` URL draws while
+    /// the file path draws nothing. Each document goes through the inline
+    /// path, a [`super::ImageEvent::LoadedDocument`] applied to the registry.
+    #[test]
+    fn a_reported_document_reads_no_file_its_image_elements_name() {
+        use std::sync::Arc;
+
+        use super::{DocumentKind, ImageEvent, ImageRegistry};
+
+        let image_of = |href: &str| {
+            format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="{href}" width="10" height="10"/></svg>"#
+            )
+        };
+        let inner = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect x="1" y="1" width="6" height="4" fill="#dc2626"/></svg>"##;
+        let path =
+            std::env::temp_dir().join(format!("dom-vector-{}-nested.svg", std::process::id()));
+        std::fs::write(&path, inner).expect("write the temp file");
+        let file = path.to_str().expect("a UTF-8 temp path").to_owned();
+        let data_url = format!(
+            "data:image/svg+xml;base64,{}",
+            base64_encode(inner.as_bytes())
+        );
+
+        let mut registry = ImageRegistry::default();
+        // A file every Unix has, the nested document by path, and the same
+        // document as a `data:` URL.
+        let mut drawn = Vec::new();
+        for (source, href) in [
+            ("app:///hosts.svg", "/etc/hosts"),
+            ("app:///by-path.svg", file.as_str()),
+            ("app:///by-data.svg", data_url.as_str()),
+        ] {
+            let applied = registry.apply(&ImageEvent::LoadedDocument {
+                source: Arc::from(source),
+                bytes: bytes::Bytes::from(image_of(href)),
+                kind: DocumentKind::Svg,
+            });
+            assert_eq!(
+                applied.and_then(|applied| applied.loaded),
+                Some((10, 10)),
+                "{source} loads"
+            );
+            let (_, _, vector) = registry.resolve(source).expect("loaded");
+            let vector = vector.expect("a vector image");
+            drawn.push(!vector.scene().encoding().is_empty());
+        }
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            drawn,
+            [false, false, true],
+            "neither file was read; a data: URL is resolved, which is what makes \
+             the empty scenes evidence"
+        );
+    }
+
+    fn base64_encode(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let mut buffer = [0_u8; 3];
+            buffer[..chunk.len()].copy_from_slice(chunk);
+            let bits =
+                u32::from(buffer[0]) << 16 | u32::from(buffer[1]) << 8 | u32::from(buffer[2]);
+            for index in 0..4 {
+                if index <= chunk.len() {
+                    out.push(char::from(
+                        ALPHABET[((bits >> (18 - 6 * index)) & 63) as usize],
+                    ));
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    /// Failures are usvg's own errors, as `usvg::Tree::from_data` reports
+    /// them without the `svgz` feature.
+    #[test]
+    fn unreadable_documents_fail_with_the_usvg_error() {
+        assert!(matches!(
+            VectorImage::parse_sealed(b"<svg xmlns='http://www.w3.org/2000/svg'><rect></svg>"),
+            Err(usvg::Error::ParsingFailed(_))
+        ));
+        assert!(matches!(
+            VectorImage::parse_sealed(b"<svg \xff/>"),
+            Err(usvg::Error::NotAnUtf8Str)
+        ));
+        assert!(matches!(
+            VectorImage::parse_sealed(&[0x1f, 0x8b, 0x08, 0x00]),
+            Err(usvg::Error::SvgzFeatureNotEnabled)
+        ));
     }
 }

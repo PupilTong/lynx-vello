@@ -307,8 +307,9 @@ coalesced frame post — a timeline reading, the sequence number the
 acknowledgement reports, and a fence: the count of commands sent before it,
 which main applies first — and at most one marker is queued per take), and
 `ImageEvents`
-(completed or failed host loads — no variant can carry pixels, which makes
-"`ImageData` never crosses a channel" a property of the type). The painter's
+(completed or failed host loads, and documents handed over as their bytes —
+no variant can carry pixels, which makes "`ImageData` never crosses a
+channel" a property of the type). The painter's
 device metrics are **not** a command: they ride a
 `watch<Option<Viewport>>` on the view's seat, `None` until a painter attaches,
 because an unbound `__FlushElementTree` parks the job it runs in on that very
@@ -1040,6 +1041,35 @@ set where someone can see it rather than inheriting a silent no-op.
 `LynxView::prefetch_images` warms sources ahead of the walk that would discover
 them.
 
+**A reported document is parsed by the engine, not the host**
+(`docs/svg-vector-images-design.md`). A host hands an SVG over as its bytes,
+`ImageReports::loaded_document(source, bytes, DocumentKind::Svg)`; it never
+names `usvg` or `VectorImage`. Natively the page loop's
+`ToMain::ImageEvents` arm (`Page::apply_image_events` in `main/page.rs`)
+takes every `ImageEvent::LoadedDocument` out of the batch, applies the rest at
+once, and spawns one task of the view per document (`parse_document`): it
+runs `dom::ImageEvent::parse_document` (over `VectorImage::parse_sealed`)
+with `tokio::task::spawn_blocking` on the `JsThread` runtime's blocking pool,
+then one entry applies the outcome, `LoadedVector` or `Failed` (also for a
+parse that panicked), through `MainThreadRuntime::apply_image_events`, so the
+registry, the natural-size relayout and the `load`/`error` follow the path
+every other report takes. The task belongs to the view's `Lifetime`, as
+`load_font_face` does: a view that ends mid-parse aborts it, and an entry into
+an ended view runs nothing, so nothing is applied; the parse runs to its end
+on the pool and its result is dropped. The builder sets no
+`max_blocking_threads`, so tokio's default cap applies. Group teardown does
+not wait for a parse in flight: `JsThread` shuts its runtime down with
+`shutdown_background`, so the parse is detached rather than joined (the
+closure owns only the bytes and the source URL), and `LynxGroup`'s release,
+which joins `bobcat-main` on the embedder's thread, does not stall on it. The
+source stays
+`Pending` meanwhile; a second report for it parses again, and the registry's
+never-regresses rule makes the later apply a no-op. On wasm32 there is no
+blocking pool and the batch applies unchanged: `dom` parses the document
+inline. `bobcat-core` has no direct `usvg` dependency. An inline `<svg>`
+root is not a reported document: `dom` serialises and parses it inline on the
+document thread at the start of `Document::layout`, and nothing here sees it.
+
 #### Workers, the BTS and cross-thread messages
 
 **A group also owns a second thread and a second `QuickJS` runtime,
@@ -1478,14 +1508,18 @@ they cascade in, and `PageConfig`; `tree/lib.rs` only mints the document they
 describe. Attribute policy stays in each tag's module. Numeric text and list
 attributes use UA `attr()` declarations and registered custom properties;
 `tail-color-convert` uses an attribute selector. Only image resources, blur
-hints, the swiper's item count, the refresh view's slot assignment, the
-dialog's `:open`/`:modal` state and the overlay's top-layer membership and
+hints, the swiper's item count, the refresh view's slot
+assignment, the dialog's `:open`/`:modal` state and the overlay's top-layer membership and
 events need `dom::CustomElement` callbacks. Runtime attribute members perform
 DOM mutations; Stylo tracks attribute dependencies and recascades on changes.
 The UA assembly order is mostly documentation, with one exception that is
 mechanism: `image`'s child suppression ties on specificity with the `display`
 rules `view`, `scroll-view`, `list`, `blur-view`, `x-blur-view` and `wrapper`
-carry, so it wins only by being assembled last.
+carry, so it wins only by being assembled last. `svg` has no tag module: it is
+the standard element, implemented in `dom` (below), and the sheet gives it
+only `svg { display: flex; }` and the shared box block. The Lynx
+`<svg src|content|bindload>` component is deliberately not provided
+(`docs/svg-vector-images-design.md`, revision 3).
 
 The native host-module functions call `dom::Document` directly. Element
 identity is the DOM `NodeId`, which is also the element's Lynx `unique_id` —
@@ -1667,7 +1701,8 @@ including pending loads and failures, are shared by resolved URL within a
 resource scope. Preload hints populate that same cache; registration changes
 invalidate the affected URLs.
 
-**Platform image decoding**: no codec is compiled in — `ImageIO` on macOS
+**Platform image decoding** (raster images; SVG is parsed, below): no codec
+is compiled in — `ImageIO` on macOS
 (`CGImageSourceCreateThumbnailAtIndex` with a maximum pixel size, so a photo
 shown small is decoded small), gdk-pixbuf on Linux (loaded at runtime;
 `gdk_pixbuf_loader_set_size` from the header probe), and the main thread's
@@ -1683,6 +1718,24 @@ closure becomes that image's or source's reported failure. In the browser a
 load is a local task instead. Either way completions are delivered through the
 wakeup the embedder supplies and applied in the next `LynxView::pump` through
 `service_images`.
+
+**SVG documents are neither decoded nor parsed here**, on any target: once
+preprocessing settles `ImageFormat::Svg`, the load takes no decode permit and
+hands nothing to the platform decoder; it completes as
+`Completion::LoadedDocument` with the preprocessed bytes (an image's bytes,
+unchanged) and `DocumentKind::Svg`, natively straight out of the
+blocking-pool closure that fetched them and inline in the browser's local
+task, and servicing reports it through `ImageReports::loaded_document`. The
+engine parses (see `crates/bobcat-core`), so this crate has no `usvg`
+dependency and names no `VectorImage`; a document the engine cannot read is
+the engine's failure to record, and the host records none. The browser's
+`Image` element never sees an SVG. The bytes stay in an `Entry::Document {
+bytes, kind }`: a repeated `request` re-reports `loaded_document` with the
+same bytes, `knows_image` is true, `is_resident` is false, `read` answers
+`None` (so the memory tier, refinement and restore never see it), and
+`memory_used_bytes` counts the bytes under the encoded-bytes figure. A
+document labelled with a specific non-SVG type such as `text/plain` is
+trusted as that type and is not an image (`mime::sniff`).
 
 The frame reads each image at the size it draws it: a resident bitmap far
 larger than its draw is re-decoded at the drawn size in the background and
@@ -2252,6 +2305,63 @@ Subsystems:
   committed frame's compose program, so it reads `CommittedFrame`'s filter side
   table, while still naming no node, style, layout or paint-order type.
 
+**Vector images** (`docs/svg-vector-images-design.md`): an SVG document used
+as an image — `<image src>`, `background-image`, `mask-image` — reaches the
+document as its bytes: a host reports `ImageReports::loaded_document(source,
+bytes, DocumentKind::Svg)`, carried by `ImageEvent::LoadedDocument`
+(`DocumentKind` is `#[non_exhaustive]`, so a second engine-drawn format is
+one more variant). `dom` owns the parse, the crate-private
+`VectorImage::parse_sealed` (one
+`roxmltree` parse, the root's `width`, `height` and `viewBox` read for the
+natural size and viewport, then `usvg::Tree::from_xmltree`, with
+`usvg::Options` that read nothing outside the document: `resources_dir: None`
+and a `resolve_string` that answers `None`, so only a nested `data:` image
+resolves), and produces a `VectorImage` (an `Arc<usvg::Tree>`, its natural
+size in whole CSS px and its viewport in tree units); no `VectorImage`
+method is public, and `ImageEvent::parse_document` is the only entry to the
+parse from outside `dom`. `ImageEvent::LoadedVector` is the engine-internal
+already-parsed form, which `bobcat-core` produces off the document thread
+(`ImageEvent::parse_document`); no host reports it.
+`Document::apply_image_events` accepts both: a `LoadedDocument` whose source
+is still pending is parsed inline there (the path for `dom`'s own tests,
+flashbulb's `TestImages` and the wasm32 build, which have no blocking pool in
+front of it), and a document that does not parse marks the source `Failed`.
+The registry keeps the image in `ImageState::Ready { kind:
+ImageKind::Vector(..) }` and `resolve` lends it to the walk. `paint/svg.rs` encodes the tree into a vello scene once, cached in
+the image, and `paint/background.rs` appends that scene inline into the
+fragment for each visible tile under a clip pair, scaled by `extent /
+viewport`, so a vector image is never an image draw and `FrameImages` never
+sees it. A document with nothing drawable encodes nothing at all, not even
+the clip pair. `usvg` is built with no default features (no `text`, no
+`svgz`), and masks, filters, patterns and nested raster images are recorded
+gaps listed in `paint/painter.rs`.
+
+**The standard `<svg>` element** (a subset; `tree/inline_svg.rs`,
+`tree/svg_markup.rs`) is the second producer of vector images. An element
+named `svg` is replaced content from `create_element`, so layout treats it as a
+leaf; its descendants are ordinary DOM nodes. A node's inline SVG root is the
+topmost `svg` on the walk up from it through elements whose names usvg reads
+(the 53 names of usvg 0.48's `EId`; a text node starts at its parent), so a
+nested `svg` belongs to its outer root, and an `svg` under a Lynx `<text>` or
+`<image>` (both names are in that set) is still a root. Every mutation inside
+a root (attribute, class, id or `style` on the root or a descendant, a text
+node's data, a child inserted, moved or removed) marks it, gated by a count of
+live `svg` elements so a document with none pays one integer test. The start
+of `Document::layout` (not only `commit`: everything that reads layout comes
+through it) re-resolves the marks to their current roots and, per root,
+serialises the subtree (root `xmlns` and `xmlns:xlink`, escaped values and
+text, names that would fail the XML parse skipped, shadow trees excluded),
+parses it with `ImageEvent::parse_document` inline on the document thread,
+files the result with `ImageRegistry::insert_synthetic` under
+`inline-svg:<node>:<generation>` (created settled, so no walk or bind ever
+asks the host for it), binds the root to it as `ImageRole::Source` (no `load`
+is fired), and `forget_synthetic`s the previous generation; a freed root
+forgets its source. Synthetic entries are the one kind the registry removes.
+The root's `width`/`height` attributes are presentational hints (a bare
+number is px). SVG descendants are not styled by the engine's cascade, not
+hit-tested and take no events. `Document::image_source` reads the bound
+source; `knows_image_source` is a test-only registry probe.
+
 Rulings and limits to know before touching it:
 
 - The whole `unsafe` surface is two blocks, each with a `SAFETY` comment kept
@@ -2471,6 +2581,10 @@ this workspace, and deliberately a test double: it fetches, decodes and evicts
 nothing. `pump_images` drives one round of the document-to-host image protocol
 (every source `take_wanted_images` named, then the reports back through
 `apply_image_events`) and `render_with_images` loops that to quiescence.
+`TestImages::insert_svg(source, &str)` reports an SVG document as its bytes
+through `loaded_document`, as a production host does, so the document's
+inline parse is what a vector-image test exercises; flashbulb parses nothing
+and has no `usvg` dependency.
 `headless` requires a usable GPU adapter and panics without one, so local and
 CI runs obey the same mandatory-GPU policy. DOM-aware screenshot suites live in
 `dom`, which also keeps the direct GPU smoke tests. Goldens are not

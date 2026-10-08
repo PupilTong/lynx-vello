@@ -216,6 +216,133 @@ Prefetch (`lynx.prefetchImage`/priority+cache-target API) exists only on Android
 | Fade-in transition on load | iOS-only: 0.3s `CATransition` fade when new (non-cached) image arrives, gated by `enableFadeIn` | Rare | N/A (cosmetic, not required for behavior parity) | Optional nice-to-have; skip for v1 functional parity, revisit for polish pass | `lynx/platform/darwin/ios/lynx/ui/image/LynxUIImage.mm:452-460` |
 | "big image" OOM warning | iOS-only dev warning when decoded image is disproportionately larger than its view (memory-budget guardrail) | Rare | N/A | Consider a debug-only lint/warning in lynx-vello's dev tooling, not required for runtime behavior | `lynx/platform/darwin/ios/lynx/ui/image/LynxUIImage.mm:692-718` |
 
+#### SVG
+
+Where each reference renders an SVG document:
+
+- **Native.** `<image>` does not: "Does `<image>` support SVG? No. For SVG
+  images, please use the `<svg>` component"
+  (`lynx/js_libraries/types/skills/image.md:268-269`). `<svg>` renders
+  through ServalSVG for the element's frame: iOS rasterises a `UIImage` at
+  frame size × screen scale (`lynx/platform/darwin/ios/lynx_xelement/svg/LynxUISVG.m:142-152`),
+  Android records a `Picture` for the frame rect
+  (`lynx/platform/android/lynx_xelement/lynx_xelement_svg/src/main/java/com/lynx/xelement/svg/LynxUISVG.kt:210-213`).
+  It supports a fixed tag subset (`svg g defs use path rect circle ellipse
+  line polyline polygon text image clipPath linearGradient radialGradient
+  stop`, `lynx/js_libraries/types/skills/svg.md:40-60`), and its size must
+  come from CSS `width`/`height`, not from the document's `viewBox`
+  (`svg.md:117-118`). The typing exposes `src`, `content`, `current-color`
+  (iOS, Android and Harmony only) and `bindload`
+  (`lynx/js_libraries/types/types/common/element/svg.d.ts`). `mask-image`
+  ships with the note "src(), image() functions and svg elements reference
+  are not supported" on Android and iOS
+  (`lynx/tools/css_generator/css_defines/170-mask-image.json:23,28`).
+- **web-core.** `x-svg` is a shadow `<img>`: `src` is assigned to `img.src`,
+  `content` becomes a `Blob` URL of type `image/svg+xml`
+  (`lynx-stack/packages/web-platform/web-elements/src/elements/XSvg/XSvg.ts:35-48`),
+  and `load` carries the `<img>`'s `naturalWidth`/`naturalHeight`
+  (`XSvg.ts:64-69`). `_handleContent(null)` revokes the previous Blob URL
+  and leaves `img.src` as it was. The tag map sends `svg` to `x-svg`
+  (`lynx-stack/packages/web-platform/web-core/src/constants.rs:50`).
+  `x-image` hands its `src` to an `<img>` as well (`XImage/ImageSrc.ts:28-31`),
+  and CSS `url()` images go to the browser, so web-core renders SVG in
+  `<image src>`, `background-image` and `mask-image`, with the browser's
+  full SVG support.
+
+lynx-vello (2026-10-08, design in `docs/svg-vector-images-design.md`)
+renders SVG documents in `<image src>`, `background-image` and `mask-image`,
+following web-core (native's `<image>` refuses SVG), and draws the standard
+`<svg>` element's subtree. The Lynx `<svg src|content|bindload>` component is
+deliberately not provided (ruled 2026-10-08, revision 3): `svg` is the
+browser's standard element as a subset (step 7). An SVG stays a vector image
+from parse to paint; it never becomes a bitmap. A document has two producers,
+a host's fetch (steps 1 and 2) and an inline `<svg>` root (step 7); both meet
+at the parse:
+
+1. **Fetch, in `bobcat-resources`.** When the MIME preprocessing step
+   classifies a payload as `ImageFormat::Svg`, the host neither decodes nor
+   parses it: the load takes no decode permit, skips the platform decoder,
+   and reports the preprocessed bytes (an image's bytes, unchanged) through
+   `ImageReports::loaded_document(source, bytes, DocumentKind::Svg)`. The
+   browser embedder does not decode SVG through `HTMLImageElement`, so every
+   target hands over the same bytes. The resources entry keeps the bytes to
+   answer a repeated request with the same report; they count toward
+   `memory_used_bytes` as encoded bytes, and nothing enters the bitmap
+   memory tier.
+2. **Parse, in the engine.** The bytes cross to the Lynx main thread inside
+   the existing `ToMain::ImageEvents` message as
+   `ImageEvent::LoadedDocument`. Natively `bobcat-core` takes each one out of
+   the batch and parses it with `tokio::task::spawn_blocking` on that
+   thread's blocking pool, then one entry applies the outcome, a parsed
+   vector image or a failure, through the same `apply_image_events` as every
+   other report; a view that ends mid-parse applies nothing. On wasm32
+   `dom::Document::apply_image_events` parses inline. The parse is
+   the crate-private `dom::VectorImage::parse_sealed`, reached through
+   `dom::ImageEvent::parse_document`, with `usvg` built with
+   `default-features = false` (no `text`, no system fonts, no `svgz`): one
+   XML parse reads the root's `width`, `height` and `viewBox` and builds the
+   tree. A string `href` inside the document is never resolved (the resolver
+   answers `None` instead of reading the filesystem); `data:` hrefs keep
+   usvg's default. A document that does not parse fails its source in the
+   document's registry (`error` on `<image>`).
+3. **Size.** The natural size reported to layout is CSS Images 3 §4.1
+   default sizing (web-core), in CSS px rounded to whole px: `width` and
+   `height` when both are absolute; one of them plus the viewBox ratio; the
+   largest viewBox-ratio size that fits 300×150; else 300×150. A root
+   dimension is absolute when it is a bare number or a length in `px`, `in`,
+   `cm`, `mm`, `pt` or `pc`, converted at 96 px per inch (`10mm` is 38 px);
+   `em`, `ex`, percentages and any other unit count as absent.
+4. **Registry.** The parsed tree is held by `dom`'s image registry as a
+   ready vector image. The painter's `FrameImages`, the atlas and
+   `ImageSizeHint` never see it, so native's "decode to the view size" has
+   nothing to do here.
+5. **Paint, in `dom`.** `paint/svg.rs` encodes the tree into a vello scene
+   once and caches it. Where `paint/background.rs` would emit an image draw
+   (replaced content for `<image>` and an inline `<svg>` root, a background
+   layer, a mask
+   layer), a vector appends that scene into the frame's fragment under a
+   clip and a transform, one append per visible tile; destination rectangle,
+   `object-fit`/`object-position`, `background-size`, position and repeat
+   come from the same code as for a raster. The painter replays the fragment
+   unchanged.
+6. **Events.** `<image>` with an SVG `src` fires `load` with the natural size,
+   as for a raster, and `error` when the document does not parse. The
+   standard `<svg>` fires neither.
+7. **The inline `<svg>` root, in `dom`** (`crates/dom/src/tree/inline_svg.rs`).
+   The second producer of documents, and parsed inline on the document
+   thread, as browsers parse inline SVG on their main thread. An element named
+   `svg` is replaced content from its creation; its descendants are ordinary
+   DOM nodes. A node's root is the topmost `svg` on the walk up through
+   elements whose names `usvg` reads, so a nested `svg` belongs to its outer
+   root. Any mutation inside a root (an attribute, class, id or `style`, a
+   text node's data, a child inserted, moved or removed) marks it, and the
+   start of the next `Document::layout` serialises the subtree to markup
+   (`tree/svg_markup.rs`: root `xmlns` and `xmlns:xlink`, escaped values and
+   text, names that would fail the XML parse skipped), parses it through the
+   same `ImageEvent::parse_document` as step 2, and files the result in the
+   registry under a synthetic source, `inline-svg:<node>:<generation>`,
+   created already settled. The host never sees that source: no paint walk
+   or bind asks for it, and nothing crosses to the painter thread but the
+   frame. The root is bound to it as its image source, and the previous
+   generation's entry is removed (synthetic entries are the one kind the
+   registry removes; a freed root removes its own). The root's `width` and
+   `height` attributes are presentational hints, so author CSS overrides
+   them; with neither, step 3's natural size applies. From the registry on,
+   steps 4 and 5 are unchanged.
+
+The walker draws path fills and strokes (fill rule, width, cap, join, miter
+limit, dashes, paint order), solid colours, linear and radial gradients
+(spread methods, focal circle, gradient transform), group opacity and blend
+modes, `clipPath` (a multi-child clip uses the concatenated child paths
+under the nonzero rule, an approximation of their union) and nested SVG
+images. Gaps, each documented in [components.md](components.md)'s `x-svg`
+row: `<text>` vanishes at parse, a group with a `mask` is skipped rather
+than drawn unmasked, `filter` is ignored, `pattern` paint and a nested raster
+`<image>` draw nothing, `.svgz` fails to parse, and the `current-color`
+attribute is not implemented. `mask-image: url(#id)` and `clip-path:
+url(#id)` element references remain unsupported (see
+[css-visual.md](css-visual.md)).
+
 ---
 
 ## Also see
