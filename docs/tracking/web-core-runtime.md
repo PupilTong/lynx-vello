@@ -116,8 +116,8 @@ realm's root module, as every worker's root module is the module at its URL.
 It imports `bobcat:worker` and `bobcat:timers`
 itself, which is where the BTS's global scope and timers come from. The BTS
 is a dedicated worker whose URL is `bobcat:bts`: every worker is started from
-the same kind of `Start`, and the BTS differs only in its URL and the source
-its diagnostics are named by. `ViewSources.background_entry`
+the same kind of `Start`, and the BTS differs only in its URL, which the
+source its diagnostics are named by carries. `ViewSources.background_entry`
 selects an optional module; native/browser XML adapters supply the
 background section's URL, where `bobcat-source` registered the section as the
 `CommonJS` chunk web-core runs it as, prefixed with `BTS_CHUNK_PREAMBLE`. The MTS

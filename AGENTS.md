@@ -1017,7 +1017,8 @@ the kind of entry they happened in, also where the code that failed was a
 continuation that entry resumed, and none of them is fatal: the realm goes
 on, the walk continues, a repeating timer stays armed, and later events and
 timers are delivered as normal. The two worker events are not fatal either;
-each carries the worker's `ScriptSource` (`Background` or `Worker(WorkerId)`),
+each carries the worker's `ScriptSource` (`Worker { id, url }`, whose `url` is
+`bobcat:bts` for the BTS),
 is reported before the creating realm's `Worker` object dispatches its `error`
 event, so no listener there suppresses it, and is reported only while the
 script still holds that worker's key: never after `terminate()`, and never for
@@ -1149,9 +1150,9 @@ its key, its name, its URL, the receiving end of its message channel, the
 sender its events go back on — the creating MTS realm's `WorkerEvent` channel
 — the Worker's own cancellation token, and the `HostOutbox` it asks the
 view's host through. It carries neither a script nor a `ScriptSource`: the
-worker's realm asks for its own script, and both threads derive the source
-from the URL and the key (`background::worker_source`). There is no worker
-kind: the BTS is the
+worker's realm asks for its own script, and both threads write the source
+from the key and the URL, as `ScriptSource::Worker { id, url }`. There is no
+worker kind: the BTS is the
 dedicated worker whose URL is `bobcat:bts`, and nothing of the view's data is
 in its `Start`: that reaches it in the `initialize` message. The
 worker's realm opens as its `Start` is served, the way a view's opens as that
@@ -1179,9 +1180,10 @@ never linked, and reading the namespace of such a module crashes QuickJS.
 MTS routes events through weak references to JS Worker objects; their
 finalizers and explicit `terminate()` release sending handles, and releasing
 the MTS realm closes its remaining senders. Apart from those handles, the
-realm's `WorkerOwner` records each key's public `ScriptSource` (`Background`,
-or `Worker(WorkerId)`; the value is `worker_source(url, key)`, which the
-worker thread calls too) from the moment the key is allocated until
+realm's `WorkerOwner` records each key's public `ScriptSource`
+(`Worker { id, url }`: the key's id and the worker's script URL, the value the
+worker thread writes too, from the same `Start`) from the moment the key is
+allocated until
 `terminate()` or delivery of the worker's own end, so a worker that fails
 before it is started has a source too; `WorkerThrew` and `WorkerEnded` carry
 it, and a key without one reports neither — so a trap that reaches a worker
@@ -1246,9 +1248,9 @@ transport and lifetime boundaries.
 **After the MTS entry import settles, whether the entry succeeded or threw,
 boot creates a BTS Worker** named
 `lynx-bg` through that same class, using the engine URL `bobcat:bts`. The BTS
-is a dedicated worker like any other, started the same way: its URL is what
-names it `ScriptSource::Background` (`worker_source`), and nothing else in
-Rust tells it apart. That URL is a registered module (`bts.ts`) and the BTS
+is a dedicated worker like any other, started the same way, and Rust has no
+check that tells it apart: its URL is the `url` of its `ScriptSource`, as
+every worker's is. That URL is a registered module (`bts.ts`) and the BTS
 realm's root module: it imports `bobcat:worker` and `bobcat:timers` (the
 BTS's global scope and timers), installs its JS initializer from
 `bobcat:bts-runtime` and returns, with no top-level `await`, so the first
@@ -1305,7 +1307,7 @@ through the worker global's `reportError`, reaching the parent `Worker`'s
 `queueMicrotask` or `lynx.fetchBundle` callback that throws the same way, as an
 uncaught exception of its realm. Only its disposal hook's throw and a misused
 `SelectorQuery` go through `lynx.reportError`, as a `ScriptReported` from
-`ScriptSource::Background`; the hook's has to, because it must reach the host
+the BTS's `ScriptSource`; the hook's has to, because it must reach the host
 before the `disposed` reply lets MTS terminate the Worker. Origins identify
 the sending CoreContext or JSContext. MTS
 queues payload references until the Worker is connected; Worker postMessage
@@ -1328,7 +1330,7 @@ committed. The BTS Worker's state is no part of it, so a BTS entry whose
 top-level await never settles does not keep the view from becoming ready. A BTS
 entry that throws is reported like any worker script: `reportError` in the
 worker realm surfaces it at the `Worker`'s `error` event and as a nonfatal
-`WorkerThrew` from `ScriptSource::Background`; the BTS keeps running and still
+`WorkerThrew` from the BTS's `ScriptSource`; the BTS keeps running and still
 takes messages, and no BTS failure ends the view. MTS keeps its Worker
 reference after that Worker ends; a post to an ended Worker is dropped by the
 host, and the pre-connection FIFO holds only what the MTS entry sends before
@@ -1384,9 +1386,8 @@ stylesheet, startup-string (the module table among them), event-name and
 `invokeNativeModule` in both. The constructor has no role field; it is told
 two things about a realm: the key its display-frame demand is reported under,
 `None` for MTS and the worker's key for a worker, and the `ScriptSource` its
-diagnostics carry, `Main` for MTS and, for a worker, the one `worker_source`
-derives from its URL and key (`Background` for the URL `bobcat:bts`, otherwise
-`Worker(WorkerId)` of its key). What it
+diagnostics carry, `Main` for MTS and, for a worker, `Worker { id, url }`
+over its key and its URL, whatever that URL is. What it
 answers with, `RealmCore { engine, timers, futures }`, is the first field of
 both `MainThreadRuntime` and the worker thread's `WorkerRealm`.
 
@@ -1944,6 +1945,8 @@ failure, as `CliError::StartView`, and any other fatal event (`Panicked`) as
 `CliError::Script`. Every other event is printed to standard error and the run
 goes on: `ScriptRunError`, `ListenerFailed`, `TimerFailed`, `WorkerThrew` and
 `WorkerEnded`, and the realms' diagnostics as `[{source}] [{level}] {message}`.
+A `ScriptSource` prints as `main` or as `worker <id> <url>`, so the BTS's lines
+begin `[worker <id> bobcat:bts]`.
 Headed mode builds its painter over the window; headless builds one over
 `DrawTarget::Offscreen` and relays synthetic vsync ticks into `Painter::tick`,
 whether a tick becomes GPU work being the engine's decision. Fields drop in the

@@ -135,7 +135,7 @@ member `nativeModuleTable`, beside `initData` and `globalProps`.
 BTS entry. So `initialize` carries the page's data, the BTS entry's URL, the
 MTS realm's `SystemInfo` and this record, and the BTS's `WorkerStart` carries
 none of the view's data: it differs from any other worker's only in its URL,
-which is also what names it `ScriptSource::Background`. A plain `Worker` is
+which its `ScriptSource` carries as every worker's does. A plain `Worker` is
 posted no `initialize`, so its
 `NativeModules` is empty. Every realm kind declares the host module
 `bobcat-internal:native-modules`, with `invokeNativeModule` alone, so the
@@ -781,9 +781,8 @@ constructor names no realm kind. It is told two things: the key the realm's
 display-frame demand is reported under, `None` for an MTS realm and the
 worker's key for a worker realm, and the `ScriptSource` its `ScriptReported`
 and `ConsoleMessage` carry, `Main` for
-an MTS realm and, for a worker realm, the one `worker_source` derives from
-its URL and key:
-`Background` for the URL `bobcat:bts`, otherwise `Worker(WorkerId)`. Since
+an MTS realm and, for a worker realm, `Worker { id, url }`: the id of its
+key and its script URL, whatever that URL is. Since
 both runtimes register
 every built-in module, these host modules are also what decides which
 built-ins a realm can link.
@@ -847,9 +846,10 @@ itself — to the creating view's entry response URL, which the realm holds as
 `__Card__` and passes as the third argument; Rust does not keep it. A URL that
 does not resolve allocates no key, sends no `Start` and requests nothing, and
 `new Worker` throws HTML's synchronous `SyntaxError`. There is one kind of
-worker. The BTS is the dedicated worker whose URL is `bobcat:bts`, and the URL
-alone decides the one thing Rust tells workers apart by: only `bobcat:bts` is
-named `ScriptSource::Background`. Whether a URL is requested from the host is
+worker. The BTS is the dedicated worker whose URL is `bobcat:bts`, and Rust
+has no check that tells it apart: every worker is named
+`ScriptSource::Worker { id, url }`, and the BTS's `url` is `bobcat:bts`.
+Whether a URL is requested from the host is
 the answer of the realm's module loader, as for any import, and `createWorker`
 neither asks the host for anything nor checks a prefix. No `Start` carries the
 view's data: the MTS realm posts it to the BTS in the `initialize` message.
@@ -912,13 +912,14 @@ Worker keys are allocated once per group on main and never reused. A worker's
 whole state is its own task; `bobcat-main` keeps two things per worker. One is
 the sending end of its message channel, and only while that worker runs — a
 worker that closed itself or failed is forgotten where the realm learns of it,
-when that event is dispatched. The other is its `ScriptSource` (`Background`
-for `bobcat:bts`, `Worker(WorkerId)` for any other URL), recorded when the key
-is allocated, before the `Start` is sent, and removed
+when that event is dispatched. The other is its `ScriptSource`,
+`Worker { id, url }` over the key and the worker's script URL, recorded when
+the key is allocated, before the `Start` is sent, and removed
 at `terminate()` or at that same dispatch; a worker that fails before it is
 started, and so never had a channel here, has one too. The `Start` carries no
-source: the worker thread derives the same value from the same URL and key,
-with the same function (`worker_source`). MTS keeps
+source: the worker thread writes the same value from the key and the URL the
+`Start` carries, with no branch on the URL. A source prints as `main` or as
+`worker <id> <url>`, so the BTS's is `worker <id> bobcat:bts`. MTS keeps
 `WeakRef<Worker>` values for event routing; a JS `FinalizationRegistry`
 releases an unreachable Worker's sending handle.
 A reachable Worker survives collection. Explicit `terminate()` uses the same
@@ -965,13 +966,14 @@ the MTS realm, and through the worker global's `reportError`, hence the parent
 `Worker`'s `error` event and a nonfatal `WorkerThrew`, in a worker realm. The
 BTS treats an animation-frame, `queueMicrotask` or `lynx.fetchBundle`
 callback that throws as the same uncaught exception; its `lynx.reportError`
-is a diagnostic instead, a `ScriptReported` from `ScriptSource::Background`
+is a diagnostic instead, a `ScriptReported` from the BTS's `ScriptSource`
 sent to the host by the BTS realm itself.
 
 Each MTS boot starts one BTS Worker named `lynx-bg` once its entry import has
 settled, whether the entry succeeded or threw.
 Boot constructs it through the same `bobcat-internal` class, using the engine
-URL `bobcat:bts`, which is what tells the BTS apart. All workers use the same
+URL `bobcat:bts`, the only thing in which the BTS differs from another worker.
+All workers use the same
 protocol, and each one's root module is the module at its URL. BTS `lynx` is an ESM export from
 `bobcat:bts-runtime`; neither MTS nor BTS sets `globalThis.lynx`. A BTS
 application has the bindings it needs, `lynx` included, as imports of
@@ -1031,8 +1033,9 @@ throws at the `dispatchEvent` call. That pre-connection queue is only for
 messages the MTS entry itself produces, before boot constructs the Worker; it
 is not a holding area for anything else. The worker's task queues what
 is posted until its entry has evaluated. Worker release, source cancellation
-and `WorkerThrew` / `WorkerEnded` reporting apply to BTS too, from
-`ScriptSource::Background`. `ScriptFinished` means MTS boot finished: the
+and `WorkerThrew` / `WorkerEnded` reporting apply to BTS too, from the
+`ScriptSource::Worker` whose URL is `bobcat:bts`. `ScriptFinished` means MTS
+boot finished: the
 entry module evaluated, its top-level await settled, and its first flush
 committed. The BTS Worker's state — still importing its entry, its
 entry threw, or it ended — is no part of that, so a BTS entry whose top-level

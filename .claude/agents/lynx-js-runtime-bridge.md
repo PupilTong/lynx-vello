@@ -59,10 +59,11 @@ and `bobcat-workers` (every Worker realm, including the BTS).
   reported. "Has run" is `WorkerFlags::scope_installed`, set by
   `bobcat:worker`'s read of `workerName`, its last statement, never an
   instance check: a module a failed or pending graph compiled is never
-  linked, and reading its namespace crashes QuickJS. The source is derived
-  from the URL and the key by `background::worker_source`, which
-  `WorkerOwner::start` and the worker thread both call: `bobcat:bts` is
-  `ScriptSource::Background`, every other URL `Worker(id)`; every `Start` is
+  linked, and reading its namespace crashes QuickJS. The source is
+  `ScriptSource::Worker { id, url }`, written from the key and the URL by
+  `WorkerOwner::start` and by the worker thread, with no branch on the URL:
+  Rust has no check that tells the BTS apart, and its label carries the URL
+  `bobcat:bts` and prints as `worker <id> bobcat:bts`; every `Start` is
   built the same way and carries neither a script nor a source. The BTS's data
   — its entry URL, the MTS realm's own `SystemInfo` and the view's native
   module table — reaches it in the `initialize` message
@@ -186,8 +187,9 @@ Landed and not to be regressed:
   never kept for the next entry.
 - The BTS is a `Worker` named `lynx-bg` on the group's `bobcat-workers` runtime.
   A BTS failure is a nonfatal `EngineEvent::WorkerThrew` (it threw and still
-  runs) or `WorkerEnded` (it ended without being told to) from
-  `ScriptSource::Background` — never `StartupFailed`, never view teardown.
+  runs) or `WorkerEnded` (it ended without being told to) from the
+  `ScriptSource::Worker` whose URL is `bobcat:bts` — never `StartupFailed`,
+  never view teardown.
   `ScriptFinished` means MTS boot settled and says nothing about the BTS.
 - A worker event names its worker by the `ScriptSource` the realm's
   `WorkerOwner` recorded when it allocated the key, and is reported before the

@@ -296,9 +296,17 @@ fn sources(background: &str) -> ViewSources {
 
 /// Pumps `view` until the background realm prints, and answers with what it
 /// printed first.
+///
+/// The background realm is the worker whose URL is `bobcat:bts`, which is the
+/// comparison an embedder makes. Its id is 1 here: each test's group has one
+/// view, whose entry constructs no worker, so boot's BTS is the group's first.
 fn first_console_message(view: &mut LynxView<Entries>) -> String {
     let (source, message) = first_console_output(view);
-    assert_eq!(source, ScriptSource::Background, "{message}");
+    let ScriptSource::Worker { id, url } = &source else {
+        panic!("{source} printed first: {message}");
+    };
+    assert_eq!(&**url, "bobcat:bts", "{message}");
+    assert_eq!(id.to_string(), "1", "{message}");
     message
 }
 

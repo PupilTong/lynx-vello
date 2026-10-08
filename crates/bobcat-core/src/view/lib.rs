@@ -376,8 +376,8 @@ pub enum EngineEvent {
     /// differs for the worker's own script: it never runs a worker whose
     /// script fetch failed (`docs/tracking/deviations.md`).
     ///
-    /// `source` is [`ScriptSource::Background`] or a
-    /// [`ScriptSource::Worker`]. Both worker events are reported before the
+    /// `source` is a [`ScriptSource::Worker`], whose URL is `bobcat:bts` for
+    /// the BTS Worker. Both worker events are reported before the
     /// creating realm's `Worker` object dispatches its `error` event, so a
     /// listener there, `preventDefault()` included, has no effect on them.
     /// Neither is reported for a worker its script has already let go of,
@@ -450,25 +450,38 @@ impl EngineEvent {
 
 /// The realm of a view that a script event came from.
 ///
-/// A view runs script in three kinds of realm: its main-thread realm, its
-/// background thread (BTS), which boot creates as a built-in `Worker`, and
-/// each `Worker` its main-thread script constructs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// A view runs script in its main-thread realm and in workers. The view's
+/// background thread (BTS) is a worker like any other: the one boot creates
+/// over the URL `bobcat:bts`. The engine has no other name for it and no
+/// check that tells it apart, so an embedder that needs to know whether an
+/// event came from the background thread compares `url` with `bobcat:bts`.
+/// A worker the view's script constructs over that URL carries the same
+/// `url` and an `id` of its own.
+///
+/// Printed as `main`, or as `worker <id> <url>`: `worker 1 bobcat:bts`,
+/// `worker 4 app:///nested/worker.js`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ScriptSource {
     /// The view's main-thread realm.
     Main,
-    /// The view's background thread.
-    Background,
-    /// A `Worker` the view's main-thread script constructed.
-    Worker(WorkerId),
+    /// A worker's realm: the view's background thread, or a `Worker` the
+    /// view's main-thread script constructed.
+    Worker {
+        /// Tells this worker from every other of its group, including one
+        /// constructed over the same URL.
+        id: WorkerId,
+        /// The worker's script URL as `new Worker` resolved it: the
+        /// specifier joined by URL rules to the response URL of the view's
+        /// entry. A script answered from another URL leaves it as it is.
+        url: Arc<str>,
+    },
 }
 
 impl fmt::Display for ScriptSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Main => formatter.write_str("main"),
-            Self::Background => formatter.write_str("background"),
-            Self::Worker(id) => write!(formatter, "worker {id}"),
+            Self::Worker { id, url } => write!(formatter, "worker {id} {url}"),
         }
     }
 }
@@ -647,9 +660,9 @@ pub struct ViewSources {
     /// Neither MTS evaluation nor [`EngineEvent::ScriptFinished`] waits for it:
     /// a host update accepted while the BTS entry is still importing is
     /// forwarded to the Worker, which queues it behind that import. An entry
-    /// that throws is reported as [`EngineEvent::WorkerThrew`] from
-    /// [`ScriptSource::Background`], like any worker script, and leaves the
-    /// view and the BTS Worker running.
+    /// that throws is reported as [`EngineEvent::WorkerThrew`] from the
+    /// [`ScriptSource::Worker`] whose URL is `bobcat:bts`, like any worker
+    /// script, and leaves the view and the BTS Worker running.
     pub background_entry: Option<String>,
     /// Initial page data, as JSON text. The engine hands it to the view's
     /// realm unread, as a plain string; `bobcat:runtime` parses it there and

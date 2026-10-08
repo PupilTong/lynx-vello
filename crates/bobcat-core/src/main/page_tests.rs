@@ -3061,17 +3061,15 @@ fn a_bts_worker_that_fails_reports_worker_ended_and_leaves_boot_alone() {
                 }),
             })
             .unwrap();
+        let named = crate::ScriptSource::Worker {
+            id: crate::WorkerId::from(background.key),
+            url: "bobcat:bts".into(),
+        };
         harness
             .until("the BTS failure was never reported", |h| {
-                h.events.iter().any(|e| {
-                    matches!(
-                        e,
-                        EngineEvent::WorkerEnded {
-                            source: crate::ScriptSource::Background,
-                            ..
-                        }
-                    )
-                })
+                h.events.iter().any(
+                    |e| matches!(e, EngineEvent::WorkerEnded { source, .. } if *source == named),
+                )
             })
             .await;
         assert!(
@@ -3082,10 +3080,9 @@ fn a_bts_worker_that_fails_reports_worker_ended_and_leaves_boot_alone() {
             .events
             .iter()
             .filter_map(|event| match event {
-                EngineEvent::WorkerEnded {
-                    source: crate::ScriptSource::Background,
-                    error,
-                } => Some(error.to_string()),
+                EngineEvent::WorkerEnded { source, error } if *source == named => {
+                    Some(error.to_string())
+                }
                 EngineEvent::StartupFailed(_)
                 | EngineEvent::ListenerFailed(_)
                 | EngineEvent::ScriptRunError(_)

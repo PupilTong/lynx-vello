@@ -18,13 +18,13 @@ use tokio_util::sync::CancellationToken;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::background::{
-    WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart, worker_source,
+    WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart,
 };
 use crate::esm::HOST_MODULE_SPECIFIER;
 use crate::link::{ViewNotice, ViewOutbox};
 use crate::script::ScriptError;
 use crate::threads::platform_script_error;
-use crate::view::ScriptSource;
+use crate::view::{ScriptSource, WorkerId};
 
 /// Issued on bobcat-main, once per group. No cross-thread allocator or lock:
 /// the one thing it reads across threads is the worker thread's trap flag.
@@ -182,11 +182,12 @@ impl WorkerOwner {
     /// end of its message channel, while the worker runs.
     ///
     /// The worker's source is recorded before anything is sent, so a worker
-    /// that fails at once has one too. It is derived from the worker's URL
-    /// and key by the function the worker thread names the realm with, so
-    /// the `Start` does not carry it. Neither a Worker nor a request it
-    /// makes of the host inherits the view's cancellation token: both end
-    /// with the token `start` carries.
+    /// that fails at once has one too. It is the id of the worker's key and
+    /// the worker's URL, whatever that URL is, and the worker thread writes
+    /// the same value from the same `Start` when it opens the realm, so the
+    /// `Start` carries no source. Neither a Worker nor a request it makes of
+    /// the host inherits the view's cancellation token: both end with the
+    /// token `start` carries.
     ///
     /// A worker thread that has trapped, or one whose inbox is closed, fails
     /// the worker at once. A worker that has already failed is still a
@@ -195,9 +196,13 @@ impl WorkerOwner {
     /// Nothing is sent to the thread or kept in `live`.
     fn start(&self, start: WorkerStart, messages: mpsc::UnboundedSender<WorkerMessage>) {
         let key = start.key;
-        self.sources
-            .borrow_mut()
-            .insert(key, worker_source(&start.url, key));
+        self.sources.borrow_mut().insert(
+            key,
+            ScriptSource::Worker {
+                id: WorkerId::from(key),
+                url: Arc::from(start.url.as_str()),
+            },
+        );
         if !self.factory.trapped.load(Ordering::Acquire) {
             self.outbox.notify(ViewNotice::WorkerCreated {
                 key,
@@ -275,7 +280,7 @@ impl WorkerOwner {
     /// Which realm the worker under `key` is, while the script still holds
     /// that key.
     pub(super) fn source_of(&self, key: WorkerKey) -> Option<ScriptSource> {
-        self.sources.borrow().get(&key).copied()
+        self.sources.borrow().get(&key).cloned()
     }
 
     /// How many workers this realm still has running.

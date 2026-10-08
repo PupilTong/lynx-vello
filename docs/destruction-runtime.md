@@ -8,7 +8,7 @@ that Promise. Reload does not dispose the application.
 The BTS message handler calls the current `app.callDestroyLifetimeFun` with the
 app receiver and no arguments. A throw is reported through `lynx.reportError`,
 which the BTS realm sends to the host itself as a `ScriptReported` from
-`ScriptSource::Background` during the call, so the report does not depend on
+the BTS's `ScriptSource` during the call, so the report does not depend on
 anything MTS receives after `disposed`: the worker global's `reportError`
 would report it only once the handler's entry ended, after the reply had been
 posted, when MTS may already have terminated the Worker and stopped hearing

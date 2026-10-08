@@ -67,8 +67,9 @@ importing its entry, its entry threw, or it ended — is no part of that, so a
 BTS entry whose top-level await never settles does not keep the view from
 becoming ready.
 A BTS entry that throws calls the worker realm's `reportError`, so it reaches
-the `Worker`'s `error` event and a nonfatal `WorkerThrew` from
-`ScriptSource::Background` like any other worker script; BTS stays up and
+the `Worker`'s `error` event and a nonfatal `WorkerThrew` from its
+`ScriptSource`, the worker whose URL is `bobcat:bts`, like any other worker
+script; BTS stays up and
 still takes messages. An animation-frame, `queueMicrotask` or
 `lynx.fetchBundle` callback of the BTS that throws is reported the same way.
 A BTS that ends without being told to — its realm could not be built, or the
@@ -124,8 +125,11 @@ The module is written over two members every realm's core has under
 `logScriptMessage(level, message)`. Each sends one
 `EngineEvent::ScriptReported` or `ConsoleMessage` to the view's host through
 the realm's own `HostOutbox`, carrying the realm's `ScriptSource` — `Main`,
-`Background`, or `Worker(WorkerId)` for a `Worker` the MTS script
-constructed — from whichever thread the realm is on. No realm relays another
+or `Worker { id, url }` for a worker, the worker's id and its script URL —
+from whichever thread the realm is on. The BTS is the worker whose `url` is
+`bobcat:bts`: Rust has no check that tells it apart, and an embedder that
+needs to know compares the URL. A source prints as `main` or as
+`worker <id> <url>`, for example `worker 1 bobcat:bts`. No realm relays another
 realm's diagnostics: a BTS or `Worker` diagnostic reaches the host while MTS is
 busy, and it is not a Worker message the MTS realm dispatches. One realm's
 diagnostics arrive in the order it made them; two realms' have no order
@@ -181,7 +185,7 @@ tests cover readiness observed through `pump()`, startup failure, an entry
 that throws and still becomes ready, early-event refusal without replay, and
 refusal after cancellation. Page-owner and runtime tests verify that
 MTS boot alone settles readiness, and that a BTS failure reports one
-`WorkerEnded` from `ScriptSource::Background` and still publishes
+`WorkerEnded` named by the BTS's id and the URL `bobcat:bts` and still publishes
 `ScriptFinished`, without a `StartupFailed`, a `WorkerThrew` or a listener
 failure. Runtime tests fix which of the two worker events a throw and an end
 report, the source each names, and that a worker stopped with `terminate()`

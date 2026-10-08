@@ -1,7 +1,7 @@
 use tokio::sync::mpsc;
 
 use super::*;
-use crate::background::{WorkerCommand, WorkerEvent, WorkerPayload, worker_source};
+use crate::background::{WorkerCommand, WorkerEvent, WorkerPayload};
 use crate::esm::build_runtime;
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, detached_outbox};
@@ -428,13 +428,12 @@ struct GroupFarEnds {
 /// A realm starts every worker the same way, from the URL its specifier joins
 /// to, and asks its host for nothing as it does: a `Start` carries neither a
 /// script nor a source, and a worker's realm asks for its own script once it
-/// boots. The BTS is the worker whose URL is `bobcat:bts`: it alone is named
-/// `Background`, and nothing in its `Start` differs but that URL, since the
-/// view's data reaches it in the `initialize` message. The source the realm
-/// records under each key and the one the worker thread names the realm by
-/// are one function of the worker's URL and key.
+/// boots. The source the realm records under each key is the id of that key
+/// and the worker's URL, at every URL: `bobcat:bts` is recorded as any other
+/// is. Boot's own BTS and the worker the entry constructs over `bobcat:bts`
+/// have that URL in common and are told apart by their ids.
 #[test]
-fn constructing_a_worker_asks_the_host_for_nothing_and_only_bobcat_bts_is_named_background() {
+fn constructing_a_worker_asks_the_host_for_nothing_and_records_its_id_and_url() {
     let (mut js, mut first, _second, mut ends) = two_view_group();
     first
         .run_main_thread_script(
@@ -449,31 +448,36 @@ fn constructing_a_worker_asks_the_host_for_nothing_and_only_bobcat_bts_is_named_
         )
         .expect("the entry constructs the three workers");
     let workers = ends.workers.as_mut().expect("the group's worker inbox");
-    // The entry's three, in the order it constructed them. Boot's own BTS
-    // follows them, once the entry has run.
+    // The entry's three, in the order it constructed them, then boot's own
+    // BTS, which boot constructs once the entry has run.
     let mut start = || {
         let Ok(WorkerCommand::Start(start)) = workers.try_recv() else {
             panic!("each `new Worker` sent one Start")
         };
         start
     };
-    let (background, fetched, engine) = (start(), start(), start());
-    assert_eq!(background.url, "bobcat:bts");
-    assert_eq!(fetched.url, "app:///w.js");
-    assert_eq!(engine.url, "bobcat:timers");
-    assert_eq!(
-        first.workers.source_of(background.key),
-        Some(ScriptSource::Background)
-    );
-    assert_eq!(
-        worker_source(&background.url, background.key),
-        ScriptSource::Background
-    );
-    for start in [&fetched, &engine] {
-        let named = ScriptSource::Worker(WorkerId::from(start.key));
-        assert_eq!(first.workers.source_of(start.key), Some(named));
-        assert_eq!(worker_source(&start.url, start.key), named);
+    let (scripted, fetched, engine, background) = (start(), start(), start(), start());
+    for (start, url) in [
+        (&scripted, "bobcat:bts"),
+        (&fetched, "app:///w.js"),
+        (&engine, "bobcat:timers"),
+        (&background, "bobcat:bts"),
+    ] {
+        assert_eq!(start.url, url);
+        assert_eq!(
+            first.workers.source_of(start.key),
+            Some(ScriptSource::Worker {
+                id: WorkerId::from(start.key),
+                url: url.into(),
+            }),
+            "the worker at {url}"
+        );
     }
+    assert_ne!(
+        first.workers.source_of(scripted.key),
+        first.workers.source_of(background.key),
+        "two workers over one URL have different ids"
+    );
     // Nothing reads this group's `Start`s but the test, so no worker has
     // booted: whatever the host was asked for, the constructing realm asked.
     while let Ok(notice) = ends.views[0].notices.try_recv() {
@@ -512,18 +516,25 @@ fn a_worker_constructed_after_its_thread_trapped_is_sent_no_start() {
                 matches!(event.payload, WorkerPayload::Failed(_)),
                 "a worker constructed on a trapped thread has failed"
             );
-            first.workers.source_of(event.key)
+            (event.key, first.workers.source_of(event.key))
         })
         .collect();
-    assert!(
-        matches!(
-            failed.as_slice(),
-            [
-                Some(ScriptSource::Worker(_)),
-                Some(ScriptSource::Background)
-            ]
-        ),
-        "the entry's worker failed at its construction, then boot's BTS: {failed:?}"
+    let [(entry_key, entry_named), (boot_key, boot_named)] = failed.as_slice() else {
+        panic!("the entry's worker failed at its construction, then boot's BTS: {failed:?}");
+    };
+    assert_eq!(
+        *entry_named,
+        Some(ScriptSource::Worker {
+            id: WorkerId::from(*entry_key),
+            url: "app:///w.js".into(),
+        })
+    );
+    assert_eq!(
+        *boot_named,
+        Some(ScriptSource::Worker {
+            id: WorkerId::from(*boot_key),
+            url: "bobcat:bts".into(),
+        })
     );
     let workers = ends.workers.as_mut().expect("the group's worker inbox");
     assert!(

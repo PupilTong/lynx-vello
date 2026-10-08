@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use super::*;
-use crate::background::{WorkerEvent, WorkerHome, WorkerPayload};
+use crate::background::{WorkerEvent, WorkerHome, WorkerKey, WorkerPayload};
 use crate::esm::build_runtime;
 use crate::jobs::JsThread;
 use crate::link::{DetachedView, ViewNotice, block_on_deadline, detached_outbox};
@@ -29,6 +29,19 @@ const BTS_ENTRY_RAN: &str = "bts-entry-ran";
 /// script by: the specifier joined by URL rules to the entry's URL,
 /// `app:///nested/main.js`.
 const WORKER_URL: &str = "app:///nested/worker.js";
+
+/// What a worker's failures and diagnostics are named by: the id of its key
+/// and its script URL, which is `bobcat:bts` for the BTS.
+///
+/// A pair is a group of its own, so its keys count from 1 in the order its
+/// realm constructs workers: the entry's, then the BTS boot creates once the
+/// entry has run.
+fn worker_label(key: u64, url: &str) -> crate::ScriptSource {
+    crate::ScriptSource::Worker {
+        id: crate::WorkerId::from(WorkerKey::new(key)),
+        url: url.into(),
+    }
+}
 
 /// Whether the worker posted exactly this string.
 ///
@@ -1352,15 +1365,11 @@ fn a_script_that_cannot_be_fetched_dispatches_one_error_and_leaves_the_worker_te
     drop(pair.source());
     pair.deliver();
     let events = worker_events(pair.notices());
-    let [
-        crate::EngineEvent::WorkerThrew {
-            source: crate::ScriptSource::Worker(_),
-            error,
-        },
-    ] = events.as_slice()
-    else {
+    let [crate::EngineEvent::WorkerThrew { source, error }] = events.as_slice() else {
         panic!("one WorkerThrew from the worker: {events:?}");
     };
+    // The entry's worker is the pair's first.
+    assert_eq!(*source, worker_label(1, WORKER_URL));
     assert!(
         error.message.contains("loading a worker module")
             && error.message.contains("without completing"),
@@ -1422,15 +1431,10 @@ fn a_worker_created_after_its_thread_trapped_fails_without_starting() {
         .dispatch_worker_event(&mut pair.js, event.key, event.payload)
         .unwrap();
     let events = worker_events(pair.notices());
-    let [
-        crate::EngineEvent::WorkerEnded {
-            source: crate::ScriptSource::Worker(_),
-            error,
-        },
-    ] = events.as_slice()
-    else {
+    let [crate::EngineEvent::WorkerEnded { source, error }] = events.as_slice() else {
         panic!("one WorkerEnded from the worker: {events:?}");
     };
+    assert_eq!(*source, worker_label(event.key.get(), WORKER_URL));
     assert!(
         error.message.contains("the worker thread has ended"),
         "{}",
@@ -1464,18 +1468,17 @@ fn a_view_booted_after_its_worker_thread_trapped_hears_each_worker_end() {
     pair.deliver();
     let events = worker_events(pair.notices());
     let [
+        crate::EngineEvent::WorkerEnded { source: worker, .. },
         crate::EngineEvent::WorkerEnded {
-            source: crate::ScriptSource::Worker(_),
-            ..
-        },
-        crate::EngineEvent::WorkerEnded {
-            source: crate::ScriptSource::Background,
-            ..
+            source: background, ..
         },
     ] = events.as_slice()
     else {
         panic!("one WorkerEnded for the Worker, then one for the BTS: {events:?}");
     };
+    // In construction order: the entry's worker, then boot's BTS.
+    assert_eq!(*worker, worker_label(1, WORKER_URL));
+    assert_eq!(*background, worker_label(2, "bobcat:bts"));
     assert_eq!(pair.live_workers(), 0);
 }
 
@@ -1495,22 +1498,18 @@ fn a_bts_that_throws_reports_worker_threw_from_the_background() {
         .dispatch_worker_event(&mut pair.js, event.key, event.payload)
         .unwrap();
     let events = worker_events(pair.notices());
-    let [
-        crate::EngineEvent::WorkerThrew {
-            source: crate::ScriptSource::Background,
-            error,
-        },
-    ] = events.as_slice()
-    else {
+    let [crate::EngineEvent::WorkerThrew { source, error }] = events.as_slice() else {
         panic!("one WorkerThrew from the BTS: {events:?}");
     };
+    assert_eq!(*source, worker_label(event.key.get(), "bobcat:bts"));
     assert!(error.message.contains("BTS threw"), "{}", error.message);
     assert_eq!(pair.live_workers(), 1, "the BTS that threw still runs");
 }
 
-/// A `Worker` is named by the key its `Worker` object holds: the printed
-/// `WorkerId` is the key string the realm routed the event by, and the
-/// `error` event reaching that object is what shows the realm holds it.
+/// A `Worker` is named by the key its `Worker` object holds and by its URL:
+/// the printed `WorkerId` is the key string the realm routed the event by,
+/// the URL is the one its specifier joined to, and the `error` event
+/// reaching that object is what shows the realm holds it.
 #[test]
 fn a_worker_is_named_by_the_key_its_worker_object_holds() {
     let mut pair = Pair::new(
@@ -1532,7 +1531,7 @@ fn a_worker_is_named_by_the_key_its_worker_object_holds() {
     let events = worker_events(pair.notices());
     let [
         crate::EngineEvent::WorkerThrew {
-            source: crate::ScriptSource::Worker(id),
+            source: crate::ScriptSource::Worker { id, url },
             error,
         },
     ] = events.as_slice()
@@ -1540,10 +1539,109 @@ fn a_worker_is_named_by_the_key_its_worker_object_holds() {
         panic!("one WorkerThrew from the worker: {events:?}");
     };
     assert_eq!(id.to_string(), key);
+    assert_eq!(&**url, WORKER_URL);
     assert!(error.message.contains("worker threw"), "{}", error.message);
     pair.check(
         "if (errors.length !== 1 || !errors[0].includes('worker threw')) throw Error(JSON.stringify(errors));",
     );
+}
+
+/// A worker's label is the id of its key and its script URL, and both
+/// threads write that one value from the worker's `Start`: the creating realm
+/// records it under the key and reports the worker's throw with it, and the
+/// worker's own realm names its console output with it. The BTS is labelled
+/// by the same rule, with the URL `bobcat:bts`, and two workers constructed
+/// over one URL carry that URL and differ in their ids.
+#[test]
+fn a_workers_label_is_its_id_and_its_url_on_both_threads() {
+    const SCRIPT: &str = "import 'bobcat:worker'; \
+         console.log(`${name} logged`); throw Error(`${name} threw`);";
+    let mut pair = Pair::with_background(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.workers = [
+            new Worker('./worker.js', { name: 'first' }),
+            new Worker('./worker.js', { name: 'second' }),
+        ];
+        ",
+        Some(
+            r"
+        import { console } from 'bobcat:bts-runtime';
+        console.log('lynx-bg logged');
+        throw Error('lynx-bg threw');
+        ",
+        ),
+    );
+    // Each of the two asks for the script at its URL.
+    pair.answer(SCRIPT);
+    pair.answer(SCRIPT);
+    // In construction order: the entry's two, then the BTS boot created once
+    // the entry had run.
+    let labels = [
+        ("first", worker_label(1, WORKER_URL)),
+        ("second", worker_label(2, WORKER_URL)),
+        ("lynx-bg", worker_label(3, "bobcat:bts")),
+    ];
+    // One throw each, in no order between the three workers. Each was logged
+    // before it was thrown, so the three console messages are with the host
+    // once the three throws are here.
+    for _ in &labels {
+        let event = pair.next_event().expect("each worker reports its throw");
+        assert!(
+            matches!(event.payload, WorkerPayload::Errored(_)),
+            "a throw is an ordinary worker error"
+        );
+        pair.runtime
+            .as_mut()
+            .unwrap()
+            .dispatch_worker_event(&mut pair.js, event.key, event.payload)
+            .unwrap();
+    }
+    let mut thrown = Vec::new();
+    let mut logged = Vec::new();
+    for notice in pair.notices() {
+        match notice {
+            ViewNotice::Engine(crate::EngineEvent::WorkerThrew { source, error }) => {
+                thrown.push((source, error.message.to_string()));
+            }
+            ViewNotice::Engine(crate::EngineEvent::ConsoleMessage {
+                source, message, ..
+            }) => logged.push((source, message)),
+            ViewNotice::Engine(crate::EngineEvent::WorkerEnded { error, .. }) => {
+                panic!("{error}")
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(thrown.len(), 3, "{thrown:?}");
+    assert_eq!(logged.len(), 3, "{logged:?}");
+    let workers = &pair.runtime.as_ref().unwrap().workers;
+    for (key, (name, label)) in (1..).zip(&labels) {
+        assert_eq!(
+            workers.source_of(WorkerKey::new(key)).as_ref(),
+            Some(label),
+            "what the creating realm recorded for {name}"
+        );
+        let threw: Vec<_> = thrown
+            .iter()
+            .filter(|(source, _)| source == label)
+            .map(|(_, message)| message.as_str())
+            .collect();
+        assert!(
+            matches!(threw.as_slice(), [message] if message.contains(&format!("{name} threw"))),
+            "the throw the creating realm reported for {name}: {thrown:?}"
+        );
+        let said: Vec<_> = logged
+            .iter()
+            .filter(|(source, _)| source == label)
+            .map(|(_, message)| message.as_str())
+            .collect();
+        assert_eq!(
+            said,
+            [format!("{name} logged")],
+            "what the realm of {name} printed: {logged:?}"
+        );
+    }
 }
 
 /// A worker its script has stopped is reported to no one: an error or an end
@@ -2440,7 +2538,8 @@ fn each_realm_reports_its_own_diagnostics_with_its_source() {
     assert!(main[0].2.contains("MTS warning"));
     assert!(main[0].2.contains("app:///nested/main.js"));
     assert_eq!(main[1], (false, "info", "MTS {\"value\":1}"));
-    let background = from(crate::ScriptSource::Background);
+    // The entry constructed no worker, so the BTS is the pair's first.
+    let background = from(worker_label(1, "bobcat:bts"));
     assert_eq!(background.len(), 2, "{background:?}");
     assert_eq!((background[0].0, background[0].1), (true, "fatal"));
     assert!(background[0].2.contains("BTS fatal label"));
@@ -2449,7 +2548,7 @@ fn each_realm_reports_its_own_diagnostics_with_its_source() {
 
 /// A plain `Worker` has a global `console`, not enumerable, whose output
 /// reaches the embedder from the worker itself, named by the key its
-/// `Worker` object holds. It has no `requestAnimationFrame`.
+/// `Worker` object holds and by its URL. It has no `requestAnimationFrame`.
 #[test]
 fn a_workers_global_console_reports_from_the_worker() {
     let mut pair = Pair::new(
@@ -2485,10 +2584,11 @@ fn a_workers_global_console_reports_from_the_worker() {
             _ => None,
         })
         .collect();
-    let [(crate::ScriptSource::Worker(id), level, message)] = logged.as_slice() else {
+    let [(crate::ScriptSource::Worker { id, url }, level, message)] = logged.as_slice() else {
         panic!("one console message from the worker: {logged:?}");
     };
     assert_eq!(id.to_string(), key);
+    assert_eq!(&**url, WORKER_URL);
     assert_eq!(level, "log");
     assert_eq!(message, "from the worker {\"value\":1}");
 }
@@ -2527,17 +2627,21 @@ fn a_throwing_bts_frame_or_microtask_callback_is_a_worker_throw() {
     let events = worker_events(notices);
     let [
         crate::EngineEvent::WorkerThrew {
-            source: crate::ScriptSource::Background,
+            source: microtask_source,
             error: microtask,
         },
         crate::EngineEvent::WorkerThrew {
-            source: crate::ScriptSource::Background,
+            source: frame_source,
             error: frame,
         },
     ] = events.as_slice()
     else {
         panic!("two WorkerThrew from the BTS: {events:?}");
     };
+    // The entry constructed no worker, so the BTS is the pair's first.
+    let background = worker_label(1, "bobcat:bts");
+    assert_eq!(*microtask_source, background);
+    assert_eq!(*frame_source, background);
     assert!(microtask.message.contains("microtask threw"), "{microtask}");
     assert!(
         frame.message.starts_with("running animation callbacks: ")
@@ -2579,9 +2683,11 @@ fn a_misused_bts_selector_query_is_reported_from_the_background() {
             _ => None,
         })
         .collect();
-    let [(crate::ScriptSource::Background, level, message)] = reports.as_slice() else {
+    let [(source, level, message)] = reports.as_slice() else {
         panic!("one report from the BTS: {reports:?}");
     };
+    // The entry constructed no worker, so the BTS is the pair's first.
+    assert_eq!(*source, worker_label(1, "bobcat:bts"));
     assert_eq!(level, "error");
     assert!(
         message.contains("selectReactRef() should be called before any other"),
@@ -3610,13 +3716,14 @@ fn verify_react_teardown(reload: bool, development: bool) {
     // The cleanup logs from the BTS itself, before the `disposed` reply the
     // disposal above waited for, so the host already has it.
     let notices = pair.notices();
+    // The card's main-thread script constructs no worker, so the BTS is the
+    // pair's first.
+    let background = worker_label(1, "bobcat:bts");
     assert!(
         !notices.iter().any(|notice| matches!(
             notice,
-            ViewNotice::Engine(crate::EngineEvent::ScriptReported {
-                source: crate::ScriptSource::Background,
-                ..
-            })
+            ViewNotice::Engine(crate::EngineEvent::ScriptReported { source, .. })
+                if *source == background
         )),
         "the BTS reported an error during disposal"
     );
@@ -3624,10 +3731,10 @@ fn verify_react_teardown(reload: bool, development: bool) {
         .iter()
         .filter_map(|notice| match notice {
             ViewNotice::Engine(crate::EngineEvent::ConsoleMessage {
-                source: crate::ScriptSource::Background,
-                message,
-                ..
-            }) if message.starts_with("reload-cleanup ") => Some(message.as_str()),
+                source, message, ..
+            }) if *source == background && message.starts_with("reload-cleanup ") => {
+                Some(message.as_str())
+            }
             _ => None,
         })
         .collect::<Vec<_>>();

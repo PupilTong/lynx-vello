@@ -85,10 +85,9 @@ use tokio_util::sync::CancellationToken;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
-use crate::esm::BTS_MODULE_SPECIFIER;
 use crate::script::ScriptError;
 use crate::threads::ThreadJoin;
-use crate::view::{EngineError, ScriptSource, WorkerId};
+use crate::view::EngineError;
 
 /// Names one `Worker` for the life of its group.
 ///
@@ -105,22 +104,6 @@ impl WorkerKey {
 
     pub(crate) const fn get(self) -> u64 {
         self.0
-    }
-}
-
-/// What a worker's diagnostics and failures are named by, from its URL and
-/// its key: the background thread for the worker whose URL is `bobcat:bts`,
-/// and the `Worker` its key names for every other.
-///
-/// The one place the BTS is told apart from any other worker. The creating
-/// realm calls it to record the source under the key, and the worker thread
-/// calls it to name the realm it opens, so the two threads agree without
-/// either sending the other the answer.
-pub(crate) fn worker_source(url: &str, key: WorkerKey) -> ScriptSource {
-    if url == BTS_MODULE_SPECIFIER {
-        ScriptSource::Background
-    } else {
-        ScriptSource::Worker(WorkerId::from(key))
     }
 }
 
@@ -141,7 +124,9 @@ pub(crate) struct WorkerStart {
     /// creating entry's response URL by URL rules, which leaves an absolute
     /// URL such as `bobcat:bts` as it is. The realm's root module is the
     /// module at this URL, loaded by it, and with the key it is what the
-    /// worker's diagnostics are named by.
+    /// worker's diagnostics are named by: the creating realm and the worker
+    /// thread each write the worker's
+    /// [`ScriptSource::Worker`](crate::ScriptSource::Worker) from the two.
     pub(crate) url: String,
     /// What the MTS Worker object posts. Its finalizer or explicit terminate
     /// sends `Terminate`; releasing the MTS realm closes the channel.

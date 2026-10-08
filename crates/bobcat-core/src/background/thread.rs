@@ -568,7 +568,10 @@ impl Worker {
                         &self.sources,
                         self.lifetime.thread().clone(),
                         Some(self.key),
-                        super::worker_source(&self.url, self.key),
+                        crate::ScriptSource::Worker {
+                            id: crate::WorkerId::from(self.key),
+                            url: Arc::from(self.url.as_str()),
+                        },
                         |engine, js| {
                             let events = self.events.clone();
                             let key = self.key;
