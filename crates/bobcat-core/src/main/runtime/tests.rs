@@ -1258,9 +1258,10 @@ fn the_page_config_written_into_the_boot_module_builds_the_ua_cascade() {
         let page = tree.get(node_id(2)).expect("the card's page");
         let view = tree.get(node_id(3)).expect("the card's one view");
         assert_eq!(
-            page.computed_style()
+            *page
+                .computed_style()
                 .expect("a flushed element has style")
-                .clone_overflow_x(),
+                .get_overflow_x(),
             Overflow::Clip,
             "the page clips whatever `defaultOverflowVisible` says: linear={linear}"
         );
