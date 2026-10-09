@@ -742,6 +742,10 @@ impl FilterTextures {
     /// content nor ticks a curve some entry holds; otherwise only the
     /// entries whose readings moved re-bake.
     ///
+    /// `images` is the frame's resolved bitmaps and `vectors` the textures
+    /// its vector draws were baked into, both index-parallel with their
+    /// side tables: an entry's range may draw either.
+    ///
     /// # Errors
     ///
     /// [`GpuError::Render`] if a bake render fails. The table then holds a
@@ -761,6 +765,7 @@ impl FilterTextures {
         atlas: &mut AtlasResidency,
         frame: &CommittedFrame,
         images: &[Option<ImageData>],
+        vectors: &[Option<ImageData>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
         animation_now: Option<f64>,
@@ -812,6 +817,7 @@ impl FilterTextures {
             atlas,
             frame,
             images,
+            vectors,
             offset_of,
             animation_now,
         )?;
@@ -902,6 +908,7 @@ impl FilterTextures {
         atlas: &mut AtlasResidency,
         frame: &CommittedFrame,
         images: &[Option<ImageData>],
+        vectors: &[Option<ImageData>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) -> Result<(), GpuError> {
@@ -930,11 +937,19 @@ impl FilterTextures {
             let bank = ensure_bank(&mut banks[index], renderer, device, width, height);
 
             bake.reset();
-            frame.bake_filter(index, bake, images, filtered, offset_of, animation_now);
+            frame.bake_filter(
+                index,
+                bake,
+                images,
+                filtered,
+                vectors,
+                offset_of,
+                animation_now,
+            );
             // Every render through this renderer owes the residency a pass,
             // including a bake: a patch-free bake frees the whole image
             // atlas, which is exactly the loss `AtlasResidency` repairs.
-            atlas.prepare_all(renderer, bake, images, filtered);
+            atlas.prepare_all(renderer, bake, images, filtered, vectors);
             renderer
                 .render_to_texture(
                     device,

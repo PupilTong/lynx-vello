@@ -2550,7 +2550,7 @@ fn a_compose_samples_only_the_curves_its_program_encodes() {
         "only the dots in the list's window compose, got {composed}",
     );
     let mut scene = crate::vello::Scene::new();
-    frame.compose_into(&mut scene, &[], &[], &|_| None, Some(0.5));
+    frame.compose_into(&mut scene, &[], &[], &[], &|_| None, Some(0.5));
 }
 
 /// The same for a scroll container that is no stacking context: it takes

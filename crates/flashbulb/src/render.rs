@@ -95,17 +95,22 @@ pub fn capture_document_sized<T: Sync>(
         .expect("`Document::render` always leaves a committed frame retained");
     let (mut images, mut sources) = (Vec::new(), Vec::new());
     frame.resolve_images(pixels, &mut images, &mut sources);
-    // No offsets, no generation and no timeline reading: a capture composes
-    // the frame exactly as it was committed.
+    // The vector textures first, since a filter bake may draw them; then,
+    // with no offsets, no generation and no timeline reading, the filter
+    // bakes: a capture composes the frame exactly as it was committed.
+    let vectors: Vec<Option<ImageData>> = gpu
+        .prepare_vectors(&frame)
+        .map_err(CaptureError::Gpu)?
+        .to_vec();
     let filtered: Vec<Option<ImageData>> = gpu
-        .prepare_filters(&frame, &images, &|_| None, 0, None)
+        .prepare_filters(&frame, &images, &vectors, &|_| None, 0, None)
         .map_err(CaptureError::Gpu)?
         .to_vec();
     let mut composed = Scene::new();
     let scene = if let Some(scene) = frame.scene() {
         scene
     } else {
-        frame.compose_into(&mut composed, &images, &filtered, &|_| None, None);
+        frame.compose_into(&mut composed, &images, &filtered, &vectors, &|_| None, None);
         &composed
     };
     let pixels = gpu

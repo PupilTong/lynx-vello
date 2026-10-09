@@ -126,8 +126,45 @@ pub struct VectorImage {
     tree: Arc<usvg::Tree>,
     natural: (u32, u32),
     viewport: (f32, f32),
+    aspect: AspectRatio,
+    key: u64,
     scene: OnceLock<Arc<Scene>>,
 }
+
+/// One side of a `preserveAspectRatio` alignment: where the viewport sits
+/// along an axis of a box with another ratio.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[allow(dead_code)] // The converter writes these once it parses `preserveAspectRatio`.
+pub(crate) enum AspectAlign {
+    Min,
+    #[default]
+    Mid,
+    Max,
+}
+
+/// The root's `preserveAspectRatio` (SVG 2 §8.6): how the viewport maps
+/// onto a destination box whose ratio differs. `align: None` is `none`, a
+/// stretch per axis; otherwise the viewport is scaled uniformly to `meet`
+/// (fit inside) or `slice` (cover) the box and aligned per axis. The
+/// default is `xMidYMid meet`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AspectRatio {
+    pub(crate) align: Option<(AspectAlign, AspectAlign)>,
+    pub(crate) slice: bool,
+}
+
+impl Default for AspectRatio {
+    fn default() -> Self {
+        Self {
+            align: Some((AspectAlign::Mid, AspectAlign::Mid)),
+            slice: false,
+        }
+    }
+}
+
+/// The source of every [`VectorImage::key`]: a counter, so two images
+/// never share a key within a process.
+static NEXT_VECTOR_KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// The tree crosses from the thread that parsed it (natively a blocking-pool
 /// thread) to the document's inside an [`ImageEvent`], and the cached scene
@@ -148,8 +185,33 @@ impl VectorImage {
             tree,
             natural,
             viewport,
+            aspect: AspectRatio::default(),
+            key: NEXT_VECTOR_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             scene: OnceLock::new(),
         }
+    }
+
+    /// A process-unique identity for this image's picture: the painter's
+    /// raster cache keys its textures by it and a device size. Clones share
+    /// it, because they share the picture.
+    #[must_use]
+    pub(crate) fn key(&self) -> u64 {
+        self.key
+    }
+
+    /// How the viewport maps onto a destination box of another ratio.
+    #[must_use]
+    pub(crate) fn aspect(&self) -> AspectRatio {
+        self.aspect
+    }
+
+    /// Whether drawing the picture opens a blend layer with no isolating
+    /// layer of its own around it, so the layer a draw of the whole image
+    /// opens must be a full `Normal` layer rather than a clip layer (vello
+    /// [#1198](https://github.com/linebender/vello/issues/1198)).
+    #[must_use]
+    pub(crate) fn opens_blend(&self) -> bool {
+        crate::paint::svg::opens_blend(self.tree.root())
     }
 
     /// Parses the SVG document `svg`, and computes its natural size and
@@ -240,6 +302,7 @@ impl VectorImage {
     }
 
     /// The parsed document.
+    #[allow(dead_code)] // Goes with `usvg` when the own converter lands.
     pub(crate) fn tree(&self) -> &usvg::Tree {
         &self.tree
     }

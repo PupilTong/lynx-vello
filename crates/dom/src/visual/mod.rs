@@ -1012,8 +1012,10 @@ impl<T> Document<T> {
             frame.resolve_images(pixels, &mut images, &mut sources);
             let mut scene = crate::vello::Scene::new();
             // No GPU here, so no bake: a `filter: blur()` group replays raw
-            // and this scene is the unblurred one (documented fallback).
-            frame.compose_into(&mut scene, &images, &[], &|_| None, None);
+            // and this scene is the unblurred one, and a vector image, whose
+            // texture only a renderer can bake, draws nothing (both
+            // documented fallbacks).
+            frame.compose_into(&mut scene, &images, &[], &[], &|_| None, None);
             Box::new(scene)
         });
         SceneRef { frame, composed }

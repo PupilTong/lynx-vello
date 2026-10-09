@@ -395,7 +395,7 @@ fn sticky_survives_an_initial_target_refill_and_a_retained_snap_step() {
             Some(sticky)
         );
         let mut scene = Scene::new();
-        frame.compose_into(&mut scene, &[], &[], &offsets, None);
+        frame.compose_into(&mut scene, &[], &[], &[], &offsets, None);
         let pixels = gpu
             .render(&scene, &[], 100, 100, Color::WHITE)
             .expect("render sticky after initial targeting and snapping");
@@ -418,6 +418,7 @@ fn sticky_pixels_survive_scroll_refills_and_match_retained_frame_hits() {
             &mut scene,
             &[],
             &[],
+            &[],
             &|slot| Some(doc.dom.scroll_offset(slot.node)),
             None,
         );
@@ -437,6 +438,7 @@ fn sticky_pixels_survive_scroll_refills_and_match_retained_frame_hits() {
     let mut scene = Scene::new();
     frame.compose_into(
         &mut scene,
+        &[],
         &[],
         &[],
         &|slot| (slot.node == scroller).then_some(Vector2D::new(0.0, 80.0)),
@@ -463,11 +465,11 @@ fn sticky_pixels_survive_enclosing_effects_and_far_refills() {
             let frame = doc.dom.commit();
             let offsets = |slot: &dom::ScrollSlot| Some(doc.dom.scroll_offset(slot.node));
             let filtered = gpu
-                .prepare_filters(&frame, &[], &offsets, generation, None)
+                .prepare_filters(&frame, &[], &[], &offsets, generation, None)
                 .expect("prepare sticky effects")
                 .to_vec();
             let mut scene = Scene::new();
-            frame.compose_into(&mut scene, &[], &filtered, &offsets, None);
+            frame.compose_into(&mut scene, &[], &filtered, &[], &offsets, None);
             let pixels = gpu
                 .render(&scene, &[], 100, 100, Color::WHITE)
                 .expect("render sticky effects");
@@ -505,11 +507,11 @@ fn nested_sticky_motion_refreshes_a_filter_with_the_same_scroll_chain() {
         let offsets =
             |slot: &dom::ScrollSlot| (slot.node == scroller).then_some(Vector2D::new(0.0, offset));
         let filtered = gpu
-            .prepare_filters(&frame, &[], &offsets, generation, None)
+            .prepare_filters(&frame, &[], &[], &offsets, generation, None)
             .expect("prepare nested sticky filter")
             .to_vec();
         let mut scene = Scene::new();
-        frame.compose_into(&mut scene, &[], &filtered, &offsets, None);
+        frame.compose_into(&mut scene, &[], &filtered, &[], &offsets, None);
         let pixels = gpu
             .render(&scene, &[], 100, 100, Color::WHITE)
             .expect("render nested sticky filter");

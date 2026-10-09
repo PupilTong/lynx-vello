@@ -15,9 +15,12 @@
 //!   zero intrinsic axis → skip); gradients resolve via [`gradient_brush`].
 //! - A `url(…)` that names an SVG document resolves to a vector image. Its tile grid, or a replaced
 //!   element's `object-fit` destination, is computed by the same code as a bitmap's, from the
-//!   natural size the registry holds; then each visible tile appends the image's cached scene
-//!   (`paint/svg.rs`) inline, scaled by `extent / viewport`, between a clip pair for that tile's
-//!   share of the clip shape. It is never an image draw, so the painter never reads it.
+//!   natural size the registry holds; then each visible tile becomes one
+//!   [`VectorDraw`](crate::paint::compose::VectorDraw) — the image's scene, the tile, and the
+//!   tile's share of the clip shape — which the painter's raster cache
+//!   ([`crate::render::vector_textures`]) bakes at the device size and draws as a texture. The
+//!   scene is never appended to the frame, and the painter never reads the image through
+//!   `FrameImages`.
 //! - Repeat via `peniko::Extend::Repeat` on the image sampler where the tile grid is uniform;
 //!   gradients restart per tile, so when more than one tile is visible they are drawn as an
 //!   explicit tile loop. `space` is approximated as `repeat` (recorded v1 limit) and `round`
@@ -49,11 +52,11 @@ use stylo::values::specified::background::BackgroundRepeatKeyword;
 use stylo::values::specified::position::{HorizontalPositionKeyword, VerticalPositionKeyword};
 
 use crate::layout::NaturalSize;
-use crate::paint::compose::{ImageArea, ImageDraw};
+use crate::paint::compose::{ImageArea, ImageDraw, VectorDraw};
 use crate::paint::convert::resolve_color;
 use crate::paint::shape::{BoxShape, inner_radii, with_shape};
 use crate::paint::walker::WalkSink;
-use crate::paint::{BoxFragment, TextClip, svg};
+use crate::paint::{BoxFragment, TextClip};
 use crate::render::image::{ImageRegistry, VectorImage};
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect, Size, Vec2};
@@ -189,12 +192,17 @@ fn paint_raster_layer(
     }
 }
 
-/// One `url(...)` layer naming an SVG document: every visible tile appends
-/// the image's cached scene, inside the `background-clip: text` sandwich
-/// when there is one.
+/// One `url(...)` layer naming an SVG document: every visible tile is one
+/// vector draw, inside the `background-clip: text` sandwich when there is
+/// one.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one layer's full resolved geometry, none of which the caller groups"
+)]
 fn paint_vector_layer(
     sink: &mut WalkSink<'_>,
     space: Option<u32>,
+    style: &ComputedValues,
     fragment: &BoxFragment,
     layer: &PatternLayer<'_>,
     text_clip: Option<&TextClip<'_>>,
@@ -209,7 +217,9 @@ fn paint_vector_layer(
         return;
     }
     fill_vector_tiles(
-        sink.scene_for(space),
+        sink,
+        space,
+        image_quality(style),
         fragment.transform,
         &layer.clip,
         grid,
@@ -291,8 +301,8 @@ fn open_text_clip_ops(
 }
 
 /// Draws the image `image` names into the element's content box: a bitmap
-/// as an image draw, or `vector`, when the source is an SVG document, encoded
-/// inline.
+/// as an image draw, or `vector`, when the source is an SVG document, as a
+/// vector draw.
 ///
 /// Which of a replaced element's two sources that is, is the registry's
 /// choice — see `ImageRegistry::resolve_presented` — and `natural` is the
@@ -338,14 +348,19 @@ pub(crate) fn paint_replaced_content(
 
     let shape = level_shape(fragment, BoxLevel::Content);
     if let Some(vector) = vector {
-        if is_drawable(vector) {
-            append_vector(
-                sink.scene_for(space),
-                fragment.transform,
-                &shape,
-                destination,
-                vector,
-                svg::opens_blend(vector.tree().root()),
+        if is_drawable(vector)
+            && let Some(area) = image_area(&shape, destination)
+        {
+            sink.vector(
+                space,
+                vector_draw(
+                    vector,
+                    vector.opens_blend(),
+                    fragment.transform,
+                    destination,
+                    image_quality(style),
+                    area,
+                ),
             );
         }
         return;
@@ -509,7 +524,8 @@ pub(super) fn paint_pattern_layer(
     };
 
     // A raster layer becomes a program op, because its pixels are not
-    // reachable from here. Everything else still encodes inline.
+    // reachable from here; a vector layer, because its texture is the
+    // painter's to bake. Gradients and solids still encode inline.
     if let Source::Raster(image, _) = &source {
         paint_raster_layer(
             sink,
@@ -525,10 +541,12 @@ pub(super) fn paint_pattern_layer(
         return;
     }
 
-    // A vector layer encodes inline, but tile by tile rather than as one
-    // brush fill.
+    // A vector layer is a program op per visible tile, each a texture the
+    // painter bakes, rather than one repeating brush fill.
     if let Source::Vector(vector, _) = &source {
-        paint_vector_layer(sink, space, fragment, layer, text_clip, &grid, vector);
+        paint_vector_layer(
+            sink, space, style, fragment, layer, text_clip, &grid, vector,
+        );
         return;
     }
 
@@ -873,105 +891,84 @@ fn fill_gradient_tiles(
 
 /// Whether a vector image has anything to draw.
 ///
-/// An empty cached scene encodes nothing at all, not even its clip pair:
-/// `Encoding::append` copies the appended scene's `flags`, so appending an
-/// empty scene would clear the `FORCE_NEXT_TRANSFORM | FORCE_NEXT_STYLE`
-/// bits a preceding glyph run set, and the next path's transform could be
-/// wrongly deduplicated. A degenerate viewport has no scale to draw at.
+/// An empty scene produces no draw at all: there is nothing to bake, and
+/// the monolithic walk, which appends the scene, must not append an empty
+/// one — `Encoding::append` copies the appended scene's `flags`, so that
+/// would clear the `FORCE_NEXT_TRANSFORM | FORCE_NEXT_STYLE` bits a
+/// preceding glyph run set, and the next path's transform could be wrongly
+/// deduplicated. Glyph runs are deferred resources, so a text-only scene has
+/// an empty path stream and still draws. A degenerate viewport has no scale
+/// to draw at.
 fn is_drawable(vector: &VectorImage) -> bool {
     let (width, height) = vector.viewport();
+    let encoding = vector.scene().encoding();
     width > 0.0
         && height > 0.0
         && width.is_finite()
         && height.is_finite()
-        && !vector.scene().encoding().is_empty()
+        && !(encoding.is_empty() && encoding.resources.glyph_runs.is_empty())
 }
 
-/// Appends `vector` once per visible tile of `grid` inside `clip`.
+/// Emits one [`VectorDraw`] of `vector` per visible tile of `grid` inside
+/// `clip`, each over the tile's own share of the clip shape — the
+/// [`ImageArea`] a raster draw of that tile would fill, whose clip pair the
+/// encoder opens and closes inside one op — with the row count cut at
+/// `MAX_TILE_FILLS` by [`TileGrid::span`]. An image with nothing to draw
+/// emits nothing; the caller checks the same before it opens a
+/// `background-clip: text` sandwich around the tiles.
 fn fill_vector_tiles(
-    scene: &mut Scene,
+    sink: &mut WalkSink<'_>,
+    space: Option<u32>,
+    quality: ImageQuality,
     transform: Affine,
     clip: &BoxShape,
     grid: &TileGrid,
     vector: &VectorImage,
 ) {
+    if !is_drawable(vector) {
+        return;
+    }
     let (x_first, x_count, y_first, y_count) = grid.span(clip.bounding_box());
-    let isolate = svg::opens_blend(vector.tree().root());
+    let opens_blend = vector.opens_blend();
     let mut iy = 0.0;
     while iy < y_count {
         let mut ix = 0.0;
         while ix < x_count {
             let tile = grid.tile_rect(x_first + ix, y_first + iy);
-            append_vector(scene, transform, clip, tile, vector, isolate);
+            if let Some(area) = image_area(clip, tile) {
+                sink.vector(
+                    space,
+                    vector_draw(vector, opens_blend, transform, tile, quality, area),
+                );
+            }
             ix += 1.0;
         }
         iy += 1.0;
     }
 }
 
-/// Appends `vector` scaled onto `tile`, clipped to the share of `clip` that
-/// `tile` covers: the [`ImageArea`] a raster draw of `tile` would fill.
-///
-/// The clip layers and their pops are encoded in this one call, so a
-/// fragment cut can never land between them (see [`ImageArea`]). When the
-/// image's own scene opens a blend layer at its top level, the layers are
-/// full `Normal` layers instead of clip layers, per the vello #1198 rule in
-/// `walker.rs`; that also keeps the image's blending inside the image.
-fn append_vector(
-    scene: &mut Scene,
-    transform: Affine,
-    clip: &BoxShape,
-    tile: Rect,
+/// The draw of `vector` onto `destination` — item-local, under `transform`
+/// — filling `area`. `opens_blend` is the image's own answer, taken once by
+/// a caller that draws many tiles.
+fn vector_draw(
     vector: &VectorImage,
-    isolate: bool,
-) {
-    let layers = match fill_plan(clip, tile) {
-        FillPlan::None => return,
-        FillPlan::Shape => {
-            with_shape!(clip, |s| push_tile_layer(scene, isolate, transform, s));
-            1
-        }
-        FillPlan::Rect(both) => {
-            push_tile_layer(scene, isolate, transform, &both);
-            1
-        }
-        FillPlan::Clipped(rect) => {
-            with_shape!(clip, |s| push_tile_layer(scene, isolate, transform, s));
-            push_tile_layer(scene, isolate, transform, &rect);
-            2
-        }
-    };
-    let (width, height) = vector.viewport();
-    let placement = transform
-        * Affine::translate(tile.origin().to_vec2())
-        * Affine::scale_non_uniform(
-            tile.width() / f64::from(width),
-            tile.height() / f64::from(height),
-        );
-    scene.append(vector.scene(), Some(placement));
-    for _ in 0..layers {
-        scene.pop_layer();
-    }
-}
-
-/// One clip layer of a vector tile: a clip layer, or a full `Normal` layer
-/// when `isolate`.
-fn push_tile_layer(
-    scene: &mut Scene,
-    isolate: bool,
+    opens_blend: bool,
     transform: Affine,
-    shape: &impl crate::vello::kurbo::Shape,
-) {
-    if isolate {
-        scene.push_layer(
-            Fill::NonZero,
-            peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::SrcOver),
-            1.0,
-            transform,
-            shape,
-        );
-    } else {
-        scene.push_clip_layer(Fill::NonZero, transform, shape);
+    destination: Rect,
+    quality: ImageQuality,
+    area: ImageArea,
+) -> VectorDraw {
+    VectorDraw {
+        scene: Arc::clone(vector.scene()),
+        key: vector.key(),
+        viewport: vector.viewport(),
+        aspect: vector.aspect(),
+        opens_blend,
+        transform,
+        anchor: destination.origin(),
+        extent: destination.size(),
+        sampler: ImageSampler::default().with_quality(quality),
+        area,
     }
 }
 
@@ -1831,9 +1828,40 @@ mod tests {
         VectorImage::parse_sealed(svg.as_bytes()).expect("a valid document")
     }
 
-    /// A vector tile's clip layer is a full `Normal` layer exactly when the
-    /// image opens a blend layer at its top level, including through an
-    /// `isolation: isolate` group, which pushes no layer of its own.
+    /// The tiles of `grid` inside `clip`, as the compose program records
+    /// them.
+    fn compose_tiles(
+        clip: &BoxShape,
+        grid: &TileGrid,
+        image: &VectorImage,
+    ) -> crate::paint::compose::Finished {
+        let mut assembly = crate::paint::compose::ComposeAssembly::default();
+        let mut sink = WalkSink::Compose(&mut assembly);
+        fill_vector_tiles(
+            &mut sink,
+            None,
+            ImageQuality::Medium,
+            Affine::IDENTITY,
+            clip,
+            grid,
+            image,
+        );
+        assembly.finish()
+    }
+
+    fn grid(tile: f64) -> TileGrid {
+        TileGrid {
+            origin: Point::ZERO,
+            tile: Size::new(tile, tile),
+            repeat_x: true,
+            repeat_y: true,
+        }
+    }
+
+    /// On the monolithic walk a vector tile's layer is a full `Normal` layer
+    /// exactly when the image opens a blend layer at its top level,
+    /// including through an `isolation: isolate` group, which pushes no
+    /// layer of its own; the draw records the same answer for the bake.
     #[test]
     fn a_vector_tile_isolates_a_blend_under_an_isolated_root_group() {
         let blended = vector(
@@ -1851,7 +1879,16 @@ mod tests {
         };
         for (image, isolate) in [(&blended, true), (&plain, false)] {
             let mut actual = Scene::new();
-            fill_vector_tiles(&mut actual, Affine::IDENTITY, &clip, &grid, image);
+            let mut sink = WalkSink::Monolithic(&mut actual, &crate::NoImages);
+            fill_vector_tiles(
+                &mut sink,
+                None,
+                ImageQuality::Medium,
+                Affine::IDENTITY,
+                &clip,
+                &grid,
+                image,
+            );
             let mut expected = Scene::new();
             let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
             if isolate {
@@ -1868,7 +1905,64 @@ mod tests {
             expected.append(image.scene(), Some(Affine::scale(0.4)));
             expected.pop_layer();
             crate::paint::equivalence::assert_scenes_identical(&actual, &expected);
+
+            let finished = compose_tiles(&clip, &grid, image);
+            assert_eq!(finished.vector_draws.len(), 1);
+            assert_eq!(finished.vector_draws[0].opens_blend, isolate);
         }
+    }
+
+    /// A repeated vector background is one vector draw per visible tile —
+    /// a 100 px box under 25 px tiles records 16 — each over its own tile,
+    /// and no fragment at all: nothing of the picture lands in the frame's
+    /// own encoding.
+    #[test]
+    fn a_repeated_vector_background_records_one_draw_per_visible_tile() {
+        let image = vector(r##"<rect width="100" height="100" fill="#ff0000"/>"##);
+        let clip = BoxShape::Rect(Rect::new(0.0, 0.0, 100.0, 100.0));
+        let finished = compose_tiles(&clip, &grid(25.0), &image);
+        assert_eq!(finished.vector_draws.len(), 16);
+        assert_eq!(
+            finished.program.len(),
+            16,
+            "sixteen vector ops and nothing else"
+        );
+        assert!(
+            finished
+                .program
+                .iter()
+                .all(|op| matches!(op, crate::paint::compose::ComposeOp::Vector { .. }))
+        );
+        assert!(finished.fragments.is_empty());
+        let last = &finished.vector_draws[15];
+        assert_eq!(last.anchor, Point::new(75.0, 75.0));
+        assert_eq!(last.extent, Size::new(25.0, 25.0));
+        assert_eq!(last.key, image.key());
+    }
+
+    /// The tile cap still bounds the draws: 1 px tiles over a 200 px box
+    /// would be 40,000, and `MAX_TILE_FILLS` cuts the rows to the 81 whole
+    /// rows of 200 that fit under it.
+    #[test]
+    fn the_tile_cap_bounds_the_vector_draws() {
+        let image = vector(r##"<rect width="100" height="100" fill="#ff0000"/>"##);
+        let clip = BoxShape::Rect(Rect::new(0.0, 0.0, 200.0, 200.0));
+        let finished = compose_tiles(&clip, &grid(1.0), &image);
+        assert_eq!(finished.vector_draws.len(), 200 * 81);
+        assert_eq!(finished.program.len(), 200 * 81);
+    }
+
+    /// A document with nothing drawable records no draw at all, not even
+    /// an op: there is nothing to bake, and on the monolithic walk nothing
+    /// to append.
+    #[test]
+    fn an_empty_vector_image_records_nothing() {
+        let image = vector("");
+        assert!(!is_drawable(&image));
+        let clip = BoxShape::Rect(Rect::new(0.0, 0.0, 100.0, 100.0));
+        let finished = compose_tiles(&clip, &grid(25.0), &image);
+        assert!(finished.vector_draws.is_empty());
+        assert!(finished.program.is_empty());
     }
 }
 

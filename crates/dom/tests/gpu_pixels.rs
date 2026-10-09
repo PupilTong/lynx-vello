@@ -514,6 +514,7 @@ fn a_composition_at_a_scroll_offset_stays_inside_the_scrollport() {
             &mut scene,
             &[],
             &[],
+            &[],
             &|_| Some(Vector2D::new(0.0, offset)),
             None,
         );
@@ -615,11 +616,11 @@ fn render_filtered(gpu: &mut dom::render::gpu::Headless, doc: &mut Doc, size: u3
         .committed_frame()
         .expect("render leaves a committed frame retained");
     let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-        .prepare_filters(&frame, &[], &|_| None, 0, None)
+        .prepare_filters(&frame, &[], &[], &|_| None, 0, None)
         .expect("the filter bakes render")
         .to_vec();
     let mut scene = Scene::new();
-    frame.compose_into(&mut scene, &[], &filtered, &|_| None, None);
+    frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
     gpu.render(&scene, &[], size, size, Color::WHITE)
         .expect("headless render")
 }
@@ -856,7 +857,14 @@ fn a_blurred_box_in_a_scroller_moves_with_the_offset() {
     gpu.forget_filters();
     for offset in [0.0_f32, 40.0] {
         let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-            .prepare_filters(&frame, &[], &|_| Some(Vector2D::new(0.0, offset)), 0, None)
+            .prepare_filters(
+                &frame,
+                &[],
+                &[],
+                &|_| Some(Vector2D::new(0.0, offset)),
+                0,
+                None,
+            )
             .expect("the filter bakes render")
             .to_vec();
         let mut scene = Scene::new();
@@ -864,6 +872,7 @@ fn a_blurred_box_in_a_scroller_moves_with_the_offset() {
             &mut scene,
             &[],
             &filtered,
+            &[],
             &|_| Some(Vector2D::new(0.0, offset)),
             None,
         );
@@ -940,11 +949,11 @@ fn a_sliding_blurred_card_stays_inside_its_ancestors_clip() {
     // frame's clip ends at x = 100.
     let now = Some(0.6);
     let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-        .prepare_filters(&frame, &[], &|_| None, 0, now)
+        .prepare_filters(&frame, &[], &[], &|_| None, 0, now)
         .expect("the filter bakes render")
         .to_vec();
     let mut scene = Scene::new();
-    frame.compose_into(&mut scene, &[], &filtered, &|_| None, now);
+    frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, now);
     let pixels = gpu
         .render(&scene, &[], 200, 100, Color::WHITE)
         .expect("headless render");
@@ -969,11 +978,11 @@ fn compose_at(
     (width, height): (u32, u32),
 ) -> Vec<u8> {
     let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-        .prepare_filters(frame, &[], &|_| None, 0, now)
+        .prepare_filters(frame, &[], &[], &|_| None, 0, now)
         .expect("the filter bakes render")
         .to_vec();
     let mut scene = Scene::new();
-    frame.compose_into(&mut scene, &[], &filtered, &|_| None, now);
+    frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, now);
     gpu.render(&scene, &[], width, height, Color::WHITE)
         .expect("headless render")
 }
@@ -1249,12 +1258,12 @@ fn a_blurred_backdrop_over_a_scroller_re_bakes_with_it() {
     let draw = |gpu: &mut dom::render::gpu::Headless, generation: u64, offset: f32| {
         let offset_of = |_: &dom::ScrollSlot| Some(Vector2D::new(0.0, offset));
         let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-            .prepare_filters(&frame, &[], &offset_of, generation, None)
+            .prepare_filters(&frame, &[], &[], &offset_of, generation, None)
             .expect("the entries bake")
             .to_vec();
         assert!(filtered.iter().all(Option::is_some), "both entries baked");
         let mut scene = Scene::new();
-        frame.compose_into(&mut scene, &[], &filtered, &offset_of, None);
+        frame.compose_into(&mut scene, &[], &filtered, &[], &offset_of, None);
         gpu.render(&scene, &[], 128, 128, Color::WHITE)
             .expect("headless render")
     };
@@ -1664,7 +1673,7 @@ fn a_group_over_the_budget_renders_unblurred() {
         "and it is past the budget ({width}x{height})",
     );
     let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-        .prepare_filters(&frame, &[], &|_| None, 0, None)
+        .prepare_filters(&frame, &[], &[], &|_| None, 0, None)
         .expect("a refused group is not an error")
         .to_vec();
     assert_eq!(filtered.len(), 1);
@@ -1673,7 +1682,7 @@ fn a_group_over_the_budget_renders_unblurred() {
         "a group over the budget gets no texture"
     );
     let mut scene = Scene::new();
-    frame.compose_into(&mut scene, &[], &filtered, &|_| None, None);
+    frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
     // Rendered at a viewport-sized target, which is all the retained scene is
     // valid for; the point is that the unblurred fallback draws.
     let pixels = gpu
@@ -1746,7 +1755,7 @@ fn render_baked(
         "the frame's filter entries",
     );
     let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-        .prepare_filters(&frame, &[], &|_| None, 0, None)
+        .prepare_filters(&frame, &[], &[], &|_| None, 0, None)
         .expect("the bakes render")
         .to_vec();
     assert!(
@@ -1754,7 +1763,7 @@ fn render_baked(
         "every recorded entry baked a texture",
     );
     let mut scene = Scene::new();
-    frame.compose_into(&mut scene, &[], &filtered, &|_| None, None);
+    frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
     gpu.render(&scene, &[], size, size, Color::WHITE)
         .expect("headless render")
 }
@@ -1953,6 +1962,7 @@ fn a_fixed_backdrop_over_a_scroller_rebakes_per_offset() {
             .prepare_filters(
                 &frame,
                 &[],
+                &[],
                 &|_| Some(Vector2D::new(0.0, offset)),
                 generation,
                 None,
@@ -1965,6 +1975,7 @@ fn a_fixed_backdrop_over_a_scroller_rebakes_per_offset() {
             &mut scene,
             &[],
             &filtered,
+            &[],
             &|_| Some(Vector2D::new(0.0, offset)),
             None,
         );
@@ -2112,7 +2123,7 @@ fn a_backdrop_over_the_budget_stays_unfiltered() {
         "and it is past the budget ({width}x{height})",
     );
     let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-        .prepare_filters(&frame, &[], &|_| None, 0, None)
+        .prepare_filters(&frame, &[], &[], &|_| None, 0, None)
         .expect("a refused entry is not an error")
         .to_vec();
     assert_eq!(filtered.len(), 1);
@@ -2121,7 +2132,7 @@ fn a_backdrop_over_the_budget_stays_unfiltered() {
         "an entry over the budget gets no texture",
     );
     let mut scene = Scene::new();
-    frame.compose_into(&mut scene, &[], &filtered, &|_| None, None);
+    frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
     let pixels = gpu
         .render(&scene, &[], 256, 256, Color::WHITE)
         .expect("the unfiltered fallback renders");
@@ -2156,7 +2167,7 @@ fn a_colour_only_backdrop_darkens_only_inside_the_box() {
         "a colour-only list has no blur",
     );
     let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-        .prepare_filters(&frame, &[], &|_| None, 0, None)
+        .prepare_filters(&frame, &[], &[], &|_| None, 0, None)
         .expect("the backdrop bakes")
         .to_vec();
     assert!(
@@ -2164,7 +2175,7 @@ fn a_colour_only_backdrop_darkens_only_inside_the_box() {
         "a zero-sigma backdrop still produces its texture",
     );
     let mut scene = Scene::new();
-    frame.compose_into(&mut scene, &[], &filtered, &|_| None, None);
+    frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
     let pixels = gpu
         .render(&scene, &[], 128, 128, Color::WHITE)
         .expect("headless render");
@@ -2232,11 +2243,11 @@ fn an_anchored_box_follows_its_scrolled_anchor_and_hides_with_it() {
     {
         let offset_of = move |_: &dom::ScrollSlot| Some(Vector2D::new(0.0, offset));
         let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-            .prepare_filters(&frame, &[], &offset_of, generation as u64, None)
+            .prepare_filters(&frame, &[], &[], &offset_of, generation as u64, None)
             .expect("the filter bakes render")
             .to_vec();
         let mut scene = Scene::new();
-        frame.compose_into(&mut scene, &[], &filtered, &offset_of, None);
+        frame.compose_into(&mut scene, &[], &filtered, &[], &offset_of, None);
         let pixels = gpu
             .render(&scene, &[], 200, 150, Color::WHITE)
             .expect("headless render");

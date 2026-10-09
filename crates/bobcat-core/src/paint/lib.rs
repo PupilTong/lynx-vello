@@ -221,8 +221,40 @@ impl Output {
         }
     }
 
+    /// Bakes the textures of `frame`'s vector image draws not already
+    /// resident in this target's raster cache into `out`, index-parallel
+    /// with the frame's vector draws.
+    ///
+    /// Copied out for the same reason [`Self::prepare_filters`]'s table is.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Gpu`] if a bake render fails.
+    fn prepare_vectors(
+        &mut self,
+        frame: &CommittedFrame,
+        out: &mut Vec<Option<ImageData>>,
+    ) -> Result<(), EngineError> {
+        out.clear();
+        let baked = match self {
+            #[cfg(test)]
+            // A painter with nowhere to draw bakes nothing, so every vector
+            // draw encodes nothing — which is what a routing test wants: no
+            // device.
+            Self::None => return Ok(()),
+            Self::Offscreen(gpu) => gpu
+                .prepare_vectors(frame)
+                .map_err(|error| EngineError::Gpu(error.to_string()))?,
+            Self::Window(graphics) => graphics.prepare_vectors(frame)?,
+        };
+        out.extend(baked.iter().cloned());
+        Ok(())
+    }
+
     /// Bakes `frame`'s `filter: blur()` groups and `backdrop-filter`
     /// elements into `out`, index-parallel with the frame's filter entries.
+    /// `vectors` is the table [`Self::prepare_vectors`] filled for this
+    /// frame, since an entry's range may draw one.
     ///
     /// The table is copied out rather than borrowed because the very next
     /// step needs the target mutably again to render; an `ImageData` is a
@@ -232,10 +264,16 @@ impl Output {
     /// # Errors
     ///
     /// [`EngineError::Gpu`] if a bake render fails.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one bake pre-step's full inputs: the frame, its two pixel tables, the three \
+                  compose readings, and the table it fills"
+    )]
     fn prepare_filters(
         &mut self,
         frame: &CommittedFrame,
         images: &[Option<ImageData>],
+        vectors: &[Option<ImageData>],
         offset_of: &dyn Fn(&dom::ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
         animation_now: Option<f64>,
@@ -249,11 +287,19 @@ impl Output {
             // wants: no device.
             Self::None => return Ok(()),
             Self::Offscreen(gpu) => gpu
-                .prepare_filters(frame, images, offset_of, scroll_generation, animation_now)
+                .prepare_filters(
+                    frame,
+                    images,
+                    vectors,
+                    offset_of,
+                    scroll_generation,
+                    animation_now,
+                )
                 .map_err(|error| EngineError::Gpu(error.to_string()))?,
             Self::Window(graphics) => graphics.prepare_filters(
                 frame,
                 images,
+                vectors,
                 offset_of,
                 scroll_generation,
                 animation_now,
@@ -372,6 +418,9 @@ pub struct Painter {
     /// of the target's bake cache. Kept here so its capacity outlives a
     /// frame.
     composed_filters: Vec<Option<ImageData>>,
+    /// The vector image textures of the frame being composed, copied out of
+    /// the target's raster cache, for the same reason.
+    composed_vectors: Vec<Option<ImageData>>,
     /// The pixels this commit draws, read out of the attached view's store.
     images: images::PainterImages,
     thread_bound: PhantomData<Rc<()>>,
@@ -950,28 +999,37 @@ fn settle_stretch_aware(
 /// rendered straight out of the commit — composing it would copy it.
 #[expect(
     clippy::too_many_arguments,
-    reason = "one frame's whole path to pixels: the target, the two compose buffers, the frame, \
-              and the two pixel tables it draws from"
+    reason = "one frame's whole path to pixels: the target, the three compose buffers, the \
+              frame, and the pixel table it draws from"
 )]
 fn compose_and_render(
     output: &mut Output,
     buffer: &mut Scene,
     filtered: &mut Vec<Option<ImageData>>,
+    vectors: &mut Vec<Option<ImageData>>,
     intents: &ScrollIntents,
     frame: &CommittedFrame,
     images: &[Option<ImageData>],
     size: FrameSize,
     animation_now: Option<f64>,
 ) -> Result<(), EngineError> {
-    // The one optional pre-step. A frame with no `filter: blur()` group and
-    // no `backdrop-filter` element — the overwhelming majority — skips it on
-    // this one test and touches no offscreen texture at all.
+    // The two optional pre-steps, each skipped on one test. A frame drawing
+    // no SVG document bakes no vector texture; a frame with no
+    // `filter: blur()` group and no `backdrop-filter` element — the
+    // overwhelming majority — bakes no filter and touches no offscreen
+    // texture at all. The vectors come first: a filter's range may draw one.
+    if frame.draws_vectors() {
+        output.prepare_vectors(frame, vectors)?;
+    } else {
+        vectors.clear();
+    }
     if frame.filter_groups().is_empty() {
         filtered.clear();
     } else {
         output.prepare_filters(
             frame,
             images,
+            vectors,
             &|slot| intents.offset_for(slot.node),
             intents.generation,
             animation_now,
@@ -992,6 +1050,7 @@ fn compose_and_render(
             buffer,
             images,
             filtered,
+            vectors,
             &|slot| intents.offset_for(slot.node),
             animation_now,
         );
@@ -1065,6 +1124,7 @@ impl Painter {
             composed: None,
             composed_scene: Scene::new(),
             composed_filters: Vec::new(),
+            composed_vectors: Vec::new(),
             images: images::PainterImages::default(),
             thread_bound: PhantomData,
         }
@@ -1275,6 +1335,7 @@ impl Painter {
     fn forget_target(&mut self) {
         self.composed = None;
         self.composed_filters.clear();
+        self.composed_vectors.clear();
         self.output.forget();
     }
 
@@ -1695,6 +1756,7 @@ impl Painter {
             output,
             composed_scene,
             composed_filters,
+            composed_vectors,
             scroll_intents,
             images,
             ..
@@ -1703,6 +1765,7 @@ impl Painter {
             output,
             composed_scene,
             composed_filters,
+            composed_vectors,
             scroll_intents,
             frame,
             images.resolved(),

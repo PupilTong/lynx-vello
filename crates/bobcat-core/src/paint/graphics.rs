@@ -25,6 +25,7 @@ use dom::render::blur::FilterTextures;
 #[cfg(not(target_arch = "wasm32"))]
 use dom::render::gpu::read_texture;
 use dom::render::gpu::{AtlasResidency, render_params, renderer_options};
+use dom::render::vector_textures::VectorTextures;
 use dom::vello::peniko::{Color, ImageData};
 use dom::vello::util::{RenderContext, RenderSurface};
 use dom::{CommittedFrame, ScrollSlot, Vector2D, vello};
@@ -67,6 +68,10 @@ pub(crate) struct WindowGraphics {
     /// The `filter: blur()` bakes of the frame this renderer last composed;
     /// see [`dom::render::blur::FilterTextures`].
     filters: FilterTextures,
+    /// The textures the vector images drawn through this renderer were
+    /// baked into, kept across frames under a byte budget; see
+    /// [`dom::render::vector_textures::VectorTextures`].
+    vectors: VectorTextures,
     #[cfg(not(target_arch = "wasm32"))]
     capture: Option<CaptureTarget>,
 }
@@ -116,6 +121,7 @@ impl WindowGraphics {
             renderer,
             atlas: AtlasResidency::default(),
             filters: FilterTextures::default(),
+            vectors: VectorTextures::default(),
             #[cfg(not(target_arch = "wasm32"))]
             capture: None,
         })
@@ -187,10 +193,16 @@ impl WindowGraphics {
         size: FrameSize,
     ) -> Result<(), EngineError> {
         self.configure_for(size);
-        // The filter bakes are override images this scene may draw, so the
-        // residency has to see them too or a post-loss repair is missed.
-        self.atlas
-            .prepare_all(&mut self.renderer, scene, images, self.filters.images());
+        // The filter and vector bakes are override images this scene may
+        // draw, so the residency has to see them too or a post-loss repair
+        // is missed.
+        self.atlas.prepare_all(
+            &mut self.renderer,
+            scene,
+            images,
+            self.filters.images(),
+            self.vectors.images(),
+        );
         let handle = &self.context.devices[self.surface.dev_id];
         self.renderer
             .render_to_texture(
@@ -203,15 +215,40 @@ impl WindowGraphics {
             .map_err(|error| EngineError::Render(error.to_string()))
     }
 
+    /// Bakes the textures of `frame`'s vector image draws not already
+    /// resident, on the window's own device.
+    ///
+    /// Call before [`Self::prepare_filters`] and before composing; a frame
+    /// with no vector draw asks nothing of the device.
+    pub(super) fn prepare_vectors(
+        &mut self,
+        frame: &CommittedFrame,
+    ) -> Result<&[Option<ImageData>], EngineError> {
+        let Self {
+            context,
+            surface,
+            renderer,
+            atlas,
+            vectors,
+            ..
+        } = self;
+        let handle = &context.devices[surface.dev_id];
+        vectors
+            .prepare(frame, renderer, &handle.device, &handle.queue, atlas)
+            .map_err(|error| EngineError::Gpu(error.to_string()))
+    }
+
     /// Bakes `frame`'s `filter: blur()` groups and `backdrop-filter`
     /// elements on the window's own device.
     ///
-    /// Call before composing; a frame with no filter entry asks nothing of
-    /// the device.
+    /// Call before composing, with the `vectors` table
+    /// [`Self::prepare_vectors`] answered for this frame; a frame with no
+    /// filter entry asks nothing of the device.
     pub(super) fn prepare_filters(
         &mut self,
         frame: &CommittedFrame,
         images: &[Option<ImageData>],
+        vectors: &[Option<ImageData>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
         animation_now: Option<f64>,
@@ -233,6 +270,7 @@ impl WindowGraphics {
                 atlas,
                 frame,
                 images,
+                vectors,
                 offset_of,
                 scroll_generation,
                 animation_now,
