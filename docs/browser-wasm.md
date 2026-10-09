@@ -130,15 +130,20 @@ SVG documents are the exception: the browser does not decode them through
 the Render Worker reports the bytes themselves
 (`ImageReports::loaded_document` with `DocumentKind::Svg`), exactly as the
 native targets do, and the engine parses and draws the document itself
-(`docs/svg-vector-images-design.md`). wasm32 has no blocking pool, so the
+(`docs/svg-lynx-component-design.md`). wasm32 has no blocking pool, so the
 Lynx main Worker (`bobcat-main`) parses the document inline when it applies
-the report; natively the parse runs on that thread's blocking pool. Nothing
-reaches the browser's main thread, no bitmap is allocated, and an evicted
-SVG has nothing to restore. All three targets therefore render an SVG the
-same way. `usvg` is built without its
-`svgz` feature, so a body that is still gzip-compressed (a `.svgz` file
-served without `Content-Encoding: gzip`, or registered as is) fails to load
-on every target; this is a documented gap.
+the report, and parses an `<svg content>`'s markup inline in the epilogue of
+the entry that wrote it (`Document::apply_pending_documents`); natively both
+parses run on that thread's blocking pool. Nothing reaches the browser's main
+thread, and no bitmap is allocated on the resource side: the Render Worker's
+painter rasterises each vector draw into a texture of its own
+(`crates/dom/src/render/vector_textures.rs`), with the resident textures
+bounded by a 32 MiB budget on wasm32 (64 MiB natively), and an evicted
+texture is rebaked from the scene the frame carries. All three targets
+therefore render an SVG the same way. The engine's converter does not
+decompress, so a body that is still gzip-compressed (a `.svgz` file served
+without `Content-Encoding: gzip`, or registered as is) fails to load on every
+target; this is a documented gap.
 
 `loadLynxXml(url)` similarly fetches the source envelope once and decodes it
 with the browser's replacement-mode UTF-8 `TextDecoder`, matching web-core's
