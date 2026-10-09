@@ -785,7 +785,6 @@ impl<'a> Converter<'a> {
                         self.sheet,
                         context.viewport,
                         f64::from(context.style.font_size),
-                        context.style.color,
                     )
                 });
                 spec.clone()

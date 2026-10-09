@@ -59,16 +59,14 @@ pub(crate) struct GradientSpec {
 const MAX_CHAIN: usize = 16;
 
 /// Builds the specification of the gradient element `node`, following its
-/// `href` chain for missing attributes and stops. `color` is the
-/// referencing element's `color`, what a `stop-color: currentColor` falls
-/// back to. `None` for an element that is not a gradient.
+/// `href` chain for missing attributes and stops. `None` for an element
+/// that is not a gradient.
 pub(super) fn gradient<'a>(
     node: roxmltree::Node<'a, 'a>,
     ids: &Ids<'a>,
     sheet: &Sheet<'a>,
     viewport: Viewport,
     font_size: f64,
-    color: svgtypes::Color,
 ) -> Option<Arc<GradientSpec>> {
     let name = node.tag_name().name();
     if name != "linearGradient" && name != "radialGradient" {
@@ -136,7 +134,7 @@ pub(super) fn gradient<'a>(
     // Stops come from the first gradient in the chain that has any.
     let stops = chain
         .iter()
-        .map(|node| stops(*node, sheet, color))
+        .map(|node| stops(*node, sheet))
         .find(|stops| !stops.is_empty())
         .unwrap_or_default();
     Some(Arc::new(GradientSpec {
@@ -163,11 +161,12 @@ pub(super) fn href<'a>(
 
 /// `node`'s `stop` children: offsets clamped to the unit interval and made
 /// non-decreasing, colours with `stop-opacity` folded in.
-fn stops<'a>(
-    node: roxmltree::Node<'a, 'a>,
-    sheet: &Sheet<'a>,
-    color: svgtypes::Color,
-) -> Vec<(f32, Color)> {
+///
+/// A `stop-color: currentColor` is the stop's own `color`, which inherits
+/// through the stop's own ancestors (the gradient, its `defs`, …), never
+/// from an element the gradient paints: one gradient is one set of stops
+/// for every shape that references it.
+fn stops<'a>(node: roxmltree::Node<'a, 'a>, sheet: &Sheet<'a>) -> Vec<(f32, Color)> {
     let mut stops: Vec<(f32, Color)> = Vec::new();
     let mut previous = 0.0_f32;
     for stop in node.children().filter(|child| child.has_tag_name("stop")) {
@@ -178,13 +177,9 @@ fn stops<'a>(
             .max(previous);
         previous = offset;
         let declared = super::style::declarations(stop, sheet);
-        let own_color = declared
-            .get("color")
-            .and_then(|value| svgtypes::Color::from_str(value).ok())
-            .unwrap_or(color);
         let stop_color = match declared.get("stop-color") {
             None | Some("inherit") => svgtypes::Color::black(),
-            Some("currentColor") => own_color,
+            Some("currentColor") => inherited_color(stop, sheet),
             Some(value) => {
                 svgtypes::Color::from_str(value).unwrap_or_else(|_| svgtypes::Color::black())
             }
@@ -196,6 +191,23 @@ fn stops<'a>(
         stops.push((offset, with_opacity(stop_color, opacity)));
     }
     stops
+}
+
+/// The computed `color` of `node`: the nearest of it and its ancestors that
+/// declares a valid one, else the initial black. Read only for a stop whose
+/// `stop-color` is `currentColor`. As in
+/// [`Style::resolve`](super::style::Style::resolve), a value that does not
+/// parse as a colour (`inherit`, `currentColor` included) leaves the
+/// parent's.
+fn inherited_color<'a>(node: roxmltree::Node<'a, 'a>, sheet: &Sheet<'a>) -> svgtypes::Color {
+    node.ancestors()
+        .filter(roxmltree::Node::is_element)
+        .find_map(|element| {
+            super::style::declarations(element, sheet)
+                .get("color")
+                .and_then(|value| svgtypes::Color::from_str(value).ok())
+        })
+        .unwrap_or_else(svgtypes::Color::black)
 }
 
 /// `color` with its alpha multiplied by `opacity`, rounded to RGBA8 the

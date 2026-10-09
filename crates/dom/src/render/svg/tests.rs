@@ -510,6 +510,36 @@ fn a_one_stop_gradient_and_a_fallback_are_solid() {
     assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
+/// A stop's `currentColor` is the stop's own `color`, inherited through the
+/// gradient and its ancestors, never the painted shape's: two shapes of
+/// different `color` sharing one gradient get the same stop.
+#[test]
+fn a_stops_current_color_inherits_through_the_gradient_not_the_shape() {
+    let parsed = document(
+        r##"<defs color="#0000ff">
+              <linearGradient id="defs"><stop offset="0" stop-color="currentColor"/></linearGradient>
+              <linearGradient id="own" color="#ff0000"><stop offset="0" stop-color="currentColor"/></linearGradient>
+            </defs>
+            <rect width="10" height="10" color="#00ff00" fill="url(#defs)"/>
+            <rect width="10" height="10" color="#ff00ff" fill="url(#defs)"/>
+            <rect width="10" height="10" color="#0000ff" fill="url(#own)"/>"##,
+    );
+    let fills: Vec<&Brush> = parsed
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Path {
+                fill: Some(fill), ..
+            } => Some(&fill.brush),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        fills,
+        [&Brush::Solid(BLUE), &Brush::Solid(BLUE), &Brush::Solid(RED)]
+    );
+}
+
 // --- Groups, layers and clips -------------------------------------------
 
 #[test]

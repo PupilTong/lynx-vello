@@ -89,8 +89,10 @@
 //!
 //! # Paint servers
 //!
-//! Solid colours fold the paint opacity into RGBA8. Gradients inherit
-//! attributes and stops along their `href` chain, map `spreadMethod` to
+//! Solid colours fold the paint opacity into RGBA8. A stop's
+//! `currentColor` is the stop's own `color`, inherited through the
+//! gradient's ancestors, whichever element the gradient paints. Gradients
+//! inherit attributes and stops along their `href` chain, map `spreadMethod` to
 //! [`Extend`](crate::vello::peniko::Extend), take `gradientTransform` as the
 //! brush transform, and resolve `objectBoundingBox` units against the shape's
 //! `kurbo` bounding box;
