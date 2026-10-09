@@ -83,14 +83,6 @@
 //! entry, and a document that does not parse marks its source failed. A
 //! vector image is never an image draw: [`FrameImages`] is never asked for
 //! it, and no bitmap budget applies.
-//!
-//! The document is the second producer of vector images: an inline `<svg>`
-//! root's subtree is serialised and parsed through the same
-//! [`ImageEvent::parse_document`] inline on the document thread, and filed
-//! under a synthetic source ([`SYNTHETIC_SOURCE_PREFIX`]) the registry
-//! creates already settled, so the host never sees it
-//! (`tree/inline_svg.rs`). Synthetic entries are the only ones the registry
-//! ever removes.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -734,20 +726,6 @@ pub(crate) struct ImageApplied {
     pub(crate) nodes: SmallVec<[(NodeId, ImageRole); 1]>,
 }
 
-/// The prefix of every synthetic source: the one an inline SVG root is bound
-/// to (`tree::inline_svg`), `inline-svg:<node>:<generation>`. The registry
-/// creates such an entry already settled, so the host is never asked for
-/// it, and removes it when the root rebinds or is freed.
-///
-/// A host URL that happened to start with this prefix would be forgotten
-/// with the node that last presented it; no host scheme does.
-pub(crate) const SYNTHETIC_SOURCE_PREFIX: &str = "inline-svg:";
-
-/// Whether `source` is a synthetic source ([`SYNTHETIC_SOURCE_PREFIX`]).
-pub(crate) fn is_synthetic_source(source: &str) -> bool {
-    source.starts_with(SYNTHETIC_SOURCE_PREFIX)
-}
-
 /// What the registry holds for one source.
 #[derive(Debug, Default)]
 struct Entry {
@@ -770,10 +748,7 @@ struct Entry {
 ///
 /// The invariant that makes it work: **an entry exists exactly when the
 /// source has been asked for.** There is no window in which a source is known
-/// but has no key, because the key *is* the source. A synthetic source
-/// ([`SYNTHETIC_SOURCE_PREFIX`]) is the one exception: its entry is created
-/// settled by the document itself ([`ImageRegistry::insert_synthetic`]), and
-/// existing is exactly what keeps it from ever being asked for.
+/// but has no key, because the key *is* the source.
 #[derive(Default)]
 pub(crate) struct ImageRegistry {
     entries: FxHashMap<Arc<str>, Entry>,
@@ -1005,36 +980,6 @@ impl ImageRegistry {
             ImageState::Ready { width, height, .. } => Some((*width, *height)),
             ImageState::Pending | ImageState::Failed => None,
         }
-    }
-
-    /// Files a synthetic source ([`SYNTHETIC_SOURCE_PREFIX`]) already
-    /// settled by `event`, before any node binds it: an entry that exists
-    /// is never queued as wanted, so no paint walk and no bind asks the host
-    /// for it. A parsed document is encoded through `context` as
-    /// [`ImageRegistry::apply`] encodes one.
-    pub(crate) fn insert_synthetic(
-        &mut self,
-        event: &ImageEvent,
-        context: &mut Option<Box<TextContext>>,
-    ) {
-        debug_assert!(
-            is_synthetic_source(event.source()),
-            "only a synthetic source is inserted settled"
-        );
-        self.entries
-            .insert(Arc::clone(event.source()), Entry::default());
-        let _ = self.apply(event, context);
-    }
-
-    /// Removes a synthetic source's entry: a superseded generation of an
-    /// inline SVG root, or the source of a freed one. The one removal the
-    /// registry makes; a host source never regresses.
-    pub(crate) fn forget_synthetic(&mut self, source: &str) {
-        debug_assert!(
-            is_synthetic_source(source),
-            "only a synthetic source is ever removed: {source}"
-        );
-        self.entries.remove(source);
     }
 
     /// Whether the registry holds an entry for `source`.

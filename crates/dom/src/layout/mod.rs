@@ -73,15 +73,7 @@ impl<T: Sync> Document<T> {
     /// nobody here: it waits for whatever flush comes next, which an animation
     /// tick can precede, so that one is spelled the way
     /// [`Document::mark_subtree_recascade`] spells it.
-    ///
-    /// Before any of it, every inline SVG root a mutation marked since the
-    /// last call is serialised and parsed again
-    /// ([`crate::tree::inline_svg`]), so the natural size the pass reads and
-    /// the picture the next paint draws describe the subtree as it is now.
-    /// Here rather than in `render` because every caller that reads layout
-    /// comes through this.
     pub fn layout(&mut self) {
-        self.refresh_inline_svgs();
         let mut resized = Vec::new();
         for pass in 0..committed_box::CONTAINER_PASSES {
             self.layout_pass(&mut resized);
@@ -375,17 +367,13 @@ impl<T> Document<T> {
 
     /// The source `id` holds in `role`, if it is replaced content holding
     /// one.
-    ///
-    /// For an inline SVG root ([`crate::tree::inline_svg`]) this is the
-    /// synthetic source its subtree was last parsed under, which changes
-    /// with every refresh.
     #[must_use]
     pub fn image_source(&self, id: crate::NodeId, role: ImageRole) -> Option<&str> {
         self.get(id)?.image_source(role)
     }
 
     /// Whether the document's image registry holds an entry for `source`.
-    /// For tests: a freed inline SVG root must leave none behind.
+    /// For tests.
     #[doc(hidden)]
     #[must_use]
     pub fn knows_image_source(&self, source: &str) -> bool {

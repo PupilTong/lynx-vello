@@ -70,9 +70,6 @@ pub struct Document<T> {
     /// a page whose images have not loaded paints without them rather than
     /// failing.
     pub(crate) images: crate::render::image::ImageRegistry,
-    /// The inline SVG roots awaiting a refresh, and the count of live `svg`
-    /// elements that gates their tracking ([`crate::tree::inline_svg`]).
-    pub(crate) inline_svgs: crate::tree::inline_svg::InlineSvgs,
     /// The `content-visibility: auto` skipping changes committed renders have
     /// produced and no one has drained yet, in frame order — css-contain-2
     /// §4.4's event queue, as [`crate::visual::relevance`] fills it and
@@ -130,7 +127,6 @@ impl<T> Document<T> {
             layout,
             painter: RefCell::new(crate::paint::painter::Painter::default()),
             images: crate::render::image::ImageRegistry::default(),
-            inline_svgs: crate::tree::inline_svg::InlineSvgs::default(),
             content_visibility_changes: Vec::new(),
             pending_snapshots: SnapshotMap::new(),
             relayout_roots: Vec::new(),
@@ -397,7 +393,6 @@ impl<T> Document<T> {
             let local_name = local_name.clone();
             |owner, id| Node::new_element(owner, id, local_name)
         });
-        self.note_element_created_for_inline_svg(id);
         self.pin_node(id);
         self.note_custom_element_created(id, &local_name);
         self.drain_reactions(base);
@@ -525,8 +520,6 @@ impl<T> Document<T> {
         self.live_node_mut(child).parent = Some(parent_slot);
         let appended = index + 1 == self.live_node_mut(parent).children.len();
         let contains_custom_elements = self.note_custom_subtree_inserted(child);
-        self.note_inline_svg_mutation(parent);
-        self.note_svg_inserted(child);
 
         self.note_moved_subtree(child);
         self.note_slot_assignment_inserted(parent, child, appended);
@@ -714,7 +707,6 @@ impl<T> Document<T> {
         };
         self.live_node_mut(child).parent = None;
         self.note_slot_assignment_removed(parent, child);
-        self.note_inline_svg_mutation(parent);
 
         debug_assert_ne!(
             parent, DOCUMENT_NODE_ID,
@@ -890,9 +882,6 @@ impl<T> Document<T> {
                 self.images.unbind_node(source, id, role);
             }
         }
-        // An inline SVG root's source is its own: nothing else can bind it,
-        // so its entry goes with it.
-        self.note_node_freed_for_inline_svg(&node);
         let slot = id;
         debug_assert_eq!(
             removed_snapshot,
