@@ -1895,7 +1895,7 @@ async fn write_on_images(page: &Rc<Page>, name: &str, value: &str) {
 }
 
 /// An SVG document `width` x `height` px with nothing drawable in it.
-fn svg_markup(width: u32, height: u32) -> String {
+fn empty_svg(width: u32, height: u32) -> String {
     format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"/>"#)
 }
 
@@ -1951,7 +1951,7 @@ fn an_svg_document_parses_off_thread_and_an_image_load_carries_its_natural_size(
         write_on_images(&owned.page, "src", "app:///a.svg").await;
         assert_eq!(images_seen(&owned.page).await, vec![None, None, None]);
         let settled = owned.page.epilogue_count();
-        report_svg(&owned.page, "app:///a.svg", &svg_markup(30, 15)).await;
+        report_svg(&owned.page, "app:///a.svg", &empty_svg(30, 15)).await;
         for _ in 0..TURNS {
             task::yield_now().await;
         }
@@ -1991,7 +1991,7 @@ fn an_svg_parses_off_thread_and_its_load_carries_the_layout_size() {
         write_on_images(&owned.page, "src", "app:///a.svg").await;
         assert_eq!(images_seen(&owned.page).await, vec![None, None, None]);
         let settled = owned.page.epilogue_count();
-        report_svg(&owned.page, "app:///a.svg", &svg_markup(30, 15)).await;
+        report_svg(&owned.page, "app:///a.svg", &empty_svg(30, 15)).await;
         for _ in 0..TURNS {
             task::yield_now().await;
         }
@@ -2139,7 +2139,7 @@ async fn report_held_parse(
         started,
         release: parse_released,
     });
-    page.apply(vec![svg_document(source, &svg_markup(30, 15))])
+    page.apply(vec![svg_document(source, &empty_svg(30, 15))])
         .await;
     until_parsed("the parse never started", || {
         parse_started.try_recv().is_ok()
@@ -2378,7 +2378,7 @@ fn an_svg_load_settled_before_the_first_commit_waits_for_it() {
             .commands
             .send(ToMain::ImageEvents(vec![dom::ImageEvent::parse_document(
                 Arc::from("app:///a.svg"),
-                svg_markup(30, 15).as_bytes(),
+                empty_svg(30, 15).as_bytes(),
                 dom::DocumentKind::Svg,
             )]))
             .expect("the view is serving");
