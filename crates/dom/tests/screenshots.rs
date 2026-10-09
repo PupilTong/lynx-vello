@@ -276,3 +276,103 @@ fn a_modal_top_layer_element_and_its_backdrop_paint_over_any_z_index() {
     );
     screenshot::assert_golden(&["top-layer", "modal-backdrop"], &actual);
 }
+
+/// The Explorer border/background/shadow example: the top edge must continue
+/// around its lone rounded corner, and the shadow must follow that same shape.
+/// Styles come from `@lynx-example/css@74e8136`, `border_background_shadow`.
+/// The reference was captured with Chrome 154.0.8037.99 at device scale 1;
+/// fixed positioning replaces viewport-dependent centering for this comparison.
+#[test]
+fn rounded_box_showcase_matches_browser() {
+    let mut doc = paint_common::Doc::with_css_sized("", 220.0, 220.0);
+    doc.dom
+        .register_fonts(dom::FontBlob::from_static(screenshot::ROBOTO));
+    doc.dom.set_inline_style(
+        doc.root,
+        "display:flex;position:relative;width:220px;height:220px;background:#fff",
+    );
+    let subject = doc.el(doc.root, "");
+    doc.dom.set_inline_style(subject,
+        "display:flex;position:absolute;left:32px;top:32px;width:150px;height:150px;box-sizing:border-box;background:linear-gradient(to right,rgb(255,53,26),rgb(0,235,235));border-radius:0 50% 0 0;box-shadow:3px 5px 5px black;border-left:2px rgb(0,235,235) dotted;border-top:2px rgb(255,53,26) dashed");
+    let actual = screenshot::capture_prebuilt_document(
+        "rounded_box_showcase_matches_browser",
+        &mut doc.dom,
+        &dom::NoImages,
+    );
+    let references = flashbulb::Screenshots::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/screenshots/rounded-box-browser"
+    ))
+    .with_artifacts_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/artifacts"))
+    // CSS permits different dash/dot phasing. The two geometric assertions
+    // below are independent of that allowance and of the stored reference.
+    .with_options(flashbulb::CompareOptions::default().with_max_diff_pixels(150));
+    assert!(
+        !references.is_updating(),
+        "recapture this reference with Chrome; never accept native output"
+    );
+    assert!(
+        references.path(&["showcase"]).exists(),
+        "the browser reference must be committed"
+    );
+    references.assert_matches(&["showcase"], &actual);
+    let comparison = flashbulb::compare(
+        &flashbulb::Image::read_png(references.path(&["showcase"])).unwrap(),
+        &actual,
+        references.options(),
+    );
+    eprintln!(
+        "showcase browser comparison: {} differing pixels",
+        comparison.diff_pixels
+    );
+
+    let pixel = |x: usize, y: usize| &actual.pixels()[(y * 220 + x) * 4..][..3];
+    assert!(
+        (170..178).all(|x| (43..49).all(|y| pixel(x, y).iter().all(|&v| v > 245))),
+        "the removed corner must not contain a rectangular shadow"
+    );
+    let red_arc = (120..180)
+        .flat_map(|x| (38..104).map(move |y| (x, y)))
+        .filter(|&(x, y)| {
+            let rgb = pixel(x, y);
+            rgb[0] > 220 && rgb[1] < 90 && rgb[2] < 65
+        })
+        .count();
+    assert!(
+        red_arc > 8,
+        "the red top border must extend down the rounded corner: {red_arc} pixels"
+    );
+}
+
+/// Separate controls for elliptical/mixed radii, inward and outward blur,
+/// spread, zero blur, asymmetric border widths, and nested filter composition.
+#[test]
+fn rounded_box_matrix_matches_reference() {
+    let subjects = [
+        "border-radius:0 60px 12px 24px;box-shadow:4px 6px 8px 2px #111827;border-top:3px dashed #ef4444;border-left:2px dotted #06b6d4",
+        "border-radius:60px 20px 50px 5px / 20px 50px 15px 40px;box-shadow:4px 6px 8px #111827;border:3px solid #ef4444;border-right:9px solid #2563eb",
+        "border-radius:0 60px 12px 24px;box-shadow:inset 4px 6px 12px 2px #111827;border:3px solid #06b6d4",
+        "border-radius:0 60px 12px 24px;box-shadow:4px 6px 0px -2px #111827;border:6px double #ef4444;border-left:12px double #2563eb",
+        "border-radius:24px;box-shadow:4px 6px 8px #111827;border:4px dashed #ef4444;border-bottom:4px dotted #2563eb",
+        "border-radius:0 60px 12px 24px;box-shadow:4px 6px 8px #111827,inset 3px 4px 6px #ef4444;filter:blur(1px);opacity:0.7;border-top:3px dashed #ef4444",
+    ];
+    let mut doc = paint_common::Doc::with_css_sized("", 480.0, 320.0);
+    doc.dom
+        .register_fonts(dom::FontBlob::from_static(screenshot::ROBOTO));
+    doc.dom.set_inline_style(
+        doc.root,
+        "display:flex;position:relative;width:480px;height:320px;background:#fff",
+    );
+    for (index, style) in subjects.iter().enumerate() {
+        let subject = doc.el(doc.root, "");
+        doc.dom.set_inline_style(subject, &format!(
+            "display:flex;position:absolute;left:{}px;top:{}px;width:120px;height:120px;box-sizing:border-box;background:#d1fae5;{style}",
+            20 + index % 3 * 160, 20 + index / 3 * 160));
+    }
+    let actual = screenshot::capture_prebuilt_document(
+        "rounded_box_matrix_matches_reference",
+        &mut doc.dom,
+        &dom::NoImages,
+    );
+    screenshot::assert_golden(&["rounded-box-matrix"], &actual);
+}

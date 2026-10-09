@@ -275,7 +275,7 @@ impl WalkSink<'_> {
     /// composer, so its walk encodes the group's content inline and the
     /// frame is simply unblurred — which is what makes it still a usable
     /// culling oracle for a filtered page.
-    fn push_filter(&mut self, group: FilterGroup) -> bool {
+    pub(super) fn push_filter(&mut self, group: FilterGroup) -> bool {
         match self {
             Self::Monolithic(..) => false,
             Self::Compose(assembly) => {
@@ -285,7 +285,7 @@ impl WalkSink<'_> {
         }
     }
 
-    fn pop_filter(&mut self, frame: &PaintOrder) {
+    pub(super) fn pop_filter(&mut self, frame: &PaintOrder) {
         match self {
             Self::Monolithic(..) => {}
             Self::Compose(assembly) => {
@@ -1532,9 +1532,9 @@ fn paint_item<T>(
             // program op, which cuts the open fragment. `fragment_for` cuts
             // only when the space actually changed, so re-acquiring where
             // nothing was emitted costs a comparison.
-            shadow::paint_outset(sink.scene_for(space), &mut scratch.paths, style, &fragment);
+            shadow::paint_outset(sink, frame, space, &mut scratch.paths, style, &fragment);
             background::paint(sink, space, style, &fragment, images, text_clip.as_ref());
-            shadow::paint_inset(sink.scene_for(space), &mut scratch.paths, style, &fragment);
+            shadow::paint_inset(sink, frame, space, &mut scratch.paths, style, &fragment);
             // Of a replaced element's two sources, the registry picks the one
             // whose bitmap the node's natural size was recomputed from, so
             // `object-fit` fits the bitmap drawn here.
