@@ -13,13 +13,19 @@
 //! transform, fragments append under the same map (`Scene::append`
 //! left-multiplies the child's transform stream), and pops are pops.
 //! Painter-internal pushes (background layers, text `SrcIn` sandwiches,
-//! inset-shadow isolation, the clip pair around each tile of a vector image)
-//! are balanced within one item and stay inside fragments untouched.
+//! inset-shadow isolation) are balanced within one item and stay inside
+//! fragments untouched.
 //!
-//! An image draw is a raster image only. A vector image (an SVG document) is
-//! encoded into the current fragment on the document thread, as a gradient
-//! is, so it is never a [`ComposeOp::Image`] and the composer never reads
-//! it.
+//! Two ops draw pictures whose pixels the composer supplies. A
+//! [`ComposeOp::Image`] is a raster image: the frame carries its name and
+//! geometry, and the painter reads its bitmap once per commit. A
+//! [`ComposeOp::Vector`] is a vector image (an SVG document): the frame
+//! carries its scene and geometry, and the painter's raster cache
+//! ([`crate::render::vector_textures`]) bakes a texture of it at the draw's
+//! device size, which the op draws through the same path as a bitmap. The
+//! scene is never appended to a fragment, so the committed encoding costs
+//! the same whatever the picture holds, and without a texture the op
+//! encodes nothing.
 //!
 //! A space's map is [`SpaceSamples::css`]: its path's scroll, sticky and
 //! animation nodes, root first (see [`crate::visual::space`]).
@@ -71,11 +77,14 @@ use euclid::default::Vector2D;
 use smallvec::SmallVec;
 
 use crate::paint::shape::{BoxShape, with_shape};
-use crate::render::image::{ImageSizeHint, is_renderable};
+use crate::render::image::{
+    AspectAlign, AspectRatio, ImageSizeHint, MAX_RENDERABLE_DIMENSION, is_renderable,
+};
 use crate::vello::Scene;
-use crate::vello::kurbo::{Affine, Point, Rect, Size};
+use crate::vello::kurbo::{Affine, Point, Rect, Shape, Size};
 use crate::vello::peniko::{
-    BlendMode, BrushRef, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
+    BlendMode, BrushRef, Compose, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
+    Mix,
 };
 use crate::visual::anchored::AnchoredSlot;
 use crate::visual::space::{self, Space, SpaceSamples};
@@ -165,6 +174,184 @@ fn device_length(length: f64) -> u32 {
     length
 }
 
+/// One vector image (an SVG document) drawn into a destination rectangle,
+/// with every CSS decision resolved on the document's thread and the pixels
+/// left to the painter's raster cache
+/// ([`crate::render::vector_textures::VectorTextures`]).
+///
+/// The frame carries the picture as its scene, never as pixels: the painter
+/// bakes the scene into a texture at the draw's device size and draws that
+/// texture exactly as it draws an [`ImageDraw`]'s bitmap, with the brush
+/// scale `extent / texture size`. `anchor`, `extent`, `sampler` and `area`
+/// mean what they mean on [`ImageDraw`]; the rest is what the bake needs:
+/// the scene, the identity its texture is cached under, the viewport the
+/// scene is encoded in, how that viewport maps onto a box of another ratio,
+/// and whether the scene opens a blend layer at its top level (the vello
+/// #1198 rule: such a scene is baked inside one full `Normal` layer).
+pub(crate) struct VectorDraw {
+    pub(crate) scene: Arc<Scene>,
+    /// The image's process-unique identity (`VectorImage::key`), half of
+    /// the raster cache's key; the device size is the other half.
+    pub(crate) key: u64,
+    /// The rectangle of scene units the draw maps onto `extent`.
+    pub(crate) viewport: (f32, f32),
+    pub(crate) aspect: AspectRatio,
+    pub(crate) opens_blend: bool,
+    /// Item-local space to device px.
+    pub(crate) transform: Affine,
+    /// Where the destination rectangle starts, item-local.
+    pub(crate) anchor: Point,
+    /// How large it is, item-local.
+    pub(crate) extent: Size,
+    /// Extend modes, `image-rendering` quality, alpha.
+    pub(crate) sampler: ImageSampler,
+    pub(crate) area: ImageArea,
+}
+
+impl std::fmt::Debug for VectorDraw {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VectorDraw")
+            .field("key", &self.key)
+            .field("viewport", &self.viewport)
+            .field("transform", &self.transform)
+            .field("anchor", &self.anchor)
+            .field("extent", &self.extent)
+            .field("area", &self.area)
+            .finish_non_exhaustive()
+    }
+}
+
+impl VectorDraw {
+    /// The device size the texture is baked at: `extent` under the per-axis
+    /// scale of `transform`, rounded up — [`ImageDraw::size_hint`]'s rule —
+    /// and clamped to [`MAX_RENDERABLE_DIMENSION`] per axis, which is as
+    /// large as vello's atlas can place. A clamped texture is drawn
+    /// stretched over the extent, since the brush scale divides by its own
+    /// size. Zero on an axis with no device length, which bakes nothing.
+    pub(crate) fn device_size(&self) -> (u32, u32) {
+        let [a, b, c, d, _, _] = self.transform.as_coeffs();
+        (
+            device_length(self.extent.width * a.hypot(b)).min(MAX_RENDERABLE_DIMENSION),
+            device_length(self.extent.height * c.hypot(d)).min(MAX_RENDERABLE_DIMENSION),
+        )
+    }
+
+    /// The map from scene units onto a `width` × `height` box by `aspect`.
+    pub(crate) fn placement(&self, width: f64, height: f64) -> Affine {
+        aspect_transform(self.viewport, self.aspect, Size::new(width, height))
+    }
+}
+
+/// The map from `viewport` scene units onto a box of `size` under
+/// `preserveAspectRatio` (SVG 2 §8.6): `align: None` is `none`, a stretch
+/// per axis; otherwise one uniform scale — the smaller ratio to `meet` the
+/// box, the larger to `slice` it — with the viewport aligned per axis at the
+/// box's start, middle or end.
+pub(crate) fn aspect_transform(viewport: (f32, f32), aspect: AspectRatio, size: Size) -> Affine {
+    let (width, height) = (f64::from(viewport.0), f64::from(viewport.1));
+    let (sx, sy) = (size.width / width, size.height / height);
+    let Some((align_x, align_y)) = aspect.align else {
+        return Affine::scale_non_uniform(sx, sy);
+    };
+    let scale = if aspect.slice { sx.max(sy) } else { sx.min(sy) };
+    let offset = |align: AspectAlign, slack: f64| match align {
+        AspectAlign::Min => 0.0,
+        AspectAlign::Mid => slack / 2.0,
+        AspectAlign::Max => slack,
+    };
+    Affine::new([
+        scale,
+        0.0,
+        0.0,
+        scale,
+        offset(align_x, size.width - width * scale),
+        offset(align_y, size.height - height * scale),
+    ])
+}
+
+/// Encodes vector draw `index` through its baked texture, if the painter
+/// has one for it.
+///
+/// A draw with no texture — no GPU behind the composition, or a texture
+/// larger than the raster cache's whole budget — encodes nothing: nothing
+/// stands in for the picture, and nothing stands in its place either.
+fn encode_vector(
+    scene: &mut Scene,
+    draws: &[VectorDraw],
+    textures: &[Option<ImageData>],
+    index: u32,
+    outer: Affine,
+) {
+    let index = index as usize;
+    if let Some(Some(data)) = textures.get(index) {
+        let draw = &draws[index];
+        encode_textured(
+            scene,
+            outer * draw.transform,
+            draw.anchor,
+            draw.extent,
+            draw.sampler,
+            &draw.area,
+            data,
+        );
+    }
+}
+
+/// Encodes one vector draw by appending its scene, scaled onto the
+/// destination rectangle — the pre-cache shape, kept for the monolithic walk
+/// the equivalence tests run, which has no renderer to bake with.
+///
+/// The layers around the append are the ones the texture fill of the same
+/// [`ImageArea`] would open, closed in this one call so a fragment cut can
+/// never land between them; when the scene opens a blend layer at its top
+/// level they are full `Normal` layers rather than clip layers (vello #1198),
+/// which also keeps the picture's blending inside the picture. The append
+/// is never of an empty scene — the producers refuse one — so the
+/// `FORCE_NEXT_*` flags a preceding glyph run set are never cleared.
+pub(crate) fn encode_vector_inline(scene: &mut Scene, draw: &VectorDraw, outer: Affine) {
+    let transform = outer * draw.transform;
+    let isolate = draw.opens_blend;
+    let layers = match &draw.area {
+        ImageArea::Fill(CapturedShape::Rect(rect)) => {
+            push_vector_layer(scene, isolate, transform, rect);
+            1
+        }
+        ImageArea::Fill(CapturedShape::Box(shape)) => {
+            with_shape!(shape, |s| push_vector_layer(scene, isolate, transform, s));
+            1
+        }
+        ImageArea::Clipped { clip, draw: rect } => {
+            with_shape!(clip, |s| push_vector_layer(scene, isolate, transform, s));
+            push_vector_layer(scene, isolate, transform, rect);
+            2
+        }
+    };
+    let placement = transform
+        * Affine::translate(draw.anchor.to_vec2())
+        * draw.placement(draw.extent.width, draw.extent.height);
+    scene.append(&draw.scene, Some(placement));
+    for _ in 0..layers {
+        scene.pop_layer();
+    }
+}
+
+/// One layer around an inline vector draw: a clip layer, or a full `Normal`
+/// layer when `isolate`.
+fn push_vector_layer(scene: &mut Scene, isolate: bool, transform: Affine, shape: &impl Shape) {
+    if isolate {
+        scene.push_layer(
+            Fill::NonZero,
+            BlendMode::new(Mix::Normal, Compose::SrcOver),
+            1.0,
+            transform,
+            shape,
+        );
+    } else {
+        scene.push_clip_layer(Fill::NonZero, transform, shape);
+    }
+}
+
 /// Encodes draw `index`, if its pixels resolved.
 ///
 /// A draw whose source had no pixels is simply absent from the table's
@@ -189,6 +376,29 @@ fn encode_draw(
 /// not-yet-loaded image already produces. `outer` is the device-px map of
 /// the space the draw composes in.
 pub(crate) fn encode_image(scene: &mut Scene, draw: &ImageDraw, outer: Affine, data: &ImageData) {
+    encode_textured(
+        scene,
+        outer * draw.transform,
+        draw.anchor,
+        draw.extent,
+        draw.sampler,
+        &draw.area,
+        data,
+    );
+}
+
+/// Encodes one fill of `area` with `data`, under `transform`, placed so one
+/// copy of the bitmap covers the `extent` at `anchor`. The shared encoder of
+/// an image draw and a vector draw's texture.
+fn encode_textured(
+    scene: &mut Scene,
+    transform: Affine,
+    anchor: Point,
+    extent: Size,
+    sampler: ImageSampler,
+    area: &ImageArea,
+    data: &ImageData,
+) {
     // A bitmap vello cannot place draws as nothing — the same one-frame gap a
     // not-yet-loaded image already produces. This is the only place the bound
     // is enforced, because it is the only place the bitmap is known, and the
@@ -196,17 +406,16 @@ pub(crate) fn encode_image(scene: &mut Scene, draw: &ImageDraw, outer: Affine, d
     if !is_renderable(data) {
         return;
     }
-    let transform = outer * draw.transform;
-    let brush_transform = Affine::translate(draw.anchor.to_vec2())
+    let brush_transform = Affine::translate(anchor.to_vec2())
         * Affine::scale_non_uniform(
-            draw.extent.width / f64::from(data.width),
-            draw.extent.height / f64::from(data.height),
+            extent.width / f64::from(data.width),
+            extent.height / f64::from(data.height),
         );
     let brush = BrushRef::Image(ImageBrush {
         image: data,
-        sampler: draw.sampler,
+        sampler,
     });
-    match &draw.area {
+    match area {
         ImageArea::Fill(CapturedShape::Rect(rect)) => {
             scene.fill(Fill::NonZero, transform, brush, Some(brush_transform), rect);
         }
@@ -251,8 +460,15 @@ pub(crate) enum ComposeOp {
     },
     Pop,
     /// Draw `image_draws[index]`, whose pixels the composer supplies. A
-    /// raster image only: a vector image is part of a fragment.
+    /// raster image only; a vector image is a [`Self::Vector`].
     Image {
+        index: u32,
+        space: Option<u32>,
+    },
+    /// Draw `vector_draws[index]` through the texture the composer's raster
+    /// cache baked for it, exactly as [`Self::Image`] draws a bitmap.
+    /// Without a texture it encodes nothing.
+    Vector {
         index: u32,
         space: Option<u32>,
     },
@@ -286,9 +502,10 @@ impl ComposeOp {
     )]
     pub(crate) fn space(&self, groups: &[FilterGroup]) -> Option<Option<u32>> {
         match self {
-            Self::Fragment { space, .. } | Self::Push { space, .. } | Self::Image { space, .. } => {
-                Some(*space)
-            }
+            Self::Fragment { space, .. }
+            | Self::Push { space, .. }
+            | Self::Image { space, .. }
+            | Self::Vector { space, .. } => Some(*space),
             Self::PushFilter { index } | Self::PushBackdrop { index } => {
                 Some(groups[*index as usize].space)
             }
@@ -459,6 +676,7 @@ pub(crate) struct ComposeAssembly {
     pub(crate) fragments: Vec<Scene>,
     pub(crate) program: Vec<ComposeOp>,
     pub(crate) image_draws: Vec<ImageDraw>,
+    pub(crate) vector_draws: Vec<VectorDraw>,
     pub(crate) filter_groups: Vec<FilterGroup>,
     /// The space of the currently open fragment, if one is open.
     #[expect(
@@ -492,6 +710,7 @@ impl ComposeAssembly {
         fragments: Vec<Scene>,
         program: Vec<ComposeOp>,
         image_draws: Vec<ImageDraw>,
+        vector_draws: Vec<VectorDraw>,
         filter_groups: Vec<FilterGroup>,
         pool: Vec<Scene>,
     ) -> Self {
@@ -499,6 +718,7 @@ impl ComposeAssembly {
             fragments.is_empty()
                 && program.is_empty()
                 && image_draws.is_empty()
+                && vector_draws.is_empty()
                 && filter_groups.is_empty(),
             "recycled containers are emptied before they are handed back",
         );
@@ -506,6 +726,7 @@ impl ComposeAssembly {
             fragments,
             program,
             image_draws,
+            vector_draws,
             filter_groups,
             current: None,
             open_filter: None,
@@ -541,6 +762,15 @@ impl ComposeAssembly {
         let index = u32::try_from(self.image_draws.len()).expect("a frame cannot hold 2^32 images");
         self.image_draws.push(draw);
         self.push_op(ComposeOp::Image { index, space });
+    }
+
+    /// Records one vector draw as a program op, sealing any open fragment
+    /// first so the draw lands after the content already encoded.
+    pub(crate) fn push_vector(&mut self, space: Option<u32>, draw: VectorDraw) {
+        let index =
+            u32::try_from(self.vector_draws.len()).expect("a frame cannot hold 2^32 vector draws");
+        self.vector_draws.push(draw);
+        self.push_op(ComposeOp::Vector { index, space });
     }
 
     /// Closes the open fragment: an empty one goes back to the pool and
@@ -744,6 +974,7 @@ impl ComposeAssembly {
             fragments: self.fragments,
             program: self.program,
             image_draws: self.image_draws,
+            vector_draws: self.vector_draws,
             filter_groups: self.filter_groups,
             pool: self.pool,
         }
@@ -755,6 +986,7 @@ pub(crate) struct Finished {
     pub(crate) fragments: Vec<Scene>,
     pub(crate) program: Vec<ComposeOp>,
     pub(crate) image_draws: Vec<ImageDraw>,
+    pub(crate) vector_draws: Vec<VectorDraw>,
     pub(crate) filter_groups: Vec<FilterGroup>,
     pub(crate) pool: Vec<Scene>,
 }
@@ -785,7 +1017,7 @@ pub(crate) fn snap_offset(offset: Vector2D<f32>, ratio: f32) -> Vector2D<f32> {
 /// genuinely redundant rather than wrong.
 #[expect(
     clippy::too_many_arguments,
-    reason = "one replay's full inputs: the program, its three side tables, and the samples"
+    reason = "one replay's full inputs: the program, its side tables, and the samples"
 )]
 pub(crate) fn replay(
     scene: &mut Scene,
@@ -793,6 +1025,8 @@ pub(crate) fn replay(
     program: &[ComposeOp],
     image_draws: &[ImageDraw],
     images: &[Option<ImageData>],
+    vector_draws: &[VectorDraw],
+    vectors: &[Option<ImageData>],
     filter_groups: &[FilterGroup],
     filtered: &[Option<ImageData>],
     samples: &SpaceSamples<'_>,
@@ -804,6 +1038,8 @@ pub(crate) fn replay(
             program,
             image_draws,
             images,
+            vector_draws,
+            vectors,
             filter_groups,
             filtered,
             spaces: samples.spaces,
@@ -1043,9 +1279,9 @@ pub(crate) fn replay_seams(
 /// seam copy of that slot's content has to draw again.
 fn draws_riding(tables: Tables<'_>, op: &ComposeOp, slot: u32) -> bool {
     match op {
-        ComposeOp::Fragment { space, .. } | ComposeOp::Image { space, .. } => {
-            space::rides(tables.spaces, *space, slot)
-        }
+        ComposeOp::Fragment { space, .. }
+        | ComposeOp::Image { space, .. }
+        | ComposeOp::Vector { space, .. } => space::rides(tables.spaces, *space, slot),
         ComposeOp::PushFilter { index } => {
             matches!(tables.filtered.get(*index as usize), Some(Some(_)))
                 && space::rides(
@@ -1071,6 +1307,10 @@ pub(crate) struct Tables<'a> {
     pub(crate) program: &'a [ComposeOp],
     pub(crate) image_draws: &'a [ImageDraw],
     pub(crate) images: &'a [Option<ImageData>],
+    pub(crate) vector_draws: &'a [VectorDraw],
+    /// One entry per [`Tables::vector_draws`] entry: the texture the raster
+    /// cache baked for that draw, or `None` for a draw that encodes nothing.
+    pub(crate) vectors: &'a [Option<ImageData>],
     pub(crate) filter_groups: &'a [FilterGroup],
     /// One entry per [`Tables::filter_groups`] entry: the baked texture for
     /// that entry, or `None` for the unfiltered fallback.
@@ -1111,6 +1351,8 @@ pub(crate) fn replay_ops(
         program,
         image_draws,
         images,
+        vector_draws,
+        vectors,
         filter_groups,
         filtered,
         spaces,
@@ -1164,6 +1406,12 @@ pub(crate) fn replay_ops(
                 if draws(*space) {
                     let transform = device_transform(*space);
                     encode_draw(scene, image_draws, images, *draw, transform);
+                }
+            }
+            ComposeOp::Vector { index: draw, space } => {
+                if draws(*space) {
+                    let transform = device_transform(*space);
+                    encode_vector(scene, vector_draws, vectors, *draw, transform);
                 }
             }
             ComposeOp::Pop => scene.pop_layer(),
@@ -1300,10 +1548,16 @@ fn is_integer_translation(affine: Affine) -> bool {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::vello::peniko::{Compose, Mix};
 
     fn assembly() -> ComposeAssembly {
-        ComposeAssembly::with_storage(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        ComposeAssembly::with_storage(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
     /// A clip push in `space` — the cheapest op that carries one.
@@ -1455,6 +1709,8 @@ mod tests {
             program,
             &[],
             &[],
+            &[],
+            &[],
             groups,
             filtered,
             &SpaceSamples {
@@ -1501,6 +1757,8 @@ mod tests {
             &mut scene,
             &fragments,
             program,
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -1991,5 +2249,251 @@ mod tests {
             "and the child's range draws the root's texture",
         );
         assert!(!child.inner_chains);
+    }
+
+    /// A vector draw of [`fragment`]'s picture — an 8×8 viewport — onto an
+    /// 8×8 box at the origin, under `transform`, filling `area`.
+    fn vector_draw(transform: Affine, area: ImageArea) -> VectorDraw {
+        VectorDraw {
+            scene: Arc::new(fragment()),
+            key: 7,
+            viewport: (8.0, 8.0),
+            aspect: AspectRatio::default(),
+            opens_blend: false,
+            transform,
+            anchor: Point::ZERO,
+            extent: Size::new(8.0, 8.0),
+            sampler: ImageSampler::default(),
+            area,
+        }
+    }
+
+    fn whole() -> ImageArea {
+        ImageArea::Fill(CapturedShape::Rect(Rect::new(0.0, 0.0, 8.0, 8.0)))
+    }
+
+    /// The handle a baked texture is drawn through: an empty blob with an
+    /// identity of its own, as the raster cache registers one.
+    fn texture(width: u32, height: u32) -> ImageData {
+        ImageData {
+            data: crate::vello::peniko::Blob::new(Arc::new([])),
+            format: crate::vello::peniko::ImageFormat::Rgba8,
+            alpha_type: crate::vello::peniko::ImageAlphaType::Alpha,
+            width,
+            height,
+        }
+    }
+
+    fn replay_vectors(
+        program: &[ComposeOp],
+        draws: &[VectorDraw],
+        vectors: &[Option<ImageData>],
+    ) -> Scene {
+        let fragments = [fragment()];
+        let mut scene = Scene::default();
+        replay(
+            &mut scene,
+            &fragments,
+            program,
+            &[],
+            &[],
+            draws,
+            vectors,
+            &[],
+            &[],
+            &SpaceSamples {
+                spaces: &SPACES,
+                slots: &[],
+                animations: &crate::visual::AnimationSamples::default(),
+                stickies: &crate::visual::StickySamples::default(),
+                anchored: &crate::visual::anchored::AnchoredSamples::new(),
+                ratio: 1.0,
+                offset_of: &|_| None,
+            },
+        );
+        scene
+    }
+
+    /// Without a texture the op encodes nothing at all: the program with
+    /// the op is byte for byte the program without it. Nothing stands in
+    /// for the picture, and nothing stands in its place either.
+    #[test]
+    fn a_vector_op_encodes_nothing_without_a_texture() {
+        let bare = [ComposeOp::Fragment {
+            index: 0,
+            space: None,
+        }];
+        let with_op = [
+            ComposeOp::Fragment {
+                index: 0,
+                space: None,
+            },
+            ComposeOp::Vector {
+                index: 0,
+                space: None,
+            },
+        ];
+        let draws = [vector_draw(Affine::IDENTITY, whole())];
+        let without = replay_vectors(&bare, &[], &[]);
+        for vectors in [&[][..], &[None][..]] {
+            let with = replay_vectors(&with_op, &draws, vectors);
+            crate::paint::equivalence::assert_scenes_identical(&with, &without);
+        }
+    }
+
+    /// With a texture the op is the one image fill an [`ImageDraw`] of the
+    /// same bitmap over the same area makes — through a clip pair, closed
+    /// inside the op, where a rounded clip is only partly covered.
+    #[test]
+    fn a_vector_op_with_a_texture_draws_it_as_one_image_fill() {
+        let program = [ComposeOp::Vector {
+            index: 0,
+            space: None,
+        }];
+        let plain = replay_vectors(
+            &program,
+            &[vector_draw(Affine::IDENTITY, whole())],
+            &[Some(texture(8, 8))],
+        );
+        let mut expected = Scene::default();
+        encode_image(
+            &mut expected,
+            &ImageDraw {
+                image: Arc::from("app:///x.png"),
+                transform: Affine::IDENTITY,
+                anchor: Point::ZERO,
+                extent: Size::new(8.0, 8.0),
+                sampler: ImageSampler::default(),
+                area: whole(),
+            },
+            Affine::IDENTITY,
+            &texture(8, 8),
+        );
+        crate::paint::equivalence::assert_scenes_identical(&plain, &expected);
+        assert_eq!(plain.encoding().resources.patches.len(), 1, "the texture");
+
+        let clipped = replay_vectors(
+            &program,
+            &[vector_draw(
+                Affine::IDENTITY,
+                ImageArea::Clipped {
+                    clip: BoxShape::Rect(Rect::new(0.0, 0.0, 8.0, 8.0)),
+                    draw: Rect::new(0.0, 0.0, 4.0, 4.0),
+                },
+            )],
+            &[Some(texture(8, 8))],
+        );
+        assert_eq!(
+            clipped.encoding().draw_tags.len(),
+            3,
+            "the clip's begin, the fill, and the clip's end",
+        );
+        assert_eq!(clipped.encoding().n_open_clips, 0);
+    }
+
+    /// A texture smaller than the draw — one the renderable bound clamped —
+    /// is stretched over the extent: the brush scale is the extent over the
+    /// texture's own size, never over the device size the draw asked for.
+    #[test]
+    #[allow(clippy::float_cmp, reason = "the expectations are exact")]
+    fn a_vector_textures_brush_scale_is_the_extent_over_its_size() {
+        let program = [ComposeOp::Vector {
+            index: 0,
+            space: None,
+        }];
+        let scene = replay_vectors(
+            &program,
+            &[vector_draw(Affine::IDENTITY, whole())],
+            &[Some(texture(4, 4))],
+        );
+        let brush = scene
+            .encoding()
+            .transforms
+            .last()
+            .expect("the brush transform is encoded after the fill's");
+        assert_eq!(brush.matrix, [2.0, 0.0, 0.0, 2.0]);
+        assert_eq!(brush.translation, [0.0, 0.0]);
+    }
+
+    /// `preserveAspectRatio`: `none` stretches per axis; `meet` fits the
+    /// viewport inside the box by the smaller ratio and aligns the slack;
+    /// `slice` covers the box by the larger ratio.
+    #[test]
+    #[allow(clippy::float_cmp, reason = "the expectations are exact")]
+    fn the_aspect_map_stretches_meets_or_slices() {
+        let viewport = (48.0, 24.0);
+        let square = Size::new(96.0, 96.0);
+        let none = AspectRatio {
+            align: None,
+            slice: false,
+        };
+        assert_eq!(
+            aspect_transform(viewport, none, square).as_coeffs(),
+            [2.0, 0.0, 0.0, 4.0, 0.0, 0.0],
+        );
+        assert_eq!(
+            aspect_transform(viewport, AspectRatio::default(), square).as_coeffs(),
+            [2.0, 0.0, 0.0, 2.0, 0.0, 24.0],
+            "xMidYMid meet: the smaller ratio, centred on the slack axis",
+        );
+        let slice = AspectRatio {
+            align: Some((AspectAlign::Mid, AspectAlign::Mid)),
+            slice: true,
+        };
+        assert_eq!(
+            aspect_transform(viewport, slice, square).as_coeffs(),
+            [4.0, 0.0, 0.0, 4.0, -48.0, 0.0],
+            "xMidYMid slice: the larger ratio, the overflow centred",
+        );
+        let corner = AspectRatio {
+            align: Some((AspectAlign::Min, AspectAlign::Max)),
+            slice: false,
+        };
+        assert_eq!(
+            aspect_transform(viewport, corner, square).as_coeffs(),
+            [2.0, 0.0, 0.0, 2.0, 0.0, 48.0],
+            "xMinYMax meet",
+        );
+    }
+
+    /// The device size is the extent under the transform's per-axis scale,
+    /// rounded up, and no larger on either axis than vello can place.
+    #[test]
+    fn a_draws_device_size_is_its_scaled_extent_rounded_up_and_bounded() {
+        let at = |transform| VectorDraw {
+            extent: Size::new(10.5, 4.0),
+            ..vector_draw(transform, whole())
+        };
+        assert_eq!(at(Affine::scale(3.0)).device_size(), (32, 12));
+        assert_eq!(
+            at(Affine::scale(10_000.0)).device_size(),
+            (MAX_RENDERABLE_DIMENSION, MAX_RENDERABLE_DIMENSION),
+        );
+        assert_eq!(at(Affine::scale(0.0)).device_size(), (0, 0));
+    }
+
+    /// The inline encoding — the monolithic walk's — places the scene with
+    /// the aspect map inside the layers the texture fill would open, and
+    /// closes them in the same call.
+    #[test]
+    fn the_inline_vector_encoding_places_the_scene_inside_its_own_layers() {
+        let draw = VectorDraw {
+            anchor: Point::new(2.0, 2.0),
+            extent: Size::new(16.0, 8.0),
+            ..vector_draw(Affine::IDENTITY, whole())
+        };
+        let mut actual = Scene::default();
+        encode_vector_inline(&mut actual, &draw, Affine::IDENTITY);
+        let mut expected = Scene::default();
+        expected.push_clip_layer(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            &Rect::new(0.0, 0.0, 8.0, 8.0),
+        );
+        // An 8×8 viewport met into 16×8 at (2, 2): scale 1, centred on x.
+        expected.append(&fragment(), Some(Affine::translate((6.0, 2.0))));
+        expected.pop_layer();
+        crate::paint::equivalence::assert_scenes_identical(&actual, &expected);
+        assert_eq!(actual.encoding().n_open_clips, 0);
     }
 }

@@ -2,11 +2,14 @@
 //! `mask-image` naming an SVG document, over the full test pipeline —
 //! `flashbulb::TestImages::insert_svg` reports the document's bytes the way a
 //! host does, `Document::apply_image_events` parses them inline into the
-//! registry, and the paint walk encodes the tree inline.
+//! registry, the paint walk records one vector draw per visible tile, and
+//! the headless renderer's raster cache bakes each draw's texture before the
+//! frame composes.
 //!
-//! Structural tests (no GPU) pin what the encoding must and must not hold:
-//! no image read, one clip layer per visible tile, nothing at all for an
-//! empty document, and the natural size layout reads. The goldens under
+//! The captures pin that a vector image is never read through
+//! `FrameImages`, and the structural test that the natural size layout
+//! reads; the per-tile op emission and the empty-document rule are unit
+//! tests beside the producers (`paint/background.rs`). The goldens under
 //! `tests/screenshots/svg/` are regression goldens of our own output, not
 //! browser references. Refresh with:
 //! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p dom --test svg_images`.
@@ -229,82 +232,6 @@ fn one_document_at_two_sizes_matches_reference() {
         &images,
     );
     screenshot::assert_golden(&["svg", "two-sizes"], &actual);
-}
-
-/// Draw count, clip-layer count, and open clips after a render.
-fn stats(doc: &mut Doc, images: &TestImages) -> (usize, u32, u32) {
-    flashbulb::render_with_images(&mut doc.dom, images);
-    let scene = doc.dom.scene(images);
-    let encoding = scene.encoding();
-    (
-        encoding.draw_tags.len(),
-        encoding.n_clips,
-        encoding.n_open_clips,
-    )
-}
-
-/// Each visible tile of a repeated vector background is one clip layer
-/// around one append; a 100 px box under 25 px tiles shows 16.
-#[test]
-fn a_repeated_vector_background_appends_once_per_visible_tile() {
-    let css = "view { left: 0; top: 0; width: 100px; height: 100px; background-size: 25px; }
-               .svg { background-image: url(app:///tile.svg); }";
-    let images = TestImages::new();
-    images.insert_svg(
-        "app:///tile.svg",
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
-              <rect width="10" height="10" fill="#ff0000"/></svg>"##,
-    );
-
-    let mut plain = page(css);
-    let root = plain.root;
-    plain.el_tag(root, "view", "");
-    let (plain_draws, plain_clips, _) = stats(&mut plain, &images);
-
-    let mut tiled = page(css);
-    let root = tiled.root;
-    tiled.el_tag(root, "view", "svg");
-    let (draws, clips, open) = stats(&mut tiled, &images);
-
-    assert_eq!(open, 0, "every tile's clip layer is closed");
-    assert_eq!(
-        clips - plain_clips,
-        2 * 16,
-        "one clip layer per tile, which vello counts at its begin and its end"
-    );
-    assert_eq!(
-        draws - plain_draws,
-        16 * 3,
-        "per tile: the clip's begin and end, and the document's one fill"
-    );
-}
-
-/// A document with nothing drawable encodes nothing, not even a clip pair:
-/// appending an empty scene would clear the encoding flags a preceding glyph
-/// run set.
-#[test]
-fn an_empty_vector_image_encodes_nothing() {
-    let css = "view { left: 0; top: 0; width: 100px; height: 100px; }
-               .svg { background-image: url(app:///empty.svg); }";
-    let images = TestImages::new();
-    images.insert_svg(
-        "app:///empty.svg",
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>"#,
-    );
-
-    let mut plain = page(css);
-    let root = plain.root;
-    plain.el_tag(root, "view", "");
-    let plain_stats = stats(&mut plain, &images);
-
-    let mut empty = page(css);
-    let root = empty.root;
-    empty.el_tag(root, "view", "svg");
-    let node = empty.el_tag(root, "image", "");
-    empty
-        .dom
-        .set_image_source(node, ImageRole::Source, Some("app:///empty.svg"));
-    assert_eq!(stats(&mut empty, &images), plain_stats);
 }
 
 /// The natural size layout reads follows CSS Images 3 default sizing: both

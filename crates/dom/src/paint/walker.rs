@@ -164,6 +164,21 @@ impl WalkSink<'_> {
         }
     }
 
+    /// One vector draw.
+    ///
+    /// In compose mode it is a program op the painter bakes a texture for
+    /// and encodes. In the monolithic mode the equivalence tests use, the
+    /// walk has no renderer to bake with, so the draw appends the image's
+    /// scene inline — the picture the texture would show, as paths.
+    pub(super) fn vector(&mut self, space: Option<u32>, draw: crate::paint::compose::VectorDraw) {
+        match self {
+            Self::Monolithic(scene, _) => {
+                crate::paint::compose::encode_vector_inline(scene, &draw, Affine::IDENTITY);
+            }
+            Self::Compose(assembly) => assembly.push_vector(space, draw),
+        }
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "mirrors vello's push_layer plus the compose tags"
@@ -3305,7 +3320,7 @@ mod tests {
 
         let alphas = |now: Option<f64>| {
             let mut scene = Scene::default();
-            frame.compose_into(&mut scene, &[], &[], &|_| None, now);
+            frame.compose_into(&mut scene, &[], &[], &[], &|_| None, now);
             layer_alphas(&scene)
                 .into_iter()
                 .filter(|&alpha| alpha < 1.0)

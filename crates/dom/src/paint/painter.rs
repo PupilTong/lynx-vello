@@ -100,6 +100,8 @@ pub(crate) struct Painter {
     spare_program: Vec<crate::paint::compose::ComposeOp>,
     /// A retired frame's emptied image-draw table, capacity intact.
     spare_image_draws: Vec<crate::paint::compose::ImageDraw>,
+    /// A retired frame's emptied vector-draw table, capacity intact.
+    spare_vector_draws: Vec<crate::paint::compose::VectorDraw>,
     /// A retired frame's emptied filter-group table, capacity intact.
     spare_filter_groups: Vec<crate::paint::compose::FilterGroup>,
     /// A retired frame's emptied composed-slot lists, capacity intact.
@@ -128,6 +130,7 @@ impl Painter {
             std::mem::take(&mut self.spare_fragments),
             std::mem::take(&mut self.spare_program),
             std::mem::take(&mut self.spare_image_draws),
+            std::mem::take(&mut self.spare_vector_draws),
             std::mem::take(&mut self.spare_filter_groups),
             std::mem::take(&mut self.spare_scenes),
         );
@@ -145,6 +148,7 @@ impl Painter {
             fragments,
             program,
             image_draws,
+            vector_draws,
             filter_groups,
             pool,
         } = assembly.finish();
@@ -163,6 +167,7 @@ impl Painter {
                 fragments,
                 program,
                 image_draws,
+                vector_draws,
                 filter_groups,
                 composed,
             },
@@ -194,6 +199,7 @@ impl Painter {
             mut fragments,
             mut program,
             mut image_draws,
+            mut vector_draws,
             mut filter_groups,
             mut composed,
         } = inner.presentation;
@@ -206,6 +212,8 @@ impl Painter {
         self.spare_program = program;
         image_draws.clear();
         self.spare_image_draws = image_draws;
+        vector_draws.clear();
+        self.spare_vector_draws = vector_draws;
         filter_groups.clear();
         self.spare_filter_groups = filter_groups;
         composed.clear();

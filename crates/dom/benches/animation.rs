@@ -326,6 +326,7 @@ fn frame_scroll_driven_composite(bencher: divan::Bencher<'_, '_>) {
             &mut scene,
             &[],
             &[],
+            &[],
             &|slot| (slot.node == list).then_some(offset),
             None,
         );
@@ -453,6 +454,7 @@ fn bench_production_frame(
         scene.reset();
         frame.compose_into(
             &mut scene,
+            &[],
             &[],
             &[],
             &|_| None,

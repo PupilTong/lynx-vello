@@ -378,6 +378,9 @@ pub(crate) struct Presentation {
     /// One entry per [`ComposeOp::Image`], in program order. Carries names
     /// and geometry; never pixels.
     pub(crate) image_draws: Vec<crate::paint::compose::ImageDraw>,
+    /// One entry per [`ComposeOp::Vector`], in program order. Carries the
+    /// image's scene and geometry; never a texture.
+    pub(crate) vector_draws: Vec<crate::paint::compose::VectorDraw>,
     /// One entry per [`ComposeOp::PushFilter`] and [`ComposeOp::PushBackdrop`],
     /// in program order. Carries device geometry and σ; never a GPU resource.
     pub(crate) filter_groups: Vec<FilterGroup>,
@@ -425,11 +428,17 @@ impl CommittedFrame {
     /// the slot's period ([`ScrollSlot::wrap`]) before anything reads it, and
     /// a slot whose scrollport straddles the seam draws its content a second
     /// time, one period back.
+    ///
+    /// `images` is the table [`Self::resolve_images`] fills, `filtered` the
+    /// one the filter bakes produce, and `vectors` the one the vector raster
+    /// cache produces (`VectorTextures::prepare`), each index-parallel with
+    /// its side table; an absent entry draws nothing.
     pub fn compose_into(
         &self,
         scene: &mut Scene,
         images: &[Option<ImageData>],
         filtered: &[Option<ImageData>],
+        vectors: &[Option<ImageData>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) {
@@ -453,6 +462,8 @@ impl CommittedFrame {
             &self.presentation.program,
             &self.presentation.image_draws,
             images,
+            &self.presentation.vector_draws,
+            vectors,
             &self.presentation.filter_groups,
             filtered,
             &self.order.space_samples(
@@ -472,6 +483,20 @@ impl CommittedFrame {
     #[must_use]
     pub fn filter_groups(&self) -> &[FilterGroup] {
         &self.presentation.filter_groups
+    }
+
+    /// The frame's vector image draws, in program order — what the
+    /// painter's raster cache bakes textures for. Empty on a frame drawing
+    /// no SVG document, which skips that pre-step on one test of this slice.
+    pub(crate) fn vector_draws(&self) -> &[compose::VectorDraw] {
+        &self.presentation.vector_draws
+    }
+
+    /// Whether the frame draws any vector image, and so owes the vector
+    /// raster cache a prepare before it composes.
+    #[must_use]
+    pub fn draws_vectors(&self) -> bool {
+        !self.presentation.vector_draws.is_empty()
     }
 
     /// Replays filter entry `index`'s own ops into `scene`, in the bake
@@ -498,13 +523,21 @@ impl CommittedFrame {
     /// entry does not ride is baked into the texture with the rest.
     ///
     /// `filtered` must already hold the textures of every entry this one's
-    /// range draws — bake in order of increasing `ops.end`.
+    /// range draws — bake in order of increasing `ops.end` — and `vectors`
+    /// the textures of the vector draws in it, which the vector raster cache
+    /// prepares before any filter bakes.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one bake's full inputs: the entry, its scene, the three pixel tables, and the \
+                  two compose readings"
+    )]
     pub fn bake_filter(
         &self,
         index: usize,
         scene: &mut Scene,
         images: &[Option<ImageData>],
         filtered: &[Option<ImageData>],
+        vectors: &[Option<ImageData>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) {
@@ -549,6 +582,8 @@ impl CommittedFrame {
                 program: &self.presentation.program,
                 image_draws: &self.presentation.image_draws,
                 images,
+                vector_draws: &self.presentation.vector_draws,
+                vectors,
                 filter_groups: groups,
                 filtered,
                 spaces: self.order.spaces(),

@@ -12,9 +12,13 @@
 //!
 //! [`AtlasResidency`] is the second thing every target owes each frame, and
 //! every [`vello::Renderer`] rendered through this crate is paired with one.
-//! [`super::blur::FilterTextures`] is the third, and unlike the other two it
-//! is optional per frame: a frame with no `filter: blur()` group and no
-//! `backdrop-filter` element asks nothing of it.
+//! [`super::vector_textures::VectorTextures`] and
+//! [`super::blur::FilterTextures`] are the third and fourth, and unlike the
+//! other two they are optional per frame: a frame drawing no SVG document
+//! asks nothing of the first, and one with no `filter: blur()` group and no
+//! `backdrop-filter` element nothing of the second. Where a frame owes
+//! both, the vector textures come first: a filter bake replays ops that may
+//! draw them.
 
 use std::fmt;
 
@@ -25,6 +29,7 @@ use vello::util::RenderContext;
 use vello::wgpu;
 
 use super::blur::FilterTextures;
+use super::vector_textures::VectorTextures;
 use crate::visual::{CommittedFrame, ScrollSlot};
 
 /// Headless GPU renderer for tests, benchmarks, and windowless embedders.
@@ -34,6 +39,7 @@ pub struct Headless {
     renderer: vello::Renderer,
     atlas: AtlasResidency,
     filters: FilterTextures,
+    vectors: VectorTextures,
     target: Option<RenderTarget>,
     readback: Option<ReadbackBuffer>,
 }
@@ -69,27 +75,30 @@ impl AtlasResidency {
         scene: &vello::Scene,
         images: &[Option<ImageData>],
     ) {
-        self.prepare_all(renderer, scene, images, &[]);
+        self.prepare_all(renderer, scene, images, &[], &[]);
     }
 
-    /// [`Self::prepare`] over two tables: the bitmaps a frame's image draws
-    /// resolved, and the textures its `filter: blur()` groups baked.
+    /// [`Self::prepare`] over three tables: the bitmaps a frame's image
+    /// draws resolved, the textures its `filter: blur()` groups baked, and
+    /// the textures its vector images were baked into.
     ///
-    /// The filter textures are override images like any other as far as the
+    /// The baked textures are override images like any other as far as the
     /// atlas is concerned, so they are owed the same repair after a loss —
-    /// and a bake of a solid-color group is precisely the patch-free render
-    /// that causes one.
+    /// and a bake of a solid-color group, or of a flat icon, is precisely
+    /// the patch-free render that causes one.
     pub fn prepare_all(
         &mut self,
         renderer: &mut vello::Renderer,
         scene: &vello::Scene,
         images: &[Option<ImageData>],
         filtered: &[Option<ImageData>],
+        vectors: &[Option<ImageData>],
     ) {
         self.prepare_with(
             scene.encoding().resources.patches.is_empty(),
             images,
             filtered,
+            vectors,
             |image| renderer.mark_override_image_dirty(image),
         );
     }
@@ -105,9 +114,10 @@ impl AtlasResidency {
         loses_atlas: bool,
         images: &[Option<ImageData>],
         filtered: &[Option<ImageData>],
+        vectors: &[Option<ImageData>],
         mut mark: impl FnMut(&ImageData),
     ) {
-        for image in images.iter().chain(filtered).flatten() {
+        for image in images.iter().chain(filtered).chain(vectors).flatten() {
             if self.reuploaded.insert(image.data.id()) {
                 mark(image);
             }
@@ -201,6 +211,7 @@ impl Headless {
             renderer,
             atlas: AtlasResidency::default(),
             filters: FilterTextures::default(),
+            vectors: VectorTextures::default(),
             target: None,
             readback: None,
         })
@@ -218,7 +229,9 @@ impl Headless {
     /// The atlas residency is untouched: it mirrors this renderer's image
     /// cache, which a change of document does not disturb. The filter bakes
     /// keep their textures but forget which frame they were baked for, since
-    /// commit ids restart at one per document.
+    /// commit ids restart at one per document. The vector textures are
+    /// untouched too: their key is a process-unique image identity, which no
+    /// document change can alias.
     pub fn forget(&mut self) {
         self.target = None;
         self.readback = None;
@@ -235,13 +248,41 @@ impl Headless {
         self.filters.forget();
     }
 
+    /// Bakes the textures of `frame`'s vector image draws that are not
+    /// already resident, if it has any, and answers the table
+    /// [`crate::CommittedFrame::compose_into`] takes for them.
+    ///
+    /// Call before [`Self::prepare_filters`] and before composing: a filter
+    /// bake replays ops that may draw these textures. A frame with no
+    /// vector draw answers an empty slice and touches no GPU resource.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError::Render`] if a bake render fails.
+    pub fn prepare_vectors(
+        &mut self,
+        frame: &CommittedFrame,
+    ) -> Result<&[Option<ImageData>], GpuError> {
+        let Self {
+            context,
+            device_index,
+            renderer,
+            atlas,
+            vectors,
+            ..
+        } = self;
+        let handle = &context.devices[*device_index];
+        vectors.prepare(frame, renderer, &handle.device, &handle.queue, atlas)
+    }
+
     /// Bakes `frame`'s `filter: blur()` groups and `backdrop-filter`
     /// elements, if it has any, and answers the table
     /// [`crate::CommittedFrame::compose_into`] takes.
     ///
     /// Call before composing, at the same `animation_now` the composition
-    /// will use. A frame with no filter entry answers an empty slice and
-    /// touches no GPU resource.
+    /// will use, with the `vectors` table [`Self::prepare_vectors`] answered
+    /// for this frame. A frame with no filter entry answers an empty slice
+    /// and touches no GPU resource.
     ///
     /// # Errors
     ///
@@ -250,6 +291,7 @@ impl Headless {
         &mut self,
         frame: &CommittedFrame,
         images: &[Option<ImageData>],
+        vectors: &[Option<ImageData>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
         animation_now: Option<f64>,
@@ -270,10 +312,24 @@ impl Headless {
             atlas,
             frame,
             images,
+            vectors,
             offset_of,
             scroll_generation,
             animation_now,
         )
+    }
+
+    /// Replaces the vector raster cache with one bounded by `bytes`, so a
+    /// test can watch eviction without drawing 64 MiB of pictures.
+    #[cfg(test)]
+    pub(crate) fn set_vector_budget(&mut self, bytes: u64) {
+        self.vectors = VectorTextures::with_budget(bytes);
+    }
+
+    /// The vector raster cache, for a test's assertions on residency.
+    #[cfg(test)]
+    pub(crate) fn vector_textures(&self) -> &VectorTextures {
+        &self.vectors
     }
 
     /// Renders a scene drawing `images` into the retained headless texture.
@@ -298,13 +354,14 @@ impl Headless {
             renderer,
             atlas,
             filters,
+            vectors,
             target,
             ..
         } = self;
         // The bakes this renderer holds are override images the composite
         // render may draw, so they are named here too — the residency has to
         // see every image a render touches or a post-loss repair is missed.
-        atlas.prepare_all(renderer, scene, images, filters.images());
+        atlas.prepare_all(renderer, scene, images, filters.images(), vectors.images());
         let handle = &context.devices[*device_index];
         let view = &target
             .as_ref()
@@ -584,7 +641,7 @@ mod tests {
         images: &[Option<ImageData>],
     ) -> usize {
         let mut marked = 0;
-        residency.prepare_with(loses_atlas, images, &[], |_| marked += 1);
+        residency.prepare_with(loses_atlas, images, &[], &[], |_| marked += 1);
         marked
     }
 
