@@ -607,13 +607,16 @@ impl<T: Sync> Element for &Node<T> {
     ) -> bool {
         match pc {
             // `:modal` and `:open` are state bits the embedder's `<dialog>`
-            // sets beside its top-layer entry (`tree::top_layer`).
+            // sets beside its top-layer entry (`tree::top_layer`);
+            // `:popover-open` is the one the popover algorithms keep
+            // (`tree::popover`).
             NonTSPseudoClass::Hover
             | NonTSPseudoClass::Active
             | NonTSPseudoClass::Focus
             | NonTSPseudoClass::Defined
             | NonTSPseudoClass::Modal
-            | NonTSPseudoClass::Open => self.element_state.contains(pc.state_flag()),
+            | NonTSPseudoClass::Open
+            | NonTSPseudoClass::PopoverOpen => self.element_state.contains(pc.state_flag()),
             _ => false,
         }
     }

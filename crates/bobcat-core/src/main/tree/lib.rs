@@ -32,6 +32,7 @@ pub(crate) mod dialog;
 mod image;
 mod list;
 mod overlay;
+mod popover;
 pub(crate) mod raw_text;
 mod refresh_view;
 mod scroll_container;

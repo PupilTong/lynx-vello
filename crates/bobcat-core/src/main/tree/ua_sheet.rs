@@ -4,8 +4,8 @@
 //! Each tag's own policy lives with that tag — [`super::scroll_container`],
 //! [`super::list`], [`super::viewpager`], [`super::swiper`],
 //! [`super::refresh_view`], [`super::scroll_coordinator`], [`super::dialog`],
-//! [`super::overlay`], [`super::text`], [`super::raw_text`], [`super::image`] —
-//! and this module
+//! [`super::popover`], [`super::overlay`], [`super::text`], [`super::raw_text`],
+//! [`super::image`] — and this module
 //! only decides what they all agree on and what order they land in.
 //! [`super::blur_view`] is the one tag module with no rules of its own: a
 //! blur view is a container and nothing more, so everything it needs is here.
@@ -15,15 +15,45 @@
 //! `svg` in the shared box block, makes it lay out the way `<image>` does.
 //! Nothing hides its children: being replaced content already does.
 //!
-//! Order is mostly documentation, with one exception that is mechanism:
-//! [`super::image`]'s child suppression ties on specificity with the `display`
-//! rules `view`, `scroll-view`, `list`, `list-item`, the two spellings each of
-//! `viewpager` and `viewpager-item`, `x-swiper`, `x-swiper-item`,
-//! `x-refresh-view`, `x-refresh-header`, `x-refresh-footer`, the ten `scroll-coordinator` tags,
-//! `blur-view`, `x-blur-view`, `dialog`, `overlay`, `x-overlay-ng` and
-//! `wrapper` carry, so it wins only by being assembled last.
-//! That module's `nothing_inside_an_image_generates_a_box` is the tripwire for
-//! it.
+//! # HTML's rules under the Lynx tags'
+//!
+//! Under web-core a page has two sheets of defaults: the browser's UA sheet,
+//! and web-elements' CSS, which is *author* origin and so outranks every UA
+//! rule whatever its specificity. This sheet is one origin for both, so it
+//! keeps that order by specificity: every HTML rule — [`super::dialog`]'s,
+//! [`super::popover`]'s and the display `dialog` maps HTML's `block` to — has
+//! its selector inside `:where()`, so it has none (a `::backdrop` rule keeps
+//! the pseudo-element's own), and every Lynx rule names a tag, so it outranks
+//! all of them. A `<view popover>` therefore keeps its Lynx `display` against
+//! `[popover]`'s `display: none`, as it does in a browser under
+//! web-elements' `x-view` rule.
+//!
+//! Among themselves the HTML rules then rank by source order alone, and the
+//! sheet orders them so that this is HTML's own precedence: `dialog`'s
+//! `display` first; then [`super::dialog`]'s rules, in HTML's order; then
+//! [`super::popover`]'s, whose `[popover]` box beats `dialog`'s as its
+//! higher specificity does in HTML; then `dialog:popover-open`'s `display`,
+//! after the closed `dialog`'s `none`, as in HTML. The one pair whose order
+//! here is the reverse of HTML's, `dialog:modal` before `[popover]`, writes
+//! the same values for every property both declare (`position: fixed`, the
+//! insets at 0, `overflow: scroll`), so no element can tell. HTML's one
+//! `!important`, the popover `::backdrop`'s `pointer-events`, beats every
+//! Lynx rule, as a UA `!important` beats an author one.
+//!
+//! This is a cascade layer below the Lynx rules, written by hand: an
+//! `@layer` in a UA sheet trips Stylo's rule tree, whose root node carries
+//! an unlayered UA rule's priority, so the first layered rule under it fails
+//! its ordering assertion.
+//!
+//! Order within the Lynx rules is mostly documentation, with one exception
+//! that is mechanism: [`super::image`]'s child suppression ties on specificity with
+//! the `display` rules `view`, `scroll-view`, `list`, `list-item`, the two
+//! spellings each of `viewpager` and `viewpager-item`, `x-swiper`,
+//! `x-swiper-item`, `x-refresh-view`, `x-refresh-header`, `x-refresh-footer`,
+//! the ten `scroll-coordinator` tags, `blur-view`, `x-blur-view`, `overlay`,
+//! `x-overlay-ng` and `wrapper` carry, so it wins only by being assembled
+//! last. That module's `nothing_inside_an_image_generates_a_box` is the
+//! tripwire for it.
 
 use super::blur_view::{BLUR_VIEW_TAG, X_BLUR_VIEW_TAG};
 use super::dialog::DIALOG_TAG;
@@ -32,8 +62,8 @@ use super::refresh_view::{REFRESH_FOOTER_TAG, REFRESH_HEADER_TAG};
 use super::swiper::{SWIPER_ITEM_TAG, SWIPER_TAG};
 use super::viewpager::{VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG};
 use super::{
-    dialog, image, list, overlay, raw_text, refresh_view, scroll_container, scroll_coordinator,
-    swiper, text, viewpager,
+    dialog, image, list, overlay, popover, raw_text, refresh_view, scroll_container,
+    scroll_coordinator, swiper, text, viewpager,
 };
 
 /// Page configuration for the Lynx runtime and UA cascade.
@@ -82,7 +112,10 @@ impl Default for PageConfig {
 /// `dialog` follows the switch's display too — HTML's `block` has no box in
 /// this engine, and the switch is what picks a page's block-like container —
 /// and nothing else of the common block: a browser gives it HTML's defaults
-/// ([`super::dialog`]).
+/// ([`super::dialog`]). That display is HTML's, so it is written with
+/// HTML's other rules, at zero specificity, for `dialog` and for
+/// `dialog:popover-open` ([`super::popover`]), rather than in the Lynx
+/// display line.
 /// `overlay` and `x-overlay-ng` follow the switch's display the same way and
 /// take nothing else of the common block either: the host is `position:
 /// fixed` on the top layer, and native never clips an overlay
@@ -148,12 +181,14 @@ impl Default for PageConfig {
 /// `overflow-y: scroll` and its column, the `overflow-y: hidden` that
 /// `enable-scroll="false"` needs to beat that scroll, and the header's, the
 /// toolbar's and the slot's positions, which its geometry is built from
-/// ([`super::scroll_coordinator`] carries the argument). The overlay's is
-/// one more, after the coordinator's: only an overlay's first child renders,
-/// which web-core itself pins and native's measurement of child 0 alone
-/// agrees with ([`super::overlay`] carries the argument).
-/// `the_ua_sheet_is_important_free_apart_from_the_text_block` pins the set to
-/// exactly those twenty-two rules.
+/// ([`super::scroll_coordinator`] carries the argument). HTML's own is one
+/// more, after the coordinator's, among HTML's rules: a popover's
+/// `::backdrop` is `pointer-events: none !important`, as in a browser
+/// ([`super::popover`]). The overlay's is one more, after it: only an
+/// overlay's first child renders, which web-core itself pins and native's
+/// measurement of child 0 alone agrees with ([`super::overlay`] carries the
+/// argument). `the_ua_sheet_is_important_free_apart_from_the_text_block`
+/// pins the set to exactly those twenty-three rules.
 #[must_use]
 pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     let component_tags = format!(
@@ -164,10 +199,16 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     let display = if config.default_display_linear {
         format!(
             "page, view, scroll-view, list, list-item, {component_tags}, {BLUR_VIEW_TAG}, \
-             {X_BLUR_VIEW_TAG}, {DIALOG_TAG}, {OVERLAY_TAG}, {X_OVERLAY_TAG} {{ display: linear; }}\n"
+             {X_BLUR_VIEW_TAG}, {OVERLAY_TAG}, {X_OVERLAY_TAG} {{ display: linear; }}\n"
         )
     } else {
         String::new()
+    };
+    // HTML's `display: block`, which no box here lowers to.
+    let block = if config.default_display_linear {
+        "linear"
+    } else {
+        "flex"
     };
     let overflow = if config.default_overflow_visible {
         format!("page, view, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG} {{ overflow: visible; }}\n")
@@ -189,7 +230,10 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          {swipers}\
          {refresh_views}\
          {coordinators}\
+         :where({DIALOG_TAG}) {{ display: {block}; }}\n\
          {dialogs}\
+         {popovers}\
+         :where({DIALOG_TAG}:popover-open) {{ display: {block}; }}\n\
          {overlays}\
          {text}\
          {carriers}\
@@ -201,6 +245,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
         refresh_views = refresh_view::UA_RULES,
         coordinators = scroll_coordinator::UA_RULES,
         dialogs = dialog::UA_RULES,
+        popovers = popover::UA_RULES,
         overlays = overlay::UA_RULES,
         text = text::UA_RULES,
         carriers = raw_text::UA_RULES,
@@ -666,14 +711,18 @@ mod tests {
     /// `enable-scroll="false"` line is important only to beat the pinned
     /// scroll. [`super::super::scroll_coordinator`] carries the argument.
     ///
-    /// The overlay's one follows the coordinator's. Only an overlay's first
+    /// HTML's own follows the coordinator's: a popover's `::backdrop` is
+    /// `pointer-events: none !important` in HTML's UA sheet, so it takes no
+    /// touch whatever an author writes. [`super::super::popover`] carries it.
+    ///
+    /// The overlay's one follows HTML's. Only an overlay's first
     /// child renders: web-core pins every other child `display: none
     /// !important`, and native measures child 0 alone, so an author
     /// `display` on a second child must not bring it back.
     /// [`super::super::overlay`] carries the argument.
     #[test]
     fn the_ua_sheet_is_important_free_apart_from_the_text_block() {
-        const ALLOWED: [&str; 22] = [
+        const ALLOWED: [&str; 23] = [
             "viewpager, x-viewpager-ng { flex-direction: row !important; \
              linear-direction: row !important; flex-wrap: nowrap !important; }",
             "viewpager-item, x-viewpager-item-ng { position: relative !important; }",
@@ -702,6 +751,8 @@ mod tests {
             "scroll-coordinator-header, x-foldview-header-ng { position: absolute !important; }",
             "scroll-coordinator-toolbar, x-foldview-toolbar-ng { position: sticky !important; }",
             "scroll-coordinator-slot, x-foldview-slot-ng { position: absolute !important; }",
+            ":where(:popover-open)::backdrop { position: fixed; inset: 0; \
+             pointer-events: none !important; background-color: transparent; }",
             "overlay > :not(:first-child), x-overlay-ng > :not(:first-child) \
              { display: none !important; }",
             "text { display: -lynx-text !important; color: initial; }",

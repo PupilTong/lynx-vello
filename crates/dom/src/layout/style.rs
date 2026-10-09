@@ -149,8 +149,9 @@ pub(crate) fn establishes_absolute_containing_block<T>(
         // adjuster does so only for a style whose `-servo-top-layer` is
         // `auto`, which a UA rule has to declare: the embedder's UA sheet
         // does for the elements it puts in the layer (bobcat-core's
-        // `dialog:modal` and `::backdrop`), and for those the position test
-        // above already answers. The layer itself is generic — membership is
+        // `dialog:modal`, `:popover-open` and `::backdrop`), and for those
+        // the position test above already answers. The layer itself is
+        // generic — membership is
         // the embedder's call and needs no matching rule — so membership
         // stays the truth here for an element no such rule reaches
         // (`tree::top_layer`).

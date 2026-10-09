@@ -1640,10 +1640,14 @@ on `:modal`, `-servo-top-layer: auto` on `:modal` and `::backdrop` so Stylo's
 attribute callback is the one path that flips `:open` and, on removal or
 `"false"`, leaves the top layer; "modal" is `Document::blocks_document`; the
 four HTML methods as UI methods the runtime dispatches by tag name, an
-`InvalidStateError` answering web-core's code 4; non-bubbling `close` and
+`InvalidStateError` answering web-core's code 4 — `showModal()` also refusing
+a dialog showing as a popover; non-bubbling `close` and
 `cancel` on the shared `ComponentEvents` queue `tree/lib.rs` defines, which
 also carries an image's `load`/`error` and which the page's epilogue posts
-once per batch), `tree::overlay` (`overlay`/`x-overlay-ng`, Lynx's modal
+once per batch), `tree::popover` (HTML's popover UA rules over `dom`'s
+popover algorithms: hidden is `display: none`, the `[popover]` box,
+`:popover-open` on the top layer, and a transparent, untouchable
+`::backdrop` with HTML's one `!important`; no component), `tree::overlay` (`overlay`/`x-overlay-ng`, Lynx's modal
 layer, with the host element itself on the top layer — no shadow tree, no
 inner dialog: `visible` (present and not `"false"`) on a connected element
 enters the layer, blocking the document unless `events-pass-through` is set;
@@ -1666,6 +1670,14 @@ hints, the swiper's item count, the refresh view's slot
 assignment, the dialog's `:open`/`:modal` state and the overlay's top-layer membership and
 events need `dom::CustomElement` callbacks. Runtime attribute members perform
 DOM mutations; Stylo tracks attribute dependencies and recascades on changes.
+HTML's own rules — the dialog's, the popover's and the display `dialog` maps
+`block` to — are written with their selectors inside `:where()` and ordered
+so that source order is HTML's precedence among them: every Lynx rule names a
+tag and so outranks them all, as web-elements' author rules outrank a
+browser's UA sheet under web-core (a `<view popover>` keeps its Lynx
+`display`). That is a cascade layer by hand: an `@layer` in a UA sheet trips
+Stylo's rule-tree ordering assertion, whose root node carries an unlayered UA
+rule's priority (`docs/style-assumptions.md` §31).
 The UA assembly order is mostly documentation, with one exception that is
 mechanism: `image`'s child suppression ties on specificity with the `display`
 rules `view`, `scroll-view`, `list`, `blur-view`, `x-blur-view` and `wrapper`
@@ -2634,9 +2646,22 @@ Rulings and limits to know before touching it:
   per-node bit: the layer is almost always empty and every per-box reader
   tests `is_empty` first. §3.1's computed-value fixups run where a UA rule
   declares the UA-only `-servo-top-layer` (bobcat-core's `dialog:modal`,
-  `::backdrop`, `overlay` and `x-overlay-ng`); membership, not the longhand, stays `dom`'s truth for the
+  `:popover-open`, `::backdrop`, `overlay` and `x-overlay-ng`); membership, not the longhand, stays `dom`'s truth for the
   containing block (see `docs/dom-architecture.md` "Top layer and
   `::backdrop`").
+- HTML's **popover** attribute is `dom`'s (`crates/dom/src/tree/popover.rs`),
+  because every element carries it: its four states (`PopoverState`), the
+  visibility state as `ElementState::POPOVER_OPEN` (`:popover-open`, which
+  only this module writes), and HTML's *show popover* / *hide popover*
+  (`show_popover`, `hide_popover`, throwing `PopoverError`) for Manual
+  popovers, each a top-layer entry that does not block the document. The
+  attribute setters hide a showing popover whose attribute changes state,
+  removal included (Chromium's and Gecko's behavior, where the spec's text
+  would leave it showing), and the unlink path hides one that left the
+  document. A subset of a browser's capability and nothing that behaves
+  differently (user ruling): Auto and Hint popovers are refused rather than
+  shown, `beforetoggle`/`toggle` are the embedder's to fire, and no script
+  reaches a popover (`docs/style-assumptions.md` §31).
 - Stylo's per-element style data and its traversal/invalidation flags live
   inline on `Node` (bench-defended 2026-08-03: no traversal regression, a
   measurably faster no-op-commit fast path).

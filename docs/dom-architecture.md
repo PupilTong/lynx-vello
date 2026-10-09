@@ -681,8 +681,8 @@ user** for `content-visibility: auto`.
 Stylo applies §3.1's computed-value fixups (position to `absolute`,
 `display: contents` to its block equivalent) to a style whose
 `-servo-top-layer` is `auto`. The fork's `lynx` build admits that longhand in
-a UA-origin sheet only, and bobcat-core's `dialog:modal` and `::backdrop`
-rules declare it. Membership does not depend on that declaration — the
+a UA-origin sheet only, and bobcat-core's `dialog:modal`, `:popover-open` and
+`::backdrop` rules declare it. Membership does not depend on that declaration — the
 embedder decides what enters the layer — so it stays the truth where this
 crate reads it: the lowering above, and a top-layer element establishing its
 absolutely positioned descendants' containing block whatever its computed
@@ -697,6 +697,26 @@ contents (the skipping ancestor still hides it). A page with an empty top
 layer pays one `is_empty` test per lowered position, containing-block
 lookup, collected child, unlink, flush and layout run; no node carries a
 field for any of it.
+
+**Popovers** (`tree/popover.rs`) are HTML's `popover` attribute over this
+layer, `dom`'s because the attribute is global to every element: no
+embedder component could see every element's attribute changes and every
+removal. The attribute's four states are parsed as HTML's enumerated
+attribute (`PopoverState`); the popover visibility state is
+`ElementState::POPOVER_OPEN`, which `:popover-open` matches and which only
+this module writes (`add_element_state` refuses it, as it refuses
+`:defined`). `Document::show_popover` and `hide_popover` are HTML's *show
+popover* and *hide popover* with a null source, throwing (`PopoverError`):
+a shown Manual popover is an entry that does not block the document. The
+attribute setters run HTML's popover attribute change steps — a showing
+popover whose attribute moves to another state is hidden, removal included,
+as Chromium and Gecko do where the spec's text would leave it showing — and
+the unlink path's removing steps hide a showing popover that left the
+document, with no events, so it comes back hidden. A subset with no
+behavior of its own: Auto and Hint popovers are refused rather than shown
+(no stacks, light dismiss or close requests), `beforetoggle`/`toggle` are
+the embedder's to fire, and there is no focus, no source or trigger, and no
+`overlay` transition.
 
 ## Scroll, input and event paths
 
