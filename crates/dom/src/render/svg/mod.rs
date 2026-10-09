@@ -115,10 +115,10 @@
 //! changes the font continues the chunk and `text-anchor` (0, half or all of
 //! the chunk's advance) anchors the whole chunk. Whitespace follows
 //! `xml:space`: by default newlines go, tabs become spaces, runs collapse
-//! and the element's ends are trimmed; `preserve` keeps every character as a
-//! space. Font family, size, weight, style and stretch come from the
-//! document's own properties; a missing `font-family` is the context's
-//! default family. Glyphs are drawn as `paint/text.rs` draws them
+//! (a run's one space stays in the chunk the run began in) and the
+//! element's ends are trimmed; `preserve` keeps every character as a space. Font family, size,
+//! weight, style and stretch come from the document's own properties; a missing `font-family` is
+//! the context's default family. Glyphs are drawn as `paint/text.rs` draws them
 //! (`draw_glyphs`, the run's size and normalised coordinates, no hinting).
 //! `textPath`, per-character `x`/`y` lists, `dominant-baseline`,
 //! `rotate`, `textLength` and bidi reordering within a chunk are out, and a

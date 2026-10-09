@@ -105,13 +105,21 @@ pub(super) enum Space {
 /// Normalises the text of every span of `chunks` in document order under
 /// `space`, across span boundaries, and drops the spans and chunks left
 /// empty.
+///
+/// A run of collapsed whitespace becomes one space, written once the next
+/// character shows it is not trailing: before that character when it is in
+/// the same chunk, else at the end of the span the run began in, because a
+/// space belongs to the chunk that produced it (SVG 1.1 §10.15) and counts
+/// in that chunk's advance, which `text-anchor` reads.
 pub(super) fn normalize_whitespace(chunks: &mut Vec<TextChunk>, space: Space) {
-    let mut pending_space = false;
+    // Where the pending collapsed space began: its chunk and its span.
+    let mut pending: Option<(usize, usize)> = None;
     let mut at_start = true;
-    for chunk in chunks.iter_mut() {
-        for span in &mut chunk.spans {
-            let mut out = String::with_capacity(span.text.len());
-            for character in span.text.chars() {
+    for chunk_index in 0..chunks.len() {
+        for span_index in 0..chunks[chunk_index].spans.len() {
+            let text = std::mem::take(&mut chunks[chunk_index].spans[span_index].text);
+            let mut out = String::with_capacity(text.len());
+            for character in text.chars() {
                 match space {
                     Space::Preserve => {
                         out.push(if matches!(character, '\n' | '\r' | '\t') {
@@ -125,19 +133,24 @@ pub(super) fn normalize_whitespace(chunks: &mut Vec<TextChunk>, space: Space) {
                             continue;
                         }
                         if character == ' ' || character == '\t' {
-                            pending_space = !at_start;
+                            if !at_start && pending.is_none() {
+                                pending = Some((chunk_index, span_index));
+                            }
                             continue;
                         }
-                        if pending_space {
-                            out.push(' ');
-                            pending_space = false;
+                        if let Some((produced_in, produced_by)) = pending.take() {
+                            if produced_in == chunk_index {
+                                out.push(' ');
+                            } else {
+                                chunks[produced_in].spans[produced_by].text.push(' ');
+                            }
                         }
                         out.push(character);
                         at_start = false;
                     }
                 }
             }
-            span.text = out;
+            chunks[chunk_index].spans[span_index].text = out;
         }
     }
     // A pending space at the end is the trailing whitespace the default

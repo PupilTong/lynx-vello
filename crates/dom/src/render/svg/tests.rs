@@ -1413,6 +1413,33 @@ fn text_whitespace_follows_xml_space() {
     assert!(!blank.has_text);
 }
 
+/// A collapsed space stays in the chunk that produced it: one that ends a
+/// chunk ends that chunk's last span rather than starting the next chunk,
+/// while one between spans of a chunk still separates them.
+#[test]
+fn a_collapsed_space_stays_in_its_chunk() {
+    let chunked = document(r#"<text>Label: <tspan x="100">value</tspan></text>"#);
+    let [Item::Text(text)] = chunked.items.as_slice() else {
+        panic!("one text item");
+    };
+    let chunks: Vec<Vec<&str>> = text
+        .chunks
+        .iter()
+        .map(|chunk| chunk.spans.iter().map(|span| span.text.as_str()).collect())
+        .collect();
+    assert_eq!(chunks, [["Label: "], ["value"]]);
+
+    let joined = document("<text>A <tspan>B</tspan></text>");
+    let [Item::Text(text)] = joined.items.as_slice() else {
+        panic!("one text item");
+    };
+    let [chunk] = text.chunks.as_slice() else {
+        panic!("one chunk");
+    };
+    let spans: String = chunk.spans.iter().map(|span| span.text.as_str()).collect();
+    assert_eq!(spans, "A B");
+}
+
 /// Shaped through Ahem, each span is one glyph run placed by the pen:
 /// the chunk's start, then every span's `dx`/`dy` and advance; a chunk
 /// anchored `middle` or `end` is shifted back by half or all of its width.
