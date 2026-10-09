@@ -2619,6 +2619,95 @@ fn an_overlay_shows_and_dismisses_through_set_attribute() {
     );
 }
 
+/// An event at a UA component's shadow content — an `<x-swiper>`'s
+/// shadow `#content`, which a touch between its items hits — reaches script
+/// as a browser reports it to listeners outside the shadow tree: retargeted
+/// to the host. A tap there captures down from the page and bubbles from
+/// the swiper, its `target` at every step. A non-composed event at the same
+/// node never leaves
+/// the shadow tree, where script names nothing, so it reaches no listener
+/// and is no error.
+#[test]
+fn an_event_at_shadow_content_reaches_script_retargeted_to_its_host() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const outer = __CreateView(0);
+                  const swiper = __CreateElement('x-swiper', 0);
+                  __AppendElement(page, outer);
+                  __AppendElement(outer, swiper);
+                  __AppendElement(swiper, __CreateElement('x-swiper-item', 0));
+                  globalThis.held = [page, outer, swiper];
+                  const note = (label) => ({
+                    type: 'worklet',
+                    value: {
+                      body: (event) =>
+                        seen.push(
+                          label + ':' + event.currentTarget.uid + ':' +
+                          event.target.uid + ':' + event.type,
+                        ),
+                    },
+                  });
+                  for (const name of ['tap', 'close']) {
+                    __AddEvent(swiper, 'bindEvent', name, note('swiper'));
+                    __AddEvent(outer, 'bindEvent', name, note('outer'));
+                    __AddEvent(page, 'capture-bind', name, note('page-capture'));
+                  }
+                };
+                ",
+            "app:///shadow-target.js",
+        )
+        .expect("main-thread script");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __FlushElementTree } from 'bobcat:element';
+                __FlushElementTree();
+                ",
+            "app:///shadow-target-flush.js",
+            "flush",
+        )
+        .expect("flush");
+    let (swiper, content) = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let outer = tree.get(page).expect("the page").child_ids()[0];
+        let swiper = tree.get(outer).expect("the outer view").child_ids()[0];
+        let root = tree.shadow_root(swiper).expect("the swiper's shadow root");
+        let content = tree.get(root).expect("the shadow root").child_ids()[0];
+        (swiper, content)
+    };
+    let uid = packed_node_id(swiper);
+
+    runtime
+        .dispatch_for_test(&mut js_runtime, content, "tap", event_point())
+        .expect("a hit on shadow content is delivered");
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        &format!("page-capture:2:{uid}:tap|swiper:{uid}:{uid}:tap|outer:3:{uid}:tap"),
+    );
+
+    runtime
+        .slot
+        .borrow()
+        .component_events
+        .queue(content, "close");
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    expect_seen(&mut js_runtime, &mut runtime, "");
+}
+
 /// Measuring runs no pipeline step. A job that mutates and then measures
 /// sees the box the last pass produced; the new one arrives only once the
 /// realm flushes itself, or once the entry's epilogue commits for it.
@@ -4294,13 +4383,12 @@ fn enough_removals_end_a_batch_with_a_collection() {
 ///
 /// Routing cannot produce one today: it targets elements, and a hit on a
 /// text run maps to its element in `hit.rs`. This builds the path by hand
-/// against the run itself, the one node no handle ever names. The case
-/// that *will* produce one is a UA component with hit-testable shadow
-/// chrome — `first_element_at` answers with the flat-tree element it
-/// hits, shadow tree included, and script names no shadow node — so the
-/// first such component owes the event path a retarget to its host, the
-/// same one `event_path` already performs for every step outside the
-/// tree. Generated text has no DOM identity and cannot become such a target.
+/// against the run itself, the one node no handle ever names. A hit on a UA
+/// component's shadow chrome is not one: `first_element_at` answers with the
+/// flat-tree element it hits, shadow tree included, and the dispatch drops
+/// every shadow step, so the event starts at the host
+/// (`an_event_at_shadow_content_reaches_script_retargeted_to_its_host`).
+/// Generated text has no DOM identity and cannot become such a target.
 #[test]
 fn an_event_target_no_handle_names_is_an_error_not_a_silent_drop() {
     let (mut js_runtime, mut runtime, elements) = runtime();

@@ -1189,7 +1189,12 @@ impl MainThreadRuntime {
                 }
                 ComponentEvent::Plain { node, name } => (node, name, EventDetail::Empty),
             };
-            if let Err(error) = self.dispatch(js_runtime, target, name, false, timestamp, &detail) {
+            // Not composed either, as HTML and web-core fire every one of
+            // them: one queued at a UA shadow tree's node stays inside that
+            // tree.
+            if let Err(error) =
+                self.dispatch(js_runtime, target, name, false, false, timestamp, &detail)
+            {
                 failures.push(error);
             }
         }
@@ -1208,11 +1213,12 @@ impl MainThreadRuntime {
     /// here, where the document is, and the dispatch over it is the realm's.
     ///
     /// Every routed input event bubbles — the painting side routes what a
-    /// gesture produced, and Lynx has no non-bubbling input event — so this
-    /// is [`Self::dispatch`] with the flag set and the payload's numbers for
-    /// a detail. The events that do not bubble are the components' — an
-    /// `<image>`'s `load` and `error`, a `<dialog>`'s `cancel` and `close` —
-    /// which [`Self::dispatch_component_events`] delivers.
+    /// gesture produced, and Lynx has no non-bubbling input event — and is
+    /// composed, as every UI event is, so this is [`Self::dispatch`] with
+    /// both flags set and the payload's numbers for a detail. The events that
+    /// do neither are the components' — an `<image>`'s `load` and `error`, a
+    /// `<dialog>`'s `cancel` and `close` — which
+    /// [`Self::dispatch_component_events`] delivers.
     pub(crate) fn dispatch_input_event(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -1224,6 +1230,7 @@ impl MainThreadRuntime {
             js_runtime,
             target,
             name,
+            true,
             true,
             payload.timestamp,
             &EventDetail::Input(payload),
@@ -1257,6 +1264,16 @@ impl MainThreadRuntime {
     /// (`WASMJSBinding.ts:254-258`). Sending a narrowed path instead would
     /// lose the capture pass.
     ///
+    /// `composed` is the event's own flag too, and it shapes the path here,
+    /// where the tree is: a non-composed event's path ends at the root of the
+    /// tree its target is in (DOM's *get the parent*). The path then loses
+    /// every step at a UA shadow tree's content, because script names no
+    /// node of one — no handle, no listener — and a browser reports exactly
+    /// that to every listener outside the tree: the host, retargeted, as the
+    /// first step that remains says. An event at shadow content therefore
+    /// starts at its host, and a non-composed one there reaches no step at
+    /// all.
+    ///
     /// Everything else crosses as numbers, and the realm builds the objects:
     /// the `timestamp`, then [`EventDetail`]'s discriminator and whatever
     /// numbers that kind spends. No JSON is formatted here and none is parsed
@@ -1267,26 +1284,37 @@ impl MainThreadRuntime {
     ///
     /// Returns whether the realm published the export, which is all the host
     /// can know: nothing here says whether anything ran.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the event's two flags, as `dom::Document::event_steps` takes them"
+    )]
     fn dispatch(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         target: dom::NodeId,
         name: &str,
         bubbles: bool,
+        composed: bool,
         timestamp: f64,
         detail: &EventDetail<'_>,
     ) -> Result<bool, MainThreadError> {
-        let steps = {
+        let steps: SmallVec<[dom::event::EventStep; 16]> = {
             let mut slot = self.slot.borrow_mut();
             let document = slot.document_mut();
             if document.get(target).is_none() {
                 return Ok(false);
             }
-            document.event_steps(target, true, true)
+            let steps = document.event_steps(target, true, composed);
+            steps
+                .steps()
+                .iter()
+                .filter(|step| !step.capture && document.shadow_root_of(step.node).is_none())
+                .copied()
+                .collect()
         };
         let mut nodes = String::new();
         let mut targets = String::new();
-        for step in steps.steps().iter().filter(|step| !step.capture) {
+        for step in &steps {
             if !nodes.is_empty() {
                 nodes.push(',');
                 targets.push(',');

@@ -353,8 +353,12 @@ impl<T> Document<T> {
         self.get(slot).map_or(&[][..], Node::assigned_node_ids)
     }
 
+    /// The shadow root `node`'s tree is rooted at — `node` itself for a
+    /// shadow root — or `None` for a node of the document tree or of a
+    /// detached tree: DOM's `getRootNode()`, answered only when that is a
+    /// `ShadowRoot`.
     #[must_use]
-    fn shadow_root_of(&self, node: NodeId) -> Option<NodeId> {
+    pub fn shadow_root_of(&self, node: NodeId) -> Option<NodeId> {
         if self.get(node)?.is_shadow_root() {
             return Some(node);
         }

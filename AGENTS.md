@@ -1536,7 +1536,10 @@ document, releases it, and makes one call to the Element module's
 `quickjs::ScriptEngine::call_module_export`, the one Rust-to-JS path in the
 tree, carrying the whole path: the standard's bubble steps, target-first, as
 two comma-joined decimal id strings — the nodes, and position for position each
-step's shadow-retargeted target — plus the name and then numbers alone: the
+step's shadow-retargeted target, less every step at a UA shadow tree's
+content, which script names none of, so an event at shadow chrome starts at
+its host (routed input events are composed, the components' events are not,
+as HTML and web-core fire them) — plus the name and then numbers alone: the
 `timestamp` (milliseconds on the view's timeline), the position the `detail`
 reports, the wheel delta (`undefined` for every event without one, which keeps
 the two keys out of the `detail`), and four numbers per touch point
