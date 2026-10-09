@@ -223,23 +223,47 @@ impl std::fmt::Debug for VectorDraw {
 }
 
 impl VectorDraw {
-    /// The device size the texture is baked at: `extent` under the per-axis
-    /// scale of `transform`, rounded up — [`ImageDraw::size_hint`]'s rule —
-    /// and clamped to [`MAX_RENDERABLE_DIMENSION`] per axis, which is as
-    /// large as vello's atlas can place. A clamped texture is drawn
-    /// stretched over the extent, since the brush scale divides by its own
-    /// size. Zero on an axis with no device length, which bakes nothing.
-    pub(crate) fn device_size(&self) -> (u32, u32) {
+    /// The destination's size in device px: `extent` under the per-axis
+    /// scale of `transform`, neither rounded nor clamped.
+    pub(crate) fn device_extent(&self) -> Size {
         let [a, b, c, d, _, _] = self.transform.as_coeffs();
-        (
-            device_length(self.extent.width * a.hypot(b)).min(MAX_RENDERABLE_DIMENSION),
-            device_length(self.extent.height * c.hypot(d)).min(MAX_RENDERABLE_DIMENSION),
+        Size::new(
+            self.extent.width * a.hypot(b),
+            self.extent.height * c.hypot(d),
         )
     }
 
-    /// The map from scene units onto a `width` × `height` box by `aspect`.
-    pub(crate) fn placement(&self, width: f64, height: f64) -> Affine {
-        aspect_transform(self.viewport, self.aspect, Size::new(width, height))
+    /// The device size the texture is baked at: [`Self::device_extent`]
+    /// rounded up — [`ImageDraw::size_hint`]'s rule — and clamped to
+    /// [`MAX_RENDERABLE_DIMENSION`] per axis, which is as large as vello's
+    /// atlas can place. A clamped texture is drawn stretched over the
+    /// extent, since the brush scale divides by its own size. Zero on an
+    /// axis with no device length, which bakes nothing.
+    pub(crate) fn device_size(&self) -> (u32, u32) {
+        let extent = self.device_extent();
+        (
+            device_length(extent.width).min(MAX_RENDERABLE_DIMENSION),
+            device_length(extent.height).min(MAX_RENDERABLE_DIMENSION),
+        )
+    }
+
+    /// The map from scene units onto a `raster` box standing for a
+    /// destination of `size`: the viewport placed in `size` by `aspect`,
+    /// then scaled per axis onto `raster`.
+    ///
+    /// The bake passes the device extent and the texture size, which differ
+    /// where the size was rounded up or clamped. Drawing the texture over
+    /// the extent scales it back per axis, so the picture keeps the place
+    /// `aspect` gives it in the real destination; fitting it to a clamped
+    /// texture's own ratio instead would letterbox it there and then
+    /// stretch the letterbox. The inline encoding passes the item-local
+    /// extent as both.
+    pub(crate) fn placement(&self, size: Size, raster: Size) -> Affine {
+        let ratio = |raster: f64, size: f64| if size > 0.0 { raster / size } else { 1.0 };
+        Affine::scale_non_uniform(
+            ratio(raster.width, size.width),
+            ratio(raster.height, size.height),
+        ) * aspect_transform(self.viewport, self.aspect, size)
     }
 }
 
@@ -329,7 +353,7 @@ pub(crate) fn encode_vector_inline(scene: &mut Scene, draw: &VectorDraw, outer: 
     };
     let placement = transform
         * Affine::translate(draw.anchor.to_vec2())
-        * draw.placement(draw.extent.width, draw.extent.height);
+        * draw.placement(draw.extent, draw.extent);
     scene.append(&draw.scene, Some(placement));
     for _ in 0..layers {
         scene.pop_layer();
@@ -2454,6 +2478,39 @@ mod tests {
             [2.0, 0.0, 0.0, 2.0, 0.0, 48.0],
             "xMinYMax meet",
         );
+    }
+
+    /// A texture clamped on one axis holds the picture placed in the real
+    /// device extent, squeezed: a 200×1 viewport met into a 20000×100 px
+    /// draw fills the whole 8192×100 texture, so the stretch back over the
+    /// extent draws it 100 px tall, not letterboxed into 8192×100 first.
+    #[test]
+    fn a_clamped_texture_holds_the_picture_placed_in_the_real_extent() {
+        let draw = VectorDraw {
+            viewport: (200.0, 1.0),
+            extent: Size::new(20_000.0, 100.0),
+            ..vector_draw(Affine::IDENTITY, whole())
+        };
+        let (width, height) = draw.device_size();
+        assert_eq!((width, height), (MAX_RENDERABLE_DIMENSION, 100));
+        let placed = draw
+            .placement(
+                draw.device_extent(),
+                Size::new(f64::from(width), f64::from(height)),
+            )
+            .transform_rect_bbox(Rect::new(0.0, 0.0, 200.0, 1.0));
+        let texture = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
+        for (actual, expected) in [
+            (placed.x0, texture.x0),
+            (placed.y0, texture.y0),
+            (placed.x1, texture.x1),
+            (placed.y1, texture.y1),
+        ] {
+            assert!(
+                (actual - expected).abs() < 1e-9,
+                "the viewport fills the texture: {placed:?}",
+            );
+        }
     }
 
     /// The device size is the extent under the transform's per-axis scale,
