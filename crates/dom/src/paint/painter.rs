@@ -50,15 +50,15 @@
 //!   nearest sampling.
 //! - The grammar has no `image-orientation`; the embedder's resource system is expected to apply
 //!   EXIF orientation before it reports natural size and serves pixels.
-//! - An SVG document used as an image (`<image src>`, `background-image`, `mask-image`) is a `usvg`
-//!   tree encoded as vector paths (`paint/svg.rs`), and the painter bakes it into a texture at the
-//!   destination's device size. `image-rendering` samples that texture as it samples a bitmap
-//!   (`crisp-edges`/`pixelated` nearest, `auto` bilinear), which shows where the texture is drawn
-//!   at another size than it was baked at: under a compose-time transform, or clamped to the
-//!   renderable bound. Groups with a `mask` are skipped, `filter`s draw unfiltered, patterns and
-//!   nested raster images paint nothing, a `clipPath` with several children clips with their
-//!   concatenation rather than their union, and `<text>` is dropped at parse
-//!   (`docs/svg-vector-images-design.md`).
+//! - An SVG document used as an image (`<image src>`, `background-image`, `mask-image`) is encoded
+//!   as vector paths by the engine's own converter (`render/svg`), and the painter bakes it into a
+//!   texture at the destination's device size. `image-rendering` samples that texture as it samples
+//!   a bitmap (`crisp-edges`/`pixelated` nearest, `auto` bilinear), which shows where the texture
+//!   is drawn at another size than it was baked at: under a compose-time transform, or clamped to
+//!   the renderable bound. Groups with a `mask` are skipped, `filter`s draw unfiltered, patterns
+//!   and nested `<image>`s paint nothing, a `clipPath` with several children clips with their
+//!   concatenation rather than their union, and `<text>` draws nothing yet
+//!   (`docs/svg-lynx-component-design.md`).
 
 use std::sync::Arc;
 

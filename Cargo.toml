@@ -83,10 +83,12 @@ web-sys = "0.3"
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
 vello = { version = "0.11", default-features = false }
-# SVG documents as vector images: parsed to a tree that `dom::paint::svg`
-# walks into a vello scene. No `text`, `system-fonts`, `memmap-fonts`,
-# `svgz` or `writer` (docs/svg-vector-images-design.md).
-usvg = { version = "0.48", default-features = false }
+# SVG documents as vector images: `dom::render::svg` parses the XML with
+# `roxmltree`, its attribute values with `svgtypes` and its `<style>` sheets
+# with `simplecss`, into a vello scene (docs/svg-lynx-component-design.md).
+roxmltree = "0.21.1"
+simplecss = "0.2.2"
+svgtypes = "0.16.1"
 
 [workspace.lints.rust]
 unsafe_code = "warn"

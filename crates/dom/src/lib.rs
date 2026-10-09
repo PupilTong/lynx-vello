@@ -40,6 +40,7 @@ pub use crate::render::image::{
     DocumentKind, FrameImages, ImageEvent, ImageInbox, ImageOutcome, ImageReports, ImageRole,
     ImageSizeHint, MAX_RENDERABLE_DIMENSION, NoImages, VectorImage, is_renderable,
 };
+pub use crate::render::svg::VectorDocument;
 pub use crate::style::animation::AnimationTick;
 pub use crate::style::device::Device;
 #[doc(hidden)]

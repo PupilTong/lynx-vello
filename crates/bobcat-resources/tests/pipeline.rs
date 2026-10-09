@@ -84,7 +84,7 @@ impl Harness {
                 | ImageEvent::LoadedDocument {
                     source: reported, ..
                 }
-                | ImageEvent::LoadedVector {
+                | ImageEvent::ParsedDocument {
                     source: reported, ..
                 }
                 | ImageEvent::Failed { source: reported } => &**reported == source,

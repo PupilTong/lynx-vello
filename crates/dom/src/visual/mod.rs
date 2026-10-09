@@ -1115,14 +1115,14 @@ impl<T> Document<T> {
     /// Applies the host's image reports: records completed loads with their
     /// intrinsic dimensions, and marks failures.
     ///
-    /// A [`ImageEvent::LoadedDocument`] is parsed inline, on this thread,
-    /// when its source is still pending, and settles as a loaded vector image
-    /// or, for a document that does not parse, as a failure. This is the
+    /// A [`ImageEvent::ParsedDocument`] is encoded here, on this thread,
+    /// when its source is still pending: its scene is built once, so it
+    /// settles as a loaded vector image. Natively `bobcat-core` parses off this thread first
+    /// ([`ImageEvent::parse_document`]) and hands that event over. A
+    /// [`ImageEvent::LoadedDocument`] is parsed here as well, inline, on the
     /// path with no blocking pool behind it — this crate's own tests and the
-    /// wasm32 build. Natively `bobcat-core` parses off this thread first
-    /// ([`ImageEvent::parse_document`]) and hands the result over as an
-    /// [`ImageEvent::LoadedVector`] or an [`ImageEvent::Failed`], so nothing
-    /// is parsed here.
+    /// wasm32 build — and a document that does not parse settles as a
+    /// failure.
     ///
     /// A report that lands on replaced nodes recomputes their natural size in
     /// the same call, so an element resizes in the commit that first draws
