@@ -95,11 +95,42 @@ fn paint_one_outset(
     let Some(rect) = offset_rect(fragment.border_box, &geometry, geometry.spread) else {
         return;
     };
-    let radii = adjust_radii(&fragment.radii, geometry.spread as f32);
+    let radii = normalize_radii(
+        adjust_radii(&fragment.radii, geometry.spread as f32),
+        rect.width() as f32,
+        rect.height() as f32,
+    );
 
     let margin = 3.0 * geometry.sigma + geometry.dx.abs() + geometry.dy.abs();
     let bounds = BoxShape::Rect(rect.inflate(margin, margin));
     ring_path_into(&mut paths.ring, &bounds, border_shape);
+    // Inline shadows keep their balanced clip in the current scene. Recording
+    // compose ops here would clone the ring and split fragments for every box.
+    let radius = uniform_radius(&radii);
+    if geometry.sigma == 0.0 || radius.is_some() {
+        let scene = sink.scene_for(space);
+        scene.push_clip_layer(Fill::EvenOdd, fragment.transform, &paths.ring);
+        if geometry.sigma > 0.0 {
+            scene.draw_blurred_rounded_rect(
+                fragment.transform,
+                rect,
+                color,
+                radius.expect("a blurred inline shadow has uniform circular radii"),
+                geometry.sigma,
+            );
+        } else {
+            let shape = BoxShape::new(rect, &radii);
+            with_shape!(&shape, |s| scene.fill(
+                Fill::NonZero,
+                fragment.transform,
+                color,
+                None,
+                s
+            ));
+        }
+        scene.pop_layer();
+        return;
+    }
     // The knockout clips the blurred result, not the silhouette entering the blur.
     sink.push_clip_box(
         space,
@@ -401,6 +432,62 @@ mod tests {
             },
             spread: Length::new(spread),
             inset,
+        }
+    }
+
+    #[test]
+    fn inline_outset_shadows_do_not_add_compose_fragments_or_clips() {
+        use crate::test_common::Doc;
+
+        for (radius, shadow) in [
+            ("10px", "0px 2px 6px rgba(0,0,0,0.25)"),
+            ("200px", "0px 2px 6px 2px black"),
+            ("0 60px 12px 24px", "4px 6px 0px -2px black"),
+        ] {
+            let mut doc = Doc::with_css(&format!(
+                "page {{ display:flex; position:relative; width:800px; height:600px; }}
+                 .card {{ display:flex; position:absolute; width:180px; height:80px;
+                          background:#f6f6f8; border:2px solid #ccc; border-radius:{radius}; }}
+                 .fade {{ opacity:0.85; }} .clip {{ overflow:hidden; }}
+                 .chip {{ display:flex; width:60px; height:20px; background:#3366ff; }}"
+            ));
+            let mut cards = Vec::new();
+            for index in 0..120 {
+                let card = doc.el(doc.root, "view.card");
+                if index % 3 == 0 {
+                    doc.dom.add_class(card, "fade");
+                }
+                if index % 2 == 0 {
+                    doc.dom.add_class(card, "clip");
+                }
+                doc.el(card, "view.chip");
+                cards.push(card);
+            }
+            doc.dom.render();
+            let frame = &doc.dom.committed_frame().unwrap().presentation;
+            let baseline = (frame.fragments.len(), frame.program.len());
+            for card in &cards {
+                doc.dom
+                    .set_inline_style_property(*card, "box-shadow", shadow);
+            }
+            // Repeated commits must keep shadows inside the existing fragments.
+            for tick in ["1", "2", "3"] {
+                doc.dom.set_attribute(cards[0], "data-tick", tick);
+                doc.dom.render();
+                let frame = &doc.dom.committed_frame().unwrap().presentation;
+                assert_eq!(
+                    (frame.fragments.len(), frame.program.len()),
+                    baseline,
+                    "radius={radius}, shadow={shadow}"
+                );
+                assert!(frame.filter_groups.is_empty());
+                assert!(
+                    frame
+                        .fragments
+                        .iter()
+                        .all(|scene| scene.encoding().n_open_clips == 0)
+                );
+            }
         }
     }
 
