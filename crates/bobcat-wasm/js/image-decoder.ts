@@ -6,7 +6,7 @@
 // the browser's codecs and its EXIF orientation handling, and a 2D canvas to
 // resize with and read the pixels out of. Nothing here parses an image
 // container. SVG never arrives here: `bobcat-resources` hands its bytes to
-// the engine, which parses it with usvg, as it does on every target.
+// the engine, which parses it with its own converter, as it does on every target.
 //
 // The Render Worker and this thread share the Wasm memory. Every job has a
 // mailbox of eight Int32 words at an address in that memory:

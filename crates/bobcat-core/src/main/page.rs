@@ -1284,7 +1284,7 @@ async fn load_font_face(page: Rc<Page>, request: dom::FontFaceRequest) {
 /// The parse is [`dom::ImageEvent::parse_document`], run with
 /// `spawn_blocking` on the blocking pool of this engine thread's runtime, so
 /// no job and no other task waits on it. When it returns, one entry applies
-/// its outcome — [`dom::ImageEvent::LoadedVector`] or
+/// its outcome — [`dom::ImageEvent::ParsedDocument`] or
 /// [`dom::ImageEvent::Failed`] — through the same
 /// [`MainThreadRuntime::apply_image_events`] a batch from the painter goes
 /// through, so the registry, the natural-size relayout and the `load` or

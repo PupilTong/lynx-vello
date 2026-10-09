@@ -17,6 +17,7 @@
 pub mod blur;
 pub mod gpu;
 pub(crate) mod image;
+pub(crate) mod svg;
 pub mod vector_textures;
 
 pub use crate::render::image::MAX_RENDERABLE_DIMENSION;

@@ -25,7 +25,8 @@ smallvec = { workspace = true }
 pollster = { workspace = true }
 rayon = { workspace = true }
 vello = { workspace = true, features = ["wgpu", "wgpu_default"] }
-usvg = { workspace = true }
+roxmltree = { workspace = true }
+svgtypes = { workspace = true }
 
 hughie = { workspace = true }
 

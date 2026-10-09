@@ -1858,60 +1858,6 @@ mod tests {
         }
     }
 
-    /// On the monolithic walk a vector tile's layer is a full `Normal` layer
-    /// exactly when the image opens a blend layer at its top level,
-    /// including through an `isolation: isolate` group, which pushes no
-    /// layer of its own; the draw records the same answer for the bake.
-    #[test]
-    fn a_vector_tile_isolates_a_blend_under_an_isolated_root_group() {
-        let blended = vector(
-            r##"<g style="isolation:isolate">
-                  <g style="mix-blend-mode:screen"><rect width="20" height="20" fill="#ff0000"/></g>
-                </g>"##,
-        );
-        let plain = vector(r##"<rect width="20" height="20" fill="#ff0000"/>"##);
-        let clip = BoxShape::Rect(Rect::new(0.0, 0.0, 40.0, 40.0));
-        let grid = TileGrid {
-            origin: Point::ZERO,
-            tile: Size::new(40.0, 40.0),
-            repeat_x: false,
-            repeat_y: false,
-        };
-        for (image, isolate) in [(&blended, true), (&plain, false)] {
-            let mut actual = Scene::new();
-            let mut sink = WalkSink::Monolithic(&mut actual, &crate::NoImages);
-            fill_vector_tiles(
-                &mut sink,
-                None,
-                ImageQuality::Medium,
-                Affine::IDENTITY,
-                &clip,
-                &grid,
-                image,
-            );
-            let mut expected = Scene::new();
-            let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
-            if isolate {
-                expected.push_layer(
-                    Fill::NonZero,
-                    peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::SrcOver),
-                    1.0,
-                    Affine::IDENTITY,
-                    &rect,
-                );
-            } else {
-                expected.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect);
-            }
-            expected.append(image.scene(), Some(Affine::scale(0.4)));
-            expected.pop_layer();
-            crate::paint::equivalence::assert_scenes_identical(&actual, &expected);
-
-            let finished = compose_tiles(&clip, &grid, image);
-            assert_eq!(finished.vector_draws.len(), 1);
-            assert_eq!(finished.vector_draws[0].opens_blend, isolate);
-        }
-    }
-
     /// A repeated vector background is one vector draw per visible tile —
     /// a 100 px box under 25 px tiles records 16 — each over its own tile,
     /// and no fragment at all: nothing of the picture lands in the frame's

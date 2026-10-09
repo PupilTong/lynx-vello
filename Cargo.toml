@@ -83,10 +83,11 @@ web-sys = "0.3"
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
 vello = { version = "0.11", default-features = false }
-# SVG documents as vector images: parsed to a tree that `dom::paint::svg`
-# walks into a vello scene. No `text`, `system-fonts`, `memmap-fonts`,
-# `svgz` or `writer` (docs/svg-vector-images-design.md).
-usvg = { version = "0.48", default-features = false }
+# SVG documents as vector images: `dom::render::svg` parses the XML with
+# `roxmltree` and its attribute values with `svgtypes` into a vello scene;
+# CSS inside an SVG is not read (docs/svg-lynx-component-design.md).
+roxmltree = "0.21.1"
+svgtypes = "0.16.1"
 
 [workspace.lints.rust]
 unsafe_code = "warn"
@@ -106,3 +107,11 @@ missing_panics_doc = "allow"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# `roxmltree` parses element nesting by recursion. Unoptimised it takes about
+# 17 KB of stack a level, so an SVG nested 123 deep would overflow the 2 MiB
+# blocking-pool thread a debug build parses it on, below the 256 levels the
+# converter allows (`crates/dom/src/render/svg/nesting.rs`); at `opt-level = 1`
+# it takes about 1.1 KB.
+[profile.dev.package.roxmltree]
+opt-level = 1

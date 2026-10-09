@@ -99,6 +99,7 @@ fn is_close(actual: [u8; 4], expected: [u8; 4]) -> bool {
 const RED: [u8; 4] = [255, 0, 0, 255];
 const BLUE: [u8; 4] = [0, 0, 255, 255];
 const WHITE: [u8; 4] = [255, 255, 255, 255];
+const BLACK: [u8; 4] = [0, 0, 0, 255];
 
 /// A 48x48 root at column `c1` whose rounded rect fills with a
 /// `linearGradient` referenced by `url(#g)`.
@@ -146,8 +147,9 @@ fn gradient_cell(doc: &mut Doc) -> NodeId {
 }
 
 /// A root at column `c2` sized by `width` and a square `viewBox`, coloured
-/// by a `<style>` sheet, with a nested `svg` holding a circle; answers the
-/// root and the nested `svg`.
+/// by presentation attributes beside a `<style>` sheet that is not read
+/// (CSS inside an SVG is ignored), with a nested `svg` holding a circle;
+/// answers the root and the nested `svg`.
 fn styled_cell(doc: &mut Doc) -> (NodeId, NodeId) {
     let root = doc.root;
     let styled = element(
@@ -159,13 +161,18 @@ fn styled_cell(doc: &mut Doc) -> (NodeId, NodeId) {
     let style = element(doc, styled, "style", &[]);
     let sheet = doc
         .dom
-        .create_text_node(".a { fill: #2563eb; } svg > .b { fill: #16a34a; }", ());
+        .create_text_node(".a { fill: #ff0000; } svg > .b { fill: #ff0000; }", ());
     doc.dom.append_child(style, sheet);
     element(
         doc,
         styled,
         "rect",
-        &[("class", "a"), ("width", "48"), ("height", "48")],
+        &[
+            ("class", "a"),
+            ("width", "48"),
+            ("height", "48"),
+            ("fill", "#2563eb"),
+        ],
     );
     let nested = element(
         doc,
@@ -183,7 +190,13 @@ fn styled_cell(doc: &mut Doc) -> (NodeId, NodeId) {
         doc,
         nested,
         "circle",
-        &[("class", "b"), ("cx", "1"), ("cy", "1"), ("r", "1")],
+        &[
+            ("class", "b"),
+            ("cx", "1"),
+            ("cy", "1"),
+            ("r", "1"),
+            ("fill", "#16a34a"),
+        ],
     );
     (styled, nested)
 }
@@ -215,7 +228,8 @@ fn grouped_cell(doc: &mut Doc) -> NodeId {
 }
 
 /// Four roots: a path through a `viewBox`; a gradient referenced by
-/// `url(#id)`; a `<style>` sheet and a nested `svg`; a group with opacity
+/// `url(#id)`; attribute colours beside an unread `<style>` sheet, and a
+/// nested `svg`; a group with opacity
 /// and a stroked circle. Each lays out at its `width`/`height` attributes.
 #[test]
 fn inline_svgs_lay_out_at_their_attribute_size_and_draw() {
@@ -281,7 +295,9 @@ fn a_mutated_descendant_re_renders_on_the_next_layout() {
         "the path's new `d` no longer covers the top-left"
     );
 
-    // A text node inside a `<style>` is part of the markup too.
+    // A `<style>` sheet is not read (CSS inside an SVG is ignored): with its
+    // `fill` removed the path draws in the initial black, whatever the
+    // sheet says before or after its text changes.
     let style = element(&mut doc, svg, "style", &[]);
     let sheet = doc.dom.create_text_node("path { fill: #ff0000 }", ());
     doc.dom.append_child(style, sheet);
@@ -290,13 +306,13 @@ fn a_mutated_descendant_re_renders_on_the_next_layout() {
         "a_mutated_descendant_re_renders_on_the_next_layout",
         &mut doc,
     );
-    assert!(is_close(pixel(&image, 16 + 36, 16 + 36), RED));
+    assert!(is_close(pixel(&image, 16 + 36, 16 + 36), BLACK));
     doc.dom.set_text_node_data(sheet, "path { fill: #0000ff }");
     let image = capture(
         "a_mutated_descendant_re_renders_on_the_next_layout",
         &mut doc,
     );
-    assert!(is_close(pixel(&image, 16 + 36, 16 + 36), BLUE));
+    assert!(is_close(pixel(&image, 16 + 36, 16 + 36), BLACK));
 
     // A removed child is gone from the picture.
     doc.dom.remove_element(path);
