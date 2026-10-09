@@ -8,7 +8,7 @@ use std::sync::Arc;
 use svgtypes::{Length, LengthUnit};
 
 use super::parse::Ids;
-use super::style::{Axis, Sheet, Viewport, parse_opacity, resolve_length, transform};
+use super::style::{Axis, Viewport, parse_opacity, resolve_length, transform};
 use crate::vello::kurbo::{Affine, Rect};
 use crate::vello::peniko::color::DynamicColor;
 use crate::vello::peniko::{Brush, Color, ColorStop, Extend, Gradient};
@@ -64,7 +64,6 @@ const MAX_CHAIN: usize = 16;
 pub(super) fn gradient<'a>(
     node: roxmltree::Node<'a, 'a>,
     ids: &Ids<'a>,
-    sheet: &Sheet<'a>,
     viewport: Viewport,
     font_size: f64,
 ) -> Option<Arc<GradientSpec>> {
@@ -134,7 +133,7 @@ pub(super) fn gradient<'a>(
     // Stops come from the first gradient in the chain that has any.
     let stops = chain
         .iter()
-        .map(|node| stops(*node, sheet))
+        .map(|node| stops(*node))
         .find(|stops| !stops.is_empty())
         .unwrap_or_default();
     Some(Arc::new(GradientSpec {
@@ -166,7 +165,7 @@ pub(super) fn href<'a>(
 /// through the stop's own ancestors (the gradient, its `defs`, …), never
 /// from an element the gradient paints: one gradient is one set of stops
 /// for every shape that references it.
-fn stops<'a>(node: roxmltree::Node<'a, 'a>, sheet: &Sheet<'a>) -> Vec<(f32, Color)> {
+fn stops(node: roxmltree::Node<'_, '_>) -> Vec<(f32, Color)> {
     let mut stops: Vec<(f32, Color)> = Vec::new();
     let mut previous = 0.0_f32;
     for stop in node.children().filter(|child| child.has_tag_name("stop")) {
@@ -176,10 +175,10 @@ fn stops<'a>(node: roxmltree::Node<'a, 'a>, sheet: &Sheet<'a>) -> Vec<(f32, Colo
             .unwrap_or(0.0)
             .max(previous);
         previous = offset;
-        let declared = super::style::declarations(stop, sheet);
+        let declared = super::style::declarations(stop);
         let stop_color = match declared.get("stop-color") {
             None | Some("inherit") => svgtypes::Color::black(),
-            Some("currentColor") => inherited_color(stop, sheet),
+            Some("currentColor") => inherited_color(stop),
             Some(value) => {
                 svgtypes::Color::from_str(value).unwrap_or_else(|_| svgtypes::Color::black())
             }
@@ -199,11 +198,11 @@ fn stops<'a>(node: roxmltree::Node<'a, 'a>, sheet: &Sheet<'a>) -> Vec<(f32, Colo
 /// [`Style::resolve`](super::style::Style::resolve), a value that does not
 /// parse as a colour (`inherit`, `currentColor` included) leaves the
 /// parent's.
-fn inherited_color<'a>(node: roxmltree::Node<'a, 'a>, sheet: &Sheet<'a>) -> svgtypes::Color {
+fn inherited_color(node: roxmltree::Node<'_, '_>) -> svgtypes::Color {
     node.ancestors()
         .filter(roxmltree::Node::is_element)
         .find_map(|element| {
-            super::style::declarations(element, sheet)
+            super::style::declarations(element)
                 .get("color")
                 .and_then(|value| svgtypes::Color::from_str(value).ok())
         })

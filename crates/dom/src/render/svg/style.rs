@@ -1,12 +1,11 @@
 //! Properties: where an element's declared values come from, and the
 //! computed style each element inherits from its parent.
 //!
-//! A value has three sources, in rising precedence: the presentation
-//! attribute of the same name, the `<style>` rules that match the element
-//! (`simplecss`, by specificity then source order), and the `style`
-//! attribute; an `!important` rule beats the attribute. [`declarations`]
-//! folds them into one small table per element and [`Style::resolve`] turns
-//! that table plus the parent's computed style into the element's own.
+//! A value has one source, the presentation attribute of the same name: CSS
+//! inside an SVG document (`<style>` rules, the `style` attribute) is not
+//! read. [`declarations`] collects an element's attributes into one small
+//! table and [`Style::resolve`] turns that table plus the parent's computed
+//! style into the element's own.
 
 use std::str::FromStr;
 
@@ -47,8 +46,8 @@ const PROPERTIES: &[&str] = &[
     "visibility",
 ];
 
-/// One element's declared property values, highest precedence already
-/// applied.
+/// One element's declared property values: its presentation attributes
+/// named in [`PROPERTIES`], values trimmed.
 #[derive(Default)]
 pub(super) struct Declarations<'a> {
     entries: SmallVec<[(&'a str, &'a str); 8]>,
@@ -61,223 +60,23 @@ impl<'a> Declarations<'a> {
             .find(|(declared, _)| *declared == name)
             .map(|(_, value)| *value)
     }
-
-    fn set(&mut self, name: &'a str, value: &'a str) {
-        let value = value.trim();
-        if let Some(entry) = self
-            .entries
-            .iter_mut()
-            .find(|(declared, _)| *declared == name)
-        {
-            entry.1 = value;
-        } else {
-            self.entries.push((name, value));
-        }
-    }
 }
 
-/// The document's `<style>` rules, sorted so that applying them in order
-/// lets the right one win: ascending specificity, source order within a
-/// specificity.
-pub(super) struct Sheet<'a> {
-    /// Each rule with the fast reject its selector allows.
-    rules: Vec<(simplecss::Rule<'a>, RuleFilter)>,
-}
-
-impl<'a> Sheet<'a> {
-    /// Parses every `<style>` element of `document` (a `type` other than
-    /// `text/css` is skipped) into one sheet.
-    pub(super) fn collect(document: &'a roxmltree::Document<'a>) -> Self {
-        let mut sheet = simplecss::StyleSheet::new();
-        for node in document
-            .descendants()
-            .filter(|node| node.has_tag_name("style"))
-        {
-            if node
-                .attribute("type")
-                .is_some_and(|kind| !kind.trim().eq_ignore_ascii_case("text/css"))
-            {
-                continue;
-            }
-            for text in node.children().filter_map(|child| child.text()) {
-                sheet.parse_more(text);
-            }
-        }
-        let mut rules = sheet.rules;
-        rules.sort_by_key(|rule| rule.selector.specificity());
-        Self {
-            rules: rules
-                .into_iter()
-                .map(|rule| {
-                    let filter = rule_filter(&rule.selector);
-                    (rule, filter)
-                })
-                .collect(),
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.rules.is_empty()
-    }
-}
-
-/// What an element must have for a rule to match at all: the type, class
-/// and id its selector's rightmost compound names. Most rules of a sheet
-/// (an Illustrator export's `.st0 … .st40`) are rejected by one string
-/// compare instead of a selector walk per element.
-#[derive(Default)]
-struct RuleFilter {
-    tag: Option<String>,
-    class: Option<String>,
-    id: Option<String>,
-}
-
-impl RuleFilter {
-    /// Whether an element with these attributes may match.
-    fn admits(&self, tag: &str, class: Option<&str>, id: Option<&str>) -> bool {
-        self.tag.as_deref().is_none_or(|required| required == tag)
-            && self.class.as_deref().is_none_or(|required| {
-                class.is_some_and(|class| {
-                    class.split_ascii_whitespace().any(|word| word == required)
-                })
+/// `node`'s declared values: its presentation attributes, and nothing else.
+/// Neither a `style` attribute nor a `<style>` element is read (the
+/// "CSS inside SVG" ruling of `docs/svg-lynx-component-design.md`). XML
+/// allows an attribute once per element, so each property has at most one
+/// value.
+pub(super) fn declarations<'a>(node: roxmltree::Node<'a, 'a>) -> Declarations<'a> {
+    Declarations {
+        entries: node
+            .attributes()
+            .filter(|attribute| {
+                attribute.namespace().is_none() && PROPERTIES.contains(&attribute.name())
             })
-            && self
-                .id
-                .as_deref()
-                .is_none_or(|required| id == Some(required))
+            .map(|attribute| (attribute.name(), attribute.value().trim()))
+            .collect(),
     }
-}
-
-/// The filter for `selector`, read back from the text `simplecss` prints
-/// it as (`g > *[class~='c']`): the rightmost compound's type, `[class~=]`
-/// and `[id=]`. Anything the reader does not recognise adds no
-/// requirement, so a filter only ever rejects what the selector would.
-fn rule_filter(selector: &simplecss::Selector<'_>) -> RuleFilter {
-    let text = selector.to_string();
-    // The rightmost compound starts after the last combinator outside
-    // brackets.
-    let mut depth = 0_u32;
-    let mut start = 0;
-    for (index, byte) in text.bytes().enumerate() {
-        match byte {
-            b'[' => depth += 1,
-            b']' => depth = depth.saturating_sub(1),
-            b' ' | b'>' | b'+' if depth == 0 => start = index + 1,
-            _ => {}
-        }
-    }
-    let compound = &text[start..];
-    let mut filter = RuleFilter::default();
-    let tag_end = compound.find(['[', ':']).unwrap_or(compound.len());
-    let tag = &compound[..tag_end];
-    if !tag.is_empty() && tag != "*" {
-        filter.tag = Some(tag.to_owned());
-    }
-    let mut rest = &compound[tag_end..];
-    while let Some(inner) = rest.strip_prefix('[') {
-        let Some(end) = inner.find(']') else { break };
-        let attribute = &inner[..end];
-        let quoted = |prefix: &str| {
-            attribute
-                .strip_prefix(prefix)
-                .and_then(|value| value.strip_suffix('\''))
-                .filter(|value| !value.contains('\''))
-                .map(str::to_owned)
-        };
-        if let Some(class) = quoted("class~='") {
-            filter.class = Some(class);
-        } else if let Some(id) = quoted("id='") {
-            filter.id = Some(id);
-        }
-        rest = &inner[end + 1..];
-    }
-    filter
-}
-
-/// A roxmltree element as `simplecss` matches selectors against it.
-struct XmlElement<'a, 'input>(roxmltree::Node<'a, 'input>);
-
-impl simplecss::Element for XmlElement<'_, '_> {
-    fn parent_element(&self) -> Option<Self> {
-        self.0.parent_element().map(XmlElement)
-    }
-
-    fn prev_sibling_element(&self) -> Option<Self> {
-        self.0.prev_sibling_element().map(XmlElement)
-    }
-
-    fn has_local_name(&self, name: &str) -> bool {
-        self.0.tag_name().name() == name
-    }
-
-    fn attribute_matches(
-        &self,
-        local_name: &str,
-        operator: simplecss::AttributeOperator<'_>,
-    ) -> bool {
-        self.0
-            .attribute(local_name)
-            .is_some_and(|value| operator.matches(value))
-    }
-
-    fn pseudo_class_matches(&self, class: simplecss::PseudoClass<'_>) -> bool {
-        match class {
-            simplecss::PseudoClass::FirstChild => self.0.prev_sibling_element().is_none(),
-            simplecss::PseudoClass::Link
-            | simplecss::PseudoClass::Visited
-            | simplecss::PseudoClass::Hover
-            | simplecss::PseudoClass::Active
-            | simplecss::PseudoClass::Focus
-            | simplecss::PseudoClass::Lang(_) => false,
-        }
-    }
-}
-
-/// `node`'s declared values from its presentation attributes, the matching
-/// rules of `sheet` and its `style` attribute.
-pub(super) fn declarations<'a>(
-    node: roxmltree::Node<'a, 'a>,
-    sheet: &Sheet<'a>,
-) -> Declarations<'a> {
-    let mut declared = Declarations::default();
-    for attribute in node.attributes() {
-        if attribute.namespace().is_none() && PROPERTIES.contains(&attribute.name()) {
-            declared.set(attribute.name(), attribute.value());
-        }
-    }
-    let mut important: SmallVec<[(&str, &str); 2]> = SmallVec::new();
-    if !sheet.is_empty() {
-        let element = XmlElement(node);
-        let tag = node.tag_name().name();
-        let class = node.attribute("class");
-        let id = node.attribute("id");
-        for (rule, filter) in &sheet.rules {
-            if !filter.admits(tag, class, id) || !rule.selector.matches(&element) {
-                continue;
-            }
-            for declaration in &rule.declarations {
-                if !PROPERTIES.contains(&declaration.name) {
-                    continue;
-                }
-                if declaration.important {
-                    important.push((declaration.name, declaration.value));
-                } else {
-                    declared.set(declaration.name, declaration.value);
-                }
-            }
-        }
-    }
-    if let Some(style) = node.attribute("style") {
-        for declaration in simplecss::DeclarationTokenizer::from(style) {
-            if PROPERTIES.contains(&declaration.name) {
-                declared.set(declaration.name, declaration.value);
-            }
-        }
-    }
-    for (name, value) in important {
-        declared.set(name, value);
-    }
-    declared
 }
 
 /// A paint as declared: resolved to a brush where it is used, against the

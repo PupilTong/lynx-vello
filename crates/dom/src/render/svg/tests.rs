@@ -590,7 +590,7 @@ fn layer_bounds_include_strokes() {
 #[test]
 fn a_blend_mode_is_the_group_layer_blend() {
     let parsed = document(
-        r##"<g style="mix-blend-mode:multiply">
+        r##"<g mix-blend-mode="multiply">
               <rect width="20" height="20" fill="#ff0000"/>
             </g>"##,
     );
@@ -640,7 +640,7 @@ fn opacity_on_a_shape_is_a_layer_around_it() {
 
 #[test]
 fn isolation_alone_and_a_filter_push_nothing() {
-    for attribute in [r#"style="isolation:isolate""#, r#"filter="url(#f)""#] {
+    for attribute in [r#"isolation="isolate""#, r#"filter="url(#f)""#] {
         let parsed = document(&format!(
             r##"<defs><filter id="f"><feGaussianBlur stdDeviation="2"/></filter></defs>
                 <g {attribute}><rect width="20" height="20" fill="#ff0000"/></g>"##
@@ -844,7 +844,7 @@ fn a_clip_around_a_blend_group_is_a_full_layer() {
     let parsed = document(
         r##"<defs><clipPath id="c"><rect width="30" height="30"/></clipPath></defs>
             <g clip-path="url(#c)">
-              <g style="mix-blend-mode:screen"><rect width="20" height="20" fill="#ff0000"/></g>
+              <g mix-blend-mode="screen"><rect width="20" height="20" fill="#ff0000"/></g>
             </g>"##,
     );
     let mut expected = Scene::new();
@@ -886,8 +886,8 @@ fn a_clip_around_an_isolated_group_around_a_blend_group_is_a_full_layer() {
     let parsed = document(
         r##"<defs><clipPath id="c"><rect width="30" height="30"/></clipPath></defs>
             <g clip-path="url(#c)">
-              <g style="isolation:isolate">
-                <g style="mix-blend-mode:screen"><rect width="20" height="20" fill="#ff0000"/></g>
+              <g isolation="isolate">
+                <g mix-blend-mode="screen"><rect width="20" height="20" fill="#ff0000"/></g>
               </g>
             </g>"##,
     );
@@ -924,8 +924,8 @@ fn a_clip_around_an_isolated_group_around_a_blend_group_is_a_full_layer() {
 #[test]
 fn a_blend_under_an_isolated_group_at_the_root_opens_a_blend() {
     let parsed = document(
-        r##"<g style="isolation:isolate">
-              <g style="mix-blend-mode:screen"><rect width="20" height="20" fill="#ff0000"/></g>
+        r##"<g isolation="isolate">
+              <g mix-blend-mode="screen"><rect width="20" height="20" fill="#ff0000"/></g>
             </g>"##,
     );
     let mut expected = Scene::new();
@@ -964,7 +964,7 @@ fn only_the_innermost_clip_layer_around_a_blend_is_full() {
                   <clipPath id="inner" clip-path="url(#outer)"><rect width="40" height="15"/></clipPath>
                 </defs>
                 <g clip-path="url(#inner)" opacity="{opacity}">
-                  <g style="mix-blend-mode:screen"><rect width="20" height="20" fill="#ff0000"/></g>
+                  <g mix-blend-mode="screen"><rect width="20" height="20" fill="#ff0000"/></g>
                 </g>"##
         ));
         let outer_shape = rect_path(0.0, 0.0, 15.0, 40.0);
@@ -1234,48 +1234,65 @@ fn a_switch_draws_its_first_unconditional_child() {
     assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
-/// `<style>` rules match by type, class and id in specificity order, the
-/// `style` attribute beats them, and `!important` beats the attribute.
+/// CSS inside the document is not read: a `<style>` rule, `!important`
+/// included, changes nothing, so each fill stays its presentation
+/// attribute's or the initial black, and a rule's stroke and `display`
+/// never apply.
 #[test]
-fn style_sheet_rules_apply_in_specificity_order_under_the_style_attribute() {
+fn a_style_element_changes_nothing() {
     let parsed = document(
         r##"<style>
               rect { fill: #0000ff; }
-              .a { fill: #ff0000; }
-              #b { fill: #00ff00 !important; }
-              g > .c { stroke: #ff0000; stroke-width: 2; }
+              .a { fill: #00ff00 !important; stroke: #ff0000; stroke-width: 2; }
+              #b { fill: #00ff00 !important; display: none; }
             </style>
             <rect width="10" height="10"/>
-            <rect class="a" width="10" height="10" fill="#000000"/>
-            <rect class="a" width="10" height="10" style="fill: #0000ff"/>
-            <rect id="b" class="a" width="10" height="10" style="fill: #000000"/>
-            <g><rect class="c" width="10" height="10" fill="none"/></g>"##,
+            <rect class="a" width="10" height="10" fill="#ff0000"/>
+            <rect id="b" width="10" height="10" fill="#0000ff"/>
+            <g><rect class="a" width="10" height="10" fill="none"/></g>"##,
     );
     let shape = rect_path(0.0, 0.0, 10.0, 10.0);
     let mut expected = Scene::new();
-    solid_fill(&mut expected, Fill::NonZero, Affine::IDENTITY, BLUE, &shape);
-    solid_fill(&mut expected, Fill::NonZero, Affine::IDENTITY, RED, &shape);
-    solid_fill(&mut expected, Fill::NonZero, Affine::IDENTITY, BLUE, &shape);
     solid_fill(
         &mut expected,
         Fill::NonZero,
         Affine::IDENTITY,
-        Color::from_rgba8(0, 255, 0, 255),
+        Color::from_rgba8(0, 0, 0, 255),
         &shape,
     );
-    // The type rule outranks the presentation attribute `fill="none"`.
+    solid_fill(&mut expected, Fill::NonZero, Affine::IDENTITY, RED, &shape);
     solid_fill(&mut expected, Fill::NonZero, Affine::IDENTITY, BLUE, &shape);
-    expected.stroke(
-        &Stroke::new(2.0)
-            .with_caps(Cap::Butt)
-            .with_join(Join::Miter)
-            .with_miter_limit(4.0),
+    assert_scenes_identical(&encoded(&parsed), &expected);
+}
+
+/// The `style` attribute is not read either: its declarations, `!important`
+/// included, change neither a fill nor a group's opacity or blend.
+#[test]
+fn a_style_attribute_changes_nothing() {
+    let parsed = document(
+        r##"<rect width="10" height="10" style="fill: #0000ff"/>
+            <rect width="10" height="10" fill="#ff0000"
+                  style="fill: #0000ff !important; stroke: #0000ff; display: none"/>
+            <g style="opacity: 0.5; mix-blend-mode: multiply">
+              <rect width="10" height="10" fill="#0000ff"/>
+            </g>"##,
+    );
+    let shape = rect_path(0.0, 0.0, 10.0, 10.0);
+    let mut expected = Scene::new();
+    solid_fill(
+        &mut expected,
+        Fill::NonZero,
         Affine::IDENTITY,
-        &Brush::Solid(RED),
-        None,
+        Color::from_rgba8(0, 0, 0, 255),
         &shape,
     );
+    solid_fill(&mut expected, Fill::NonZero, Affine::IDENTITY, RED, &shape);
+    solid_fill(&mut expected, Fill::NonZero, Affine::IDENTITY, BLUE, &shape);
     assert_scenes_identical(&encoded(&parsed), &expected);
+    assert!(
+        !opens_blend(&parsed),
+        "a blend in a style attribute opens nothing"
+    );
 }
 
 /// `inherit` takes the parent's value, and `currentColor` is each

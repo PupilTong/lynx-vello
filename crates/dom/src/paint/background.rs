@@ -1865,8 +1865,8 @@ mod tests {
     #[test]
     fn a_vector_tile_isolates_a_blend_under_an_isolated_root_group() {
         let blended = vector(
-            r##"<g style="isolation:isolate">
-                  <g style="mix-blend-mode:screen"><rect width="20" height="20" fill="#ff0000"/></g>
+            r##"<g isolation="isolate">
+                  <g mix-blend-mode="screen"><rect width="20" height="20" fill="#ff0000"/></g>
                 </g>"##,
         );
         let plain = vector(r##"<rect width="20" height="20" fill="#ff0000"/>"##);

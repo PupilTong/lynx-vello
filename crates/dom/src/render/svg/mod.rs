@@ -19,22 +19,22 @@
 //! (`href`/`xlink:href`, `x`, `y`, `width`/`height` for a `symbol` or `svg`
 //! target, recursion refused), `path`, `rect` (`rx`/`ry`), `circle`,
 //! `ellipse`, `line`, `polyline`, `polygon`, `clipPath` (`clipPathUnits`,
-//! nested `clip-path`), `linearGradient`, `radialGradient`, `stop`, `style`,
+//! nested `clip-path`), `linearGradient`, `radialGradient`, `stop`,
 //! `switch` (its first child with no `systemLanguage`, `requiredFeatures` or
 //! `requiredExtensions`). `text` (for now, below), `image`, `mask`,
-//! `filter`, `pattern`, `marker`, `title`, `desc`, `metadata` and every
-//! unknown element produce nothing.
+//! `filter`, `pattern`, `marker`, `style`, `title`, `desc`, `metadata` and
+//! every unknown element produce nothing.
 //!
-//! Properties, each from its presentation attribute, from `<style>` rules
-//! (`simplecss`: type, class, id, attribute and universal selectors, `*`,
-//! descendant and child combinators, `:first-child`, in specificity then
-//! source order, `!important` last) and from the `style` attribute, in that
-//! rising precedence: `fill`, `fill-opacity`, `fill-rule`, `stroke`,
-//! `stroke-width`, `stroke-opacity`, `stroke-linecap`, `stroke-linejoin`,
-//! `stroke-miterlimit`, `stroke-dasharray`, `stroke-dashoffset`,
-//! `paint-order`, `color`, `display`, `visibility`, `opacity`,
-//! `mix-blend-mode`, `isolation`, `clip-path`, `clip-rule`, `transform`,
-//! `font-size`, and `stop-color`/`stop-opacity` on a `stop`. Lengths take
+//! Properties, each from its presentation attribute only: `fill`,
+//! `fill-opacity`, `fill-rule`, `stroke`, `stroke-width`, `stroke-opacity`,
+//! `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit`,
+//! `stroke-dasharray`, `stroke-dashoffset`, `paint-order`, `color`,
+//! `display`, `visibility`, `opacity`, `mix-blend-mode`, `isolation`,
+//! `clip-path`, `clip-rule`, `transform`, `font-size`, and
+//! `stop-color`/`stop-opacity` on a `stop`. CSS inside the document is not
+//! read, by ruling (`docs/svg-lynx-component-design.md`, "CSS inside SVG"):
+//! a `style` element's text and a `style` attribute change nothing, as in
+//! native Lynx, whose SVG renderer has no `style` element. Lengths take
 //! user units, `px`, `%` (of the viewport width or height, or of its
 //! normalised diagonal for `r` and `stroke-width`), `pt`, `pc`, `mm`, `cm`,
 //! `in`, and `em`/`ex` of the element's own font size (`ex` is half an em).

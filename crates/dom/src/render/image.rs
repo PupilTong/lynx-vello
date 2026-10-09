@@ -1563,7 +1563,7 @@ mod vector_tests {
         let mut registry = ImageRegistry::default();
         let event = ImageEvent::parse_document(
             Arc::from("app:///icon.svg"),
-            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 10"><g style="mix-blend-mode:screen"><rect width="6" height="4"/></g></svg>"#,
+            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 10"><g mix-blend-mode="screen"><rect width="6" height="4"/></g></svg>"#,
             DocumentKind::Svg,
         );
         assert!(matches!(event, ImageEvent::ParsedDocument { .. }));

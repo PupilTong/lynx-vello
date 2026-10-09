@@ -26,7 +26,6 @@ pollster = { workspace = true }
 rayon = { workspace = true }
 vello = { workspace = true, features = ["wgpu", "wgpu_default"] }
 roxmltree = { workspace = true }
-simplecss = { workspace = true }
 svgtypes = { workspace = true }
 
 hughie = { workspace = true }

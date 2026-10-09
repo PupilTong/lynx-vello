@@ -14,7 +14,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use super::paint_server::{self, GradientSpec};
-use super::style::{Axis, Fallback, Paint, Sheet, Style, Viewport, declarations, parse_length};
+use super::style::{Axis, Fallback, Paint, Style, Viewport, declarations, parse_length};
 use super::{FillPaint, Item, LayerClip, StrokePaint, SvgError, VectorDocument, nesting, shapes};
 use crate::render::image::{AspectAlign, AspectRatio};
 use crate::vello::kurbo::{Affine, BezPath, Rect, Shape, Stroke};
@@ -54,7 +54,6 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<VectorDocument, SvgError> {
     let aspect = root
         .attribute("preserveAspectRatio")
         .map_or_else(AspectRatio::default, aspect_ratio);
-    let sheet = Sheet::collect(&xml);
     // Every `url(#id)` and `href` resolves through one table built in one
     // pass; the first element with an id wins, as `getElementById` says.
     let mut ids: FxHashMap<&str, roxmltree::Node<'_, '_>> = FxHashMap::default();
@@ -65,7 +64,6 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<VectorDocument, SvgError> {
     }
     let mut converter = Converter {
         ids: &ids,
-        sheet: &sheet,
         items: Vec::new(),
         gradients: FxHashMap::default(),
         references: Vec::new(),
@@ -275,7 +273,6 @@ struct OpenLayers {
 struct Converter<'a> {
     /// Every element with an `id`, by id.
     ids: &'a Ids<'a>,
-    sheet: &'a Sheet<'a>,
     items: Vec<Item>,
     /// Gradient specifications by element, built on first use.
     gradients: FxHashMap<roxmltree::NodeId, Option<Arc<GradientSpec>>>,
@@ -314,7 +311,7 @@ impl<'a> Converter<'a> {
     /// effects apply, but its viewport and `viewBox` are the document's,
     /// already in `parent` and the sizes, not a nested viewport to clip.
     fn convert_root(&mut self, root: roxmltree::Node<'a, 'a>, parent: Context<'_>) {
-        let declared = declarations(root, self.sheet);
+        let declared = declarations(root);
         let style = parent.style.resolve(&declared, parent.viewport);
         if !style.display || style.masked {
             return;
@@ -339,7 +336,7 @@ impl<'a> Converter<'a> {
         if !is_rendered(name) || parent.depth >= MAX_NESTING {
             return;
         }
-        let declared = declarations(node, self.sheet);
+        let declared = declarations(node);
         let style = parent.style.resolve(&declared, parent.viewport);
         if !style.display || style.masked {
             return;
@@ -614,7 +611,7 @@ impl<'a> Converter<'a> {
             // Both are viewports the `use` sizes; a `symbol` is only ever
             // drawn this way.
             "symbol" | "svg" => {
-                let declared = declarations(target, self.sheet);
+                let declared = declarations(target);
                 let style = context.style.resolve(&declared, context.viewport);
                 if style.display && !style.masked {
                     let inner = Context {
@@ -782,7 +779,6 @@ impl<'a> Converter<'a> {
                     paint_server::gradient(
                         node,
                         self.ids,
-                        self.sheet,
                         context.viewport,
                         f64::from(context.style.font_size),
                     )
@@ -806,7 +802,7 @@ impl<'a> Converter<'a> {
             .get(id)
             .copied()
             .filter(|node| node.has_tag_name("clipPath"))?;
-        let declared = declarations(node, self.sheet);
+        let declared = declarations(node);
         let style = context.style.resolve(&declared, context.viewport);
         let object_units = node.attribute("clipPathUnits") == Some("objectBoundingBox");
         let outer = style
@@ -827,7 +823,7 @@ impl<'a> Converter<'a> {
                 let Some(target) = paint_server::href(child, self.ids) else {
                     continue;
                 };
-                let use_declared = declarations(child, self.sheet);
+                let use_declared = declarations(child);
                 let use_style = style.resolve(&use_declared, context.viewport);
                 let font_size = f64::from(use_style.font_size);
                 let at = |name: &str, axis: Axis| {
@@ -848,7 +844,7 @@ impl<'a> Converter<'a> {
             if !is_shape(name) {
                 continue;
             }
-            let child_declared = declarations(shape_node, self.sheet);
+            let child_declared = declarations(shape_node);
             let child_style = style.resolve(&child_declared, context.viewport);
             if !child_style.display || !child_style.visible {
                 continue;
