@@ -915,10 +915,17 @@ impl ImageRegistry {
     ///
     /// A synthetic source is the exception, and is never asked for: its
     /// entry already exists when it was filed by
-    /// [`ImageRegistry::insert_document`], and one named any other way has
-    /// no bytes to ask for.
+    /// [`ImageRegistry::insert_document`]. One named any other way (a page
+    /// writing `svg-content:…` into an `<image src>`) has no bytes to ask
+    /// for, so it binds nothing and files no entry: an entry without bytes
+    /// would make the markup's own later [`ImageRegistry::insert_document`]
+    /// read it as known and never queue its parse.
     pub(crate) fn bind_node(&mut self, source: &str, node: NodeId, role: ImageRole) {
-        if !self.entries.contains_key(source) && !is_synthetic_source(source) {
+        let known = self.entries.contains_key(source);
+        if !known && is_synthetic_source(source) {
+            return;
+        }
+        if !known {
             // Deduplicated against a walk that met the same source first and
             // whose request has not been drained yet, the same way `resolve`
             // deduplicates against itself.
@@ -1836,6 +1843,21 @@ mod synthetic_tests {
                 .is_none()
         );
         assert!(registry.take_wanted().is_empty());
+    }
+
+    /// A page naming a synthetic source itself files nothing, so the markup
+    /// that source names is still parsed when an element hands it over.
+    #[test]
+    fn a_synthetic_source_named_by_a_page_files_nothing() {
+        let mut registry = ImageRegistry::default();
+        let named = synthetic_source(ICON, DocumentKind::Svg);
+        registry.bind_node(&named, node(1), ImageRole::Source);
+        assert!(!registry.knows(&named));
+        assert!(registry.take_wanted().is_empty());
+
+        let icon = registry.insert_document(ICON, DocumentKind::Svg);
+        assert_eq!(&*icon, named);
+        assert_eq!(registry.take_pending_documents().len(), 1, "still parsed");
     }
 
     /// The last binder letting go forgets the entry, in either role, and
