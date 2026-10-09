@@ -7,10 +7,12 @@
 //!
 //! - [`parse`] turns the bytes into a [`VectorDocument`]: one `roxmltree` parse, one walk, and a
 //!   flat list of [`Item`]s in paint order, in viewport units, every transform absolute and every
-//!   paint a final peniko brush. Geometry is resolved here, so the parse needs no document state
-//!   and can run on a blocking pool. `Send + Sync`.
-//! - [`encode`] turns a document into a [`Scene`](crate::vello::Scene) on the document thread.
-//!   [`opens_blend`] is the vello #1198 test the layer around a whole-image draw needs.
+//!   paint a final peniko brush. Geometry is resolved here; text is collected but not shaped, so
+//!   the parse needs no fonts and can run on a blocking pool. `Send + Sync`.
+//! - [`encode`] turns a document into a [`Scene`](crate::vello::Scene) on the document thread,
+//!   shaping its text through the document's own [`TextContext`](hughie::text::TextContext) by way
+//!   of a [`TextShaper`], so SVG glyphs come from the same fonts and `@font-face` registrations as
+//!   `<text>`. [`opens_blend`] is the vello #1198 test the layer around a whole-image draw needs.
 //!
 //! # The supported subset
 //!
@@ -18,23 +20,24 @@
 //! `preserveAspectRatio`), `g`, `a` (as `g`), `defs`, `symbol`, `use`
 //! (`href`/`xlink:href`, `x`, `y`, `width`/`height` for a `symbol` or `svg`
 //! target, recursion refused), `path`, `rect` (`rx`/`ry`), `circle`,
-//! `ellipse`, `line`, `polyline`, `polygon`, `clipPath` (`clipPathUnits`,
-//! nested `clip-path`), `linearGradient`, `radialGradient`, `stop`,
-//! `switch` (its first child with no `systemLanguage`, `requiredFeatures` or
-//! `requiredExtensions`). `text` (for now, below), `image`, `mask`,
-//! `filter`, `pattern`, `marker`, `style`, `title`, `desc`, `metadata` and
-//! every unknown element produce nothing.
+//! `ellipse`, `line`, `polyline`, `polygon`, `text`, `tspan`, `clipPath`
+//! (`clipPathUnits`, nested `clip-path`), `linearGradient`, `radialGradient`,
+//! `stop`, `switch` (its first child with no `systemLanguage`,
+//! `requiredFeatures` or `requiredExtensions`). `image`, `mask`, `filter`,
+//! `pattern`, `marker`, `style`, `title`, `desc`, `metadata` and every
+//! unknown element produce nothing.
 //!
 //! Properties, each from its presentation attribute only: `fill`,
 //! `fill-opacity`, `fill-rule`, `stroke`, `stroke-width`, `stroke-opacity`,
 //! `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit`,
 //! `stroke-dasharray`, `stroke-dashoffset`, `paint-order`, `color`,
 //! `display`, `visibility`, `opacity`, `clip-path`, `clip-rule`,
-//! `transform`, `font-size`, and `stop-color`/`stop-opacity` on a `stop`.
-//! CSS inside the document is not read, by ruling
-//! (`docs/svg-lynx-component-design.md`, "CSS inside SVG"): a `style`
-//! element's text and a `style` attribute change nothing, as in native
-//! Lynx, whose SVG renderer has no `style` element. Lengths take
+//! `transform`, `font-family`, `font-size`, `font-weight`, `font-style`,
+//! `font-stretch`, `text-anchor`, `letter-spacing`, and
+//! `stop-color`/`stop-opacity` on a `stop`. CSS inside the document is not
+//! read, by ruling (`docs/svg-lynx-component-design.md`, "CSS inside SVG"):
+//! a `style` element's text and a `style` attribute change nothing, as in
+//! native Lynx, whose SVG renderer has no `style` element. Lengths take
 //! user units, `px`, `%` (of the viewport width or height, or of its
 //! normalised diagonal for `r` and `stroke-width`), `pt`, `pc`, `mm`, `cm`,
 //! `in`, and `em`/`ex` of the element's own font size (`ex` is half an em).
@@ -42,12 +45,13 @@
 //! asks.
 //!
 //! Nesting is bounded: the walk goes 256 levels deep at most, counting an
-//! element inside another and a `use` expanding its target each as one
-//! level, and skips whatever lies below with its subtree. Markup nested
-//! deeper than that is removed before `roxmltree` parses it, and a document
-//! whose entities' replacement text could nest markup past the bound is
-//! refused. Both the walk and `roxmltree` recurse once per level, and
-//! natively the parse runs on a blocking pool thread with a 2 MiB stack.
+//! element inside another, a `tspan` inside a `text` or `tspan`, and a
+//! `use` expanding its target each as one level, and skips whatever lies
+//! below with its subtree. Markup nested deeper than that is removed before
+//! `roxmltree` parses it, and a document whose entities' replacement text
+//! could nest markup past the bound is refused. Both the walk and
+//! `roxmltree` recurse once per level, and natively the parse runs on a
+//! blocking pool thread with a 2 MiB stack.
 //!
 //! # Inheritance
 //!
@@ -95,7 +99,7 @@
 //! inherit attributes and stops along their `href` chain, map `spreadMethod` to
 //! [`Extend`](crate::vello::peniko::Extend), take `gradientTransform` as the
 //! brush transform, and resolve `objectBoundingBox` units against the shape's
-//! `kurbo` bounding box;
+//! `kurbo` bounding box (a text chunk's advance box after shaping);
 //! `userSpaceOnUse` percentages resolve against the viewport. A radial
 //! gradient's focal circle is peniko's start circle and its outer circle the
 //! end circle. A gradient with one stop is that colour, with none paints
@@ -104,9 +108,22 @@
 //!
 //! # Text
 //!
-//! Not drawn yet: a `text` element and its `tspan`s produce nothing, as an
-//! `image` does. Text lands in the next change, shaped on the document
-//! thread through the document's own text context.
+//! `text` and `tspan`, as chunks: the `text` element starts one at its `x`/`y`,
+//! and a `tspan` with an absolute `x` or `y` starts another; only the first
+//! value of each list is read. `dx`/`dy` move the pen. A chunk is a list of
+//! spans, one per run of characters under one style, so a `tspan` that only
+//! changes the font continues the chunk and `text-anchor` (0, half or all of
+//! the chunk's advance) anchors the whole chunk. Whitespace follows
+//! `xml:space`: by default newlines go, tabs become spaces, runs collapse
+//! and the element's ends are trimmed; `preserve` keeps every character as a
+//! space. Font family, size, weight, style and stretch come from the
+//! document's own properties; a missing `font-family` is the context's
+//! default family. Glyphs are drawn as `paint/text.rs` draws them
+//! (`draw_glyphs`, the run's size and normalised coordinates, no hinting).
+//! `textPath`, per-character `x`/`y` lists, `dominant-baseline`,
+//! `rotate`, `textLength` and bidi reordering within a chunk are out, and a
+//! `@font-face` registered after a document was encoded does not re-shape
+//! it.
 
 mod encode;
 mod nesting;
@@ -114,9 +131,11 @@ mod paint_server;
 mod parse;
 mod shapes;
 mod style;
+mod text;
 
 pub(crate) use encode::{encode, opens_blend};
 pub(crate) use parse::parse;
+pub(crate) use text::{DocumentShaper, TextItem, TextShaper};
 
 use crate::render::image::AspectRatio;
 use crate::vello::kurbo::{Affine, BezPath, Rect, Stroke};
@@ -139,6 +158,8 @@ pub struct VectorDocument {
     /// The root's `preserveAspectRatio`.
     pub(crate) aspect: AspectRatio,
     pub(crate) items: Vec<Item>,
+    /// Whether any item is text, so an encoder knows whether it will shape.
+    pub(crate) has_text: bool,
 }
 
 /// One drawing command. Transforms are absolute (viewport space); shapes
@@ -177,6 +198,7 @@ pub(crate) enum Item {
         isolate: bool,
     },
     Pop,
+    Text(TextItem),
 }
 
 /// A fill: its brush, the brush transform (`None` for a solid colour) and
@@ -200,7 +222,8 @@ pub(crate) struct StrokePaint {
 #[derive(Clone, Debug)]
 pub(crate) enum LayerClip {
     /// The bounding box of the layer's own drawing, in the layer's
-    /// coordinates.
+    /// coordinates. Text inside the layer extends it at encode time, once
+    /// shaped.
     Bounds(Rect),
     /// The element's single-shape clip path, which doubles as the layer's
     /// shape.

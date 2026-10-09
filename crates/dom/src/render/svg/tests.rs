@@ -7,7 +7,10 @@
 
 use std::sync::Arc;
 
+use hughie::text::{FontBlob, TextContext};
+
 use super::shapes::{self, ARC_TOLERANCE};
+use super::text::{TextAnchor, TextPaint};
 use super::{Item, LayerClip, SvgError, VectorDocument, encode, opens_blend, parse};
 use crate::paint::equivalence::assert_scenes_identical;
 use crate::render::image::{AspectAlign, AspectRatio};
@@ -22,6 +25,7 @@ use crate::vello::peniko::{
 
 const RED: Color = Color::from_rgba8(255, 0, 0, 255);
 const BLUE: Color = Color::from_rgba8(0, 0, 255, 255);
+const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
 
 fn document(body: &str) -> VectorDocument {
     let svg =
@@ -29,8 +33,18 @@ fn document(body: &str) -> VectorDocument {
     parse(svg.as_bytes()).expect("a valid test document")
 }
 
+fn no_fonts() -> TextContext {
+    TextContext::without_system_fonts()
+}
+
+fn ahem() -> TextContext {
+    let mut context = no_fonts();
+    assert_eq!(context.register_fonts(FontBlob::from_static(AHEM)), 1);
+    context
+}
+
 fn encoded(parsed: &VectorDocument) -> Scene {
-    encode(parsed)
+    encode(parsed, &mut no_fonts())
 }
 
 /// Every path item, in order, with its transform.
@@ -895,7 +909,7 @@ fn document_on_pool_stack(body: String) -> VectorDocument {
 /// Element nesting past [`MAX_NESTING`](super::parse::MAX_NESTING) is
 /// skipped with its subtree instead of recursing until the stack runs
 /// out, in `roxmltree` or in the walk; the levels above the bound still
-/// convert.
+/// convert. `tspan`s nest the same way.
 #[test]
 fn nesting_past_the_bound_is_skipped() {
     let bound = super::parse::MAX_NESTING as usize;
@@ -916,6 +930,13 @@ fn nesting_past_the_bound_is_skipped() {
         "one layer per group above the bound, found {layers}",
     );
     assert_eq!(parsed.items.len(), 2 * layers, "each layer and its pop");
+
+    let spans = document_on_pool_stack(format!(
+        "<text>{}x{}</text>",
+        "<tspan>".repeat(levels),
+        "</tspan>".repeat(levels),
+    ));
+    assert!(spans.items.is_empty(), "the text lies below the bound");
 }
 
 /// A chain of `use`s, each expanding the next, is bounded the same way,
@@ -1323,14 +1344,205 @@ fn unreadable_documents_fail_with_their_own_error() {
     );
 }
 
+// --- Text ------------------------------------------------------------------
+
+/// `text` starts a chunk at its `x`/`y`; a `tspan` with an absolute
+/// position starts another; `dx`/`dy` move the pen; the font and anchor
+/// inherit and override per span.
+#[test]
+fn text_collects_chunks_with_positions_and_inherited_fonts() {
+    let parsed = document(
+        r#"<text x="10 99" y="20" font-size="10" font-family="Ahem, serif" font-weight="bold" letter-spacing="1">ab<tspan dx="2" dy="3" font-size="2em" font-weight="lighter">c</tspan><tspan x="50" y="60" text-anchor="middle" font-style="italic">d e</tspan></text>"#,
+    );
+    assert!(parsed.has_text);
+    let [Item::Text(text)] = parsed.items.as_slice() else {
+        panic!("one text item, found {:?}", parsed.items);
+    };
+    assert_eq!(text.transform, Affine::IDENTITY);
+    assert_eq!(text.chunks.len(), 2);
+    let first = &text.chunks[0];
+    assert_eq!(
+        (first.x, first.y, first.anchor),
+        (10.0, 20.0, TextAnchor::Start)
+    );
+    assert_eq!(first.spans.len(), 2);
+    assert_eq!(first.spans[0].text, "ab");
+    assert_eq!((first.spans[0].dx, first.spans[0].dy), (0.0, 0.0));
+    assert_eq!(first.spans[0].font.families, ["Ahem", "serif"]);
+    assert_eq!(first.spans[0].font.size, 10.0);
+    assert_eq!(first.spans[0].font.weight, 700);
+    assert_eq!(first.spans[0].letter_spacing, 1.0);
+    assert_eq!(first.spans[1].text, "c");
+    assert_eq!((first.spans[1].dx, first.spans[1].dy), (2.0, 3.0));
+    assert_eq!(first.spans[1].font.size, 20.0, "2em of the inherited 10");
+    assert_eq!(first.spans[1].font.weight, 400, "lighter than bold");
+    let second = &text.chunks[1];
+    assert_eq!(
+        (second.x, second.y, second.anchor),
+        (50.0, 60.0, TextAnchor::Middle)
+    );
+    assert_eq!(second.spans[0].text, "d e");
+    assert_eq!(
+        second.spans[0].font.style,
+        hughie::text::ResolvedFontStyle::Italic
+    );
+    assert!(matches!(second.spans[0].fill, Some(TextPaint::Solid(color)) if color == Color::BLACK));
+}
+
+/// Default `xml:space` collapses runs, drops newlines and trims the ends,
+/// across spans; `preserve` keeps every character as a space.
+#[test]
+fn text_whitespace_follows_xml_space() {
+    let collapsed = document("<text x=\"0\" y=\"0\">  a \n  b<tspan>  c </tspan> d  </text>");
+    let [Item::Text(text)] = collapsed.items.as_slice() else {
+        panic!("one text item");
+    };
+    let spans: Vec<&str> = text.chunks[0]
+        .spans
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect();
+    assert_eq!(spans, ["a b", " c", " d"]);
+    let preserved = document("<text x=\"0\" y=\"0\" xml:space=\"preserve\">  a \n b </text>");
+    let [Item::Text(text)] = preserved.items.as_slice() else {
+        panic!("one text item");
+    };
+    assert_eq!(text.chunks[0].spans[0].text, "  a   b ");
+    let blank = document("<text x=\"0\" y=\"0\">   </text>");
+    assert!(blank.items.is_empty(), "a blank text draws nothing");
+    assert!(!blank.has_text);
+}
+
+/// Shaped through Ahem, each span is one glyph run placed by the pen:
+/// the chunk's start, then every span's `dx`/`dy` and advance; a chunk
+/// anchored `middle` or `end` is shifted back by half or all of its width.
+#[test]
+fn text_is_drawn_as_glyph_runs_at_the_pen_and_anchored() {
+    let parsed = document(
+        r##"<text x="10" y="20" font-size="10" font-family="Ahem" fill="#ff0000">ab<tspan dx="2" dy="3">c</tspan><tspan x="50" y="60" text-anchor="middle">de</tspan><tspan x="80" y="90" text-anchor="end">fgh</tspan></text>"##,
+    );
+    let scene = encode(&parsed, &mut ahem());
+    let runs = &scene.encoding().resources.glyph_runs;
+    assert_eq!(runs.len(), 4, "one run per span");
+    let placed: Vec<([f32; 2], usize, f32)> = runs
+        .iter()
+        .map(|run| (run.transform.translation, run.glyphs.len(), run.font_size))
+        .collect();
+    assert_eq!(
+        placed,
+        [
+            ([10.0, 20.0], 2, 10.0),
+            ([32.0, 23.0], 1, 10.0),
+            ([40.0, 60.0], 2, 10.0),
+            ([50.0, 90.0], 3, 10.0),
+        ]
+    );
+    assert!(runs.iter().all(|run| !run.hint));
+    assert!(runs.iter().all(|run| run.brush_transform.is_none()));
+    let glyphs = &scene.encoding().resources.glyphs;
+    assert_eq!(glyphs.len(), 8);
+    assert_eq!(glyphs[1].x, 10.0, "the second glyph one em along");
+    assert!(glyphs.iter().all(|glyph| glyph.y == 0.0));
+}
+
+/// A text fill through an `objectBoundingBox` gradient resolves against
+/// the chunk's advance box after shaping, with the pen undone in the
+/// run's paint transform; a stroke draws after the fill.
+#[test]
+fn text_gradients_resolve_against_the_shaped_chunk_box() {
+    let parsed = document(
+        r##"<defs><linearGradient id="g"><stop offset="0" stop-color="#ff0000"/><stop offset="1" stop-color="#0000ff"/></linearGradient></defs>
+            <text x="10" y="20" font-size="10" font-family="Ahem" fill="url(#g)" stroke="#0000ff" stroke-width="1">ab</text>"##,
+    );
+    let scene = encode(&parsed, &mut ahem());
+    let runs = &scene.encoding().resources.glyph_runs;
+    assert_eq!(runs.len(), 2, "a fill run and a stroke run");
+    let brush = runs[0].brush_transform.expect("the gradient's transform");
+    // The chunk box is 20 wide (two ems) from the pen, 8 above and 2 below
+    // the baseline: the unit square maps onto it, relative to the pen.
+    assert_eq!(brush.translation, [0.0, -8.0]);
+    assert_eq!(brush.matrix, [20.0, 0.0, 0.0, 10.0]);
+    assert!(matches!(
+        runs[0].style,
+        crate::vello::peniko::Style::Fill(_)
+    ));
+    assert!(matches!(
+        runs[1].style,
+        crate::vello::peniko::Style::Stroke(_)
+    ));
+    assert!(!scene.encoding().resources.color_stops.is_empty());
+}
+
+/// Text inside an opacity group extends the layer's bounds once shaped,
+/// so the layer is not clipped to nothing.
+#[test]
+fn text_extends_the_bounds_of_the_layer_around_it() {
+    let parsed = document(
+        r#"<g opacity="0.5" transform="translate(5 5)"><text x="10" y="20" font-size="10" font-family="Ahem">ab</text></g>"#,
+    );
+    // One context for both, so the font blob is the same registration.
+    let mut context = ahem();
+    let scene = encode(&parsed, &mut context);
+    let mut expected = Scene::new();
+    expected.push_layer(
+        Fill::NonZero,
+        normal(),
+        0.5,
+        Affine::translate((5.0, 5.0)),
+        &Rect::new(10.0, 12.0, 30.0, 22.0),
+    );
+    let line = hughie::text::shape_line(
+        &mut context,
+        "ab",
+        &hughie::text::ResolvedFont {
+            families: vec!["Ahem".to_owned()],
+            size: 10.0,
+            weight: 400,
+            style: hughie::text::ResolvedFontStyle::Normal,
+            stretch: 1.0,
+        },
+        0.0,
+    );
+    for run in &line.runs {
+        expected
+            .draw_glyphs(&run.font)
+            .font_size(run.size)
+            .transform(Affine::translate((5.0, 5.0)) * Affine::translate((10.0, 20.0)))
+            .normalized_coords(&run.normalized_coords)
+            .hint(false)
+            .brush(&Brush::Solid(Color::BLACK))
+            .brush_transform(None)
+            .draw(
+                Fill::NonZero,
+                run.glyphs.iter().map(|glyph| crate::vello::Glyph {
+                    id: glyph.id,
+                    x: glyph.x,
+                    y: glyph.y,
+                }),
+            );
+    }
+    expected.pop_layer();
+    assert_scenes_identical(&scene, &expected);
+}
+
+/// Shaping with no fonts at all still produces a scene without panicking:
+/// the text simply has no glyphs.
+#[test]
+fn text_without_any_font_encodes_without_glyphs() {
+    let parsed = document(r#"<text x="0" y="10">dropped</text>"#);
+    let scene = encode(&parsed, &mut no_fonts());
+    assert!(scene.encoding().resources.glyphs.is_empty());
+}
+
 /// Every item type crosses threads, and a document clones.
 #[test]
 fn a_document_is_sendable_and_clonable() {
-    let parsed = document(r#"<g opacity="0.5"><rect width="1" height="1"/></g>"#);
+    let parsed =
+        document(r#"<text x="0" y="10" font-family="Ahem">a</text><rect width="1" height="1"/>"#);
     let shared = Arc::new(parsed.clone());
     std::thread::spawn(move || shared.items.len())
         .join()
         .expect("the thread ran");
-    assert_eq!(parsed.items.len(), 3);
+    assert_eq!(parsed.items.len(), 2);
     assert!(format!("{parsed:?}").starts_with("VectorDocument"));
 }
