@@ -61,15 +61,6 @@ const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
 const LOAD_EVENT: &str = "load";
 const ERROR_EVENT: &str = "error";
 
-/// The two flags of the event a dispatch carries: whether it bubbles, which
-/// the realm narrows its passes by, and whether it is composed, which shapes
-/// the path ([`MainThreadRuntime::dispatch`]).
-#[derive(Clone, Copy)]
-struct DispatchFlags {
-    bubbles: bool,
-    composed: bool,
-}
-
 /// What one dispatch's `detail` is made of, as it crosses the boundary: a
 /// discriminator and the numbers that kind spends. The object itself is built
 /// in the realm, because its shape is JavaScript's.
@@ -1189,13 +1180,12 @@ impl MainThreadRuntime {
                 }
                 ComponentEvent::Plain { node, name } => (node, name, EventDetail::Empty),
             };
-            // Not composed, as HTML and web-core fire every one of them: one
-            // queued at a UA shadow tree's node stays inside that tree.
-            let flags = DispatchFlags {
-                bubbles: false,
-                composed: false,
-            };
-            if let Err(error) = self.dispatch(js_runtime, target, name, flags, timestamp, &detail) {
+            // Not composed either, as HTML and web-core fire every one of
+            // them: one queued at a UA shadow tree's node stays inside that
+            // tree.
+            if let Err(error) =
+                self.dispatch(js_runtime, target, name, false, false, timestamp, &detail)
+            {
                 failures.push(error);
             }
         }
@@ -1231,10 +1221,8 @@ impl MainThreadRuntime {
             js_runtime,
             target,
             name,
-            DispatchFlags {
-                bubbles: true,
-                composed: true,
-            },
+            true,
+            true,
             payload.timestamp,
             &EventDetail::Input(payload),
         )
@@ -1287,12 +1275,17 @@ impl MainThreadRuntime {
     ///
     /// Returns whether the realm published the export, which is all the host
     /// can know: nothing here says whether anything ran.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the event's two flags, as `dom::Document::event_steps` takes them"
+    )]
     fn dispatch(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         target: dom::NodeId,
         name: &str,
-        flags: DispatchFlags,
+        bubbles: bool,
+        composed: bool,
         timestamp: f64,
         detail: &EventDetail<'_>,
     ) -> Result<bool, MainThreadError> {
@@ -1302,7 +1295,7 @@ impl MainThreadRuntime {
             if document.get(target).is_none() {
                 return Ok(false);
             }
-            let steps = document.event_steps(target, true, flags.composed);
+            let steps = document.event_steps(target, true, composed);
             steps
                 .steps()
                 .iter()
@@ -1328,7 +1321,7 @@ impl MainThreadRuntime {
         arguments.push(HostArgument::String(&nodes));
         arguments.push(HostArgument::String(&targets));
         arguments.push(HostArgument::String(name));
-        arguments.push(HostArgument::Boolean(flags.bubbles));
+        arguments.push(HostArgument::Boolean(bubbles));
         arguments.push(HostArgument::Number(timestamp));
         arguments.push(HostArgument::Number(detail.kind()));
         detail.push_numbers(&mut arguments);
