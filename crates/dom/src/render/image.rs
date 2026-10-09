@@ -764,7 +764,7 @@ pub(crate) fn is_synthetic_source(source: &str) -> bool {
 ///
 /// The hash is SipHash-1-3 with its 128-bit output, from `siphasher` (already
 /// in the dependency tree through `phf`), keyed with zeros so one markup has
-/// one name in every document and every run. SipHash folds the length into
+/// one name in every document and every run. The hash folds the length into
 /// its last block, so a prefix of a document is not its collision. Keyed
 /// with a known key it is not collision-resistant against a page that sets
 /// out to collide two of its own pictures; such a page only confuses its own
