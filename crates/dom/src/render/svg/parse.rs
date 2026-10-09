@@ -15,7 +15,7 @@ use smallvec::SmallVec;
 
 use super::paint_server::{self, GradientSpec};
 use super::style::{Axis, Fallback, Paint, Sheet, Style, Viewport, declarations, parse_length};
-use super::{FillPaint, Item, LayerClip, StrokePaint, SvgError, VectorDocument, shapes};
+use super::{FillPaint, Item, LayerClip, StrokePaint, SvgError, VectorDocument, nesting, shapes};
 use crate::render::image::{AspectAlign, AspectRatio};
 use crate::vello::kurbo::{Affine, BezPath, Rect, Shape, Stroke};
 use crate::vello::peniko::{BlendMode, Brush, Compose, Fill, Mix};
@@ -23,11 +23,20 @@ use crate::vello::peniko::{BlendMode, Brush, Compose, Fill, Mix};
 /// The default object size of CSS Images 3, in CSS px.
 const DEFAULT_OBJECT_SIZE: (f32, f32) = (300.0, 150.0);
 
+/// How deep the walk goes: element nesting and `use` expansion together.
+/// An element (with its subtree) or a `use` target past it is skipped, and
+/// markup nested deeper never reaches `roxmltree` ([`nesting::bound`]).
+///
+/// Both recurse once per level, and natively the parse runs on a blocking
+/// pool thread with a 2 MiB stack, where an overflow aborts the process.
+pub(super) const MAX_NESTING: u32 = 256;
+
 /// Parses `bytes` as an SVG document.
 pub(crate) fn parse(bytes: &[u8]) -> Result<VectorDocument, SvgError> {
     let text = std::str::from_utf8(bytes).map_err(|_| SvgError::NotUtf8)?;
+    let text = nesting::bound(text, MAX_NESTING as usize).ok_or(SvgError::TooDeep)?;
     let xml = roxmltree::Document::parse_with_options(
-        text,
+        &text,
         roxmltree::ParsingOptions {
             allow_dtd: true,
             ..roxmltree::ParsingOptions::default()
@@ -69,6 +78,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<VectorDocument, SvgError> {
             height: f64::from(viewport.1),
         },
         style: &Style::initial(),
+        depth: 0,
     };
     converter.convert_root(root, context);
     Ok(VectorDocument {
@@ -223,12 +233,14 @@ fn view_box_transform(
 }
 
 /// Where an element is converted: its absolute transform, the viewport
-/// percentages resolve against, and the parent's computed style.
+/// percentages resolve against, the parent's computed style, and how many
+/// levels of the walk enclose it ([`MAX_NESTING`]).
 #[derive(Clone, Copy)]
 struct Context<'s> {
     transform: Affine,
     viewport: Viewport,
     style: &'s Style,
+    depth: u32,
 }
 
 /// A `clipPath` resolved to one shape.
@@ -312,6 +324,7 @@ impl<'a> Converter<'a> {
             transform,
             viewport: parent.viewport,
             style: &style,
+            depth: parent.depth + 1,
         };
         let layers = self.open_layers(&style, context);
         let content_start = self.items.len();
@@ -319,10 +332,11 @@ impl<'a> Converter<'a> {
         self.close_layers(layers, content_start, transform);
     }
 
-    /// Converts one element and everything it draws.
+    /// Converts one element and everything it draws; nothing past
+    /// [`MAX_NESTING`].
     fn convert_element(&mut self, node: roxmltree::Node<'a, 'a>, parent: Context<'_>) {
         let name = node.tag_name().name();
-        if !is_rendered(name) {
+        if !is_rendered(name) || parent.depth >= MAX_NESTING {
             return;
         }
         let declared = declarations(node, self.sheet);
@@ -335,6 +349,7 @@ impl<'a> Converter<'a> {
             transform,
             viewport: parent.viewport,
             style: &style,
+            depth: parent.depth + 1,
         };
         let layers = self.open_layers(&style, context);
         let content_start = self.items.len();
@@ -554,6 +569,7 @@ impl<'a> Converter<'a> {
                 transform: context.transform * inner,
                 viewport,
                 style: context.style,
+                depth: context.depth,
             },
         );
         if opens_blend_in(&self.items[content_start..])
@@ -565,7 +581,12 @@ impl<'a> Converter<'a> {
     }
 
     /// A `use`: its target drawn at `x`/`y`, inheriting from the `use`.
+    /// The expansion is a level of its own, so a chain of `use`s is bounded
+    /// by [`MAX_NESTING`] like nested elements.
     fn convert_use(&mut self, node: roxmltree::Node<'a, 'a>, context: Context<'_>) {
+        if context.depth >= MAX_NESTING {
+            return;
+        }
         let Some(target) = paint_server::href(node, self.ids) else {
             return;
         };
@@ -585,6 +606,7 @@ impl<'a> Converter<'a> {
         let y = length("y", Axis::Vertical).unwrap_or(0.0);
         let placed = Context {
             transform: context.transform * Affine::translate((x, y)),
+            depth: context.depth + 1,
             ..context
         };
         self.references.push(target.id());
@@ -599,6 +621,7 @@ impl<'a> Converter<'a> {
                         transform: placed.transform * style.transform,
                         viewport: placed.viewport,
                         style: &style,
+                        depth: placed.depth,
                     };
                     let layers = self.open_layers(&style, inner);
                     let content_start = self.items.len();
@@ -798,6 +821,7 @@ impl<'a> Converter<'a> {
             transform: Affine::IDENTITY,
             viewport: context.viewport,
             style: &style,
+            depth: context.depth,
         };
         for child in node.children().filter(roxmltree::Node::is_element) {
             let (shape_node, placement) = if child.has_tag_name("use") {

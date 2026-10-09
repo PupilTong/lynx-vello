@@ -108,3 +108,11 @@ missing_panics_doc = "allow"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# `roxmltree` parses element nesting by recursion. Unoptimised it takes about
+# 17 KB of stack a level, so an SVG nested 123 deep would overflow the 2 MiB
+# blocking-pool thread a debug build parses it on, below the 256 levels the
+# converter allows (`crates/dom/src/render/svg/nesting.rs`); at `opt-level = 1`
+# it takes about 1.1 KB.
+[profile.dev.package.roxmltree]
+opt-level = 1

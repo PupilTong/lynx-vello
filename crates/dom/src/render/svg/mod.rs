@@ -41,6 +41,14 @@
 //! A malformed path renders up to its first error, as the SVG specification
 //! asks.
 //!
+//! Nesting is bounded: the walk goes 256 levels deep at most, counting an
+//! element inside another and a `use` expanding its target each as one
+//! level, and skips whatever lies below with its subtree. Markup nested
+//! deeper than that is removed before `roxmltree` parses it, and a document
+//! whose entities' replacement text could nest markup past the bound is
+//! refused. Both the walk and `roxmltree` recurse once per level, and
+//! natively the parse runs on a blocking pool thread with a 2 MiB stack.
+//!
 //! # Inheritance
 //!
 //! SVG's: every property above except `display`, `opacity`,
@@ -99,6 +107,7 @@
 //! thread through the document's own text context.
 
 mod encode;
+mod nesting;
 mod paint_server;
 mod parse;
 mod shapes;
@@ -205,6 +214,9 @@ pub(crate) enum SvgError {
     Xml(roxmltree::Error),
     /// The root element is not `svg`.
     NotSvg,
+    /// The replacement text of the document's entities nests markup that
+    /// could take the parse past the nesting bound.
+    TooDeep,
 }
 
 impl std::fmt::Display for SvgError {
@@ -213,6 +225,9 @@ impl std::fmt::Display for SvgError {
             Self::NotUtf8 => formatter.write_str("the document is not UTF-8"),
             Self::Xml(error) => write!(formatter, "the document is not well-formed XML: {error}"),
             Self::NotSvg => formatter.write_str("the root element is not <svg>"),
+            Self::TooDeep => {
+                formatter.write_str("the document's entities could nest markup past the bound")
+            }
         }
     }
 }

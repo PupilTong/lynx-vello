@@ -1019,6 +1019,133 @@ fn a_recursive_use_draws_nothing() {
     assert_eq!(paths(&parsed).len(), 1, "only the rect, once");
 }
 
+/// Parses `body` inside a root `svg` on a thread with the stack the native
+/// blocking pool gives the parse (tokio's 2 MiB), so a walk too deep for
+/// it fails the test the way it would abort the process.
+fn document_on_pool_stack(body: String) -> VectorDocument {
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(move || document(&body))
+        .expect("a parse thread")
+        .join()
+        .expect("the parse returns")
+}
+
+/// Element nesting past [`MAX_NESTING`](super::parse::MAX_NESTING) is
+/// skipped with its subtree instead of recursing until the stack runs
+/// out, in `roxmltree` or in the walk; the levels above the bound still
+/// convert.
+#[test]
+fn nesting_past_the_bound_is_skipped() {
+    let bound = super::parse::MAX_NESTING as usize;
+    let levels = 3_000;
+    let parsed = document_on_pool_stack(format!(
+        r#"{}<rect width="10" height="10"/>{}"#,
+        r#"<g opacity="0.5">"#.repeat(levels),
+        "</g>".repeat(levels),
+    ));
+    assert!(paths(&parsed).is_empty(), "the rect lies below the bound");
+    let layers = parsed
+        .items
+        .iter()
+        .filter(|item| matches!(item, Item::PushLayer { .. }))
+        .count();
+    assert!(
+        (bound - 1..=bound).contains(&layers),
+        "one layer per group above the bound, found {layers}",
+    );
+    assert_eq!(parsed.items.len(), 2 * layers, "each layer and its pop");
+}
+
+/// A chain of `use`s, each expanding the next, is bounded the same way,
+/// though its markup is flat: 3,000 of them would overflow the stack.
+#[test]
+fn a_use_chain_past_the_bound_is_skipped() {
+    use std::fmt::Write as _;
+
+    let chain = |length: usize| {
+        let mut body = String::from("<defs>");
+        for index in 0..length {
+            write!(body, r##"<use id="u{index}" href="#u{}"/>"##, index + 1).expect("a String");
+        }
+        write!(
+            body,
+            r##"<rect id="u{length}" width="10" height="10"/></defs><use href="#u0"/>"##
+        )
+        .expect("a String");
+        document_on_pool_stack(body)
+    };
+    let long = chain(3_000);
+    assert!(long.items.is_empty(), "the rect lies past the bound");
+    assert_eq!(
+        paths(&chain(100)).len(),
+        1,
+        "a chain within the bound draws"
+    );
+}
+
+/// The pass ahead of `roxmltree` cuts each element nested past the bound
+/// with its content and leaves every other byte; comments, `CDATA`,
+/// processing instructions, declarations and quoted attribute values nest
+/// nothing, as in the parser.
+#[test]
+fn markup_past_the_bound_is_cut_before_the_parse() {
+    use std::borrow::Cow;
+
+    use super::nesting::bound;
+
+    let untouched = |text: &str, limit| {
+        assert!(
+            matches!(bound(text, limit), Some(Cow::Borrowed(kept)) if kept == text),
+            "{text} is left as it is",
+        );
+    };
+    untouched("<a><b>x</b><b/></a>", 2);
+    untouched(
+        "<a><!--<b><c>--><![CDATA[<b><c>]]><?p <b><c>?><b t='>'/></a>",
+        2,
+    );
+    untouched(r#"<!DOCTYPE a [<!ENTITY e "]>"><!--"-->]><a>&e;</a>"#, 1);
+    assert_eq!(
+        bound("<a><b><c>x<d/></c>y<e/></b>z</a>", 2).as_deref(),
+        Some("<a><b>y</b>z</a>"),
+    );
+    assert_eq!(
+        bound(r#"<a><b t="/>"><c/></b></a>"#, 2).as_deref(),
+        Some(r#"<a><b t="/>"></b></a>"#),
+        "a `/>` inside a value neither empties the tag nor ends it",
+    );
+    assert_eq!(
+        bound("<a><b><c>", 2).as_deref(),
+        Some("<a><b>"),
+        "an unclosed cut runs to the end"
+    );
+
+    // An entity's markup nests where it is referenced, up to ten
+    // references deep, inside the parser: the bound refuses what it cannot
+    // cut, and lets through what cannot reach it.
+    let entity = r#"<!DOCTYPE a [<!ENTITY e "<b><c/></b>">]><a>&e;</a>"#;
+    assert!(bound(entity, 2).is_none());
+    untouched(entity, 256);
+    let deep = format!(
+        r#"<!DOCTYPE svg [<!ENTITY e "{}">]><svg xmlns="http://www.w3.org/2000/svg">&e;</svg>"#,
+        "<g>".repeat(300) + &"</g>".repeat(300),
+    );
+    assert!(matches!(parse(deep.as_bytes()), Err(SvgError::TooDeep)));
+}
+
+/// A document nested well inside the bound draws its leaf.
+#[test]
+fn nesting_inside_the_bound_draws_the_leaf() {
+    let levels = 200;
+    let parsed = document_on_pool_stack(format!(
+        r#"{}<rect width="10" height="10"/>{}"#,
+        "<g>".repeat(levels),
+        "</g>".repeat(levels),
+    ));
+    assert_eq!(paths(&parsed).len(), 1);
+}
+
 /// A nested `svg` clips to its viewport and maps its `viewBox` by its
 /// `preserveAspectRatio`.
 #[test]
