@@ -11,8 +11,10 @@
 //!
 //! Each tag owns its UA rules and tests. Numeric text and list attributes
 //! flow through `attr()`; boolean flags use attribute selectors. Only `image`,
-//! `blur_view`, `swiper`, `refresh_view`, `viewpager`, `scroll_container`,
-//! `dialog` and `overlay` need components: for image resources, blur hints,
+//! `svg`, `blur_view`, `swiper`, `refresh_view`, `viewpager`,
+//! `scroll_container`, `dialog` and `overlay` need components: for image
+//! resources (an `svg`'s `content` as a document handed to the host as its
+//! bytes), blur hints,
 //! the swiper's UA shadow tree, item count and `scrollTo` UI method, the
 //! refresh view's UA shadow tree and its header and footer slot assignment,
 //! the viewpager's `selectTab` UI method, the `scroll-view`'s `scrollTo`, `scrollBy` and
@@ -43,6 +45,7 @@ pub(crate) mod raw_text;
 mod refresh_view;
 mod scroll_container;
 mod scroll_coordinator;
+mod svg;
 pub(crate) mod swiper;
 /// Reached from `main` as well as from the tags here: the exposure tests
 /// build their documents the same way.
@@ -60,6 +63,7 @@ use std::rc::Rc;
 use dom::{Document, ImageOutcome, NodeId, StylesheetOrigin};
 
 pub(crate) use self::base_methods::invoke_base_method;
+pub(crate) use self::svg::is_svg;
 pub use self::ua_sheet::PageConfig;
 pub(crate) use crate::view::Viewport;
 
@@ -71,9 +75,9 @@ pub(crate) const PAGE_TAG: &str = "page";
 /// Creates the document with its permanent `page` element, the components the
 /// engine defines, and the UA cascade.
 ///
-/// `events` is the queue the `image` component leaves a `src` that settled at
-/// its bind in, the `dialog` component the `close` and `cancel` its methods
-/// queue, and the `overlay` component its `showoverlay` and
+/// `events` is the queue the `image` and `svg` components leave a source that
+/// settled at its bind in, the `dialog` component the `close` and `cancel` its
+/// methods queue, and the `overlay` component its `showoverlay` and
 /// `dismissoverlay`, for the runtime to dispatch once it is out of the
 /// JavaScript call that caused them.
 #[must_use]
@@ -85,6 +89,7 @@ pub(crate) fn new_document(
     let mut document = Document::new(viewport.device(), PAGE_TAG, ());
     blur_view::define(&mut document);
     image::define(&mut document, events.clone());
+    svg::define(&mut document, events.clone());
     swiper::define(&mut document);
     refresh_view::define(&mut document);
     viewpager::define(&mut document);
@@ -147,8 +152,9 @@ pub(super) fn element_child(document: &LynxDocument, parent: NodeId, index: f64)
 /// the component belongs to.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum ComponentEvent {
-    /// An `<image>`'s own `src` settled: `load`, which carries the bitmap's
-    /// intrinsic size, or `error`.
+    /// An `<image>`'s or `<svg>`'s own source settled: `load`, which carries
+    /// an `<image>`'s intrinsic size and an `<svg>`'s layout size, or `error`,
+    /// which an `<svg>` does not fire.
     Image(ImageOutcome),
     /// An event whose detail is `{}`, named by the component that queued it:
     /// a `<dialog>`'s `close` and `cancel` ([`dialog`]), an `<overlay>`'s
