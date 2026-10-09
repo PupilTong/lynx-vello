@@ -53,7 +53,7 @@ use crate::paint::compose::{ImageArea, ImageDraw};
 use crate::paint::convert::resolve_color;
 use crate::paint::shape::{BoxShape, inner_radii, with_shape};
 use crate::paint::walker::WalkSink;
-use crate::paint::{BoxFragment, TextClip, svg};
+use crate::paint::{BoxFragment, TextClip};
 use crate::render::image::{ImageRegistry, VectorImage};
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect, Size, Vec2};
@@ -345,7 +345,7 @@ pub(crate) fn paint_replaced_content(
                 &shape,
                 destination,
                 vector,
-                svg::opens_blend(vector.tree().root()),
+                vector.opens_blend(),
             );
         }
         return;
@@ -896,7 +896,7 @@ fn fill_vector_tiles(
     vector: &VectorImage,
 ) {
     let (x_first, x_count, y_first, y_count) = grid.span(clip.bounding_box());
-    let isolate = svg::opens_blend(vector.tree().root());
+    let isolate = vector.opens_blend();
     let mut iy = 0.0;
     while iy < y_count {
         let mut ix = 0.0;
