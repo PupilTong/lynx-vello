@@ -1783,6 +1783,43 @@ fn an_image_event_queued_by_a_listener_is_delivered_by_an_entry_of_its_own() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// Three `<svg>`s in a row that does not stretch them — one sized by CSS,
+/// one unsized, one `display: none` — each recording every `load` and
+/// `error` it is handed, and an `updatePage` that writes one attribute on
+/// all three. The same shape as [`LOADING_IMAGES`], so [`images_seen`] and
+/// [`write_on_images`] serve both.
+const LOADING_SVGS: &str = r"
+globalThis.runWorklet = (value, params) => value.body(params[0]);
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  const holder = __CreateView(0);
+  __SetInlineStyles(holder, 'display:flex;flex-direction:row;align-items:flex-start');
+  __AppendElement(page, holder);
+  globalThis.svgs = ['width:120px;height:80px', '', 'display:none'].map((style) => {
+    const svg = __CreateElement('svg', 0);
+    if (style) __SetInlineStyles(svg, style);
+    __AppendElement(holder, svg);
+    const seen = [];
+    for (const name of ['load', 'error']) {
+      __AddEvent(svg, 'bindEvent', name, {
+        type: 'worklet',
+        value: {
+          body: (event) => {
+            seen.push(event.type + ':' + JSON.stringify(event.detail));
+            __SetAttribute(svg, 'data-seen', seen.join('|'));
+          },
+        },
+      });
+    }
+    return svg;
+  });
+};
+globalThis.updatePage = (data) => {
+  for (const svg of svgs) __SetAttribute(svg, data.name, data.value);
+};
+";
+
+#[cfg(not(target_arch = "wasm32"))]
 /// Three `<image>`s in a row that does not stretch them — one sized by CSS,
 /// one unsized, one `display: none` — each recording every `load` and
 /// `error` it is handed, and an `updatePage` that writes one attribute on
@@ -1819,7 +1856,8 @@ globalThis.updatePage = (data) => {
 ";
 
 #[cfg(not(target_arch = "wasm32"))]
-/// What each of [`LOADING_IMAGES`]' three elements has recorded, in order.
+/// What each of [`LOADING_IMAGES`]' (or [`LOADING_SVGS`]') three elements
+/// has recorded, in order.
 async fn images_seen(page: &Rc<Page>) -> Vec<Option<String>> {
     let (answer, read) = std::sync::mpsc::channel();
     page.apply(vec![ToMain::Probe(Box::new(move |document| {
@@ -1844,7 +1882,9 @@ async fn images_seen(page: &Rc<Page>) -> Vec<Option<String>> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// Writes `name="value"` on every `<image>` of [`LOADING_IMAGES`].
+/// Writes `name="value"` on every `<image>` of [`LOADING_IMAGES`] (or
+/// `<svg>` of [`LOADING_SVGS`]). `value` travels inside a JSON string, so it
+/// holds no `"`.
 async fn write_on_images(page: &Rc<Page>, name: &str, value: &str) {
     page.apply(vec![ToMain::PageUpdate(PageUpdate::Data {
         data: format!(r#"{{"name":"{name}","value":"{value}"}}"#),
@@ -1854,7 +1894,6 @@ async fn write_on_images(page: &Rc<Page>, name: &str, value: &str) {
     .await;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 /// An SVG document `width` x `height` px with nothing drawable in it.
 fn svg_markup(width: u32, height: u32) -> String {
     format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"/>"#)
@@ -1931,26 +1970,106 @@ fn an_svg_document_parses_off_thread_and_an_image_load_carries_its_natural_size(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// An `<image>` recording every `load` and `error` it is handed.
-const BROKEN_IMAGE: &str = r"
+/// An `<svg>`'s `load` carries the element's border-box layout size, not the
+/// document's natural size (ruled: native's detail): the CSS size when it
+/// has one, the natural size when it has none, and 0x0 when it has no box.
+///
+/// A `src` is fetched by the host and reported as bytes. A `content` is
+/// handed to the document as markup, so the write's own entry starts the
+/// parse, and the three elements' identical markup is parsed once: the
+/// write, one outcome and one delivery are three entries in all. Either way
+/// the parse runs off this thread, one entry applies the outcome, and the
+/// `load`s are delivered by an entry of their own, as an `<image>`'s are.
+/// Writing the same markup again changes nothing: no parse, no `load`.
+#[test]
+fn an_svg_parses_off_thread_and_its_load_carries_the_layout_size() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(LOADING_SVGS).await;
+
+        write_on_images(&owned.page, "src", "app:///a.svg").await;
+        assert_eq!(images_seen(&owned.page).await, vec![None, None, None]);
+        let settled = owned.page.epilogue_count();
+        report_svg(&owned.page, "app:///a.svg", &svg_markup(30, 15)).await;
+        for _ in 0..TURNS {
+            task::yield_now().await;
+        }
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 3,
+            "the report was one entry, the parse's outcome another, and the \
+             three `load`s it settled were delivered by one more"
+        );
+        assert_eq!(
+            images_seen(&owned.page).await,
+            vec![
+                Some(r#"load:{"width":120,"height":80}"#.to_owned()),
+                Some(r#"load:{"width":30,"height":15}"#.to_owned()),
+                Some(r#"load:{"width":0,"height":0}"#.to_owned()),
+            ]
+        );
+
+        let markup = "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='5'/>";
+        let settled = owned.page.epilogue_count();
+        write_on_images(&owned.page, "content", markup).await;
+        until_parsed("the content's parse was never applied", || {
+            owned.page.epilogue_count() > settled + 1
+        })
+        .await;
+        for _ in 0..TURNS {
+            task::yield_now().await;
+        }
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 3,
+            "the write was one entry, the one parse's outcome another, and \
+             the three `load`s it settled were delivered by one more"
+        );
+        let after_content = vec![
+            Some(r#"load:{"width":120,"height":80}|load:{"width":120,"height":80}"#.to_owned()),
+            Some(r#"load:{"width":30,"height":15}|load:{"width":10,"height":5}"#.to_owned()),
+            Some(r#"load:{"width":0,"height":0}|load:{"width":0,"height":0}"#.to_owned()),
+        ];
+        assert_eq!(images_seen(&owned.page).await, after_content);
+
+        let settled = owned.page.epilogue_count();
+        write_on_images(&owned.page, "content", markup).await;
+        for _ in 0..TURNS {
+            task::yield_now().await;
+        }
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 1,
+            "the same markup again is the write's entry alone"
+        );
+        assert_eq!(images_seen(&owned.page).await, after_content);
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// An `<image>` and an `<svg>` on one source, each recording every `load`
+/// and `error` it is handed.
+const IMAGE_AND_SVG: &str = r"
 globalThis.runWorklet = (value, params) => value.body(params[0]);
 globalThis.renderPage = function () {
   const page = __CreatePage('card', 0);
-  const image = __CreateImage(0);
-  __AppendElement(page, image);
-  const seen = [];
-  for (const name of ['load', 'error']) {
-    __AddEvent(image, 'bindEvent', name, {
-      type: 'worklet',
-      value: {
-        body: (event) => {
-          seen.push(event.type);
-          __SetAttribute(image, 'data-seen', seen.join('|'));
+  for (const element of [__CreateImage(0), __CreateElement('svg', 0)]) {
+    __AppendElement(page, element);
+    const seen = [];
+    for (const name of ['load', 'error']) {
+      __AddEvent(element, 'bindEvent', name, {
+        type: 'worklet',
+        value: {
+          body: (event) => {
+            seen.push(event.type);
+            __SetAttribute(element, 'data-seen', seen.join('|'));
+          },
         },
-      },
-    });
+      });
+    }
+    __SetAttribute(element, 'src', 'app:///broken.svg');
   }
-  __SetAttribute(image, 'src', 'app:///broken.svg');
 };
 ";
 
@@ -1980,14 +2099,15 @@ async fn page_children_seen(page: &Rc<Page>) -> Vec<Option<String>> {
 
 #[cfg(not(target_arch = "wasm32"))]
 /// A reported document that does not parse fails its source: an `<image>`
-/// on it is handed an `error`.
+/// on it is handed an `error`, and an `<svg>` on the same source nothing,
+/// in the same delivery.
 #[test]
 fn a_malformed_svg_document_fails_its_source() {
     on_a_js_thread(|thread| async move {
         let (context, _workers) = group(&thread);
         let mut owned = OwnedPage::new(context);
-        owned.boot(BROKEN_IMAGE).await;
-        assert_eq!(page_children_seen(&owned.page).await, vec![None]);
+        owned.boot(IMAGE_AND_SVG).await;
+        assert_eq!(page_children_seen(&owned.page).await, vec![None, None]);
 
         report_svg(
             &owned.page,
@@ -1999,7 +2119,7 @@ fn a_malformed_svg_document_fails_its_source() {
         // outcome posted, so it reads what that delivery left.
         assert_eq!(
             page_children_seen(&owned.page).await,
-            vec![Some("error".to_owned())]
+            vec![Some("error".to_owned()), None]
         );
     });
 }
@@ -2155,6 +2275,137 @@ fn a_parse_that_returns_after_the_view_ended_applies_nothing() {
                 .iter()
                 .any(|event| matches!(event, EngineEvent::Panicked(_))),
             "nothing panicked"
+        );
+    });
+}
+
+/// An entry whose top-level `await` leaves boot before its first flush, with
+/// one `<svg>` written and a listed sheet that sizes it still outstanding.
+const SVG_BEFORE_THE_FIRST_FLUSH: &str = r"
+globalThis.runWorklet = (value, params) => value.body(params[0]);
+const page = __CreatePage('card', 0);
+const svg = __CreateElement('svg', 0);
+__AppendElement(page, svg);
+__AddEvent(svg, 'bindEvent', 'load', {
+  type: 'worklet',
+  value: { body: (event) => __SetAttribute(svg, 'data-seen', JSON.stringify(event.detail)) },
+});
+__SetAttribute(svg, 'src', 'app:///a.svg');
+await import('app:///dep.js');
+";
+
+/// Answers the outstanding module request for `url` with `source`, whatever
+/// else is outstanding.
+fn answer_module_at(harness: &mut Harness, url: &str, source: &str) {
+    let position = harness
+        .sources
+        .iter()
+        .position(|(request, _)| matches!(request, SourceRequest::Module(named) if named == url))
+        .expect("that module request is outstanding");
+    let (_, completion) = harness.sources.remove(position);
+    completion.complete(Ok(LoadedSource::Module {
+        source: source.to_owned(),
+        url: url.to_owned(),
+    }));
+}
+
+/// The `data-seen` attribute of the page's first child, read through a probe
+/// command.
+async fn first_child_seen(harness: &mut Harness) -> Option<String> {
+    let (probe, probed) = std::sync::mpsc::channel();
+    harness
+        .commands
+        .send(ToMain::Probe(Box::new(move |document| {
+            let page = document.document_element().id();
+            let first = document.get(page).expect("the page is live").child_ids()[0];
+            let _ = probe.send(
+                document
+                    .get(first)
+                    .and_then(|node| node.attribute("data-seen"))
+                    .map(str::to_owned),
+            );
+        })))
+        .expect("the view is serving");
+    let mut seen = None;
+    harness
+        .until("the probe never ran", |_| {
+            seen = probed.try_recv().ok();
+            seen.is_some()
+        })
+        .await;
+    seen.expect("the probe answered")
+}
+
+/// An `<svg>` source that settles while the epilogue cannot commit — a listed
+/// sheet still outstanding — is held, not delivered: delivering it then would
+/// read a box no layout has produced. The first flush settles the sheet and
+/// commits, and the epilogue of that entry posts the held `load`, which then
+/// reads the size the sheet gave the element.
+#[test]
+fn an_svg_load_settled_before_the_first_commit_waits_for_it() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::serving(
+            context,
+            workers,
+            ViewSources {
+                style_sheets: vec!["app:///a.css".to_owned()],
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+            },
+        );
+        harness
+            .until("the view never asked for its stylesheet", |h| {
+                h.wants_a_style_sheet()
+            })
+            .await;
+        answer_module_at(
+            &mut harness,
+            "app:///main.js",
+            &card_entry(SVG_BEFORE_THE_FIRST_FLUSH),
+        );
+        harness
+            .until("the entry's import was never requested", |harness| {
+                harness.sources.iter().any(|(request, _)| {
+                    matches!(request, SourceRequest::Module(url) if url == "app:///dep.js")
+                })
+            })
+            .await;
+
+        // Already parsed, so the source settles inside this command's own
+        // entry, before any commit: the hold is what this pins, not the
+        // parse.
+        harness
+            .commands
+            .send(ToMain::ImageEvents(vec![dom::ImageEvent::parse_document(
+                Arc::from("app:///a.svg"),
+                svg_markup(30, 15).as_bytes(),
+                dom::DocumentKind::Svg,
+            )]))
+            .expect("the view is serving");
+        for _ in 0..16 {
+            harness.turn().await;
+        }
+        assert_eq!(
+            first_child_seen(&mut harness).await,
+            None,
+            "nothing is committed yet, so the `load` is held"
+        );
+        assert!(harness.view.published.commit().is_none());
+
+        harness.answer_style_sheet_at("app:///a.css", "svg{width:50px;height:40px}");
+        answer_module_at(&mut harness, "app:///dep.js", "export const value = 1;");
+        harness.until("boot never finished", |h| h.finished()).await;
+        let mut seen = None;
+        for _ in 0..TURNS {
+            seen = first_child_seen(&mut harness).await;
+            if seen.is_some() {
+                break;
+            }
+        }
+        assert_eq!(
+            seen.as_deref(),
+            Some(r#"{"width":50,"height":40}"#),
+            "delivered after the commit that laid the element out"
         );
     });
 }
