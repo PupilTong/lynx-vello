@@ -279,6 +279,44 @@ async fn compiled_pass_through_overlay_lets_a_tap_outside_its_content_through() 
     paint_and_tap(page, [210, 210], &[BLUE, CYAN, MAGENTA], None).await;
 }
 
+/// The compiled `react-svg` card: the Lynx `<svg>` component drawing from
+/// `content` and from `src`, beside `<image src="x.svg">` and a tiled
+/// `background-image`, each sampled inside a solid area of its picture
+/// (the fixture's `index.jsx` has the layout).
+///
+/// - `<svg content>` sized by CSS: the green band of its 40 by 20 `viewBox` at the bottom quarter
+///   of its 120 by 60 box, and the yellow triangle's centre; the `<text>` card's blue rectangle
+///   clear of the text.
+/// - `<svg src>` unsized: it lays out at the document's natural 80 by 40, so its yellow circle is
+///   at (40, 80) and the point right of it is the white page.
+/// - `<image mode="aspectFit">`: magenta above the letterboxed picture, its yellow circle at the
+///   centre.
+/// - The tiles: a green square at each tile's top-left, yellow beside it.
+#[tokio::test]
+async fn compiled_svg_component_draws_content_and_src() {
+    const WHITE: [u8; 4] = [255, 255, 255, 255];
+    const GREEN: [u8; 4] = [0, 128, 0, 255];
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+    const YELLOW: [u8; 4] = [255, 255, 0, 255];
+    const MAGENTA: [u8; 4] = [255, 0, 255, 255];
+    paint_and_sample(
+        fixtures::fixture("react-svg").page,
+        &[
+            (60, 54, GREEN),
+            (60, 25, YELLOW),
+            (124, 4, BLUE),
+            (40, 80, YELLOW),
+            (6, 64, BLUE),
+            (110, 80, WHITE),
+            (60, 128, MAGENTA),
+            (60, 180, YELLOW),
+            (124, 124, GREEN),
+            (135, 135, YELLOW),
+        ],
+    )
+    .await;
+}
+
 /// A compiled `<scroll-coordinator>` (300 by 400: a translucent blue toolbar
 /// 60 tall, a red header 200 tall, a slot of eight 100px items in a
 /// `<scroll-view>`) boots with the header under the toolbar and the first
@@ -607,6 +645,76 @@ async fn paint_and_tap(
         verification,
     )
     .await;
+}
+
+/// Boots `bytes` in a 240px view and pumps it until every `(x, y, colour)`
+/// of `expected` is on screen.
+async fn paint_and_sample(bytes: &[u8], expected: &[(u16, u16, [u8; 4])]) {
+    use bobcat_core::{DrawTarget, Painter};
+    let page =
+        PageSource::from_bytes(&Url::parse("app:///sample.web.bundle").unwrap(), bytes).unwrap();
+    let resources = Resources::new(ResourcesConfig::default(), || {});
+    page.register_with(&resources);
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto)
+        .await
+        .unwrap();
+    let mut view = group
+        .create_lynx_view(
+            240.0,
+            240.0,
+            1.0,
+            resources.builder(),
+            Vec::new(),
+            page.view_sources(SCREEN),
+        )
+        .unwrap();
+    let mut painter = Painter::new(DrawTarget::Offscreen, 240.0, 240.0, 1.0)
+        .await
+        .unwrap();
+    painter.attach(&view).unwrap();
+    let mut booted = false;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        for event in view.pump() {
+            match event {
+                EngineEvent::ScriptFinished => booted = true,
+                EngineEvent::ConsoleMessage { level, message, .. } => {
+                    eprintln!("[{level}] {message}");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        painter.pump().unwrap();
+        if booted {
+            let shot = painter.capture().unwrap();
+            let seen: Vec<_> = expected
+                .iter()
+                .map(|(x, y, _)| {
+                    let at = (usize::from(*y) * 240 + usize::from(*x)) * 4;
+                    [
+                        shot.pixels[at],
+                        shot.pixels[at + 1],
+                        shot.pixels[at + 2],
+                        shot.pixels[at + 3],
+                    ]
+                })
+                .collect();
+            if expected
+                .iter()
+                .zip(&seen)
+                .all(|((_, _, colour), seen)| colour == seen)
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "expected {expected:?}, got {seen:?}"
+            );
+        } else {
+            assert!(Instant::now() < deadline, "BTS boot did not finish");
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 async fn paint_registered(
