@@ -13,10 +13,13 @@ use smallvec::SmallVec;
 use svgtypes::{Length, LengthListParser, LengthUnit, PaintFallback};
 
 use crate::vello::kurbo::{Affine, Cap, Join};
-use crate::vello::peniko::{Fill, Mix};
+use crate::vello::peniko::Fill;
 
 /// The property names read as presentation attributes. An attribute outside
 /// this list is never a property, so `width` on a `rect` stays geometry.
+/// `mix-blend-mode` and `isolation` are not here: SVG 2 gives them no
+/// presentation attribute, only CSS sets them, and CSS is not read, so a
+/// document cannot set them at all.
 const PROPERTIES: &[&str] = &[
     "clip-path",
     "clip-rule",
@@ -27,9 +30,7 @@ const PROPERTIES: &[&str] = &[
     "fill-rule",
     "filter",
     "font-size",
-    "isolation",
     "mask",
-    "mix-blend-mode",
     "opacity",
     "paint-order",
     "stop-color",
@@ -217,8 +218,6 @@ pub(super) struct Style {
     /// `display` is not `none`.
     pub(super) display: bool,
     pub(super) opacity: f32,
-    pub(super) blend: Mix,
-    pub(super) isolate: bool,
     pub(super) clip_path: Option<String>,
     pub(super) masked: bool,
     /// The element's own `transform`.
@@ -248,8 +247,6 @@ impl Style {
             clip_rule: Fill::NonZero,
             display: true,
             opacity: 1.0,
-            blend: Mix::Normal,
-            isolate: false,
             clip_path: None,
             masked: false,
             transform: Affine::IDENTITY,
@@ -269,8 +266,6 @@ impl Style {
         let mut style = Self {
             display: initial.display,
             opacity: initial.opacity,
-            blend: initial.blend,
-            isolate: initial.isolate,
             clip_path: None,
             masked: false,
             transform: Affine::IDENTITY,
@@ -395,12 +390,6 @@ impl Style {
                         style.opacity = opacity;
                     }
                 }
-                "mix-blend-mode" => {
-                    if let Some(mix) = blend_mode(value) {
-                        style.blend = mix;
-                    }
-                }
-                "isolation" => style.isolate = *value == "isolate",
                 "clip-path" => {
                     style.clip_path = svgtypes::FuncIRI::from_str(value)
                         .ok()
@@ -417,12 +406,6 @@ impl Style {
         }
         if inherit("opacity") {
             style.opacity = parent.opacity;
-        }
-        if inherit("mix-blend-mode") {
-            style.blend = parent.blend;
-        }
-        if inherit("isolation") {
-            style.isolate = parent.isolate;
         }
         if inherit("clip-path") {
             style.clip_path.clone_from(&parent.clip_path);
@@ -490,28 +473,6 @@ fn dash_array(value: &str, font_size: f64, viewport: Viewport) -> Option<Vec<f64
         dashes.extend(copy);
     }
     Some(dashes)
-}
-
-fn blend_mode(value: &str) -> Option<Mix> {
-    Some(match value {
-        "normal" => Mix::Normal,
-        "multiply" => Mix::Multiply,
-        "screen" => Mix::Screen,
-        "overlay" => Mix::Overlay,
-        "darken" => Mix::Darken,
-        "lighten" => Mix::Lighten,
-        "color-dodge" => Mix::ColorDodge,
-        "color-burn" => Mix::ColorBurn,
-        "hard-light" => Mix::HardLight,
-        "soft-light" => Mix::SoftLight,
-        "difference" => Mix::Difference,
-        "exclusion" => Mix::Exclusion,
-        "hue" => Mix::Hue,
-        "saturation" => Mix::Saturation,
-        "color" => Mix::Color,
-        "luminosity" => Mix::Luminosity,
-        _ => return None,
-    })
 }
 
 /// A `transform` list folded into one affine, in SVG's order (the first

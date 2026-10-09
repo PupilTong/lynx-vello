@@ -587,21 +587,17 @@ fn layer_bounds_include_strokes() {
     assert_eq!(*bounds, Rect::new(8.0, 8.0, 32.0, 32.0));
 }
 
+/// `mix-blend-mode` and `isolation` have no presentation attribute: as
+/// attributes they change nothing, so the group pushes no layer and the
+/// image opens no blend.
 #[test]
-fn a_blend_mode_is_the_group_layer_blend() {
+fn blend_and_isolation_attributes_change_nothing() {
     let parsed = document(
-        r##"<g mix-blend-mode="multiply">
+        r##"<g mix-blend-mode="multiply" isolation="isolate">
               <rect width="20" height="20" fill="#ff0000"/>
             </g>"##,
     );
     let mut expected = Scene::new();
-    expected.push_layer(
-        Fill::NonZero,
-        BlendMode::new(Mix::Multiply, Compose::SrcOver),
-        1.0,
-        Affine::IDENTITY,
-        &Rect::new(0.0, 0.0, 20.0, 20.0),
-    );
     solid_fill(
         &mut expected,
         Fill::NonZero,
@@ -609,9 +605,8 @@ fn a_blend_mode_is_the_group_layer_blend() {
         RED,
         &rect_path(0.0, 0.0, 20.0, 20.0),
     );
-    expected.pop_layer();
     assert_scenes_identical(&encoded(&parsed), &expected);
-    assert!(opens_blend(&parsed), "a draw of this image must isolate it");
+    assert!(!opens_blend(&parsed));
 }
 
 /// Opacity on a shape itself wraps that one shape in a layer, as a group
@@ -639,22 +634,20 @@ fn opacity_on_a_shape_is_a_layer_around_it() {
 }
 
 #[test]
-fn isolation_alone_and_a_filter_push_nothing() {
-    for attribute in [r#"isolation="isolate""#, r#"filter="url(#f)""#] {
-        let parsed = document(&format!(
-            r##"<defs><filter id="f"><feGaussianBlur stdDeviation="2"/></filter></defs>
-                <g {attribute}><rect width="20" height="20" fill="#ff0000"/></g>"##
-        ));
-        let mut expected = Scene::new();
-        solid_fill(
-            &mut expected,
-            Fill::NonZero,
-            Affine::IDENTITY,
-            RED,
-            &rect_path(0.0, 0.0, 20.0, 20.0),
-        );
-        assert_scenes_identical(&encoded(&parsed), &expected);
-    }
+fn a_filter_pushes_nothing() {
+    let parsed = document(
+        r##"<defs><filter id="f"><feGaussianBlur stdDeviation="2"/></filter></defs>
+            <g filter="url(#f)"><rect width="20" height="20" fill="#ff0000"/></g>"##,
+    );
+    let mut expected = Scene::new();
+    solid_fill(
+        &mut expected,
+        Fill::NonZero,
+        Affine::IDENTITY,
+        RED,
+        &rect_path(0.0, 0.0, 20.0, 20.0),
+    );
+    assert_scenes_identical(&encoded(&parsed), &expected);
 }
 
 #[test]
@@ -834,168 +827,6 @@ fn an_object_bounding_box_clip_scales_to_the_element() {
     );
     expected.pop_layer();
     assert_scenes_identical(&encoded(&parsed), &expected);
-}
-
-/// A blend group directly inside a clip-only group would open a blend
-/// layer inside a clip layer (vello #1198), so the clip becomes a full
-/// `Normal` layer.
-#[test]
-fn a_clip_around_a_blend_group_is_a_full_layer() {
-    let parsed = document(
-        r##"<defs><clipPath id="c"><rect width="30" height="30"/></clipPath></defs>
-            <g clip-path="url(#c)">
-              <g mix-blend-mode="screen"><rect width="20" height="20" fill="#ff0000"/></g>
-            </g>"##,
-    );
-    let mut expected = Scene::new();
-    expected.push_layer(
-        Fill::NonZero,
-        normal(),
-        1.0,
-        Affine::IDENTITY,
-        &rect_path(0.0, 0.0, 30.0, 30.0),
-    );
-    expected.push_layer(
-        Fill::NonZero,
-        BlendMode::new(Mix::Screen, Compose::SrcOver),
-        1.0,
-        Affine::IDENTITY,
-        &Rect::new(0.0, 0.0, 20.0, 20.0),
-    );
-    solid_fill(
-        &mut expected,
-        Fill::NonZero,
-        Affine::IDENTITY,
-        RED,
-        &rect_path(0.0, 0.0, 20.0, 20.0),
-    );
-    expected.pop_layer();
-    expected.pop_layer();
-    assert_scenes_identical(&encoded(&parsed), &expected);
-    assert!(
-        !opens_blend(&parsed),
-        "the blend sits inside the clip's own layer, not at the image's top level"
-    );
-}
-
-/// An `isolation: isolate` group pushes no layer, so a blend group inside
-/// it still opens directly in the clip layer around both; the clip becomes
-/// a full `Normal` layer exactly as with no group between.
-#[test]
-fn a_clip_around_an_isolated_group_around_a_blend_group_is_a_full_layer() {
-    let parsed = document(
-        r##"<defs><clipPath id="c"><rect width="30" height="30"/></clipPath></defs>
-            <g clip-path="url(#c)">
-              <g isolation="isolate">
-                <g mix-blend-mode="screen"><rect width="20" height="20" fill="#ff0000"/></g>
-              </g>
-            </g>"##,
-    );
-    let mut expected = Scene::new();
-    expected.push_layer(
-        Fill::NonZero,
-        normal(),
-        1.0,
-        Affine::IDENTITY,
-        &rect_path(0.0, 0.0, 30.0, 30.0),
-    );
-    expected.push_layer(
-        Fill::NonZero,
-        BlendMode::new(Mix::Screen, Compose::SrcOver),
-        1.0,
-        Affine::IDENTITY,
-        &Rect::new(0.0, 0.0, 20.0, 20.0),
-    );
-    solid_fill(
-        &mut expected,
-        Fill::NonZero,
-        Affine::IDENTITY,
-        RED,
-        &rect_path(0.0, 0.0, 20.0, 20.0),
-    );
-    expected.pop_layer();
-    expected.pop_layer();
-    assert_scenes_identical(&encoded(&parsed), &expected);
-}
-
-/// At the image root, a blend group under an `isolation: isolate` group
-/// opens in whatever layer a draw of the image pushes, so the image
-/// counts as opening a blend (`background.rs` promotes its tile layers).
-#[test]
-fn a_blend_under_an_isolated_group_at_the_root_opens_a_blend() {
-    let parsed = document(
-        r##"<g isolation="isolate">
-              <g mix-blend-mode="screen"><rect width="20" height="20" fill="#ff0000"/></g>
-            </g>"##,
-    );
-    let mut expected = Scene::new();
-    expected.push_layer(
-        Fill::NonZero,
-        BlendMode::new(Mix::Screen, Compose::SrcOver),
-        1.0,
-        Affine::IDENTITY,
-        &Rect::new(0.0, 0.0, 20.0, 20.0),
-    );
-    solid_fill(
-        &mut expected,
-        Fill::NonZero,
-        Affine::IDENTITY,
-        RED,
-        &rect_path(0.0, 0.0, 20.0, 20.0),
-    );
-    expected.pop_layer();
-    assert_scenes_identical(&encoded(&parsed), &expected);
-    assert!(
-        opens_blend(&parsed),
-        "the isolated group pushes no layer between the draw and the blend"
-    );
-}
-
-/// A clipped `clipPath` around a blend group promotes only the innermost
-/// layer, the one that encloses the children: the inner clip when it is
-/// a clip layer of its own, the outer clip when the inner one is the
-/// group's compositing layer.
-#[test]
-fn only_the_innermost_clip_layer_around_a_blend_is_full() {
-    for opacity in ["1", "0.5"] {
-        let parsed = document(&format!(
-            r##"<defs>
-                  <clipPath id="outer"><rect width="15" height="40"/></clipPath>
-                  <clipPath id="inner" clip-path="url(#outer)"><rect width="40" height="15"/></clipPath>
-                </defs>
-                <g clip-path="url(#inner)" opacity="{opacity}">
-                  <g mix-blend-mode="screen"><rect width="20" height="20" fill="#ff0000"/></g>
-                </g>"##
-        ));
-        let outer_shape = rect_path(0.0, 0.0, 15.0, 40.0);
-        let inner_shape = rect_path(0.0, 0.0, 40.0, 15.0);
-        let mut expected = Scene::new();
-        if opacity == "1" {
-            expected.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &outer_shape);
-            expected.push_layer(Fill::NonZero, normal(), 1.0, Affine::IDENTITY, &inner_shape);
-        } else {
-            expected.push_layer(Fill::NonZero, normal(), 0.5, Affine::IDENTITY, &inner_shape);
-            expected.push_layer(Fill::NonZero, normal(), 1.0, Affine::IDENTITY, &outer_shape);
-        }
-        expected.push_layer(
-            Fill::NonZero,
-            BlendMode::new(Mix::Screen, Compose::SrcOver),
-            1.0,
-            Affine::IDENTITY,
-            &Rect::new(0.0, 0.0, 20.0, 20.0),
-        );
-        solid_fill(
-            &mut expected,
-            Fill::NonZero,
-            Affine::IDENTITY,
-            RED,
-            &rect_path(0.0, 0.0, 20.0, 20.0),
-        );
-        expected.pop_layer();
-        expected.pop_layer();
-        expected.pop_layer();
-        assert_scenes_identical(&encoded(&parsed), &expected);
-    }
 }
 
 // --- Structure: use, symbol, nested svg, switch, style -------------------

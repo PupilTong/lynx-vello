@@ -29,12 +29,12 @@
 //! `fill-opacity`, `fill-rule`, `stroke`, `stroke-width`, `stroke-opacity`,
 //! `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit`,
 //! `stroke-dasharray`, `stroke-dashoffset`, `paint-order`, `color`,
-//! `display`, `visibility`, `opacity`, `mix-blend-mode`, `isolation`,
-//! `clip-path`, `clip-rule`, `transform`, `font-size`, and
-//! `stop-color`/`stop-opacity` on a `stop`. CSS inside the document is not
-//! read, by ruling (`docs/svg-lynx-component-design.md`, "CSS inside SVG"):
-//! a `style` element's text and a `style` attribute change nothing, as in
-//! native Lynx, whose SVG renderer has no `style` element. Lengths take
+//! `display`, `visibility`, `opacity`, `clip-path`, `clip-rule`,
+//! `transform`, `font-size`, and `stop-color`/`stop-opacity` on a `stop`.
+//! CSS inside the document is not read, by ruling
+//! (`docs/svg-lynx-component-design.md`, "CSS inside SVG"): a `style`
+//! element's text and a `style` attribute change nothing, as in native
+//! Lynx, whose SVG renderer has no `style` element. Lengths take
 //! user units, `px`, `%` (of the viewport width or height, or of its
 //! normalised diagonal for `r` and `stroke-width`), `pt`, `pc`, `mm`, `cm`,
 //! `in`, and `em`/`ex` of the element's own font size (`ex` is half an em).
@@ -51,10 +51,9 @@
 //!
 //! # Inheritance
 //!
-//! SVG's: every property above except `display`, `opacity`,
-//! `mix-blend-mode`, `isolation`, `clip-path`, `transform` and the `stop-*`
-//! pair inherits its *computed* value, so an inherited `stroke-width: 1em`
-//! is the parent's px and an inherited `fill: currentColor` is still the
+//! SVG's: every property above except `display`, `opacity`, `clip-path`,
+//! `transform` and the `stop-*` pair inherits its *computed* value, so an inherited `stroke-width:
+//! 1em` is the parent's px and an inherited `fill: currentColor` is still the
 //! keyword, resolved against each element's own `color`. `inherit` takes
 //! the parent's value for every property, inherited or not. A `use`'s
 //! target inherits from the `use`, not from where it sits. The initial
@@ -65,11 +64,10 @@
 //!
 //! The drawing rules of the former `usvg` walker are kept:
 //!
-//! - An element with `opacity` below one or a non-`normal` `mix-blend-mode` draws inside one
-//!   compositing layer. Its shape is the clip path when the element's `clip-path` has exactly one
-//!   shape child, otherwise the bounding box of what it draws (strokes included), in the element's
-//!   own coordinates. A clip with opacity one and a normal blend is a clip layer alone. `isolation:
-//!   isolate` by itself pushes nothing, and `filter` is ignored: the content draws unfiltered.
+//! - An element with `opacity` below one draws inside one `Normal` compositing layer. Its shape is
+//!   the clip path when the element's `clip-path` has exactly one shape child, otherwise the
+//!   bounding box of what it draws (strokes included), in the element's own coordinates. A clip
+//!   with opacity one is a clip layer alone. `filter` is ignored: the content draws unfiltered.
 //! - A `clipPath` with one shape child clips with that shape under its `clip-rule`; with several,
 //!   with the concatenation of every child under `nonzero`, an approximation of the union that
 //!   differs where children overlap with opposite winding. A `clipPath` that is itself clipped
@@ -82,6 +80,8 @@
 //!   where a clip layer would enclose a non-`normal` blend with no layer between them, the
 //!   innermost clip layer is a full `Normal` layer instead ([`Item::PushClip`]'s `isolate`), and
 //!   [`opens_blend`] answers the same question for the layer a draw of the whole image opens.
+//!   `mix-blend-mode` and `isolation` have no presentation attribute and CSS is not read, so no
+//!   layer blends and both always compute `false`; the plumbing stays for the raster cache.
 //! - A nested `svg` and a `symbol` clip to their viewport (`overflow: hidden`) and map their
 //!   `viewBox` by their `preserveAspectRatio`. The root's `preserveAspectRatio` is not applied
 //!   here: it is carried as [`VectorDocument::aspect`] for the painter, which maps the viewport

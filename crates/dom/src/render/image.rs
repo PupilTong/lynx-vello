@@ -1563,7 +1563,7 @@ mod vector_tests {
         let mut registry = ImageRegistry::default();
         let event = ImageEvent::parse_document(
             Arc::from("app:///icon.svg"),
-            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 10"><g mix-blend-mode="screen"><rect width="6" height="4"/></g></svg>"#,
+            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 10"><g opacity="0.5"><rect width="6" height="4"/></g></svg>"#,
             DocumentKind::Svg,
         );
         assert!(matches!(event, ImageEvent::ParsedDocument { .. }));
@@ -1572,7 +1572,11 @@ mod vector_tests {
         let (_, _, vector) = registry.resolve("app:///icon.svg").expect("loaded");
         let vector = vector.expect("a vector image");
         assert_eq!(vector.viewport(), (40.0, 10.0));
-        assert!(vector.opens_blend(), "a blend group at the root");
+        assert!(!vector.scene().encoding().is_empty());
+        assert!(
+            !vector.opens_blend(),
+            "an opacity layer is `Normal`, never a blend"
+        );
     }
 
     /// A document that does not parse is the source's failure.

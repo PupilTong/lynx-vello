@@ -379,9 +379,10 @@ impl<'a> Converter<'a> {
     }
 
     /// Opens the layers `style`'s group effects need around the element's
-    /// content: a compositing layer for opacity or a blend (shaped by a
-    /// one-shape clip when there is one, else by the content's bounds),
-    /// then the clip chain, outermost first.
+    /// content: a compositing layer for opacity (shaped by a one-shape clip
+    /// when there is one, else by the content's bounds), then the clip
+    /// chain, outermost first. Every layer is `Normal`: `mix-blend-mode`
+    /// has no presentation attribute and CSS is not read.
     fn open_layers(&mut self, style: &Style, context: Context<'_>) -> OpenLayers {
         let mut open = OpenLayers {
             count: 0,
@@ -393,10 +394,10 @@ impl<'a> Converter<'a> {
             .clip_path
             .as_deref()
             .and_then(|id| self.clip_path(id, context, 0));
-        let composite = style.opacity < 1.0 || style.blend != Mix::Normal;
+        let composite = style.opacity < 1.0;
         let mut own_clip_pushed = false;
         if composite {
-            let blend = BlendMode::new(style.blend, Compose::SrcOver);
+            let blend = BlendMode::new(Mix::Normal, Compose::SrcOver);
             // A one-shape clip doubles as the layer's shape (the clips
             // clipping it are pushed inside, as clip layers).
             match &clip {
