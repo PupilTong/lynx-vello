@@ -1,15 +1,20 @@
 //! SVG documents as vector images: `<image src>`, `background-image` and
-//! `mask-image` naming an SVG document, over the full test pipeline —
+//! `mask-image` naming an SVG document, and an element handed a document as
+//! its markup (`Document::set_image_document`, what the Lynx
+//! `<svg content>` calls), over the full test pipeline —
 //! `flashbulb::TestImages::insert_svg` reports the document's bytes the way a
-//! host does, `Document::apply_image_events` parses them inline into the
-//! registry, the paint walk records one vector draw per visible tile, and
+//! host does, `flashbulb::pump_images` parses an element's markup the way
+//! the wasm32 runtime does, `Document::apply_image_events` files either in
+//! the registry, the paint walk records one vector draw per visible tile, and
 //! the headless renderer's raster cache bakes each draw's texture before the
 //! frame composes.
 //!
 //! The captures pin that a vector image is never read through
-//! `FrameImages`, and the structural test that the natural size layout
-//! reads; the per-tile op emission and the empty-document rule are unit
-//! tests beside the producers (`paint/background.rs`). The goldens under
+//! `FrameImages`, and the structural tests the natural size layout reads
+//! and the synthetic source markup is filed under; the per-tile op emission
+//! and the empty-document rule are unit tests beside the producers
+//! (`paint/background.rs`), the registry's half of the synthetic source unit
+//! tests beside it (`render/image.rs`). The goldens under
 //! `tests/screenshots/svg/` are regression goldens of our own output, not
 //! browser references. Refresh with:
 //! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p dom --test svg_images`.
@@ -20,7 +25,7 @@ mod paint_common;
 #[path = "support/screenshot.rs"]
 mod screenshot;
 
-use dom::ImageRole;
+use dom::{DocumentKind, ImageOutcome, ImageRole, NodeId};
 use flashbulb::TestImages;
 use paint_common::Doc;
 
@@ -269,4 +274,212 @@ fn an_unsized_image_lays_out_at_the_documents_natural_size() {
             "<svg {attributes}>"
         );
     }
+}
+
+/// The source `node` presents, owned, so the document can be borrowed again.
+fn source_of(doc: &Doc, node: NodeId) -> String {
+    doc.dom
+        .image_source(node, ImageRole::Source)
+        .expect("the element has a source")
+        .to_owned()
+}
+
+/// The border-box size `node` laid out at.
+fn size_of(doc: &mut Doc, node: NodeId) -> (f32, f32) {
+    doc.dom.layout();
+    let layout = doc.dom.rounded_layout(node).expect("laid out");
+    (layout.size.width, layout.size.height)
+}
+
+/// Parses and applies every pending document, as the wasm32 runtime does.
+fn parse_pending(doc: &mut Doc) -> Vec<ImageOutcome> {
+    doc.dom.apply_pending_documents()
+}
+
+/// An element handed [`ICON`] as markup draws exactly what an `<image>`
+/// whose URL the host answers with the same document draws: the markup goes
+/// through the same parse, the same kind of registry entry and the same
+/// raster cache, and the host is never asked for it.
+#[test]
+fn a_document_set_as_markup_draws_as_one_loaded_from_a_url() {
+    const TEST: &str = "a_document_set_as_markup_draws_as_one_loaded_from_a_url";
+    let css = ".icon { left: 20px; top: 20px; width: 160px; height: 80px; }";
+
+    let url_images = TestImages::new();
+    url_images.insert_svg("app:///icon.svg", ICON);
+    let mut by_url = page(css);
+    let root = by_url.root;
+    let node = by_url.el_tag(root, "image", "icon");
+    by_url
+        .dom
+        .set_image_source(node, ImageRole::Source, Some("app:///icon.svg"));
+    let by_url = capture(TEST, &mut by_url, &url_images);
+
+    let markup_images = TestImages::new();
+    let mut by_markup = page(css);
+    let root = by_markup.root;
+    let node = by_markup.el_tag(root, "image", "icon");
+    by_markup
+        .dom
+        .set_image_document(node, ImageRole::Source, ICON.as_bytes(), DocumentKind::Svg);
+    let source = source_of(&by_markup, node);
+    let by_markup = capture(TEST, &mut by_markup, &markup_images);
+    assert!(
+        !markup_images.was_asked_for(&source),
+        "the host is never asked for markup"
+    );
+
+    assert_eq!(
+        (by_markup.width(), by_markup.height()),
+        (by_url.width(), by_url.height())
+    );
+    assert!(
+        by_markup.pixels() == by_url.pixels(),
+        "markup and URL draw the same picture"
+    );
+}
+
+/// Two elements handed identical markup share one synthetic source and one
+/// parse, and both settle with the document's natural size when it applies.
+#[test]
+fn identical_markup_on_two_elements_is_one_source_and_one_parse() {
+    let mut doc = page("");
+    let root = doc.root;
+    let first = doc.el_tag(root, "image", "");
+    let second = doc.el_tag(root, "image", "");
+    for node in [first, second] {
+        assert_eq!(
+            doc.dom
+                .set_image_document(node, ImageRole::Source, ICON.as_bytes(), DocumentKind::Svg),
+            None,
+            "pending until the parse applies"
+        );
+    }
+    let source = source_of(&doc, first);
+    assert!(source.starts_with("svg-content:"), "{source}");
+    assert_eq!(source_of(&doc, second), source);
+    assert!(
+        doc.dom.take_wanted_images().is_empty(),
+        "nothing for the host"
+    );
+
+    let pending = doc.dom.take_pending_documents();
+    assert_eq!(pending.len(), 1, "one parse for both elements");
+    assert!(doc.dom.take_pending_documents().is_empty(), "drained once");
+    let events: Vec<_> = pending
+        .into_iter()
+        .map(|(source, bytes, kind)| dom::ImageEvent::parse_document(source, &bytes, kind))
+        .collect();
+    assert_eq!(
+        doc.dom.apply_image_events(&events),
+        [first, second].map(|node| ImageOutcome::Loaded {
+            node,
+            width: 48,
+            height: 24,
+        })
+    );
+    assert_eq!(size_of(&mut doc, first), (48.0, 24.0));
+    assert_eq!(size_of(&mut doc, second), (48.0, 24.0));
+
+    // A third element on a settled markup is answered at the bind.
+    let third = doc.el_tag(root, "image", "");
+    assert_eq!(
+        doc.dom
+            .set_image_document(third, ImageRole::Source, ICON.as_bytes(), DocumentKind::Svg),
+        Some(ImageOutcome::Loaded {
+            node: third,
+            width: 48,
+            height: 24,
+        })
+    );
+    assert!(doc.dom.take_pending_documents().is_empty());
+}
+
+/// New markup rebinds the element to a new source and forgets the old one,
+/// whose bytes are never parsed if the parse had not started; setting the
+/// same markup again is no change at all.
+#[test]
+fn changed_markup_rebinds_and_forgets_the_old_source() {
+    let mut doc = page("");
+    let root = doc.root;
+    let node = doc.el_tag(root, "image", "");
+    doc.dom
+        .set_image_document(node, ImageRole::Source, ICON.as_bytes(), DocumentKind::Svg);
+    let icon = source_of(&doc, node);
+    doc.dom
+        .set_image_document(node, ImageRole::Source, TILE.as_bytes(), DocumentKind::Svg);
+    let tile = source_of(&doc, node);
+    assert_ne!(icon, tile);
+    assert!(!doc.dom.knows_image_source(&icon), "the old source is gone");
+
+    let pending = doc.dom.take_pending_documents();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|(source, ..)| &**source)
+            .collect::<Vec<_>>(),
+        [tile.as_str()],
+        "only the markup the element still presents is parsed"
+    );
+    doc.dom.apply_image_events(
+        &pending
+            .into_iter()
+            .map(|(source, bytes, kind)| dom::ImageEvent::parse_document(source, &bytes, kind))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(size_of(&mut doc, node), (20.0, 20.0));
+
+    assert_eq!(
+        doc.dom
+            .set_image_document(node, ImageRole::Source, TILE.as_bytes(), DocumentKind::Svg),
+        None,
+        "the same markup again changes nothing"
+    );
+    assert!(doc.dom.take_pending_documents().is_empty());
+
+    // Back to the first markup: a new parse, and the settled one is gone.
+    doc.dom
+        .set_image_document(node, ImageRole::Source, ICON.as_bytes(), DocumentKind::Svg);
+    assert!(!doc.dom.knows_image_source(&tile));
+    assert_eq!(
+        parse_pending(&mut doc),
+        [ImageOutcome::Loaded {
+            node,
+            width: 48,
+            height: 24,
+        }]
+    );
+    assert_eq!(size_of(&mut doc, node), (48.0, 24.0));
+}
+
+/// A synthetic source outlives every element but the last presenting it:
+/// freeing one of two keeps it, freeing the second forgets it, and a parse
+/// that lands afterwards applies to nothing.
+#[test]
+fn freeing_the_last_element_forgets_its_source() {
+    let mut doc = page("");
+    let root = doc.root;
+    let first = doc.el_tag(root, "image", "");
+    let second = doc.el_tag(root, "image", "");
+    for node in [first, second] {
+        doc.dom
+            .set_image_document(node, ImageRole::Source, ICON.as_bytes(), DocumentKind::Svg);
+    }
+    let source = source_of(&doc, first);
+    let pending = doc.dom.take_pending_documents();
+
+    doc.dom.drop_element(first);
+    assert!(doc.dom.knows_image_source(&source), "one element is left");
+    doc.dom.drop_element(second);
+    assert!(
+        !doc.dom.knows_image_source(&source),
+        "forgotten with the last element"
+    );
+
+    let events: Vec<_> = pending
+        .into_iter()
+        .map(|(source, bytes, kind)| dom::ImageEvent::parse_document(source, &bytes, kind))
+        .collect();
+    assert!(doc.dom.apply_image_events(&events).is_empty());
+    assert!(!doc.dom.knows_image_source(&source), "and stays forgotten");
 }

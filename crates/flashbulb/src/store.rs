@@ -311,12 +311,22 @@ pub fn rgba8(width: u32, height: u32, pixels: Vec<u8>) -> ImageData {
 /// painter runs: request every source the last walk discovered, then apply
 /// whatever the host reported.
 ///
+/// A document the page handed over as markup
+/// ([`Document::set_image_document`]) is the engine's to parse, not the
+/// host's: it is parsed here, inline, as the wasm32 runtime parses it, and
+/// applied with the host's reports.
+///
 /// Returns whether anything moved, so a caller can loop to quiescence.
 pub fn pump_images<T>(document: &mut Document<T>, store: &TestImages) -> bool {
     for source in document.take_wanted_images() {
         store.request(&source);
     }
-    let events = store.drain_events();
+    let mut events: Vec<ImageEvent> = document
+        .take_pending_documents()
+        .into_iter()
+        .map(|(source, bytes, kind)| ImageEvent::parse_document(source, &bytes, kind))
+        .collect();
+    events.extend(store.drain_events());
     if events.is_empty() {
         return false;
     }

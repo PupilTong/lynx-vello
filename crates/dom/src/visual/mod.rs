@@ -136,7 +136,7 @@ pub(crate) use self::space::{Space, SpaceKind, SpaceSamples};
 #[cfg(test)]
 pub(crate) use self::sticky_frame::StickySample;
 pub(crate) use self::sticky_frame::{StickySamples, StickySlot};
-use crate::render::image::{ImageEvent, ImageOutcome, ImageRole};
+use crate::render::image::{ImageEvent, ImageOutcome, ImageRole, PendingDocument};
 use crate::scroll::SnapPoint;
 use crate::scroll::initial_target::InitialTarget;
 use crate::tree::document::Document;
@@ -1110,6 +1110,33 @@ impl<T> Document<T> {
     /// sources a frame actually needs.
     pub fn take_wanted_images(&mut self) -> Vec<Arc<str>> {
         self.images.take_wanted()
+    }
+
+    /// The documents [`Document::set_image_document`] filed since the last
+    /// drain and nobody has parsed yet: each one's synthetic source, its
+    /// bytes, and what to parse them as. Drained once; every one names a
+    /// source that is pending and still presented by some element.
+    ///
+    /// The embedder parses each with [`ImageEvent::parse_document`], as it
+    /// parses a host's reported document, and hands the result to
+    /// [`Self::apply_image_events`]: natively off this thread, which is why
+    /// the bytes leave the document at all. A caller with nowhere else to
+    /// parse uses [`Self::apply_pending_documents`] instead.
+    pub fn take_pending_documents(&mut self) -> Vec<PendingDocument> {
+        self.images.take_pending_documents()
+    }
+
+    /// Parses every pending document on this thread and applies the
+    /// results, answering their outcomes as [`Self::apply_image_events`]
+    /// does: the path with no blocking pool behind it (the wasm32 build,
+    /// and every test that holds a bare document).
+    pub fn apply_pending_documents(&mut self) -> Vec<ImageOutcome> {
+        let events: Vec<ImageEvent> = self
+            .take_pending_documents()
+            .into_iter()
+            .map(|(source, bytes, kind)| ImageEvent::parse_document(source, &bytes, kind))
+            .collect();
+        self.apply_image_events(&events)
     }
 
     /// Applies the host's image reports: records completed loads with their
