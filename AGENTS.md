@@ -1648,14 +1648,23 @@ once per batch), `tree::popover` (HTML's popover UA rules over `dom`'s
 popover algorithms: hidden is `display: none`, the `[popover]` box,
 `:popover-open` on the top layer, and a transparent, untouchable
 `::backdrop` with HTML's one `!important`; no component), `tree::overlay` (`overlay`/`x-overlay-ng`, Lynx's modal
-layer, with the host element itself on the top layer — no shadow tree, no
-inner dialog: `visible` (present and not `"false"`) on a connected element
-enters the layer, blocking the document unless `events-pass-through` is set;
-UA rules fill the viewport with the host, place its first child at the
-viewport's top-left, hide every other child with one `!important`, and make
-a pass-through host and its `::backdrop` `pointer-events: none`;
-non-bubbling `showoverlay`/`dismissoverlay` on the same `ComponentEvents`
-queue, on transitions only; no element state, no UI method), and
+layer, built as web-core builds it: the host is `display: contents` and
+paints nothing, and a UA shadow tree `dialog#dialog[part=dialog] >
+div.overlay-inner > slot` carries the content — the dialog
+(`popover="manual"`) is `tree::dialog`'s own element, driven only through
+HTML's API for it, as web-core drives its own: `visible` (present and not
+`"false"`) on a connected host shows it with `showModal()`, or — under
+`events-pass-through` — as a Manual popover, the top-layer element HTML does
+not make the document inert for, and hides it with `close()` or
+`hidePopover()`; hidden is therefore the dialog's state no author rule on the
+host can override, and what fills the viewport is the transparent dialog,
+which an author background on the host never reaches; UA rules keep an
+author-displayed host zero-sized, place the first child at the viewport's
+top-left, and hide every other child with one `!important`; the shadow sheet
+makes a pass-through dialog `pointer-events: none` (its popover `::backdrop`
+already is); non-bubbling `showoverlay`/`dismissoverlay` at the host on the
+same `ComponentEvents` queue, on transitions only, while the dialog's own
+`close`, not composed, stays in its shadow tree; no UI method), and
 `tree::blur_view` (`blur-radius` reflected into a
 `backdrop-filter: blur()` presentational hint, under both the native tag
 `blur-view` and web-core's `x-blur-view`, as a CSS length rather than
@@ -1667,8 +1676,9 @@ describe. Attribute policy stays in each tag's module. Numeric text and list
 attributes use UA `attr()` declarations and registered custom properties;
 `tail-color-convert` uses an attribute selector. Only image resources, blur
 hints, the swiper's item count, the refresh view's slot
-assignment, the dialog's `:open`/`:modal` state and the overlay's top-layer membership and
-events need `dom::CustomElement` callbacks. Runtime attribute members perform
+assignment, the dialog's `:open`/`:modal` state, and the overlay's shadow
+tree, its dialog's top-layer membership and its events need
+`dom::CustomElement` callbacks. Runtime attribute members perform
 DOM mutations; Stylo tracks attribute dependencies and recascades on changes.
 HTML's own rules — the dialog's, the popover's and the display `dialog` maps
 `block` to — are written with their selectors inside `:where()` and ordered
@@ -2646,7 +2656,7 @@ Rulings and limits to know before touching it:
   per-node bit: the layer is almost always empty and every per-box reader
   tests `is_empty` first. §3.1's computed-value fixups run where a UA rule
   declares the UA-only `-servo-top-layer` (bobcat-core's `dialog:modal`,
-  `:popover-open`, `::backdrop`, `overlay` and `x-overlay-ng`); membership, not the longhand, stays `dom`'s truth for the
+  `:popover-open` and `::backdrop`); membership, not the longhand, stays `dom`'s truth for the
   containing block (see `docs/dom-architecture.md` "Top layer and
   `::backdrop`").
 - HTML's **popover** attribute is `dom`'s (`crates/dom/src/tree/popover.rs`),
