@@ -313,27 +313,24 @@ pub fn rgba8(width: u32, height: u32, pixels: Vec<u8>) -> ImageData {
 ///
 /// A document the page handed over as markup
 /// ([`Document::set_image_document`]) is the engine's to parse, not the
-/// host's: it is parsed here, inline, as the wasm32 runtime parses it, and
-/// applied with the host's reports.
+/// host's: it is parsed and applied first, inline, through
+/// [`Document::apply_pending_documents`] as the wasm32 runtime does, then
+/// the host's reports are applied.
 ///
 /// Returns whether anything moved, so a caller can loop to quiescence.
 pub fn pump_images<T>(document: &mut Document<T>, store: &TestImages) -> bool {
     for source in document.take_wanted_images() {
         store.request(&source);
     }
-    let mut events: Vec<ImageEvent> = document
-        .take_pending_documents()
-        .into_iter()
-        .map(|(source, bytes, kind)| ImageEvent::parse_document(source, &bytes, kind))
-        .collect();
-    events.extend(store.drain_events());
-    if events.is_empty() {
-        return false;
-    }
+    // A page hands markup over as an element's own source
+    // (`ImageRole::Source`, the `<svg>` component's `content`), so each
+    // pending document that applies answers an outcome for its elements.
+    let parsed = document.apply_pending_documents();
+    let events = store.drain_events();
     // The outcomes go nowhere: they are what an embedder turns into `load`
     // and `error` events, and a screenshot has no realm to dispatch one in.
     let _outcomes = document.apply_image_events(&events);
-    true
+    !parsed.is_empty() || !events.is_empty()
 }
 
 /// Renders until every image the page needs has been requested, reported and
