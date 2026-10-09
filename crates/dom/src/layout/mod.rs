@@ -324,6 +324,30 @@ impl<T> Document<T> {
         outcome
     }
 
+    /// Sets one of this replaced element's two sources to a document handed
+    /// over as its bytes rather than named by a URL: the Lynx
+    /// `<svg content>`. Otherwise exactly [`Self::set_image_source`], whose
+    /// outcome this returns.
+    ///
+    /// The source is synthetic, `svg-content:` and the 32 hex digits of a
+    /// 128-bit hash of `bytes`, so identical markup names one registry entry
+    /// whichever element, and however many, set it. A source this document
+    /// already holds binds at once — settled or still parsing — and costs a
+    /// hash; an unknown one is created pending and its bytes are queued for
+    /// [`Self::take_pending_documents`], so the host is never asked for it.
+    /// The entry is forgotten when the last element presenting it lets go of
+    /// it, by setting another source or by being freed.
+    pub fn set_image_document(
+        &mut self,
+        id: crate::NodeId,
+        role: ImageRole,
+        bytes: &[u8],
+        kind: crate::DocumentKind,
+    ) -> Option<ImageOutcome> {
+        let source = self.images.insert_document(bytes, kind);
+        self.set_image_source(id, role, Some(&source))
+    }
+
     /// Settles a source change: the natural size the element's new sources
     /// give it, and the invalidation that change is worth.
     fn note_replaced_change(&mut self, id: crate::NodeId, was_replaced: bool) {
@@ -366,14 +390,16 @@ impl<T> Document<T> {
     }
 
     /// The source `id` holds in `role`, if it is replaced content holding
-    /// one.
+    /// one: the URL [`Self::set_image_source`] was given, or the synthetic
+    /// source [`Self::set_image_document`] filed its bytes under.
     #[must_use]
     pub fn image_source(&self, id: crate::NodeId, role: ImageRole) -> Option<&str> {
         self.get(id)?.image_source(role)
     }
 
     /// Whether the document's image registry holds an entry for `source`.
-    /// For tests.
+    /// For tests: a synthetic source no element presents any more must leave
+    /// none behind.
     #[doc(hidden)]
     #[must_use]
     pub fn knows_image_source(&self, source: &str) -> bool {

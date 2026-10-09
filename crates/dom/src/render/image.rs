@@ -83,6 +83,25 @@
 //! entry, and a document that does not parse marks its source failed. A
 //! vector image is never an image draw: [`FrameImages`] is never asked for
 //! it, and no bitmap budget applies.
+//!
+//! # Documents the page hands over
+//!
+//! A document need not come from a host. The Lynx `<svg content>` hands the
+//! document its markup directly
+//! ([`Document::set_image_document`](crate::Document::set_image_document)),
+//! and the registry files it under a *synthetic source*:
+//! [`SYNTHETIC_SOURCE_PREFIX`] followed by the 32 hex digits of a 128-bit
+//! hash of the bytes (SipHash-1-3 with the zero key, [`synthetic_source`]).
+//! Identical markup is therefore one entry, one parse, one scene and one
+//! raster texture however many elements draw it. An unknown synthetic source
+//! is created `Pending` and its bytes queued for the embedder
+//! ([`ImageRegistry::take_pending_documents`]), which parses them exactly as
+//! it parses a host's [`ImageEvent::LoadedDocument`] and applies the result
+//! as a report for that source; a known one binds and settles at once. No
+//! walk and no bind ever asks the host for a synthetic source, and its entry
+//! is forgotten when the last node presenting it lets go
+//! ([`ImageRegistry::unbind_node`]): the one removal the registry makes, a
+//! host source still never regressing.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -726,6 +745,41 @@ pub(crate) struct ImageApplied {
     pub(crate) nodes: SmallVec<[(NodeId, ImageRole); 1]>,
 }
 
+/// The prefix of every synthetic source: the name the registry files a
+/// document handed over as markup under
+/// ([`Document::set_image_document`](crate::Document::set_image_document)),
+/// `svg-content:<32 hex digits>`. Such an entry is never asked of the host,
+/// and is forgotten when its last binder unbinds.
+///
+/// A host URL that happened to start with this prefix would be neither asked
+/// for nor kept; no host scheme does.
+pub(crate) const SYNTHETIC_SOURCE_PREFIX: &str = "svg-content:";
+
+/// Whether `source` is a synthetic source ([`SYNTHETIC_SOURCE_PREFIX`]).
+pub(crate) fn is_synthetic_source(source: &str) -> bool {
+    source.starts_with(SYNTHETIC_SOURCE_PREFIX)
+}
+
+/// The synthetic source naming `bytes` as a document of `kind`.
+///
+/// The hash is SipHash-1-3 with its 128-bit output, from `siphasher` (already
+/// in the dependency tree through `phf`), keyed with zeros so one markup has
+/// one name in every document and every run. SipHash folds the length into
+/// its last block, so a prefix of a document is not its collision. Keyed
+/// with a known key it is not collision-resistant against a page that sets
+/// out to collide two of its own pictures; such a page only confuses its own
+/// drawing, which it could do by writing the same markup twice.
+pub(crate) fn synthetic_source(bytes: &[u8], kind: DocumentKind) -> String {
+    let hash = siphasher::sip128::SipHasher13::new().hash(bytes).as_u128();
+    match kind {
+        DocumentKind::Svg => format!("{SYNTHETIC_SOURCE_PREFIX}{hash:032x}"),
+    }
+}
+
+/// A document handed over as markup and not yet parsed: its synthetic
+/// source, its bytes, and what to parse them as.
+pub type PendingDocument = (Arc<str>, Bytes, DocumentKind);
+
 /// What the registry holds for one source.
 #[derive(Debug, Default)]
 struct Entry {
@@ -734,6 +788,10 @@ struct Entry {
     /// natural size to recompute and whose element owes an event. A
     /// `background-image` user is not here: it has no natural size, and the
     /// load invalidates the frame anyway.
+    ///
+    /// Deduplicated per `(node, role)` and unbound when a node is freed, so
+    /// its length is the entry's binder count, which is what forgets a
+    /// synthetic source when it reaches zero.
     nodes: SmallVec<[(NodeId, ImageRole); 1]>,
 }
 
@@ -748,7 +806,11 @@ struct Entry {
 ///
 /// The invariant that makes it work: **an entry exists exactly when the
 /// source has been asked for.** There is no window in which a source is known
-/// but has no key, because the key *is* the source.
+/// but has no key, because the key *is* the source. A synthetic source
+/// ([`SYNTHETIC_SOURCE_PREFIX`]) is the one exception: the document asks
+/// itself for it, so its entry exists from the moment its bytes are queued
+/// in [`ImageRegistry::pending_documents`], and existing is exactly what
+/// keeps the host from being asked.
 #[derive(Default)]
 pub(crate) struct ImageRegistry {
     entries: FxHashMap<Arc<str>, Entry>,
@@ -757,6 +819,10 @@ pub(crate) struct ImageRegistry {
     /// `RefCell` because the paint walk takes the document shared, and the
     /// walk is exactly where sources are discovered.
     wanted: RefCell<Vec<Arc<str>>>,
+    /// Synthetic sources created since the last drain, with the bytes the
+    /// embedder parses for each. Every one names a `Pending` entry: a source
+    /// forgotten before the drain leaves this list with its entry.
+    pending_documents: Vec<PendingDocument>,
 }
 
 impl std::fmt::Debug for ImageRegistry {
@@ -764,6 +830,7 @@ impl std::fmt::Debug for ImageRegistry {
         formatter
             .debug_struct("ImageRegistry")
             .field("entries", &self.entries.len())
+            .field("pending_documents", &self.pending_documents.len())
             .finish_non_exhaustive()
     }
 }
@@ -820,7 +887,9 @@ impl ImageRegistry {
     /// that knows which sources a frame actually needs.
     fn sight(&self, source: &str) -> Option<(&Arc<str>, &Entry)> {
         let found = self.entries.get_key_value(source);
-        if found.is_none() {
+        // A synthetic source with no entry has no bytes anywhere: no binder
+        // holds it, and the host has nothing to answer it with.
+        if found.is_none() && !is_synthetic_source(source) {
             // Deduplicated here rather than on the way out: a list of 200 rows
             // sharing one `url(...)` resolves it 200 times on its first
             // commit, and allocating a copy of the URL per *draw* to request
@@ -843,8 +912,13 @@ impl ImageRegistry {
     /// request that source would ever get — and a replaced element binds its
     /// source in the same call that makes it replaced, always before any walk
     /// could have resolved it.
+    ///
+    /// A synthetic source is the exception, and is never asked for: its
+    /// entry already exists when it was filed by
+    /// [`ImageRegistry::insert_document`], and one named any other way has
+    /// no bytes to ask for.
     pub(crate) fn bind_node(&mut self, source: &str, node: NodeId, role: ImageRole) {
-        if !self.entries.contains_key(source) {
+        if !self.entries.contains_key(source) && !is_synthetic_source(source) {
             // Deduplicated against a walk that met the same source first and
             // whose request has not been drained yet, the same way `resolve`
             // deduplicates against itself.
@@ -861,10 +935,47 @@ impl ImageRegistry {
 
     /// Drops `node`'s claim on `source` in `role`. Its claim in the other
     /// role, which an element naming one URL twice has, survives.
+    ///
+    /// The last claim on a synthetic source forgets it: its entry, its
+    /// picture, and its bytes if they were still waiting for a parse. A later
+    /// [`ImageRegistry::insert_document`] of the same markup files it afresh.
+    /// A host source is never forgotten, because one URL is reported once.
     pub(crate) fn unbind_node(&mut self, source: &str, node: NodeId, role: ImageRole) {
-        if let Some(entry) = self.entries.get_mut(source) {
-            entry.nodes.retain(|held| *held != (node, role));
+        let Some(entry) = self.entries.get_mut(source) else {
+            return;
+        };
+        entry.nodes.retain(|held| *held != (node, role));
+        if entry.nodes.is_empty() && is_synthetic_source(source) {
+            self.entries.remove(source);
+            self.pending_documents
+                .retain(|(pending, ..)| &**pending != source);
         }
+    }
+
+    /// Files `bytes` as a document of `kind` under its synthetic source and
+    /// answers that source, queueing the bytes for a parse only when no entry
+    /// holds them yet: identical markup, from any number of elements, is one
+    /// entry and one parse.
+    ///
+    /// Answers the map's own key when the entry exists, so every binder of
+    /// one markup shares one allocation of its name.
+    pub(crate) fn insert_document(&mut self, bytes: &[u8], kind: DocumentKind) -> Arc<str> {
+        let source = synthetic_source(bytes, kind);
+        if let Some((known, _)) = self.entries.get_key_value(source.as_str()) {
+            return Arc::clone(known);
+        }
+        let source = Arc::<str>::from(source);
+        self.entries.insert(Arc::clone(&source), Entry::default());
+        self.pending_documents
+            .push((Arc::clone(&source), Bytes::copy_from_slice(bytes), kind));
+        source
+    }
+
+    /// The documents filed by [`ImageRegistry::insert_document`] since the
+    /// last drain, for the embedder to parse. Each names an entry that is
+    /// still `Pending` and still bound.
+    pub(crate) fn take_pending_documents(&mut self) -> Vec<PendingDocument> {
+        std::mem::take(&mut self.pending_documents)
     }
 
     /// The sources discovered since the last drain, for the painter to ask
@@ -894,11 +1005,19 @@ impl ImageRegistry {
     /// the path for a caller with no blocking pool to parse on (this
     /// crate's tests, the wasm32 build). A document that does not parse is
     /// a failure, exactly as a [`ImageEvent::Failed`] report would be.
+    ///
+    /// A report on a synthetic source that has been forgotten since its bytes
+    /// were taken (every element let go while the parse ran) moves nothing:
+    /// filing it would keep an entry nobody can bind to without
+    /// [`ImageRegistry::insert_document`] queueing a parse of its own.
     pub(crate) fn apply(
         &mut self,
         event: &ImageEvent,
         context: &mut Option<Box<TextContext>>,
     ) -> Option<ImageApplied> {
+        if is_synthetic_source(event.source()) && !self.entries.contains_key(&**event.source()) {
+            return None;
+        }
         let entry = self.entry_for(event.source());
         if !matches!(entry.state, ImageState::Pending) {
             return None;
@@ -1595,5 +1714,179 @@ mod vector_tests {
         assert_ne!(first.key(), second.key());
         assert_eq!(first.clone().key(), first.key());
         assert!(format!("{first:?}").starts_with("VectorImage"));
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod synthetic_tests {
+    //! Documents handed over as markup: the synthetic source, its single
+    //! parse, and its eviction with the last binder. The document-level
+    //! half (`Document::set_image_document`) is in `tests/svg_images.rs`.
+
+    use std::sync::Arc;
+
+    use hughie::text::TextContext;
+
+    use super::{
+        DocumentKind, ImageEvent, ImageRegistry, ImageRole, SYNTHETIC_SOURCE_PREFIX,
+        is_synthetic_source, synthetic_source,
+    };
+
+    const ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="4"/>"#;
+    const OTHER: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="6" height="6"/>"#;
+
+    fn node(bits: u64) -> crate::NodeId {
+        crate::NodeId::from_bits(bits).expect("a valid node id")
+    }
+
+    /// The source is the prefix and 32 lowercase hex digits, the same for
+    /// the same bytes, and different for different ones.
+    #[test]
+    fn the_source_names_the_markup() {
+        let source = synthetic_source(ICON, DocumentKind::Svg);
+        let digits = source
+            .strip_prefix(SYNTHETIC_SOURCE_PREFIX)
+            .expect("the prefix");
+        assert_eq!(digits.len(), 32, "{source}");
+        assert!(
+            digits
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "{source}"
+        );
+        assert!(is_synthetic_source(&source));
+        assert_eq!(source, synthetic_source(ICON, DocumentKind::Svg));
+        assert_ne!(source, synthetic_source(OTHER, DocumentKind::Svg));
+        assert_ne!(
+            source,
+            synthetic_source(&ICON[..ICON.len() - 1], DocumentKind::Svg),
+            "a prefix of the markup is another document"
+        );
+    }
+
+    /// Two elements handing over identical markup share one entry and one
+    /// queued parse, and the parse's outcome reaches both.
+    #[test]
+    fn identical_markup_is_one_entry_and_one_parse() {
+        let mut registry = ImageRegistry::default();
+        let first = registry.insert_document(ICON, DocumentKind::Svg);
+        registry.bind_node(&first, node(1), ImageRole::Source);
+        let second = registry.insert_document(ICON, DocumentKind::Svg);
+        registry.bind_node(&second, node(2), ImageRole::Source);
+
+        assert!(Arc::ptr_eq(&first, &second), "one name, one allocation");
+        let pending = registry.take_pending_documents();
+        assert_eq!(pending.len(), 1, "one parse");
+        let (source, bytes, kind) = pending.into_iter().next().expect("one document");
+        assert!(Arc::ptr_eq(&source, &first));
+        assert_eq!(&*bytes, ICON);
+        assert_eq!(kind, DocumentKind::Svg);
+
+        let mut context = Some(Box::new(TextContext::without_system_fonts()));
+        let applied = registry
+            .apply(
+                &ImageEvent::parse_document(source, &bytes, kind),
+                &mut context,
+            )
+            .expect("the parse settled the entry");
+        assert_eq!(applied.loaded, Some((8, 4)));
+        assert_eq!(
+            applied.nodes.as_slice(),
+            [(node(1), ImageRole::Source), (node(2), ImageRole::Source)],
+            "both elements are bound to the one entry"
+        );
+
+        // A third element on the same markup binds a settled entry and
+        // queues nothing.
+        let third = registry.insert_document(ICON, DocumentKind::Svg);
+        registry.bind_node(&third, node(3), ImageRole::Source);
+        assert!(registry.take_pending_documents().is_empty());
+        assert!(registry.outcome_for(&third, node(3)).is_some());
+    }
+
+    /// The pending list drains once, and markup filed after a drain is a
+    /// list of its own.
+    #[test]
+    fn pending_documents_drain_once() {
+        let mut registry = ImageRegistry::default();
+        let icon = registry.insert_document(ICON, DocumentKind::Svg);
+        registry.bind_node(&icon, node(1), ImageRole::Source);
+        assert_eq!(registry.take_pending_documents().len(), 1);
+        assert!(registry.take_pending_documents().is_empty());
+
+        let other = registry.insert_document(OTHER, DocumentKind::Svg);
+        registry.bind_node(&other, node(2), ImageRole::Source);
+        let pending = registry.take_pending_documents();
+        assert_eq!(pending.len(), 1);
+        assert!(Arc::ptr_eq(&pending[0].0, &other));
+    }
+
+    /// The host is never asked for a synthetic source: not at the bind, not
+    /// when a walk meets one, and not when a walk meets one nobody holds.
+    #[test]
+    fn a_synthetic_source_is_never_asked_of_the_host() {
+        let mut registry = ImageRegistry::default();
+        let icon = registry.insert_document(ICON, DocumentKind::Svg);
+        registry.bind_node(&icon, node(1), ImageRole::Source);
+        assert!(registry.resolve(&icon).is_none(), "pending");
+        assert!(
+            registry
+                .resolve(&synthetic_source(OTHER, DocumentKind::Svg))
+                .is_none()
+        );
+        assert!(registry.take_wanted().is_empty());
+    }
+
+    /// The last binder letting go forgets the entry, in either role, and
+    /// takes the still-unparsed bytes with it; a host source survives
+    /// losing every binder.
+    #[test]
+    fn the_last_unbind_forgets_a_synthetic_source() {
+        let mut registry = ImageRegistry::default();
+        let icon = registry.insert_document(ICON, DocumentKind::Svg);
+        registry.bind_node(&icon, node(1), ImageRole::Source);
+        registry.bind_node(&icon, node(2), ImageRole::Placeholder);
+
+        registry.unbind_node(&icon, node(1), ImageRole::Source);
+        assert!(registry.knows(&icon), "one binder is left");
+        registry.unbind_node(&icon, node(2), ImageRole::Placeholder);
+        assert!(!registry.knows(&icon), "forgotten with the last binder");
+        assert!(
+            registry.take_pending_documents().is_empty(),
+            "and its bytes are never parsed"
+        );
+
+        registry.bind_node("app:///a.svg", node(3), ImageRole::Source);
+        registry.unbind_node("app:///a.svg", node(3), ImageRole::Source);
+        assert!(registry.knows("app:///a.svg"), "a host source never goes");
+    }
+
+    /// A parse that returns after every binder let go applies to nothing
+    /// and recreates nothing; the same markup set again is a new entry with
+    /// a parse of its own.
+    #[test]
+    fn a_parse_for_a_forgotten_source_moves_nothing() {
+        let mut registry = ImageRegistry::default();
+        let icon = registry.insert_document(ICON, DocumentKind::Svg);
+        registry.bind_node(&icon, node(1), ImageRole::Source);
+        let (source, bytes, kind) = registry
+            .take_pending_documents()
+            .pop()
+            .expect("one document");
+        registry.unbind_node(&icon, node(1), ImageRole::Source);
+
+        let mut context = Some(Box::new(TextContext::without_system_fonts()));
+        let event = ImageEvent::parse_document(source, &bytes, kind);
+        assert!(registry.apply(&event, &mut context).is_none());
+        assert!(!registry.knows(&icon));
+
+        let again = registry.insert_document(ICON, DocumentKind::Svg);
+        registry.bind_node(&again, node(2), ImageRole::Source);
+        assert_eq!(registry.take_pending_documents().len(), 1);
+        let applied = registry
+            .apply(&event, &mut context)
+            .expect("the new entry is pending");
+        assert_eq!(applied.nodes.as_slice(), [(node(2), ImageRole::Source)]);
     }
 }
