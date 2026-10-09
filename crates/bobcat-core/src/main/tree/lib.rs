@@ -111,7 +111,7 @@ pub(crate) enum ComponentEvent {
 /// Each holds a clone of this one queue, and the runtime drains it in an entry
 /// of its own, posted by the epilogue of the entry that filled it
 /// (`docs/runtime-architecture.md` has the entry boundary,
-/// [`crate::main::page`] the epilogue's order).
+/// [`crate::realm::owner`] the epilogue's order).
 ///
 /// Every producer runs inside a JavaScript call or with the document
 /// borrowed, where nothing may dispatch, and queueing is the only thing any of

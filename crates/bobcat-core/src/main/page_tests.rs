@@ -9,7 +9,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 use tokio::task;
@@ -20,16 +20,18 @@ use crate::background::{WorkerCommand, WorkerMessage, WorkerStart};
 use crate::esm::build_runtime;
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::link::{
-    CommandSender, DetachedView, FramePost, InputEventPayload, PageUpdate, ScrollEntry,
+    CommandSender, DetachedView, FramePost, InputEventPayload, PageUpdate, Published, ScrollEntry,
     ScrollMailbox, ViewNotice, detached_base, detached_outbox,
 };
 use crate::main::WorkerFactory;
 use crate::main::runtime::{bound_metrics, card_entry};
 use crate::main::tree::PageConfig;
-use crate::resource::{SourceCompletion, SourceRequest};
+use crate::resource::{SourceCompletion, SourceRequest, unanswered_source};
 use crate::script::ScriptError;
 use crate::threads::platform_script_error;
-use crate::view::{NoWakeup, ScreenMetrics, StartupSource, StartupSources, resolve_startup_urls};
+use crate::view::{
+    EventRequester, NoWakeup, ScreenMetrics, StartupSource, StartupSources, resolve_startup_urls,
+};
 
 /// How many times the harness lets every ready task run before it gives up on
 /// something happening. A hang detector rather than a schedule: everything
@@ -1216,7 +1218,7 @@ fn a_job_entered_at_the_painter_clock_sees_the_timeline_there() {
         let (context, _workers) = group(&thread);
         let mut owned = OwnedPage::new(context);
         owned.boot(ONE_BOX).await;
-        let clock = |page: &Rc<Page>| page.enter(|runtime, _| runtime.animation_clock());
+        let clock = |page: &Rc<Page>| owner::enter(page, |runtime, _| runtime.animation_clock());
 
         owned.scroll.set_clock(2.5);
         assert_eq!(clock(&owned.page).await, Some(2.5));
@@ -2121,7 +2123,8 @@ fn a_parse_that_returns_after_the_view_ended_applies_nothing() {
         assert!(parse_started.recv().is_err(), "the parse ran to its end");
         // No yield since the parse returned: the task waiting on it has not
         // been polled, so its entry is queued after this end.
-        assert!(owned.page.end(), "this is what ends the view");
+        assert!(!owned.page.ended(), "this is what ends the view");
+        owner::end(&owned.page);
         until_parsed("the parse's entry was never refused", || {
             owned.page.refused_entry_count() > refused
         })
@@ -2683,6 +2686,380 @@ fn the_end_acknowledges_the_begin_frame_a_painter_is_blocked_on() {
         assert!(
             owned.page.armed_deadline().is_none(),
             "and withdrew the deadline the realm had armed"
+        );
+    });
+}
+
+/// The end acknowledges a frame post a marker took and no burst has applied,
+/// as it does one a burst applied: the post is fenced behind a command the
+/// view was sent before it and has not applied, and with the view over that
+/// command never will be.
+///
+/// A painter blocked on that sequence number is released by the end either
+/// way.
+#[test]
+fn the_end_acknowledges_a_frame_post_that_has_not_reached_its_fence() {
+    on_a_js_thread(|thread| async move {
+        let (context, mut workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(ONE_BOX).await;
+        let serviced = owned.view.published.begin_frame_serviced();
+        // The marker is sent first, a second command behind it, then the
+        // post.
+        let fence = owned.page.applied.get() + 2;
+        assert!(owned.scroll.post(
+            [],
+            Some(FramePost {
+                now: 0.5,
+                seq: serviced + 1,
+                fence
+            })
+        ));
+        owned.page.apply(vec![ToMain::Posted]).await;
+        assert_eq!(
+            owned.view.published.begin_frame_serviced(),
+            serviced,
+            "taken, and not applied ahead of the command sent before it"
+        );
+
+        let Some(WorkerCommand::Start(mut background)) = workers.recv().await else {
+            panic!("BTS starts")
+        };
+        owned.token.cancel();
+        tokio::join!(owned.page.run_owner(), answer_disposal(&mut background));
+
+        assert_eq!(
+            owned.view.published.begin_frame_serviced(),
+            serviced + 1,
+            "the end acknowledged the frame post no burst had applied"
+        );
+    });
+}
+
+/// A startup failure's end acknowledges the pending frame post as the
+/// embedder's release does: the acknowledgement is the end's, whichever path
+/// reached it.
+///
+/// A listed sheet's load failed before the realm opened, under an entry that
+/// holds boot open until its first animation frame. A painter pass sends the
+/// vsync, posts its frame fenced behind it and sends the post's marker, and
+/// the page takes all of it as one burst: the vsync resumes the entry, boot's
+/// own `__FlushElementTree` settles the sheet and throws, boot's module
+/// rejects, and the end of the burst applies the post. The epilogue then
+/// reports one `StartupFailed` and ends the view before its own
+/// acknowledgement step, so the acknowledgement seen here is the end's.
+#[test]
+fn a_startup_failure_acknowledges_the_frame_post_a_painter_is_blocked_on() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        let (completion, answer) = SourceCompletion::new(owned.token.clone());
+        completion.complete(Err(unanswered_source().into()));
+        let startup = RealmStartup {
+            sheets: vec![StartupSource {
+                url: "app:///a.css".to_owned(),
+                answer,
+            }],
+            entry: "app:///main.js".to_owned(),
+            ..RealmStartup::default()
+        };
+        crate::lifetime::run_job(&owned.page, move |page| {
+            page.open_realm(ingredients(), startup);
+            Some(())
+        })
+        .await;
+        load_entry(
+            Rc::clone(&owned.page),
+            answered_entry(
+                &format!(
+                    "{ONE_BOX}
+await new Promise((resolve) => lynx.requestAnimationFrame(resolve));
+"
+                ),
+                "app:///main.js",
+                &owned.token,
+            ),
+        )
+        .await;
+        // The vsync is sent first, then the post, then the post's marker.
+        let fence = owned.page.applied.get() + 1;
+        assert!(owned.scroll.post(
+            [],
+            Some(FramePost {
+                now: 0.0,
+                seq: 9,
+                fence
+            })
+        ));
+        owned
+            .page
+            .apply(vec![ToMain::Vsync(16.0), ToMain::Posted])
+            .await;
+
+        let events = owned.events();
+        let failures: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::StartupFailed(error) => Some(error),
+                _ => None,
+            })
+            .collect();
+        let [LynxViewError::Script(error)] = failures.as_slice() else {
+            panic!("one Script startup failure, got {events:?}");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("loading stylesheet app:///a.css"),
+            "{message}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, EngineEvent::ScriptFinished)),
+            "boot never finished: {events:?}"
+        );
+        assert_eq!(
+            owned.view.published.begin_frame_serviced(),
+            9,
+            "the startup failure's end acknowledged the frame post its burst applied"
+        );
+        assert!(
+            owned.page.armed_deadline().is_none(),
+            "the end left no deadline armed"
+        );
+    });
+}
+
+/// A panic's end acknowledges the pending frame post too. The view has taken
+/// a post that is still waiting for its fence when one of its tasks panics:
+/// the `Panicked` ends it, and its end acknowledges the post no burst had
+/// applied.
+#[test]
+fn a_panic_acknowledges_the_frame_post_a_painter_is_blocked_on() {
+    on_a_js_thread(|thread| async move {
+        let (context, mut workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(ONE_BOX).await;
+        let Some(WorkerCommand::Start(mut background)) = workers.recv().await else {
+            panic!("BTS starts")
+        };
+        let serviced = owned.view.published.begin_frame_serviced();
+        // The marker is sent first, a second command behind it, then the
+        // post.
+        let fence = owned.page.applied.get() + 2;
+        assert!(owned.scroll.post(
+            [],
+            Some(FramePost {
+                now: 0.0,
+                seq: serviced + 1,
+                fence
+            })
+        ));
+        owned.page.apply(vec![ToMain::Posted]).await;
+        assert_eq!(
+            owned.view.published.begin_frame_serviced(),
+            serviced,
+            "taken, and not applied ahead of the command sent before it"
+        );
+        owned
+            .page
+            .spawn(async { panic!("a task of the view trapped") });
+        tokio::join!(owned.page.run_owner(), answer_disposal(&mut background));
+
+        let events = owned.events();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, EngineEvent::Panicked(_)))
+                .count(),
+            1,
+            "the panic is reported once: {events:?}"
+        );
+        assert_eq!(
+            owned.view.published.begin_frame_serviced(),
+            serviced + 1,
+            "the panic's end acknowledged the frame post no burst had applied"
+        );
+    });
+}
+
+/// What a [`RecordingRequester`] saw, in the order the view asked its host
+/// for a turn.
+enum Seen {
+    /// A notice the view sent. Held rather than dropped, so a request it
+    /// carries is not answered by its completion's drop.
+    Notice(ViewNotice),
+    /// What the view had published when it asked: the newest commit, and the
+    /// newest frame post acknowledged.
+    Published { commit: Option<u64>, serviced: u64 },
+}
+
+impl Seen {
+    fn is_script_finished(&self) -> bool {
+        matches!(
+            self,
+            Self::Notice(ViewNotice::Engine(EngineEvent::ScriptFinished))
+        )
+    }
+
+    /// One line of a log, for a failure message: `ViewNotice` itself has no
+    /// `Debug`.
+    fn describe(&self) -> String {
+        match self {
+            Self::Notice(ViewNotice::Engine(event)) => format!("{event:?}"),
+            Self::Notice(_) => "a notice".to_owned(),
+            Self::Published { commit, serviced } => {
+                format!("published commit {commit:?}, frame post {serviced}")
+            }
+        }
+    }
+}
+
+/// A host's wakeup that records, at each request for a turn, what that turn
+/// would find: every notice sent since the last request, in order, and then
+/// what the view has published. Publishing a frame and acknowledging a
+/// frame post both ask for a turn, as sending a notice does.
+struct RecordingRequester {
+    link: Mutex<(
+        mpsc::UnboundedReceiver<ViewNotice>,
+        watch::Receiver<Published>,
+    )>,
+    seen: Arc<Mutex<Vec<Seen>>>,
+}
+
+impl EventRequester for RecordingRequester {
+    fn request_event(&self) {
+        let mut link = self.link.lock().expect("no recording panicked");
+        let (notices, frames) = &mut *link;
+        let mut seen = self.seen.lock().expect("no recording panicked");
+        while let Ok(notice) = notices.try_recv() {
+            seen.push(Seen::Notice(notice));
+        }
+        let published = frames.borrow();
+        seen.push(Seen::Published {
+            commit: published.commit(),
+            serviced: published.begin_frame_serviced,
+        });
+    }
+}
+
+/// A frame post taken while boot is still open is acknowledged by the
+/// epilogue of the entry that finishes boot, and only after that entry's
+/// commit and its `ScriptFinished`: a host blocked on the sequence number is
+/// blocked on the frame it implies, and on the event that says the page has
+/// booted.
+///
+/// The entry holds boot open until its first animation frame. The post is
+/// fenced behind the vsync that delivers that frame, and its marker reaches
+/// the page in a burst of its own first: the post is taken there, and the
+/// burst that carries the vsync both finishes boot and applies it.
+///
+/// The three happen in one job, so only a host's own wakeup can tell their
+/// order apart, which is why this page's outbox has one that records.
+#[test]
+fn a_frame_post_pending_across_boot_is_acknowledged_after_the_boot_report_and_its_commit() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (notices, notice_receiver) = mpsc::unbounded_channel();
+        let (frames, frame_receiver) = watch::channel(Published::default());
+        let token = CancellationToken::new();
+        let outbox = ViewOutbox::new(
+            notices,
+            frames,
+            Arc::new(RecordingRequester {
+                link: Mutex::new((notice_receiver, frame_receiver)),
+                seen: Arc::clone(&seen),
+            }),
+            token.clone(),
+            None,
+            detached_base(),
+        );
+        // Bound from the start, and no listed sheets: boot's own flush parks
+        // on neither.
+        let (_metrics, metric_receiver) = watch::channel(Some(CREATE_VIEWPORT));
+        let scroll = Arc::new(ScrollMailbox::default());
+        let page = Page::new(
+            context,
+            outbox,
+            metric_receiver,
+            Arc::clone(&scroll),
+            token.clone(),
+        );
+        let startup = RealmStartup {
+            entry: "app:///main.js".to_owned(),
+            ..RealmStartup::default()
+        };
+        crate::lifetime::run_job(&page, move |page| {
+            page.open_realm(ingredients(), startup);
+            Some(())
+        })
+        .await;
+        load_entry(
+            Rc::clone(&page),
+            answered_entry(
+                &format!(
+                    "{ONE_BOX}
+await new Promise((resolve) => lynx.requestAnimationFrame(resolve));
+"
+                ),
+                "app:///main.js",
+                &token,
+            ),
+        )
+        .await;
+        // The marker is sent first, the vsync second, then the post.
+        let fence = page.applied.get() + 2;
+        assert!(scroll.post(
+            [],
+            Some(FramePost {
+                now: 0.0,
+                seq: 7,
+                fence
+            })
+        ));
+        page.apply(vec![ToMain::Posted]).await;
+        // What was published while boot was still open: the document as it
+        // stood before the entry rendered anything.
+        let before_boot = {
+            let seen = seen.lock().expect("no recording panicked");
+            let log: Vec<String> = seen.iter().map(Seen::describe).collect();
+            assert!(
+                !seen.iter().any(|seen| {
+                    seen.is_script_finished() || matches!(seen, Seen::Published { serviced: 7, .. })
+                }),
+                "boot is still open, and the post waits for the vsync sent before it: {log:#?}"
+            );
+            seen.iter()
+                .filter_map(|seen| match seen {
+                    Seen::Published { commit, .. } => Some(*commit),
+                    Seen::Notice(_) => None,
+                })
+                .next_back()
+                .flatten()
+        };
+        page.apply(vec![ToMain::Vsync(16.0)]).await;
+
+        let seen = std::mem::take(&mut *seen.lock().expect("no recording panicked"));
+        let log: Vec<String> = seen.iter().map(Seen::describe).collect();
+        let finished = seen
+            .iter()
+            .position(Seen::is_script_finished)
+            .unwrap_or_else(|| panic!("boot finished: {log:#?}"));
+        let acknowledged = seen
+            .iter()
+            .position(|seen| matches!(seen, Seen::Published { serviced: 7, .. }))
+            .unwrap_or_else(|| panic!("the frame post was acknowledged: {log:#?}"));
+        assert!(
+            finished < acknowledged,
+            "ScriptFinished came before the acknowledgement: {log:#?}"
+        );
+        let Seen::Published { commit, .. } = &seen[acknowledged] else {
+            unreachable!("the position was found by this pattern");
+        };
+        assert!(
+            *commit > before_boot,
+            "boot's commit was published before the acknowledgement: {log:#?}"
         );
     });
 }

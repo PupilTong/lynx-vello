@@ -865,6 +865,53 @@ postMessage('resumed');",
     );
 }
 
+/// A script the fetcher answered with something other than a script is
+/// reported with this text and nothing else: the context of a module load,
+/// the `TypeError` a realm rejects a failed completion with, the module's
+/// name, and what the fetcher returned for which URL. That the worker is
+/// left running is the stylesheet test's to pin, above.
+#[test]
+fn a_script_answered_with_a_font_is_reported_naming_the_module_and_the_answer() {
+    let mut group = Group::new();
+    let key = group.construct_requesting(0, "", "app:///font-worker.js");
+    group
+        .script_request(key)
+        .complete(Ok(LoadedSource::Font(dom::FontBlob::from_static(
+            b"not a script",
+        ))));
+    let event = group.next(0);
+    assert_eq!(event.key, key);
+    let WorkerPayload::Errored(error) = event.payload else {
+        panic!("an answer that is not a script is a load the realm rejected")
+    };
+    assert_eq!(
+        &*error.message,
+        "loading a worker module: TypeError: module 'app:///font-worker.js': \
+         the fetcher returned a font for app:///font-worker.js"
+    );
+}
+
+/// An import the fetcher answered with something other than a script is
+/// rejected with the module's name and what the fetcher returned for it, and
+/// nothing else.
+#[test]
+fn an_import_answered_with_a_stylesheet_is_rejected_naming_the_answer() {
+    let mut group = Group::new();
+    group.start(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         import('./dep.js').catch(error => postMessage(error.message));",
+    );
+    let (url, completion) = group.views[0].source();
+    assert_eq!(url, "app:///dep.js");
+    completion.complete(Ok(LoadedSource::StyleSheet(
+        crate::resource::StyleSheetSource::Text(String::new()),
+    )));
+    assert_eq!(
+        wire_json(&group.message(0)),
+        r#""module 'app:///dep.js': the fetcher returned a stylesheet for app:///dep.js""#
+    );
+}
+
 /// A worker whose URL is an engine name is loaded by its realm's own loader
 /// alone: the load of such a root module raises no request, so the worker
 /// asks its host for nothing and nothing waits for an answer. A registered
