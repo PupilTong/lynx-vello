@@ -195,14 +195,12 @@ impl VectorImage {
     /// raster cache keys its textures by it and a device size. Clones share
     /// it, because they share the picture.
     #[must_use]
-    #[allow(dead_code)] // Read by the painter's raster cache once it exists.
     pub(crate) fn key(&self) -> u64 {
         self.key
     }
 
     /// How the viewport maps onto a destination box of another ratio.
     #[must_use]
-    #[allow(dead_code)] // Read by the painter's raster cache once it exists.
     pub(crate) fn aspect(&self) -> AspectRatio {
         self.aspect
     }
