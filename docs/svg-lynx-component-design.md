@@ -1,10 +1,13 @@
 # SVG as the Lynx `<svg>` component: design (2026-10-09)
 
-Status: in implementation. This document supersedes
-`docs/svg-vector-images-design.md`, whose revision 3 (the standard inline
-`<svg>` element whose DOM subtree is serialised and parsed by `usvg`) is
-withdrawn. Rulings in this document were made by the project owner on
-2026-10-09; everything else is the architect's decision and is marked so.
+Status: implemented (2026-10-09; phase 1 contracts C and D, phase 2
+contracts A, B and E). What the implementation decided where this document
+was silent or wrong is recorded under
+[Decisions during implementation](#decisions-during-implementation). This
+document supersedes `docs/svg-vector-images-design.md`, whose revision 3 (the
+standard inline `<svg>` element whose DOM subtree is serialised and parsed by
+`usvg`) is withdrawn. Rulings in this document were made by the project owner
+on 2026-10-09; everything else is the architect's decision and is marked so.
 
 ## Why the inline element goes
 
@@ -137,3 +140,32 @@ Per `<svg content>`: the `content` string once in the DOM attribute, one `Scene`
 - Text shaped before a later `@font-face` arrives keeps its fallback glyphs.
 - `image` inside an SVG draws nothing; `mask`, `filter`, `pattern`, `marker` are not supported; `textPath`, per-character `x`/`y` lists, `dominant-baseline`, bidi reordering within a chunk are out.
 - A `content` string is parsed once per distinct markup per document, never evicted while an element is bound to it.
+
+## Decisions during implementation
+
+### Phase 1, converter (F1)
+
+- Chunks are `TextChunk { x, y, anchor, spans }` with per-span style, so `text-anchor` anchors the whole chunk.
+- `ShapedLine` carries ascent/descent, and its types live in hughie (`crates/hughie/src/text/line.rs`).
+- `Item::PushLayer` clips are `LayerClip::{Bounds, Path}`.
+- `VectorDocument` is `pub` without public members.
+- A `text` child of a `clipPath` contributes nothing.
+- The `font` shorthand is not read.
+- `switch` picks the first child without `systemLanguage`/`requiredFeatures`/`requiredExtensions`.
+
+### Phase 1, raster cache (F2)
+
+- Textures are registered with straight alpha (`ImageAlphaType::Alpha`): vello writes straight alpha.
+- The monolithic `Document::scene()` draws no vector image.
+- Keys are per parse, so one markup in two documents is two textures.
+- Per-frame admission is unbounded; the budget bounds retention only.
+
+### Phase 2, component and synthetic sources (O1)
+
+- The hash is SipHash-1-3 with its 128-bit output from `siphasher` 1.0 (already in the lock through `phf`, now a direct dependency of `dom`), one pass keyed with zeros, not two seeded 64-bit passes: the 128-bit variant exists, SipHash folds the length into its last block, and a fixed key gives one markup one name in every document and every run. A known key does not make it collision-resistant against a page that sets out to collide two of its own pictures; such a page only confuses its own drawing (`render/image.rs`, `synthetic_source`).
+- The binder count is the entry's existing `(node, role)` list: deduplicated per binding and unbound by `free_node`, its length is the count, so no second counter was added. The last unbind of a synthetic source removes the entry and its still-unparsed bytes; a parse that lands afterwards applies to nothing (`ImageRegistry::apply` refuses a forgotten synthetic source rather than recreating it). Host sources are still never removed.
+- `ImageRegistry::bind_node` and the paint walk never queue a synthetic source as wanted. One a page names itself (`<image src="svg-content:…">` or `url(svg-content:…)`) is neither asked for nor filed, since an entry without bytes would make that markup's own later `set_image_document` read it as known and never parse it: it draws the picture while some `<svg content>` holds that markup, and nothing otherwise.
+- `Document::take_pending_documents` returns `Vec<dom::PendingDocument>`, a public alias for `(Arc<str>, Bytes, DocumentKind)`. `Document::apply_pending_documents` parses and applies them inline; the wasm32 runtime and the tests call it, `flashbulb::pump_images` does the same through `take_pending_documents`, and natively nothing does.
+- The page's epilogue drains the pending documents before its commit (`crates/bobcat-core/src/main/page.rs`): natively each goes to the existing `parse_document` task; on wasm32 they are parsed and applied inline so that the same commit draws them. The contract placed the wasm32 parse inside `apply_image_events`; a separate call in the same epilogue does the same without a second path inside `dom`.
+- The epilogue's hold on component events while a commit was skipped (`MainThreadRuntime::needs_render`) returns with the component, because an `<svg>`'s `load` reads the layout box at delivery. It was part of the pre-revision-3 component and was removed with it.
+- The `react-svg` fixture is consumed by `compiled_svg_component_draws_content_and_src` in `crates/bobcat-source/tests/reactlynx_runtime.rs`, which samples one solid point of each picture; no new golden was added, and the four `dom` SVG goldens did not change.
