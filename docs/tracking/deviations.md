@@ -975,6 +975,15 @@ consequential choice about whether to follow the spec or the quirk.
     default family; glyphs come from the document's own `TextContext`, so
     `@font-face` faces apply, but text shaped before a face arrives keeps its
     fallback glyphs.
+  - *CSS inside an SVG document is ignored* (native, ruled 2026-10-09): the
+    converter reads presentation attributes only, so a `<style>` element's
+    rules and a `style` attribute change nothing, `!important` included.
+    web-core's shadow `<img>` hands the document to the browser, which
+    applies both; native's ServalSVG has no `style` element in its tag
+    subset. The project keeps one styling engine, stylo, and adds no second
+    one for SVG. A document coloured only by a `<style>` sheet (an
+    Illustrator export's `.st0 { fill: … }` classes) draws with the initial
+    black fill here.
   - *Masks, filters, patterns, markers and a nested `image` draw nothing*,
     where the browser draws them all and native's subset lists `image`: a
     masked group is skipped with its subtree (drawing it unmasked would show

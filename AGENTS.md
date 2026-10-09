@@ -2540,8 +2540,11 @@ as an image — `<image src>`, `background-image`, `mask-image`, the Lynx
 `ImageReports::loaded_document(source, bytes, DocumentKind::Svg)`, carried by
 `ImageEvent::LoadedDocument` (`DocumentKind` is `#[non_exhaustive]`, so a
 second engine-drawn format is one more variant). The parse is `dom`'s own
-converter, `render/svg/` over `roxmltree`, `svgtypes` and `simplecss` (no
-`usvg`; its module docs list the supported subset): `svg::parse` produces a
+converter, `render/svg/` over `roxmltree` and `svgtypes` (no `usvg`; its
+module docs list the supported subset). It reads presentation attributes
+only: CSS inside an SVG document (a `<style>` element, a `style` attribute)
+is not read, by ruling, because native's ServalSVG has no `style` element
+and the project keeps stylo as its one styling engine. `svg::parse` produces a
 `VectorDocument`, a flat paint-order command list with geometry, transforms
 and brushes resolved and text collected but unshaped, so it needs no fonts and
 is `Send + Sync`. `ImageEvent::parse_document` is the only entry to it from

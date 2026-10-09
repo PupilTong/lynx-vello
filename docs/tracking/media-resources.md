@@ -287,8 +287,9 @@ a host's fetch (`<svg src>`, `<image src>`, CSS `url()`; step 1) and an
    main Worker. The parse is `dom`'s own converter
    (`crates/dom/src/render/svg/`), reached through
    `dom::ImageEvent::parse_document`: one `roxmltree` parse (DTD allowed),
-   attribute values through `svgtypes`, `<style>` sheets through `simplecss`,
-   and one walk producing a flat command list with geometry, transforms and
+   presentation attribute values through `svgtypes` (CSS inside the
+   document, a `<style>` element or a `style` attribute, is not read; ruled
+   2026-10-09), and one walk producing a flat command list with geometry, transforms and
    brushes resolved and text collected but not shaped. It reads nothing
    outside the document. A document that does not parse fails its source in
    the document's registry (`error` on `<image>`, nothing on `<svg>`).
@@ -326,12 +327,14 @@ a host's fetch (`<svg src>`, `<image src>`, CSS `url()`; step 1) and an
 The converter draws path fills and strokes (fill rule, width, cap, join,
 miter limit, dashes, paint order), solid colours, linear and radial gradients
 (spread methods, focal circle, gradient transform, `href` chains), group
-opacity and blend modes, `clipPath` (a multi-child clip uses the concatenated
+opacity (blend modes need CSS, which is not read), `clipPath` (a multi-child clip uses the concatenated
 child paths under the nonzero rule, an approximation of their union), `use`
 and `symbol`, nested `svg`, and `<text>`/`<tspan>` as a subset (chunks
 started by absolute `x`/`y`, `dx`/`dy`, `text-anchor`, `letter-spacing`).
 Gaps, each documented in [components.md](components.md)'s `x-svg` row and in
-[deviations.md](deviations.md): a group with a `mask` is skipped rather than
+[deviations.md](deviations.md): CSS inside the document (`<style>` rules,
+the `style` attribute) is not read, by ruling, so only presentation
+attributes style it; a group with a `mask` is skipped rather than
 drawn unmasked, `filter` is ignored, `pattern` paint, `marker` and a nested
 `<image>` draw nothing, `.svgz` fails to parse, the `font` shorthand and the
 `current-color` attribute are not read, and text shaped before a later
