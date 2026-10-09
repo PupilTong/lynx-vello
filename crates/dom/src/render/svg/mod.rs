@@ -10,9 +10,10 @@
 //!   paint a final peniko brush. Geometry is resolved here; text is collected but not shaped, so
 //!   the parse needs no fonts and can run on a blocking pool. `Send + Sync`.
 //! - [`encode`] turns a document into a [`Scene`](crate::vello::Scene) on the document thread,
-//!   shaping its text through the document's own [`TextContext`](hughie::text::TextContext) by way
-//!   of a [`TextShaper`], so SVG glyphs come from the same fonts and `@font-face` registrations as
-//!   `<text>`. [`opens_blend`] is the vello #1198 test the layer around a whole-image draw needs.
+//!   shaping its text through the document's own [`TextContext`](hughie::text::TextContext),
+//!   created on the first text shaped, so SVG glyphs come from the same fonts and `@font-face`
+//!   registrations as `<text>`. [`opens_blend`] is the vello #1198 test the layer around a
+//!   whole-image draw needs.
 //!
 //! # The supported subset
 //!
@@ -135,7 +136,7 @@ mod text;
 
 pub(crate) use encode::{encode, opens_blend};
 pub(crate) use parse::parse;
-pub(crate) use text::{DocumentShaper, TextItem, TextShaper};
+pub(crate) use text::TextItem;
 
 use crate::render::image::AspectRatio;
 use crate::vello::kurbo::{Affine, BezPath, Rect, Stroke};

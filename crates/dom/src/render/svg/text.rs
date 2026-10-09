@@ -1,5 +1,4 @@
-//! SVG `text`: the chunk model the parse collects and the shaper seam the
-//! encode shapes it through.
+//! SVG `text`: the chunk model the parse collects and the encode shapes.
 //!
 //! A `text` element is a list of *chunks*, each positioned absolutely
 //! (the `text`'s own `x`/`y`, or a `tspan`'s), and a chunk is a list of
@@ -7,39 +6,17 @@
 //! anchors a whole chunk by its total advance, so a `tspan` that only
 //! changes the font stays inside its chunk. Shaping needs fonts, which the
 //! parse does not have: the chunks carry their text and resolved font, and
-//! [`TextShaper`] shapes each span at encode time.
+//! the encode shapes each span through the document's `TextContext`
+//! (`encode.rs`), created on the first span shaped so a document that never
+//! draws text pays for no font context.
 
 use std::sync::Arc;
 
-use hughie::text::{ResolvedFont, ShapedLine, TextContext, shape_line};
+use hughie::text::ResolvedFont;
 
 use super::paint_server::GradientSpec;
 use crate::vello::kurbo::{Affine, Stroke};
 use crate::vello::peniko::Color;
-
-/// Shapes one span of text; the document's `TextContext` behind a seam
-/// the converter's tests can replace.
-pub(crate) trait TextShaper {
-    fn shape(&mut self, text: &str, font: &ResolvedFont, letter_spacing: f32) -> ShapedLine;
-}
-
-impl TextShaper for TextContext {
-    fn shape(&mut self, text: &str, font: &ResolvedFont, letter_spacing: f32) -> ShapedLine {
-        shape_line(self, text, font, letter_spacing)
-    }
-}
-
-/// The document's shaper: the lazily created `TextContext` in its layout
-/// state, created on the first span shaped, so a document that never
-/// shows text and never draws SVG text pays for no font context.
-pub(crate) struct DocumentShaper<'a>(pub(crate) &'a mut Option<Box<TextContext>>);
-
-impl TextShaper for DocumentShaper<'_> {
-    fn shape(&mut self, text: &str, font: &ResolvedFont, letter_spacing: f32) -> ShapedLine {
-        let context = self.0.get_or_insert_with(|| Box::new(TextContext::new()));
-        shape_line(context, text, font, letter_spacing)
-    }
-}
 
 /// `text-anchor`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

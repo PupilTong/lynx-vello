@@ -38,13 +38,13 @@ fn no_fonts() -> TextContext {
 }
 
 fn ahem() -> TextContext {
-    let mut context = no_fonts();
+    let mut context = TextContext::without_system_fonts();
     assert_eq!(context.register_fonts(FontBlob::from_static(AHEM)), 1);
     context
 }
 
 fn encoded(parsed: &VectorDocument) -> Scene {
-    encode(parsed, &mut no_fonts())
+    encode(parsed, &mut Some(Box::new(no_fonts())))
 }
 
 /// Every path item, in order, with its transform.
@@ -1448,7 +1448,7 @@ fn text_is_drawn_as_glyph_runs_at_the_pen_and_anchored() {
     let parsed = document(
         r##"<text x="10" y="20" font-size="10" font-family="Ahem" fill="#ff0000">ab<tspan dx="2" dy="3">c</tspan><tspan x="50" y="60" text-anchor="middle">de</tspan><tspan x="80" y="90" text-anchor="end">fgh</tspan></text>"##,
     );
-    let scene = encode(&parsed, &mut ahem());
+    let scene = encode(&parsed, &mut Some(Box::new(ahem())));
     let runs = &scene.encoding().resources.glyph_runs;
     assert_eq!(runs.len(), 4, "one run per span");
     let placed: Vec<([f32; 2], usize, f32)> = runs
@@ -1481,7 +1481,7 @@ fn text_gradients_resolve_against_the_shaped_chunk_box() {
         r##"<defs><linearGradient id="g"><stop offset="0" stop-color="#ff0000"/><stop offset="1" stop-color="#0000ff"/></linearGradient></defs>
             <text x="10" y="20" font-size="10" font-family="Ahem" fill="url(#g)" stroke="#0000ff" stroke-width="1">ab</text>"##,
     );
-    let scene = encode(&parsed, &mut ahem());
+    let scene = encode(&parsed, &mut Some(Box::new(ahem())));
     let runs = &scene.encoding().resources.glyph_runs;
     assert_eq!(runs.len(), 2, "a fill run and a stroke run");
     let brush = runs[0].brush_transform.expect("the gradient's transform");
@@ -1508,7 +1508,7 @@ fn text_extends_the_bounds_of_the_layer_around_it() {
         r#"<g opacity="0.5" transform="translate(5 5)"><text x="10" y="20" font-size="10" font-family="Ahem">ab</text></g>"#,
     );
     // One context for both, so the font blob is the same registration.
-    let mut context = ahem();
+    let mut context = Some(Box::new(ahem()));
     let scene = encode(&parsed, &mut context);
     let mut expected = Scene::new();
     expected.push_layer(
@@ -1519,7 +1519,7 @@ fn text_extends_the_bounds_of_the_layer_around_it() {
         &Rect::new(10.0, 12.0, 30.0, 22.0),
     );
     let line = hughie::text::shape_line(
-        &mut context,
+        context.as_mut().expect("the encode created the context"),
         "ab",
         &hughie::text::ResolvedFont {
             families: vec!["Ahem".to_owned()],
@@ -1557,7 +1557,7 @@ fn text_extends_the_bounds_of_the_layer_around_it() {
 #[test]
 fn text_without_any_font_encodes_without_glyphs() {
     let parsed = document(r#"<text x="0" y="10">dropped</text>"#);
-    let scene = encode(&parsed, &mut no_fonts());
+    let scene = encode(&parsed, &mut Some(Box::new(no_fonts())));
     assert!(scene.encoding().resources.glyphs.is_empty());
 }
 

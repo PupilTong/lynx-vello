@@ -97,12 +97,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use hughie::text::TextContext;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use vello::peniko::ImageData;
 
 use crate::NodeId;
-use crate::render::svg::{self, TextShaper, VectorDocument};
+use crate::render::svg::{self, VectorDocument};
 use crate::vello::Scene;
 
 /// A parsed SVG document, encoded and drawable at any size.
@@ -176,13 +177,16 @@ const _: () = {
 };
 
 impl VectorImage {
-    /// Encodes `document` into a vector image, shaping its text through
-    /// `shaper`. This is the one place a scene is built for a document, on
-    /// the document thread, once per source.
+    /// Encodes `document` into a vector image, shaping its text through the
+    /// document's `context`. This is the one place a scene is built for a
+    /// document, on the document thread, once per source.
     #[must_use]
-    pub(crate) fn from_document(document: &VectorDocument, shaper: &mut dyn TextShaper) -> Self {
+    pub(crate) fn from_document(
+        document: &VectorDocument,
+        context: &mut Option<Box<TextContext>>,
+    ) -> Self {
         Self {
-            scene: Arc::new(svg::encode(document, shaper)),
+            scene: Arc::new(svg::encode(document, context)),
             natural: document.natural,
             viewport: document.viewport,
             aspect: document.aspect,
@@ -197,11 +201,7 @@ impl VectorImage {
     #[cfg(test)]
     pub(crate) fn parse_sealed(svg: &[u8]) -> Result<Self, svg::SvgError> {
         let document = svg::parse(svg)?;
-        let mut context = None;
-        Ok(Self::from_document(
-            &document,
-            &mut svg::DocumentShaper(&mut context),
-        ))
+        Ok(Self::from_document(&document, &mut None))
     }
 
     /// A process-unique identity for this image's picture: the painter's
@@ -912,8 +912,9 @@ impl ImageRegistry {
     /// with one content makes a no-op.
     ///
     /// A [`ImageEvent::ParsedDocument`] is encoded here, on the calling
-    /// thread, its text shaped through `shaper` (the document's own text
-    /// context), and only when its source is still pending. A
+    /// thread, its text shaped through `context` (the document's own text
+    /// context, created on the first text shaped), and only when its source
+    /// is still pending. A
     /// [`ImageEvent::LoadedDocument`] is parsed here first as well: this is
     /// the path for a caller with no blocking pool to parse on (this
     /// crate's tests, the wasm32 build). A document that does not parse is
@@ -921,7 +922,7 @@ impl ImageRegistry {
     pub(crate) fn apply(
         &mut self,
         event: &ImageEvent,
-        shaper: &mut dyn TextShaper,
+        context: &mut Option<Box<TextContext>>,
     ) -> Option<ImageApplied> {
         let entry = self.entry_for(event.source());
         if !matches!(entry.state, ImageState::Pending) {
@@ -942,11 +943,11 @@ impl ImageRegistry {
                 }
             }
             ImageEvent::ParsedDocument { document, .. } => {
-                vector_state(VectorImage::from_document(document, shaper))
+                vector_state(VectorImage::from_document(document, context))
             }
             ImageEvent::LoadedDocument { bytes, kind, .. } => parse_document(bytes, *kind)
                 .map_or(ImageState::Failed, |document| {
-                    vector_state(VectorImage::from_document(&document, shaper))
+                    vector_state(VectorImage::from_document(&document, context))
                 }),
             ImageEvent::Loaded { .. } | ImageEvent::Failed { .. } => ImageState::Failed,
         };
@@ -1009,16 +1010,20 @@ impl ImageRegistry {
     /// Files a synthetic source ([`SYNTHETIC_SOURCE_PREFIX`]) already
     /// settled by `event`, before any node binds it: an entry that exists
     /// is never queued as wanted, so no paint walk and no bind asks the host
-    /// for it. A parsed document is encoded through `shaper` as
+    /// for it. A parsed document is encoded through `context` as
     /// [`ImageRegistry::apply`] encodes one.
-    pub(crate) fn insert_synthetic(&mut self, event: &ImageEvent, shaper: &mut dyn TextShaper) {
+    pub(crate) fn insert_synthetic(
+        &mut self,
+        event: &ImageEvent,
+        context: &mut Option<Box<TextContext>>,
+    ) {
         debug_assert!(
             is_synthetic_source(event.source()),
             "only a synthetic source is inserted settled"
         );
         self.entries
             .insert(Arc::clone(event.source()), Entry::default());
-        let _ = self.apply(event, shaper);
+        let _ = self.apply(event, context);
     }
 
     /// Removes a synthetic source's entry: a superseded generation of an
@@ -1095,9 +1100,10 @@ mod tests {
         assert_eq!(registry.take_wanted().len(), 1);
     }
 
-    /// A shaper for events that carry no text to shape.
-    fn no_text() -> hughie::text::TextContext {
-        hughie::text::TextContext::without_system_fonts()
+    /// The text context of a document that has shaped nothing: what an
+    /// event with no text to shape is applied with.
+    fn no_text() -> Option<Box<hughie::text::TextContext>> {
+        None
     }
 
     fn node(bits: u64) -> crate::NodeId {
@@ -1567,7 +1573,7 @@ mod vector_tests {
     #[test]
     fn a_reported_document_is_parsed_and_encoded_inline() {
         let mut registry = ImageRegistry::default();
-        let mut context = TextContext::without_system_fonts();
+        let mut context = Some(Box::new(TextContext::without_system_fonts()));
         let applied = registry.apply(
             &ImageEvent::LoadedDocument {
                 source: Arc::from("app:///icon.svg"),
@@ -1591,7 +1597,7 @@ mod vector_tests {
     #[test]
     fn a_parsed_document_is_encoded_at_apply() {
         let mut registry = ImageRegistry::default();
-        let mut context = TextContext::without_system_fonts();
+        let mut context = Some(Box::new(TextContext::without_system_fonts()));
         let event = ImageEvent::parse_document(
             Arc::from("app:///icon.svg"),
             br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 10"><g opacity="0.5"><rect width="6" height="4"/></g></svg>"#,
@@ -1622,7 +1628,7 @@ mod vector_tests {
         );
         assert!(matches!(event, ImageEvent::Failed { .. }));
         let mut registry = ImageRegistry::default();
-        let mut context = TextContext::without_system_fonts();
+        let mut context = Some(Box::new(TextContext::without_system_fonts()));
         let applied = registry
             .apply(&event, &mut context)
             .expect("the failure moved the entry");

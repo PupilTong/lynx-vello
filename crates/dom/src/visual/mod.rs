@@ -1141,7 +1141,7 @@ impl<T> Document<T> {
             // content makes a no-op: nothing moved, so nothing is dirtied.
             let applied = {
                 let (images, text_context) = self.image_apply_parts();
-                images.apply(event, &mut crate::render::svg::DocumentShaper(text_context))
+                images.apply(event, text_context)
             };
             let Some(applied) = applied else {
                 continue;

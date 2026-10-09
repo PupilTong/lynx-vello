@@ -1,20 +1,25 @@
 //! Items into a vello scene, text shaped on the way.
 
-use hughie::text::ShapedLine;
+use hughie::text::{ShapedLine, TextContext, shape_line};
 
 use super::parse::opens_blend_in;
-use super::text::{TextAnchor, TextItem, TextPaint, TextShaper};
+use super::text::{TextAnchor, TextItem, TextPaint};
 use super::{Item, LayerClip, VectorDocument, paint_server};
 use crate::vello::kurbo::{Affine, Point, Rect, Stroke};
 use crate::vello::peniko::{BlendMode, Brush, Compose, Fill, Mix, StyleRef};
 use crate::vello::{Glyph, Scene};
 
 /// Encodes `document` into a scene in viewport units, shaping its text
-/// through `shaper`. A document with nothing drawable encodes nothing.
-pub(crate) fn encode(document: &VectorDocument, shaper: &mut dyn TextShaper) -> Scene {
+/// through the document's `context`, created here on the first document
+/// with text so one without pays for no font context. A document with
+/// nothing drawable encodes nothing.
+pub(crate) fn encode(document: &VectorDocument, context: &mut Option<Box<TextContext>>) -> Scene {
     let mut scene = Scene::new();
     let shaped_texts = if document.has_text {
-        shape_all(document, shaper)
+        shape_all(
+            document,
+            context.get_or_insert_with(|| Box::new(TextContext::new())),
+        )
     } else {
         Vec::new()
     };
@@ -124,7 +129,7 @@ struct ShapedChunk {
 }
 
 /// Shapes every text item of `document`, in item order.
-fn shape_all(document: &VectorDocument, shaper: &mut dyn TextShaper) -> Vec<ShapedText> {
+fn shape_all(document: &VectorDocument, context: &mut TextContext) -> Vec<ShapedText> {
     document
         .items
         .iter()
@@ -140,7 +145,9 @@ fn shape_all(document: &VectorDocument, shaper: &mut dyn TextShaper) -> Vec<Shap
                     let lines: Vec<ShapedLine> = chunk
                         .spans
                         .iter()
-                        .map(|span| shaper.shape(&span.text, &span.font, span.letter_spacing))
+                        .map(|span| {
+                            shape_line(context, &span.text, &span.font, span.letter_spacing)
+                        })
                         .collect();
                     // The pen runs from the chunk's start through every
                     // span's `dx` and advance; the anchor shifts the whole

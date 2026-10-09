@@ -216,10 +216,7 @@ impl<T> Document<T> {
         let event =
             ImageEvent::parse_document(Arc::clone(&source), markup.as_bytes(), DocumentKind::Svg);
         let (images, text_context) = self.image_apply_parts();
-        images.insert_synthetic(
-            &event,
-            &mut crate::render::svg::DocumentShaper(text_context),
-        );
+        images.insert_synthetic(&event, text_context);
         let previous = self
             .get(root)
             .and_then(|node| node.image_source(ImageRole::Source))
