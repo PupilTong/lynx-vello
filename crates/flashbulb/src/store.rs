@@ -16,9 +16,10 @@
 //! reported as the parsed document, or as a failure when it does not parse.
 //! A document is published through [`TestImages::insert_svg`], or handed
 //! over by the page as markup, which reaches the store as a document request
-//! ([`TestImages::request_document`], driven by [`pump_images`]).
-//! [`FrameImages::read`] never answers for either, because the engine never
-//! asks.
+//! ([`TestImages::request_document`], driven by [`pump_images`]). A
+//! document request keeps nothing, as a production host keeps nothing:
+//! every one is parsed and reported on its own. [`FrameImages::read`] never
+//! answers for either, because the engine never asks.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -40,9 +41,10 @@ enum Entry {
     #[default]
     Pending,
     Ready(ImageData),
-    /// A document this store parsed, kept so a later request reports it
-    /// again without a second parse.
-    Vector(Arc<VectorDocument>),
+    /// An SVG document a test published, parsed at publication: what the
+    /// store answers its source with, as [`Entry::Ready`] holds a test's
+    /// pixels.
+    Svg(Arc<VectorDocument>),
     /// Named as one that will never produce pixels.
     Failed,
 }
@@ -52,7 +54,7 @@ impl Entry {
     /// document the engine's parser makes of them, or a failure.
     fn parsed(source: &str, bytes: &[u8], kind: DocumentKind) -> Self {
         match ImageEvent::parse_document(Arc::from(source), bytes, kind) {
-            ImageEvent::ParsedDocument { document, .. } => Entry::Vector(document),
+            ImageEvent::ParsedDocument { document, .. } => Entry::Svg(document),
             ImageEvent::Loaded { .. } | ImageEvent::Failed { .. } => Entry::Failed,
         }
     }
@@ -67,7 +69,7 @@ impl Entry {
                 width: image.width,
                 height: image.height,
             }),
-            Entry::Vector(document) => Some(ImageEvent::ParsedDocument {
+            Entry::Svg(document) => Some(ImageEvent::ParsedDocument {
                 source,
                 document: Arc::clone(document),
             }),
@@ -81,7 +83,7 @@ impl Entry {
         match self {
             Entry::Pending => {}
             Entry::Ready(image) => sink.loaded(source, image.width, image.height),
-            Entry::Vector(document) => sink.parsed_document(source, Arc::clone(document)),
+            Entry::Svg(document) => sink.parsed_document(source, Arc::clone(document)),
             Entry::Failed => sink.failed(source),
         }
     }
@@ -157,7 +159,8 @@ impl TestImages {
     /// engine's parser, as a production host does, and reports the document
     /// through [`ImageReports::parsed_document`], the way [`Self::insert`]
     /// reports a bitmap, or reports a failure when it does not parse. The
-    /// entry keeps the parsed document, so a later request reports it again.
+    /// published document is what a later request for `source` is answered
+    /// with, as published pixels are.
     pub fn insert_svg(&self, source: impl Into<String>, svg: &str) {
         let source = source.into();
         let entry = Entry::parsed(&source, svg.as_bytes(), DocumentKind::Svg);
@@ -217,7 +220,7 @@ impl TestImages {
     pub fn len(&self) -> usize {
         self.entries()
             .values()
-            .filter(|entry| matches!(entry, Entry::Ready(_) | Entry::Vector(_)))
+            .filter(|entry| matches!(entry, Entry::Ready(_) | Entry::Svg(_)))
             .count()
     }
 
@@ -268,7 +271,7 @@ impl FrameImages for TestImages {
             .push((source.to_owned(), hint));
         match self.entries().get(source)? {
             Entry::Ready(image) => Some(image.clone()),
-            Entry::Pending | Entry::Vector(_) | Entry::Failed => None,
+            Entry::Pending | Entry::Svg(_) | Entry::Failed => None,
         }
     }
 
@@ -300,16 +303,12 @@ impl TestImages {
     /// them with the engine's parser, as a production host does, and
     /// reports the document, or a failure when it does not parse.
     ///
-    /// A source this store has already settled is reported from its entry
-    /// without a second parse, as a host answers a repeated request. Inherent
-    /// for the reason [`Self::request`] is.
+    /// Keeps nothing, as a production host keeps nothing: every request is
+    /// a parse and a report of its own, and the source is not asked for
+    /// ([`Self::was_asked_for`]). Inherent for the reason [`Self::request`]
+    /// is.
     pub fn request_document(&self, source: &str, bytes: &[u8], kind: DocumentKind) {
-        let mut entries = self.entries();
-        let entry = entries.entry(source.to_owned()).or_default();
-        if matches!(entry, Entry::Pending) {
-            *entry = Entry::parsed(source, bytes, kind);
-        }
-        self.report(source, entry);
+        self.report(source, &Entry::parsed(source, bytes, kind));
     }
 }
 
@@ -437,7 +436,10 @@ mod tests {
             pump_images(&mut document, &store),
             "the request was answered"
         );
-        assert!(store.was_asked_for(&source));
+        assert!(
+            !store.was_asked_for(&source),
+            "a document request files nothing"
+        );
         assert!(!pump_images(&mut document, &store), "nothing more moves");
 
         let root = document.document_element().id();
@@ -459,14 +461,14 @@ mod tests {
         );
     }
 
-    /// A repeated request for a source the store already parsed reports the
-    /// same document again, shared rather than parsed twice; markup that
-    /// does not parse is reported as a failure.
+    /// Every document request is a parse and a report of its own: two for
+    /// one source are two documents, and markup that does not parse is
+    /// reported as a failure.
     #[test]
-    fn a_repeated_document_request_re_reports_the_parsed_document() {
+    fn every_document_request_is_parsed_and_reported() {
         let store = TestImages::new();
         store.request_document("svg-content:1", ICON.as_bytes(), DocumentKind::Svg);
-        store.request_document("svg-content:1", b"not parsed again", DocumentKind::Svg);
+        store.request_document("svg-content:1", ICON.as_bytes(), DocumentKind::Svg);
         store.request_document("svg-content:2", BROKEN.as_bytes(), DocumentKind::Svg);
 
         let events = store.drain_events();
@@ -480,9 +482,10 @@ mod tests {
             ImageEvent::Failed { source },
         ] = events.as_slice()
         else {
-            panic!("two reports of one document and a failure: {events:?}");
+            panic!("two parsed documents and a failure: {events:?}");
         };
-        assert!(Arc::ptr_eq(first, again), "parsed once");
+        assert!(!Arc::ptr_eq(first, again), "parsed twice");
         assert_eq!(&**source, "svg-content:2");
+        assert!(store.is_empty(), "nothing is kept");
     }
 }
