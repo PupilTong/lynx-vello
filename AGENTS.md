@@ -1914,10 +1914,11 @@ wakeup the embedder supplies and applied in the next `LynxView::pump` through
 
 **SVG documents are parsed here, in the decode's place**, on every target
 (`docs/svg-lynx-component-design.md`, revision 4.1): once preprocessing
-settles `ImageFormat::Svg`, the load takes a decode permit and runs the
-engine's parser (`ImageEvent::parse_document`) in a blocking closure of its
-own (`images::parse_job`), inline in the browser's local task on the Render
-Worker; the platform decoder and the browser's `Image` element never see an
+settles `ImageFormat::Svg`, the load runs the engine's parser
+(`ImageEvent::parse_document`) through `images::parse_job`: natively under a
+decode permit in a blocking closure of its own, in the browser inline in the
+load's local task on the Render Worker, whose executor has no permits; the
+platform decoder and the browser's `Image` element never see an
 SVG. It completes as `Completion::ParsedDocument` and servicing reports it
 through `ImageReports::parsed_document`; a document that does not parse is
 an ordinary `Completion::Failed` with a note. `ViewResources::request_document`
