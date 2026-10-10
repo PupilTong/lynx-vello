@@ -2106,7 +2106,7 @@ fn invoke_answers_a_bounding_client_rect_carrying_the_elements_id_and_dataset() 
                 }
                 // Any other method is unknown to the engine: the shared
                 // table's code 3, without a throw and without a `data`.
-                const unsupported = measure(view, 'scrollIntoView');
+                const unsupported = measure(view, 'requestUIInfo');
                 if (unsupported.code !== 3 || unsupported.data !== undefined) {
                   throw new Error(JSON.stringify(unsupported));
                 }
@@ -2384,6 +2384,72 @@ fn a_scroll_view_answers_its_scroll_info_and_what_scroll_by_consumed() {
     assert_eq!(
         elements.tree().scroll_offset(scroller),
         dom::Vector2D::new(0.0, 42.5)
+    );
+}
+
+/// `scrollIntoView` through `__InvokeUIMethod` is the base method every
+/// element has: a child view of a `scroll-view` scrolls the scroller (code
+/// 0, no data), and the page, with no scroll container above it, answers
+/// code 8. The scroller is 100px tall over five 40px children, a range of
+/// 100.
+#[test]
+fn every_element_answers_scroll_into_view_and_one_with_no_scroller_above_fails() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const scroller = __CreateElement('scroll-view', 0);
+                  __SetInlineStyles(scroller, 'width:100px;height:100px');
+                  __AppendElement(page, scroller);
+                  const items = [];
+                  for (let i = 0; i < 5; i++) {
+                    const item = __CreateView(0);
+                    __SetInlineStyles(item, 'height:40px;flex-shrink:0');
+                    __AppendElement(scroller, item);
+                    items.push(item);
+                  }
+                  globalThis.held = [page, scroller, items];
+                };
+                ",
+            "app:///scroll-into-view.js",
+        )
+        .expect("main-thread script");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __FlushElementTree, __InvokeUIMethod } from 'bobcat:element';
+                __FlushElementTree();
+                const viaPapi = (element, params) => {
+                  let answer;
+                  __InvokeUIMethod(element, 'scrollIntoView', params, result => { answer = result; });
+                  return answer;
+                };
+                const expectAnswer = (answer, code) => {
+                  if (answer.code !== code || answer.data !== undefined) {
+                    throw new Error('expected ' + code + ', got ' + JSON.stringify(answer));
+                  }
+                };
+                // The fourth child (120..160) at the end of the 100px port.
+                expectAnswer(viaPapi(held[2][3], {scrollIntoViewOptions: {block: 'end'}}), 0);
+                expectAnswer(viaPapi(held[2][3], {}), 4);
+                expectAnswer(viaPapi(held[0], {scrollIntoViewOptions: {}}), 8);
+                ",
+            "app:///scroll-into-view-methods.js",
+            "scrollIntoView",
+        )
+        .expect("scrollIntoView");
+    let scroller = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        tree.get(page).expect("the page").child_ids()[0]
+    };
+    assert_eq!(
+        elements.tree().scroll_offset(scroller),
+        dom::Vector2D::new(0.0, 60.0)
     );
 }
 

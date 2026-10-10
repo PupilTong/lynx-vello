@@ -62,10 +62,11 @@ interface BobcatNative {
    * none — and answers either a status code or the method's data as text.
    * `boundingClientRect` is answered by the host for every element; every
    * other name is asked of the element's kind (its component's
-   * `dom::CustomElement::invoke`):
+   * `dom::CustomElement::invoke`) and, when the kind has no method of that
+   * name, of the base set every element has (`scrollIntoView`):
    *
-   * - `3` (`METHOD_NOT_FOUND`): the element's kind has no method of that
-   *   name.
+   * - `3` (`METHOD_NOT_FOUND`): neither the element's kind nor the base set
+   *   has a method of that name.
    * - `4` (`PARAM_INVALID`): the method refused `params` and did nothing.
    * - `7` (`INVALID_STATE_ERROR`): the element's state refused the method
    *   (a dialog's `InvalidStateError`), and it did nothing.
@@ -97,6 +98,15 @@ interface BobcatNative {
    * index naming no child is code 4. `scrollBy` scrolls by a numeric
    * `offset` at once and answers what it consumed; `getScrollInfo` answers
    * the offset and the axis's maximum offset.
+   *
+   * `scrollIntoView({scrollIntoViewOptions: {behavior?, block?, inline?}})`
+   * exists on every element: CSSOM-View's `scrollIntoView` on the nearest
+   * scroll container above the element alone (`container: "nearest"`),
+   * smoothly when `behavior` is `"smooth"`, with `block` (default `"start"`)
+   * and `inline` (default `"nearest"`) each one of `"start"`, `"center"`,
+   * `"end"` and `"nearest"`, any other value reading as `"start"`. A
+   * missing `scrollIntoViewOptions` object is code 4; an element with no
+   * box or no scroll container above it is code 8. It answers no data.
    *
    * `show`, `showModal`, `close` and `requestClose` exist on `dialog` only:
    * HTML's `HTMLDialogElement` methods, `params` unread. `close` and

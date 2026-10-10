@@ -250,8 +250,9 @@ pub(super) fn scroll_to(
     Ok(())
 }
 
-/// `params` as a JSON object, or code 4.
-fn object(params: &str) -> Result<Map<String, Value>, InvalidParams> {
+/// `params` as a JSON object, or code 4. Shared with the base set's
+/// `scrollIntoView` ([`super::base_methods`]).
+pub(super) fn object(params: &str) -> Result<Map<String, Value>, InvalidParams> {
     match serde_json::from_str(params) {
         Ok(Value::Object(params)) => Ok(params),
         _ => Err(InvalidParams),

@@ -1410,6 +1410,52 @@ consequential choice about whether to follow the spec or the quirk.
     hook. `takeContentScreenshot` needs a pixel readback from the painter,
     which does not exist.
 
+- **`scrollIntoView` UI method (2026-10-10): the CSSOM-View algorithm with
+  `container: "nearest"`, on every element.** User ruling 2026-10-10: Lynx's
+  method is the standard `scrollIntoView` of the CSSOM-View editor's draft
+  (§"scroll an element into view", §"determine the scroll-into-view
+  position") called with `container: "nearest"`, not an algorithm of its
+  own. `dom::Document::scroll_into_view`
+  (`crates/dom/src/scroll/into_view.rs:188`) is the algorithm, and the base
+  method (`crates/bobcat-core/src/main/tree/base_methods.rs:84`) reads the
+  params into its options. References: iOS `LynxUI.m:1549-1615` and
+  `scroll_view/LynxUIScroller.m:1027-1065`, Android `LynxBaseUI.java:1055-1119`
+  and `scroll/UIScrollView.java:762-810`, Harmony `ui_scroll.cc:157-200`,
+  web-core `XView.ts:22-37` and `ScrollView/ScrollIntoView.ts` (all under the
+  paths the base method's documentation gives). Where it leaves a reference:
+  - *`nearest` scrolls the least distance that shows the element*, as the
+    draft does, on both axes. The natives do nothing at all for `nearest` on
+    their scroller's scrolling axis (iOS `LynxUIScroller.m:1033-1035,1049-1051`,
+    Android `UIScrollView.java:771-773,791-793`, Harmony
+    `ui_scroll.cc:166-168,182-184`); web-core's handler has no `nearest`
+    case and so aligns the start edge (`ScrollIntoView.ts:46-70`).
+  - *Both axes of the nearest scroll container are placed.* The natives and
+    web-core position the scroller's scrolling axis alone and write 0 to the
+    other (iOS `LynxUIScroller.m:1047,1063`, Android `UIScrollView.java:789,808`,
+    web-core's `scrollTo({left, top})` with the unscrolled axis 0); here a
+    `scroll-view`'s cross axis, a scroll container only script moves
+    (`overflow: hidden`), is placed by `inline` (or `block`) like any
+    scrolling box, and under the default `inline: "nearest"` it moves only
+    when the element sticks out across it.
+  - *The element's `scroll-margin` and the scroller's `scroll-padding`
+    apply*, and positions align with the snapport; the references align the
+    element's frame with the scroller's frame. Android's `end` also adds a
+    `bottomInset` (`UIScrollView.java:778`), which has no counterpart.
+  - *No scroll container above the element is code 8*, `OPERATION_ERROR`, as
+    iOS (`LynxUI.m:1603-1611`) and Android (`LynxBaseUI.java:1110-1115`)
+    answer. web-core's `__scrollIntoView` event reaches no handler and its
+    call answers 0. An element with no box (`display: none`, or under one) is
+    code 8 too: the draft scrolls nothing for it.
+  - *A `scrollIntoViewOptions` value that is not an object is code 4*, like
+    a missing one; iOS sends it `allKeys` regardless and Android's `HashMap`
+    cast throws.
+  - *A smooth scroll answers at once*, as the `scroll-view` methods do; the
+    natives' `setContentOffset:animated:` / `setScrollTo` return before the
+    animation too, and answer success on return.
+  - *`block`/`inline` values other than the four keywords read as
+    `"start"`*, as the natives' string compares and web-core's `switch`
+    default leave them; a non-string value too.
+
 - **`x-swiper` (2026-10-06): a component with web-core's shadow `#content`
   scroll container and a dot strip, and its layouts are UA rules.** `crates/bobcat-core/src/main/tree/swiper.rs` translates
   `x-swiper.css` and its template (`htmlTemplates.ts:225-275`) onto web-core's

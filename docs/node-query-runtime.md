@@ -59,8 +59,20 @@ queue without clearing it. Selection captures its root at select time.
   (native's code; web-core answers 4 for any method that throws, a ruled
   deviation recorded in `docs/tracking/deviations.md`), and changes nothing;
   `params` is not read.
-  Every other method name, and each of these on any other element, fails with
-  code 3, `METHOD_NOT_FOUND` — web-core's code, where native answers its
+  `scrollIntoView({scrollIntoViewOptions: {behavior?, block?, inline?}})`
+  exists on every element and succeeds with no data once the scroll is
+  requested: it is CSSOM-View's `scrollIntoView` with `container: "nearest"`
+  (`Document::scroll_into_view`, `crates/dom/src/scroll/into_view.rs:188`,
+  run by `crates/bobcat-core/src/main/tree/base_methods.rs:84`), so only the
+  nearest scroll container above the element moves, to the position
+  `block` (default `"start"`) and `inline` (default `"nearest"`) choose
+  against its `scroll-padding` and the element's `scroll-margin`, smoothly
+  when `behavior` is `"smooth"`. A missing `scrollIntoViewOptions` object
+  fails with code 4; an element with no box or no scroll container above it
+  fails with code 8, `OPERATION_ERROR`, native's answer (web-core answers 0,
+  recorded in `docs/tracking/deviations.md`).
+  Every other method name, and each kind's method on any other element,
+  fails with code 3, `METHOD_NOT_FOUND` — web-core's code, where native answers its
   generic 1. A failure without a fail callback is ignored by the production
   facade. `params` crosses to the main thread as JSON text.
 - The measurement runs no flush. It reports the last completed pass, so a BTS

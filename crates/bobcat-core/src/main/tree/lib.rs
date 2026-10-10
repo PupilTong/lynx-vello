@@ -22,7 +22,10 @@
 //! the `dialog` in it, and its `showoverlay` and `dismissoverlay` events
 //! ([`overlay`]). A component's UI methods are its
 //! [`dom::CustomElement::invoke`], which the runtime's `callElementMethod`
-//! reaches through [`dom::Document::invoke_element_method`].
+//! reaches through [`dom::Document::invoke_element_method`]. The methods
+//! every element has whatever its kind, which `callElementMethod` runs when
+//! the kind has no method of the name, are [`base_methods`]' (only
+//! `scrollIntoView` today).
 //! `scroll_coordinator` needs no component, and has no UI method: its ten tags
 //! are UA rules over anchor-sized absolute boxes, a sticky toolbar and
 //! `scroll-capture-y`. `swiper`, `refresh_view` and `overlay` have no UI
@@ -30,6 +33,7 @@
 //!
 //! [`NodeId`]: dom::NodeId
 
+mod base_methods;
 mod blur_view;
 pub(crate) mod dialog;
 mod image;
@@ -54,6 +58,7 @@ use std::rc::Rc;
 
 use dom::{Document, ImageOutcome, NodeId, StylesheetOrigin};
 
+pub(crate) use self::base_methods::invoke_base_method;
 pub use self::ua_sheet::PageConfig;
 pub(crate) use crate::view::Viewport;
 
