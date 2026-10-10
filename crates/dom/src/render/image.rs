@@ -118,21 +118,19 @@ use crate::vello::Scene;
 /// Built by [`VectorImage::from_document`] on the document thread from the
 /// [`VectorDocument`] the converter parsed (`render/svg`), which is what a
 /// host turns a document's bytes into with [`ImageEvent::parse_document`]
-/// and reports through [`ImageReports::parsed_document`]. It carries
-/// the encoded scene and two sizes, both computed at the parse from the
-/// root element's `width`, `height` and `viewBox`:
-///
-/// - the **natural size**, in whole CSS px, which layout reads exactly as it reads a bitmap's
-///   intrinsic size (CSS Images 3 default sizing; see `docs/svg-lynx-component-design.md`);
-/// - the **viewport**, the rectangle in scene units that a draw maps onto its destination
-///   rectangle: the `viewBox` size when the root has one, else the natural size. How a viewport of
-///   another ratio maps onto the destination is the root's [`AspectRatio`].
+/// and reports through [`ImageReports::parsed_document`]. It carries what a
+/// draw needs: the encoded scene and the **viewport**, the rectangle in
+/// scene units that a draw maps onto its destination rectangle (the
+/// `viewBox` size when the root has one, else the natural size), computed
+/// at the parse. How a viewport of another ratio maps onto the destination
+/// is the root's [`AspectRatio`]. The natural size layout reads (CSS Images
+/// 3 default sizing; see `docs/svg-lynx-component-design.md`) is the
+/// registry entry's, as a bitmap's intrinsic size is.
 ///
 /// Cloning shares the scene.
 #[derive(Clone)]
 pub(crate) struct VectorImage {
     scene: Arc<Scene>,
-    natural: (u32, u32),
     viewport: (f32, f32),
     aspect: AspectRatio,
     key: u64,
@@ -194,7 +192,6 @@ impl VectorImage {
     ) -> Self {
         Self {
             scene: Arc::new(svg::encode(document, context)),
-            natural: document.natural,
             viewport: document.viewport,
             aspect: document.aspect,
             key: NEXT_VECTOR_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -224,12 +221,6 @@ impl VectorImage {
         self.aspect
     }
 
-    /// The size layout is told, in whole CSS px.
-    #[must_use]
-    pub(crate) fn natural_size(&self) -> (u32, u32) {
-        self.natural
-    }
-
     /// The rectangle in scene units a draw maps onto its destination.
     #[must_use]
     pub(crate) fn viewport(&self) -> (f32, f32) {
@@ -247,7 +238,6 @@ impl std::fmt::Debug for VectorImage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("VectorImage")
-            .field("natural", &self.natural)
             .field("viewport", &self.viewport)
             .field("aspect", &self.aspect)
             .field("key", &self.key)
@@ -631,22 +621,6 @@ fn parse_document(bytes: &[u8], kind: DocumentKind) -> Option<VectorDocument> {
     }
 }
 
-/// The state a parsed vector image settles its source in. A zero axis is a
-/// failure, as it is for a bitmap; the converter never produces one, so the
-/// check guards [`VectorImage::from_document`]'s callers.
-fn vector_state(image: VectorImage) -> ImageState {
-    let (width, height) = image.natural_size();
-    if width > 0 && height > 0 {
-        ImageState::Ready {
-            width,
-            height,
-            kind: ImageKind::Vector(image),
-        }
-    } else {
-        ImageState::Failed
-    }
-}
-
 /// What the document knows about one image. Never any pixels.
 ///
 /// `Pending` is the only state with outgoing edges; both others are sinks,
@@ -1018,8 +992,15 @@ impl ImageRegistry {
                     kind: ImageKind::Raster,
                 }
             }
+            // The converter rounds a natural size to at least one px on each
+            // axis, so a parsed document is never refused for a zero axis.
             ImageEvent::ParsedDocument { document, .. } => {
-                vector_state(VectorImage::from_document(document, context))
+                let (width, height) = document.natural;
+                ImageState::Ready {
+                    width,
+                    height,
+                    kind: ImageKind::Vector(VectorImage::from_document(document, context)),
+                }
             }
             ImageEvent::Loaded { .. } | ImageEvent::Failed { .. } => ImageState::Failed,
         };

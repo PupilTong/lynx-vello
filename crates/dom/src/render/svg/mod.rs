@@ -150,7 +150,8 @@ use crate::vello::peniko::{Brush, Fill};
 #[derive(Clone, Debug)]
 pub struct VectorDocument {
     /// The size layout is told, in whole CSS px (CSS Images 3 default
-    /// sizing over the root's `width`, `height` and `viewBox`).
+    /// sizing over the root's `width`, `height` and `viewBox`), at least one
+    /// on each axis.
     pub(crate) natural: (u32, u32),
     /// The rectangle the items are drawn in: the `viewBox` size when the
     /// root has one, else the natural size.
