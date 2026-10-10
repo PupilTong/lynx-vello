@@ -5378,6 +5378,7 @@ fn an_mts_realm_declares_these_host_members() {
         "createPage",
         "createWorker",
         "dropElement",
+        "exposureEvents",
         "fetchResource",
         "flushElementTree",
         "getAttribute",
@@ -5408,6 +5409,7 @@ fn an_mts_realm_declares_these_host_members() {
         "settleFuture",
         "supportsStyleProperty",
         "swapElement",
+        "switchExposure",
         "tagName",
         "takeFuture",
         "terminateWorker",
@@ -5441,6 +5443,300 @@ fn an_mts_realm_declares_these_host_members() {
             "the realm after the import",
         )
         .unwrap();
+}
+
+/// The card's one element, the page element's first child: the element
+/// every exposure test below registers.
+fn first_card_element(elements: &DocumentProbe) -> dom::NodeId {
+    elements
+        .tree()
+        .document_element()
+        .first_child()
+        .expect("the card rendered its element")
+        .id()
+}
+
+/// The observer the realm's exposure registration of `node` owns, if it is
+/// registered and detection runs.
+fn exposure_observer(
+    elements: &DocumentProbe,
+    node: dom::NodeId,
+) -> Option<dom::IntersectionObserverId> {
+    elements.slot.borrow().exposure.observer_of(node)
+}
+
+/// `rpx` in an exposure margin is the viewport width over 750 — stylo's
+/// rule — read from the document's viewport when the element registers: a
+/// `20rpx` top screen margin on this realm's 393px-wide viewport is
+/// `20 × 393 / 750` px of root margin. Written through `__SetAttribute`,
+/// which reaches the registration through the host's `setAttribute`.
+#[test]
+fn an_rpx_exposure_margin_resolves_against_the_viewport_width() {
+    let (mut js, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        globalThis.renderPage = function () {
+          const view = __CreateView(0);
+          __AppendElement(__CreatePage('card', 0), view);
+          __SetAttribute(view, 'exposure-screen-margin-top', '20rpx');
+          __SetAttribute(view, 'exposure-id', 'card');
+          globalThis.view = view;
+        };
+        ",
+            "app:///exposure-rpx.js",
+        )
+        .expect("main-thread script");
+    let view = first_card_element(&elements);
+    let observer =
+        exposure_observer(&elements, view).expect("an `exposure-id` registers the element");
+    assert_eq!(
+        elements
+            .tree()
+            .intersection_observer(observer)
+            .root_margin()
+            .top,
+        dom::MarginLength::Px(20.0 * 393.0 / 750.0),
+    );
+
+    // Removing the id through `__SetAttribute`'s `null` is the host's
+    // `removeAttribute`, which lets the registration go.
+    runtime
+        .evaluate_module(
+            &mut js,
+            r"
+        import { __SetAttribute } from 'bobcat:element';
+        __SetAttribute(globalThis.view, 'exposure-id', null);
+        ",
+            "app:///exposure-remove.js",
+            "removing the exposure id",
+        )
+        .expect("removing the attribute");
+    assert_eq!(exposure_observer(&elements, view), None);
+}
+
+/// The two exposure members, from script: `exposureEvents` registers an
+/// element that has no `exposure-id` and lets it go again, `switchExposure`
+/// stops and resumes detection, and each refuses an argument that is not
+/// its shape — a flag is `0` or `1`, as every tree member's is.
+#[test]
+fn the_exposure_members_register_listeners_and_switch_detection() {
+    let (mut js, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        globalThis.renderPage = function () {
+          globalThis.view = __CreateView(0);
+          __AppendElement(__CreatePage('card', 0), globalThis.view);
+        };
+        ",
+            "app:///exposure-members.js",
+        )
+        .expect("main-thread script");
+    let view = first_card_element(&elements);
+    let mut run = |source: &str| {
+        runtime
+            .evaluate_module(
+                &mut js,
+                &format!(
+                    r"
+            import {{ exposureEvents, switchExposure }} from 'bobcat-internal:host';
+            import {{ __GetElementUniqueID }} from 'bobcat:element';
+            const view = __GetElementUniqueID(globalThis.view);
+            {source}
+            "
+                ),
+                "app:///exposure-call.js",
+                "calling an exposure member",
+            )
+            .expect("the exposure member call");
+    };
+    assert_eq!(exposure_observer(&elements, view), None);
+
+    run("exposureEvents(view, 1);");
+    let first = exposure_observer(&elements, view).expect("a listener registers the element");
+    run("switchExposure(0, 1);");
+    assert_eq!(
+        exposure_observer(&elements, view),
+        None,
+        "stopping drops every observer"
+    );
+    run("switchExposure(1, 1);");
+    let resumed = exposure_observer(&elements, view).expect("resuming observes it again");
+    assert_ne!(resumed, first, "with an observer of its own");
+    run("exposureEvents(view, 0);");
+    assert_eq!(exposure_observer(&elements, view), None);
+
+    run(r"
+        for (const [call, expected] of [
+          [() => exposureEvents(view, true), 'exposureEvents expects 0 or 1 for argument 1'],
+          [() => switchExposure(1, 2), 'switchExposure expects 0 or 1 for argument 1'],
+          [() => exposureEvents(987654321, 1), 'exposureEvents'],
+        ]) {
+          let thrown;
+          try { call(); } catch (error) { thrown = String(error?.message ?? error); }
+          if (thrown === undefined || !thrown.includes(expected)) {
+            throw Error(`expected a throw naming ${expected}, got ${thrown}`);
+          }
+        }
+    ");
+}
+
+/// The realm registers an element for exposure out of its own handler maps:
+/// the first `uiappear`/`uidisappear` handler `__AddEvent` files calls
+/// `exposureEvents(node, 1)`, which arms an observer for an element that
+/// has no `exposure-id`; a second handler, of the other name or the other
+/// kind, calls nothing — the observer is the one the first call armed, where
+/// a second call would have re-armed a fresh one — and web-core's disable
+/// mark, a `null` handler, taking the last one away calls
+/// `exposureEvents(node, 0)`, which lets the registration go.
+#[test]
+fn an_add_event_for_uiappear_arms_and_disarms_exposure() {
+    let (mut js, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        globalThis.renderPage = function () {
+          globalThis.view = __CreateView(0);
+          __AppendElement(__CreatePage('card', 0), globalThis.view);
+        };
+        ",
+            "app:///exposure-add-event.js",
+        )
+        .expect("main-thread script");
+    let view = first_card_element(&elements);
+    let mut run = |source: &str| {
+        runtime
+            .evaluate_module(
+                &mut js,
+                &format!(
+                    r"
+            import {{ __AddEvent }} from 'bobcat:element';
+            const view = globalThis.view;
+            {source}
+            "
+                ),
+                "app:///exposure-add-event-call.js",
+                "filing an exposure handler",
+            )
+            .expect("the handler call");
+    };
+    assert_eq!(exposure_observer(&elements, view), None);
+
+    run("__AddEvent(view, 'bindEvent', 'uiappear', '3:0:appear');");
+    let armed =
+        exposure_observer(&elements, view).expect("a `uiappear` handler registers the element");
+    run(r"
+        __AddEvent(view, 'bindEvent', 'uidisappear', '3:0:disappear');
+        __AddEvent(view, 'bindEvent', 'uiappear', { type: 'worklet', value: {} });
+        __AddEvent(view, 'bindEvent', 'uiappear', null);
+    ");
+    assert_eq!(
+        exposure_observer(&elements, view),
+        Some(armed),
+        "neither a second handler nor removing one of two is an edge",
+    );
+    run("__AddEvent(view, 'bindEvent', 'uidisappear', undefined);");
+    assert_eq!(
+        exposure_observer(&elements, view),
+        None,
+        "the last handler went, and the registration with it",
+    );
+
+    // A worklet alone, `main-thread:binduiappear`, registers it as well.
+    run("__AddEvent(view, 'bindEvent', 'uiappear', { type: 'worklet', value: {} });");
+    assert!(exposure_observer(&elements, view).is_some());
+}
+
+/// A `uiappear` reaches an `__AddEventListener` closure through the
+/// intersection delivery, non-bubbling, with web-core's detail: the target's
+/// unique id, and its `exposure-id` and `exposure-scene` under both of
+/// web-core's spellings. The closure is itself what registers the element,
+/// as any registration form does. The element carries an `exposure-id` too,
+/// so the same delivery sends the `exposure` record list, which `bobcat:runtime`
+/// now takes — the delivery reports no failure.
+#[test]
+fn a_uiappear_listener_hears_web_cores_exposure_detail() {
+    let (mut js, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const view = __CreateView(0);
+          __SetInlineStyles(view, 'width:100px;height:100px');
+          __AppendElement(page, view);
+          __SetAttribute(view, 'exposure-id', 'card-7');
+          __SetAttribute(view, 'exposure-scene', 'feed');
+          globalThis.heard = [];
+          for (const element of [view, page]) {
+            __AddEventListener(element, 'uiappear', (event) => {
+              heard.push([event.type, __GetElementUniqueID(element), event.detail]);
+            }, {});
+          }
+          globalThis.view = view;
+        };
+        ",
+            "app:///exposure-detail.js",
+        )
+        .expect("main-thread script");
+    let view = first_card_element(&elements);
+    assert!(exposure_observer(&elements, view).is_some());
+
+    assert!(
+        runtime.update_intersection_observations(),
+        "the first update after an observe queues the element",
+    );
+    let failures = runtime.notify_intersection_observers(&mut js);
+    assert!(
+        failures.is_empty(),
+        "{:?}",
+        failures
+            .into_iter()
+            .map(|failure| failure.into_script_error().message)
+            .collect::<Vec<_>>()
+    );
+    runtime
+        .evaluate_module(
+            &mut js,
+            r"
+        import { __GetElementUniqueID, __GetPageElement } from 'bobcat:element';
+        const uid = __GetElementUniqueID(globalThis.view);
+        const detail = {
+          'unique-id': uid,
+          exposureID: 'card-7',
+          exposureScene: 'feed',
+          'exposure-id': 'card-7',
+          'exposure-scene': 'feed',
+        };
+        // The page is visible too and registered by its own closure, but it
+        // has no `exposure-id`: it hears its own `uiappear`, never the view's,
+        // because the event does not bubble.
+        const page = __GetElementUniqueID(__GetPageElement());
+        const pageDetail = {
+          'unique-id': page,
+          exposureID: null,
+          exposureScene: '',
+          'exposure-id': null,
+          'exposure-scene': '',
+        };
+        const expected = JSON.stringify([
+          ['uiappear', page, pageDetail],
+          ['uiappear', uid, detail],
+        ]);
+        const sorted = globalThis.heard.slice().sort((a, b) => a[1] - b[1]);
+        if (JSON.stringify(sorted) !== expected) {
+          throw Error(JSON.stringify(globalThis.heard));
+        }
+        ",
+            "app:///exposure-detail-check.js",
+            "reading what the listeners heard",
+        )
+        .expect("the listeners heard web-core's detail");
 }
 
 fn requested_stylesheet(

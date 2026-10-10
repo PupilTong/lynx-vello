@@ -1859,6 +1859,48 @@ consequential choice about whether to follow the spec or the quirk.
   edge-inclusive answer and `rootMargin` percentages resolve by
   height/width as every engine does; both recorded in
   `docs/style-assumptions.md` §32. No script surface exists yet.
+- **Lynx exposure is the primitive's geometry, native's switches and
+  web-core's payload** (user-directed 2026-10-11;
+  `crates/bobcat-core/src/main/exposure.rs`). The references disagree on
+  nearly every point, so the decisions are listed. Rulings: an element is
+  exposed when the W3C observer says it intersects the viewport through
+  every clipping ancestor with a ratio of at least `exposure-area`
+  (web-core's browser observer uses the nearest scroll container *instead
+  of* the viewport; native tests the screen, the root and each scroll
+  ancestor's whole rect separately); `exposure-ui-margin-*` apply only with
+  `enable-exposure-ui-margin` or the `enableExposureUIMargin` page config,
+  as documented and as native does (web-core applies them always, with a
+  TODO); `lynx.stopExposure` stops detection and `resumeExposure` restarts
+  it (web-core's flag is read nowhere else); delivery is one batch per
+  update with no timer (web-core coalesces the global lists on a 50 ms
+  timer, native polls at 50 ms), and `setObserverFrameRate` is accepted and
+  ignored. Defaults taken from web-core: the `uiappear` detail and the
+  global record shapes (`unique-id` is the element's uid; no `sign`,
+  `extra-data`, `dataSet` or `internal-signature`), `exposure` before
+  `disexposure` within a batch (native sends `disexposure` first), identity
+  is the element (two elements with one id+scene are two records), a
+  teardown or an `exposure-id` change emits a `disexposure` record with the
+  old id and no `uidisappear`, `exposure-area` is `parseFloat(value) / 100`,
+  zero-area and edge-adjacent targets count as intersecting, and
+  `visibility: hidden`/`opacity: 0` do not hide (native checks alpha and
+  hidden). Defaults taken from native: global records need a non-empty
+  `exposure-id` (web-core emits records with a null id for listener-only
+  elements), a freed exposed element emits one `disexposure` (web-core
+  emits nothing for a removed node), `rpx` margins resolve (web-core:
+  0), and every registration form arms an element — an
+  `__AddEventListener` closure for `uiappear` included, since native syncs
+  every form into the element's event set (web-core marks from
+  `__AddEvent` alone). One more from web-core: `lynx.stopExposure({})`,
+  an object naming no `sendEvent`, sends the records (`sendEvent ?? true`;
+  native sends nothing for it). Not modelled: `enable-exposure-ui-clip` (every clipping ancestor
+  clips), `%` on a ui margin (native resolves it against the target's own
+  size, which a root margin cannot express: 0), native's iOS flap filter
+  and `enableCheckExposureOptimize`, the other exposure page configs
+  (`enableDisexposureWhenLynxHidden`, `enableExposureWhenLayout`,
+  `enableExposureWhenReload`, `enableDisexposureWhenBackground`,
+  `enableiOSAnimationLayerForExposure`), overlay special-casing (the top
+  layer escapes to the viewport in the primitive already) and the native
+  component registration API (`uniqueID`/`extraData`/`useOptions`).
 - **The rect carries `id` and `dataset`** — native's result bundles both
   (`LynxUI.m`, `platform_event_target_helper.cc`); web-core's carries the
   geometry and the id only, because DOM `getBoundingClientRect()` has neither.

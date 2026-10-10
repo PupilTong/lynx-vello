@@ -45,8 +45,10 @@ mod refresh_view;
 mod scroll_container;
 mod scroll_coordinator;
 mod swiper;
+/// Reached from `main` as well as from the tags here: the exposure tests
+/// build their documents the same way.
 #[cfg(test)]
-mod test_support;
+pub(super) mod test_support;
 mod text;
 mod ua_sheet;
 mod viewpager;

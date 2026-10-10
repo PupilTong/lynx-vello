@@ -10,17 +10,19 @@ use dom::stylo::values::computed::{Display, Overflow};
 use super::{ComponentEvents, LynxDocument, PageConfig, Viewport, new_document};
 
 /// A document on a phone-shaped viewport with the default page config.
-pub(super) fn document() -> LynxDocument {
+pub(in crate::main) fn document() -> LynxDocument {
     with_config(PageConfig::default())
 }
 
-pub(super) fn with_config(config: PageConfig) -> LynxDocument {
+pub(in crate::main) fn with_config(config: PageConfig) -> LynxDocument {
     with_component_events(config).0
 }
 
 /// The same document, plus the queue its components leave the events they
 /// owe script in — what the runtime holds the other end of.
-pub(super) fn with_component_events(config: PageConfig) -> (LynxDocument, ComponentEvents) {
+pub(in crate::main) fn with_component_events(
+    config: PageConfig,
+) -> (LynxDocument, ComponentEvents) {
     let events = ComponentEvents::default();
     (
         new_document(Viewport::new(393.0, 727.0), config, events.clone()),
@@ -29,12 +31,12 @@ pub(super) fn with_component_events(config: PageConfig) -> (LynxDocument, Compon
 }
 
 /// Attaches `tag` under the page, with `style` as its inline style.
-pub(super) fn child(document: &mut LynxDocument, tag: &str, style: &str) -> NodeId {
+pub(in crate::main) fn child(document: &mut LynxDocument, tag: &str, style: &str) -> NodeId {
     let page = document.document_element().id();
     element_under(document, page, tag, style)
 }
 
-pub(super) fn element_under(
+pub(in crate::main) fn element_under(
     document: &mut LynxDocument,
     parent: NodeId,
     tag: &str,
@@ -48,7 +50,7 @@ pub(super) fn element_under(
     element
 }
 
-pub(super) fn style_of(document: &LynxDocument, element: NodeId) -> Arc<ComputedValues> {
+pub(in crate::main) fn style_of(document: &LynxDocument, element: NodeId) -> Arc<ComputedValues> {
     document
         .get(element)
         .expect("a live element")
@@ -56,11 +58,11 @@ pub(super) fn style_of(document: &LynxDocument, element: NodeId) -> Arc<Computed
         .expect("a flushed element has computed style")
 }
 
-pub(super) fn display(document: &LynxDocument, element: NodeId) -> Display {
+pub(in crate::main) fn display(document: &LynxDocument, element: NodeId) -> Display {
     *style_of(document, element).get_display()
 }
 
-pub(super) fn overflow(document: &LynxDocument, element: NodeId) -> (Overflow, Overflow) {
+pub(in crate::main) fn overflow(document: &LynxDocument, element: NodeId) -> (Overflow, Overflow) {
     let style = style_of(document, element);
     (*style.get_overflow_x(), *style.get_overflow_y())
 }

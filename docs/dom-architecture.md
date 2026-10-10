@@ -811,6 +811,11 @@ from every target list, drops queued entries naming it, and turns an
 `drop_intersection_observer`. An unlinked but live target stays observed
 and reports not rendered at the next update.
 
+The first consumer is bobcat-core's Lynx exposure service
+(`crates/bobcat-core/src/main/exposure.rs`): one observer per exposed element,
+with a handler type of its own that records transitions for the delivery
+entry to drain; `dom` holds nothing of it.
+
 ## Scroll, input and event paths
 
 Its `scroll` module owns CSSOM-View scrolling — scrollport/scrolling-area

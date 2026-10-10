@@ -5,7 +5,7 @@
  */
 interface BobcatNative {
   /**
-   * Builds the realm's one document out of the four page switches, in
+   * Builds the realm's one document out of the five page switches, in
    * `PageConfig`'s order, and the view's own resources, which never reach
    * this realm: its metrics, its fonts and its style pool.
    *
@@ -19,6 +19,7 @@ interface BobcatNative {
     defaultOverflowVisible: boolean,
     enableCssSelector: boolean,
     enableJSDataProcessor: boolean,
+    enableExposureUIMargin: boolean,
   ): void;
   /** Marks the permanent page live and returns its `NodeId`. */
   createPage(): number;
@@ -186,6 +187,28 @@ interface BobcatNative {
   /** The reverse: the last registration for that name anywhere went away. */
   listenerNameClosed(eventName: string): void;
   /**
+   * Tells the host whether the element has any registration for `uiappear`
+   * or `uidisappear` — an `__AddEvent` handler of either kind in either slot,
+   * or an `__AddEventListener` closure — each time that answer changes: `1`
+   * when it now has one, `0` when its last went. An element with one is
+   * detected for exposure whether or not it carries an `exposure-id`, and
+   * hears those two events, dispatched by the host's intersection delivery
+   * with the exposure detail kind. Its exposure attributes are read by the
+   * host from the element itself.
+   */
+  exposureEvents(nodeId: number, wants: 0 | 1): void;
+  /**
+   * `lynx.stopExposure({sendEvent})` (`on` `0`) and `lynx.resumeExposure()`
+   * (`on` `1`), as native runs them. Stopping drops every detection; with
+   * `sendEvent` `1` every exposed element is sent one `disexposure` record
+   * and forgotten as exposed, with `0` nothing is sent and the exposed set
+   * is kept. Resuming detects every registered element again, and one that
+   * is visible and not recorded as exposed is exposed again. Stopping a
+   * stopped page and resuming a running one do nothing; `sendEvent` is read
+   * by a stop alone.
+   */
+  switchExposure(on: 0 | 1, sendEvent: 0 | 1): void;
+  /**
    * Arms one timer `delayMilliseconds` from now — repeating until cleared
    * when `repeats` — and returns the id it is armed under. The delay goes
    * through HTML's `long` conversion and nesting clamp here, so any number
@@ -304,6 +327,8 @@ declare module "bobcat-internal:host" {
   export const flushElementTree: BobcatNative["flushElementTree"];
   export const listenerNameOpened: BobcatNative["listenerNameOpened"];
   export const listenerNameClosed: BobcatNative["listenerNameClosed"];
+  export const exposureEvents: BobcatNative["exposureEvents"];
+  export const switchExposure: BobcatNative["switchExposure"];
   export const setTimer: BobcatNative["setTimer"];
   export const clearTimer: BobcatNative["clearTimer"];
   export const initData: BobcatNative["initData"];

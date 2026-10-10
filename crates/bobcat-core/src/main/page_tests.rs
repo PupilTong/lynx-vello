@@ -1145,6 +1145,226 @@ fn an_intersection_hook_that_mutates_gets_its_own_commit_and_no_second_delivery(
     });
 }
 
+/// A page of [`WATCHED_ROWS`] rows, [`WATCHED_ROW_HEIGHT`] px each, in a
+/// [`WATCHED_SCROLLPORT`] px column scroller — the page element's first child
+/// — every row registered for exposure the way the realm registers an
+/// element with a `uiappear` handler: a script listener for `uiappear` and
+/// `uidisappear` on it, and `exposureEvents(row, 1)`. Row `exposed` (when it
+/// is a row's index) also carries `exposure-id="first"`.
+///
+/// Each listener appends `<event>:row<index>` to the page element's
+/// `data-heard`, which [`heard`] reads back. `updatePage({on, sendEvent})`
+/// is `switchExposure(on, sendEvent)`.
+fn exposure_page(exposed: Option<usize>) -> String {
+    let exposed = exposed.map_or_else(|| "-1".to_owned(), |row| row.to_string());
+    format!(
+        r"
+import {{ exposureEvents, switchExposure }} from 'bobcat-internal:host';
+globalThis.renderPage = function () {{
+  const page = __CreatePage('card', 0);
+  __SetInlineStyles(page, 'display:flex;width:200px;height:240px;align-items:flex-start');
+  const scroller = __CreateView(0);
+  __SetInlineStyles(
+    scroller,
+    'display:flex;flex-direction:column;overflow:hidden;width:200px;height:{WATCHED_SCROLLPORT}px',
+  );
+  __AppendElement(page, scroller);
+  const heard = [];
+  for (let index = 0; index < {WATCHED_ROWS}; index++) {{
+    const row = __CreateView(0);
+    __SetInlineStyles(row, 'flex-shrink:0;width:200px;height:{WATCHED_ROW_HEIGHT}px');
+    __AppendElement(scroller, row);
+    if (index === {exposed}) __SetAttribute(row, 'exposure-id', 'first');
+    for (const name of ['uiappear', 'uidisappear']) {{
+      __AddEventListener(row, name, () => {{
+        heard.push(name + ':row' + index);
+        __SetAttribute(page, 'data-heard', heard.join(','));
+      }}, {{}});
+    }}
+    exposureEvents(__GetElementUniqueID(row), 1);
+  }}
+}};
+globalThis.updatePage = function (data) {{
+  switchExposure(data.on, data.sendEvent);
+}};
+"
+    )
+}
+
+/// Everything the rows' listeners have heard, in order.
+async fn heard(page: &Rc<Page>) -> Vec<String> {
+    let (answer, read) = std::sync::mpsc::channel();
+    page.apply(vec![ToMain::Probe(Box::new(move |document| {
+        let heard = document
+            .document_element()
+            .attribute("data-heard")
+            .unwrap_or_default();
+        let _ = answer.send(
+            heard
+                .split(',')
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        );
+    }))])
+    .await;
+    read.try_recv().expect("the probe ran")
+}
+
+/// The page element's first child: [`exposure_page`]'s scroller.
+async fn first_page_child(page: &Rc<Page>) -> dom::NodeId {
+    let (answer, read) = std::sync::mpsc::channel();
+    page.apply(vec![ToMain::Probe(Box::new(move |document| {
+        let _ = answer.send(document.document_element().first_child().map(dom::Node::id));
+    }))])
+    .await;
+    read.try_recv()
+        .expect("the probe ran")
+        .expect("the card rendered its scroller")
+}
+
+/// `switchExposure(on, sendEvent)` through `updatePage`, as one command.
+async fn switch_exposure(page: &Rc<Page>, on: u8, send_event: u8) {
+    page.apply(vec![ToMain::PageUpdate(PageUpdate::Data {
+        data: format!(r#"{{"on":{on},"sendEvent":{send_event}}}"#),
+        processor_name: String::new(),
+        reset: false,
+    })])
+    .await;
+}
+
+/// Exposure is delivered by the intersection delivery entry: the entry whose
+/// epilogue ran the update only records what moved, and the elements'
+/// `uiappear` and `uidisappear` listeners run in the entry after it — one
+/// per batch, whether or not the update's own entry committed anything.
+///
+/// The rows are 40px in a 100px scrollport, so at offset 0 rows 0 to 2 are
+/// visible (row 2 in part) and at 30 row 3 joins them; the area is 0, so any
+/// visible part exposes a row. Every offset posted here is inside the
+/// encode window, so the marker's own entry commits nothing, and the update
+/// still runs against the offset it adopted.
+#[test]
+fn exposure_events_are_delivered_by_an_entry_after_the_update() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(&exposure_page(None)).await;
+        assert_eq!(
+            heard(&owned.page).await,
+            ["uiappear:row0", "uiappear:row1", "uiappear:row2"],
+            "boot's own update reported every visible row, in registration order",
+        );
+        let scroller = first_page_child(&owned.page).await;
+
+        let settled = owned.page.epilogue_count();
+        owned
+            .scroll_to(scroller, dom::Vector2D::new(0.0, 30.0))
+            .await;
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 2,
+            "the marker was one entry and the delivery its update queued was \
+             another",
+        );
+        assert_eq!(
+            heard(&owned.page).await[3..],
+            ["uiappear:row3"],
+            "row 3 appeared; rows 0 to 2 stayed visible and said nothing",
+        );
+
+        // One pixel more moves no row in or out.
+        let settled = owned.page.epilogue_count();
+        owned
+            .scroll_to(scroller, dom::Vector2D::new(0.0, 31.0))
+            .await;
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 1,
+            "an update that moves no exposure posts no delivery",
+        );
+        assert_eq!(heard(&owned.page).await.len(), 4);
+
+        // Back to the top: row 3 leaves.
+        owned
+            .scroll_to(scroller, dom::Vector2D::new(0.0, 0.0))
+            .await;
+        assert_eq!(heard(&owned.page).await[4..], ["uidisappear:row3"]);
+    });
+}
+
+/// `switchExposure` from a script: a stop drops every observer and, for rows
+/// that have no `exposure-id`, owes nothing, so its entry posts nothing; a
+/// resume observes every row again, and the update in the resume's own
+/// epilogue posts the delivery entry that tells each visible row it
+/// appeared, since the stop forgot them as exposed.
+#[test]
+fn a_resumed_exposure_is_delivered_by_an_entry_of_its_own() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(&exposure_page(None)).await;
+        assert_eq!(heard(&owned.page).await.len(), 3);
+
+        let settled = owned.page.epilogue_count();
+        switch_exposure(&owned.page, 0, 1).await;
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 1,
+            "a stop that owes no record posts no delivery",
+        );
+        assert_eq!(heard(&owned.page).await.len(), 3, "and fires no event");
+
+        let settled = owned.page.epilogue_count();
+        switch_exposure(&owned.page, 1, 1).await;
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 2,
+            "the resume was one entry and its delivery another",
+        );
+        assert_eq!(
+            heard(&owned.page).await[3..],
+            ["uiappear:row0", "uiappear:row1", "uiappear:row2"],
+        );
+    });
+}
+
+/// A transition that forms outside any update — here the `disexposure` a
+/// `stopExposure({sendEvent: true})` owes an exposed element with an
+/// `exposure-id` — gets the delivery entry too, although no observer has an
+/// entry queued: the epilogue posts one whenever exposure is owed. What the
+/// realm does with the record lists is not this pin's business; it counts
+/// entries.
+#[test]
+fn a_stop_that_owes_records_posts_a_delivery_entry_of_its_own() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(&exposure_page(Some(0))).await;
+        assert_eq!(heard(&owned.page).await.len(), 3);
+
+        let settled = owned.page.epilogue_count();
+        switch_exposure(&owned.page, 0, 1).await;
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 2,
+            "the stop was one entry and the delivery of its records another",
+        );
+        assert_eq!(
+            heard(&owned.page).await.len(),
+            3,
+            "a stop sends records and fires no element event",
+        );
+
+        let settled = owned.page.epilogue_count();
+        switch_exposure(&owned.page, 0, 1).await;
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 1,
+            "a second stop does nothing",
+        );
+    });
+}
+
 /// The document's offset for `scroller`, and its pending request.
 async fn scroll_state(
     page: &Rc<Page>,

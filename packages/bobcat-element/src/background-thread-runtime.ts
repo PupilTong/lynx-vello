@@ -381,6 +381,32 @@ export const lynx = {
     try { scope.postMessage({bobcat:"runtime", method:"reloadFromJS", data, id}); }
     catch (error) { if (id !== undefined) callbacks.delete(id); throw error; }
   },
+  /**
+   * Exposure is detected on the main thread, where the document is, so these
+   * two are posts to it, which it runs as its own `lynx` members do. A stop
+   * sends a `disexposure` for every exposed element unless `sendEvent` is
+   * false — web-core's `param.sendEvent ?? true`
+   * (`background-apis/createNativeModules.ts:27-29`), behind lynx-core's
+   * shim, which turns an omitted argument into `{sendEvent: true}`
+   * (`lynx-core/src/app/app.ts:402-408`); the main-thread runtime reads its
+   * own `lynx.stopExposure` the same way. Neither waits: what they change
+   * reaches this realm as the `exposure`/`disexposure` global events.
+   */
+  stopExposure(options?: {sendEvent?: boolean}) {
+    const sendEvent = Boolean((options as {sendEvent?: unknown} | null | undefined)?.sendEvent ?? true);
+    scope.postMessage({bobcat:"runtime", method:"switchExposure", on:false, sendEvent});
+  },
+  resumeExposure() {
+    scope.postMessage({bobcat:"runtime", method:"switchExposure", on:true, sendEvent:true});
+  },
+  /**
+   * Accepted and ignored, posting nothing: the main thread detects exposure
+   * in the intersection update each rendering step runs, not on a polling
+   * timer whose rate could be set.
+   */
+  setObserverFrameRate(_options?: unknown) {
+    return undefined;
+  },
   SystemInfo,
   __initData: {} as unknown,
   __globalProps: {} as unknown,

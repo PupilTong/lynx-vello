@@ -25,6 +25,7 @@
 //! and a finished one be joined while a sibling view's job is parked on a
 //! synchronous stylesheet.
 
+mod exposure;
 mod page;
 pub(crate) mod quickjs;
 pub(crate) mod record;
