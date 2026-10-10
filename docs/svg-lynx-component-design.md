@@ -3,7 +3,12 @@
 Status: implemented (2026-10-09; phase 1 contracts C and D, phase 2
 contracts A, B and E). What the implementation decided where this document
 was silent or wrong is recorded under
-[Decisions during implementation](#decisions-during-implementation). This
+[Decisions during implementation](#decisions-during-implementation).
+[Revision 4.1](#revision-41-2026-10-10-the-fetcher-parses) (2026-10-10)
+moves the parse out of the engine into the resource fetcher; where the
+contracts below say the engine parses (`loaded_document`,
+`take_pending_documents`, the `parse_document` task, the wasm32 inline
+parse), revision 4.1 is what is in force. This
 document supersedes `docs/svg-vector-images-design.md`, whose revision 3 (the
 standard inline `<svg>` element whose DOM subtree is serialised and parsed by
 `usvg`) is withdrawn. Rulings in this document were made by the project owner
@@ -42,29 +47,33 @@ with 346 nodes, 56 paths and 16 gradients: serialise 114 µs, `roxmltree`
 
 ## Architecture
 
+As of [revision 4.1](#revision-41-2026-10-10-the-fetcher-parses):
+
 ```mermaid
 flowchart LR
     subgraph main["document thread (bobcat-main)"]
-        comp["bobcat-core tree/svg.rs\n<svg src|content>"] -->|src| bind["Document::set_image_source"]
+        comp["bobcat-core tree/svg.rs\n<svg src|content>"] -->|src| bind["Document::set_image_source\n→ take_wanted_images"]
         comp -->|content| doc["Document::set_image_document\nsynthetic source svg-content:<hash>"]
-        doc --> pend["take_pending_documents()"]
+        doc --> req["take_document_requests()\n→ ViewNotice::RequestDocuments"]
         apply["Document::apply_image_events\nParsedDocument → shape text (TextContext)\n→ encode Scene → VectorImage"] --> reg["ImageRegistry Ready{Vector}"]
         reg --> paint["paint/background.rs\nVectorDraw (scene, dest, aspect)"]
         paint --> frame["CommittedFrame\nPresentation.vector_draws + ComposeOp::Vector"]
     end
-    subgraph pool["blocking pool (spawn_blocking) / wasm32 inline"]
-        parse["dom::svg::parse(bytes) → VectorDocument\n(geometry resolved, text unshaped)"]
+    subgraph fetcher["host: bobcat-resources (decode pool / Render Worker task)"]
+        fetch["request_image: fetch + sniff Svg"] --> parse["decode permit →\nImageEvent::parse_document → VectorDocument\n(geometry resolved, text unshaped)"]
+        docreq["request_document(source, bytes, kind)"] --> parse
+        parse --> entry["Entry::Vector { document }"]
     end
-    pend --> parse
-    host["host: loaded_document(bytes, Svg)"] --> parse
-    parse -->|ImageEvent::ParsedDocument| apply
+    bind --> fetch
+    req --> docreq
+    entry -->|"ImageReports::parsed_document\n(ToMain::ImageEvents)"| apply
     subgraph painter["painter thread"]
         bank["VectorTextures\n(key, w, h) → texture, LRU budget"] --> replay["compose replay\nComposeOp::Vector → image quad"]
         frame --> bank
     end
 
     classDef focus stroke:#d73a49,stroke-width:4px
-    class parse,apply,bank focus
+    class parse,docreq,req,apply focus
 ```
 
 ## Contracts
@@ -139,7 +148,7 @@ Per `<svg content>`: the `content` string once in the DOM attribute, one `Scene`
 - A texture is per device size: a `transform: scale()` animation on an ancestor samples the texture, so an item scaling from 0.8 to 1 (the swiper's `coverflow`) draws a 0.8-size raster upscaled during the animation. Native does the same. Follow-up if it shows: bake at the largest size an exported scale curve reaches.
 - Text shaped before a later `@font-face` arrives keeps its fallback glyphs.
 - `image` inside an SVG draws nothing; `mask`, `filter`, `pattern`, `marker` are not supported; `textPath`, per-character `x`/`y` lists, `dominant-baseline`, bidi reordering within a chunk are out.
-- A `content` string is parsed once per distinct markup per document, never evicted while an element is bound to it.
+- A `content` string is parsed once per distinct markup per document, never evicted while an element is bound to it; since revision 4.1 the fetcher also keeps the parsed document for its own life (see there).
 - Blend modes inside an SVG need CSS, which is not read: `mix-blend-mode` and `isolation` have no presentation attribute, so every layer the converter opens is `Normal`, and `opens_blend` (kept for the raster cache's interface) is always `false`.
 
 ## Decisions during implementation
@@ -184,3 +193,139 @@ Per `<svg content>`: the `content` string once in the DOM attribute, one `Scene`
 
 - Phase 1 shipped `<style>` rules (matched with `simplecss`, specificity order, `!important`) and the `style` attribute as property sources. The ruling removed both: `render/svg/style.rs`'s `declarations` reads the presentation attributes named in `PROPERTIES` and nothing else, the converter carries no sheet, a `style` element is not rendered and its text is never read, and `simplecss` left the dependency tree.
 - `mix-blend-mode` and `isolation` are not read at all: SVG 2 gives them no presentation attribute, browsers accept them only through CSS, and `usvg` refused them as attributes for that reason, so with CSS not read they are unreachable. Every layer the converter opens is `Normal`; the item model's `PushLayer { blend }`, `PushClip { isolate }` and `opens_blend` stay for the raster cache's interface and always compute `false` (gap under [Known costs](#known-costs-and-follow-ups)).
+
+## Revision 4.1 (2026-10-10): the fetcher parses
+
+**Ruling (owner, 2026-10-10).** SVG documents are parsed by the resource
+fetcher (`bobcat-resources`), on its decode pool, exactly where bitmaps are
+decoded; the engine no longer parses on its own blocking pool. This reverses
+revision 2 of 2026-10-08, "the host never names an engine type": the host
+protocol may carry the engine's `VectorDocument`, and the bytes of an
+`<svg content>` are handed to the host through the request path. Everything
+below that is not the ruling is the implementer's decision.
+
+### The protocol
+
+- **Reports.** `ImageReports::parsed_document(source, document:
+  Arc<VectorDocument>)` posts `ImageEvent::ParsedDocument { source, document:
+  Arc<VectorDocument> }`. `ImageReports::loaded_document` and
+  `ImageEvent::LoadedDocument` are gone. A document that does not parse is
+  reported with the existing `failed(source)`. The document travels in an
+  `Arc` rather than by value: the fetcher keeps it to answer repeated
+  requests, and a re-report is then a count bump, not a deep copy of the
+  command list (`VectorDocument` is `Clone`, which would copy every path).
+- **The parser.** `ImageEvent::parse_document(source, bytes, kind) ->
+  ImageEvent` stays the one public parser entry. The host calls it on its
+  decode thread and takes the document out of the `ParsedDocument` it
+  returns, or reports `failed` for `Failed`. A thinner
+  `parse(bytes, kind) -> VectorDocument` re-exported through `bobcat-core`
+  was the alternative; keeping the existing function adds no public item.
+  `DocumentKind` is what the host passes it. `VectorDocument` stays `pub`
+  with no public member and `Send + Sync`, and `bobcat-core` now re-exports
+  it.
+- **Document requests.** `Document::set_image_document` still files the
+  synthetic `svg-content:<hash>` source `Pending` with its binder count, and
+  identical markup still binds without a new request. Instead of an
+  engine-side pending list, the bytes are queued as a document request:
+  `Document::take_document_requests() -> Vec<dom::DocumentRequest>`
+  (`(Arc<str>, Bytes, DocumentKind)`; formerly `take_pending_documents` and
+  `PendingDocument`). The page's epilogue drains it before its commit
+  (`MainThreadRuntime::request_documents`), as one
+  `ViewNotice::RequestDocuments` beside `RequestImages`, and
+  `LynxView::pump` hands each to the new
+  `ResourceFetcher::request_document(source, bytes, kind)` after
+  `service_images` and the image requests; a failed view hands over
+  nothing. The trait method defaults to doing nothing, so an `<svg content>`
+  on a host without document support stays pending and draws nothing; the
+  `Rc<T>` impl forwards it.
+- **The document thread never parses.** `Document::apply_pending_documents`
+  is gone, and `Document::apply_image_events` takes `Loaded`,
+  `ParsedDocument` and `Failed` only. Applying a `ParsedDocument` shapes its
+  text and encodes the scene, as before.
+
+### The fetcher
+
+- **A fetched SVG** (`<image src="x.svg">`, `<svg src>`, CSS `url(x.svg)`) is
+  requested as before. After sniffing `ImageFormat::Svg`, the load job takes
+  a decode permit and runs the parse in a blocking closure of its own, in the
+  decode's place (`images::parse_job`). It completes as
+  `Completion::ParsedDocument` into `Entry::Vector { document, source_bytes
+  }`, or as `Completion::Failed` with a note (`… is not a document the engine
+  can draw`) into `Entry::Failed`. A parse that panics is the load's failure,
+  as a decode's is.
+- **A document request** (`ViewResources::request_document`,
+  `images::request_document`) answers a known source from its entry:
+  `parsed_document` with the kept document, `failed`, or a place among the
+  waiters of a parse in flight. An unknown source gets a `Loading` entry, as
+  a request for a fetched source does, and a parse job of its own. That job
+  does no resolution, no transport and no preprocessing, and takes the same
+  decode permit.
+- **The entry.** `read` answers `None`, `is_resident` is false and
+  `knows_image` is true, as for the former `Entry::Document`. A repeated
+  request, from the same view or another, re-reports the shared document.
+- **Memory.** `memory_used_bytes` counts each parsed document as the byte
+  length of the source it was parsed from, captured at the parse. This is an
+  approximation: the command list is not measured, and its size is not the
+  markup's.
+
+### What left `bobcat-core`
+
+- The `parse_document` task in `main/page.rs` with its `spawn_blocking`, the
+  `ParseGate` test seam, and the two tests that ended a view during a parse.
+  Also `Page::apply_image_events`, which split `LoadedDocument`s out of a
+  report batch, `MainThreadRuntime::take_pending_documents`,
+  `MainThreadRuntime::apply_pending_documents` and the wasm32 inline path.
+  `after_timers` now calls `request_documents` and then commits, so the
+  requests still go out before the commit.
+- The test-only refused-entry counter on `Lifetime` (`count_refused_entry`,
+  `refused_entry_count`), which only those two tests read.
+- `DetachingRuntime` in `jobs.rs` and its test. #365 introduced it so that a
+  group release would not join a running parse. No other
+  blocking-pool user runs on a `JsThread` runtime: `load_font_face` awaits a
+  source request and spawns nothing blocking. The runtime is therefore
+  dropped plainly again, as it was before #365. A parse in flight at
+  teardown now belongs to the fetcher's executor, whose drop already detaches
+  running blocking closures (`bobcat-resources/src/executor.rs`, Shutdown).
+- `bytes` becomes an unconditional dependency of `bobcat-core`: it is the
+  type of `request_document`'s argument.
+
+### flashbulb
+
+`TestImages` acts as the fetcher. `insert_svg(source, markup)` parses with
+`ImageEvent::parse_document` and reports `parsed_document`, or `failed`.
+`TestImages::request_document` answers a document request the same way and
+re-reports a source it already settled. `pump_images` drains
+`take_document_requests`, the function the runtime drains, answers each
+request through `request_document`, and then applies the store's events.
+`flashbulb` drops the `bytes` dependency revision 3 gave it and gains
+nothing.
+
+### wasm32
+
+The parse leaves the Lynx-main Worker. The Render Worker parses a fetched
+document inside the load's local task, after preprocessing, and an
+`<svg content>` document in a local task of its own. The Lynx-main Worker
+only shapes text and encodes the scene, at apply. Before this revision the
+wasm32 build parsed both inline on the Lynx-main Worker, which blocked it
+for the parse's duration (#365 recorded that cost, and contract B and the
+phase-2 decisions kept it); that cost is gone. The Render Worker, which also
+paints, pays the parse instead. The inline path also drew an
+`<svg content>` in the commit of the entry that wrote it. On every target
+that document now draws in the commit after the host's report, as a URL's
+does.
+
+### Known costs
+
+- An `<svg content>` costs one view turn and one report entry, as a fetched
+  document does: the request leaves in a notice, the fetcher parses and
+  reports, and the report applies in a later entry.
+- The fetcher keeps every document it parsed, synthetic sources included,
+  for its own life, as it keeps every fetched source. The engine forgets a
+  synthetic source with its last binder and asks again when the markup comes
+  back, and the fetcher answers that request from its entry. A page that
+  cycles through many distinct `content` strings therefore grows
+  `memory_used_bytes` by each markup's length. Follow-up if this shows: a
+  protocol call that tells the host the engine forgot a synthetic source.
+- The parse now takes a decode permit, so a large SVG and a large bitmap
+  queue behind each other under a low `decode_parallelism`. Before
+  revision 4.1 a document took no permit.
