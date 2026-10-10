@@ -340,8 +340,8 @@ fn a_document_set_as_markup_draws_as_one_loaded_from_a_url() {
     let source = source_of(&by_markup, node);
     let by_markup = capture(TEST, &mut by_markup, &markup_images);
     assert!(
-        markup_images.was_asked_for(&source),
-        "the markup reached the host as a document request"
+        !markup_images.was_asked_for(&source),
+        "the markup reached the host as a document request, never as a source to fetch"
     );
 
     assert_eq!(
