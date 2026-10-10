@@ -1678,12 +1678,26 @@ function invokeUIMethod(handle: Handle, method: string, params: unknown): Invoke
  *
  * The host passes those fields through unread (`AGENTS.md`, "JavaScript
  * data ownership"), so the object a caller receives is built here, one arm
- * per method name. No method returns data yet: the first one that does adds
- * its arm and builds its object from its fields. A method without an arm
- * gets the fields themselves.
+ * per method name, each field a number in CSS px. The two that answer data
+ * are a `scroll-view`'s:
+ *
+ * - `scrollBy`: `{consumedX, consumedY, unconsumedX, unconsumedY}`, what the
+ *   scrolling axis moved and what neither axis did.
+ * - `getScrollInfo`: `{scrollX, scrollY, scrollRange, maxScrollOffset}`, the
+ *   offset and the scrolling axis's maximum offset, under both names.
+ *
+ * A method without an arm gets the fields themselves.
  */
 function decodeMethodData(method: string, fields: string[]): unknown {
   switch (method) {
+    case "scrollBy": {
+      const [consumedX, consumedY, unconsumedX, unconsumedY] = fields.map(Number);
+      return { consumedX, consumedY, unconsumedX, unconsumedY };
+    }
+    case "getScrollInfo": {
+      const [scrollX, scrollY, scrollRange, maxScrollOffset] = fields.map(Number);
+      return { scrollX, scrollY, scrollRange, maxScrollOffset };
+    }
     default:
       return fields;
   }
@@ -1698,8 +1712,8 @@ function decodeMethodData(method: string, fields: string[]): unknown {
  * The callback runs synchronously inside the call, exactly once, as
  * web-core's does: the answer is already in hand when the host returns, and
  * a card that measures and then acts in the same job depends on it. A
- * `selectTab` answers as soon as the scroll is requested, not when a smooth
- * one ends, as web-core's does.
+ * `selectTab` or a `scroll-view`'s `scrollTo` answers as soon as the scroll
+ * is requested, not when a smooth one ends, as web-core's does.
  */
 export function __InvokeUIMethod(
   element: unknown,

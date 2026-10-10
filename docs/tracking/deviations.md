@@ -1094,7 +1094,8 @@ consequential choice about whether to follow the spec or the quirk.
   (`item-snap`/`paging-enabled`), and the threshold-observer parts behind
   `scrolltoupper`/`scrolltolower`. Several of those are shadow-part machinery
   that a UA sheet cannot express alone; they belong with the component work,
-  not with the tag defaults.
+  not with the tag defaults. The tag's component answers three UI methods
+  and nothing else (the `scroll-view` UI methods entry below).
 - **A `list` is that plus virtualized, placed cells — and nothing else yet**
   *(2026-09-21)*. `crates/bobcat-core/src/main/tree/list.rs` carries the same
   axis rules written against `scroll-orientation`, and on top of them
@@ -1337,6 +1338,123 @@ consequential choice about whether to follow the spec or the quirk.
     web-core hides it (`x-viewpager-ng.css:6-14`) — the `list-item` decision
     above. *No `contain: strict` from the fifth page on* (`:66-68`): a browser
     performance shortcut, not a behavior.
+
+- **`scroll-view` UI methods (2026-10-10): `scrollTo`, `scrollBy` and
+  `getScrollInfo` on the scrolling axis; `autoScroll` and
+  `takeContentScreenshot` not built.** `crates/bobcat-core/src/main/tree/scroll_container.rs`
+  answers them in the `scroll-view` component's `CustomElement::invoke`.
+  References: iOS `LynxUIScroller.m:1078-1118,1219-1360`, Android
+  `UIScrollView.java:746-749,922-931,960-1050`, Harmony
+  `ui_scroll.cc:64-155,750-799`, web-core `ScrollView.ts:32-112` (all under
+  the paths the module documentation gives). Where it leaves a reference:
+  - *The other axis keeps its offset.* Every method moves the axis the UA
+    rules scroll (x under `scroll-x` / `scroll-orientation="horizontal"`,
+    else y, iOS's `_enableScrollY`, Harmony's `IsHorizontal()`). Native
+    writes 0 to the cross axis, which never moves there; web-core writes the
+    one value to both axes and lets the browser clamp (`ScrollView.ts:48-53`).
+  - *No right-to-left mirroring* of an indexed x target, which iOS
+    (`LynxUIScroller.m:1282-1284`) and Android (`UIScrollView.java:1028-1032`)
+    apply; web-core has none.
+  - *`scrollTo`'s `offset` units.* A number is CSS px; a string is a number
+    with `px`, `rpx` (viewport width / 750), `ppx` (divided by the device
+    pixel ratio) or no unit; anything else (`"10vw"`, `"abc"`, `""`, `null`,
+    a boolean) is code 4. iOS also reads `rem`, `em`, `vw` and `vh` and reads
+    what it cannot parse as 0 (`lynx/platform/darwin/common/lynx/utils/LynxUnitUtils.m:10-17,110-144`); Android and
+    Harmony read a number only (`UIScrollView.java:1001`, `ui_scroll.cc:92-93`);
+    web-core `parseFloat`s a string and drops its unit (`ScrollView.ts:48-50`).
+  - *`index`.* A non-number is code 4, where Harmony ignores it and scrolls
+    to `offset` (`ui_scroll.cc:89-91`). A fraction truncates toward zero, as
+    every native truncates it. An index outside the element children is
+    code 4 and moves nothing, as all three natives answer
+    (`LynxUIScroller.m:1265-1272`, `UIScrollView.java:1005-1011`,
+    `ui_scroll.cc:81-88`); web-core ignores it (`ScrollView.ts:55-73`). The
+    child's position is its layout location less the scroller's border, 0
+    for a child with no box, which is web-core's `offsetTop` of a
+    `display: none` child; web-core's index 0 scrolls to `offset` alone
+    (`:57-59`).
+  - *An empty scroller takes an offset-only `scrollTo`* (web-core). The
+    natives answer code 4 for any `scrollTo` on a scroller with no children
+    (`LynxUIScroller.m:1258-1261`, `UIScrollView.java:995-999`,
+    `ui_scroll.cc:752-756`); here that holds only when an `index` is given.
+  - *A clamped target succeeds* (iOS `LynxUIScroller.m:1096-1103`, web-core).
+    Android scrolls to the clamped target and answers code 4
+    (`UIScrollView.java:1019-1023,1048-1050`); Harmony answers code 4 and does
+    not scroll, with the content size as its upper bound rather than the
+    range (`ui_scroll.cc:759,773-777`).
+  - *`smooth` is read with JavaScript truthiness* and defaults to `false`
+    (web-core's `smooth ? 'smooth' : 'auto'`; Android's
+    `getBoolean("smooth", false)` and Harmony's `smooth{false}` read a boolean
+    only). *A smooth `scrollTo` answers at once* (web-core); native answers
+    when the animation ends and reports an interrupted one to the earlier
+    callback (`LynxUIScroller.m:1251-1256`, `UIScrollView.java:987-993`).
+  - *`scrollBy` refuses a missing or non-numeric `offset`* with code 4
+    (Android `UIScrollView.java:965-968`, iOS `LynxUIScroller.m:1224-1228`);
+    Harmony reads it as 0 (`ui_scroll.cc:139-142`), and web-core's
+    `HTMLElement.scrollBy` reads no `offset` and moves nothing. The answer's
+    numbers are the natives' (the cross axis consumes nothing and leaves the
+    whole `offset` unconsumed) as `f32` CSS px, where Android and iOS
+    truncate them to integers (`UIScrollView.java:976-979`,
+    `LynxUIScroller.m:1236-1239`). web-core answers no data.
+  - *`getScrollInfo`'s `scrollRange` is the maximum offset*, Android's
+    (`UIScrollView.java:929,1294-1297`) and Harmony's
+    (`ui_scroll.cc:798`) reading, written beside iOS's `maxScrollOffset`
+    under that name too (`LynxUIScroller.m:1323`). iOS's own `scrollRange`,
+    the content size, marked there as a legacy field
+    (`LynxUIScroller.m:1324-1325`), is not followed. Values are `f32`, where
+    Android answers integers (`putInt`). web-core has no `getScrollInfo`
+    (code 3).
+  - *`autoScroll` and `takeContentScreenshot` are code 3.* `autoScroll`
+    needs a scroll request the painter drives at a constant rate until the
+    boundary, with a way to stop it: `dom::scroll::ScrollRequest` carries
+    `Instant | Smooth` to one target only, and a component has no per-frame
+    hook. `takeContentScreenshot` needs a pixel readback from the painter,
+    which does not exist.
+
+- **`scrollIntoView` UI method (2026-10-10): the CSSOM-View algorithm with
+  `container: "nearest"`, on every element.** User ruling 2026-10-10: Lynx's
+  method is the standard `scrollIntoView` of the CSSOM-View editor's draft
+  (§"scroll an element into view", §"determine the scroll-into-view
+  position") called with `container: "nearest"`, not an algorithm of its
+  own. `dom::Document::scroll_into_view`
+  (`crates/dom/src/scroll/into_view.rs:188`) is the algorithm, and the base
+  method (`crates/bobcat-core/src/main/tree/base_methods.rs:84`) reads the
+  params into its options. References: iOS `LynxUI.m:1549-1615` and
+  `scroll_view/LynxUIScroller.m:1027-1065`, Android `LynxBaseUI.java:1055-1119`
+  and `scroll/UIScrollView.java:762-810`, Harmony `ui_scroll.cc:157-200`,
+  web-core `XView.ts:22-37` and `ScrollView/ScrollIntoView.ts` (all under the
+  paths the base method's documentation gives). Where it leaves a reference:
+  - *`nearest` scrolls the least distance that shows the element*, as the
+    draft does, on both axes. The natives do nothing at all for `nearest` on
+    their scroller's scrolling axis (iOS `LynxUIScroller.m:1033-1035,1049-1051`,
+    Android `UIScrollView.java:771-773,791-793`, Harmony
+    `ui_scroll.cc:166-168,182-184`); web-core's handler has no `nearest`
+    case and so aligns the start edge (`ScrollIntoView.ts:46-70`).
+  - *Both axes of the nearest scroll container are placed.* The natives and
+    web-core position the scroller's scrolling axis alone and write 0 to the
+    other (iOS `LynxUIScroller.m:1047,1063`, Android `UIScrollView.java:789,808`,
+    web-core's `scrollTo({left, top})` with the unscrolled axis 0); here a
+    `scroll-view`'s cross axis, a scroll container only script moves
+    (`overflow: hidden`), is placed by `inline` (or `block`) like any
+    scrolling box, and under the default `inline: "nearest"` it moves only
+    when the element sticks out across it.
+  - *The element's `scroll-margin` and the scroller's `scroll-padding`
+    apply*, and positions align with the snapport; the references align the
+    element's frame with the scroller's frame. Android's `end` also adds a
+    `bottomInset` (`UIScrollView.java:778`), which has no counterpart.
+  - *No scroll container above the element is code 8*, `OPERATION_ERROR`, as
+    iOS (`LynxUI.m:1603-1611`) and Android (`LynxBaseUI.java:1110-1115`)
+    answer. web-core's `__scrollIntoView` event reaches no handler and its
+    call answers 0. An element with no box (`display: none`, or under one) is
+    code 8 too: the draft scrolls nothing for it.
+  - *A `scrollIntoViewOptions` value that is not an object is code 4*, like
+    a missing one; iOS sends it `allKeys` regardless and Android's `HashMap`
+    cast throws.
+  - *A smooth scroll answers at once*, as the `scroll-view` methods do; the
+    natives' `setContentOffset:animated:` / `setScrollTo` return before the
+    animation too, and answer success on return.
+  - *`block`/`inline` values other than the four keywords read as
+    `"start"`*, as the natives' string compares and web-core's `switch`
+    default leave them; a non-string value too.
 
 - **`x-swiper` (2026-10-06): a component with web-core's shadow `#content`
   scroll container and a dot strip, and its layouts are UA rules.** `crates/bobcat-core/src/main/tree/swiper.rs` translates

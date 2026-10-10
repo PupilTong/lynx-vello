@@ -424,8 +424,8 @@ pub(crate) type NativeModuleTable = Vec<(String, Vec<String>)>;
 pub(crate) fn encode_table(modules: &NativeModuleTable) -> String {
     let mut record = String::new();
     for (name, methods) in modules {
-        crate::main::runtime::write_record_field(&mut record, name);
-        crate::main::runtime::write_record_field(&mut record, &methods.join(","));
+        crate::main::record::write_record_field(&mut record, name);
+        crate::main::record::write_record_field(&mut record, &methods.join(","));
     }
     record
 }

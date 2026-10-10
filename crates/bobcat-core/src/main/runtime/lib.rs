@@ -45,7 +45,10 @@ use crate::esm::{
     WORKER_CLASS_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
-use crate::main::tree::{ComponentEvent, ComponentEvents, LynxDocument, PageConfig, new_document};
+use crate::main::record::write_record_field;
+use crate::main::tree::{
+    ComponentEvent, ComponentEvents, LynxDocument, PageConfig, invoke_base_method, new_document,
+};
 use crate::realm::policy::context_of;
 use crate::realm::{RealmCore, open_realm, string_argument};
 use crate::script::ScriptError;
@@ -2209,7 +2212,8 @@ fn method_answer(outcome: MethodOutcome) -> HostValue {
 /// `__FlushElementTree` — measuring must not be able to move layout out from
 /// under the job that measures, and a card that wants current numbers says
 /// so. The UI methods that write record what the next commit carries:
-/// `selectTab` a scroll request, a dialog's four an attribute, a state bit
+/// `selectTab`, a `scroll-view`'s `scrollTo` and `scrollBy`, and every
+/// element's `scrollIntoView` a scroll request, a dialog's four an attribute, a state bit
 /// and top-layer membership, and `close`/`requestClose` the events they queue
 /// for an entry of their own. Both still go through [`validate_live_element`],
 /// so a freed element is a script error rather than a zero rect or an empty
@@ -2253,16 +2257,29 @@ fn install_readback_members(
             }
             // Every other name is the element kind's own method first
             // (`dom::CustomElement::invoke`, run by the kind's component in
-            // `tree`). On `NotFound` the shared base set every element has
-            // would answer: the documented UI methods `boundingClientRect`,
-            // `scrollIntoView`, `scrollTo`/`scrollBy` and `focus`/`blur`
-            // (user ruling 2026-10-09). Of those only `boundingClientRect`,
-            // above, is built, so `NotFound` is code 3.
+            // `tree`). The kinds' methods built are a pager's `selectTab`
+            // (`tree::viewpager`), a `scroll-view`'s `scrollTo`, `scrollBy`
+            // and `getScrollInfo` (`tree::scroll_container`), and a dialog's
+            // `show`, `showModal`, `close` and `requestClose`
+            // (`tree::dialog`). On `NotFound` the shared base set every
+            // element has answers (`tree::base_methods`): the documented UI
+            // methods `boundingClientRect`, `scrollIntoView`,
+            // `scrollTo`/`scrollBy` and `focus`/`blur` (user ruling
+            // 2026-10-09), of which `boundingClientRect`, above, and
+            // `scrollIntoView` are built; a name neither answers is code 3.
+            // The kind's method runs inside the `[CEReactions]` scope
+            // `invoke_element_method` opens and the base method outside it,
+            // which needs none: `scrollIntoView` records scroll requests and
+            // queues no custom element reaction.
             let call = MethodCall {
                 name: method,
                 params,
             };
-            Ok(method_answer(document.invoke_element_method(node, call)))
+            let outcome = match document.invoke_element_method(node, call) {
+                MethodOutcome::NotFound => invoke_base_method(document, node, call),
+                outcome => outcome,
+            };
+            Ok(method_answer(outcome))
         },
     )?;
 
@@ -2440,7 +2457,8 @@ fn split_style_record<'a>(
     Ok(declarations)
 }
 
-/// Reads one `<units>:<text>` field, returning it and what follows.
+/// Reads one `<units>:<text>` field, returning it and what follows:
+/// [`write_record_field`]'s inverse.
 fn take_record_field<'a>(function: &str, rest: &'a str) -> Result<(&'a str, &'a str), String> {
     let malformed = || format!("{function} received a malformed style record");
     let separator = rest.find(':').ok_or_else(malformed)?;
@@ -2463,14 +2481,6 @@ fn take_record_field<'a>(function: &str, rest: &'a str) -> Result<(&'a str, &'a 
         return Err(malformed());
     }
     Ok((&body[..end], &body[end..]))
-}
-
-/// Appends one `<units>:<text>` field, [`take_record_field`]'s inverse; the
-/// count is in UTF-16 code units because `String.prototype.slice` consumes it.
-pub(crate) fn write_record_field(record: &mut String, text: &str) {
-    let units: usize = text.chars().map(char::len_utf16).sum();
-    write!(record, "{units}:").expect("writing to a String cannot fail");
-    record.push_str(text);
 }
 
 fn borrow_slot<'a>(

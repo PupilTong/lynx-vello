@@ -501,7 +501,10 @@ Each blocks replicas that could not be written at all.
 - **Text selection.** No selection model anywhere; `text-selection` is inert.
 - **Editable text controls.** No `<input>` or `<textarea>`; 54 catalogued cases
   are specified but unwritable.
-- **`scrollIntoView`** and its CSSOM-View alignment computation.
+- **`scrollIntoView`** and its CSSOM-View alignment computation. *Since
+  2026-10-10 an entry point exists* (`Document::scroll_into_view`,
+  `crates/dom/src/scroll/into_view.rs:188`, and the `scrollIntoView` UI method
+  on every element); the replicas have not been written against it yet.
 
 ### F. Recorded deviations, not gaps
 
@@ -606,12 +609,13 @@ failure mode is easy to reintroduce.
   ignored against the gap, un-ignored when the loader seam closed it above — and
   the `bobcat-source` module doc states that its nine green tests cover the wire
   and lowering only.
-- **`scrollIntoView` genuinely cannot be carried by a test.** There is no entry
-  point in `crates/dom/src/scroll/`, so a test could only re-implement CSSOM-View
-  inside itself and assert nothing about the engine. It stays report-only until
-  an entry point exists; the two `a_text_block_is_a_*_axis_scroll_target_like_a_view`
-  tests pin scroll-target geometry and say explicitly that they do not pin
-  alignment.
+- **`scrollIntoView` could not be carried by a test** when this was written.
+  There was no entry point in `crates/dom/src/scroll/`, so a test could only
+  re-implement CSSOM-View inside itself and assert nothing about the engine.
+  The entry point now exists (`Document::scroll_into_view`, 2026-10-10), and
+  the replicas remain to be written against it; the two
+  `a_text_block_is_a_*_axis_scroll_target_like_a_view` tests pin scroll-target
+  geometry and say explicitly that they do not pin alignment.
 - **Four cases were writable but declined.** #230 implemented
   `__SetDataset`/`__GetDataset`/`__AddDataset` and a BTS `SelectorQuery` whose
   `setNativeProps` is serviced by `__BobcatQueryNodes`, so the four

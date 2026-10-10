@@ -31,10 +31,9 @@
 //! scroll: the runtime's at-rest rule settles it on a snapping container.
 
 use euclid::default::Vector2D;
-use stylo::values::computed::Length;
 
 use super::ScrollBehavior;
-use super::snap::scroll_padding;
+use super::into_view::ScrollLogicalPosition;
 use crate::NodeId;
 use crate::tree::document::Document;
 use crate::visual::PaintOrder;
@@ -45,24 +44,6 @@ use crate::visual::PaintOrder;
 pub(crate) struct InitialTarget {
     pub(crate) chain: u32,
     pub(crate) node: NodeId,
-}
-
-/// The offset `scrollIntoView` chooses on one axis for `inline: nearest`
-/// (CSSOM-View §"scroll an element into view"): unchanged when the area is
-/// already within the visible range or covers all of it, else aligned to
-/// the nearer edge.
-fn nearest_edge(current: f32, area: (f32, f32), port: (f32, f32)) -> f32 {
-    let (area_start, area_end) = area;
-    let (visible_start, visible_end) = (port.0 + current, port.1 + current);
-    if (area_start >= visible_start && area_end <= visible_end)
-        || (area_start <= visible_start && area_end >= visible_end)
-    {
-        current
-    } else if area_start < visible_start {
-        area_start - port.0
-    } else {
-        area_end - port.1
-    }
 }
 
 impl<T> Document<T> {
@@ -93,7 +74,16 @@ impl<T> Document<T> {
                 continue;
             }
             self.set_honoured_initial_target(container, Some(chosen));
-            if let Some(position) = self.scroll_into_view_position(chosen, container) {
+            // `scrollIntoView`'s position with `block: start` and
+            // `inline: nearest` (§3.1.1), in the one container, which is
+            // the target's nearest: no scroll container lies between them.
+            if let Some(position) = self.scroll_into_view_position(
+                chosen,
+                container,
+                ScrollLogicalPosition::Start,
+                ScrollLogicalPosition::Nearest,
+                Vector2D::zero(),
+            ) {
                 self.scroll_to_with(container, position, ScrollBehavior::Instant);
                 requested = true;
             }
@@ -132,41 +122,6 @@ impl<T> Document<T> {
         None
     }
 
-    /// Where `container` scrolls to bring `target` into view with
-    /// `block: start`, `inline: nearest`, or `None` when either has no box.
-    fn scroll_into_view_position(
-        &self,
-        target: NodeId,
-        container: NodeId,
-    ) -> Option<Vector2D<f32>> {
-        let scroll_box = self.scroll_box(container)?;
-        let style = self.get(container)?.layout_computed_style()?;
-        let port = scroll_box.scrollport;
-        let snapport_x = (
-            scroll_padding(style.get_scroll_padding_left(), port.width),
-            port.width - scroll_padding(style.get_scroll_padding_right(), port.width),
-        );
-        let snapport_y = (
-            scroll_padding(style.get_scroll_padding_top(), port.height),
-            port.height - scroll_padding(style.get_scroll_padding_bottom(), port.height),
-        );
-        let rect = self.rect_in_scroll_container(target, container)?;
-        let values = self.get(target)?.layout_computed_style()?;
-        let margin = |length: Length| length.px();
-        let area_x = (
-            rect.min_x() - margin(*values.get_scroll_margin_left()),
-            rect.max_x() + margin(*values.get_scroll_margin_right()),
-        );
-        let area_y = (
-            rect.min_y() - margin(*values.get_scroll_margin_top()),
-            rect.max_y() + margin(*values.get_scroll_margin_bottom()),
-        );
-        Some(Vector2D::new(
-            nearest_edge(scroll_box.offset.x, area_x, snapport_x),
-            area_y.0 - snapport_y.0,
-        ))
-    }
-
     fn honoured_initial_target(&self, container: NodeId) -> Option<NodeId> {
         self.layout_state()
             .initial_targets
@@ -195,31 +150,6 @@ mod tests {
     use super::*;
     use crate::StylesheetOrigin;
     use crate::tree::document::tests::device;
-
-    #[test]
-    fn nearest_edge_leaves_a_visible_area_alone_and_aligns_the_nearer_edge() {
-        assert_eq!(nearest_edge(0.0, (20.0, 80.0), (0.0, 100.0)), 0.0);
-        assert_eq!(
-            nearest_edge(0.0, (-20.0, 180.0), (0.0, 100.0)),
-            0.0,
-            "covers the port"
-        );
-        assert_eq!(
-            nearest_edge(0.0, (300.0, 400.0), (0.0, 100.0)),
-            300.0,
-            "to the right: end"
-        );
-        assert_eq!(
-            nearest_edge(350.0, (300.0, 400.0), (0.0, 100.0)),
-            300.0,
-            "to the left: start"
-        );
-        assert_eq!(
-            nearest_edge(0.0, (300.0, 400.0), (10.0, 90.0)),
-            310.0,
-            "against the snapport"
-        );
-    }
 
     fn paged(page_css: &str, count: usize) -> (Document<()>, NodeId, Vec<NodeId>) {
         let mut document: Document<()> = Document::new(device(), "page", ());
@@ -351,17 +281,17 @@ mod tests {
 
     #[test]
     fn the_inline_axis_aligns_the_nearer_edge_only_when_needed() {
-        let (mut document, scroller, pages) = paged("", 3);
+        let (mut document, scroller, pages) = paged("", 4);
         document.add_stylesheet(
-            ".scroller { flex-direction: row; } .page { width: 150px; }",
+            ".scroller { flex-direction: row; } .page { width: 80px; }",
             StylesheetOrigin::Author,
         );
         document.set_inline_style(pages[2], "scroll-initial-target: nearest");
         document.commit();
         assert_eq!(
             document.scroll_offset(scroller),
-            Vector2D::new(350.0, 0.0),
-            "the third page (300..450) is to the right, so its end edge aligns",
+            Vector2D::new(140.0, 0.0),
+            "the third page (160..240) is to the right, so its end edge aligns",
         );
     }
 }

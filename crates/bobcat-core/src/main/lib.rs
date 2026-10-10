@@ -27,6 +27,7 @@
 
 mod page;
 pub(crate) mod quickjs;
+pub(crate) mod record;
 #[path = "runtime/lib.rs"]
 pub(crate) mod runtime;
 #[path = "tree/lib.rs"]
