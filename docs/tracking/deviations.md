@@ -1728,6 +1728,19 @@ consequential choice about whether to follow the spec or the quirk.
   `relativeTo`, `androidEnableTransformProps` and `iOSEnableAnimationProps`
   are not accepted at all; `boundingClientRect` reads nothing from its
   `params`.
+- **The Intersection Observer primitive includes transforms while
+  `invoke('boundingClientRect')` does not** (user-directed 2026-10-08). The
+  observer is bucket 1 — web-core delegates to the browser's
+  `IntersectionObserver`, whose rects are `getBoundingClientRect()`'s and so
+  transformed — and native's platform observers ignore transforms unless
+  `enableTransformForPositionCalculation` is on. **Decision: follow the
+  browser** for the observer (a 100px target under `translateX(500px)` in a
+  300px viewport is not intersecting) and keep the earlier engine-path
+  decision for `boundingClientRect`, so the two readbacks of one element can
+  differ under a transform. `isIntersecting` is Chromium's clipped,
+  edge-inclusive answer and `rootMargin` percentages resolve by
+  height/width as every engine does; both recorded in
+  `docs/style-assumptions.md` §32. No script surface exists yet.
 - **The rect carries `id` and `dataset`** — native's result bundles both
   (`LynxUI.m`, `platform_event_target_helper.cc`); web-core's carries the
   geometry and the id only, because DOM `getBoundingClientRect()` has neither.

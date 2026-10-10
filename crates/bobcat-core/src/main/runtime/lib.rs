@@ -1410,6 +1410,73 @@ impl MainThreadRuntime {
             .dispatch_content_visibility_changes();
     }
 
+    /// Runs the W3C "update intersection observations" steps
+    /// ([§3.2.10](https://w3c.github.io/IntersectionObserver/#update-intersection-observations-algo))
+    /// over the document's observers, and answers whether any of them has
+    /// entries queued afterwards — the page's cue to post a delivery.
+    ///
+    /// Asked once per entry, after its commit, and nearly always answered at
+    /// once: `dom` runs nothing when there are no observers or nothing went
+    /// stale since the last update that ran — a frame built, an offset
+    /// moved, a target observed. It reads the last completed layout and the
+    /// live scroll offsets and runs no pass, so an entry whose scroll was
+    /// composed inside the encode window, and committed nothing, still
+    /// updates against the offset it adopted.
+    ///
+    /// Every entry it queues is stamped with [`Self::timeline_milliseconds`]:
+    /// the reading the latest `vsync` or frame post handed this side, which
+    /// is the `DOMHighResTimeStamp` that frame's animation-frame callbacks
+    /// were called with and the one an image's `load` is stamped with. That
+    /// is HTML's order — the observations are updated in the same rendering
+    /// step as the callbacks, after them — so the entries' `time` compares
+    /// directly with every other time this side reports, and nothing takes a
+    /// second reading of the clock.
+    pub(crate) fn update_intersection_observations(&mut self) -> bool {
+        let time = self.timeline_milliseconds;
+        self.slot
+            .borrow_mut()
+            .document
+            .as_mut()
+            .is_some_and(|document| document.update_intersection_observations(time))
+    }
+
+    /// Delivers every observer's queued entries to its handler, in creation
+    /// order — "notify intersection observers"
+    /// ([§3.2.5](https://w3c.github.io/IntersectionObserver/#notify-intersection-observers-algo)),
+    /// which `dom` runs whole, call included.
+    ///
+    /// Every observer this runtime creates today belongs to one of the
+    /// engine's own components, a `dom::CustomElement` definition, through a
+    /// [`dom::ElementHandler`]: `dom` calls that element's
+    /// `intersections_changed` hook in its own `[CEReactions]` scope, and
+    /// drops the entries if the element is not a constructed component.
+    /// **No realm is entered** for one, as for
+    /// [`Self::dispatch_content_visibility_changes`]: it has no script form,
+    /// and nothing about it is published to the painting or the background
+    /// side.
+    ///
+    /// A hook may mutate the tree. Whatever it wrote is committed by the
+    /// delivery entry's own epilogue, whose update then runs again against
+    /// the new frame.
+    ///
+    /// `js` stays for the realm's observers. The MTS `IntersectionObserver`
+    /// binding's handler cannot call the realm from inside `dom`'s loop —
+    /// the realm is not the document's to lend — so it queues
+    /// `(observer, entries)` on a runtime queue, the `ComponentEvents` shape,
+    /// and this same entry drains that queue into the realm after the loop:
+    /// the entries encoded into one export call per observer, a callback
+    /// that throws reported as `ListenerFailed` with the rest still
+    /// delivered. The realm borrow therefore stays here.
+    pub(crate) fn notify_intersection_observers(&mut self, js: &mut ScriptRuntime) {
+        self.slot
+            .borrow_mut()
+            .document_mut()
+            .notify_intersection_observers();
+        // The realm's half: the binding's queue is drained here, after the
+        // loop, once the binding exists.
+        let _ = js;
+    }
+
     /// When the earliest armed timer comes due, if one is armed, for a test
     /// that drives this realm's timers itself. The page's epilogue reads the
     /// same table through the realm's core.

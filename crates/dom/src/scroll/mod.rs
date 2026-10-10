@@ -549,6 +549,10 @@ impl<T> Document<T> {
         };
         let clamped = clamp_to(offset, scroll_box.max_offset());
         if clamped != scroll_box.offset {
+            // Intersection observations move with the offset whether or not
+            // the frame does: a scroll the retained frame composes commits
+            // nothing, so no render would say so.
+            self.note_intersections_stale();
             let composable = self
                 .committed_frame()
                 .is_some_and(|frame| frame.covers_scroll_offset(id, clamped));

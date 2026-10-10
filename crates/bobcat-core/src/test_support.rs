@@ -10,7 +10,8 @@
 
 use std::future::Future;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rustc_hash::FxHashMap;
@@ -351,4 +352,68 @@ pub(crate) fn block_on<T>(future: impl Future<Output = T>) -> T {
         .build()
         .expect("a test runtime asks the platform for nothing")
         .block_on(future)
+}
+
+/// Where an [`IntersectionWatcher`] records the entries it was delivered.
+pub(crate) type WatcherLog = Arc<Mutex<Vec<String>>>;
+
+/// Everything `log` holds, leaving it empty.
+pub(crate) fn take_watched(log: &WatcherLog) -> Vec<String> {
+    std::mem::take(&mut *log.lock().expect("the log is never poisoned"))
+}
+
+/// An engine component that observes intersection, for the tests that pin
+/// when its entries are delivered: a `dom::CustomElement` defined by the test
+/// itself, through a document probe, rather than a component the engine
+/// ships. Its observers are created with a `dom::ElementHandler` naming it,
+/// which calls its `intersections_changed`.
+///
+/// It records every entry it hears as `observer:target:intersecting:ratio`,
+/// naming the target by its `id` attribute, and does nothing on connection —
+/// the test creates its observers from the probe that created the element.
+pub(crate) struct IntersectionWatcher {
+    pub(crate) log: WatcherLog,
+    /// Whether the next delivery also writes to the tree: set, it writes an
+    /// inline `opacity` on the watcher itself and clears the flag, so one
+    /// delivery mutates and the rest do not.
+    pub(crate) mutate: Arc<AtomicBool>,
+}
+
+impl IntersectionWatcher {
+    /// A watcher that records into `log`, with [`Self::mutate`] clear.
+    pub(crate) fn new(log: &WatcherLog) -> Self {
+        Self {
+            log: Arc::clone(log),
+            mutate: Arc::default(),
+        }
+    }
+}
+
+impl dom::CustomElement<()> for IntersectionWatcher {
+    fn intersections_changed(
+        &self,
+        document: &mut dom::Document<()>,
+        element: dom::NodeId,
+        observer: dom::IntersectionObserverId,
+        entries: Vec<dom::IntersectionObserverEntry>,
+    ) {
+        {
+            let mut log = self.log.lock().expect("the log is never poisoned");
+            for entry in entries {
+                let target = document
+                    .get(entry.target)
+                    .and_then(|node| node.attribute("id"))
+                    .expect("every target a watcher observes carries an id");
+                log.push(format!(
+                    "{}:{target}:{}:{}",
+                    observer.get(),
+                    entry.is_intersecting,
+                    entry.intersection_ratio,
+                ));
+            }
+        }
+        if self.mutate.swap(false, Ordering::Relaxed) {
+            document.set_inline_style_property(element, "opacity", "0.5");
+        }
+    }
 }

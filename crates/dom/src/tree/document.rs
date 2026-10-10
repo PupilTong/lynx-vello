@@ -78,6 +78,11 @@ pub struct Document<T> {
     /// §4.4's event queue, as [`crate::visual::relevance`] fills it and
     /// [`Document::dispatch_content_visibility_changes`] empties it.
     pub(crate) content_visibility_changes: Vec<crate::visual::ContentVisibilityChange>,
+    /// The intersection observers and their queues
+    /// ([`crate::visual::intersection`]). A field rather than a
+    /// [`TreeArenas`] table: nothing in style, layout or paint reads it, and
+    /// its one reader, the update, holds the document mutably.
+    pub(crate) intersections: crate::visual::intersection::IntersectionObservers<T>,
     pending_snapshots: SnapshotMap,
     relayout_roots: Vec<PendingRelayout>,
     relayout_root_ids: FxHashSet<NodeId>,
@@ -132,6 +137,7 @@ impl<T> Document<T> {
             images: crate::render::image::ImageRegistry::default(),
             inline_svgs: crate::tree::inline_svg::InlineSvgs::default(),
             content_visibility_changes: Vec::new(),
+            intersections: crate::visual::intersection::IntersectionObservers::default(),
             pending_snapshots: SnapshotMap::new(),
             relayout_roots: Vec::new(),
             relayout_root_ids: FxHashSet::default(),
@@ -869,6 +875,17 @@ impl<T> Document<T> {
             .remove(&OpaqueNode(id.arena_key()))
             .is_some();
         self.animations.forget(&[id]);
+        // An intersection observer names nodes three ways — as the node its
+        // handler is bound to, as a target, as its root — and an entry names
+        // its target. This is the one place a name stops meaning anything,
+        // and an id retired here is never reissued, so the registry forgets
+        // the node here, before the arenas do: an observer never outlives the
+        // node it is bound to, an entry handed out always names a live node,
+        // and a freed root becomes one whose targets report leaving. One test
+        // when nothing observes.
+        if !self.intersections.is_empty() {
+            self.intersections.forget_node(id);
+        }
         let (node, payload) = self.tree.remove_node(id);
         // The image registry names replaced nodes so a completed load knows
         // whose natural size to set, and this is the one place a name stops

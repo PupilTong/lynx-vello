@@ -59,6 +59,11 @@ pub use crate::tree::popover::{PopoverError, PopoverState};
 pub use crate::tree::shadow::ShadowRootMode;
 pub use crate::tree::top_layer::TopLayerEntry;
 pub use crate::visual::frame::ENCODE_WINDOW_SCROLLPORTS;
+pub use crate::visual::intersection::{
+    ElementHandler, IntersectionEventHandler, IntersectionGeometry, IntersectionObserver,
+    IntersectionObserverEntry, IntersectionObserverId, IntersectionObserverRoot, MarginLength,
+    RootGeometry, RootMargin,
+};
 pub use crate::visual::{
     AnimationSlot, CommittedFrame, ContentVisibilityChange, HitTarget, ScrollSlot, SnapSlot,
     SnapSlotAxis,

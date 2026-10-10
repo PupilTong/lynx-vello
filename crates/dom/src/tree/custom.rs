@@ -216,6 +216,37 @@ pub trait CustomElement<T> {
         let _ = (document, element, call);
         MethodOutcome::NotFound
     }
+
+    /// Entries one of this element's intersection observers queued — the
+    /// observers created with an [`ElementHandler`](crate::ElementHandler)
+    /// naming this element.
+    ///
+    /// Not a lifecycle callback either: it is called by that handler's
+    /// [`IntersectionEventHandler::notify`](crate::IntersectionEventHandler::notify)
+    /// from [`Document::notify_intersection_observers`], which the host runs
+    /// from a delivery of its own, after the update that queued them, never
+    /// inside a render or a commit. `observer` says which of the element's
+    /// observers this is — the id
+    /// [`Document::create_intersection_observer`] answered; `entries` are in
+    /// the order the updates queued them.
+    ///
+    /// **This path never reaches script**, as [`Self::handle_event`]'s does
+    /// not: it is how the engine's own components observe intersection. A
+    /// realm's observer carries a handler of its own.
+    ///
+    /// Each call is its own `[CEReactions]` scope: the reactions the
+    /// handler's mutations raise run before the delivery returns. A panic
+    /// here leaves the document unspecified, as a panicking lifecycle
+    /// callback does.
+    fn intersections_changed(
+        &self,
+        document: &mut Document<T>,
+        element: NodeId,
+        observer: crate::IntersectionObserverId,
+        entries: Vec<crate::IntersectionObserverEntry>,
+    ) {
+        let _ = (document, element, observer, entries);
+    }
 }
 
 /// One call of an element method: its name, and the parameters as the text

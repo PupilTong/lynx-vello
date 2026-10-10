@@ -107,6 +107,7 @@ pub(crate) mod curves;
 pub(crate) mod frame;
 pub(crate) mod geometry;
 mod hit;
+pub(crate) mod intersection;
 mod motion;
 #[cfg(test)]
 mod oracle_tests;
@@ -930,6 +931,9 @@ impl<T: Sync> Document<T> {
             viewport,
             device_pixel_ratio,
         );
+        // A new frame is new geometry for every intersection observer:
+        // layout moved, or the viewport did, or an animation ticked.
+        self.note_intersections_stale();
         true
     }
 

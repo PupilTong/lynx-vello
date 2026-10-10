@@ -1,9 +1,12 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dom::Point2D;
 use dom::input::{InputEvent, PointerKind, PointerPhase};
 
-use crate::test_support::{TestEngine, TestViewSpec};
+use crate::test_support::{
+    IntersectionWatcher, TestEngine, TestViewSpec, WatcherLog, take_watched,
+};
 
 /// The handle a packed id names, the way script spells one.
 fn node_id(bits: u64) -> dom::NodeId {
@@ -1920,6 +1923,109 @@ fn a_bounding_client_rect_follows_an_adopted_scroll() {
     assert!(
         (rect.origin.y - 170.0).abs() < 0.5,
         "the second row sits 30px higher, got {rect:?}"
+    );
+}
+
+/// Polls `log` until it holds `count` entries, then answers them. The
+/// delivery is an entry of its own, queued behind the one that updated, so
+/// one probe round trip is not enough to have seen it.
+fn wait_for_watched(engine: &mut TestEngine, log: &WatcherLog, count: usize) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen = Vec::new();
+    loop {
+        seen.extend(take_watched(log));
+        if seen.len() >= count {
+            // A later entry: the delivery's own epilogue has run by the time
+            // this answers, so whatever it committed is published.
+            engine
+                .probe_document(|_| ())
+                .expect("the view's task answers probes");
+            seen.extend(take_watched(log));
+            return seen;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected {count} entries, saw {seen:?}"
+        );
+        std::thread::yield_now();
+    }
+}
+
+/// An engine component's intersection observer, end to end through the real
+/// painter: a wheel scroll inside the encode window is composed on the
+/// painting side, its offset posted and adopted on the main thread, the
+/// update run against it by that entry's epilogue, and the entries delivered
+/// to the component by the entry after — with no commit anywhere along the
+/// way, because a windowed scroll recommits nothing.
+///
+/// Rooted at the 200px scroller, the first row starts wholly visible and the
+/// second sits exactly at the scrollport's bottom edge: intersecting, at
+/// ratio 0, because intersection is edge-inclusive. The 0.1 threshold is
+/// what makes the second row's arrival a crossing — under `[0, 1]` alone,
+/// ratio 0 on the edge and ratio 0.15 thirty pixels later share a band.
+#[test]
+fn a_windowed_scroll_delivers_intersections_to_an_engine_component() {
+    let mut engine = booted(TWO_ROW_SCROLLER_PAGE);
+    let log: WatcherLog = Arc::default();
+    let watcher = IntersectionWatcher::new(&log);
+    let observer = engine
+        .probe_document(move |document| {
+            document.define("x-watcher", Box::new(watcher));
+            let root = document.document_element().id();
+            let element = document.create_element("x-watcher", ());
+            document.set_inline_style(element, "position:absolute;width:0;height:0");
+            document.append_child(root, element);
+            let (scroller, first, second) = (node_id(3), node_id(4), node_id(5));
+            document.set_id_attribute(first, Some("first"));
+            document.set_id_attribute(second, Some("second"));
+            let observer = document.create_intersection_observer(
+                Box::new(dom::ElementHandler(element)),
+                Some(scroller),
+                dom::RootMargin::ZERO,
+                vec![0.0, 0.1, 1.0],
+            );
+            document.observe_intersection(observer, first);
+            document.observe_intersection(observer, second);
+            observer.get()
+        })
+        .expect("the view's task answers probes");
+    assert_eq!(
+        wait_for_watched(&mut engine, &log, 2),
+        [
+            format!("{observer}:first:true:1"),
+            format!("{observer}:second:true:0"),
+        ],
+        "the first update reports both rows, the edge-adjacent one as intersecting",
+    );
+    let committed = engine
+        .published_frame()
+        .expect("the probe's commit is published")
+        .commit_id();
+
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 100.0),
+        dom::Vector2D::new(0.0, 30.0),
+    ));
+    assert_eq!(
+        wait_for_watched(&mut engine, &log, 2),
+        [
+            format!("{observer}:first:true:0.85"),
+            format!("{observer}:second:true:0.15"),
+        ],
+        "the row that left ratio 1 and the row that crossed 0.1, in observe order",
+    );
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(0.0, 30.0),
+        "the document adopted the posted offset",
+    );
+    assert_eq!(
+        engine
+            .published_frame()
+            .expect("still published")
+            .commit_id(),
+        committed,
+        "a windowed scroll commits nothing, and the delivery wrote nothing",
     );
 }
 

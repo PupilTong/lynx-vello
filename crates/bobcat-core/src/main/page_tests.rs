@@ -28,6 +28,7 @@ use crate::main::runtime::{bound_metrics, card_entry};
 use crate::main::tree::PageConfig;
 use crate::resource::{SourceCompletion, SourceRequest, unanswered_source};
 use crate::script::ScriptError;
+use crate::test_support::{IntersectionWatcher, WatcherLog, take_watched};
 use crate::threads::platform_script_error;
 use crate::view::{
     EventRequester, NoWakeup, ScreenMetrics, StartupSource, StartupSources, resolve_startup_urls,
@@ -907,6 +908,239 @@ fn a_scroll_past_the_window_delivers_both_directions_in_the_entry_after_its_comm
             "the case is only worth anything if both directions happened: {expected:?}",
         );
         assert_eq!(take(&log), expected);
+        assert!(!js_heard(&owned.page).await);
+    });
+}
+
+/// How many rows [`build_watched_rows`] observes, how tall each is, and how
+/// tall the scrollport they scroll in is — whole CSS pixels, so every ratio
+/// the tests below expect is an exact quotient of two areas.
+const WATCHED_ROWS: usize = 5;
+const WATCHED_ROW_HEIGHT: usize = 40;
+const WATCHED_SCROLLPORT: usize = 100;
+
+/// Defines `watcher` as `x-watcher` and builds one under the card's page
+/// element, beside a column scroller of [`WATCHED_ROWS`] rows, then creates
+/// the watcher's observer — root the scroller, thresholds `[0, 0.5, 1]` —
+/// and observes every row, in row order, through a `dom::ElementHandler`
+/// bound to the watcher. One probe, because the handler is bound to a live
+/// element and hears only a constructed one, which `create_element` has made
+/// by the time it returns.
+///
+/// The watcher is positioned out of flow, so the scroller and its rows lay
+/// out exactly as they would without it. Returns the scroller, which a
+/// posted offset names, and the observer, which every logged entry names.
+async fn build_watched_rows(
+    page: &Rc<Page>,
+    watcher: IntersectionWatcher,
+) -> (dom::NodeId, dom::IntersectionObserverId) {
+    let (answer, built) = std::sync::mpsc::channel();
+    page.apply(vec![ToMain::Probe(Box::new(move |document| {
+        document.define("x-watcher", Box::new(watcher));
+        let root = document.document_element().id();
+        let watcher = document.create_element("x-watcher", ());
+        document.set_inline_style(
+            watcher,
+            "position:absolute;left:0;top:150px;width:10px;height:10px",
+        );
+        document.append_child(root, watcher);
+
+        let scroller = document.create_element("view", ());
+        document.set_inline_style(
+            scroller,
+            &format!(
+                "display:flex;flex-direction:column;overflow:hidden;\
+                 width:200px;height:{WATCHED_SCROLLPORT}px"
+            ),
+        );
+        document.append_child(root, scroller);
+        let rows: Vec<dom::NodeId> = (0..WATCHED_ROWS)
+            .map(|index| {
+                let row = document.create_element("view", ());
+                document.set_inline_style(
+                    row,
+                    &format!("flex-shrink:0;width:200px;height:{WATCHED_ROW_HEIGHT}px"),
+                );
+                document.set_id_attribute(row, Some(&format!("row{index}")));
+                document.append_child(scroller, row);
+                row
+            })
+            .collect();
+
+        let observer = document.create_intersection_observer(
+            Box::new(dom::ElementHandler(watcher)),
+            Some(scroller),
+            dom::RootMargin::ZERO,
+            vec![0.0, 0.5, 1.0],
+        );
+        for row in rows {
+            document.observe_intersection(observer, row);
+        }
+        let _ = answer.send((scroller, observer));
+    }))])
+    .await;
+    built.try_recv().expect("the probe ran")
+}
+
+/// What an [`IntersectionWatcher`] logs for one row's entry.
+fn watched(
+    observer: dom::IntersectionObserverId,
+    row: usize,
+    intersecting: bool,
+    ratio: f64,
+) -> String {
+    format!("{}:row{row}:{intersecting}:{ratio}", observer.get())
+}
+
+/// The W3C "queue an intersection observer task": the entry whose epilogue
+/// ran the update only queues what it found, and the observer's handler hears
+/// it from an entry of its own — one per batch, whether or not the update's
+/// own entry committed anything.
+///
+/// The rows are 40px in a 100px scrollport, under thresholds `[0, 0.5, 1]`,
+/// so at offset 0 rows 0 and 1 are wholly visible, row 2 is half visible and
+/// rows 3 and 4 are below it; at 30 the scrollport spans 30..130, which
+/// shows a quarter of row 0, all of rows 1 and 2, and a quarter of row 3.
+/// Every offset posted here is inside the encode window and short of half
+/// its headroom, so the retained frame composes it and nothing commits.
+#[test]
+fn intersection_entries_are_delivered_by_an_entry_after_the_update() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(LISTENING_PAGE).await;
+        let log: WatcherLog = Arc::default();
+        let settled = owned.page.epilogue_count();
+
+        let (scroller, observer) =
+            build_watched_rows(&owned.page, IntersectionWatcher::new(&log)).await;
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 2,
+            "the probe's entry committed the rows and updated against that \
+             commit, and the delivery was the entry after it",
+        );
+        assert_eq!(
+            take_watched(&log),
+            vec![
+                watched(observer, 0, true, 1.0),
+                watched(observer, 1, true, 1.0),
+                watched(observer, 2, true, 0.5),
+                watched(observer, 3, false, 0.0),
+                watched(observer, 4, false, 0.0),
+            ],
+            "the first update after observe reports every target once, \
+             whatever its state, in observe order",
+        );
+
+        // A scroll the encode window covers: the document adopts the
+        // offset and commits nothing, and the update still runs against it.
+        let committed = owned.view.published.commit();
+        let settled = owned.page.epilogue_count();
+        owned
+            .scroll_to(scroller, dom::Vector2D::new(0.0, 30.0))
+            .await;
+        assert_eq!(
+            owned.view.published.commit(),
+            committed,
+            "a windowed scroll commits nothing",
+        );
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 2,
+            "the marker was one entry and the delivery its update queued \
+             was another",
+        );
+        assert_eq!(
+            take_watched(&log),
+            vec![
+                watched(observer, 0, true, 0.25),
+                watched(observer, 2, true, 1.0),
+                watched(observer, 3, true, 0.25),
+            ],
+            "only the rows whose threshold index or intersecting state \
+             moved: row 0 fell below 0.5, row 2 reached 1, row 3 appeared; \
+             rows 1 and 4 stayed where they were",
+        );
+
+        // One pixel more moves every ratio and crosses nothing.
+        let settled = owned.page.epilogue_count();
+        owned
+            .scroll_to(scroller, dom::Vector2D::new(0.0, 31.0))
+            .await;
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 1,
+            "an update that queues nothing posts no delivery",
+        );
+        assert_eq!(take_watched(&log), Vec::<String>::new());
+        assert_eq!(owned.view.published.commit(), committed);
+
+        // The attribute the realm's listener would write stays written once
+        // set, so one read at the end covers every entry above.
+        assert!(
+            !js_heard(&owned.page).await,
+            "no realm is entered for an engine component's observer",
+        );
+    });
+}
+
+/// A hook that writes to the tree gets a commit of its own: the delivery
+/// entry's epilogue publishes what the hook wrote and runs the update again
+/// against that frame, which finds no observation moved and posts nothing —
+/// the chain ends after one delivery.
+#[test]
+fn an_intersection_hook_that_mutates_gets_its_own_commit_and_no_second_delivery() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(LISTENING_PAGE).await;
+        let log: WatcherLog = Arc::default();
+        let watcher = IntersectionWatcher::new(&log);
+        let mutate = Arc::clone(&watcher.mutate);
+        let (scroller, observer) = build_watched_rows(&owned.page, watcher).await;
+        assert_eq!(take_watched(&log).len(), WATCHED_ROWS);
+        owned
+            .scroll_to(scroller, dom::Vector2D::new(0.0, 30.0))
+            .await;
+        assert_eq!(take_watched(&log).len(), 3);
+
+        // Back to 0, with the next delivery writing an inline style on the
+        // watcher itself.
+        mutate.store(true, std::sync::atomic::Ordering::Relaxed);
+        let committed = owned
+            .view
+            .published
+            .commit()
+            .expect("the rows were committed");
+        let settled = owned.page.epilogue_count();
+        owned
+            .scroll_to(scroller, dom::Vector2D::new(0.0, 0.0))
+            .await;
+        assert_eq!(
+            take_watched(&log),
+            vec![
+                watched(observer, 0, true, 1.0),
+                watched(observer, 2, true, 0.5),
+                watched(observer, 3, false, 0.0),
+            ],
+        );
+        assert!(
+            !mutate.load(std::sync::atomic::Ordering::Relaxed),
+            "the delivery wrote to the tree"
+        );
+        assert_eq!(
+            owned.view.published.commit(),
+            Some(committed + 1),
+            "the marker's windowed scroll committed nothing; the delivery \
+             entry's epilogue committed what the hook wrote",
+        );
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 2,
+            "the marker and the delivery, and no third entry: the update \
+             after the hook's commit found no row's observation moved",
+        );
         assert!(!js_heard(&owned.page).await);
     });
 }
