@@ -76,17 +76,6 @@ impl Entry {
             Entry::Failed => Some(ImageEvent::Failed { source }),
         }
     }
-
-    /// Makes the same report as [`Entry::event`] through `sink`. A pending
-    /// entry has settled as nothing and reports nothing.
-    fn report_to(&self, source: &str, sink: &ImageReports) {
-        match self {
-            Entry::Pending => {}
-            Entry::Ready(image) => sink.loaded(source, image.width, image.height),
-            Entry::Svg(document) => sink.parsed_document(source, Arc::clone(document)),
-            Entry::Failed => sink.failed(source),
-        }
-    }
 }
 
 /// Decoded images keyed by the source string the paint walk asks for.
@@ -247,10 +236,20 @@ impl TestImages {
         let Some(event) = entry.event(source) else {
             return;
         };
-        self.pending.lock().expect("test image reports").push(event);
         if let Some(sink) = self.sink.borrow().as_ref() {
-            entry.report_to(source, sink);
+            match &event {
+                ImageEvent::Loaded {
+                    source,
+                    width,
+                    height,
+                } => sink.loaded(source, *width, *height),
+                ImageEvent::ParsedDocument { source, document } => {
+                    sink.parsed_document(source, Arc::clone(document));
+                }
+                ImageEvent::Failed { source } => sink.failed(source),
+            }
         }
+        self.pending.lock().expect("test image reports").push(event);
     }
 
     /// Takes the reports made since the last drain.
