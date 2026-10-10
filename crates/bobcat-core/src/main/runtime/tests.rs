@@ -2120,10 +2120,11 @@ fn invoke_answers_a_bounding_client_rect_carrying_the_elements_id_and_dataset() 
 /// `selectTab` on a pager, through both paths a card reaches a UI method by:
 /// `__InvokeUIMethod`, and the selector-query `invoke` the background
 /// thread's `lynx.createSelectorQuery()` sends (`__BobcatQueryNodes`). The
-/// target is `index` times the 200px scrollport width; an instant turn moves
-/// the document at once, a smooth one — the default — only records the
-/// request for the painter. Bad params are code 4 and move nothing; an
-/// index past the end clamps; `selectTab` anywhere but a pager, and any
+/// pager's element child number `index` is scrolled into view at its start
+/// edge, which for four 200px pages is `index` times 200; an instant turn
+/// moves the document at once, a smooth one — the default — only records
+/// the request for the painter. Bad params, and an index naming no page,
+/// are code 4 and move nothing; `selectTab` anywhere but a pager, and any
 /// other method on a pager, is code 3; `boundingClientRect` is unchanged.
 #[test]
 #[expect(clippy::too_many_lines, reason = "one scenario over both invoke paths")]
@@ -2262,7 +2263,7 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
         );
     }
 
-    // No index worth multiplying: refused, and nothing recorded or moved.
+    // No numeric index: refused, and nothing recorded or moved.
     let pending = elements.tree().pending_scroll_request(pager);
     run(
         &mut runtime,
@@ -2278,13 +2279,20 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
     assert_eq!(offset(), dom::Vector2D::new(400.0, 0.0));
     assert_eq!(elements.tree().pending_scroll_request(pager), pending);
 
-    // Past the end clamps to the last page, and succeeds.
+    // An index naming no page, past the end or below zero, is refused on
+    // either path, and nothing is recorded or moved.
     run(
         &mut runtime,
         &mut js_runtime,
-        "expectCode(viaQuery('#pager', 'selectTab', {index: 9, smooth: false}), 0);",
+        r"
+            for (const index of [4, 9, -1]) {
+              expectCode(viaPapi(held[1], 'selectTab', {index, smooth: false}), 4);
+              expectCode(viaQuery('#pager', 'selectTab', {index, smooth: false}), 4);
+            }
+            ",
     );
-    assert_eq!(offset(), dom::Vector2D::new(600.0, 0.0));
+    assert_eq!(offset(), dom::Vector2D::new(400.0, 0.0));
+    assert_eq!(elements.tree().pending_scroll_request(pager), pending);
 
     run(
         &mut runtime,
@@ -2308,7 +2316,7 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
             }
             ",
     );
-    assert_eq!(offset(), dom::Vector2D::new(600.0, 0.0));
+    assert_eq!(offset(), dom::Vector2D::new(400.0, 0.0));
 }
 
 /// A `scroll-view`'s `getScrollInfo`, `scrollBy` and `scrollTo` through
