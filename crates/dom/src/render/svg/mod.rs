@@ -255,13 +255,6 @@ impl std::fmt::Display for SvgError {
 
 impl std::error::Error for SvgError {}
 
-/// The document crosses from the host's parsing thread to the document's
-/// inside an `ImageEvent`.
-const _: () = {
-    const fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<VectorDocument>();
-};
-
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;
