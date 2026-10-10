@@ -73,15 +73,7 @@ impl<T: Sync> Document<T> {
     /// nobody here: it waits for whatever flush comes next, which an animation
     /// tick can precede, so that one is spelled the way
     /// [`Document::mark_subtree_recascade`] spells it.
-    ///
-    /// Before any of it, every inline SVG root a mutation marked since the
-    /// last call is serialised and parsed again
-    /// ([`crate::tree::inline_svg`]), so the natural size the pass reads and
-    /// the picture the next paint draws describe the subtree as it is now.
-    /// Here rather than in `render` because every caller that reads layout
-    /// comes through this.
     pub fn layout(&mut self) {
-        self.refresh_inline_svgs();
         let mut resized = Vec::new();
         for pass in 0..committed_box::CONTAINER_PASSES {
             self.layout_pass(&mut resized);
@@ -332,6 +324,31 @@ impl<T> Document<T> {
         outcome
     }
 
+    /// Sets one of this replaced element's two sources to a document handed
+    /// over as its bytes rather than named by a URL: the Lynx
+    /// `<svg content>`. Otherwise exactly [`Self::set_image_source`], whose
+    /// outcome this returns.
+    ///
+    /// The source is synthetic, `svg-content:` and the 32 hex digits of a
+    /// 128-bit hash of `bytes`, so identical markup names one registry entry
+    /// whichever element, and however many, set it. A source this document
+    /// already holds binds at once — settled or still parsing — and costs a
+    /// hash; an unknown one is created pending and its bytes are queued as a
+    /// request for the host to parse ([`Self::take_document_requests`]), so
+    /// the host is never asked to fetch it.
+    /// The entry is forgotten when the last element presenting it lets go of
+    /// it, by setting another source or by being freed.
+    pub fn set_image_document(
+        &mut self,
+        id: crate::NodeId,
+        role: ImageRole,
+        bytes: &[u8],
+        kind: crate::DocumentKind,
+    ) -> Option<ImageOutcome> {
+        let source = self.images.insert_document(bytes, kind);
+        self.set_image_source(id, role, Some(&source))
+    }
+
     /// Settles a source change: the natural size the element's new sources
     /// give it, and the invalidation that change is worth.
     fn note_replaced_change(&mut self, id: crate::NodeId, was_replaced: bool) {
@@ -374,18 +391,16 @@ impl<T> Document<T> {
     }
 
     /// The source `id` holds in `role`, if it is replaced content holding
-    /// one.
-    ///
-    /// For an inline SVG root ([`crate::tree::inline_svg`]) this is the
-    /// synthetic source its subtree was last parsed under, which changes
-    /// with every refresh.
+    /// one: the URL [`Self::set_image_source`] was given, or the synthetic
+    /// source [`Self::set_image_document`] filed its bytes under.
     #[must_use]
     pub fn image_source(&self, id: crate::NodeId, role: ImageRole) -> Option<&str> {
         self.get(id)?.image_source(role)
     }
 
     /// Whether the document's image registry holds an entry for `source`.
-    /// For tests: a freed inline SVG root must leave none behind.
+    /// For tests: a synthetic source no element presents any more must leave
+    /// none behind.
     #[doc(hidden)]
     #[must_use]
     pub fn knows_image_source(&self, source: &str) -> bool {
@@ -2125,21 +2140,23 @@ mod tests {
         }
     }
 
+    /// What a host reports for `svg` fetched at `source`: the document it
+    /// parsed with the engine's parser, or the failure of one that did not
+    /// parse.
     fn document_report(source: &str, svg: &str) -> crate::ImageEvent {
-        crate::ImageEvent::LoadedDocument {
-            source: std::sync::Arc::from(source),
-            bytes: bytes::Bytes::copy_from_slice(svg.as_bytes()),
-            kind: crate::DocumentKind::Svg,
-        }
+        crate::ImageEvent::parse_document(
+            std::sync::Arc::from(source),
+            svg.as_bytes(),
+            crate::DocumentKind::Svg,
+        )
     }
 
-    /// A host reports an SVG document as its bytes, and with no blocking
-    /// pool in front of it the document parses them inline: the source loads
-    /// at the document's natural size, a repeat report of the same bytes
-    /// moves nothing, and a document that does not parse fails its source
-    /// exactly as a failure report would.
+    /// A host reports an SVG document as the document it parsed: the source
+    /// loads at the document's natural size, a repeat report moves nothing,
+    /// and a document that did not parse fails its source exactly as any
+    /// failure report does.
     #[test]
-    fn a_reported_document_is_parsed_inline_and_a_malformed_one_fails() {
+    fn a_parsed_document_loads_and_a_malformed_one_fails() {
         let (mut document, image) = image_document();
         document.set_image_source(image, ImageRole::Source, Some(SRC));
         let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="12"/>"#;

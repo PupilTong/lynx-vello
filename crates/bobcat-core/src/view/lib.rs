@@ -1264,6 +1264,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
     pub fn pump(&mut self) -> Vec<EngineEvent> {
         let mut events = Vec::new();
         let mut image_requests = Vec::new();
+        let mut document_requests = Vec::new();
         while let Ok(notice) = self.notices.try_recv() {
             match notice {
                 ViewNotice::WorkerCreated { key, messages } => {
@@ -1297,6 +1298,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                     }
                 }
                 ViewNotice::RequestImages(sources) => image_requests.extend(sources),
+                ViewNotice::RequestDocuments(documents) => document_requests.extend(documents),
                 // A view that failed or was released asks its host for
                 // nothing more: the completion is dropped instead, which is
                 // what tells whoever was awaiting it that no source is coming.
@@ -1365,13 +1367,17 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         // turn discovered are named, so a load that finished between turns is
         // reported whether or not this turn asked for anything.
         //
-        // A view that has failed asks its host for nothing at all, images
-        // included: the document those pixels were for is finished with, and
-        // the same rule already governs the source requests above.
+        // A view that has failed asks its host for nothing at all, images and
+        // documents included: the document those pictures were for is
+        // finished with, and the same rule already governs the source
+        // requests above.
         if self.state != ViewState::Failed {
             self.fetcher.service_images();
             for source in image_requests {
                 self.fetcher.request_image(source.as_ref());
+            }
+            for (source, bytes, kind) in document_requests {
+                self.fetcher.request_document(&source, bytes, kind);
             }
         }
         // Drained either way, so what a host reported before the failure is

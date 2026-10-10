@@ -5,8 +5,9 @@
 // Decoding is the platform's: an `Image` element fed a Blob URL, which is
 // the browser's codecs and its EXIF orientation handling, and a 2D canvas to
 // resize with and read the pixels out of. Nothing here parses an image
-// container. SVG never arrives here: `bobcat-resources` hands its bytes to
-// the engine, which parses it with its own converter, as it does on every target.
+// container. SVG never arrives here: `bobcat-resources` parses it on the
+// Render Worker, in the load's own task, with the engine's converter, as it
+// does on its decode pool on every other target.
 //
 // The Render Worker and this thread share the Wasm memory. Every job has a
 // mailbox of eight Int32 words at an address in that memory:

@@ -297,6 +297,7 @@ impl Harness {
                     completion,
                 } => self.sources.push((request, completion)),
                 ViewNotice::RequestImages(_)
+                | ViewNotice::RequestDocuments(_)
                 | ViewNotice::WorkerCreated { .. }
                 | ViewNotice::NativeModuleCall { .. }
                 | ViewNotice::ScriptFrameDemand { .. } => {}
@@ -1783,6 +1784,43 @@ fn an_image_event_queued_by_a_listener_is_delivered_by_an_entry_of_its_own() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// Three `<svg>`s in a row that does not stretch them — one sized by CSS,
+/// one unsized, one `display: none` — each recording every `load` and
+/// `error` it is handed, and an `updatePage` that writes one attribute on
+/// all three. The same shape as [`LOADING_IMAGES`], so [`images_seen`] and
+/// [`write_on_images`] serve both.
+const LOADING_SVGS: &str = r"
+globalThis.runWorklet = (value, params) => value.body(params[0]);
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  const holder = __CreateView(0);
+  __SetInlineStyles(holder, 'display:flex;flex-direction:row;align-items:flex-start');
+  __AppendElement(page, holder);
+  globalThis.svgs = ['width:120px;height:80px', '', 'display:none'].map((style) => {
+    const svg = __CreateElement('svg', 0);
+    if (style) __SetInlineStyles(svg, style);
+    __AppendElement(holder, svg);
+    const seen = [];
+    for (const name of ['load', 'error']) {
+      __AddEvent(svg, 'bindEvent', name, {
+        type: 'worklet',
+        value: {
+          body: (event) => {
+            seen.push(event.type + ':' + JSON.stringify(event.detail));
+            __SetAttribute(svg, 'data-seen', seen.join('|'));
+          },
+        },
+      });
+    }
+    return svg;
+  });
+};
+globalThis.updatePage = (data) => {
+  for (const svg of svgs) __SetAttribute(svg, data.name, data.value);
+};
+";
+
+#[cfg(not(target_arch = "wasm32"))]
 /// Three `<image>`s in a row that does not stretch them — one sized by CSS,
 /// one unsized, one `display: none` — each recording every `load` and
 /// `error` it is handed, and an `updatePage` that writes one attribute on
@@ -1819,7 +1857,8 @@ globalThis.updatePage = (data) => {
 ";
 
 #[cfg(not(target_arch = "wasm32"))]
-/// What each of [`LOADING_IMAGES`]' three elements has recorded, in order.
+/// What each of [`LOADING_IMAGES`]' (or [`LOADING_SVGS`]') three elements
+/// has recorded, in order.
 async fn images_seen(page: &Rc<Page>) -> Vec<Option<String>> {
     let (answer, read) = std::sync::mpsc::channel();
     page.apply(vec![ToMain::Probe(Box::new(move |document| {
@@ -1844,7 +1883,9 @@ async fn images_seen(page: &Rc<Page>) -> Vec<Option<String>> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// Writes `name="value"` on every `<image>` of [`LOADING_IMAGES`].
+/// Writes `name="value"` on every `<image>` of [`LOADING_IMAGES`] (or
+/// `<svg>` of [`LOADING_SVGS`]). `value` travels inside a JSON string, so it
+/// holds no `"`.
 async fn write_on_images(page: &Rc<Page>, name: &str, value: &str) {
     page.apply(vec![ToMain::PageUpdate(PageUpdate::Data {
         data: format!(r#"{{"name":"{name}","value":"{value}"}}"#),
@@ -1854,56 +1895,55 @@ async fn write_on_images(page: &Rc<Page>, name: &str, value: &str) {
     .await;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 /// An SVG document `width` x `height` px with nothing drawable in it.
-fn svg_markup(width: u32, height: u32) -> String {
+fn empty_svg(width: u32, height: u32) -> String {
     format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"/>"#)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// A batch reporting `svg` as the document at `source`, the way a host
-/// reports one: as its bytes.
-fn svg_document(source: &str, svg: &str) -> ToMain {
-    ToMain::ImageEvents(vec![dom::ImageEvent::LoadedDocument {
-        source: Arc::from(source),
-        bytes: bytes::Bytes::copy_from_slice(svg.as_bytes()),
-        kind: dom::DocumentKind::Svg,
-    }])
+/// What a host reports for `svg` at `source`: the document it parsed with
+/// the engine's parser, or a failure for one that does not parse, in one
+/// batch.
+fn host_report(source: &str, svg: &str) -> ToMain {
+    ToMain::ImageEvents(vec![dom::ImageEvent::parse_document(
+        Arc::from(source),
+        svg.as_bytes(),
+        dom::DocumentKind::Svg,
+    )])
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// Waits until `released` reads `true`, letting this thread's tasks and
-/// jobs run and the blocking pool make progress in between.
-async fn until_parsed(what: &str, mut released: impl FnMut() -> bool) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while !released() {
-        assert!(std::time::Instant::now() < deadline, "{what}");
-        task::yield_now().await;
-        std::thread::sleep(std::time::Duration::from_millis(1));
+impl OwnedPage {
+    /// Every document request this page has handed its host so far, one
+    /// entry per `RequestDocuments` notice. Every other notice is dropped.
+    fn document_requests(&mut self) -> Vec<Vec<dom::DocumentRequest>> {
+        let mut requests = Vec::new();
+        while let Ok(notice) = self.view.notices.try_recv() {
+            if let ViewNotice::RequestDocuments(documents) = notice {
+                requests.push(documents);
+            }
+        }
+        requests
     }
-}
 
-#[cfg(not(target_arch = "wasm32"))]
-/// Reports `svg` as the document at `source` and waits for the entry that
-/// applies its parse: the report's own entry parses nothing, and the
-/// parse's outcome is applied by one entry more.
-async fn report_svg(page: &Rc<Page>, source: &str, svg: &str) {
-    page.apply(vec![svg_document(source, svg)]).await;
-    let reported = page.epilogue_count();
-    until_parsed(&format!("the parse of {source} was never applied"), || {
-        page.epilogue_count() > reported
-    })
-    .await;
+    /// Answers `requests` as a host does: parses each document with the
+    /// engine's parser and reports them as one batch.
+    async fn answer_documents(&self, requests: Vec<dom::DocumentRequest>) {
+        let reports = requests
+            .into_iter()
+            .map(|(source, bytes, kind)| dom::ImageEvent::parse_document(source, &bytes, kind))
+            .collect();
+        self.page.apply(vec![ToMain::ImageEvents(reports)]).await;
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 /// An `<image src="x.svg">`'s `load` carries the document's natural size,
 /// as it carries a bitmap's, whatever box the element lays out at. The host
-/// reports the document as bytes; they are parsed off this thread, one entry
-/// applies the outcome, and the `load`s are delivered by an entry of their
-/// own.
+/// parses the document and reports it; one entry applies the report, and the
+/// `load`s are delivered by an entry of their own.
 #[test]
-fn an_svg_document_parses_off_thread_and_an_image_load_carries_its_natural_size() {
+fn an_image_load_on_a_parsed_svg_document_carries_its_natural_size() {
     on_a_js_thread(|thread| async move {
         let (context, _workers) = group(&thread);
         let mut owned = OwnedPage::new(context);
@@ -1912,15 +1952,18 @@ fn an_svg_document_parses_off_thread_and_an_image_load_carries_its_natural_size(
         write_on_images(&owned.page, "src", "app:///a.svg").await;
         assert_eq!(images_seen(&owned.page).await, vec![None, None, None]);
         let settled = owned.page.epilogue_count();
-        report_svg(&owned.page, "app:///a.svg", &svg_markup(30, 15)).await;
+        owned
+            .page
+            .apply(vec![host_report("app:///a.svg", &empty_svg(30, 15))])
+            .await;
         for _ in 0..TURNS {
             task::yield_now().await;
         }
         assert_eq!(
             owned.page.epilogue_count(),
-            settled + 3,
-            "the report was one entry, the parse's outcome another, and the \
-             three `load`s it settled were delivered by one more"
+            settled + 2,
+            "the report was one entry, and the three `load`s it settled were \
+             delivered by one more"
         );
         let natural = Some(r#"load:{"width":30,"height":15}"#.to_owned());
         assert_eq!(
@@ -1931,26 +1974,144 @@ fn an_svg_document_parses_off_thread_and_an_image_load_carries_its_natural_size(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// An `<image>` recording every `load` and `error` it is handed.
-const BROKEN_IMAGE: &str = r"
+/// An `<svg>`'s `load` carries the element's border-box layout size, not the
+/// document's natural size (ruled: native's detail): the CSS size when it
+/// has one, the natural size when it has none, and 0x0 when it has no box.
+///
+/// A `src` is fetched and parsed by the host and reported as a document. A
+/// `content` is handed to the document as markup: the write's own entry asks
+/// the host to parse it, one `RequestDocuments` for the three elements'
+/// identical markup, and nothing on this thread parses. The host's report is
+/// one entry and the `load`s it settles are delivered by one more, as an
+/// `<image>`'s are. Writing the same markup again asks nothing and fires no
+/// `load`.
+#[test]
+fn an_svg_load_carries_the_layout_size_for_src_and_content() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(LOADING_SVGS).await;
+
+        write_on_images(&owned.page, "src", "app:///a.svg").await;
+        assert_eq!(images_seen(&owned.page).await, vec![None, None, None]);
+        assert!(
+            owned.document_requests().is_empty(),
+            "a URL is fetched, not handed over"
+        );
+        let settled = owned.page.epilogue_count();
+        owned
+            .page
+            .apply(vec![host_report("app:///a.svg", &empty_svg(30, 15))])
+            .await;
+        for _ in 0..TURNS {
+            task::yield_now().await;
+        }
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 2,
+            "the report was one entry, and the three `load`s it settled were \
+             delivered by one more"
+        );
+        assert_eq!(
+            images_seen(&owned.page).await,
+            vec![
+                Some(r#"load:{"width":120,"height":80}"#.to_owned()),
+                Some(r#"load:{"width":30,"height":15}"#.to_owned()),
+                Some(r#"load:{"width":0,"height":0}"#.to_owned()),
+            ]
+        );
+
+        let markup = "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='5'/>";
+        let settled = owned.page.epilogue_count();
+        write_on_images(&owned.page, "content", markup).await;
+        let requests = owned.document_requests();
+        let [request] = requests.as_slice() else {
+            panic!("one notice for the write's entry: {requests:?}");
+        };
+        let [(source, bytes, kind)] = request.as_slice() else {
+            panic!("one document for three elements with one markup: {request:?}");
+        };
+        assert!(source.starts_with("svg-content:"), "{source}");
+        assert_eq!(&**bytes, markup.as_bytes(), "the markup as written");
+        assert_eq!(*kind, dom::DocumentKind::Svg);
+        for _ in 0..TURNS {
+            task::yield_now().await;
+        }
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 1,
+            "the write's entry alone: nothing parses here, so nothing applies \
+             until the host reports"
+        );
+        assert_eq!(
+            images_seen(&owned.page).await,
+            vec![
+                Some(r#"load:{"width":120,"height":80}"#.to_owned()),
+                Some(r#"load:{"width":30,"height":15}"#.to_owned()),
+                Some(r#"load:{"width":0,"height":0}"#.to_owned()),
+            ],
+            "no `load` before the report"
+        );
+
+        let settled = owned.page.epilogue_count();
+        owned.answer_documents(request.clone()).await;
+        for _ in 0..TURNS {
+            task::yield_now().await;
+        }
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 2,
+            "the report was one entry, and the three `load`s it settled were \
+             delivered by one more"
+        );
+        let after_content = vec![
+            Some(r#"load:{"width":120,"height":80}|load:{"width":120,"height":80}"#.to_owned()),
+            Some(r#"load:{"width":30,"height":15}|load:{"width":10,"height":5}"#.to_owned()),
+            Some(r#"load:{"width":0,"height":0}|load:{"width":0,"height":0}"#.to_owned()),
+        ];
+        assert_eq!(images_seen(&owned.page).await, after_content);
+
+        let settled = owned.page.epilogue_count();
+        write_on_images(&owned.page, "content", markup).await;
+        for _ in 0..TURNS {
+            task::yield_now().await;
+        }
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 1,
+            "the same markup again is the write's entry alone"
+        );
+        assert!(
+            owned.document_requests().is_empty(),
+            "and asks the host for nothing"
+        );
+        assert_eq!(images_seen(&owned.page).await, after_content);
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// An `<image>` and an `<svg>` on one source, each recording every `load`
+/// and `error` it is handed.
+const IMAGE_AND_SVG: &str = r"
 globalThis.runWorklet = (value, params) => value.body(params[0]);
 globalThis.renderPage = function () {
   const page = __CreatePage('card', 0);
-  const image = __CreateImage(0);
-  __AppendElement(page, image);
-  const seen = [];
-  for (const name of ['load', 'error']) {
-    __AddEvent(image, 'bindEvent', name, {
-      type: 'worklet',
-      value: {
-        body: (event) => {
-          seen.push(event.type);
-          __SetAttribute(image, 'data-seen', seen.join('|'));
+  for (const element of [__CreateImage(0), __CreateElement('svg', 0)]) {
+    __AppendElement(page, element);
+    const seen = [];
+    for (const name of ['load', 'error']) {
+      __AddEvent(element, 'bindEvent', name, {
+        type: 'worklet',
+        value: {
+          body: (event) => {
+            seen.push(event.type);
+            __SetAttribute(element, 'data-seen', seen.join('|'));
+          },
         },
-      },
-    });
+      });
+    }
+    __SetAttribute(element, 'src', 'app:///broken.svg');
   }
-  __SetAttribute(image, 'src', 'app:///broken.svg');
 };
 ";
 
@@ -1979,182 +2140,159 @@ async fn page_children_seen(page: &Rc<Page>) -> Vec<Option<String>> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// A reported document that does not parse fails its source: an `<image>`
-/// on it is handed an `error`.
+/// A document the host could not parse is reported as a failure of its
+/// source: an `<image>` on it is handed an `error`, and an `<svg>` on the
+/// same source nothing, in the same delivery.
 #[test]
 fn a_malformed_svg_document_fails_its_source() {
     on_a_js_thread(|thread| async move {
         let (context, _workers) = group(&thread);
         let mut owned = OwnedPage::new(context);
-        owned.boot(BROKEN_IMAGE).await;
-        assert_eq!(page_children_seen(&owned.page).await, vec![None]);
+        owned.boot(IMAGE_AND_SVG).await;
+        assert_eq!(page_children_seen(&owned.page).await, vec![None, None]);
 
-        report_svg(
-            &owned.page,
-            "app:///broken.svg",
-            r#"<svg xmlns="http://www.w3.org/2000/svg"><rect></svg>"#,
-        )
-        .await;
-        // The probe's entry is queued behind the delivery the parse's
-        // outcome posted, so it reads what that delivery left.
+        owned
+            .page
+            .apply(vec![host_report(
+                "app:///broken.svg",
+                r#"<svg xmlns="http://www.w3.org/2000/svg"><rect></svg>"#,
+            )])
+            .await;
+        // The probe's entry is queued behind the delivery the report's
+        // entry posted, so it reads what that delivery left.
         assert_eq!(
             page_children_seen(&owned.page).await,
-            vec![Some("error".to_owned())]
+            vec![Some("error".to_owned()), None]
         );
     });
 }
 
-/// Holds the next document parse of `page` on its pool thread, reports
-/// `source` as an SVG document, and returns once the parse has started:
-/// what the test sends on the first channel lets it go, and the second
-/// disconnects once the parse has returned.
-#[cfg(not(target_arch = "wasm32"))]
-async fn report_held_parse(
-    page: &Rc<Page>,
-    source: &str,
-) -> (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>) {
-    let (started, parse_started) = std::sync::mpsc::channel();
-    let (release, parse_released) = std::sync::mpsc::channel();
-    page.hold_next_parse(ParseGate {
-        started,
-        release: parse_released,
-    });
-    page.apply(vec![svg_document(source, &svg_markup(30, 15))])
-        .await;
-    until_parsed("the parse never started", || {
-        parse_started.try_recv().is_ok()
-    })
-    .await;
-    (release, parse_started)
+/// An entry whose top-level `await` leaves boot before its first flush, with
+/// one `<svg>` written and a listed sheet that sizes it still outstanding.
+const SVG_BEFORE_THE_FIRST_FLUSH: &str = r"
+globalThis.runWorklet = (value, params) => value.body(params[0]);
+const page = __CreatePage('card', 0);
+const svg = __CreateElement('svg', 0);
+__AppendElement(page, svg);
+__AddEvent(svg, 'bindEvent', 'load', {
+  type: 'worklet',
+  value: { body: (event) => __SetAttribute(svg, 'data-seen', JSON.stringify(event.detail)) },
+});
+__SetAttribute(svg, 'src', 'app:///a.svg');
+await import('app:///dep.js');
+";
+
+/// Answers the outstanding module request for `url` with `source`, whatever
+/// else is outstanding.
+fn answer_module_at(harness: &mut Harness, url: &str, source: &str) {
+    let position = harness
+        .sources
+        .iter()
+        .position(|(request, _)| matches!(request, SourceRequest::Module(named) if named == url))
+        .expect("that module request is outstanding");
+    let (_, completion) = harness.sources.remove(position);
+    completion.complete(Ok(LoadedSource::Module {
+        source: source.to_owned(),
+        url: url.to_owned(),
+    }));
 }
 
-/// Whether `source` is still pending in `page`'s document, read without an
-/// entry (the view may have ended): a failure applied now settles it for
-/// every one of `bound` elements only if no earlier report has.
-#[cfg(not(target_arch = "wasm32"))]
-fn still_pending(page: &Page, source: &str, bound: usize) -> bool {
-    let mut realm = page.realm.borrow_mut();
-    let runtime = realm.as_deref_mut().expect("the realm is still open");
-    runtime.with_document(|document| {
-        document
-            .apply_image_events(&[dom::ImageEvent::Failed {
-                source: Arc::from(source),
-            }])
-            .len()
-            == bound
-    })
-}
-
-/// The view ends while one of its documents is still parsing (the parse is
-/// held on its pool thread until after the release). This proves three
-/// things: the task waiting on the parse is aborted and reclaimed with the
-/// view's others; the parse still runs to its end on the pool; and the
-/// aborted task queues no entry for the outcome, so not even a refused one
-/// runs, and nothing panics. It does not reach the outcome's entry at all;
-/// [`a_parse_that_returns_after_the_view_ended_applies_nothing`] is the
-/// ordering that does.
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn a_view_released_while_a_document_parses_reclaims_the_waiting_task() {
-    on_a_js_thread(|thread| async move {
-        let (context, mut workers) = group(&thread);
-        let mut owned = OwnedPage::new(context);
-        owned.boot(LOADING_IMAGES).await;
-        write_on_images(&owned.page, "src", "app:///a.svg").await;
-        let (release, parse_started) = report_held_parse(&owned.page, "app:///a.svg").await;
-
-        let Some(WorkerCommand::Start(mut background)) = workers.recv().await else {
-            panic!("BTS starts")
-        };
-        owned.token.cancel();
-        tokio::join!(owned.page.run_owner(), answer_disposal(&mut background));
-        assert_eq!(
-            owned.page.task_count(),
-            0,
-            "the task waiting on the parse was reclaimed with the view"
-        );
-        let refused = owned.page.refused_entry_count();
-
-        release.send(()).expect("the parse is waiting to be let go");
-        // The gate is dropped once the parse has returned.
-        assert!(parse_started.recv().is_err(), "the parse ran to its end");
-        for _ in 0..TURNS {
-            task::yield_now().await;
-        }
-        assert_eq!(
-            owned.page.refused_entry_count(),
-            refused,
-            "the aborted task queued no entry for the parse's outcome"
-        );
-        assert!(
-            !owned
-                .events()
-                .iter()
-                .any(|event| matches!(event, EngineEvent::Panicked(_))),
-            "nothing panicked"
-        );
-    });
-}
-
-/// The parse returns first and the view ends after it, before the task
-/// waiting on the parse is polled again: that task is still alive (the end
-/// is the latch, and nothing has reclaimed it yet), so it queues the entry
-/// that would apply the outcome, and that entry finds the view ended. This
-/// proves that the entry is queued and refused — one refused entry, no
-/// epilogue — and that the document saw no apply: the source is still
-/// pending afterwards.
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn a_parse_that_returns_after_the_view_ended_applies_nothing() {
-    on_a_js_thread(|thread| async move {
-        let (context, mut workers) = group(&thread);
-        let mut owned = OwnedPage::new(context);
-        owned.boot(LOADING_IMAGES).await;
-        write_on_images(&owned.page, "src", "app:///a.svg").await;
-        let Some(WorkerCommand::Start(mut background)) = workers.recv().await else {
-            panic!("BTS starts")
-        };
-        let (release, parse_started) = report_held_parse(&owned.page, "app:///a.svg").await;
-        let settled = owned.page.epilogue_count();
-        let refused = owned.page.refused_entry_count();
-
-        release.send(()).expect("the parse is waiting to be let go");
-        // Blocks this thread, so no task runs until the parse has returned.
-        assert!(parse_started.recv().is_err(), "the parse ran to its end");
-        // No yield since the parse returned: the task waiting on it has not
-        // been polled, so its entry is queued after this end.
-        assert!(!owned.page.ended(), "this is what ends the view");
-        owner::end(&owned.page);
-        until_parsed("the parse's entry was never refused", || {
-            owned.page.refused_entry_count() > refused
+/// The `data-seen` attribute of the page's first child, read through a probe
+/// command.
+async fn first_child_seen(harness: &mut Harness) -> Option<String> {
+    let (probe, probed) = std::sync::mpsc::channel();
+    harness
+        .commands
+        .send(ToMain::Probe(Box::new(move |document| {
+            let page = document.document_element().id();
+            let first = document.get(page).expect("the page is live").child_ids()[0];
+            let _ = probe.send(
+                document
+                    .get(first)
+                    .and_then(|node| node.attribute("data-seen"))
+                    .map(str::to_owned),
+            );
+        })))
+        .expect("the view is serving");
+    let mut seen = None;
+    harness
+        .until("the probe never ran", |_| {
+            seen = probed.try_recv().ok();
+            seen.is_some()
         })
         .await;
-        for _ in 0..TURNS {
-            task::yield_now().await;
+    seen.expect("the probe answered")
+}
+
+/// An `<svg>` source that settles while the epilogue cannot commit — a listed
+/// sheet still outstanding — is held, not delivered: delivering it then would
+/// read a box no layout has produced. The first flush settles the sheet and
+/// commits, and the epilogue of that entry posts the held `load`, which then
+/// reads the size the sheet gave the element.
+#[test]
+fn an_svg_load_settled_before_the_first_commit_waits_for_it() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::serving(
+            context,
+            workers,
+            ViewSources {
+                style_sheets: vec!["app:///a.css".to_owned()],
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+            },
+        );
+        harness
+            .until("the view never asked for its stylesheet", |h| {
+                h.wants_a_style_sheet()
+            })
+            .await;
+        answer_module_at(
+            &mut harness,
+            "app:///main.js",
+            &card_entry(SVG_BEFORE_THE_FIRST_FLUSH),
+        );
+        harness
+            .until("the entry's import was never requested", |harness| {
+                harness.sources.iter().any(|(request, _)| {
+                    matches!(request, SourceRequest::Module(url) if url == "app:///dep.js")
+                })
+            })
+            .await;
+
+        // Parsed by the host, so the source settles inside this command's
+        // own entry, before any commit: the hold is what this pins.
+        harness
+            .commands
+            .send(ToMain::ImageEvents(vec![dom::ImageEvent::parse_document(
+                Arc::from("app:///a.svg"),
+                empty_svg(30, 15).as_bytes(),
+                dom::DocumentKind::Svg,
+            )]))
+            .expect("the view is serving");
+        for _ in 0..16 {
+            harness.turn().await;
         }
         assert_eq!(
-            owned.page.refused_entry_count(),
-            refused + 1,
-            "the parse's entry, and only it, was queued and refused"
+            first_child_seen(&mut harness).await,
+            None,
+            "nothing is committed yet, so the `load` is held"
         );
-        assert_eq!(
-            owned.page.epilogue_count(),
-            settled,
-            "no epilogue ran for the parse's outcome"
-        );
-        assert!(
-            still_pending(&owned.page, "app:///a.svg", 3),
-            "the document saw no apply: the source is still pending"
-        );
+        assert!(harness.view.published.commit().is_none());
 
-        tokio::join!(owned.page.run_owner(), answer_disposal(&mut background));
-        assert_eq!(owned.page.task_count(), 0);
-        assert!(
-            !owned
-                .events()
-                .iter()
-                .any(|event| matches!(event, EngineEvent::Panicked(_))),
-            "nothing panicked"
+        harness.answer_style_sheet_at("app:///a.css", "svg{width:50px;height:40px}");
+        answer_module_at(&mut harness, "app:///dep.js", "export const value = 1;");
+        harness.until("boot never finished", |h| h.finished()).await;
+        let mut seen = None;
+        for _ in 0..TURNS {
+            seen = first_child_seen(&mut harness).await;
+            if seen.is_some() {
+                break;
+            }
+        }
+        assert_eq!(
+            seen.as_deref(),
+            Some(r#"{"width":50,"height":40}"#),
+            "delivered after the commit that laid the element out"
         );
     });
 }

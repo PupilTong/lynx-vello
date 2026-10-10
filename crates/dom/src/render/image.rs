@@ -66,31 +66,38 @@
 //!
 //! # Vector images
 //!
-//! An SVG document is not pixels, and a host does not parse it. It reports
-//! the fetched bytes and their [`DocumentKind`] through
-//! [`ImageReports::loaded_document`], which travel to the document thread
-//! inside [`ImageEvent::LoadedDocument`]. The engine's own converter
-//! (`render/svg`) parses them into a [`VectorDocument`], a flat command
-//! list with its geometry resolved and its text still unshaped, reached
-//! from outside this crate only through [`ImageEvent::parse_document`]:
-//! natively `bobcat-core` parses on its engine thread's blocking pool and
-//! applies the result as [`ImageEvent::ParsedDocument`]; where nothing
-//! parses first (this crate's own tests, the wasm32 build),
-//! [`Document::apply_image_events`](crate::Document::apply_image_events)
-//! parses inline. Applying a parsed document shapes its text through the
-//! document's own `TextContext` and encodes the scene, on the document
-//! thread, into a [`VectorImage`]; the registry keeps that in the loaded
-//! entry, and a document that does not parse marks its source failed. A
-//! vector image is never an image draw: [`FrameImages`] is never asked for
-//! it, and no bitmap budget applies.
+//! An SVG document is not pixels, and the engine draws it itself. The host
+//! that fetched it parses it, on whatever thread it decodes bitmaps on,
+//! with the engine's own converter (`render/svg`), reached from outside this
+//! crate only through [`ImageEvent::parse_document`]: the result is a
+//! [`VectorDocument`], a flat command list with its geometry resolved and
+//! its text still unshaped, which the host reports through
+//! [`ImageReports::parsed_document`] and which travels to the document
+//! thread inside [`ImageEvent::ParsedDocument`]. A document that does not
+//! parse is reported with [`ImageReports::failed`]. Applying a parsed
+//! document shapes its text through the document's own `TextContext` and
+//! encodes the scene, on the document thread, into a [`VectorImage`]; the
+//! registry keeps that in the loaded entry. A vector image is never an image
+//! draw: [`FrameImages`] is never asked for it, and no bitmap budget applies.
 //!
-//! The document is the second producer of vector images: an inline `<svg>`
-//! root's subtree is serialised and parsed through the same
-//! [`ImageEvent::parse_document`] inline on the document thread, and filed
-//! under a synthetic source ([`SYNTHETIC_SOURCE_PREFIX`]) the registry
-//! creates already settled, so the host never sees it
-//! (`tree/inline_svg.rs`). Synthetic entries are the only ones the registry
-//! ever removes.
+//! # Documents the page hands over
+//!
+//! A document need not be fetched. The Lynx `<svg content>` hands the
+//! document its markup directly
+//! ([`Document::set_image_document`](crate::Document::set_image_document)),
+//! and the registry files it under a *synthetic source*:
+//! [`SYNTHETIC_SOURCE_PREFIX`] followed by the 32 hex digits of a 128-bit
+//! hash of the bytes (SipHash-1-3 with the zero key, [`synthetic_source`]).
+//! Identical markup is therefore one entry, one parse, one scene and one
+//! raster texture however many elements draw it. An unknown synthetic source
+//! is created `Pending` and its bytes queued as a *document request*
+//! ([`ImageRegistry::take_document_requests`]), which the embedder hands to
+//! the host with the bytes: the host parses them exactly as it parses a
+//! fetched document and reports the result for that source. A known one
+//! binds and settles at once. No walk and no bind ever asks the host to
+//! fetch a synthetic source, and its entry is forgotten when the last node
+//! presenting it lets go ([`ImageRegistry::unbind_node`]): the one removal
+//! the registry makes, a host source still never regressing.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -110,7 +117,8 @@ use crate::vello::Scene;
 ///
 /// Built by [`VectorImage::from_document`] on the document thread from the
 /// [`VectorDocument`] the converter parsed (`render/svg`), which is what a
-/// host's bytes become through [`ImageEvent::parse_document`]. It carries
+/// host turns a document's bytes into with [`ImageEvent::parse_document`]
+/// and reports through [`ImageReports::parsed_document`]. It carries
 /// the encoded scene and two sizes, both computed at the parse from the
 /// root element's `width`, `height` and `viewBox`:
 ///
@@ -165,10 +173,10 @@ impl Default for AspectRatio {
 /// never share a key within a process.
 static NEXT_VECTOR_KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// The parsed document crosses from the thread that parsed it (natively a
-/// blocking-pool thread) to the document's inside an [`ImageEvent`], and
-/// the encoded scene is published inside the registry, so both must be
-/// `Send + Sync`.
+/// The parsed document crosses from the thread the host parsed it on (its
+/// decode pool) to the document's inside an [`ImageEvent`], shared by the
+/// host's entry and every report it makes from it, and the encoded scene is
+/// published inside the registry, so both must be `Send + Sync`.
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<VectorDocument>();
@@ -469,23 +477,22 @@ impl ImageReports {
         });
     }
 
-    /// `source` is a document of `kind` the engine draws itself, and `bytes`
-    /// are its encoded bytes as fetched (after any preprocessing that leaves
-    /// an image's bytes unchanged).
+    /// `source` is a document the engine draws itself, and `document` is
+    /// what [`ImageEvent::parse_document`] made of its bytes.
     ///
-    /// The host does not parse: the engine does, and a document it cannot
-    /// read becomes a failure of the source on the engine's side. Otherwise
-    /// the same contract as [`ImageReports::loaded`]: reported once per
-    /// source, never retracted. A host may answer a later request for the
-    /// same source with the same bytes again; the document's registry makes
-    /// the repeat a no-op.
+    /// The host parses, with the engine's converter, wherever it decodes a
+    /// bitmap; a document that does not parse is reported with
+    /// [`ImageReports::failed`] instead. Otherwise the same contract as
+    /// [`ImageReports::loaded`]: reported once per source, never retracted.
+    /// A host may answer a later request for the same source with the same
+    /// document again, sharing it rather than parsing twice; the document's
+    /// registry makes the repeat a no-op.
     ///
     /// Non-blocking, and it must not re-enter the store.
-    pub fn loaded_document(&self, source: &str, bytes: Bytes, kind: DocumentKind) {
-        self.post(ImageEvent::LoadedDocument {
+    pub fn parsed_document(&self, source: &str, document: Arc<VectorDocument>) {
+        self.post(ImageEvent::ParsedDocument {
             source: Arc::from(source),
-            bytes,
-            kind,
+            document,
         });
     }
 
@@ -545,28 +552,29 @@ impl ImageInbox {
     }
 }
 
-/// Which kind of document a host reported through
-/// [`ImageReports::loaded_document`]: what the engine parses the bytes as.
+/// Which kind of document a host hands the engine's parser
+/// ([`ImageEvent::parse_document`]): what the bytes are parsed as. The host
+/// learns it from its own sniffing for a fetched document, and from the
+/// document request for markup a page handed over.
 ///
 /// Non-exhaustive so that a second engine-drawn format is one more variant
 /// rather than a second protocol method.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DocumentKind {
-    /// An SVG document (`image/svg+xml`), parsed by
-    /// [`ImageEvent::parse_document`].
+    /// An SVG document (`image/svg+xml`).
     Svg,
 }
 
 /// One report from the store, on its way to the document.
 ///
-/// `Send` by construction: an `Arc<str>`, integers, [`Bytes`] and a
+/// `Send` by construction: an `Arc<str>`, integers and a shared
 /// [`VectorDocument`], which is `Send + Sync`. Unlike the sink, this really
 /// does cross a thread — the painter forwards a batch of these to the Lynx
 /// main thread — and the `Arc`s are what make that legal. There is no variant
-/// that could carry pixels (encoded document bytes and a parsed command list
-/// are not pixels), which is what makes "`ImageData` never crosses a channel"
-/// a property of the type rather than a rule to remember.
+/// that could carry pixels (a parsed command list is not pixels), which is
+/// what makes "`ImageData` never crosses a channel" a property of the type
+/// rather than a rule to remember.
 ///
 /// Not `PartialEq`: a [`VectorDocument`] has no meaningful equality, and
 /// every consumer matches events by pattern.
@@ -578,44 +586,39 @@ pub enum ImageEvent {
         width: u32,
         height: u32,
     },
-    /// This source is a document of `kind` the engine draws itself, and
-    /// these are its encoded bytes. What a host reports
-    /// ([`ImageReports::loaded_document`]); the engine parses it, and it ends
-    /// as [`ImageEvent::ParsedDocument`] or [`ImageEvent::Failed`].
-    LoadedDocument {
-        source: Arc<str>,
-        bytes: Bytes,
-        kind: DocumentKind,
-    },
-    /// This source is an SVG document, already parsed and not yet encoded.
-    /// Engine-internal: no host reports it. `bobcat-core` produces it from
-    /// a [`ImageEvent::LoadedDocument`] it parsed off the document thread
-    /// ([`ImageEvent::parse_document`]); applying it shapes the document's
-    /// text and encodes its scene on the document thread. Its natural size
-    /// is the intrinsic size layout reads.
+    /// This source is a document the engine draws itself, parsed by the host
+    /// ([`ImageReports::parsed_document`]) and not yet encoded. Applying it
+    /// shapes the document's text and encodes its scene on the document
+    /// thread. Its natural size is the intrinsic size layout reads.
+    ///
+    /// The document is shared, so a host that keeps it to answer a repeated
+    /// request reports it again without a copy.
     ParsedDocument {
         source: Arc<str>,
-        document: Box<VectorDocument>,
+        document: Arc<VectorDocument>,
     },
     /// This source will never produce pixels.
     Failed { source: Arc<str> },
 }
 
 impl ImageEvent {
-    /// The parsed event a [`ImageEvent::LoadedDocument`] for `source` with
-    /// `bytes` of `kind` ends as: [`ImageEvent::ParsedDocument`] when the
-    /// document parses, [`ImageEvent::Failed`] when it does not.
+    /// The report `bytes`, a document of `kind` fetched or handed over for
+    /// `source`, ends as: [`ImageEvent::ParsedDocument`] when the document
+    /// parses, [`ImageEvent::Failed`] when it does not. The engine's one
+    /// parser entry, for the host that reports the document.
     ///
     /// The parse is the converter's (`render/svg`), which reads nothing
     /// outside the document and needs no fonts. It runs on the calling
-    /// thread and may take as long as the document is large, so a caller
-    /// with a blocking pool runs it there.
+    /// thread and may take as long as the document is large, so a host runs
+    /// it where it decodes bitmaps, off the thread it reports on. Its
+    /// recursion is bounded (see `render/svg`'s module docs) for a thread
+    /// with a 2 MiB stack.
     #[must_use]
     pub fn parse_document(source: Arc<str>, bytes: &[u8], kind: DocumentKind) -> Self {
         match parse_document(bytes, kind) {
             Some(document) => Self::ParsedDocument {
                 source,
-                document: Box::new(document),
+                document: Arc::new(document),
             },
             None => Self::Failed { source },
         }
@@ -625,7 +628,6 @@ impl ImageEvent {
     fn source(&self) -> &Arc<str> {
         match self {
             Self::Loaded { source, .. }
-            | Self::LoadedDocument { source, .. }
             | Self::ParsedDocument { source, .. }
             | Self::Failed { source } => source,
         }
@@ -734,19 +736,40 @@ pub(crate) struct ImageApplied {
     pub(crate) nodes: SmallVec<[(NodeId, ImageRole); 1]>,
 }
 
-/// The prefix of every synthetic source: the one an inline SVG root is bound
-/// to (`tree::inline_svg`), `inline-svg:<node>:<generation>`. The registry
-/// creates such an entry already settled, so the host is never asked for
-/// it, and removes it when the root rebinds or is freed.
+/// The prefix of every synthetic source: the name the registry files a
+/// document handed over as markup under
+/// ([`Document::set_image_document`](crate::Document::set_image_document)),
+/// `svg-content:<32 hex digits>`. Such an entry is never asked of the host,
+/// and is forgotten when its last binder unbinds.
 ///
-/// A host URL that happened to start with this prefix would be forgotten
-/// with the node that last presented it; no host scheme does.
-pub(crate) const SYNTHETIC_SOURCE_PREFIX: &str = "inline-svg:";
+/// A host URL that happened to start with this prefix would be neither asked
+/// for nor kept; no host scheme does.
+pub(crate) const SYNTHETIC_SOURCE_PREFIX: &str = "svg-content:";
 
 /// Whether `source` is a synthetic source ([`SYNTHETIC_SOURCE_PREFIX`]).
 pub(crate) fn is_synthetic_source(source: &str) -> bool {
     source.starts_with(SYNTHETIC_SOURCE_PREFIX)
 }
+
+/// The synthetic source naming `bytes` as a document of `kind`.
+///
+/// The hash is SipHash-1-3 with its 128-bit output, from `siphasher` (already
+/// in the dependency tree through `phf`), keyed with zeros so one markup has
+/// one name in every document and every run. The hash folds the length into
+/// its last block, so a prefix of a document is not its collision. Keyed
+/// with a known key it is not collision-resistant against a page that sets
+/// out to collide two of its own pictures; such a page only confuses its own
+/// drawing, which it could do by writing the same markup twice.
+pub(crate) fn synthetic_source(bytes: &[u8], kind: DocumentKind) -> String {
+    let hash = siphasher::sip128::SipHasher13::new().hash(bytes).as_u128();
+    match kind {
+        DocumentKind::Svg => format!("{SYNTHETIC_SOURCE_PREFIX}{hash:032x}"),
+    }
+}
+
+/// A document handed over as markup that the host is to parse: its
+/// synthetic source, its bytes, and what to parse them as.
+pub type DocumentRequest = (Arc<str>, Bytes, DocumentKind);
 
 /// What the registry holds for one source.
 #[derive(Debug, Default)]
@@ -756,6 +779,10 @@ struct Entry {
     /// natural size to recompute and whose element owes an event. A
     /// `background-image` user is not here: it has no natural size, and the
     /// load invalidates the frame anyway.
+    ///
+    /// Deduplicated per `(node, role)` and unbound when a node is freed, so
+    /// its length is the entry's binder count, which is what forgets a
+    /// synthetic source when it reaches zero.
     nodes: SmallVec<[(NodeId, ImageRole); 1]>,
 }
 
@@ -771,9 +798,10 @@ struct Entry {
 /// The invariant that makes it work: **an entry exists exactly when the
 /// source has been asked for.** There is no window in which a source is known
 /// but has no key, because the key *is* the source. A synthetic source
-/// ([`SYNTHETIC_SOURCE_PREFIX`]) is the one exception: its entry is created
-/// settled by the document itself ([`ImageRegistry::insert_synthetic`]), and
-/// existing is exactly what keeps it from ever being asked for.
+/// ([`SYNTHETIC_SOURCE_PREFIX`]) is the one exception: the document files it
+/// itself, so its entry exists from the moment its bytes are queued in
+/// [`ImageRegistry::document_requests`], and existing is exactly what keeps
+/// the host from being asked to fetch it.
 #[derive(Default)]
 pub(crate) struct ImageRegistry {
     entries: FxHashMap<Arc<str>, Entry>,
@@ -782,6 +810,10 @@ pub(crate) struct ImageRegistry {
     /// `RefCell` because the paint walk takes the document shared, and the
     /// walk is exactly where sources are discovered.
     wanted: RefCell<Vec<Arc<str>>>,
+    /// Synthetic sources created since the last drain, with the bytes the
+    /// host parses for each. Every one names a `Pending` entry: a source
+    /// forgotten before the drain leaves this list with its entry.
+    document_requests: Vec<DocumentRequest>,
 }
 
 impl std::fmt::Debug for ImageRegistry {
@@ -789,6 +821,7 @@ impl std::fmt::Debug for ImageRegistry {
         formatter
             .debug_struct("ImageRegistry")
             .field("entries", &self.entries.len())
+            .field("document_requests", &self.document_requests.len())
             .finish_non_exhaustive()
     }
 }
@@ -845,7 +878,9 @@ impl ImageRegistry {
     /// that knows which sources a frame actually needs.
     fn sight(&self, source: &str) -> Option<(&Arc<str>, &Entry)> {
         let found = self.entries.get_key_value(source);
-        if found.is_none() {
+        // A synthetic source with no entry has no bytes anywhere: no binder
+        // holds it, and the host has nothing to answer it with.
+        if found.is_none() && !is_synthetic_source(source) {
             // Deduplicated here rather than on the way out: a list of 200 rows
             // sharing one `url(...)` resolves it 200 times on its first
             // commit, and allocating a copy of the URL per *draw* to request
@@ -868,8 +903,20 @@ impl ImageRegistry {
     /// request that source would ever get — and a replaced element binds its
     /// source in the same call that makes it replaced, always before any walk
     /// could have resolved it.
+    ///
+    /// A synthetic source is the exception, and is never asked for: its
+    /// entry already exists when it was filed by
+    /// [`ImageRegistry::insert_document`]. One named any other way (a page
+    /// writing `svg-content:…` into an `<image src>`) has no bytes to ask
+    /// for, so it binds nothing and files no entry: an entry without bytes
+    /// would make the markup's own later [`ImageRegistry::insert_document`]
+    /// read it as known and never queue its parse.
     pub(crate) fn bind_node(&mut self, source: &str, node: NodeId, role: ImageRole) {
-        if !self.entries.contains_key(source) {
+        let known = self.entries.contains_key(source);
+        if !known && is_synthetic_source(source) {
+            return;
+        }
+        if !known {
             // Deduplicated against a walk that met the same source first and
             // whose request has not been drained yet, the same way `resolve`
             // deduplicates against itself.
@@ -886,10 +933,47 @@ impl ImageRegistry {
 
     /// Drops `node`'s claim on `source` in `role`. Its claim in the other
     /// role, which an element naming one URL twice has, survives.
+    ///
+    /// The last claim on a synthetic source forgets it: its entry, its
+    /// picture, and its bytes if they were still waiting for a parse. A later
+    /// [`ImageRegistry::insert_document`] of the same markup files it afresh.
+    /// A host source is never forgotten, because one URL is reported once.
     pub(crate) fn unbind_node(&mut self, source: &str, node: NodeId, role: ImageRole) {
-        if let Some(entry) = self.entries.get_mut(source) {
-            entry.nodes.retain(|held| *held != (node, role));
+        let Some(entry) = self.entries.get_mut(source) else {
+            return;
+        };
+        entry.nodes.retain(|held| *held != (node, role));
+        if entry.nodes.is_empty() && is_synthetic_source(source) {
+            self.entries.remove(source);
+            self.document_requests
+                .retain(|(requested, ..)| &**requested != source);
         }
+    }
+
+    /// Files `bytes` as a document of `kind` under its synthetic source and
+    /// answers that source, queueing the bytes for a parse only when no entry
+    /// holds them yet: identical markup, from any number of elements, is one
+    /// entry and one parse.
+    ///
+    /// Answers the map's own key when the entry exists, so every binder of
+    /// one markup shares one allocation of its name.
+    pub(crate) fn insert_document(&mut self, bytes: &[u8], kind: DocumentKind) -> Arc<str> {
+        let source = synthetic_source(bytes, kind);
+        if let Some((known, _)) = self.entries.get_key_value(source.as_str()) {
+            return Arc::clone(known);
+        }
+        let source = Arc::<str>::from(source);
+        self.entries.insert(Arc::clone(&source), Entry::default());
+        self.document_requests
+            .push((Arc::clone(&source), Bytes::copy_from_slice(bytes), kind));
+        source
+    }
+
+    /// The documents filed by [`ImageRegistry::insert_document`] since the
+    /// last drain, for the embedder to hand the host, which parses them.
+    /// Each names an entry that is still `Pending` and still bound.
+    pub(crate) fn take_document_requests(&mut self) -> Vec<DocumentRequest> {
+        std::mem::take(&mut self.document_requests)
     }
 
     /// The sources discovered since the last drain, for the painter to ask
@@ -914,16 +998,20 @@ impl ImageRegistry {
     /// A [`ImageEvent::ParsedDocument`] is encoded here, on the calling
     /// thread, its text shaped through `context` (the document's own text
     /// context, created on the first text shaped), and only when its source
-    /// is still pending. A
-    /// [`ImageEvent::LoadedDocument`] is parsed here first as well: this is
-    /// the path for a caller with no blocking pool to parse on (this
-    /// crate's tests, the wasm32 build). A document that does not parse is
-    /// a failure, exactly as a [`ImageEvent::Failed`] report would be.
+    /// is still pending. Nothing is parsed here: the host parsed it.
+    ///
+    /// A report on a synthetic source that has been forgotten since its bytes
+    /// were requested (every element let go while the host parsed) moves nothing:
+    /// filing it would keep an entry nobody can bind to without
+    /// [`ImageRegistry::insert_document`] queueing a parse of its own.
     pub(crate) fn apply(
         &mut self,
         event: &ImageEvent,
         context: &mut Option<Box<TextContext>>,
     ) -> Option<ImageApplied> {
+        if is_synthetic_source(event.source()) && !self.entries.contains_key(&**event.source()) {
+            return None;
+        }
         let entry = self.entry_for(event.source());
         if !matches!(entry.state, ImageState::Pending) {
             return None;
@@ -945,10 +1033,6 @@ impl ImageRegistry {
             ImageEvent::ParsedDocument { document, .. } => {
                 vector_state(VectorImage::from_document(document, context))
             }
-            ImageEvent::LoadedDocument { bytes, kind, .. } => parse_document(bytes, *kind)
-                .map_or(ImageState::Failed, |document| {
-                    vector_state(VectorImage::from_document(&document, context))
-                }),
             ImageEvent::Loaded { .. } | ImageEvent::Failed { .. } => ImageState::Failed,
         };
         let loaded = match &state {
@@ -1005,36 +1089,6 @@ impl ImageRegistry {
             ImageState::Ready { width, height, .. } => Some((*width, *height)),
             ImageState::Pending | ImageState::Failed => None,
         }
-    }
-
-    /// Files a synthetic source ([`SYNTHETIC_SOURCE_PREFIX`]) already
-    /// settled by `event`, before any node binds it: an entry that exists
-    /// is never queued as wanted, so no paint walk and no bind asks the host
-    /// for it. A parsed document is encoded through `context` as
-    /// [`ImageRegistry::apply`] encodes one.
-    pub(crate) fn insert_synthetic(
-        &mut self,
-        event: &ImageEvent,
-        context: &mut Option<Box<TextContext>>,
-    ) {
-        debug_assert!(
-            is_synthetic_source(event.source()),
-            "only a synthetic source is inserted settled"
-        );
-        self.entries
-            .insert(Arc::clone(event.source()), Entry::default());
-        let _ = self.apply(event, context);
-    }
-
-    /// Removes a synthetic source's entry: a superseded generation of an
-    /// inline SVG root, or the source of a freed one. The one removal the
-    /// registry makes; a host source never regresses.
-    pub(crate) fn forget_synthetic(&mut self, source: &str) {
-        debug_assert!(
-            is_synthetic_source(source),
-            "only a synthetic source is ever removed: {source}"
-        );
-        self.entries.remove(source);
     }
 
     /// Whether the registry holds an entry for `source`.
@@ -1565,25 +1619,40 @@ mod vector_tests {
 
     use hughie::text::TextContext;
 
-    use super::{DocumentKind, ImageEvent, ImageRegistry, VectorImage};
+    use super::{DocumentKind, ImageEvent, ImageInbox, ImageRegistry, VectorImage};
 
-    /// A document a host reported, applied inline (the path this crate's
-    /// tests and the wasm32 build take), settles as a vector image with the
-    /// document's natural size and an encoded scene.
+    /// What a host does with a document's bytes: parse them with the
+    /// engine's parser and report the document through `parsed_document`.
+    /// The report carries the very document the host keeps, and applying it
+    /// settles a vector image with the document's natural size and an
+    /// encoded scene.
     #[test]
-    fn a_reported_document_is_parsed_and_encoded_inline() {
+    fn a_document_the_host_parsed_and_reported_settles_as_a_vector_image() {
+        let ImageEvent::ParsedDocument { document, .. } = ImageEvent::parse_document(
+            Arc::from("app:///icon.svg"),
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="6" height="4" fill="#dc2626"/></svg>"##,
+            DocumentKind::Svg,
+        ) else {
+            panic!("the document parses");
+        };
+        let (reports, inbox) = ImageInbox::new();
+        reports.parsed_document("app:///icon.svg", Arc::clone(&document));
+        let drained = inbox.drain();
+        let [
+            ImageEvent::ParsedDocument {
+                source,
+                document: reported,
+            },
+        ] = drained.as_slice()
+        else {
+            panic!("one parsed document: {drained:?}");
+        };
+        assert_eq!(&**source, "app:///icon.svg");
+        assert!(Arc::ptr_eq(reported, &document), "shared, not copied");
+
         let mut registry = ImageRegistry::default();
         let mut context = Some(Box::new(TextContext::without_system_fonts()));
-        let applied = registry.apply(
-            &ImageEvent::LoadedDocument {
-                source: Arc::from("app:///icon.svg"),
-                bytes: bytes::Bytes::from_static(
-                    br##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="6" height="4" fill="#dc2626"/></svg>"##,
-                ),
-                kind: DocumentKind::Svg,
-            },
-            &mut context,
-        );
+        let applied = registry.apply(&drained[0], &mut context);
         assert_eq!(applied.and_then(|applied| applied.loaded), Some((10, 10)));
         let (_, _, vector) = registry.resolve("app:///icon.svg").expect("loaded");
         let vector = vector.expect("a vector image");
@@ -1592,8 +1661,7 @@ mod vector_tests {
         assert!(!vector.opens_blend());
     }
 
-    /// A document parsed off the document thread arrives as
-    /// `ParsedDocument` and is encoded at apply, the natural path.
+    /// A parsed document is encoded at apply, on the thread that applies it.
     #[test]
     fn a_parsed_document_is_encoded_at_apply() {
         let mut registry = ImageRegistry::default();
@@ -1650,5 +1718,194 @@ mod vector_tests {
         assert_ne!(first.key(), second.key());
         assert_eq!(first.clone().key(), first.key());
         assert!(format!("{first:?}").starts_with("VectorImage"));
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod synthetic_tests {
+    //! Documents handed over as markup: the synthetic source, its single
+    //! parse, and its eviction with the last binder. The document-level
+    //! half (`Document::set_image_document`) is in `tests/svg_images.rs`.
+
+    use std::sync::Arc;
+
+    use hughie::text::TextContext;
+
+    use super::{
+        DocumentKind, ImageEvent, ImageRegistry, ImageRole, SYNTHETIC_SOURCE_PREFIX,
+        is_synthetic_source, synthetic_source,
+    };
+
+    const ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="4"/>"#;
+    const OTHER: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="6" height="6"/>"#;
+
+    fn node(bits: u64) -> crate::NodeId {
+        crate::NodeId::from_bits(bits).expect("a valid node id")
+    }
+
+    /// The source is the prefix and 32 lowercase hex digits, the same for
+    /// the same bytes, and different for different ones.
+    #[test]
+    fn the_source_names_the_markup() {
+        let source = synthetic_source(ICON, DocumentKind::Svg);
+        let digits = source
+            .strip_prefix(SYNTHETIC_SOURCE_PREFIX)
+            .expect("the prefix");
+        assert_eq!(digits.len(), 32, "{source}");
+        assert!(
+            digits
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "{source}"
+        );
+        assert!(is_synthetic_source(&source));
+        assert_eq!(source, synthetic_source(ICON, DocumentKind::Svg));
+        assert_ne!(source, synthetic_source(OTHER, DocumentKind::Svg));
+        assert_ne!(
+            source,
+            synthetic_source(&ICON[..ICON.len() - 1], DocumentKind::Svg),
+            "a prefix of the markup is another document"
+        );
+    }
+
+    /// Two elements handing over identical markup share one entry and one
+    /// queued parse, and the parse's outcome reaches both.
+    #[test]
+    fn identical_markup_is_one_entry_and_one_parse() {
+        let mut registry = ImageRegistry::default();
+        let first = registry.insert_document(ICON, DocumentKind::Svg);
+        registry.bind_node(&first, node(1), ImageRole::Source);
+        let second = registry.insert_document(ICON, DocumentKind::Svg);
+        registry.bind_node(&second, node(2), ImageRole::Source);
+
+        assert!(Arc::ptr_eq(&first, &second), "one name, one allocation");
+        let requests = registry.take_document_requests();
+        assert_eq!(requests.len(), 1, "one parse");
+        let (source, bytes, kind) = requests.into_iter().next().expect("one document");
+        assert!(Arc::ptr_eq(&source, &first));
+        assert_eq!(&*bytes, ICON);
+        assert_eq!(kind, DocumentKind::Svg);
+
+        let mut context = Some(Box::new(TextContext::without_system_fonts()));
+        let applied = registry
+            .apply(
+                &ImageEvent::parse_document(source, &bytes, kind),
+                &mut context,
+            )
+            .expect("the parse settled the entry");
+        assert_eq!(applied.loaded, Some((8, 4)));
+        assert_eq!(
+            applied.nodes.as_slice(),
+            [(node(1), ImageRole::Source), (node(2), ImageRole::Source)],
+            "both elements are bound to the one entry"
+        );
+
+        // A third element on the same markup binds a settled entry and
+        // queues nothing.
+        let third = registry.insert_document(ICON, DocumentKind::Svg);
+        registry.bind_node(&third, node(3), ImageRole::Source);
+        assert!(registry.take_document_requests().is_empty());
+        assert!(registry.outcome_for(&third, node(3)).is_some());
+    }
+
+    /// The request list drains once, and markup filed after a drain is a
+    /// list of its own.
+    #[test]
+    fn document_requests_drain_once() {
+        let mut registry = ImageRegistry::default();
+        let icon = registry.insert_document(ICON, DocumentKind::Svg);
+        registry.bind_node(&icon, node(1), ImageRole::Source);
+        assert_eq!(registry.take_document_requests().len(), 1);
+        assert!(registry.take_document_requests().is_empty());
+
+        let other = registry.insert_document(OTHER, DocumentKind::Svg);
+        registry.bind_node(&other, node(2), ImageRole::Source);
+        let requests = registry.take_document_requests();
+        assert_eq!(requests.len(), 1);
+        assert!(Arc::ptr_eq(&requests[0].0, &other));
+    }
+
+    /// The host is never asked for a synthetic source: not at the bind, not
+    /// when a walk meets one, and not when a walk meets one nobody holds.
+    #[test]
+    fn a_synthetic_source_is_never_asked_of_the_host() {
+        let mut registry = ImageRegistry::default();
+        let icon = registry.insert_document(ICON, DocumentKind::Svg);
+        registry.bind_node(&icon, node(1), ImageRole::Source);
+        assert!(registry.resolve(&icon).is_none(), "pending");
+        assert!(
+            registry
+                .resolve(&synthetic_source(OTHER, DocumentKind::Svg))
+                .is_none()
+        );
+        assert!(registry.take_wanted().is_empty());
+    }
+
+    /// A page naming a synthetic source itself files nothing, so the markup
+    /// that source names is still parsed when an element hands it over.
+    #[test]
+    fn a_synthetic_source_named_by_a_page_files_nothing() {
+        let mut registry = ImageRegistry::default();
+        let named = synthetic_source(ICON, DocumentKind::Svg);
+        registry.bind_node(&named, node(1), ImageRole::Source);
+        assert!(!registry.knows(&named));
+        assert!(registry.take_wanted().is_empty());
+
+        let icon = registry.insert_document(ICON, DocumentKind::Svg);
+        assert_eq!(&*icon, named);
+        assert_eq!(registry.take_document_requests().len(), 1, "still parsed");
+    }
+
+    /// The last binder letting go forgets the entry, in either role, and
+    /// takes the still-unparsed bytes with it; a host source survives
+    /// losing every binder.
+    #[test]
+    fn the_last_unbind_forgets_a_synthetic_source() {
+        let mut registry = ImageRegistry::default();
+        let icon = registry.insert_document(ICON, DocumentKind::Svg);
+        registry.bind_node(&icon, node(1), ImageRole::Source);
+        registry.bind_node(&icon, node(2), ImageRole::Placeholder);
+
+        registry.unbind_node(&icon, node(1), ImageRole::Source);
+        assert!(registry.knows(&icon), "one binder is left");
+        registry.unbind_node(&icon, node(2), ImageRole::Placeholder);
+        assert!(!registry.knows(&icon), "forgotten with the last binder");
+        assert!(
+            registry.take_document_requests().is_empty(),
+            "and its bytes are never parsed"
+        );
+
+        registry.bind_node("app:///a.svg", node(3), ImageRole::Source);
+        registry.unbind_node("app:///a.svg", node(3), ImageRole::Source);
+        assert!(registry.knows("app:///a.svg"), "a host source never goes");
+    }
+
+    /// A parse that returns after every binder let go applies to nothing
+    /// and recreates nothing; the same markup set again is a new entry with
+    /// a parse of its own.
+    #[test]
+    fn a_parse_for_a_forgotten_source_moves_nothing() {
+        let mut registry = ImageRegistry::default();
+        let icon = registry.insert_document(ICON, DocumentKind::Svg);
+        registry.bind_node(&icon, node(1), ImageRole::Source);
+        let (source, bytes, kind) = registry
+            .take_document_requests()
+            .pop()
+            .expect("one document");
+        registry.unbind_node(&icon, node(1), ImageRole::Source);
+
+        let mut context = Some(Box::new(TextContext::without_system_fonts()));
+        let event = ImageEvent::parse_document(source, &bytes, kind);
+        assert!(registry.apply(&event, &mut context).is_none());
+        assert!(!registry.knows(&icon));
+
+        let again = registry.insert_document(ICON, DocumentKind::Svg);
+        registry.bind_node(&again, node(2), ImageRole::Source);
+        assert_eq!(registry.take_document_requests().len(), 1);
+        let applied = registry
+            .apply(&event, &mut context)
+            .expect("the new entry is pending");
+        assert_eq!(applied.nodes.as_slice(), [(node(2), ImageRole::Source)]);
     }
 }

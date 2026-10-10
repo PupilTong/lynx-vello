@@ -136,11 +136,6 @@ pub(crate) struct Lifetime {
     /// the wakes a view or a worker answers.
     #[cfg(test)]
     epilogues: Cell<u64>,
-    /// How many entries found the object ended and ran nothing, for the tests
-    /// that tell an entry that was queued and refused from one that was never
-    /// queued.
-    #[cfg(test)]
-    refused_entries: Cell<u64>,
 }
 
 impl Lifetime {
@@ -156,8 +151,6 @@ impl Lifetime {
             thread,
             #[cfg(test)]
             epilogues: Cell::new(0),
-            #[cfg(test)]
-            refused_entries: Cell::new(0),
         }
     }
 
@@ -264,18 +257,6 @@ impl Lifetime {
     #[cfg(test)]
     pub(crate) fn epilogue_count(&self) -> u64 {
         self.epilogues.get()
-    }
-
-    /// Counts one entry that found the object ended and ran nothing.
-    #[cfg(test)]
-    pub(crate) fn count_refused_entry(&self) {
-        self.refused_entries.set(self.refused_entries.get() + 1);
-    }
-
-    /// How many entries have found the object ended and run nothing.
-    #[cfg(test)]
-    pub(crate) fn refused_entry_count(&self) -> u64 {
-        self.refused_entries.get()
     }
 
     /// The owner's one wait: the end, or the next task to finish.

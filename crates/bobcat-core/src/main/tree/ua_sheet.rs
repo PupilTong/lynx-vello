@@ -5,15 +5,10 @@
 //! [`super::list`], [`super::viewpager`], [`super::swiper`],
 //! [`super::refresh_view`], [`super::scroll_coordinator`], [`super::dialog`],
 //! [`super::popover`], [`super::overlay`], [`super::text`], [`super::raw_text`],
-//! [`super::image`] — and this module
+//! [`super::image`], [`super::svg`] — and this module
 //! only decides what they all agree on and what order they land in.
 //! [`super::blur_view`] is the one tag module with no rules of its own: a
 //! blur view is a container and nothing more, so everything it needs is here.
-//! `svg` has no tag module either: it is the standard element, implemented
-//! in `dom` (an inline SVG root, replaced content whose subtree is parsed as
-//! one vector image), and its one rule here, `svg { display: flex; }` with
-//! `svg` in the shared box block, makes it lay out the way `<image>` does.
-//! Nothing hides its children: being replaced content already does.
 //!
 //! # HTML's rules under the Lynx tags'
 //!
@@ -46,14 +41,14 @@
 //! its ordering assertion.
 //!
 //! Order within the Lynx rules is mostly documentation, with one exception
-//! that is mechanism: [`super::image`]'s child suppression ties on specificity with
-//! the `display` rules `view`, `scroll-view`, `list`, `list-item`, the two
+//! that is mechanism: [`super::image`]'s and [`super::svg`]'s child suppression ties on specificity
+//! with the `display` rules `view`, `scroll-view`, `list`, `list-item`, the two
 //! spellings each of `viewpager` and `viewpager-item`, `x-swiper`,
 //! `x-swiper-item`, `x-refresh-view`, `x-refresh-header`, `x-refresh-footer`,
 //! the ten `scroll-coordinator` tags, `blur-view`, `x-blur-view`, `overlay`,
 //! `x-overlay-ng` (their hosts' `display: contents`) and `wrapper` carry, so
-//! it wins only by being assembled last. That module's `nothing_inside_an_image_generates_a_box` is
-//! the tripwire for it.
+//! it wins only by being assembled last. Those modules' `nothing_inside_an_image_generates_a_box`
+//! and `nothing_inside_an_svg_generates_a_box` are the tripwires for it.
 
 use super::blur_view::{BLUR_VIEW_TAG, X_BLUR_VIEW_TAG};
 use super::dialog::DIALOG_TAG;
@@ -62,7 +57,7 @@ use super::swiper::{SWIPER_ITEM_TAG, SWIPER_TAG};
 use super::viewpager::{VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG};
 use super::{
     dialog, image, list, overlay, popover, raw_text, refresh_view, scroll_container,
-    scroll_coordinator, swiper, text, viewpager,
+    scroll_coordinator, svg, swiper, text, viewpager,
 };
 
 /// Page configuration for the Lynx runtime and UA cascade.
@@ -221,7 +216,6 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          {overflow}\
          page {{ width: 100%; height: 100%; font-family: sans-serif; }}\n\
          wrapper {{ display: contents; }}\n\
-         svg {{ display: flex; }}\n\
          {scrollers}\
          {lists}\
          {pagers}\
@@ -235,7 +229,8 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          {overlays}\
          {text}\
          {carriers}\
-         {images}",
+         {images}\
+         {svgs}",
         scrollers = scroll_container::UA_RULES,
         lists = list::UA_RULES,
         pagers = viewpager::UA_RULES,
@@ -248,6 +243,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
         text = text::UA_RULES,
         carriers = raw_text::UA_RULES,
         images = image::UA_RULES,
+        svgs = svg::UA_RULES,
     )
 }
 
@@ -321,45 +317,6 @@ mod tests {
             let style = style_of(&document, container);
             assert_eq!(*style.get_box_sizing(), box_sizing::T::BorderBox, "{tag}");
             assert_eq!(*style.get_display(), Display::Linear, "{tag}");
-        }
-    }
-
-    /// `svg` is a flex box under either display configuration (it is outside
-    /// the `defaultDisplayLinear` list), and an inline root lays out at its
-    /// `width`/`height` attributes with no box for anything inside it.
-    #[test]
-    fn an_svg_is_a_flex_leaf_sized_by_its_attributes() {
-        for linear in [true, false] {
-            let mut document = with_config(PageConfig {
-                default_display_linear: linear,
-                ..PageConfig::default()
-            });
-            let svg = child(&mut document, "svg", "");
-            document.set_attribute(svg, "viewBox", "0 0 24 24");
-            document.set_attribute(svg, "width", "48");
-            document.set_attribute(svg, "height", "32");
-            let path = document.create_element("path", ());
-            document.set_attribute(path, "d", "M0 0 H24 V24 Z");
-            document.append_child(svg, path);
-            document.layout();
-
-            assert_eq!(
-                *style_of(&document, svg).get_display(),
-                Display::Flex,
-                "linear={linear}"
-            );
-            let layout = document.rounded_layout(svg).expect("the svg is laid out");
-            assert_eq!(
-                (layout.size.width, layout.size.height),
-                (48.0, 32.0),
-                "linear={linear}"
-            );
-            assert!(
-                document
-                    .rounded_layout(path)
-                    .is_none_or(|layout| layout.size.width == 0.0 && layout.size.height == 0.0),
-                "a replaced svg's children generate no box: linear={linear}"
-            );
         }
     }
 
