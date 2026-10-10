@@ -11,7 +11,7 @@ use hughie::text::{FontBlob, TextContext};
 
 use super::shapes::{self, ARC_TOLERANCE};
 use super::text::{TextAnchor, TextPaint};
-use super::{Item, LayerClip, SvgError, VectorDocument, encode, opens_blend, parse};
+use super::{Item, LayerClip, SvgError, VectorDocument, encode, parse};
 use crate::paint::equivalence::assert_scenes_identical;
 use crate::render::image::{AspectAlign, AspectRatio};
 use crate::vello::Scene;
@@ -602,8 +602,7 @@ fn layer_bounds_include_strokes() {
 }
 
 /// `mix-blend-mode` and `isolation` have no presentation attribute: as
-/// attributes they change nothing, so the group pushes no layer and the
-/// image opens no blend.
+/// attributes they change nothing, so the group pushes no layer.
 #[test]
 fn blend_and_isolation_attributes_change_nothing() {
     let parsed = document(
@@ -620,7 +619,6 @@ fn blend_and_isolation_attributes_change_nothing() {
         &rect_path(0.0, 0.0, 20.0, 20.0),
     );
     assert_scenes_identical(&encoded(&parsed), &expected);
-    assert!(!opens_blend(&parsed));
 }
 
 /// Opacity on a shape itself wraps that one shape in a layer, as a group
@@ -1142,10 +1140,6 @@ fn a_style_attribute_changes_nothing() {
     solid_fill(&mut expected, Fill::NonZero, Affine::IDENTITY, RED, &shape);
     solid_fill(&mut expected, Fill::NonZero, Affine::IDENTITY, BLUE, &shape);
     assert_scenes_identical(&encoded(&parsed), &expected);
-    assert!(
-        !opens_blend(&parsed),
-        "a blend in a style attribute opens nothing"
-    );
 }
 
 /// `inherit` takes the parent's value, and `currentColor` is each
@@ -1196,7 +1190,6 @@ fn an_empty_document_encodes_nothing() {
     let parsed = document("");
     assert!(parsed.items.is_empty());
     assert!(encoded(&parsed).encoding().is_empty());
-    assert!(!opens_blend(&parsed));
 }
 
 // --- Sizes and errors ------------------------------------------------------

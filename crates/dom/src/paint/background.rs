@@ -355,7 +355,6 @@ pub(crate) fn paint_replaced_content(
                 space,
                 vector_draw(
                     vector,
-                    vector.opens_blend(),
                     fragment.transform,
                     destination,
                     image_quality(style),
@@ -929,17 +928,13 @@ fn fill_vector_tiles(
         return;
     }
     let (x_first, x_count, y_first, y_count) = grid.span(clip.bounding_box());
-    let opens_blend = vector.opens_blend();
     let mut iy = 0.0;
     while iy < y_count {
         let mut ix = 0.0;
         while ix < x_count {
             let tile = grid.tile_rect(x_first + ix, y_first + iy);
             if let Some(area) = image_area(clip, tile) {
-                sink.vector(
-                    space,
-                    vector_draw(vector, opens_blend, transform, tile, quality, area),
-                );
+                sink.vector(space, vector_draw(vector, transform, tile, quality, area));
             }
             ix += 1.0;
         }
@@ -948,11 +943,9 @@ fn fill_vector_tiles(
 }
 
 /// The draw of `vector` onto `destination` — item-local, under `transform`
-/// — filling `area`. `opens_blend` is the image's own answer, taken once by
-/// a caller that draws many tiles.
+/// — filling `area`.
 fn vector_draw(
     vector: &VectorImage,
-    opens_blend: bool,
     transform: Affine,
     destination: Rect,
     quality: ImageQuality,
@@ -963,7 +956,6 @@ fn vector_draw(
         key: vector.key(),
         viewport: vector.viewport(),
         aspect: vector.aspect(),
-        opens_blend,
         transform,
         anchor: destination.origin(),
         extent: destination.size(),

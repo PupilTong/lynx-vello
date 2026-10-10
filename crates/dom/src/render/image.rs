@@ -136,7 +136,6 @@ pub struct VectorImage {
     viewport: (f32, f32),
     aspect: AspectRatio,
     key: u64,
-    opens_blend: bool,
 }
 
 /// One side of a `preserveAspectRatio` alignment: where the viewport sits
@@ -199,7 +198,6 @@ impl VectorImage {
             viewport: document.viewport,
             aspect: document.aspect,
             key: NEXT_VECTOR_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            opens_blend: svg::opens_blend(document),
         }
     }
 
@@ -224,15 +222,6 @@ impl VectorImage {
     #[must_use]
     pub(crate) fn aspect(&self) -> AspectRatio {
         self.aspect
-    }
-
-    /// Whether drawing the picture opens a blend layer with no isolating
-    /// layer of its own around it, so the layer a draw of the whole image
-    /// opens must be a full `Normal` layer rather than a clip layer (vello
-    /// [#1198](https://github.com/linebender/vello/issues/1198)).
-    #[must_use]
-    pub(crate) fn opens_blend(&self) -> bool {
-        self.opens_blend
     }
 
     /// The size layout is told, in whole CSS px.
@@ -262,7 +251,6 @@ impl std::fmt::Debug for VectorImage {
             .field("viewport", &self.viewport)
             .field("aspect", &self.aspect)
             .field("key", &self.key)
-            .field("opens_blend", &self.opens_blend)
             .finish_non_exhaustive()
     }
 }
@@ -1658,7 +1646,6 @@ mod vector_tests {
         let vector = vector.expect("a vector image");
         assert!(!vector.scene().encoding().is_empty());
         assert_eq!(vector.viewport(), (10.0, 10.0));
-        assert!(!vector.opens_blend());
     }
 
     /// A parsed document is encoded at apply, on the thread that applies it.
@@ -1680,10 +1667,6 @@ mod vector_tests {
         let vector = vector.expect("a vector image");
         assert_eq!(vector.viewport(), (40.0, 10.0));
         assert!(!vector.scene().encoding().is_empty());
-        assert!(
-            !vector.opens_blend(),
-            "an opacity layer is `Normal`, never a blend"
-        );
     }
 
     /// A document that does not parse is the source's failure.

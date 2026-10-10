@@ -2,11 +2,10 @@
 
 use hughie::text::{ShapedLine, TextContext, shape_line};
 
-use super::parse::opens_blend_in;
 use super::text::{TextAnchor, TextItem, TextPaint};
 use super::{Item, LayerClip, VectorDocument, paint_server};
 use crate::vello::kurbo::{Affine, Point, Rect, Stroke};
-use crate::vello::peniko::{BlendMode, Brush, Compose, Fill, Mix, StyleRef};
+use crate::vello::peniko::{Brush, Fill, Mix, StyleRef};
 use crate::vello::{Glyph, Scene};
 
 /// Encodes `document` into a scene in viewport units, shaping its text
@@ -66,37 +65,23 @@ pub(crate) fn encode(document: &VectorDocument, context: &mut Option<Box<TextCon
                 }
             }
             Item::PushLayer {
-                blend,
                 alpha,
                 clip,
                 transform,
             } => match clip {
                 LayerClip::Bounds(bounds) => {
                     let bounds = extend(*bounds, extensions.get(index).copied().flatten());
-                    scene.push_layer(Fill::NonZero, *blend, *alpha, *transform, &bounds);
+                    scene.push_layer(Fill::NonZero, Mix::Normal, *alpha, *transform, &bounds);
                 }
                 LayerClip::Path(shape, rule) => {
-                    scene.push_layer(*rule, *blend, *alpha, *transform, shape);
+                    scene.push_layer(*rule, Mix::Normal, *alpha, *transform, shape);
                 }
             },
             Item::PushClip {
                 shape,
                 rule,
                 transform,
-                isolate,
-            } => {
-                if *isolate {
-                    scene.push_layer(
-                        *rule,
-                        BlendMode::new(Mix::Normal, Compose::SrcOver),
-                        1.0,
-                        *transform,
-                        shape,
-                    );
-                } else {
-                    scene.push_clip_layer(*rule, *transform, shape);
-                }
-            }
+            } => scene.push_clip_layer(*rule, *transform, shape),
             Item::Pop => scene.pop_layer(),
             Item::Text(text) => {
                 if let Some(shaped) = texts.next() {
@@ -106,13 +91,6 @@ pub(crate) fn encode(document: &VectorDocument, context: &mut Option<Box<TextCon
         }
     }
     scene
-}
-
-/// Whether drawing `document` opens a blend layer with no isolating layer
-/// of its own around it, so the layer a draw of the whole image opens must
-/// be a full `Normal` layer rather than a clip layer (vello #1198).
-pub(crate) fn opens_blend(document: &VectorDocument) -> bool {
-    opens_blend_in(&document.items)
 }
 
 /// One text item's chunks, shaped and placed in the item's user space.
