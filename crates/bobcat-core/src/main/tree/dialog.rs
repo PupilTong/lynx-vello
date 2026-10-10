@@ -82,9 +82,11 @@
 //!
 //! [`show`], [`show_modal`], [`close`] and [`request_close`] are HTML's
 //! `show()`, `showModal()`, `close()` and `requestClose()`, reached through
-//! `invoke` / `__InvokeUIMethod` as UI methods (`callElementMethod` in
-//! `main/runtime`). Each sets or removes the `open` attribute and lets the
-//! attribute callback do the state work, so there is one path for each fact.
+//! `invoke` / `__InvokeUIMethod` as UI methods: `callElementMethod` in
+//! `main/runtime` asks [`dom::Document::invoke_element_method`], which runs
+//! [`Dialog`]'s [`CustomElement::invoke`]. Each sets or removes the `open`
+//! attribute and lets the attribute callback do the state work, so there is
+//! one path for each fact.
 //! The overlay's shadow dialog ([`super::overlay`]) is driven through the
 //! same functions, as web-core drives its own through `showModal()` and
 //! `close()`.
@@ -98,14 +100,15 @@
 //! - `requestClose()`: no-op on a closed dialog; otherwise queues `cancel`, then closes as
 //!   `close()` does.
 //!
-//! [`InvalidState`] is HTML's `InvalidStateError`. The runtime answers it with
-//! the UI-method status 4, `PARAM_INVALID`, which is what web-core's `invoke`
-//! reports for any method that throws
-//! (`web-core/ts/client/mainthread/elementAPIs/createInvokeUIMethod.ts:12-44`).
-//! Native's table has a distinct `7 INVALID_STATE_ERROR`
-//! (`lynx/core/renderer/dom/lynx_get_ui_result.h:53-61`); web-core is followed
-//! (`docs/tracking/deviations.md`). The methods' `params` are not read:
-//! `returnValue` has no reader in Lynx JS, so `close(returnValue)` drops it.
+//! [`InvalidState`] is HTML's `InvalidStateError`, which `invoke` answers as
+//! [`MethodError::InvalidState`] and the runtime as the UI-method status 7,
+//! native's `INVALID_STATE_ERROR`
+//! (`lynx/core/renderer/dom/lynx_get_ui_result.h:53-61`). web-core reports
+//! every method that throws as 4, `PARAM_INVALID`
+//! (`web-core/ts/client/mainthread/elementAPIs/createInvokeUIMethod.ts:12-44`);
+//! native's code is a ruled deviation from it (`docs/tracking/deviations.md`).
+//! The methods' `params` are not read: `returnValue` has no reader in Lynx JS,
+//! so `close(returnValue)` drops it.
 //!
 //! # Events
 //!
@@ -125,7 +128,7 @@
 //!   `::backdrop` animations and transitions do not run (the lazy pseudo-element cascade carries no
 //!   animation declarations).
 
-use dom::{CustomElement, ElementState, NodeId};
+use dom::{CustomElement, ElementState, MethodCall, MethodError, MethodOutcome, NodeId};
 
 use super::{ComponentEvents, LynxDocument};
 
@@ -167,14 +170,18 @@ pub(super) const UA_RULES: &str = r#"
 
 /// Installs the `dialog` component. Must run before any element could carry
 /// the tag, which is [`Document::define`](dom::Document::define)'s own
-/// precondition.
-pub(super) fn define(document: &mut LynxDocument) {
-    document.define(DIALOG_TAG, Box::new(Dialog));
+/// precondition. `events` is the queue `close()` and `requestClose()` leave
+/// their events in.
+pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
+    document.define(DIALOG_TAG, Box::new(Dialog { events }));
 }
 
 /// The `dialog` component: keeps `:open` and `:modal` and top-layer
-/// membership in step with the `open` attribute.
-struct Dialog;
+/// membership in step with the `open` attribute, and answers HTML's four
+/// methods.
+struct Dialog {
+    events: ComponentEvents,
+}
 
 impl CustomElement<()> for Dialog {
     fn observed_attributes(&self) -> Vec<String> {
@@ -212,20 +219,38 @@ impl CustomElement<()> for Dialog {
             set_state(document, element, ElementState::MODAL, false);
         }
     }
+
+    /// `HTMLDialogElement`'s four methods; see the module documentation.
+    fn invoke(
+        &self,
+        document: &mut LynxDocument,
+        element: NodeId,
+        call: MethodCall<'_>,
+    ) -> MethodOutcome {
+        let shown = match call.name {
+            "show" => show(document, element),
+            "showModal" => show_modal(document, element),
+            "close" => {
+                close(document, element, &self.events);
+                Ok(())
+            }
+            "requestClose" => {
+                request_close(document, element, &self.events);
+                Ok(())
+            }
+            _ => return MethodOutcome::NotFound,
+        };
+        match shown {
+            Ok(()) => MethodOutcome::Done,
+            Err(InvalidState) => MethodOutcome::Failed(MethodError::InvalidState),
+        }
+    }
 }
 
 /// HTML's `InvalidStateError`: `show()` on a modal dialog, `showModal()` on
 /// an open non-modal or a disconnected one.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct InvalidState;
-
-/// Whether `node` is a `dialog`.
-pub(crate) fn is_dialog(document: &LynxDocument, node: NodeId) -> bool {
-    document
-        .get(node)
-        .and_then(dom::Node::tag_name)
-        .is_some_and(|tag| tag == DIALOG_TAG)
-}
 
 /// HTML's `show()`.
 pub(crate) fn show(document: &mut LynxDocument, dialog: NodeId) -> Result<(), InvalidState> {
@@ -313,7 +338,7 @@ mod tests {
 
     use dom::stylo::properties::PropertyId;
     use dom::stylo::values::computed::{Display, Overflow};
-    use dom::{NodeId, Point2D};
+    use dom::{MethodCall, MethodError, MethodOutcome, NodeId, Point2D};
 
     use super::super::test_support::{
         child, display, document, element_under, overflow, style_of, with_component_events,
@@ -572,6 +597,37 @@ mod tests {
             Ok(()),
             "`show` has no such rule"
         );
+    }
+
+    /// The component's `invoke` answers the four names over the functions
+    /// above, `InvalidStateError` as `InvalidState`, queues on the queue it
+    /// was defined with, and leaves every other name to the host.
+    #[test]
+    fn invoke_answers_the_four_methods_and_nothing_else() {
+        let (mut document, events) = with_component_events(PageConfig::default());
+        let dialog = child(&mut document, DIALOG_TAG, "");
+        let invoke = |document: &mut LynxDocument, name: &str| {
+            document.invoke_element_method(dialog, MethodCall { name, params: "{}" })
+        };
+
+        assert_eq!(invoke(&mut document, "showModal"), MethodOutcome::Done);
+        assert!(document.blocks_document(dialog));
+        assert_eq!(
+            invoke(&mut document, "show"),
+            MethodOutcome::Failed(MethodError::InvalidState)
+        );
+        assert_eq!(invoke(&mut document, "requestClose"), MethodOutcome::Done);
+        assert_eq!(queued(&events), vec![(dialog, "cancel"), (dialog, "close")]);
+        assert_eq!(invoke(&mut document, "show"), MethodOutcome::Done);
+        assert_eq!(invoke(&mut document, "close"), MethodOutcome::Done);
+        assert_eq!(queued(&events), vec![(dialog, "close")]);
+        for name in ["boundingClientRect", "selectTab", "remove", ""] {
+            assert_eq!(
+                invoke(&mut document, name),
+                MethodOutcome::NotFound,
+                "{name}"
+            );
+        }
     }
 
     /// `requestClose()` is `cancel` then `close`, always: there is no

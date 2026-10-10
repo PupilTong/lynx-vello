@@ -50,7 +50,7 @@ pub use crate::style::engine::{
 };
 pub use crate::style::pool::{MAX_STYLE_THREADS, StylePool, StylePoolError, StyleWorker};
 pub use crate::style::query::InvalidSelector;
-pub use crate::tree::custom::CustomElement;
+pub use crate::tree::custom::{CustomElement, MethodCall, MethodError, MethodOutcome};
 pub use crate::tree::document::{Document, NodeId};
 #[doc(hidden)]
 pub use crate::tree::node::ChildrenIter;

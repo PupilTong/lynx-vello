@@ -8,10 +8,11 @@
 //! box and snap at their start with `scroll-snap-stop: always`, and the
 //! painter's snap rules do the paging: a release under half a page glides
 //! back, one past half glides on, a flick stops at the next page
-//! (`crates/bobcat-core/src/paint/inertia.rs`). No component is defined for
-//! either tag: nothing here reacts to an attribute outside the cascade, and
-//! `selectTab` is dispatched by tag name from the runtime's
-//! `callElementMethod` ([`select_tab`]).
+//! (`crates/bobcat-core/src/paint/inertia.rs`). The pager's component
+//! ([`Viewpager`]) has one member, the `selectTab` method ([`select_tab`]),
+//! which the runtime's `callElementMethod` reaches through
+//! [`dom::Document::invoke_element_method`]; nothing here reacts to an
+//! attribute outside the cascade, and the item tags have no component.
 //!
 //! Translated from web-elements'
 //! `lynx-stack/packages/web-platform/web-elements/src/elements/XViewpagerNg/x-viewpager-ng.css`
@@ -126,7 +127,7 @@
 //!   all three are left out.
 
 use dom::scroll::ScrollBehavior;
-use dom::{NodeId, Vector2D};
+use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Vector2D};
 use serde_json::Value;
 
 use super::LynxDocument;
@@ -166,18 +167,38 @@ viewpager-item, x-viewpager-item-ng {
 viewpager-item, x-viewpager-item-ng { position: relative !important; }
 "#;
 
-/// Whether `node` is a pager, under either of its tag names.
-pub(crate) fn is_viewpager(document: &LynxDocument, node: NodeId) -> bool {
-    document
-        .get(node)
-        .and_then(dom::Node::tag_name)
-        .is_some_and(|tag| tag == VIEWPAGER_TAG || tag == X_VIEWPAGER_TAG)
+/// Installs the pager component under both of its tag names. Must run before
+/// any element could carry either tag, which is
+/// [`Document::define`](dom::Document::define)'s own precondition.
+pub(super) fn define(document: &mut LynxDocument) {
+    document.define(VIEWPAGER_TAG, Box::new(Viewpager));
+    document.define(X_VIEWPAGER_TAG, Box::new(Viewpager));
+}
+
+/// The pager component: the `selectTab` method alone.
+struct Viewpager;
+
+impl CustomElement<()> for Viewpager {
+    fn invoke(
+        &self,
+        document: &mut LynxDocument,
+        element: NodeId,
+        call: MethodCall<'_>,
+    ) -> MethodOutcome {
+        match call.name {
+            "selectTab" => match select_tab(document, element, call.params) {
+                Ok(()) => MethodOutcome::Done,
+                Err(InvalidParams) => MethodOutcome::Failed(MethodError::InvalidParams),
+            },
+            _ => MethodOutcome::NotFound,
+        }
+    }
 }
 
 /// `selectTab`'s params were not `{index: <number>, …}`: the UI-method
 /// status table's code 4, `PARAM_INVALID`.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct InvalidParams;
+pub(super) struct InvalidParams;
 
 /// `selectTab({index, smooth = true})` on `pager`, with `params` as the JSON
 /// text the realm serialized.
@@ -203,7 +224,7 @@ pub(crate) struct InvalidParams;
 /// frame carries, and one restyled into no scroll container records nothing;
 /// either way the call succeeds, as web-core's does against a zero
 /// `clientWidth`.
-pub(crate) fn select_tab(
+pub(super) fn select_tab(
     document: &mut LynxDocument,
     pager: NodeId,
     params: &str,
@@ -259,8 +280,16 @@ mod tests {
     use super::super::{LynxDocument, PageConfig};
     use super::{
         InvalidParams, VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG,
-        is_viewpager, select_tab,
+        select_tab,
     };
+
+    /// Whether `node` is a pager, under either of its tag names.
+    fn is_viewpager(document: &LynxDocument, node: NodeId) -> bool {
+        document
+            .get(node)
+            .and_then(dom::Node::tag_name)
+            .is_some_and(|tag| tag == VIEWPAGER_TAG || tag == X_VIEWPAGER_TAG)
+    }
 
     /// Both spellings of the pager, each with the item spelling that goes
     /// with it.

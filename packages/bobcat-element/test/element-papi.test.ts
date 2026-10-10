@@ -3285,18 +3285,42 @@ describe("__InvokeUIMethod", () => {
     ]);
   });
 
-  it("tells a refusal, a success without data and a rect apart", () => {
+  it("tells each status, a rect and a record apart", () => {
     const view = __CreateView(0);
     const answers: unknown[] = [];
-    for (const answer of [4, 0, "1,2,3,4"]) {
+    for (const answer of [4, 7, 8, 0, "1:0"]) {
       mock.answerElementMethod = () => answer;
       __InvokeUIMethod(view, "selectTab", {}, (result: unknown) => answers.push(result));
     }
+    mock.answerElementMethod = () => "1,2,3,4";
+    __InvokeUIMethod(view, "boundingClientRect", {}, (result: unknown) => answers.push(result));
     expect(answers[0]).toStrictEqual({ code: 4, data: undefined });
-    expect(answers[1]).toStrictEqual({ code: 0, data: undefined });
-    expect(answers[2]).toMatchObject({
+    expect(answers[1]).toStrictEqual({ code: 7, data: undefined });
+    expect(answers[2]).toStrictEqual({ code: 8, data: undefined });
+    expect(answers[3]).toStrictEqual({ code: 0, data: undefined });
+    // A string for any method but `boundingClientRect` is a record, never a
+    // rect: the code field and no data fields.
+    expect(answers[4]).toStrictEqual({ code: 0, data: [] });
+    expect(answers[5]).toMatchObject({
       code: 0,
       data: { left: 1, top: 2, width: 3, height: 4, right: 4, bottom: 6 },
+    });
+  });
+
+  it("reads a record's first field as the code and hands over the rest", () => {
+    const view = __CreateView(0);
+    // Fields that contain the delimiter and a character outside the BMP,
+    // which the host counts in UTF-16 units as `splitRecord` reads them.
+    mock.answerElementMethod = () => "1:0" + "3:a,b" + "0:" + "2:\u{1F600}";
+    const callback = rstest.fn();
+
+    __InvokeUIMethod(view, "getValue", {}, callback);
+
+    // No method has a decoder arm yet, so the fields arrive as they were
+    // written.
+    expect(callback.mock.calls[0]?.[0]).toStrictEqual({
+      code: 0,
+      data: ["a,b", "", "\u{1F600}"],
     });
   });
 
