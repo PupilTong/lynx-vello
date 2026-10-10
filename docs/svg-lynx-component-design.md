@@ -191,7 +191,14 @@ Per `<svg content>`: the `content` string once in the DOM attribute, one `Scene`
 ### CSS inside SVG (ruling 2026-10-09)
 
 - Phase 1 shipped `<style>` rules (matched with `simplecss`, specificity order, `!important`) and the `style` attribute as property sources. The ruling removed both: `render/svg/style.rs`'s `declarations` reads the presentation attributes named in `PROPERTIES` and nothing else, the converter carries no sheet, a `style` element is not rendered and its text is never read, and `simplecss` left the dependency tree.
-- `mix-blend-mode` and `isolation` are not read at all: SVG 2 gives them no presentation attribute, browsers accept them only through CSS, and `usvg` refused them as attributes for that reason, so with CSS not read they are unreachable. Every layer the converter opens is `Normal` (gap under [Known costs](#known-costs-and-follow-ups)). The item model's `PushLayer { blend }`, `PushClip { isolate }` and the `opens_blend` answer that contracts C and D describe for the vello #1198 rule were kept at first for the raster cache's interface, always `false`; the simplification pass of 2026-10-11 deleted them from the converter, `VectorImage`, `VectorDraw`, the inline encoding and the bake, since nothing could make them true.
+- `mix-blend-mode` and `isolation` are not read at all: SVG 2 gives them no presentation attribute, browsers accept them only through CSS, and `usvg` refused them as attributes for that reason, so with CSS not read they are unreachable. Every layer the converter opens is `Normal` (gap under [Known costs](#known-costs-and-follow-ups)). The item model's `PushLayer { blend }`, `PushClip { isolate }` and `opens_blend` were kept at first for the raster cache's interface and always computed `false`; see [Simplification pass](#simplification-pass-2026-10-11).
+
+### Simplification pass (2026-10-11)
+
+The owner asked for the SVG code to be simplified alongside the no-retention ruling of revision 4.1. Where contracts C and D above name these items, this is what is in force:
+
+- The vello #1198 plumbing is gone: `Item::PushLayer { blend }`, `Item::PushClip { isolate }`, `opens_blend` on the converter, `VectorImage` and `VectorDraw`, the isolating branch of the inline encoding and the bake's `Normal` wrapper. Nothing could make any of them true without CSS, which is not read; every layer is `Normal` and every clip a clip layer by construction.
+- `VectorImage` is crate-private (no other crate could make, receive or read one) and carries what a draw needs only: the scene, the viewport, the `preserveAspectRatio` and the key. The natural size is the registry entry's, as a bitmap's intrinsic size is, and a parsed document is never refused for a zero axis: the converter rounds the natural size to at least one px per axis.
 
 ## Revision 4.1 (2026-10-10): the fetcher parses
 
