@@ -62,11 +62,10 @@ flowchart LR
     subgraph fetcher["host: bobcat-resources (decode pool / Render Worker task)"]
         fetch["request_image: fetch + sniff Svg"] --> parse["decode permit →\nImageEvent::parse_document → VectorDocument\n(geometry resolved, text unshaped)"]
         docreq["request_document(source, bytes, kind)"] --> parse
-        parse --> entry["Entry::Vector { document }"]
     end
     bind --> fetch
     req --> docreq
-    entry -->|"ImageReports::parsed_document\n(ToMain::ImageEvents)"| apply
+    parse -->|"ImageReports::parsed_document\n(ToMain::ImageEvents); nothing kept"| apply
     subgraph painter["painter thread"]
         bank["VectorTextures\n(key, w, h) → texture, LRU budget"] --> replay["compose replay\nComposeOp::Vector → image quad"]
         frame --> bank
@@ -148,7 +147,7 @@ Per `<svg content>`: the `content` string once in the DOM attribute, one `Scene`
 - A texture is per device size: a `transform: scale()` animation on an ancestor samples the texture, so an item scaling from 0.8 to 1 (the swiper's `coverflow`) draws a 0.8-size raster upscaled during the animation. Native does the same. Follow-up if it shows: bake at the largest size an exported scale curve reaches.
 - Text shaped before a later `@font-face` arrives keeps its fallback glyphs.
 - `image` inside an SVG draws nothing; `mask`, `filter`, `pattern`, `marker` are not supported; `textPath`, per-character `x`/`y` lists, `dominant-baseline`, bidi reordering within a chunk are out.
-- A `content` string is parsed once per distinct markup per document, never evicted while an element is bound to it; since revision 4.1 the fetcher also keeps the parsed document for its own life (see there).
+- A `content` string is parsed once per distinct markup per document, never evicted while an element is bound to it. Nothing outside the document's registry keeps it (revision 4.1, ruling 2026-10-11), so a markup that leaves (its last element lets go) and comes back is parsed again.
 - Blend modes inside an SVG need CSS, which is not read: `mix-blend-mode` and `isolation` have no presentation attribute, so every layer the converter opens is `Normal`, and `opens_blend` (kept for the raster cache's interface) is always `false`.
 
 ## Decisions during implementation
@@ -204,6 +203,14 @@ protocol may carry the engine's `VectorDocument`, and the bytes of an
 `<svg content>` are handed to the host through the request path. Everything
 below that is not the ruling is the implementer's decision.
 
+**Ruling (owner, 2026-10-11).** The fetcher retains no parsed document, and
+nothing caches a repeated request: a virtual list recycling its rows is not
+a scenario the engine optimises for. Documents are parsed and reported,
+never retained; the engine owns the scene it encodes. As first written, this
+revision kept each parsed document in the fetcher's entry for the fetcher's
+life and answered a repeated request from it; [The fetcher](#the-fetcher)
+below is the design that replaced that.
+
 ### The protocol
 
 - **Reports.** `ImageReports::parsed_document(source, document:
@@ -211,9 +218,10 @@ below that is not the ruling is the implementer's decision.
   Arc<VectorDocument> }`. `ImageReports::loaded_document` and
   `ImageEvent::LoadedDocument` are gone. A document that does not parse is
   reported with the existing `failed(source)`. The document travels in an
-  `Arc` rather than by value: the fetcher keeps it to answer repeated
-  requests, and a re-report is then a count bump, not a deep copy of the
-  command list (`VectorDocument` is `Clone`, which would copy every path).
+  `Arc` rather than by value: one parse of a fetched document is reported
+  to every view that joined its load, and each report is then a count bump,
+  not a deep copy of the command list (`VectorDocument` is `Clone`, which
+  would copy every path).
 - **The parser.** `ImageEvent::parse_document(source, bytes, kind) ->
   ImageEvent` stays the one public parser entry. The host calls it on its
   decode thread and takes the document out of the `ParsedDocument` it
@@ -249,24 +257,30 @@ below that is not the ruling is the implementer's decision.
   requested as before. After sniffing `ImageFormat::Svg`, the load job takes
   a decode permit and runs the parse in a blocking closure of its own, in the
   decode's place (`images::parse_job`). It completes as
-  `Completion::ParsedDocument` into `Entry::Vector { document, source_bytes
-  }`, or as `Completion::Failed` with a note (`… is not a document the engine
+  `Completion::ParsedDocument`, reported to every view waiting on the load,
+  or as `Completion::Failed` with a note (`… is not a document the engine
   can draw`) into `Entry::Failed`. A parse that panics is the load's failure,
-  as a decode's is.
+  as a decode's is. A parsed document leaves `Entry::Parsed`, a unit marker:
+  the URL stays known (`knows_image`), as a bitmap's or a failure's does, but
+  nothing of the document is kept, so a later request, from the same view
+  or another, fetches and parses it again. Requests made while the load is
+  in flight still join it, as they do for a bitmap, so no request starts a
+  second fetch of a URL already loading.
 - **A document request** (`ViewResources::request_document`,
-  `images::request_document`) answers a known source from its entry:
-  `parsed_document` with the kept document, `failed`, or a place among the
-  waiters of a parse in flight. An unknown source gets a `Loading` entry, as
-  a request for a fetched source does, and a parse job of its own. That job
-  does no resolution, no transport and no preprocessing, and takes the same
-  decode permit.
-- **The entry.** `read` answers `None`, `is_resident` is false and
-  `knows_image` is true, as for the former `Entry::Document`. A repeated
-  request, from the same view or another, re-reports the shared document.
-- **Memory.** `memory_used_bytes` counts each parsed document as the byte
-  length of the source it was parsed from, captured at the parse. This is an
-  approximation: the command list is not measured, and its size is not the
-  markup's.
+  `images::request_document`) files no entry before, during or after its
+  parse. It starts a parse job of its own, with no resolution, no transport
+  and no preprocessing, under the same decode permit, and its completion
+  (`Completion::RequestedDocument`) reports to the view that asked through
+  `ImageState::requested`, a list of the requests in flight with their
+  `ImageReports`; that list exists only because a view's reports are
+  thread-bound and cannot travel with the job. Two requests for one source
+  are two parses and two reports, and the document's registry applies the
+  first that finds the source pending. A page that fetches an
+  `svg-content:` name itself goes through the URL path like any unknown
+  scheme.
+- **Reads and memory.** `read` answers `None` and `is_resident` is false
+  for a document, and `memory_used_bytes` counts none: nothing is kept to
+  count.
 
 ### What left `bobcat-core`
 
@@ -292,9 +306,11 @@ below that is not the ruling is the implementer's decision.
 ### flashbulb
 
 `TestImages` acts as the fetcher. `insert_svg(source, markup)` parses with
-`ImageEvent::parse_document` and reports `parsed_document`, or `failed`.
-`TestImages::request_document` answers a document request the same way and
-re-reports a source it already settled. `pump_images` drains
+`ImageEvent::parse_document` and reports `parsed_document`, or `failed`;
+the published document is what the store answers that URL with, as
+published pixels are. `TestImages::request_document` answers a document
+request the same way and keeps nothing: every request is a parse and a
+report of its own. `pump_images` drains
 `take_document_requests`, the function the runtime drains, answers each
 request through `request_document`, and then applies the store's events.
 `flashbulb` drops the `bytes` dependency revision 3 gave it and gains
@@ -319,13 +335,13 @@ does.
 - An `<svg content>` costs one view turn and one report entry, as a fetched
   document does: the request leaves in a notice, the fetcher parses and
   reports, and the report applies in a later entry.
-- The fetcher keeps every document it parsed, synthetic sources included,
-  for its own life, as it keeps every fetched source. The engine forgets a
-  synthetic source with its last binder and asks again when the markup comes
-  back, and the fetcher answers that request from its entry. A page that
-  cycles through many distinct `content` strings therefore grows
-  `memory_used_bytes` by each markup's length. Follow-up if this shows: a
-  protocol call that tells the host the engine forgot a synthetic source.
+- Nothing is cached for a repeated request (ruling 2026-10-11). The engine
+  forgets a synthetic source with its last binder, so a markup that leaves
+  and comes back (a virtual list recycling a row) is requested and parsed
+  again; a URL another view or a reloaded page asks for is fetched (through
+  the transport's own caches) and parsed again. Each such parse costs what
+  the first did, and nothing the fetcher holds grows with the number of
+  distinct documents.
 - The parse now takes a decode permit, so a large SVG and a large bitmap
   queue behind each other under a low `decode_parallelism`. Before
   revision 4.1 a document took no permit.

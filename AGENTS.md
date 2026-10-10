@@ -1922,17 +1922,20 @@ SVG. It completes as `Completion::ParsedDocument` and servicing reports it
 through `ImageReports::parsed_document`; a document that does not parse is
 an ordinary `Completion::Failed` with a note. `ViewResources::request_document`
 (`images::request_document`) takes the markup of an `<svg content>` under the
-synthetic `svg-content:` source the engine named: it registers a `Loading`
-entry as a request does and runs the same parse with no resolution, transport
-or preprocessing. The parsed document stays in an `Entry::Vector { document,
-source_bytes }`: a repeated `request` or `request_document`, from any view,
-re-reports the same `Arc<VectorDocument>`, `knows_image` is true,
-`is_resident` is false, `read` answers `None` (so the memory tier,
-refinement and restore never see it), and `memory_used_bytes` counts it as
-the byte length of the source it was parsed from, captured at the parse (an
-approximation). Entries are never forgotten, synthetic ones included. A
-document labelled with a specific non-SVG type such as `text/plain` is
-trusted as that type and is not an image (`mime::sniff`).
+synthetic `svg-content:` source the engine named and runs the same parse with
+no resolution, transport or preprocessing; its completion
+(`Completion::RequestedDocument`) is routed to the view that asked through
+the in-flight list `ImageState::requested`. **Documents are parsed and
+reported, never retained** (owner ruling 2026-10-11): the engine owns the
+scene it encodes. A document request files no entry before, during or after
+its parse, so two requests for one source are two parses and two reports
+and `knows_image` stays false; a fetched document leaves only the unit
+marker `Entry::Parsed`, so the URL stays known while a later request fetches
+and parses it again. `is_resident` is false, `read` answers `None` (so the
+memory tier, refinement and restore never see a document), and
+`memory_used_bytes` counts no document. A document labelled with a specific
+non-SVG type such as `text/plain` is trusted as that type and is not an
+image (`mime::sniff`).
 
 The frame reads each image at the size it draws it: a resident bitmap far
 larger than its draw is re-decoded at the drawn size in the background and

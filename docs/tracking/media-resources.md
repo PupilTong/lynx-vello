@@ -291,12 +291,13 @@ revision 4.1 of the design, ruled 2026-10-10):
    thread inside the existing `ToMain::ImageEvents` message as
    `ImageEvent::ParsedDocument`; a document that does not parse is reported
    with `failed` and fails its source in the document's registry (`error` on
-   `<image>`, nothing on `<svg>`). The resources entry keeps the parsed
-   document to answer a repeated request, from any view, with the same
-   report; it counts toward `memory_used_bytes` as the byte length of the
-   source it was parsed from (an approximation), nothing enters the bitmap
-   memory tier, and the entry is kept for the fetcher's life, synthetic
-   sources included.
+   `<image>`, nothing on `<svg>`). The host keeps nothing of a parsed
+   document (owner ruling 2026-10-11): the engine owns the scene it
+   encodes, nothing enters the bitmap memory tier or `memory_used_bytes`,
+   and a later request, from any view, fetches (for a URL) and parses
+   again. A document request files no entry at all, so two requests for
+   one markup are two parses and two reports, and the document's registry
+   applies the first that finds the source pending.
 4. **Size.** The natural size reported to layout is CSS Images 3 §4.1
    default sizing (web-core), in CSS px rounded to whole px: `width` and
    `height` when both are absolute; one of them plus the viewBox ratio; the
