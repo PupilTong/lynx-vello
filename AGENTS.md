@@ -2547,15 +2547,18 @@ and the project keeps stylo as its one styling engine. `svg::parse` produces a
 `VectorDocument`, a flat paint-order command list with geometry, transforms
 and brushes resolved and text collected but unshaped, so it needs no fonts and
 is `Send + Sync`; it is `pub` with no public member, and shared in an `Arc`
-so a host's entry and every report it makes hold one copy.
+so every report of one parse (one per view waiting on a load) holds one copy.
 `ImageEvent::parse_document` is the only entry to the converter from outside
 `dom`, and returns `ImageEvent::ParsedDocument` or `Failed`.
 `Document::apply_image_events` never parses. Applying a parsed document shapes its `<text>` through the document's own
 `TextContext` (`hughie::text::shape_line`; font family, weight, style,
 stretch and size come from the SVG's own attributes, not the host element's
-style) and encodes it once into a `VectorImage` (an `Arc<Scene>`, its natural
-size in whole CSS px, its viewport, its `preserveAspectRatio`, a process-unique
-key), kept in `ImageState::Ready { kind: ImageKind::Vector(..) }`. A later
+style) and encodes it once into a crate-private `VectorImage` (an
+`Arc<Scene>`, its viewport, its `preserveAspectRatio`, a process-unique key),
+kept in `ImageState::Ready { width, height, kind: ImageKind::Vector(..) }`
+with the document's natural size in whole CSS px (at least one per axis). Every
+layer the converter opens is `Normal`: no blend can be set without CSS, so
+there is no vello #1198 isolation to carry. A later
 `@font-face` does not re-shape already-encoded text.
 
 The frame carries the scene, never pixels: each visible tile of a vector
@@ -2584,8 +2587,10 @@ once, which the embedder hands the host to parse and report like a fetched
 document); a known one binds and settles at once. No bind and no walk ever
 asks the host to fetch a synthetic source, and its entry is forgotten when
 the last `(node, role)` binding goes (another source, or `free_node`), taking
-any unrequested bytes with it — the one removal the registry makes.
-`Document::image_source` reads the bound source; `knows_image_source` is a
+any unrequested bytes with it — the one removal the registry makes. The host
+keeps nothing of a parsed document, so markup that comes back afterwards is
+requested and parsed again, and a report that finds its source settled or
+forgotten moves nothing. `Document::image_source` reads the bound source; `knows_image_source` is a
 test-only registry probe.
 
 Rulings and limits to know before touching it:
