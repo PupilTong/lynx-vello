@@ -38,7 +38,7 @@ pub use vello;
 pub use crate::paint::compose::FilterGroup;
 pub use crate::render::image::{
     DocumentKind, DocumentRequest, FrameImages, ImageEvent, ImageInbox, ImageOutcome, ImageReports,
-    ImageRole, ImageSizeHint, MAX_RENDERABLE_DIMENSION, NoImages, VectorImage, is_renderable,
+    ImageRole, ImageSizeHint, MAX_RENDERABLE_DIMENSION, NoImages, is_renderable,
 };
 pub use crate::render::svg::VectorDocument;
 pub use crate::style::animation::AnimationTick;

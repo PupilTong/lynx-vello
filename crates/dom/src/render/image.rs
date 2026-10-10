@@ -130,7 +130,7 @@ use crate::vello::Scene;
 ///
 /// Cloning shares the scene.
 #[derive(Clone)]
-pub struct VectorImage {
+pub(crate) struct VectorImage {
     scene: Arc<Scene>,
     natural: (u32, u32),
     viewport: (f32, f32),
