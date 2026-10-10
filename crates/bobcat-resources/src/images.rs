@@ -25,15 +25,16 @@
 //! An SVG document is parsed here, where a bitmap would be decoded, with the
 //! engine's own parser ([`ImageEvent::parse_document`]). When preprocessing
 //! says the bytes are [`ImageFormat::Svg`], the job hands them to the parser
-//! instead of the platform decoder, under a decode permit, natively in a
-//! closure of its own on the blocking pool and in the browser inside the
-//! load's local task on the Render Worker. The browser's `Image` element
-//! never sees an SVG, so every target parses the same bytes the same way.
+//! instead of the platform decoder: natively under a decode permit, in a
+//! closure of its own on the blocking pool; in the browser inside the load's
+//! local task on the Render Worker, whose executor has no permits. The
+//! browser's `Image` element never sees an SVG, so every target parses the
+//! same bytes the same way.
 //!
 //! A document the page wrote itself (the Lynx `<svg content>`) arrives as a
 //! document request instead ([`request_document`]): its bytes and kind under
 //! a synthetic source the engine named, with nothing to fetch, parsed by the
-//! same job half under the same permit.
+//! same job half, natively under a permit of its own.
 //!
 //! Either is reported through [`ImageReports::parsed_document`], or through
 //! [`ImageReports::failed`] when it does not parse. **Documents are parsed
