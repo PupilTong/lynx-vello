@@ -174,8 +174,8 @@ impl Default for AspectRatio {
 static NEXT_VECTOR_KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// The parsed document crosses from the thread the host parsed it on (its
-/// decode pool) to the document's inside an [`ImageEvent`], shared by the
-/// host's entry and every report it makes from it, and the encoded scene is
+/// decode pool) to the document's inside an [`ImageEvent`], shared by every
+/// report the host makes of that one parse, and the encoded scene is
 /// published inside the registry, so both must be `Send + Sync`.
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
@@ -483,10 +483,10 @@ impl ImageReports {
     /// The host parses, with the engine's converter, wherever it decodes a
     /// bitmap; a document that does not parse is reported with
     /// [`ImageReports::failed`] instead. Otherwise the same contract as
-    /// [`ImageReports::loaded`]: reported once per source, never retracted.
-    /// A host may answer a later request for the same source with the same
-    /// document again, sharing it rather than parsing twice; the document's
-    /// registry makes the repeat a no-op.
+    /// [`ImageReports::loaded`]: never retracted. The engine owns the scene
+    /// it encodes from the report, so the host keeps nothing of the
+    /// document, and a report for a source that has already settled moves
+    /// nothing.
     ///
     /// Non-blocking, and it must not re-enter the store.
     pub fn parsed_document(&self, source: &str, document: Arc<VectorDocument>) {
@@ -591,8 +591,8 @@ pub enum ImageEvent {
     /// shapes the document's text and encodes its scene on the document
     /// thread. Its natural size is the intrinsic size layout reads.
     ///
-    /// The document is shared, so a host that keeps it to answer a repeated
-    /// request reports it again without a copy.
+    /// The document is shared, so one parse reports to every view that
+    /// waited on the load without a copy of the command list.
     ParsedDocument {
         source: Arc<str>,
         document: Arc<VectorDocument>,
@@ -1883,7 +1883,9 @@ mod synthetic_tests {
 
     /// A parse that returns after every binder let go applies to nothing
     /// and recreates nothing; the same markup set again is a new entry with
-    /// a parse of its own.
+    /// a parse of its own, and the first report to find it pending settles
+    /// it: the host keeps nothing, so a markup that left and came back can
+    /// be reported twice, and the second report moves nothing.
     #[test]
     fn a_parse_for_a_forgotten_source_moves_nothing() {
         let mut registry = ImageRegistry::default();
@@ -1907,5 +1909,9 @@ mod synthetic_tests {
             .apply(&event, &mut context)
             .expect("the new entry is pending");
         assert_eq!(applied.nodes.as_slice(), [(node(2), ImageRole::Source)]);
+        assert!(
+            registry.apply(&event, &mut context).is_none(),
+            "a second report for the settled source moves nothing"
+        );
     }
 }

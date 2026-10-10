@@ -69,7 +69,8 @@ pub type Wakeup = Arc<dyn Fn() + Send + Sync>;
 ///
 /// A panic inside a blocking closure is delivered to the job's task as a
 /// [`JoinError`](tokio::task::JoinError) and becomes that job's reported
-/// failure: `Completion::Failed` for an image load or a document parse,
+/// failure: `Completion::Failed` for an image load, a failed
+/// `Completion::RequestedDocument` for a document a page handed over,
 /// `Completion::RefineFailed` for a refinement, the protocol's `Failure` for
 /// a source. The pool's thread survives it, and so does the next job.
 ///

@@ -76,9 +76,11 @@ pub trait ResourceFetcher: dom::FrameImages {
 
     /// Names `source` and begins loading it. Non-blocking.
     ///
-    /// Idempotent and single-flight: repeated or concurrent requests for one
-    /// source join one load, and a request for an already-loaded source
-    /// starts nothing. The engine asks for a source exactly once per
+    /// Single-flight: concurrent requests for one source join one load, and
+    /// a request for an already-loaded bitmap starts nothing. A parsed
+    /// document is not retained (the engine owns the scene it encodes from
+    /// the report), so a later request for one may fetch and parse it again.
+    /// The engine asks for a source exactly once per
     /// document, keyed by the raw string the page wrote — two specifiers a
     /// host canonicalises to one resource are simply asked for twice.
     ///
@@ -110,8 +112,11 @@ pub trait ResourceFetcher: dom::FrameImages {
     /// [`ImageReports::parsed_document`](dom::ImageReports::parsed_document)
     /// or [`ImageReports::failed`](dom::ImageReports::failed) for `source`.
     /// The document asks once per distinct markup while some element
-    /// presents it, and again only after it forgot the source; a host that
-    /// kept what it parsed may answer that from its entry.
+    /// presents it, and again after it forgot the source with the last
+    /// element presenting it. Every request is parsed and reported on its
+    /// own, and the host keeps nothing of the document: the engine owns the
+    /// scene it encodes, and ignores a report for a source that has settled
+    /// or been forgotten since it asked.
     ///
     /// The default serves nothing: on a host without document support an
     /// `<svg content>` stays pending and draws nothing.

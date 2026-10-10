@@ -32,24 +32,27 @@
 //!
 //! A document the page wrote itself (the Lynx `<svg content>`) arrives as a
 //! document request instead ([`request_document`]): its bytes and kind under
-//! a synthetic source the engine named, with nothing to fetch. It registers
-//! an entry under that source as a fetched response does, and is parsed by
-//! the same job half, under the same permit.
+//! a synthetic source the engine named, with nothing to fetch, parsed by the
+//! same job half under the same permit.
 //!
-//! Either completes as [`ImageReports::parsed_document`], or as
-//! [`ImageReports::failed`] when the document does not parse, and the parsed
-//! document stays in an [`Entry::Vector`], which answers every later request
-//! with the same shared document, parsed once. It has no bitmap, so nothing
-//! enters the memory tier, [`FrameImages::read`](bobcat_core::FrameImages::read)
-//! answers `None` for it (the engine draws the document itself and never
-//! asks), and no refinement and no restore can start for it. Its weight in
-//! [`Resources::memory_used_bytes`] is the byte length of the source it was
-//! parsed from, captured at the parse: an approximation, since the parsed
-//! command list is neither measured nor the same size as the markup.
+//! Either is reported through [`ImageReports::parsed_document`], or through
+//! [`ImageReports::failed`] when it does not parse. **Documents are parsed
+//! and reported, never retained**: the engine owns the scene it encodes from
+//! the report, and this pipeline keeps nothing of the document. Nothing
+//! enters the memory tier or [`Resources::memory_used_bytes`],
+//! [`FrameImages::read`](bobcat_core::FrameImages::read) answers `None` (the
+//! engine draws the document itself and never asks), and no refinement and
+//! no restore can start for it. A document request files no entry at all,
+//! before, during or after its parse: two requests for one source are two
+//! parses and two reports, and the engine applies the first that finds the
+//! source pending. A fetched document leaves [`Entry::Parsed`], a marker
+//! that holds nothing and keeps the source known; a later request for it
+//! fetches and parses it again.
 //!
-//! The document's state never regresses, and neither does this one: an
-//! entry that failed stays failed, and one that loaded stays loaded whatever
-//! the memory tier holds for it.
+//! The document's state never regresses, and a bitmap's does not here: an
+//! entry that failed stays failed, and one that loaded as a bitmap stays
+//! loaded whatever the memory tier holds for it. The parsed marker is the
+//! one entry a later request starts over.
 
 use std::sync::Arc;
 
@@ -75,14 +78,7 @@ type LoadedImage = (Bitmap, ImageFormat, Option<ImageHeader>, Option<Bytes>);
 /// What a load job hands back: a decoded bitmap, or a parsed document.
 enum LoadOutcome {
     Raster(LoadedImage),
-    Vector(ParsedDocument),
-}
-
-/// A document the engine's parser made of a source's bytes, and the byte
-/// length of those bytes, which is what the entry counts it as.
-pub(crate) struct ParsedDocument {
-    document: Arc<VectorDocument>,
-    source_bytes: usize,
+    Vector(Arc<VectorDocument>),
 }
 
 impl LoadOutcome {
@@ -97,20 +93,21 @@ impl LoadOutcome {
                 header,
                 encoded,
             },
-            Self::Vector(parsed) => Completion::ParsedDocument { source, parsed },
+            Self::Vector(document) => Completion::ParsedDocument { source, document },
         }
     }
 }
 
 /// Parses `bytes`, a document of `kind` for `source`, with the engine's
 /// parser: the job half that takes the place of a decode for a document. A
-/// document that does not parse is the load's failure.
-fn parse(source: &Arc<str>, bytes: &[u8], kind: DocumentKind) -> Result<ParsedDocument, String> {
+/// document that does not parse is the job's failure.
+fn parse(
+    source: &Arc<str>,
+    bytes: &[u8],
+    kind: DocumentKind,
+) -> Result<Arc<VectorDocument>, String> {
     match ImageEvent::parse_document(Arc::clone(source), bytes, kind) {
-        ImageEvent::ParsedDocument { document, .. } => Ok(ParsedDocument {
-            document,
-            source_bytes: bytes.len(),
-        }),
+        ImageEvent::ParsedDocument { document, .. } => Ok(document),
         ImageEvent::Loaded { .. } | ImageEvent::Failed { .. } => {
             Err(format!("`{source}` is not a document the engine can draw"))
         }
@@ -121,6 +118,12 @@ fn parse(source: &Arc<str>, bytes: &[u8], kind: DocumentKind) -> Result<ParsedDo
 pub(crate) struct ImageState {
     entries: FxHashMap<Arc<str>, Entry>,
     bitmaps: MemoryCache<ImageData>,
+    /// Document requests whose parse is in flight, each with the view that
+    /// asked: where a parse's report goes, since a view's [`ImageReports`]
+    /// cannot travel with the job. Not an entry: two requests for one source
+    /// are two of these, two parses and two reports, and each leaves the
+    /// list when a parse of its source completes.
+    requested: Vec<(Arc<str>, ImageReports)>,
     /// The painter is the only consumer, and drains without blocking.
     completions: tokio::sync::mpsc::UnboundedReceiver<Completion>,
 }
@@ -133,14 +136,12 @@ enum Entry {
     },
     /// A decoded raster image.
     Loaded(Loaded),
-    /// A parsed document, kept to answer every later request with, and the
-    /// byte length of the source it was parsed from, which is what it counts
-    /// as in [`Resources::memory_used_bytes`]. It has no bitmap, so the
-    /// memory tier, refinement and restore never see it.
-    Vector {
-        document: Arc<VectorDocument>,
-        source_bytes: usize,
-    },
+    /// A fetched document that parsed and was reported to every view that
+    /// asked. Nothing of it is kept, since the engine owns the scene it
+    /// encodes; the marker keeps the source known, and a later request
+    /// fetches and parses it again. It has no bitmap, so the memory tier,
+    /// refinement and restore never see it.
+    Parsed,
     Failed,
 }
 
@@ -149,7 +150,7 @@ struct Loaded {
     intrinsic: (u32, u32),
     /// The container, for a decoder that wants to be told what it is given.
     /// Never [`ImageFormat::Svg`]: an SVG document completes as
-    /// [`Entry::Vector`], so no restore or refinement ever decodes one.
+    /// [`Entry::Parsed`], so no restore or refinement ever decodes one.
     format: ImageFormat,
     header: Option<ImageHeader>,
     /// The encoded bytes, kept when no other tier can hand them back: a
@@ -170,10 +171,15 @@ pub(crate) enum Completion {
         header: Option<ImageHeader>,
         encoded: Option<Bytes>,
     },
-    /// A document, parsed.
+    /// A fetched document, parsed.
     ParsedDocument {
         source: Arc<str>,
-        parsed: ParsedDocument,
+        document: Arc<VectorDocument>,
+    },
+    /// A document request's parse: the document, or why it did not parse.
+    RequestedDocument {
+        source: Arc<str>,
+        parsed: Result<Arc<VectorDocument>, String>,
     },
     Refined {
         source: Arc<str>,
@@ -198,6 +204,7 @@ impl ImageState {
         Self {
             entries: FxHashMap::default(),
             bitmaps: MemoryCache::new(budget),
+            requested: Vec::new(),
             completions,
         }
     }
@@ -211,16 +218,13 @@ impl ImageState {
         self.bitmaps.used_bytes()
     }
 
-    /// Bytes held by encoded images nothing else can restore, and the
-    /// documents kept to answer later requests, each counted as the byte
-    /// length of the source it was parsed from.
+    /// Bytes held by encoded images nothing else can restore.
     pub(crate) fn encoded_bytes(&self) -> usize {
         self.entries
             .values()
             .filter_map(|entry| match entry {
                 Entry::Loaded(loaded) => loaded.encoded.as_ref().map(Bytes::len),
-                Entry::Vector { source_bytes, .. } => Some(*source_bytes),
-                Entry::Loading { .. } | Entry::Failed => None,
+                Entry::Loading { .. } | Entry::Parsed | Entry::Failed => None,
             })
             .sum()
     }
@@ -229,7 +233,8 @@ impl ImageState {
         self.bitmaps.set_budget(budget);
     }
 
-    /// Whether `source` has been asked for at all.
+    /// Whether `source` has been asked for at all. A document request does
+    /// not count: it files no entry.
     pub(crate) fn knows(&self, source: &str) -> bool {
         self.entries.contains_key(source)
     }
@@ -248,16 +253,14 @@ impl ImageState {
 }
 
 /// Names `source` for `reports`: answers at once if the pipeline already
-/// knows it, otherwise starts the load and remembers who asked.
+/// knows it as a bitmap or a failure, joins a load in flight, and otherwise
+/// starts the load and remembers who asked. A document parsed before is
+/// fetched and parsed again.
 pub(crate) fn request(resources: &Resources, source: &str, reports: &ImageReports) {
     let mut state = resources.local.borrow_mut();
     match state.entries.get_mut(source) {
         Some(Entry::Loaded(loaded)) => {
             reports.loaded(source, loaded.intrinsic.0, loaded.intrinsic.1);
-            return;
-        }
-        Some(Entry::Vector { document, .. }) => {
-            reports.parsed_document(source, Arc::clone(document));
             return;
         }
         Some(Entry::Failed) => {
@@ -268,7 +271,7 @@ pub(crate) fn request(resources: &Resources, source: &str, reports: &ImageReport
             waiters.push(reports.clone());
             return;
         }
-        None => {}
+        Some(Entry::Parsed) | None => {}
     }
     let base = resources.base_url();
     let url = match resources.shared.transports.resolve(source, base.as_ref()) {
@@ -296,11 +299,11 @@ pub(crate) fn request(resources: &Resources, source: &str, reports: &ImageReport
     spawn_load(resources, source, url, (bound, bound));
 }
 
-/// Hands `bytes`, a document of `kind` a page wrote itself, to the parse
-/// under `source`, the synthetic name the engine filed it as, for
-/// `reports`: answers at once if the pipeline already knows the source, as
-/// [`request`] does, otherwise registers an entry for it as a request for a
-/// fetched source does and starts the parse. Nothing is resolved or fetched.
+/// Hands `bytes`, a document of `kind` a page wrote itself, to a parse of
+/// its own under `source`, the synthetic name the engine filed it as, whose
+/// outcome is reported to `reports`. Nothing is resolved or fetched, no
+/// entry is filed and none is consulted: every request is one parse and one
+/// report.
 pub(crate) fn request_document(
     resources: &Resources,
     source: &str,
@@ -308,37 +311,12 @@ pub(crate) fn request_document(
     kind: DocumentKind,
     reports: &ImageReports,
 ) {
-    let mut state = resources.local.borrow_mut();
-    match state.entries.get_mut(source) {
-        Some(Entry::Vector { document, .. }) => {
-            reports.parsed_document(source, Arc::clone(document));
-            return;
-        }
-        Some(Entry::Failed) => {
-            reports.failed(source);
-            return;
-        }
-        Some(Entry::Loading { waiters }) => {
-            waiters.push(reports.clone());
-            return;
-        }
-        // A synthetic source names a document, never a bitmap; one that
-        // loaded as a bitmap (a page fetching the name itself) is answered
-        // as what it is.
-        Some(Entry::Loaded(loaded)) => {
-            reports.loaded(source, loaded.intrinsic.0, loaded.intrinsic.1);
-            return;
-        }
-        None => {}
-    }
     let source: Arc<str> = Arc::from(source);
-    state.entries.insert(
-        Arc::clone(&source),
-        Entry::Loading {
-            waiters: vec![reports.clone()],
-        },
-    );
-    drop(state);
+    resources
+        .local
+        .borrow_mut()
+        .requested
+        .push((Arc::clone(&source), reports.clone()));
     spawn_parse(resources, source, bytes, kind);
 }
 
@@ -393,27 +371,34 @@ fn apply(resources: &Resources, completion: Completion) {
                 reports.loaded(&source, intrinsic.0, intrinsic.1);
             }
         }
-        Completion::ParsedDocument {
-            source,
-            parsed:
-                ParsedDocument {
-                    document,
-                    source_bytes,
-                },
-        } => {
+        Completion::ParsedDocument { source, document } => {
             let Some(Entry::Loading { waiters }) = state.entries.remove(&source) else {
                 return;
             };
-            state.entries.insert(
-                Arc::clone(&source),
-                Entry::Vector {
-                    document: Arc::clone(&document),
-                    source_bytes,
-                },
-            );
+            state.entries.insert(Arc::clone(&source), Entry::Parsed);
             drop(state);
             for reports in waiters {
                 reports.parsed_document(&source, Arc::clone(&document));
+            }
+        }
+        Completion::RequestedDocument { source, parsed } => {
+            // Any request for this source will do: the source names its
+            // markup, so every parse of it is the same document.
+            let Some(index) = state
+                .requested
+                .iter()
+                .position(|(requested, _)| *requested == source)
+            else {
+                return;
+            };
+            let (_, reports) = state.requested.swap_remove(index);
+            drop(state);
+            match parsed {
+                Ok(document) => reports.parsed_document(&source, document),
+                Err(message) => {
+                    resources.note(format!("image `{source}` failed to load: {message}"));
+                    reports.failed(&source);
+                }
             }
         }
         Completion::Refined {
@@ -471,7 +456,7 @@ pub(crate) fn read(resources: &Resources, source: &str, hint: ImageSizeHint) -> 
         // The engine draws a document itself and never reads it here;
         // answering `None` is what keeps every restore and refinement below
         // unreachable for an SVG document.
-        Entry::Vector { .. } | Entry::Loading { .. } | Entry::Failed => return None,
+        Entry::Parsed | Entry::Loading { .. } | Entry::Failed => return None,
     };
     let target = bounded(hint.fit(loaded.intrinsic.0, loaded.intrinsic.1));
     if let Some(image) = state.bitmaps.get(source) {
@@ -656,7 +641,7 @@ async fn load(
 /// The parse a document takes in place of a decode: a decode permit, taken
 /// before the closure is submitted and held until it returns, then the
 /// engine's parser on the blocking pool. A parse that panicked is the
-/// load's failure, as a decode's is.
+/// job's failure, as a decode's is.
 #[cfg(not(target_arch = "wasm32"))]
 async fn parse_job(
     handle: &tokio::runtime::Handle,
@@ -664,7 +649,7 @@ async fn parse_job(
     source: &Arc<str>,
     bytes: Bytes,
     kind: DocumentKind,
-) -> Result<ParsedDocument, String> {
+) -> Result<Arc<VectorDocument>, String> {
     let permit = acquire_decode(permits).await?;
     let source = Arc::clone(source);
     crate::executor::blocking(handle, "parse", move || {
@@ -710,11 +695,8 @@ fn spawn_parse(resources: &Resources, source: Arc<str>, bytes: Bytes, kind: Docu
     let handle = resources.executor.handle();
     let permits = resources.executor.decode_permits();
     resources.executor.spawn(async move {
-        let completion = match parse_job(&handle, &permits, &source, bytes, kind).await {
-            Ok(parsed) => Completion::ParsedDocument { source, parsed },
-            Err(message) => Completion::Failed { source, message },
-        };
-        shared.complete(completion);
+        let parsed = parse_job(&handle, &permits, &source, bytes, kind).await;
+        shared.complete(Completion::RequestedDocument { source, parsed });
     });
 }
 
@@ -724,11 +706,8 @@ fn spawn_parse(resources: &Resources, source: Arc<str>, bytes: Bytes, kind: Docu
 fn spawn_parse(resources: &Resources, source: Arc<str>, bytes: Bytes, kind: DocumentKind) {
     let shared = SharedHandle::clone(&resources.shared);
     wasm_bindgen_futures::spawn_local(async move {
-        let completion = match parse(&source, &bytes, kind) {
-            Ok(parsed) => Completion::ParsedDocument { source, parsed },
-            Err(message) => Completion::Failed { source, message },
-        };
-        shared.complete(completion);
+        let parsed = parse(&source, &bytes, kind);
+        shared.complete(Completion::RequestedDocument { source, parsed });
     });
 }
 
@@ -1120,8 +1099,8 @@ mod job_tests {
         );
         assert_eq!(
             resources.memory_used_bytes(),
-            2 * SVG.len(),
-            "no bitmap; each parsed document, counted as its source's bytes"
+            0,
+            "no bitmap, and nothing kept of either document"
         );
     }
 
