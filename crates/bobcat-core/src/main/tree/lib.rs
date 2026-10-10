@@ -11,10 +11,12 @@
 //!
 //! Each tag owns its UA rules and tests. Numeric text and list attributes
 //! flow through `attr()`; boolean flags use attribute selectors. Only `image`,
-//! `blur_view`, `swiper`, `refresh_view`, `viewpager`, `dialog` and `overlay`
-//! need components: for image resources, blur hints, the swiper's UA shadow
-//! tree and item count, the refresh view's UA shadow tree and its header and
-//! footer slot assignment, the viewpager's `selectTab` UI method, the dialog's
+//! `blur_view`, `swiper`, `refresh_view`, `viewpager`, `scroll_container`,
+//! `dialog` and `overlay` need components: for image resources, blur hints,
+//! the swiper's UA shadow tree and item count, the refresh view's UA shadow
+//! tree and its header and footer slot assignment, the viewpager's
+//! `selectTab` UI method, the `scroll-view`'s `scrollTo`, `scrollBy` and
+//! `getScrollInfo` UI methods, the dialog's
 //! `:open`/`:modal` state, top-layer membership and four UI methods
 //! ([`dialog`]), and the overlay's UA shadow tree, the top-layer membership of
 //! the `dialog` in it, and its `showoverlay` and `dismissoverlay` events
@@ -80,6 +82,7 @@ pub(crate) fn new_document(
     swiper::define(&mut document);
     refresh_view::define(&mut document);
     viewpager::define(&mut document);
+    scroll_container::define(&mut document);
     dialog::define(&mut document, events.clone());
     // After `dialog`: every overlay builds one in its shadow tree.
     overlay::define(&mut document, events);
@@ -88,6 +91,20 @@ pub(crate) fn new_document(
         StylesheetOrigin::UserAgent,
     );
     document
+}
+
+/// JavaScript's `ToBoolean` over the values JSON can carry: how a component
+/// method reads a boolean param, such as `selectTab`'s and `scrollTo`'s
+/// `smooth`, from the JSON text the realm serialized.
+pub(super) fn is_truthy(value: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(number) => number.as_f64().is_some_and(|number| number != 0.0),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(_) | Value::Object(_) => true,
+    }
 }
 
 /// One event a component owes script: always non-bubbling, at the element

@@ -1471,7 +1471,8 @@ mutations; the properties and queries a Snapshot's `create`/`update` functions
 write through and read back, among them `__SetInlineStyles` and the name-based
 `__AddInlineStyle`, with `__SetCSSId` accepted and ignored; the readback pair
 `__InvokeUIMethod`, whose UI methods are `boundingClientRect`, a pager's
-`selectTab` and a dialog's `show`/`showModal`/`close`/`requestClose`, and
+`selectTab`, a `scroll-view`'s `scrollTo`/`scrollBy`/`getScrollInfo` and a
+dialog's `show`/`showModal`/`close`/`requestClose`, and
 `__GetComputedStyleByKey`, neither of which commits anything
 — both read the last completed pass and leave the decision to flush to the
 caller; the event
@@ -1607,7 +1608,9 @@ reflection and its UA box), `tree::scroll_container` (`scroll-view` and
 `list` as scroll containers — which axis scrolls, which one clips, and which
 way the subtree stacks, from `web-elements`' own `scroll-view.css` and
 `x-list.css`; `enable-scroll="false"` leaves the box a scroll container only
-script can move), `tree::viewpager` (`viewpager`/`x-viewpager-ng` as a
+script can move — and a `scroll-view` component whose `CustomElement::invoke`
+answers the `scrollTo`, `scrollBy` and `getScrollInfo` UI methods on the axis
+the tag scrolls; `autoScroll` and `takeContentScreenshot` are not built), `tree::viewpager` (`viewpager`/`x-viewpager-ng` as a
 horizontal scroll container that snaps page by page, its pages' row pinned in
 the cascade, the initial page (`select-index`/`initial-select-index`) as a
 typed `attr()` and an `if()` over `sibling-index()` into
@@ -2354,7 +2357,8 @@ selector engine, including the query root, and returns fields/path data, while
 `setNativeProps` applies CSS/attributes and commits before the next request.
 `invoke` answers `boundingClientRect` — the last layout pass's border box,
 plus the element's `id` and `dataset` as native reports them — a pager's
-`selectTab` and a dialog's four methods, and fails every other method with
+`selectTab`, a `scroll-view`'s `scrollTo`, `scrollBy` and `getScrollInfo`, and
+a dialog's four methods, and fails every other method with
 code 3, `METHOD_NOT_FOUND`,
 alongside the selection failures it already delivered. No callback or document handle crosses into
 Rust's Worker transport. See `docs/node-query-runtime.md` for the supported
@@ -2850,12 +2854,15 @@ would host it:
   `mode`, `auto-size` and `blur-radius` work, and `load` (with the bitmap's
   natural size) and `error` fire, non-bubbling, through the component-event
   queue; `cap-insets` and the animated-image events do not.
-- **UI methods other than `boundingClientRect`, `selectTab` and a dialog's
+- **UI methods other than `boundingClientRect`, `selectTab`, a
+  `scroll-view`'s `scrollTo`/`scrollBy`/`getScrollInfo` and a dialog's
   `show`/`showModal`/`close`/`requestClose`.** Those dispatch by name
-  (`selectTab` on the two pager tags only, the dialog's on `dialog` only) through
-  `__InvokeUIMethod`; every other name — `scrollIntoView`, `getScrollInfo`,
-  `requestUIInfo`, `takeScreenshot` and the rest of the per-component catalog
-  — answers code 3, `METHOD_NOT_FOUND`. The rect itself ignores transforms and
+  (`selectTab` on the two pager tags only, the three scroll methods on
+  `scroll-view` only, the dialog's on `dialog` only) through
+  `__InvokeUIMethod`; every other name — `scrollIntoView`, a `scroll-view`'s
+  `autoScroll` and `takeContentScreenshot`, `requestUIInfo`, `takeScreenshot`
+  and the rest of the per-component catalog — answers code 3,
+  `METHOD_NOT_FOUND`. The rect itself ignores transforms and
   never flushes.
 - **The text `layout` event.** The per-line ranges `hughie`'s
   `text/block/content.rs` computes have no delivery path.

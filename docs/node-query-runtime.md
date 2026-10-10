@@ -41,11 +41,24 @@ queue without clearing it. Selection captures its root at select time.
   scroll is requested: the pager scrolls to `index` times its scrollport
   width, clamped to its range, smoothly unless `smooth` is falsy; a missing or
   non-numeric `index` fails with code 4, `PARAM_INVALID`, and moves nothing.
+  `scrollTo({index?, offset = 0, smooth = false})`, `scrollBy({offset})` and
+  `getScrollInfo()` on a `scroll-view` work on the axis it scrolls (x under
+  `scroll-x` / `scroll-orientation="horizontal"`, else y): `scrollTo`
+  succeeds with no data, scrolling to the `index`th element child plus
+  `offset` (a number in px or a `px`/`rpx`/`ppx` string), or to `offset`
+  alone, clamped to the range; `scrollBy` scrolls by a numeric `offset` at
+  once and succeeds with `{consumedX, consumedY, unconsumedX, unconsumedY}`;
+  `getScrollInfo` succeeds with `{scrollX, scrollY, scrollRange,
+  maxScrollOffset}`, the last two both the axis's maximum offset, all in CSS
+  px. Bad params, or an index naming no child, fail with code 4 and move
+  nothing.
   `show`, `showModal`, `close` and `requestClose` on a `dialog` are HTML's
   `HTMLDialogElement` methods and succeed with no data; HTML's
   `InvalidStateError` (`show` on a modal dialog, `showModal` on an open
-  non-modal or a disconnected one) fails with code 4, which is what web-core
-  answers for a method that throws, and changes nothing; `params` is not read.
+  non-modal or a disconnected one) fails with code 7, `INVALID_STATE_ERROR`
+  (native's code; web-core answers 4 for any method that throws, a ruled
+  deviation recorded in `docs/tracking/deviations.md`), and changes nothing;
+  `params` is not read.
   Every other method name, and each of these on any other element, fails with
   code 3, `METHOD_NOT_FOUND` — web-core's code, where native answers its
   generic 1. A failure without a fail callback is ignored by the production
@@ -85,7 +98,7 @@ native numeric-length conversion remain unsupported.
 ## Remaining boundaries
 
 Legacy component-scoped roots, direct MTS selector PAPI, UI invoke methods
-other than `boundingClientRect`, `selectTab` and a dialog's four, animation methods,
+other than `boundingClientRect`, `selectTab`, a `scroll-view`'s three and a dialog's four, animation methods,
 dataset-to-DOM reflection and cross-realm host objects remain pending.
 `boundingClientRect` takes no `relativeTo`, `androidEnableTransformProps` or
 `iOSEnableAnimationProps`: it reads nothing from its `params`, since each of
