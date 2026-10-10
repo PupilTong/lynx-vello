@@ -3,7 +3,7 @@
 //! Every element goes through [`Converter::convert_element`], which
 //! resolves its style, opens the layers its group effects need, converts
 //! its content (children, shape, text, referenced element) and closes the
-//! layers. Layer bounds and the vello #1198 `isolate` flags depend on the
+//! layers. Layer bounds and bounding-box clip transforms depend on the
 //! content, so they are patched into the already-pushed items once the
 //! content is in.
 
@@ -21,7 +21,7 @@ use super::text::{Space, TextChunk, TextItem, TextPaint, TextSpan, normalize_whi
 use super::{FillPaint, Item, LayerClip, StrokePaint, SvgError, VectorDocument, nesting, shapes};
 use crate::render::image::{AspectAlign, AspectRatio};
 use crate::vello::kurbo::{Affine, BezPath, Rect, Shape, Stroke};
-use crate::vello::peniko::{BlendMode, Brush, Compose, Fill, Mix};
+use crate::vello::peniko::{Brush, Fill};
 
 /// The default object size of CSS Images 3, in CSS px.
 const DEFAULT_OBJECT_SIZE: (f32, f32) = (300.0, 150.0);
@@ -260,8 +260,8 @@ struct ClipDef {
     outer: Option<Box<ClipDef>>,
 }
 
-/// Which `PushClip` items an element opened, and how to fix them up once
-/// its content is known.
+/// Which layer items an element opened, and how to fix them up once its
+/// content is known.
 struct OpenLayers {
     /// How many `Pop`s the element owes.
     count: usize,
@@ -270,9 +270,6 @@ struct OpenLayers {
     /// Clip items whose transform awaits the element's bounding box
     /// (`clipPathUnits="objectBoundingBox"`), with their pre-bbox transform.
     object_clips: SmallVec<[(usize, Affine, Affine); 1]>,
-    /// The innermost clip item, the one enclosing the content, which
-    /// becomes a full layer when the content opens a blend.
-    innermost_clip: Option<usize>,
 }
 
 struct Converter<'a> {
@@ -396,7 +393,6 @@ impl<'a> Converter<'a> {
             count: 0,
             bounds_layer: None,
             object_clips: SmallVec::new(),
-            innermost_clip: None,
         };
         let clip = style
             .clip_path
@@ -405,7 +401,6 @@ impl<'a> Converter<'a> {
         let composite = style.opacity < 1.0;
         let mut own_clip_pushed = false;
         if composite {
-            let blend = BlendMode::new(Mix::Normal, Compose::SrcOver);
             // A one-shape clip doubles as the layer's shape (the clips
             // clipping it are pushed inside, as clip layers).
             match &clip {
@@ -416,7 +411,6 @@ impl<'a> Converter<'a> {
                             .push((index, context.transform, clip.transform));
                     }
                     self.items.push(Item::PushLayer {
-                        blend,
                         alpha: style.opacity,
                         clip: LayerClip::Path(clip.shape.clone(), clip.rule),
                         transform: context.transform * clip.transform,
@@ -426,7 +420,6 @@ impl<'a> Converter<'a> {
                 _ => {
                     open.bounds_layer = Some(self.items.len());
                     self.items.push(Item::PushLayer {
-                        blend,
                         alpha: style.opacity,
                         clip: LayerClip::Bounds(Rect::ZERO),
                         transform: context.transform,
@@ -455,7 +448,7 @@ impl<'a> Converter<'a> {
     }
 
     /// Pushes one clip layer for `clip`, placed by the clipped element's
-    /// transform `group`; it becomes the innermost clip so far.
+    /// transform `group`.
     fn push_clip(&mut self, clip: &ClipDef, group: Affine, open: &mut OpenLayers) {
         let index = self.items.len();
         if clip.object_units {
@@ -465,16 +458,12 @@ impl<'a> Converter<'a> {
             shape: clip.shape.clone(),
             rule: clip.rule,
             transform: group * clip.transform,
-            isolate: false,
         });
-        open.innermost_clip = Some(index);
         open.count += 1;
     }
 
     /// Closes the element's layers and patches what its content decided:
-    /// the compositing layer's bounds, bounding-box clip transforms, and
-    /// the innermost clip's `isolate` when the content opens a blend
-    /// directly inside it.
+    /// the compositing layer's bounds and bounding-box clip transforms.
     fn close_layers(&mut self, open: OpenLayers, content_start: usize, transform: Affine) {
         if open.count == 0 {
             return;
@@ -511,12 +500,6 @@ impl<'a> Converter<'a> {
                     }
                 }
             }
-        }
-        if let Some(index) = open.innermost_clip
-            && opens_blend_in(&self.items[content_start..])
-            && let Item::PushClip { isolate, .. } = &mut self.items[index]
-        {
-            *isolate = true;
         }
         for _ in 0..open.count {
             self.items.push(Item::Pop);
@@ -561,14 +544,11 @@ impl<'a> Converter<'a> {
             width: v.w,
             height: v.h,
         });
-        let clip_index = self.items.len();
         self.items.push(Item::PushClip {
             shape: Rect::new(x, y, x + width, y + height).to_path(0.1),
             rule: Fill::NonZero,
             transform: context.transform,
-            isolate: false,
         });
-        let content_start = self.items.len();
         self.convert_children(
             node,
             Context {
@@ -578,11 +558,6 @@ impl<'a> Converter<'a> {
                 depth: context.depth,
             },
         );
-        if opens_blend_in(&self.items[content_start..])
-            && let Item::PushClip { isolate, .. } = &mut self.items[clip_index]
-        {
-            *isolate = true;
-        }
         self.items.push(Item::Pop);
     }
 
@@ -1095,24 +1070,4 @@ fn items_bounds(items: &[Item], into: Affine, include_stroke: bool) -> Option<Re
         bounds = Some(bounds.map_or(mapped, |bounds| bounds.union(mapped)));
     }
     bounds
-}
-
-/// Whether `items`, the content of one layer, open a non-`Normal` blend
-/// layer directly inside it: at nesting depth zero relative to the content.
-pub(super) fn opens_blend_in(items: &[Item]) -> bool {
-    let mut depth = 0_usize;
-    for item in items {
-        match item {
-            Item::PushLayer { blend, .. } => {
-                if depth == 0 && blend.mix != Mix::Normal {
-                    return true;
-                }
-                depth += 1;
-            }
-            Item::PushClip { .. } => depth += 1,
-            Item::Pop => depth = depth.saturating_sub(1),
-            Item::Path { .. } | Item::Text(_) => {}
-        }
-    }
-    false
 }

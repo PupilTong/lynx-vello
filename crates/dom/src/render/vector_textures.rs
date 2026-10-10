@@ -37,8 +37,7 @@
 //! `meet` and `slice` scale uniformly and align) and then scales that
 //! extent per axis onto the texture ([`VectorDraw::placement`]), so a
 //! clamped texture holds the same picture squeezed and the draw's stretch
-//! restores it, inside one full `Normal` layer when the scene opens a blend
-//! layer at its top level (vello #1198). vello writes its target with **straight**
+//! restores it. vello writes its target with **straight**
 //! alpha — `fine.wgsl` divides the colour by the coverage before the store —
 //! so the texture is registered as an [`ImageAlphaType::Alpha`] override
 //! image through [`vello::Renderer::override_image`], behind the deliberate
@@ -67,10 +66,8 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use vello::kurbo::{Affine, Rect, Size};
-use vello::peniko::{
-    BlendMode, Blob, Color, Compose, Fill, ImageAlphaType, ImageData, ImageFormat, Mix,
-};
+use vello::kurbo::Size;
+use vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
 use vello::wgpu;
 
 use super::gpu::{AtlasResidency, GpuError, render_params};
@@ -297,16 +294,6 @@ fn bake(
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
     scene.reset();
-    let bounds = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
-    if draw.opens_blend {
-        scene.push_layer(
-            Fill::NonZero,
-            BlendMode::new(Mix::Normal, Compose::SrcOver),
-            1.0,
-            Affine::IDENTITY,
-            &bounds,
-        );
-    }
     scene.append(
         &draw.scene,
         Some(draw.placement(
@@ -314,9 +301,6 @@ fn bake(
             Size::new(f64::from(width), f64::from(height)),
         )),
     );
-    if draw.opens_blend {
-        scene.pop_layer();
-    }
     // Every render through this renderer owes the residency a pass,
     // including a bake: a patch-free bake frees the whole image atlas, which
     // is exactly the loss `AtlasResidency` repairs.

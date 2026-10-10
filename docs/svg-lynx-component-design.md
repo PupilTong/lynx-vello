@@ -148,7 +148,7 @@ Per `<svg content>`: the `content` string once in the DOM attribute, one `Scene`
 - Text shaped before a later `@font-face` arrives keeps its fallback glyphs.
 - `image` inside an SVG draws nothing; `mask`, `filter`, `pattern`, `marker` are not supported; `textPath`, per-character `x`/`y` lists, `dominant-baseline`, bidi reordering within a chunk are out.
 - A `content` string is parsed once per distinct markup per document, never evicted while an element is bound to it. Nothing outside the document's registry keeps it (revision 4.1, ruling 2026-10-11), so a markup that leaves (its last element lets go) and comes back is parsed again.
-- Blend modes inside an SVG need CSS, which is not read: `mix-blend-mode` and `isolation` have no presentation attribute, so every layer the converter opens is `Normal`, and `opens_blend` (kept for the raster cache's interface) is always `false`.
+- Blend modes inside an SVG need CSS, which is not read: `mix-blend-mode` and `isolation` have no presentation attribute, so every layer the converter opens is `Normal`.
 
 ## Decisions during implementation
 
@@ -191,7 +191,7 @@ Per `<svg content>`: the `content` string once in the DOM attribute, one `Scene`
 ### CSS inside SVG (ruling 2026-10-09)
 
 - Phase 1 shipped `<style>` rules (matched with `simplecss`, specificity order, `!important`) and the `style` attribute as property sources. The ruling removed both: `render/svg/style.rs`'s `declarations` reads the presentation attributes named in `PROPERTIES` and nothing else, the converter carries no sheet, a `style` element is not rendered and its text is never read, and `simplecss` left the dependency tree.
-- `mix-blend-mode` and `isolation` are not read at all: SVG 2 gives them no presentation attribute, browsers accept them only through CSS, and `usvg` refused them as attributes for that reason, so with CSS not read they are unreachable. Every layer the converter opens is `Normal`; the item model's `PushLayer { blend }`, `PushClip { isolate }` and `opens_blend` stay for the raster cache's interface and always compute `false` (gap under [Known costs](#known-costs-and-follow-ups)).
+- `mix-blend-mode` and `isolation` are not read at all: SVG 2 gives them no presentation attribute, browsers accept them only through CSS, and `usvg` refused them as attributes for that reason, so with CSS not read they are unreachable. Every layer the converter opens is `Normal` (gap under [Known costs](#known-costs-and-follow-ups)). The item model's `PushLayer { blend }`, `PushClip { isolate }` and the `opens_blend` answer that contracts C and D describe for the vello #1198 rule were kept at first for the raster cache's interface, always `false`; the simplification pass of 2026-10-11 deleted them from the converter, `VectorImage`, `VectorDraw`, the inline encoding and the bake, since nothing could make them true.
 
 ## Revision 4.1 (2026-10-10): the fetcher parses
 

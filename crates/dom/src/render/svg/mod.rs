@@ -13,8 +13,7 @@
 //! - [`encode`] turns a document into a [`Scene`](crate::vello::Scene) on the document thread,
 //!   shaping its text through the document's own [`TextContext`](hughie::text::TextContext),
 //!   created on the first text shaped, so SVG glyphs come from the same fonts and `@font-face`
-//!   registrations as `<text>`. [`opens_blend`] is the vello #1198 test the layer around a
-//!   whole-image draw needs.
+//!   registrations as `<text>`.
 //!
 //! # The supported subset
 //!
@@ -82,12 +81,9 @@
 //!   not available at parse).
 //! - An element with a `mask` is skipped with its whole subtree: drawing it unmasked would show
 //!   what the author hid.
-//! - A blend layer never opens directly inside a clip layer (vello [#1198](https://github.com/linebender/vello/issues/1198)):
-//!   where a clip layer would enclose a non-`normal` blend with no layer between them, the
-//!   innermost clip layer is a full `Normal` layer instead ([`Item::PushClip`]'s `isolate`), and
-//!   [`opens_blend`] answers the same question for the layer a draw of the whole image opens.
-//!   `mix-blend-mode` and `isolation` have no presentation attribute and CSS is not read, so no
-//!   layer blends and both always compute `false`; the plumbing stays for the raster cache.
+//! - Every compositing layer is `Normal`: `mix-blend-mode` and `isolation` have no presentation
+//!   attribute and CSS is not read, so nothing blends, and no clip layer ever has to stand in for
+//!   an isolating layer (vello [#1198](https://github.com/linebender/vello/issues/1198)).
 //! - A nested `svg` and a `symbol` clip to their viewport (`overflow: hidden`) and map their
 //!   `viewBox` by their `preserveAspectRatio`. The root's `preserveAspectRatio` is not applied
 //!   here: it is carried as [`VectorDocument::aspect`] for the painter, which maps the viewport
@@ -135,13 +131,13 @@ mod shapes;
 mod style;
 mod text;
 
-pub(crate) use encode::{encode, opens_blend};
+pub(crate) use encode::encode;
 pub(crate) use parse::parse;
 pub(crate) use text::TextItem;
 
 use crate::render::image::AspectRatio;
 use crate::vello::kurbo::{Affine, BezPath, Rect, Stroke};
-use crate::vello::peniko::{BlendMode, Brush, Fill};
+use crate::vello::peniko::{Brush, Fill};
 
 /// A parsed SVG document, ready to encode: its sizes and a flat command
 /// list in viewport units.
@@ -185,21 +181,17 @@ pub(crate) enum Item {
         /// `paint-order`: the fill before the stroke.
         fill_first: bool,
     },
-    /// A compositing layer, popped by a matching [`Item::Pop`].
+    /// A `Normal` compositing layer, popped by a matching [`Item::Pop`].
     PushLayer {
-        blend: BlendMode,
         alpha: f32,
         clip: LayerClip,
         transform: Affine,
     },
-    /// A clip layer, popped by a matching [`Item::Pop`]. `isolate` makes
-    /// it a full `Normal` layer, per the vello #1198 rule in the module
-    /// docs.
+    /// A clip layer, popped by a matching [`Item::Pop`].
     PushClip {
         shape: BezPath,
         rule: Fill,
         transform: Affine,
-        isolate: bool,
     },
     Pop,
     Text(TextItem),
