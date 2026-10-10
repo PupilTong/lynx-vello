@@ -130,7 +130,7 @@ use dom::scroll::ScrollBehavior;
 use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Vector2D};
 use serde_json::Value;
 
-use super::LynxDocument;
+use super::{LynxDocument, is_truthy};
 
 /// Native's pager tag, and the one `x-viewpager-ng` stands for in web-core.
 pub(super) const VIEWPAGER_TAG: &str = "viewpager";
@@ -252,17 +252,6 @@ pub(super) fn select_tab(
     let x = (index * f64::from(scroll_box.scrollport.width)).clamp(0.0, max) as f32;
     document.scroll_to_with(pager, Vector2D::new(x, scroll_box.offset.y), behavior);
     Ok(())
-}
-
-/// JavaScript's `ToBoolean` over the values JSON can carry.
-fn is_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(value) => *value,
-        Value::Number(number) => number.as_f64().is_some_and(|number| number != 0.0),
-        Value::String(text) => !text.is_empty(),
-        Value::Array(_) | Value::Object(_) => true,
-    }
 }
 
 #[cfg(test)]

@@ -3316,11 +3316,29 @@ describe("__InvokeUIMethod", () => {
 
     __InvokeUIMethod(view, "getValue", {}, callback);
 
-    // No method has a decoder arm yet, so the fields arrive as they were
+    // `getValue` has no decoder arm, so the fields arrive as they were
     // written.
     expect(callback.mock.calls[0]?.[0]).toStrictEqual({
       code: 0,
       data: ["a,b", "", "\u{1F600}"],
+    });
+  });
+
+  it("builds a scroll-view's scrollBy and getScrollInfo data from their records", () => {
+    const view = __CreateElement("scroll-view", 0);
+    const answers: unknown[] = [];
+    mock.answerElementMethod = () => "1:0" + "1:0" + "2:20" + "2:50" + "4:30.5";
+    __InvokeUIMethod(view, "scrollBy", { offset: 50 }, (result: unknown) => answers.push(result));
+    mock.answerElementMethod = () => "1:0" + "2:15" + "4:70.5" + "3:120" + "3:120";
+    __InvokeUIMethod(view, "getScrollInfo", {}, (result: unknown) => answers.push(result));
+
+    expect(answers[0]).toStrictEqual({
+      code: 0,
+      data: { consumedX: 0, consumedY: 20, unconsumedX: 50, unconsumedY: 30.5 },
+    });
+    expect(answers[1]).toStrictEqual({
+      code: 0,
+      data: { scrollX: 15, scrollY: 70.5, scrollRange: 120, maxScrollOffset: 120 },
     });
   });
 

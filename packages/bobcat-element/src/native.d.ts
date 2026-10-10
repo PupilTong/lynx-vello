@@ -77,13 +77,26 @@ interface BobcatNative {
    *   own conversion ignores them too), zeros for an element with no box.
    * - for any other method, a string: a record (`bobcat:record`) whose
    *   first field is the status code `0` and whose remaining fields are the
-   *   method's data, as its component wrote them. No method answers one
-   *   yet.
+   *   method's data, as its component wrote them. Two methods answer one,
+   *   each field a number in CSS px: a `scroll-view`'s `scrollBy`, whose
+   *   fields are `consumedX`, `consumedY`, `unconsumedX`, `unconsumedY` in
+   *   that order, and its `getScrollInfo`, whose fields are `scrollX`,
+   *   `scrollY`, `scrollRange`, `maxScrollOffset` in that order.
    *
    * `selectTab({index, smooth = true})` exists on `viewpager` and
    * `x-viewpager-ng` only: it scrolls the pager to `index` times its
    * scrollport width, clamped to the range, smoothly unless `smooth` is
    * falsy.
+   *
+   * `scrollTo({index?, offset = 0, smooth = false})`, `scrollBy({offset})`
+   * and `getScrollInfo()` exist on `scroll-view` only, on the axis its
+   * `scroll-x` / `scroll-orientation` attributes scroll. `scrollTo` scrolls
+   * to the `index`th element child's position plus `offset` (a number in
+   * px, or a `px`/`rpx`/`ppx` string), or to `offset` alone without an
+   * `index`, clamped to the range, smoothly when `smooth` is truthy; an
+   * index naming no child is code 4. `scrollBy` scrolls by a numeric
+   * `offset` at once and answers what it consumed; `getScrollInfo` answers
+   * the offset and the axis's maximum offset.
    *
    * `show`, `showModal`, `close` and `requestClose` exist on `dialog` only:
    * HTML's `HTMLDialogElement` methods, `params` unread. `close` and
