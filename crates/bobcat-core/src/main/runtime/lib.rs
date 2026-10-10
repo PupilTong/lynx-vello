@@ -670,6 +670,20 @@ impl DocumentSlot {
         }
     }
 
+    /// Hands the host the documents an `<svg content>` gave the document
+    /// since the last drain, for it to parse and report like fetched ones.
+    /// Empty before `createDocument`, and on every entry that wrote no new
+    /// markup.
+    fn request_documents(&mut self) {
+        let Some(document) = self.document.as_mut() else {
+            return;
+        };
+        let requests = document.take_document_requests();
+        if !requests.is_empty() {
+            self.outbox.notify(ViewNotice::RequestDocuments(requests));
+        }
+    }
+
     /// The `@font-face` rules the mounted sheets declared, once each.
     ///
     /// Empty before `createDocument`: there is no cascade yet, and the
@@ -1131,33 +1145,14 @@ impl MainThreadRuntime {
         slot.component_events.extend_images(outcomes);
     }
 
-    /// The documents an `<svg content>` handed the document since the last
-    /// drain, for the page to parse on this thread's blocking pool and apply
-    /// through [`Self::apply_image_events`] (`crate::main::page`'s
-    /// epilogue). Empty before `createDocument`.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn take_pending_documents(&mut self) -> Vec<dom::PendingDocument> {
-        self.slot
-            .borrow_mut()
-            .document
-            .as_mut()
-            .map(LynxDocument::take_pending_documents)
-            .unwrap_or_default()
-    }
-
-    /// Parses every document an `<svg content>` handed the document, on this
-    /// thread, and queues the outcomes they settle as
-    /// [`Self::apply_image_events`] does: the wasm32 build has no blocking
-    /// pool, so the page's epilogue calls this where native spawns a parse.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn apply_pending_documents(&mut self) {
-        let mut slot = self.slot.borrow_mut();
-        let slot = &mut *slot;
-        let Some(document) = slot.document.as_mut() else {
-            return;
-        };
-        let outcomes = document.apply_pending_documents();
-        slot.component_events.extend_images(outcomes);
+    /// Asks the host to parse the documents an `<svg content>` handed the
+    /// document since the last drain, as one
+    /// [`ViewNotice::RequestDocuments`]. Its reports come back as
+    /// `ToMain::ImageEvents` and apply through [`Self::apply_image_events`]
+    /// like every other report. Called by the page's epilogue before its
+    /// commit; nothing on this thread parses.
+    pub(crate) fn request_documents(&mut self) {
+        self.slot.borrow_mut().request_documents();
     }
 
     /// Whether the document holds anything the last commit did not apply.

@@ -268,10 +268,6 @@ pub(super) struct Page {
     /// and the two numbers this realm's clock task waits on — the deadline it
     /// armed and the generation its own last entry recorded.
     lifetime: Lifetime,
-    /// What the next document parse waits on before it starts, for the test
-    /// that ends a view while a parse is in flight.
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    parse_gate: RefCell<Option<ParseGate>>,
 }
 
 impl Page {
@@ -302,8 +298,6 @@ impl Page {
             content_visibility_posted: Cell::new(false),
             component_events_posted: Cell::new(false),
             lifetime,
-            #[cfg(all(test, not(target_arch = "wasm32")))]
-            parse_gate: RefCell::new(None),
         })
     }
 
@@ -374,9 +368,8 @@ impl Page {
     ///
     /// The epilogue asks after its commit, beside the content-visibility
     /// check, rather than before it. Nothing a commit does produces a
-    /// component event — the queue is filled by a bind, a UI method, the
-    /// painting side's report or a parse's outcome, all of which happen in
-    /// the entry's body or, for wasm32's inline parse, before the commit — so
+    /// component event — the queue is filled by a bind, a UI method or the
+    /// painting side's report, all of which happen in the entry's body — so
     /// the position cannot change what is posted.
     ///
     /// It posts only when that commit left nothing uncommitted
@@ -547,48 +540,12 @@ impl Page {
                     policy::report(self, Scene::HostCall, error.into_script_error());
                 }
             }
-            #[cfg(not(target_arch = "wasm32"))]
-            ToMain::ImageEvents(events) => self.apply_image_events(runtime, events),
-            // No blocking pool to parse on: `dom` parses a reported document
-            // inline, on this thread.
-            #[cfg(target_arch = "wasm32")]
             ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
             #[cfg(test)]
             ToMain::Probe(probe) => runtime.with_document(probe),
             #[cfg(test)]
             ToMain::Trap(_) => unreachable!("the trap seam is taken before the entry"),
         }
-    }
-
-    /// Applies one batch of the host's image reports.
-    ///
-    /// A reported document is not parsed on this thread: each
-    /// [`dom::ImageEvent::LoadedDocument`] is taken out of the batch and
-    /// parsed on this engine thread's blocking pool by a task of this view
-    /// ([`parse_document`]), whose own entry applies the outcome later, and
-    /// the rest of the batch applies at once. Until then the source stays
-    /// pending in the document's registry.
-    ///
-    /// Native only: wasm32 has no blocking pool, so there the batch applies
-    /// as it is and `dom` parses a document inline.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn apply_image_events(
-        self: &Rc<Self>,
-        runtime: &mut MainThreadRuntime,
-        events: Vec<dom::ImageEvent>,
-    ) {
-        let mut rest = Vec::with_capacity(events.len());
-        for event in events {
-            match event {
-                dom::ImageEvent::LoadedDocument {
-                    source,
-                    bytes,
-                    kind,
-                } => owner::spawn(self, parse_document(Rc::clone(self), source, bytes, kind)),
-                event => rest.push(event),
-            }
-        }
-        runtime.apply_image_events(&rest);
     }
 
     /// Opens this view's realm and runs its entry, then starts the waits that
@@ -819,18 +776,6 @@ impl Page {
         self.lifetime.epilogue_count()
     }
 
-    /// How many entries have found the view ended and run nothing.
-    #[cfg(test)]
-    pub(super) fn refused_entry_count(&self) -> u64 {
-        self.lifetime.refused_entry_count()
-    }
-
-    /// Makes the next document parse wait on `gate` before it starts.
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    pub(super) fn hold_next_parse(&self, gate: ParseGate) {
-        *self.parse_gate.borrow_mut() = Some(gate);
-    }
-
     /// Leaves a frame post taken and unacknowledged, which is the state a
     /// painter blocked on that sequence number leaves a view in.
     #[cfg(test)]
@@ -918,27 +863,23 @@ impl RealmOwner for Page {
     }
 
     /// First the documents an `<svg content>` handed over in this entry,
-    /// each parsed by a task of its own on this thread's blocking pool
-    /// ([`parse_document`]), whose entry applies the outcome later; on
-    /// wasm32, with no pool, parsed and applied here, so the commit below
-    /// draws them. Then the commit, which is what publishes the frame and
-    /// the image sources the walk discovered — skipped while any listed
-    /// author sheet is outstanding, because the first `__FlushElementTree`
-    /// is what waits for them and a commit without them would publish an
-    /// unstyled frame. Then the `contentvisibilityautostatechange`
-    /// deliveries that commit decided and the component events this entry
-    /// produced — `<image>` `load`s and `error`s, `<svg>` `load`s,
+    /// asked of the host as one [`crate::link::ViewNotice::RequestDocuments`]
+    /// beside the image sources the commit asks for: the host parses each,
+    /// off this thread, and its report applies in a later entry as every
+    /// other image report does. Then the commit, which is what publishes the
+    /// frame and the image sources the walk discovered — skipped while any
+    /// listed author sheet is outstanding, because the first
+    /// `__FlushElementTree` is what waits for them and a commit without them
+    /// would publish an unstyled frame. Then the
+    /// `contentvisibilityautostatechange` deliveries that commit decided and
+    /// the component events this entry produced — `<image>` `load`s and
+    /// `error`s, `<svg>` `load`s,
     /// `<dialog>` `cancel`s and `close`s — each posted as an entry of its
     /// own and never run here, the component events only once the commit
     /// has run: see [`Page::post_content_visibility_changes`] and
     /// [`Page::post_component_events`].
     fn after_timers(page: &Rc<Self>, runtime: &mut MainThreadRuntime) {
-        #[cfg(not(target_arch = "wasm32"))]
-        for (source, bytes, kind) in runtime.take_pending_documents() {
-            owner::spawn(page, parse_document(Rc::clone(page), source, bytes, kind));
-        }
-        #[cfg(target_arch = "wasm32")]
-        runtime.apply_pending_documents();
+        runtime.request_documents();
         runtime.commit_if_dirty();
         if runtime.has_pending_content_visibility_changes()
             && !page.content_visibility_posted.replace(true)
@@ -1314,71 +1255,6 @@ async fn load_font_face(page: Rc<Page>, request: dom::FontFaceRequest) {
         runtime.register_font_face(&family, blob);
     })
     .await;
-}
-
-/// One document a host reported, or an `<svg content>` handed the document
-/// as markup ([`MainThreadRuntime::take_pending_documents`]), parsed off
-/// this thread.
-///
-/// The parse is [`dom::ImageEvent::parse_document`], run with
-/// `spawn_blocking` on the blocking pool of this engine thread's runtime, so
-/// no job and no other task waits on it. When it returns, one entry applies
-/// its outcome — [`dom::ImageEvent::ParsedDocument`] or
-/// [`dom::ImageEvent::Failed`] — through the same
-/// [`MainThreadRuntime::apply_image_events`] a batch from the painter goes
-/// through, so the registry, the natural-size relayout and the `load` or
-/// `error` follow the path every other report takes, and the entry's own
-/// epilogue commits. A parse that panicked is a failure of the source.
-///
-/// This is a task of the view's [`Lifetime`] like [`load_font_face`]: a view
-/// that ends while the parse runs aborts it with its others, and an entry
-/// into an ended view runs nothing, so nothing is applied. The parse itself
-/// runs to its end on the pool, and its result is dropped. A parse still
-/// running when the group is released is detached, not joined: the closure
-/// owns only its bytes and source URL, and the thread's runtime is shut down
-/// without waiting for its blocking pool (see `crate::jobs`). The source of
-/// an `<svg content>` that every element let go of while the parse ran
-/// applies to nothing: `dom` forgot it with its last binder.
-#[cfg(not(target_arch = "wasm32"))]
-async fn parse_document(
-    page: Rc<Page>,
-    source: Arc<str>,
-    bytes: bytes::Bytes,
-    kind: dom::DocumentKind,
-) {
-    let parsing = Arc::clone(&source);
-    #[cfg(test)]
-    let gate = page.parse_gate.take();
-    let event = tokio::task::spawn_blocking(move || {
-        // Held until the parse has returned, so a test sees it go when the
-        // parse is over.
-        #[cfg(test)]
-        let _gate = gate.inspect(ParseGate::hold);
-        dom::ImageEvent::parse_document(parsing, &bytes, kind)
-    })
-    .await
-    .unwrap_or_else(|_| dom::ImageEvent::Failed { source });
-    owner::enter(&page, move |runtime, _| {
-        runtime.apply_image_events(&[event]);
-    })
-    .await;
-}
-
-/// The test seam [`parse_document`] waits on: on its pool thread it says
-/// that the parse has started, waits for the test to let it go, and is
-/// dropped once the parse has returned, which disconnects `started`.
-#[cfg(all(test, not(target_arch = "wasm32")))]
-pub(super) struct ParseGate {
-    pub(super) started: std::sync::mpsc::Sender<()>,
-    pub(super) release: std::sync::mpsc::Receiver<()>,
-}
-
-#[cfg(all(test, not(target_arch = "wasm32")))]
-impl ParseGate {
-    fn hold(&self) {
-        let _ = self.started.send(());
-        let _ = self.release.recv();
-    }
 }
 
 /// The one ordered consumer of everything this view's workers say.

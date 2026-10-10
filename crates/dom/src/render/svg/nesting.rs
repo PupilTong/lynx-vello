@@ -4,8 +4,9 @@
 //! nested element, and bounds only entity expansion (ten references inside
 //! one another), not element nesting. Its frames take about 700 bytes a
 //! level in a release build, so a document nested a few thousand deep would
-//! overflow the 2 MiB stack of the blocking-pool thread a native parse runs
-//! on, which aborts the process. [`bound`] runs first: one pass over the
+//! overflow the 2 MiB stack of the decode-pool thread a native host parses
+//! on (`bobcat-resources` runs it on tokio's blocking pool), which aborts the
+//! process. [`bound`] runs first: one pass over the
 //! markup that removes every element nested deeper than the bound, with its
 //! content, which is what the converter's own walk does to an element past
 //! [`MAX_NESTING`](super::parse::MAX_NESTING).

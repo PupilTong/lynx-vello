@@ -5,9 +5,9 @@
 //! `current_thread` tokio runtime that [`Executor::new`] builds on the thread
 //! constructing the [`Resources`](crate::Resources) and hands to a thread
 //! named `bobcat-resources-driver`, which drives it and shuts it down. Its
-//! blocking pool runs every transport read, preprocessing pass and platform
-//! decode. Browser IO has no runtime here at all — it runs as local futures
-//! on the Render Worker's event loop.
+//! blocking pool runs every transport read, preprocessing pass, platform
+//! decode and SVG document parse. Browser IO has no runtime here at all — it
+//! runs as local futures on the Render Worker's event loop.
 //!
 //! Images wake the host to service reports; sources complete directly into
 //! main's FIFO, whose lifecycle notifications subsequently wake the host.
@@ -28,15 +28,17 @@ pub type Wakeup = Arc<dyn Fn() + Send + Sync>;
 ///
 /// # What runs where
 ///
-/// The painter's thread submits the three jobs this executor starts — a
-/// source load, an image load, an image refinement — and submitting one of
-/// those only enqueues a task ([`Self::spawn`]). Each job is one async task,
-/// so the driver thread runs the job's awaits and sends its completion, while
-/// every blocking step — the transport, preprocessing and the platform
-/// decoder — runs on the runtime's blocking pool. That pool is capped at
+/// The painter's thread submits the four jobs this executor starts — a
+/// source load, an image load (which parses an SVG document where it would
+/// decode a bitmap), an image refinement, and the parse of a document a page
+/// handed over — and submitting one of those only enqueues a task
+/// ([`Self::spawn`]). Each job is one async task, so the driver thread runs
+/// the job's awaits and sends its completion, while every blocking step —
+/// the transport, preprocessing, the platform decoder and the engine's SVG
+/// parser — runs on the runtime's blocking pool. That pool is capped at
 /// `worker_threads` threads and its threads are created lazily, by the
 /// `spawn_blocking` call that finds none idle, on the thread making that
-/// call — the driver's, for those three jobs.
+/// call — the driver's, for those four jobs.
 ///
 /// Not every thread of this executor is created on the driver: [`Self::new`]
 /// starts the driver thread itself on whichever thread builds the
@@ -59,15 +61,17 @@ pub type Wakeup = Arc<dyn Fn() + Send + Sync>;
 /// throughput a pool of that size could reach, though a decode can still wait
 /// for a permit behind another job's queued transport read; they bind harder
 /// only when a host sets a lower number, and then a waiting decode holds no
-/// thread. The painter's restore decode takes no permit by construction.
+/// thread. An SVG document's parse takes a permit exactly as a decode does,
+/// since it stands in the decode's place. The painter's restore decode takes
+/// no permit by construction.
 ///
 /// # Panics
 ///
 /// A panic inside a blocking closure is delivered to the job's task as a
 /// [`JoinError`](tokio::task::JoinError) and becomes that job's reported
-/// failure: `Completion::Failed` for an image load, `Completion::RefineFailed`
-/// for a refinement, the protocol's `Failure` for a source. The pool's thread
-/// survives it, and so does the next job.
+/// failure: `Completion::Failed` for an image load or a document parse,
+/// `Completion::RefineFailed` for a refinement, the protocol's `Failure` for
+/// a source. The pool's thread survives it, and so does the next job.
 ///
 /// A task body holds only awaits and the completion, so the only panic it can
 /// raise itself comes from the embedder's `wakeup`, which `Shared::complete`
@@ -78,7 +82,7 @@ pub type Wakeup = Arc<dyn Fn() + Send + Sync>;
 /// completion. An OS that refuses a new pool thread is how that happens:
 /// `spawn_blocking` panics on the thread that called it, unless the refusal
 /// is transient and a pool thread is already running to pick the closure up.
-/// For the three jobs above the panic is the task's, on the driver, and the
+/// For the four jobs above the panic is the task's, on the driver, and the
 /// job goes unreported. The hand-written pool this replaced asked for its
 /// threads once, at construction, printed a refusal to standard error and
 /// carried on with the threads it had; a fetch it could queue nowhere

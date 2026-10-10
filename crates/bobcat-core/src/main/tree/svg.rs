@@ -18,13 +18,15 @@
 //! `<image src="x.svg">`.
 //!
 //! `content` goes to [`dom::Document::set_image_document`] as its bytes. No
-//! URL is made of it and the host never sees it: `dom` files the markup
-//! under a synthetic source named by a 128-bit hash of it
-//! (`svg-content:<32 hex digits>`) and queues the bytes, and the runtime
-//! parses them as it parses a host's document — natively on the engine
-//! thread's blocking pool, on wasm32 inline (`crate::main::page`'s
-//! epilogue). Identical markup on any number of elements is one entry, one
-//! parse, one scene and one raster texture.
+//! URL is made of it and the host is never asked to fetch it: `dom` files
+//! the markup under a synthetic source named by a 128-bit hash of it
+//! (`svg-content:<32 hex digits>`) and queues the bytes as a document
+//! request, which the page's epilogue hands the host
+//! (`ViewNotice::RequestDocuments`, `ResourceFetcher::request_document`).
+//! The host parses them as it parses a fetched document, where it decodes
+//! bitmaps, and reports the parsed document for that source. Identical
+//! markup on any number of elements is one entry, one parse, one scene and
+//! one raster texture.
 //!
 //! The last attribute written wins: both callbacks write the one source, as
 //! in web-core, where both end up assigning the shadow `<img>`'s `src`. An
@@ -206,9 +208,21 @@ mod tests {
             .map(str::to_owned)
     }
 
-    /// How many documents are queued for a parse, draining them.
+    /// How many documents are queued for the host to parse, draining them.
     fn parses(document: &mut LynxDocument) -> usize {
-        document.take_pending_documents().len()
+        document.take_document_requests().len()
+    }
+
+    /// Answers every document request as a host does, with the engine's
+    /// parser over its bytes reported for its source, and applies the
+    /// reports.
+    fn answer_requests(document: &mut LynxDocument) -> Vec<ImageOutcome> {
+        let reports: Vec<ImageEvent> = document
+            .take_document_requests()
+            .into_iter()
+            .map(|(source, bytes, kind)| ImageEvent::parse_document(source, &bytes, kind))
+            .collect();
+        document.apply_image_events(&reports)
     }
 
     /// The outcomes queued at a bind, as the runtime would drain them.
@@ -274,7 +288,7 @@ mod tests {
         }
         document.set_attribute(inline, CONTENT_ATTRIBUTE, MARKUP);
         let _ = document.apply_image_events(&[loaded(SOURCE)]);
-        let _ = document.apply_pending_documents();
+        let _ = answer_requests(&mut document);
 
         assert_eq!(size_of(&mut document, natural), (30.0, 15.0));
         assert_eq!(size_of(&mut document, sized), (120.0, 80.0));
@@ -293,20 +307,21 @@ mod tests {
         assert_eq!(parses(&mut document), 0, "a URL is the host's to fetch");
     }
 
-    /// `content` is the engine's to parse: nothing is asked of the host, the
-    /// markup's bytes are queued as they were written, and the element
-    /// presents the synthetic source they are filed under.
+    /// `content` is not a source to fetch: no image is asked of the host,
+    /// the markup's bytes are queued as a document request as they were
+    /// written, and the element presents the synthetic source they are filed
+    /// under.
     #[test]
-    fn content_is_queued_for_the_engine_to_parse() {
+    fn content_is_queued_as_a_document_request() {
         let mut document = document();
         let element = svg(&mut document, "");
         let markup = r##"<svg fill="#f00">50% é</svg>"##;
         document.set_attribute(element, CONTENT_ATTRIBUTE, markup);
 
         assert!(document.take_wanted_images().is_empty());
-        let pending = document.take_pending_documents();
-        assert_eq!(pending.len(), 1);
-        let (source, bytes, kind) = &pending[0];
+        let requests = document.take_document_requests();
+        assert_eq!(requests.len(), 1);
+        let (source, bytes, kind) = &requests[0];
         assert_eq!(&**bytes, markup.as_bytes(), "the bytes as written");
         assert_eq!(*kind, dom::DocumentKind::Svg);
         assert!(source.starts_with("svg-content:"), "{source}");
@@ -328,7 +343,7 @@ mod tests {
             "`content` replaced `src`, so `src`'s load is nobody's"
         );
         assert_eq!(
-            document.apply_pending_documents(),
+            answer_requests(&mut document),
             vec![outcome(element, 10, 5)]
         );
 
@@ -409,7 +424,7 @@ mod tests {
             document.set_attribute(element, CONTENT_ATTRIBUTE, MARKUP);
             clear_content(&mut document, element);
             assert_eq!(
-                document.apply_pending_documents(),
+                answer_requests(&mut document),
                 vec![outcome(element, 10, 5)],
                 "the markup is still the source: {clear:?}"
             );
@@ -425,7 +440,7 @@ mod tests {
         // Another element settles the markup first and keeps it bound.
         let first = svg(&mut document, "");
         document.set_attribute(first, CONTENT_ATTRIBUTE, MARKUP);
-        let _ = document.apply_pending_documents();
+        let _ = answer_requests(&mut document);
         assert!(queued(&events).is_empty(), "the first bind was pending");
 
         let element = svg(&mut document, "");
@@ -450,7 +465,7 @@ mod tests {
         }
         assert_eq!(source_of(&document, first), source_of(&document, second));
         assert_eq!(
-            document.apply_pending_documents(),
+            answer_requests(&mut document),
             vec![outcome(first, 10, 5), outcome(second, 10, 5)],
             "one parse settles both"
         );
@@ -466,12 +481,12 @@ mod tests {
         let element = svg(&mut document, "");
 
         document.set_attribute(element, CONTENT_ATTRIBUTE, MARKUP);
-        assert_eq!(document.apply_pending_documents().len(), 1);
+        assert_eq!(answer_requests(&mut document).len(), 1);
         let first = source_of(&document, element).expect("a source");
 
         document.set_attribute(element, CONTENT_ATTRIBUTE, OTHER_MARKUP);
         assert_eq!(
-            document.apply_pending_documents(),
+            answer_requests(&mut document),
             vec![outcome(element, 20, 20)],
             "new markup is one parse"
         );
@@ -491,7 +506,7 @@ mod tests {
 
         document.set_attribute(element, CONTENT_ATTRIBUTE, MARKUP);
         assert_eq!(
-            document.apply_pending_documents(),
+            answer_requests(&mut document),
             vec![outcome(element, 10, 5)],
             "forgotten markup is parsed afresh"
         );

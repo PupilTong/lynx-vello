@@ -333,8 +333,9 @@ impl<T> Document<T> {
     /// 128-bit hash of `bytes`, so identical markup names one registry entry
     /// whichever element, and however many, set it. A source this document
     /// already holds binds at once — settled or still parsing — and costs a
-    /// hash; an unknown one is created pending and its bytes are queued for
-    /// [`Self::take_pending_documents`], so the host is never asked for it.
+    /// hash; an unknown one is created pending and its bytes are queued as a
+    /// request for the host to parse ([`Self::take_document_requests`]), so
+    /// the host is never asked to fetch it.
     /// The entry is forgotten when the last element presenting it lets go of
     /// it, by setting another source or by being freed.
     pub fn set_image_document(
@@ -2139,21 +2140,23 @@ mod tests {
         }
     }
 
+    /// What a host reports for `svg` fetched at `source`: the document it
+    /// parsed with the engine's parser, or the failure of one that did not
+    /// parse.
     fn document_report(source: &str, svg: &str) -> crate::ImageEvent {
-        crate::ImageEvent::LoadedDocument {
-            source: std::sync::Arc::from(source),
-            bytes: bytes::Bytes::copy_from_slice(svg.as_bytes()),
-            kind: crate::DocumentKind::Svg,
-        }
+        crate::ImageEvent::parse_document(
+            std::sync::Arc::from(source),
+            svg.as_bytes(),
+            crate::DocumentKind::Svg,
+        )
     }
 
-    /// A host reports an SVG document as its bytes, and with no blocking
-    /// pool in front of it the document parses them inline: the source loads
-    /// at the document's natural size, a repeat report of the same bytes
-    /// moves nothing, and a document that does not parse fails its source
-    /// exactly as a failure report would.
+    /// A host reports an SVG document as the document it parsed: the source
+    /// loads at the document's natural size, a repeat report moves nothing,
+    /// and a document that did not parse fails its source exactly as any
+    /// failure report does.
     #[test]
-    fn a_reported_document_is_parsed_inline_and_a_malformed_one_fails() {
+    fn a_parsed_document_loads_and_a_malformed_one_fails() {
         let (mut document, image) = image_document();
         document.set_image_source(image, ImageRole::Source, Some(SRC));
         let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="12"/>"#;

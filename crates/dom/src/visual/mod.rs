@@ -136,7 +136,7 @@ pub(crate) use self::space::{Space, SpaceKind, SpaceSamples};
 #[cfg(test)]
 pub(crate) use self::sticky_frame::StickySample;
 pub(crate) use self::sticky_frame::{StickySamples, StickySlot};
-use crate::render::image::{ImageEvent, ImageOutcome, ImageRole, PendingDocument};
+use crate::render::image::{DocumentRequest, ImageEvent, ImageOutcome, ImageRole};
 use crate::scroll::SnapPoint;
 use crate::scroll::initial_target::InitialTarget;
 use crate::tree::document::Document;
@@ -1113,45 +1113,29 @@ impl<T> Document<T> {
     }
 
     /// The documents [`Document::set_image_document`] filed since the last
-    /// drain and nobody has parsed yet: each one's synthetic source, its
-    /// bytes, and what to parse them as. Drained once; every one names a
-    /// source that is pending and still presented by some element.
+    /// drain, as requests for the host to parse: each one's synthetic
+    /// source, its bytes, and what to parse them as. Drained once; every one
+    /// names a source that is pending and still presented by some element.
     ///
-    /// The embedder parses each with [`ImageEvent::parse_document`], as it
-    /// parses a host's reported document, and hands the result to
-    /// [`Self::apply_image_events`]: natively off this thread, which is why
-    /// the bytes leave the document at all. A caller with nowhere else to
-    /// parse uses [`Self::apply_pending_documents`] instead.
-    pub fn take_pending_documents(&mut self) -> Vec<PendingDocument> {
-        self.images.take_pending_documents()
-    }
-
-    /// Parses every pending document on this thread and applies the
-    /// results, answering their outcomes as [`Self::apply_image_events`]
-    /// does: the path with no blocking pool behind it (the wasm32 build,
-    /// and every test that holds a bare document).
-    pub fn apply_pending_documents(&mut self) -> Vec<ImageOutcome> {
-        let events: Vec<ImageEvent> = self
-            .take_pending_documents()
-            .into_iter()
-            .map(|(source, bytes, kind)| ImageEvent::parse_document(source, &bytes, kind))
-            .collect();
-        self.apply_image_events(&events)
+    /// The embedder hands each to its host beside the image sources
+    /// [`Self::take_wanted_images`] names. The host parses the bytes with
+    /// [`ImageEvent::parse_document`] where it decodes bitmaps, as it parses
+    /// a fetched document, and reports the outcome for that source, which
+    /// comes back through [`Self::apply_image_events`] like every other
+    /// report. Nothing on this thread parses.
+    pub fn take_document_requests(&mut self) -> Vec<DocumentRequest> {
+        self.images.take_document_requests()
     }
 
     /// Applies the host's image reports: records completed loads with their
     /// intrinsic dimensions, and marks failures.
     ///
-    /// A [`ImageEvent::ParsedDocument`] is encoded here, on this thread,
-    /// when its source is still pending: its text is shaped through this
-    /// document's own text context (created on the first document with
-    /// text) and its scene built once, so it settles as a loaded vector
-    /// image. Natively `bobcat-core` parses off this thread first
-    /// ([`ImageEvent::parse_document`]) and hands that event over. A
-    /// [`ImageEvent::LoadedDocument`] is parsed here as well, inline, on the
-    /// path with no blocking pool behind it — this crate's own tests and the
-    /// wasm32 build — and a document that does not parse settles as a
-    /// failure.
+    /// A [`ImageEvent::ParsedDocument`], a document the host parsed, is
+    /// encoded here, on this thread, when its source is still pending: its
+    /// text is shaped through this document's own text context (created on
+    /// the first document with text) and its scene built once, so it
+    /// settles as a loaded vector image. A document that did not parse
+    /// arrives as a failure.
     ///
     /// A report that lands on replaced nodes recomputes their natural size in
     /// the same call, so an element resizes in the commit that first draws

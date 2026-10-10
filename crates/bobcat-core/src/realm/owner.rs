@@ -281,8 +281,6 @@ pub(crate) fn enter_now<O: RealmOwner, T>(
     operation: impl FnOnce(&mut O::Realm, &mut ScriptRuntime) -> T,
 ) -> Option<T> {
     if owner.lifetime().ended() {
-        #[cfg(test)]
-        owner.lifetime().count_refused_entry();
         return None;
     }
     let mut js = owner.runtime().borrow_mut();
