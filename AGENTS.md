@@ -1413,9 +1413,13 @@ the latter a flat name-then-value sequence; `childElementIds` and
 `boundingClientRect` as the four comma-joined numbers `left`, `top`, `width`
 and `height` — none of which needs a length prefix. `callElementMethod`
 answers a number instead when the method has no data: the status code, `0`
-for a success, `3` for no such method, `4` for params it refused; the params
-themselves cross as JSON text, and as the empty string for
-`boundingClientRect`, which reads none.
+for a success, `3` for no such method, `4` for params it refused, `7` for a
+state that refused it (a dialog's `InvalidStateError`), `8` for an operation
+that failed; a method with data answers a length-prefixed record whose first
+field is the code. Every name but `boundingClientRect` is the element's
+component's `dom::CustomElement::invoke`, reached through
+`Document::invoke_element_method`. The params cross as JSON text, and as the
+empty string for `boundingClientRect`, which reads none.
 
 Each call is a plain owner-thread mutation, and `__FlushElementTree` runs the
 style + layout + paint commit and publishes one immutable `Arc<CommittedFrame>`
@@ -1607,8 +1611,8 @@ script can move), `tree::viewpager` (`viewpager`/`x-viewpager-ng` as a
 horizontal scroll container that snaps page by page, its pages' row pinned in
 the cascade, the initial page (`select-index`/`initial-select-index`) as a
 typed `attr()` and an `if()` over `sibling-index()` into
-`scroll-initial-target`, and the `selectTab` UI method the runtime dispatches
-by tag name; no component), `tree::swiper` (`x-swiper`/`x-swiper-item`: the first
+`scroll-initial-target`, and a component whose only member is the `selectTab`
+UI method, its `CustomElement::invoke`), `tree::swiper` (`x-swiper`/`x-swiper-item`: the first
 component with a UA shadow tree, web-core's `#content` scroll container
 snapping item by item on its main axis with the items slotted into it, and
 `#indicator`, one box drawing the dots as background layers whose active
@@ -1639,8 +1643,9 @@ on `:modal`, `-servo-top-layer: auto` on `:modal` and `::backdrop` so Stylo's
 §3.1 position fixup runs, `::backdrop` with `display: flex` — a component with no per-element state whose `open`
 attribute callback is the one path that flips `:open` and, on removal or
 `"false"`, leaves the top layer; "modal" is `Document::blocks_document`; the
-four HTML methods as UI methods the runtime dispatches by tag name, an
-`InvalidStateError` answering web-core's code 4 — `showModal()` also refusing
+four HTML methods as UI methods, the component's `CustomElement::invoke`, an
+`InvalidStateError` answering native's code 7 (a ruled deviation from
+web-core's 4) — `showModal()` also refusing
 a dialog showing as a popover; non-bubbling `close` and
 `cancel` on the shared `ComponentEvents` queue `tree/lib.rs` defines, which
 also carries an image's `load`/`error` and which the page's epilogue posts

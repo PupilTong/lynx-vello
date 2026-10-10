@@ -191,6 +191,68 @@ pub trait CustomElement<T> {
     fn handle_event(&self, document: &mut Document<T>, element: NodeId, event: &mut ElementEvent) {
         let _ = (document, element, event);
     }
+
+    /// One imperative method of this element kind: HTML's per-interface
+    /// method surface, what `HTMLDialogElement` adds beyond `HTMLElement`.
+    ///
+    /// Called by [`Document::invoke_element_method`], inside one
+    /// `[CEReactions]` scope, so the reactions this method's mutations raise
+    /// run before that call returns, as a browser's `[CEReactions]` method
+    /// runs them before it returns to script.
+    ///
+    /// [`MethodOutcome::NotFound`] is the default and means "this kind has no
+    /// method of that name". The host answers the methods every element
+    /// shares only after a `NotFound`, so a kind that overrides a shared name
+    /// is asked first, as a subclass method shadows the base's; a name the
+    /// host answers before asking any kind never reaches this method.
+    /// `call.params` is the text the host received; this crate does not read
+    /// it.
+    fn invoke(
+        &self,
+        document: &mut Document<T>,
+        element: NodeId,
+        call: MethodCall<'_>,
+    ) -> MethodOutcome {
+        let _ = (document, element, call);
+        MethodOutcome::NotFound
+    }
+}
+
+/// One call of an element method: its name, and the parameters as the text
+/// the host received (JSON, by the Lynx contract). This crate passes both
+/// through unread; the kind that answers the call parses `params` if it needs
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MethodCall<'a> {
+    pub name: &'a str,
+    pub params: &'a str,
+}
+
+/// What [`CustomElement::invoke`] answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MethodOutcome {
+    /// This kind has no method of that name.
+    NotFound,
+    /// The method ran and has no data to return.
+    Done,
+    /// The method ran and returns this text, which the host hands to the
+    /// caller unchanged. Its format is between the kind that writes it and the
+    /// caller that reads it; this crate does not read it.
+    Data(String),
+    /// The method was found and refused the call.
+    Failed(MethodError),
+}
+
+/// Why a found method refused its call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethodError {
+    /// The parameters do not have the shape the method reads.
+    InvalidParams,
+    /// The element is not in a state the method can run in: HTML's
+    /// `InvalidStateError`, such as `show()` on a modal dialog.
+    InvalidState,
+    /// The method ran and its operation failed.
+    Operation,
 }
 
 /// Index into the document's definition list.
@@ -595,6 +657,29 @@ impl<T> Document<T> {
             return None;
         }
         self.dispatch_target(element)
+    }
+
+    /// Runs `call` against `element`'s definition: [`CustomElement::invoke`]
+    /// inside one `[CEReactions]` scope, as
+    /// [`Document::dispatch_element_event`] runs each `handle_event`, so the
+    /// reactions the method raised have run when this returns.
+    ///
+    /// An element with no constructed definition answers
+    /// [`MethodOutcome::NotFound`] without a scope: an undefined tag, a
+    /// freed node, and an element whose constructor has not returned, which
+    /// is not an instance yet.
+    pub fn invoke_element_method(
+        &mut self,
+        element: NodeId,
+        call: MethodCall<'_>,
+    ) -> MethodOutcome {
+        let Some(handler) = self.custom_element_handler(element) else {
+            return MethodOutcome::NotFound;
+        };
+        let base = self.begin_reactions();
+        let outcome = handler.invoke(self, element, call);
+        self.drain_reactions(base);
+        outcome
     }
 
     fn dispatch_target(&self, element: NodeId) -> Option<Arc<dyn CustomElement<T>>> {

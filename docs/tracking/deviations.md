@@ -1647,12 +1647,16 @@ consequential choice about whether to follow the spec or the quirk.
     against the viewport, and a `display: contents` one renders nothing.
   - *`returnValue` is dropped.* `close(returnValue)` and
     `requestClose(returnValue)` accept and ignore it; Lynx JS has no reader.
-  - *`InvalidStateError` is `invoke` code 4.* `show()` on a modal dialog and
-    `showModal()` on an open non-modal or a disconnected one answer
-    `PARAM_INVALID` (4), which is what web-core reports for any method that
-    throws (`createInvokeUIMethod.ts:12-44`). Native's table has a distinct
-    `7 INVALID_STATE_ERROR` (`lynx_get_ui_result.h:53-61`) but no dialog to
-    raise it; web-core is followed by default.
+  - *`InvalidStateError` is `invoke` code 7, not web-core's 4.* `show()` on
+    a modal dialog and `showModal()` on an open non-modal or a disconnected
+    one answer native's `INVALID_STATE_ERROR` (7,
+    `lynx_get_ui_result.h:53-61`). web-core reports every method that throws
+    as `PARAM_INVALID` (4, `createInvokeUIMethod.ts:12-44`), and native has no
+    dialog to raise its 7. A ruled deviation from web-core (user ruling
+    2026-10-09, `docs/element-methods-design.md` §9): a component method's
+    `MethodError::InvalidState` is 7 and `MethodError::Operation` is 8 for
+    every element kind, so a script can tell a refused state from refused
+    params.
   - *No toggle events, no focus.* `beforetoggle`/`toggle`, the focusing
     steps and `autofocus` are absent, and `::backdrop` itself does not
     animate.

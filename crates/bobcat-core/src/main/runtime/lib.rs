@@ -31,7 +31,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use dom::StylePool;
+use dom::{MethodCall, MethodError, MethodOutcome, StylePool};
 use quickjs_rust_bridge::{HostArgument, HostValue};
 use smallvec::SmallVec;
 use tokio::sync::watch;
@@ -45,9 +45,7 @@ use crate::esm::{
     WORKER_CLASS_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
-use crate::main::tree::{
-    self, ComponentEvent, ComponentEvents, LynxDocument, PageConfig, new_document,
-};
+use crate::main::tree::{ComponentEvent, ComponentEvents, LynxDocument, PageConfig, new_document};
 use crate::realm::policy::context_of;
 use crate::realm::{RealmCore, open_realm, string_argument};
 use crate::script::ScriptError;
@@ -2106,11 +2104,35 @@ fn install_event_members(
 }
 
 /// The UI-method status codes `callElementMethod` answers with, from the
-/// table every `invoke` path reports (web-core's `ErrorCode`; native's
-/// `LynxUIMethodConstants`).
+/// table every `invoke` path reports (native's `LynxGetUIResult`,
+/// `lynx/core/renderer/dom/lynx_get_ui_result.h:53-61`; web-core's
+/// `ErrorCode`, `web-core/ts/constants.ts:83-91`). 7 and 8 are native's alone:
+/// web-core reports every method that throws as 4.
 const UI_METHOD_SUCCESS: f64 = 0.0;
 const UI_METHOD_NOT_FOUND: f64 = 3.0;
 const UI_METHOD_PARAM_INVALID: f64 = 4.0;
+const UI_METHOD_INVALID_STATE: f64 = 7.0;
+const UI_METHOD_OPERATION_ERROR: f64 = 8.0;
+
+/// What `callElementMethod` answers for a component method's outcome: the
+/// status code, or for `Data` a record whose first field is the code `0`
+/// followed by the component's fields unchanged, which `element-papi.ts`
+/// reads by method name.
+fn method_answer(outcome: MethodOutcome) -> HostValue {
+    HostValue::Number(match outcome {
+        MethodOutcome::NotFound => UI_METHOD_NOT_FOUND,
+        MethodOutcome::Done => UI_METHOD_SUCCESS,
+        MethodOutcome::Failed(MethodError::InvalidParams) => UI_METHOD_PARAM_INVALID,
+        MethodOutcome::Failed(MethodError::InvalidState) => UI_METHOD_INVALID_STATE,
+        MethodOutcome::Failed(MethodError::Operation) => UI_METHOD_OPERATION_ERROR,
+        MethodOutcome::Data(fields) => {
+            let mut record = String::with_capacity(fields.len() + 2);
+            write_record_field(&mut record, "0");
+            record.push_str(&fields);
+            return HostValue::String(record);
+        }
+    })
+}
 
 /// Installs the two members that read geometry and style back out of the
 /// document, one of which also runs the UI methods.
@@ -2130,9 +2152,8 @@ fn install_readback_members(
     js_runtime: &mut ScriptRuntime,
     handle: &Rc<RefCell<DocumentSlot>>,
 ) -> Result<(), MainThreadError> {
-    // Written out rather than generated, because a dialog's `close` and
-    // `requestClose` queue events on the slot's component-event queue beside
-    // the document.
+    // Written out rather than generated, because the answer is either a
+    // number or a string.
     let tree = Rc::clone(handle);
     install(
         engine,
@@ -2145,59 +2166,36 @@ fn install_readback_members(
             let method = string_argument(NAME, arguments, 1)?;
             let params = string_argument(NAME, arguments, 2)?;
             let mut handle = borrow_slot(NAME, &tree)?;
-            let events = handle.component_events.clone();
             let document = handle.document_mut();
             validate_live_element(document, NAME, node)?;
-            // Dispatched by name, and by tag for a method only one component
-            // has, because the PAPI is generic. The answer is a status code
-            // when the method has no data and the rect text when it has:
-            // see `native.d.ts` for the four shapes the realm tells apart.
-            Ok(match method {
-                "boundingClientRect" => {
-                    // A box-less element answers zeros rather than nothing,
-                    // which is what both references report for one.
-                    let rect = document
-                        .bounding_client_rect(node)
-                        .unwrap_or_else(dom::Rect::zero);
-                    HostValue::String(format!(
-                        "{},{},{},{}",
-                        rect.origin.x, rect.origin.y, rect.size.width, rect.size.height
-                    ))
-                }
-                "selectTab" if tree::is_viewpager(document, node) => {
-                    HostValue::Number(match tree::select_tab(document, node, params) {
-                        Ok(()) => UI_METHOD_SUCCESS,
-                        Err(tree::InvalidParams) => UI_METHOD_PARAM_INVALID,
-                    })
-                }
-                // `params` is not read: `close(returnValue)` and
-                // `requestClose(returnValue)` take a value no Lynx reader exists
-                // for, so it is dropped (`tree::dialog`).
-                "show" | "showModal" | "close" | "requestClose"
-                    if tree::is_dialog(document, node) =>
-                {
-                    let outcome = match method {
-                        "show" => tree::dialog::show(document, node),
-                        "showModal" => tree::dialog::show_modal(document, node),
-                        "close" => {
-                            tree::dialog::close(document, node, &events);
-                            Ok(())
-                        }
-                        _ => {
-                            tree::dialog::request_close(document, node, &events);
-                            Ok(())
-                        }
-                    };
-                    // web-core reports every method that throws as code 4
-                    // (`createInvokeUIMethod.ts`); native's
-                    // `INVALID_STATE_ERROR` is 7 (`tree::dialog`).
-                    HostValue::Number(match outcome {
-                        Ok(()) => UI_METHOD_SUCCESS,
-                        Err(tree::dialog::InvalidState) => UI_METHOD_PARAM_INVALID,
-                    })
-                }
-                _ => HostValue::Number(UI_METHOD_NOT_FOUND),
-            })
+            // `boundingClientRect` is answered here, ahead of the element's
+            // own methods, as web-core answers it ahead of the element
+            // (`createInvokeUIMethod.ts:16-28`). Its answer is the rect text
+            // rather than a record: see `native.d.ts` for the shapes the
+            // realm tells apart.
+            if method == "boundingClientRect" {
+                // A box-less element answers zeros rather than nothing,
+                // which is what both references report for one.
+                let rect = document
+                    .bounding_client_rect(node)
+                    .unwrap_or_else(dom::Rect::zero);
+                return Ok(HostValue::String(format!(
+                    "{},{},{},{}",
+                    rect.origin.x, rect.origin.y, rect.size.width, rect.size.height
+                )));
+            }
+            // Every other name is the element kind's own method first
+            // (`dom::CustomElement::invoke`, run by the kind's component in
+            // `tree`). On `NotFound` the shared base set every element has
+            // would answer: the documented UI methods `boundingClientRect`,
+            // `scrollIntoView`, `scrollTo`/`scrollBy` and `focus`/`blur`
+            // (user ruling 2026-10-09). Of those only `boundingClientRect`,
+            // above, is built, so `NotFound` is code 3.
+            let call = MethodCall {
+                name: method,
+                params,
+            };
+            Ok(method_answer(document.invoke_element_method(node, call)))
         },
     )?;
 

@@ -11,17 +11,17 @@
 //!
 //! Each tag owns its UA rules and tests. Numeric text and list attributes
 //! flow through `attr()`; boolean flags use attribute selectors. Only `image`,
-//! `blur_view`, `swiper`, `refresh_view`, `dialog` and `overlay` need
-//! components: for image resources, blur hints, the swiper's UA shadow tree and
-//! item count, the refresh view's UA shadow tree and its header and footer slot
-//! assignment, the dialog's `:open`/`:modal` state and top-layer membership,
-//! and the overlay's UA shadow tree, the top-layer membership of the
-//! `dialog` in it, and its `showoverlay` and `dismissoverlay` events
-//! ([`overlay`]).
-//! `viewpager` needs none; its one UI method, `selectTab`, is here for the
-//! runtime to dispatch by tag name, as are the dialog's four
-//! ([`dialog`]).
-//! `scroll_coordinator` needs none either, and has no UI method: its ten tags
+//! `blur_view`, `swiper`, `refresh_view`, `viewpager`, `dialog` and `overlay`
+//! need components: for image resources, blur hints, the swiper's UA shadow
+//! tree and item count, the refresh view's UA shadow tree and its header and
+//! footer slot assignment, the viewpager's `selectTab` UI method, the dialog's
+//! `:open`/`:modal` state, top-layer membership and four UI methods
+//! ([`dialog`]), and the overlay's UA shadow tree, the top-layer membership of
+//! the `dialog` in it, and its `showoverlay` and `dismissoverlay` events
+//! ([`overlay`]). A component's UI methods are its
+//! [`dom::CustomElement::invoke`], which the runtime's `callElementMethod`
+//! reaches through [`dom::Document::invoke_element_method`].
+//! `scroll_coordinator` needs no component, and has no UI method: its ten tags
 //! are UA rules over anchor-sized absolute boxes, a sticky toolbar and
 //! `scroll-capture-y`. `swiper`, `refresh_view` and `overlay` have no UI
 //! method.
@@ -52,9 +52,7 @@ use std::rc::Rc;
 
 use dom::{Document, ImageOutcome, NodeId, StylesheetOrigin};
 
-pub(crate) use self::dialog::is_dialog;
 pub use self::ua_sheet::PageConfig;
-pub(crate) use self::viewpager::{InvalidParams, is_viewpager, select_tab};
 pub(crate) use crate::view::Viewport;
 
 /// The one document shape the runtime speaks.
@@ -66,9 +64,10 @@ pub(crate) const PAGE_TAG: &str = "page";
 /// engine defines, and the UA cascade.
 ///
 /// `events` is the queue the `image` component leaves a `src` that settled at
-/// its bind in, and the `overlay` component its `showoverlay` and
+/// its bind in, the `dialog` component the `close` and `cancel` its methods
+/// queue, and the `overlay` component its `showoverlay` and
 /// `dismissoverlay`, for the runtime to dispatch once it is out of the
-/// JavaScript call that wrote the attribute.
+/// JavaScript call that caused them.
 #[must_use]
 pub(crate) fn new_document(
     viewport: Viewport,
@@ -80,7 +79,8 @@ pub(crate) fn new_document(
     image::define(&mut document, events.clone());
     swiper::define(&mut document);
     refresh_view::define(&mut document);
-    dialog::define(&mut document);
+    viewpager::define(&mut document);
+    dialog::define(&mut document, events.clone());
     // After `dialog`: every overlay builds one in its shadow tree.
     overlay::define(&mut document, events);
     document.add_stylesheet(
@@ -109,8 +109,8 @@ pub(crate) enum ComponentEvent {
 /// A handle rather than a field, because the producers are on both sides of
 /// the document: the `image` component, which is inside it and reaches nothing
 /// else; the runtime's own image report path, which is outside it; the
-/// dialog's UI methods, which the runtime calls with the document borrowed;
-/// and the `overlay` component, inside the document like `image`.
+/// `dialog` component's UI methods; and the `overlay` component, inside the
+/// document like `image`.
 /// Each holds a clone of this one queue, and the runtime drains it in an entry
 /// of its own, posted by the epilogue of the entry that filled it
 /// (`docs/runtime-architecture.md` has the entry boundary,

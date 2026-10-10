@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex};
 
 use common::Doc;
 use dom::event::{ElementEvent, ElementEventKind, EventPhase};
-use dom::{CustomElement, Document, NodeId, ShadowRootMode};
+use dom::{
+    CustomElement, Document, MethodCall, MethodError, MethodOutcome, NodeId, ShadowRootMode,
+};
 
 type Log = Arc<Mutex<Vec<String>>>;
 
@@ -1396,5 +1398,173 @@ fn a_slot_signalled_by_a_slotchange_handler_fires_after_the_current_set() {
             "enter a", "leave a", "enter a", "leave a", "enter b", "leave b"
         ],
         "a's handler moves the child; a (emptied) and b fire after it returns"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Element methods: `CustomElement::invoke` through
+// `Document::invoke_element_method`
+// ---------------------------------------------------------------------------
+
+/// A definition that overrides no method.
+struct Silent;
+
+impl CustomElement<()> for Silent {}
+
+/// A definition with one method per outcome, each recording the call, and
+/// `mark`, which sets an attribute it observes inside the method.
+struct Methods {
+    log: Log,
+}
+
+impl CustomElement<()> for Methods {
+    fn observed_attributes(&self) -> Vec<String> {
+        vec!["marked".to_owned()]
+    }
+
+    fn attribute_changed_callback(
+        &self,
+        _document: &mut Document<()>,
+        element: NodeId,
+        name: &str,
+        _old: Option<&str>,
+        new: Option<&str>,
+    ) {
+        self.log
+            .lock()
+            .expect("the log is never poisoned")
+            .push(format!("attr#{element} {name}={}", new.unwrap_or("<none>")));
+    }
+
+    fn invoke(
+        &self,
+        document: &mut Document<()>,
+        element: NodeId,
+        call: MethodCall<'_>,
+    ) -> MethodOutcome {
+        self.log
+            .lock()
+            .expect("the log is never poisoned")
+            .push(format!("invoke#{element} {}({})", call.name, call.params));
+        match call.name {
+            "done" => MethodOutcome::Done,
+            "data" => MethodOutcome::Data(format!("echo:{}", call.params)),
+            "refuse" => MethodOutcome::Failed(MethodError::InvalidState),
+            "mark" => {
+                document.set_attribute(element, "marked", call.params);
+                self.log
+                    .lock()
+                    .expect("the log is never poisoned")
+                    .push("mark returns".to_owned());
+                MethodOutcome::Done
+            }
+            _ => MethodOutcome::NotFound,
+        }
+    }
+}
+
+fn call<'a>(name: &'a str, params: &'a str) -> MethodCall<'a> {
+    MethodCall { name, params }
+}
+
+#[test]
+fn a_definition_that_overrides_no_method_answers_not_found() {
+    let mut doc = Doc::new();
+    let root = doc.root;
+    doc.dom.define("x-silent", Box::new(Silent));
+    let element = doc.el(root, "x-silent");
+
+    assert_eq!(
+        doc.dom.invoke_element_method(element, call("show", "{}")),
+        MethodOutcome::NotFound
+    );
+}
+
+#[test]
+fn a_definition_answers_each_of_its_methods_by_name() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    doc.dom.define(
+        "x-methods",
+        Box::new(Methods {
+            log: Arc::clone(&log),
+        }),
+    );
+    let element = doc.el(root, "x-methods");
+
+    assert_eq!(
+        doc.dom.invoke_element_method(element, call("done", "")),
+        MethodOutcome::Done
+    );
+    assert_eq!(
+        doc.dom
+            .invoke_element_method(element, call("data", r#"{"a":1}"#)),
+        MethodOutcome::Data(r#"echo:{"a":1}"#.to_owned()),
+        "the params reach the method as the text the caller passed"
+    );
+    assert_eq!(
+        doc.dom.invoke_element_method(element, call("refuse", "")),
+        MethodOutcome::Failed(MethodError::InvalidState)
+    );
+    assert_eq!(
+        doc.dom.invoke_element_method(element, call("missing", "")),
+        MethodOutcome::NotFound
+    );
+    assert_eq!(
+        take(&log),
+        [
+            format!("invoke#{element} done()"),
+            format!(r#"invoke#{element} data({{"a":1}})"#),
+            format!("invoke#{element} refuse()"),
+            format!("invoke#{element} missing()"),
+        ]
+    );
+}
+
+#[test]
+fn an_element_without_a_definition_answers_not_found() {
+    let mut doc = Doc::new();
+    let root = doc.root;
+    let element = doc.el(root, "view");
+    let freed = doc.el(root, "view");
+    doc.dom.drop_element(freed);
+
+    assert_eq!(
+        doc.dom.invoke_element_method(element, call("show", "")),
+        MethodOutcome::NotFound
+    );
+    assert_eq!(
+        doc.dom.invoke_element_method(freed, call("show", "")),
+        MethodOutcome::NotFound,
+        "and so does a freed node"
+    );
+}
+
+#[test]
+fn a_method_s_reactions_have_run_when_the_call_returns() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    doc.dom.define(
+        "x-methods",
+        Box::new(Methods {
+            log: Arc::clone(&log),
+        }),
+    );
+    let element = doc.el(root, "x-methods");
+
+    let outcome = doc.dom.invoke_element_method(element, call("mark", "1"));
+
+    assert_eq!(outcome, MethodOutcome::Done);
+    assert_eq!(
+        take(&log),
+        [
+            format!("invoke#{element} mark(1)"),
+            format!("attr#{element} marked=1"),
+            "mark returns".to_owned(),
+        ],
+        "the attribute reaction runs inside the method, at the mutation's own boundary, \
+         and nothing is left queued once the call returns"
     );
 }

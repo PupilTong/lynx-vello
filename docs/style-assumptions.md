@@ -1737,11 +1737,11 @@ and §D.16 with what the wire format actually permits.)*
       but not modal.
     - **Invalid states.** `show()` on a modal dialog, `showModal()` on an
       open non-modal or a disconnected dialog: HTML throws
-      `InvalidStateError`; `invoke` answers 4 `PARAM_INVALID`, which is what
-      web-core reports for any method that throws
-      (`createInvokeUIMethod.ts:12-44`). Native has a distinct
-      `7 INVALID_STATE_ERROR` (`lynx_get_ui_result.h:53-61`); web-core is
-      followed (`docs/tracking/deviations.md`).
+      `InvalidStateError`; `invoke` answers native's 7
+      `INVALID_STATE_ERROR` (`lynx_get_ui_result.h:53-61`). web-core
+      reports every method that throws as 4 `PARAM_INVALID`
+      (`createInvokeUIMethod.ts:12-44`); native's code is a ruled deviation
+      from it (user ruling 2026-10-09, `docs/tracking/deviations.md`).
     - **Centring.** HTML centres a modal dialog by shrink-to-fit sizing
       (`width: fit-content; height: fit-content; margin: auto` between
       zero insets). hughie's absolute pass stretch-fits only an `auto`

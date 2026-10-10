@@ -59,18 +59,26 @@ interface BobcatNative {
   /**
    * Dispatches one Lynx UI method by name on the element, with `params` as
    * JSON text — the empty string for `boundingClientRect`, which reads
-   * none — and answers either a status code or the method's data as text:
+   * none — and answers either a status code or the method's data as text.
+   * `boundingClientRect` is answered by the host for every element; every
+   * other name is asked of the element's kind (its component's
+   * `dom::CustomElement::invoke`):
    *
-   * - `3` (`METHOD_NOT_FOUND`): the element has no method of that name.
-   * - `4` (`PARAM_INVALID`): the method refused `params`, or the element's
-   *   state (a dialog's `InvalidStateError`), and did nothing.
+   * - `3` (`METHOD_NOT_FOUND`): the element's kind has no method of that
+   *   name.
+   * - `4` (`PARAM_INVALID`): the method refused `params` and did nothing.
+   * - `7` (`INVALID_STATE_ERROR`): the element's state refused the method
+   *   (a dialog's `InvalidStateError`), and it did nothing.
+   * - `8` (`OPERATION_ERROR`): the method ran and its operation failed.
    * - `0` (`SUCCESS`): the method ran and has no data to answer.
-   * - a string: the method ran, and this is its data. Only
-   *   `boundingClientRect` has any: `"<left>,<top>,<width>,<height>"` — the
-   *   border box in viewport CSS px as of the last completed layout pass,
-   *   ancestor scroll offsets applied, transforms ignored (native's own
-   *   conversion ignores them too), zeros for an element with no box. It
-   *   reads no params.
+   * - for `boundingClientRect`, a string `"<left>,<top>,<width>,<height>"`:
+   *   the border box in viewport CSS px as of the last completed layout
+   *   pass, ancestor scroll offsets applied, transforms ignored (native's
+   *   own conversion ignores them too), zeros for an element with no box.
+   * - for any other method, a string: a record (`bobcat:record`) whose
+   *   first field is the status code `0` and whose remaining fields are the
+   *   method's data, as its component wrote them. No method answers one
+   *   yet.
    *
    * `selectTab({index, smooth = true})` exists on `viewpager` and
    * `x-viewpager-ng` only: it scrolls the pager to `index` times its

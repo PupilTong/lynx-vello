@@ -1597,24 +1597,35 @@ interface InvokeResult {
 /**
  * Runs one UI method on one element and shapes its answer.
  *
- * The host dispatches by name — and by tag, for a method one component
- * owns — and answers a status code, or its data as text. A name it has no
- * method for is code 3, `METHOD_NOT_FOUND`, web-core's code rather than
- * native's generic 1; params the method refuses are code 4,
- * `PARAM_INVALID`; a method with nothing to report answers code 0 and no
- * `data`. `boundingClientRect`, the one method with data, answers four
- * numbers: `left`, `top`, `width`, `height`. `right` and `bottom` are
- * derived here rather than sent, because they are sums.
+ * The host asks the element's kind for the method by name, and answers a
+ * status code, the rect text for `boundingClientRect`, or a record of fields
+ * for a method with data. The status codes are the table every `invoke` path
+ * reports:
+ *
+ * | Code | Name | Meaning |
+ * | --- | --- | --- |
+ * | 0 | `SUCCESS` | The method ran. |
+ * | 3 | `METHOD_NOT_FOUND` | The element's kind has no method of that name; web-core's code rather than native's generic 1. |
+ * | 4 | `PARAM_INVALID` | The method refused its params. |
+ * | 7 | `INVALID_STATE_ERROR` | The element is not in a state the method can run in, such as `show` on a modal `dialog`; native's code (web-core answers 4). |
+ * | 8 | `OPERATION_ERROR` | The method ran and its operation failed; native's code. |
+ *
+ * A method with nothing to report answers a bare code and no `data`. A
+ * method with data answers a record (`bobcat:record`) whose first field is
+ * the code and whose remaining fields are the method's own, which
+ * `decodeMethodData` turns into its `data`. `boundingClientRect` answers
+ * four numbers instead: `left`, `top`, `width`, `height`. `right` and
+ * `bottom` are derived here rather than sent, because they are sums.
  *
  * `params` crosses as JSON text. A value JSON cannot carry — a cycle, a
  * BigInt — crosses as `null`, which a method that reads params refuses.
  * `boundingClientRect` reads none and is the frequent call, so it sends the
  * empty string without serializing anything.
  *
- * `id` and `dataset` ride along as native does (web-core reports the id
- * only): `id` is the attribute, empty when the element carries none, the way
- * `element.id` is, and `dataset` is the copy `__GetDataset` hands out, so
- * what the caller receives is the caller's own.
+ * `id` and `dataset` ride along as native iOS does (`LynxUI.m:1491`;
+ * web-core reports the id only): `id` is the attribute, empty when the
+ * element carries none, the way `element.id` is, and `dataset` is the copy
+ * `__GetDataset` hands out, so what the caller receives is the caller's own.
  *
  * The rect is the last completed layout pass's, in viewport CSS px with
  * ancestor scroll offsets applied and transforms ignored — native's own
@@ -1636,6 +1647,13 @@ function invokeUIMethod(handle: Handle, method: string, params: unknown): Invoke
   if (typeof answer === "number") {
     return { code: answer, data: undefined };
   }
+  if (method !== "boundingClientRect") {
+    const fields = splitRecord(answer);
+    return {
+      code: Number(fields[0]),
+      data: decodeMethodData(method, fields.slice(1)),
+    };
+  }
   const [left = 0, top = 0, width = 0, height = 0] = answer
     .split(",")
     .map(Number);
@@ -1652,6 +1670,23 @@ function invokeUIMethod(handle: Handle, method: string, params: unknown): Invoke
       height,
     },
   };
+}
+
+/**
+ * The `data` of a UI method that answered a record, from the fields the
+ * element's component wrote after the status code.
+ *
+ * The host passes those fields through unread (`AGENTS.md`, "JavaScript
+ * data ownership"), so the object a caller receives is built here, one arm
+ * per method name. No method returns data yet: the first one that does adds
+ * its arm and builds its object from its fields. A method without an arm
+ * gets the fields themselves.
+ */
+function decodeMethodData(method: string, fields: string[]): unknown {
+  switch (method) {
+    default:
+      return fields;
+  }
 }
 
 /**

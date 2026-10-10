@@ -2310,12 +2310,46 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
     assert_eq!(offset(), dom::Vector2D::new(600.0, 0.0));
 }
 
+/// Each component-method outcome maps to one status code, and `Data` to a
+/// record whose first field is the code `0`, the component's fields after it
+/// unchanged.
+#[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "the status codes are small integers, exact in f64"
+)]
+fn a_method_outcome_answers_its_status_code_or_a_record() {
+    let number = |outcome| match method_answer(outcome) {
+        HostValue::Number(code) => code,
+        other => panic!("a status code, not {other:?}"),
+    };
+    assert_eq!(number(MethodOutcome::NotFound), 3.0);
+    assert_eq!(number(MethodOutcome::Done), 0.0);
+    assert_eq!(
+        number(MethodOutcome::Failed(MethodError::InvalidParams)),
+        4.0
+    );
+    assert_eq!(
+        number(MethodOutcome::Failed(MethodError::InvalidState)),
+        7.0
+    );
+    assert_eq!(number(MethodOutcome::Failed(MethodError::Operation)), 8.0);
+
+    let mut fields = String::new();
+    write_record_field(&mut fields, "a,b");
+    write_record_field(&mut fields, "\u{1F600}");
+    match method_answer(MethodOutcome::Data(fields)) {
+        HostValue::String(record) => assert_eq!(record, "1:03:a,b2:\u{1F600}"),
+        other => panic!("a record, not {other:?}"),
+    }
+}
+
 /// A `<dialog>`'s four methods through `__InvokeUIMethod` and the
 /// selector-query `invoke` (`__BobcatQueryNodes`): `showModal` opens it in
 /// the top layer, where `:modal` matches and `open` is an attribute script
 /// reads back; `show` on a modal dialog is HTML's `InvalidStateError`, code
-/// 4; `close` delivers a `close` and `requestClose` a `cancel` and then a
-/// `close`, each non-bubbling — the capture pass runs the path, the bind
+/// 7 (native's `INVALID_STATE_ERROR`); `close` delivers a `close` and `requestClose` a `cancel` and
+/// then a `close`, each non-bubbling — the capture pass runs the path, the bind
 /// pass the dialog alone — with a `{}` detail, from an entry of their own.
 #[test]
 #[expect(clippy::too_many_lines, reason = "one scenario over both invoke paths")]
@@ -2425,8 +2459,8 @@ fn a_dialog_opens_closes_and_fires_through_both_invoke_paths() {
         &mut js_runtime,
         r"
             expectCode(viaQuery('#d', 'showModal', undefined), 0);
-            expectCode(viaPapi(held[2], 'show', {}), 4);
-            expectCode(viaQuery('#d', 'show', {}), 4);
+            expectCode(viaPapi(held[2], 'show', {}), 7);
+            expectCode(viaQuery('#d', 'show', {}), 7);
             ",
     );
     assert_eq!(
@@ -2478,7 +2512,7 @@ fn a_dialog_opens_closes_and_fires_through_both_invoke_paths() {
         &mut js_runtime,
         r"
             expectCode(viaQuery('#d', 'show', {}), 0);
-            expectCode(viaQuery('#d', 'showModal', {}), 4);
+            expectCode(viaQuery('#d', 'showModal', {}), 7);
             expectCode(viaPapi(held[2], 'requestClose', {}), 0);
             ",
     );
