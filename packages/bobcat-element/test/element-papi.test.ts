@@ -45,6 +45,7 @@ rstest.mockRequire("bobcat-internal:host", () => {
     flushElementTree: native.flushElementTree,
     listenerNameOpened: native.listenerNameOpened,
     listenerNameClosed: native.listenerNameClosed,
+    exposureEvents: native.exposureEvents,
     setTimer: native.setTimer,
     clearTimer: native.clearTimer,
   };
@@ -78,7 +79,7 @@ const DOCUMENT_REFUSAL = new Error("the realm already created its document");
 
 /**
  * The page configuration a boot module is written with and hands to the
- * constructor. Its four switches are the host's; nothing in this file reads
+ * constructor. Its five switches are the host's; nothing in this file reads
  * them, and the constructor's only job is to pass them on, in order.
  */
 const PAGE_CONFIG: elementPapi.PageConfig = {
@@ -86,6 +87,7 @@ const PAGE_CONFIG: elementPapi.PageConfig = {
   defaultOverflowVisible: false,
   enableCssSelector: false,
   enableJSDataProcessor: true,
+  enableExposureUIMargin: true,
 };
 
 /**
@@ -184,6 +186,15 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
   };
   const attributes: Map<number, Map<string, string>> = new Map();
   const tags: Map<number, string> = new Map([[2, "page"]]);
+  // What `dropElement` freed. The real boundary refuses every read of a freed
+  // element, and the two reads an exposure record makes refuse here too.
+  const freed: Set<number> = new Set();
+  const live = (name: string, id: number): number => {
+    if (freed.has(id)) {
+      throw new TypeError(`${name} received a stale element id`);
+    }
+    return id;
+  };
   // One document per realm for the life of the realm, as the native slot
   // enforces it: the ingredients a construction spends are never restored.
   let documentSpent = false;
@@ -295,7 +306,7 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
       calls.push(["removeAttribute", id, name]);
     },
     getAttribute: (node: unknown, name: string) => {
-      const id = nodeId("getAttribute", node);
+      const id = live("getAttribute", nodeId("getAttribute", node));
       calls.push(["getAttribute", id, name]);
       return attributes.get(id)?.get(name) ?? null;
     },
@@ -329,7 +340,7 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
       );
     },
     attributeNames: (node: unknown) => {
-      const id = nodeId("attributeNames", node);
+      const id = live("attributeNames", nodeId("attributeNames", node));
       calls.push(["attributeNames", id]);
       let record = "";
       for (const name of attributes.get(id)?.keys() ?? []) {
@@ -413,7 +424,9 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
       calls.push(["swapElement", a, b]);
     },
     dropElement: (node: unknown) => {
-      calls.push(["dropElement", nodeId("dropElement", node)]);
+      const id = nodeId("dropElement", node);
+      freed.add(id);
+      calls.push(["dropElement", id]);
     },
     flushElementTree: () => {
       calls.push(["flushElementTree"]);
@@ -423,6 +436,12 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
     },
     listenerNameClosed: (eventName: unknown) => {
       calls.push(["listenerNameClosed", eventName]);
+    },
+    exposureEvents: (nodeId: number, wants: 0 | 1) => {
+      calls.push(["exposureEvents", nodeId, wants]);
+    },
+    switchExposure: (on: 0 | 1, sendEvent: 0 | 1) => {
+      calls.push(["switchExposure", on, sendEvent]);
     },
     // The Element PAPI reaches none of these; they are here because the
     // mock stands in for the whole native module, not part of it.
@@ -517,6 +536,9 @@ describe("installation", () => {
         ...arities.map(([name]) => name),
         "__BobcatQueryNodes",
         "__BobcatDispatchEvent",
+        // Not a PAPI member: the global exposure records `bobcat:runtime`'s
+        // `__BobcatSendExposure` sends, built where the element state is.
+        "__BobcatExposureEvents",
         // Neither is a PAPI member: the computed-style map is the Typed OM
         // readback the realm reaches by name, and the value class is the
         // type its entries carry.
@@ -535,8 +557,9 @@ describe("installation", () => {
   it("creates the realm's document once, over the config it is given", () => {
     void new elementModule.Document(PAGE_CONFIG);
     expect(mock.named("createDocument")).toEqual([
-      // `PageConfig`'s order: display, overflow, selectors, processor.
-      ["createDocument", true, false, false, true],
+      // `PageConfig`'s order: display, overflow, selectors, processor,
+      // exposure ui margin.
+      ["createDocument", true, false, false, true, true],
     ]);
   });
 
@@ -1290,6 +1313,7 @@ function dispatch(
 const DETAIL_POSITION = 0;
 const DETAIL_SIZE = 1;
 const DETAIL_EMPTY = 2;
+const DETAIL_EXPOSURE = 3;
 
 /**
  * What a test asks one dispatch's `detail` to be made of.
@@ -1310,6 +1334,8 @@ interface DispatchPayload {
   height?: number;
   /** An image `error`: the `DETAIL_EMPTY` kind, which spends no numbers. */
   empty?: boolean;
+  /** A `uiappear`/`uidisappear`: the `DETAIL_EXPOSURE` kind, no numbers. */
+  exposure?: boolean;
 }
 
 /**
@@ -1319,6 +1345,9 @@ interface DispatchPayload {
 function detailArguments(payload: DispatchPayload): [number, ...unknown[]] {
   if (payload.empty === true) {
     return [DETAIL_EMPTY];
+  }
+  if (payload.exposure === true) {
+    return [DETAIL_EXPOSURE];
   }
   if (payload.width !== undefined) {
     return [DETAIL_SIZE, payload.width, payload.height];
@@ -2549,6 +2578,48 @@ describe("the event detail", () => {
 
     expect(detailOf(inner, "error", { empty: true })).toEqual({});
   });
+
+  // web-core's `ExposureEventDetail` (`ExposureServices.ts:202-208`), read off
+  // the event's own target: the kind spends no numbers.
+  it("builds an exposure detail out of the target's own attributes", () => {
+    const { outer, inner } = tree();
+    __SetAttribute(inner, "exposure-id", "card-7");
+    __SetAttribute(inner, "exposure-scene", "feed");
+
+    expect(detailOf(inner, "uiappear", { exposure: true })).toEqual({
+      "unique-id": __GetElementUniqueID(inner),
+      exposureID: "card-7",
+      exposureScene: "feed",
+      "exposure-id": "card-7",
+      "exposure-scene": "feed",
+    });
+    // An element with only a listener has no id, and an absent scene is "".
+    expect(detailOf(outer, "uidisappear", { exposure: true })).toEqual({
+      "unique-id": __GetElementUniqueID(outer),
+      exposureID: null,
+      exposureScene: "",
+      "exposure-id": null,
+      "exposure-scene": "",
+    });
+  });
+
+  it("publishes the exposure detail to a background handler", () => {
+    const { inner } = tree();
+    __SetAttribute(inner, "exposure-id", "card-7");
+    __AddEvent(inner, "bindEvent", "uiappear", "3:0:binduiappear");
+
+    dispatch([inner], "uiappear", { exposure: true }, undefined, false);
+
+    const published = mock.named("publishEvent");
+    expect(published).toHaveLength(1);
+    expect((published[0]![3] as { detail: unknown }).detail).toEqual({
+      "unique-id": __GetElementUniqueID(inner),
+      exposureID: "card-7",
+      exposureScene: "",
+      "exposure-id": "card-7",
+      "exposure-scene": "",
+    });
+  });
 });
 
 describe("timestamp and params", () => {
@@ -2836,6 +2907,174 @@ describe("__GetEvents and __SetEvents", () => {
     __SetEvents(inner, undefined);
 
     expect(__GetEvents(inner)).toEqual([]);
+  });
+});
+
+describe("exposure", () => {
+  /** One `bobcat:record` field, as the host writes it. */
+  const field = (text: string) => `${text.length}:${text}`;
+
+  /** One element of a host exposure record: its id, exposure id and scene. */
+  const recorded = (uid: number, exposureId: string, scene: string) =>
+    field(String(uid)) + field(exposureId) + field(scene);
+
+  it("tells the host on an element's first exposure handler and its last, and on nothing between", () => {
+    const { outer, inner } = tree();
+    const id = __GetElementUniqueID(inner);
+
+    __AddEvent(inner, "bindEvent", "uiappear", "3:0:appear");
+    expect(mock.named("exposureEvents")).toEqual([["exposureEvents", id, 1]]);
+
+    // A handler of the other name, a worklet beside the string, and a
+    // replacement in another form: the element had one, and still has.
+    __AddEvent(inner, "bindEvent", "uidisappear", "3:0:disappear");
+    __AddEvent(inner, "bindEvent", "uiappear", { type: "worklet", value: {} });
+    __AddEvent(inner, "catchEvent", "uiappear", "3:0:replaced");
+    // Removing one name of the two leaves the other.
+    __AddEvent(inner, "bindEvent", "uidisappear", null);
+    // Another element's other name is no edge of this one's.
+    __AddEvent(outer, "bindEvent", "tap", "3:0:tap");
+    expect(mock.named("exposureEvents")).toHaveLength(1);
+
+    // web-core's disable mark: a nullish handler clears both kinds, and that
+    // was the element's last exposure handler.
+    __AddEvent(inner, "bindEvent", "uiappear", undefined);
+    expect(mock.named("exposureEvents")).toEqual([
+      ["exposureEvents", id, 1],
+      ["exposureEvents", id, 0],
+    ]);
+  });
+
+  it("counts an __AddEventListener closure and a global form, in any case", () => {
+    const { inner } = tree();
+    const id = __GetElementUniqueID(inner);
+    const listener = () => {};
+
+    __AddEventListener(inner, "UIAppear", listener, {});
+    __AddEvent(inner, "global-bindEvent", "uidisappear", "3:0:global");
+    __RemoveEventListener(inner, "uiappear", listener, {});
+    expect(mock.named("exposureEvents")).toEqual([["exposureEvents", id, 1]]);
+
+    __AddEvent(inner, "global-bindEvent", "uidisappear", null);
+    expect(mock.named("exposureEvents")).toEqual([
+      ["exposureEvents", id, 1],
+      ["exposureEvents", id, 0],
+    ]);
+  });
+
+  it("tells each element its own edges", () => {
+    const { outer, inner } = tree();
+
+    __AddEvent(inner, "bindEvent", "uiappear", "3:0:appear");
+    __AddEvent(outer, "bindEvent", "uiappear", "3:0:appear");
+    __AddEvent(inner, "bindEvent", "uiappear", null);
+
+    expect(mock.named("exposureEvents")).toEqual([
+      ["exposureEvents", __GetElementUniqueID(inner), 1],
+      ["exposureEvents", __GetElementUniqueID(outer), 1],
+      ["exposureEvents", __GetElementUniqueID(inner), 0],
+    ]);
+  });
+
+  it("tells nothing when __SetEvents hands an exposure handler back, and 0 when it drops the last", () => {
+    const { inner } = tree();
+    const id = __GetElementUniqueID(inner);
+    __AddEvent(inner, "bindEvent", "uiappear", "3:0:appear");
+    __AddEvent(inner, "bindEvent", "tap", "3:0:tap");
+    mock.calls.length = 0;
+
+    // The element before and after the call is what is reconciled, so a
+    // round trip neither unregisters it nor closes and reopens a name.
+    __SetEvents(inner, __GetEvents(inner));
+    expect(mock.calls).toEqual([]);
+
+    __SetEvents(inner, [{ type: "bindEvent", name: "tap", function: "3:0:tap" }]);
+    expect(mock.named("exposureEvents")).toEqual([["exposureEvents", id, 0]]);
+    expect(mock.named("listenerNameClosed")).toEqual([
+      ["listenerNameClosed", "uiappear"],
+    ]);
+    expect(mock.named("listenerNameOpened")).toEqual([]);
+  });
+
+  it("builds web-core's global records out of the host's record", () => {
+    const { inner } = tree();
+    const uid = __GetElementUniqueID(inner);
+    __SetID(inner, "row");
+    __SetAttribute(inner, "data-row-index", "4");
+    __AddDataset(inner, "typed", { nested: 1 });
+    const before = Date.now();
+
+    const events = elementModule.__BobcatExposureEvents(
+      "exposure",
+      // The id and scene are the record's, copied by the host when the
+      // transition formed, not the element's attributes now.
+      recorded(uid, "card-7", "feed"),
+    );
+
+    const dataset = { rowIndex: "4", typed: { nested: 1 } };
+    const target = { dataset, id: "row", uid };
+    expect(events).toEqual([
+      {
+        dataset,
+        "unique-id": uid,
+        exposureID: "card-7",
+        exposureScene: "feed",
+        "exposure-id": "card-7",
+        "exposure-scene": "feed",
+        type: "exposure",
+        target,
+        currentTarget: target,
+        detail: {
+          "unique-id": 0,
+          exposureID: "card-7",
+          exposureScene: "feed",
+          "exposure-id": "card-7",
+          "exposure-scene": "feed",
+        },
+        timestamp: expect.any(Number),
+      },
+    ]);
+    // Epoch milliseconds, web-core's `Date.now()`.
+    expect(events[0]!.timestamp).toBeGreaterThanOrEqual(before);
+    expect(events[0]!.timestamp).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("still builds the record of an element that is gone, with no dataset and no id", () => {
+    const { inner } = tree();
+    // No handle names 9999, and the host freed it, so its reads are refused.
+    mock.dropElement(9999);
+
+    const events = elementModule.__BobcatExposureEvents(
+      "disexposure",
+      recorded(__GetElementUniqueID(inner), "kept", "") +
+        recorded(9999, "freed", "feed"),
+    );
+
+    expect(events.map((event) => event["exposure-id"])).toEqual([
+      "kept",
+      "freed",
+    ]);
+    expect(events[1]).toMatchObject({
+      dataset: {},
+      "unique-id": 9999,
+      type: "disexposure",
+      target: { dataset: {}, id: null, uid: 9999 },
+      currentTarget: { dataset: {}, id: null, uid: 9999 },
+      detail: { "unique-id": 0, exposureID: "freed", exposureScene: "feed" },
+    });
+  });
+
+  it("throws a read that fails while the element's handle is live", () => {
+    const view = __CreateView(0);
+    // A live handle holds its element, so a refusal here is no free.
+    mock.dropElement(__GetElementUniqueID(view));
+
+    expect(() =>
+      elementModule.__BobcatExposureEvents(
+        "exposure",
+        recorded(__GetElementUniqueID(view), "card", ""),
+      )
+    ).toThrow("stale element id");
   });
 });
 

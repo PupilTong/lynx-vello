@@ -22,7 +22,13 @@ import * as globalEventEmitter from "../src/global-event-emitter.ts";
 rstest.mockRequire("bobcat:global-event-emitter", () => globalEventEmitter);
 rstest.mockRequire("bobcat:selector-query", () => selectorQuery);
 const queryNodes = rstest.fn();
-rstest.mockRequire("bobcat:element", () => ({ __BobcatQueryNodes: queryNodes }));
+// The record list itself is element-papi.test.ts's: here it only has to reach
+// the BTS as built.
+const exposureEvents = rstest.fn((kind: string, record: string) => [{ kind, record }]);
+rstest.mockRequire("bobcat:element", () => ({
+  __BobcatQueryNodes: queryNodes,
+  __BobcatExposureEvents: exposureEvents,
+}));
 
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
 rstest.mockRequire("bobcat:cross-thread-context", () => crossThreadContext);
@@ -57,6 +63,7 @@ const preloadStyleSheet = rstest.fn();
 const adoptStyleSheet = rstest.fn();
 const reportedErrors = rstest.fn();
 const consoleMessages = rstest.fn();
+const switchExposure = rstest.fn();
 // The runtime reads the view's page data and native module table as it
 // evaluates; this view has no page data and one module, `Echo`, declaring one
 // method, `ping`.
@@ -65,6 +72,7 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   reportScriptError: reportedErrors,
   logScriptMessage: consoleMessages,
   preloadStyleSheet, adoptStyleSheet,
+  switchExposure,
   initialProcessor: () => "",
   initData: () => undefined,
   globalProps: () => undefined,
@@ -1062,6 +1070,61 @@ describe("runtime events and diagnostics", () => {
     deliverToBackground();
     expect(listener.mock.calls).toEqual([[1, {value: 2}], []]);
     emitter.removeAllListeners("host-event");
+  });
+
+  it("sends an exposure record list as the global event's one argument", () => {
+    const emitter = bts.getJSModule("GlobalEventEmitter") as globalEventEmitter.GlobalEventEmitter;
+    const heard = rstest.fn();
+    emitter.addListener("exposure", heard);
+    emitter.addListener("disexposure", heard);
+    const start = toBackground.length;
+
+    mts.__BobcatSendExposure("exposure", "1:42:a0:");
+    mts.__BobcatSendExposure("disexposure", "1:72:b0:");
+
+    expect(exposureEvents.mock.calls).toEqual([["exposure", "1:42:a0:"], ["disexposure", "1:72:b0:"]]);
+    expect(toBackground.slice(start)).toEqual([
+      {bobcat: "runtime", method: "sendGlobalEvent", name: "exposure",
+        args: [[{kind: "exposure", record: "1:42:a0:"}]]},
+      {bobcat: "runtime", method: "sendGlobalEvent", name: "disexposure",
+        args: [[{kind: "disexposure", record: "1:72:b0:"}]]},
+    ]);
+    deliverToBackground();
+    deliverToBackground();
+    expect(heard.mock.calls).toEqual([
+      [[{kind: "exposure", record: "1:42:a0:"}]],
+      [[{kind: "disexposure", record: "1:72:b0:"}]],
+    ]);
+    emitter.removeAllListeners("exposure");
+    emitter.removeAllListeners("disexposure");
+  });
+
+  it("switches exposure from either thread's lynx, with web-core's sendEvent default", async () => {
+    switchExposure.mockClear();
+    mts.lynx.stopExposure();
+    mts.lynx.stopExposure({sendEvent: false});
+    mts.lynx.stopExposure({});
+    mts.lynx.resumeExposure();
+    mts.lynx.setObserverFrameRate({forPageRect: 10, forExposureCheck: 10});
+    const fromMain = switchExposure.mock.calls.splice(0);
+    expect(fromMain).toEqual([[0, 1], [0, 0], [0, 1], [1, 1]]);
+
+    const start = toMain.length;
+    bts.stopExposure();
+    bts.stopExposure({sendEvent: false});
+    bts.stopExposure({});
+    bts.resumeExposure();
+    // Accepted and ignored: nothing is posted for it.
+    expect(bts.setObserverFrameRate({forPageRect: 10, forExposureCheck: 10})).toBeUndefined();
+    expect(toMain.slice(start)).toEqual([
+      {bobcat: "runtime", method: "switchExposure", on: false, sendEvent: true},
+      {bobcat: "runtime", method: "switchExposure", on: false, sendEvent: false},
+      {bobcat: "runtime", method: "switchExposure", on: false, sendEvent: true},
+      {bobcat: "runtime", method: "switchExposure", on: true, sendEvent: true},
+    ]);
+    for (let index = 0; index < 4; index++) await deliverToMain();
+    // The host member takes its flags as `0 | 1`, never as booleans.
+    expect(switchExposure.mock.calls).toEqual(fromMain);
   });
 
   it("reports both realms' diagnostics directly, with severity, values and Error stacks", async () => {

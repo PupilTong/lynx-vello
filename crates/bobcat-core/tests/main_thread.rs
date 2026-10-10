@@ -117,6 +117,7 @@ async fn a_card_that_constructs_a_second_document_fails_its_boot() {
           defaultOverflowVisible: true,
           enableCssSelector: true,
           enableJSDataProcessor: false,
+          enableExposureUIMargin: false,
         });
         "#,
         "app:///second-document.js",

@@ -193,10 +193,10 @@ QuickJS ESM graph — an MTS realm, on bobcat-main's runtime
   bobcat:boot
     ├──▶ bobcat:element (Document class + flush binding)
     ├──▶ bobcat:timers (timer-global installation)
-    ├──  const config = { defaultDisplayLinear: …, … }  four boolean literals
+    ├──  const config = { defaultDisplayLinear: …, … }  five boolean literals
     ├──  export const document = new Document(config)  the realm's first
     │      └──▶ bobcat-internal:host.createDocument      statement
-    │            └──▶ four booleans + DocumentIngredients ──▶ private dom::Document<()>
+    │            └──▶ five booleans + DocumentIngredients ──▶ private dom::Document<()>
     │   (the author sheets are mounted on this document, in listed order, by
     │    the first __FlushElementTree below, never by a statement here)
     └──▶ await import("<entry URL>")    completed by the view's `load_entry`
@@ -664,7 +664,11 @@ ends the batch those callbacks ran, which runs the collection their removals
 may have made due); the commit next, so the frame exists before anything
 implying it; then the intersection observations that commit — or a scroll
 adopted inside the encode window, which commits nothing — moved, updated here
-and, when a threshold was crossed, posted as one fresh entry; then the two
+and, when a threshold was crossed — or when the Lynx exposure service holds
+transitions, as it does after `lynx.stopExposure`/`resumeExposure` — posted as
+one fresh entry, which runs the observers' handlers and then delivers the
+exposure transitions those handlers recorded: each `uiappear`/`uidisappear`,
+then the `exposure` and `disexposure` lists to the background thread; then the two
 batches of engine-decided events the entry may have
 left owing — the `contentvisibilityautostatechange` events that commit decided,
 and the component events the entry produced (an `<image>`'s `load`/`error`, a
@@ -1442,7 +1446,8 @@ The callback boundary carries only `quickjs-rust-bridge`'s primitive
 functions, raw VM values, and DOM handles cannot cross it. Bobcat registers its
 private callbacks as named exports of the native `bobcat-internal:host` ESM —
 the document member `createDocument`, the tree and attribute
-members, the two event-name members, the two timer members, and the three worker
+members, the two event-name members, the two exposure members
+(`exposureEvents`, `switchExposure`), the two timer members, and the three worker
 members — then preloads three kinds of ESM source: the core-owned
 `bobcat:runtime` named compatibility exports, the embedded `bobcat:element`
 named Element-PAPI exports, and the fetched entry under the URL boot imports
@@ -1459,7 +1464,9 @@ much of that path the bind pass runs on, and whether the `global-bindEvent`
 pass runs at all — the event's `timestamp`, and a numeric detail kind followed
 by the numbers that kind spends (a position and an optional wheel delta plus
 four numbers per touch point for a routed input event; an intrinsic size for an
-`<image>`'s `load`; none at all for its `error`).
+`<image>`'s `load`; none at all for its `error`, and none for an element's
+`uiappear`/`uidisappear`, whose detail the realm reads from the target's own
+attributes).
 
 Because `bobcat-internal:host` resolves from any module in the realm, a card
 can reach `createDocument` too. Constructing a second `Document` is refused,

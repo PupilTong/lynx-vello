@@ -302,7 +302,10 @@ what only one role has is a hook of that owner's `RealmOwner` impl at a fixed
 step. For a page the order is: the timers that came due, the commit — then the
 intersection observations that commit or an adopted scroll moved, and the
 intersection, content-visibility and component-event deliveries it posts as
-entries of their own — the boot report once, the frame-post acknowledgement, the module requests
+entries of their own (the intersection delivery also drains the Lynx exposure
+transitions — `uiappear`/`uidisappear`, then the `exposure` and `disexposure`
+lists — and is posted for them even when no observer crossed a threshold, as
+after `lynx.stopExposure`) — the boot report once, the frame-post acknowledgement, the module requests
 the operation left, the future settles, the `@font-face` loads, the next timer
 deadline, and the checkpoint generation as of this entry. `Settles::settle` is
 the epilogue alone, for a wake carrying no operation. What a failure is
@@ -560,8 +563,11 @@ An unknown module is `undefined` (web-core's answer, where native answers
 `null`; see `docs/tracking/deviations.md`), an undeclared method is
 `undefined` on both references, and a call naming a module this view lacks or
 a method its module did not declare is assembled and dropped, which releases
-its functions. No built-in module ships: `bridge`, `LynxUIMethodModule`,
-exposure and intersection are all absent.
+its functions. No built-in module ships: `bridge`, `LynxUIMethodModule` and an
+intersection module are absent. Exposure is not a module here:
+`lynx.stopExposure`/`resumeExposure` are members of both `lynx` objects over
+the `switchExposure` host member, and `lynx.setObserverFrameRate` is accepted
+and ignored (see the exposure paragraph under the intersection primitive).
 
 `PageSource` registers named CSS under entry-relative resource URLs. Boot
 supplies the entry response URL to the JS runtime before importing the entry,
@@ -766,8 +772,8 @@ Rust owns, passed as primitives, with no JSON round trip), and its first
 statement is `export const document = new Document(config);`;
 `bobcat:element`'s `Document` constructor calls
 `createDocument(defaultDisplayLinear, defaultOverflowVisible,
-enableCssSelector, enableJSDataProcessor)`, which reads four
-`HostValue::Boolean` arguments and builds the document from them plus the
+enableCssSelector, enableJSDataProcessor, enableExposureUIMargin)`, which
+reads five `HostValue::Boolean` arguments and builds the document from them plus the
 `DocumentIngredients` that never reach the realm: the create-time viewport, the
 validated text context and the group's style pool. It never waits: **the view's
 author sheets are not mounted here** but by the first `__FlushElementTree`
@@ -1601,6 +1607,32 @@ after the loop. The update is the spec's §3.2.10 pass — threshold index and
 `isIntersecting` compared with the registration's previous pair — over
 transform-aware, clip-aware geometry; see `docs/dom-architecture.md`
 "Intersection observations".
+
+**Lynx exposure** (`crates/bobcat-core/src/main/exposure.rs`, user-directed
+2026-10-11) is the first consumer of that primitive, and a bucket-2 adapter
+over it: every element whose `exposure-id` attribute is non-empty, or on which
+the realm has filed a `uiappear`/`uidisappear` handler, gets one observer of
+its own — root the viewport, thresholds `[exposure-area / 100]`, root margins
+the element's `exposure-screen-margin-*` plus, when `enable-exposure-ui-margin`
+(the attribute, else the page config `enableExposureUIMargin`, the fifth
+`PageConfig` switch) is true, its `exposure-ui-margin-*` folded onto the
+opposite sides. The attribute triggers are the `setAttribute`/`removeAttribute`
+host members, which know exactly these names because the attributes belong to
+every tag and so to no component; the listener trigger is the realm's
+`exposureEvents(node, wants)` edge, sent on the first and the last
+`uiappear`/`uidisappear` handler of an element. The observer's handler turns
+each entry into an exposed/not-exposed transition (intersecting with a ratio of
+at least the area), and the intersection delivery entry dispatches
+`uiappear`/`uidisappear` (non-bubbling, detail from the target's own
+attributes) and then one `exposure` and one `disexposure` list through the BTS
+`GlobalEventEmitter`, web-core's record shape and order. Four user rulings
+(2026-10-11): the geometry is the primitive's (viewport root, clipped through
+every clipping ancestor, the ratio over the finally visible area), ui margins
+are gated by the switch as documented and as native does, `lynx.stopExposure`
+drops every observer and `resumeExposure` re-observes (native's semantics, with
+`sendEvent` defaulting to true), and delivery is one batch per update with no
+timer. The defaults where the references differ are in
+`docs/tracking/deviations.md`.
 
 `__SetCSSId` is a sink rather than an implementation: it names the author-CSS
 scope an element cascades in, and no layer lowers a decoded `StyleInfo` into
@@ -2462,8 +2494,8 @@ whatever is due — before that entry's commit, so a callback's mutation rides
 the same frame. No deadline crosses the link and no host turn is owed for one.
 
 `src/element-papi.ts` also exports `class Document` and the `PageConfig` its
-constructor takes: the four page switches the boot module is written with,
-which the constructor passes to the native `createDocument` as four booleans,
+constructor takes: the five page switches the boot module is written with,
+which the constructor passes to the native `createDocument` as five booleans,
 in `PageConfig`'s order. It is on no collection schedule at all, which is the opposite
 of the element path in the same file.
 

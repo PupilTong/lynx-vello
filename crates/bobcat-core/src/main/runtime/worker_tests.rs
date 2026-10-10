@@ -2811,6 +2811,147 @@ fn host_global_events_reach_the_bts_emitter_in_order_after_a_listener_throws() {
     pair.check(r#"if (JSON.stringify(results) !== '[[1,{"nested":1}],[2,{"nested":2}]]') throw Error(JSON.stringify(results));"#);
 }
 
+/// The BTS entry of the exposure pins below: one `GlobalEventEmitter`
+/// listener per global record list, which hands the MTS realm what it was
+/// called with, and a `stop` Context event that runs `lynx.stopExposure()`
+/// as a card would — from the BTS.
+const EXPOSURE_BTS_ENTRY: &str = r"
+import { lynx } from 'bobcat:bts-runtime';
+const emitter = lynx.getJSModule('GlobalEventEmitter');
+for (const name of ['exposure', 'disexposure']) {
+  emitter.addListener(name, (...args) => {
+    lynx.getCoreContext().dispatchEvent({ type: 'heard', data: [name, args] });
+  });
+}
+lynx.getCoreContext().addEventListener('stop', () => lynx.stopExposure());
+";
+
+/// Two rows the 32×24 viewport shows whole, each with an `exposure-id`, one
+/// with an `exposure-scene` too, an id and a typed dataset; and the MTS end
+/// of [`EXPOSURE_BTS_ENTRY`]'s replies.
+const EXPOSURE_MTS_ENTRY: &str = r"
+globalThis.results = [];
+lynx.getJSContext().addEventListener('heard', (event) => results.push(event.data));
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  globalThis.rows = [['feed'], ['']].map(([scene], index) => {
+    const row = __CreateView(0);
+    __SetInlineStyles(row, 'width:20px;height:10px');
+    __AppendElement(page, row);
+    __SetID(row, 'r' + index);
+    __AddDataset(row, 'index', index);
+    __SetAttribute(row, 'exposure-id', 'row' + index);
+    if (scene) __SetAttribute(row, 'exposure-scene', scene);
+    return row;
+  });
+};
+";
+
+/// What the rows' global records must read as, `kind` being the list's
+/// name: web-core's `GlobalExposureEvent` per row, in registration order, the
+/// timestamp aside. Evaluated in the MTS realm, where `results` collects what
+/// the BTS listener heard.
+fn exposure_records_check(index: usize, kind: &str) -> String {
+    format!(
+        r"
+        import {{ __GetElementUniqueID }} from 'bobcat:element';
+        const [name, args] = results[{index}];
+        if (name !== '{kind}' || args.length !== 1 || !Array.isArray(args[0])) {{
+          throw Error('one list argument: ' + JSON.stringify(results[{index}]));
+        }}
+        const expected = rows.map((row, index) => {{
+          const uid = __GetElementUniqueID(row);
+          const scene = index === 0 ? 'feed' : '';
+          const detail = {{
+            'unique-id': uid,
+            exposureID: 'row' + index,
+            exposureScene: scene,
+            'exposure-id': 'row' + index,
+            'exposure-scene': scene,
+          }};
+          const target = {{ dataset: {{ index }}, id: 'r' + index, uid }};
+          return {{
+            dataset: {{ index }},
+            ...detail,
+            type: '{kind}',
+            target,
+            currentTarget: target,
+            detail: {{ ...detail, 'unique-id': 0 }},
+          }};
+        }});
+        const heard = args[0].map(({{ timestamp, ...record }}) => {{
+          if (typeof timestamp !== 'number' || !(timestamp > 0)) {{
+            throw Error('an epoch timestamp: ' + timestamp);
+          }}
+          return record;
+        }});
+        if (JSON.stringify(heard) !== JSON.stringify(expected)) {{
+          throw Error(JSON.stringify(heard) + ' !== ' + JSON.stringify(expected));
+        }}
+        "
+    )
+}
+
+/// Runs the page's intersection delivery as the page's own entry does — the
+/// update, then the notification — and answers whether the update had
+/// anything to deliver.
+fn deliver_exposure(pair: &mut Pair) -> bool {
+    let runtime = pair.runtime.as_mut().unwrap();
+    let queued = runtime.update_intersection_observations() || runtime.has_pending_exposure();
+    let failures = runtime.notify_intersection_observers(&mut pair.js);
+    assert!(
+        failures.is_empty(),
+        "{:?}",
+        failures
+            .into_iter()
+            .map(|failure| failure.into_script_error().message)
+            .collect::<Vec<_>>()
+    );
+    queued
+}
+
+/// The exposure record list the intersection delivery hands
+/// `bobcat:runtime`'s `__BobcatSendExposure` reaches a BTS
+/// `GlobalEventEmitter` listener as the global event's one argument: an
+/// array of web-core's records, one per element, built in the MTS realm out
+/// of the host's record and the elements' own id and dataset.
+#[test]
+fn exposure_records_reach_the_bts_emitter_as_one_list() {
+    let mut pair = Pair::with_background(EXPOSURE_MTS_ENTRY, Some(EXPOSURE_BTS_ENTRY));
+    assert!(deliver_exposure(&mut pair), "both rows were exposed");
+    pair.deliver();
+    pair.check(&exposure_records_check(0, "exposure"));
+}
+
+/// `lynx.stopExposure()` from the BTS is a post to the MTS realm, which runs
+/// it as `switchExposure(0, 1)`: every exposed row owes a `disexposure`, and
+/// the next delivery sends them, as one list, to the same listener.
+#[test]
+fn a_bts_stop_exposure_sends_the_disexposure_list_back_to_the_bts() {
+    let mut pair = Pair::with_background(EXPOSURE_MTS_ENTRY, Some(EXPOSURE_BTS_ENTRY));
+    assert!(deliver_exposure(&mut pair));
+    pair.deliver();
+    pair.check(&exposure_records_check(0, "exposure"));
+
+    pair.check(
+        "import { lynx } from 'bobcat:runtime';
+        lynx.getJSContext().dispatchEvent({ type: 'stop', data: null });",
+    );
+    // The BTS's `switchExposure` post, run by the MTS realm's Worker listener.
+    pair.deliver();
+    assert!(
+        pair.runtime.as_ref().unwrap().has_pending_exposure(),
+        "the stop queued a disexposure per exposed row",
+    );
+    assert!(deliver_exposure(&mut pair));
+    pair.deliver();
+    pair.check(&exposure_records_check(1, "disexposure"));
+    assert!(
+        !deliver_exposure(&mut pair),
+        "a stopped page detects nothing more",
+    );
+}
+
 #[test]
 fn mts_boot_finishes_without_waiting_for_bts() {
     // Boot is the MTS entry's own fact. A BTS entry whose top-level await

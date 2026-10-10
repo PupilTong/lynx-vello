@@ -38,6 +38,10 @@ const PATIENCE: Duration = Duration::from_secs(30);
 /// module URL an [`InlineFetcher`] answers with its entry script.
 const ENTRY: &str = "app:///main.js";
 
+/// The URL a [`TestViewSpec`] view given a BTS entry names it by, which its
+/// [`InlineFetcher`] answers with that script.
+const BACKGROUND_ENTRY: &str = "app:///background.js";
+
 /// One author stylesheet, in whichever of the two forms a host has it, or
 /// one the view lists and the host does not have.
 pub(crate) enum TestSheet {
@@ -53,6 +57,9 @@ pub(crate) struct InlineFetcher {
     /// card's MTS body as `bobcat-source` registers it, with
     /// `MTS_CHUNK_PREAMBLE` in front, since the engine adds nothing to it.
     entry: String,
+    /// The script served for [`BACKGROUND_ENTRY`], when the view names one:
+    /// a plain module, served as it was given.
+    background: Option<String>,
     sheets: FxHashMap<String, TestSheet>,
     /// The faces this host serves an `@font-face` `src` from, by URL. A URL
     /// that is not in here fails, which is how a test drives the fall-through
@@ -80,6 +87,13 @@ impl ResourceFetcher for InlineFetcher {
                 source: self.entry.clone(),
                 url,
             }),
+            SourceRequest::Module(url) if url == BACKGROUND_ENTRY => match &self.background {
+                Some(source) => Ok(LoadedSource::Module {
+                    source: source.clone(),
+                    url,
+                }),
+                None => Err(missing(&url)),
+            },
             SourceRequest::StyleSheet(url) => match self.sheets.get(&url) {
                 Some(TestSheet::Text(css)) => Ok(LoadedSource::StyleSheet(StyleSheetSource::Text(
                     css.clone(),
@@ -93,7 +107,8 @@ impl ResourceFetcher for InlineFetcher {
                 || Err(missing(&url)),
                 |blob| Ok(LoadedSource::Font(blob.clone())),
             ),
-            // This double serves no module but the entry, and no plain fetch.
+            // This double serves no module but the two entries, and no plain
+            // fetch.
             SourceRequest::Module(url) | SourceRequest::Fetch { url } => Err(missing(&url)),
         };
         completion.complete(answer);
@@ -178,6 +193,7 @@ enum TestTarget {
 /// where — if anywhere — its painter draws.
 pub(crate) struct TestViewSpec {
     entry: String,
+    background: Option<String>,
     sheets: Vec<(String, TestSheet)>,
     fonts: Vec<(String, dom::FontBlob)>,
     target: TestTarget,
@@ -195,12 +211,22 @@ impl TestViewSpec {
     pub(crate) fn new(entry: &str) -> Self {
         Self {
             entry: entry.to_owned(),
+            background: None,
             sheets: Vec::new(),
             fonts: Vec::new(),
             target: TestTarget::None,
             width: 393.0,
             height: 727.0,
         }
+    }
+
+    /// A BTS entry, which the view names at [`BACKGROUND_ENTRY`] and the host
+    /// serves as this module source — a plain module, which imports what it
+    /// uses from `bobcat:bts-runtime` itself. A view built without one has a
+    /// BTS that imports nothing.
+    pub(crate) fn with_background_entry(mut self, source: &str) -> Self {
+        self.background = Some(source.to_owned());
+        self
     }
 
     /// One face this host serves, at the URL an `@font-face` `src` names.
@@ -266,6 +292,7 @@ impl TestViewSpec {
     ) -> (TestView, Option<Painter>) {
         let Self {
             entry,
+            background,
             sheets,
             fonts,
             target,
@@ -274,6 +301,7 @@ impl TestViewSpec {
         } = self;
         let sources = ViewSources {
             style_sheets: sheets.iter().map(|(url, _)| url.clone()).collect(),
+            background_entry: background.as_ref().map(|_| BACKGROUND_ENTRY.to_owned()),
             ..ViewSources::new(
                 "app:///",
                 ENTRY,
@@ -282,6 +310,7 @@ impl TestViewSpec {
         };
         let fetcher = Rc::new(InlineFetcher {
             entry: crate::main::runtime::card_entry(&entry),
+            background,
             sheets: sheets.into_iter().collect(),
             fonts: fonts.into_iter().collect(),
         });

@@ -45,6 +45,7 @@ use crate::esm::{
     WORKER_CLASS_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
+use crate::main::exposure::{Exposure, is_exposure_attribute};
 use crate::main::record::write_record_field;
 use crate::main::tree::{
     ComponentEvent, ComponentEvents, LynxDocument, PageConfig, invoke_base_method, new_document,
@@ -57,6 +58,15 @@ use crate::view::{LynxViewError, ScreenMetrics, ScriptSource, StartupSource, Vie
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
+/// The `bobcat:runtime` export one global exposure record list is handed to;
+/// see [`MainThreadRuntime::send_exposure_records`].
+const EXPOSURE_EXPORT: &str = "__BobcatSendExposure";
+
+/// What an element hears when its exposure moves. web-core's names
+/// (`ExposureServices.ts:209-220`), dispatched non-bubbling and not composed
+/// as web-core dispatches them.
+const APPEAR_EVENT: &str = "uiappear";
+const DISAPPEAR_EVENT: &str = "uidisappear";
 
 /// What an element's own image source settling is called. Both are web-core's
 /// names, which are the browser's (`XImage/ImageEvents.ts`), and both are
@@ -79,6 +89,12 @@ enum EventDetail<'a> {
     Size { width: f64, height: f64 },
     /// An `<image>`'s `error`: the realm's `{}`, and no numbers at all.
     Empty,
+    /// An element's `uiappear` or `uidisappear`: no numbers either. The
+    /// realm builds web-core's detail (`ExposureServices.ts:202-208`) from
+    /// the target's own unique id and its `exposure-id` and `exposure-scene`
+    /// attributes, which are the live element's because [`MainThreadRuntime::dispatch`]
+    /// resolves the target before it calls the realm.
+    Exposure,
 }
 
 /// The discriminators [`EventDetail`] crosses as. Mirrored by the realm's own
@@ -86,6 +102,7 @@ enum EventDetail<'a> {
 const DETAIL_INPUT: f64 = 0.0;
 const DETAIL_SIZE: f64 = 1.0;
 const DETAIL_EMPTY: f64 = 2.0;
+const DETAIL_EXPOSURE: f64 = 3.0;
 
 impl EventDetail<'_> {
     const fn kind(&self) -> f64 {
@@ -93,6 +110,7 @@ impl EventDetail<'_> {
             Self::Input(_) => DETAIL_INPUT,
             Self::Size { .. } => DETAIL_SIZE,
             Self::Empty => DETAIL_EMPTY,
+            Self::Exposure => DETAIL_EXPOSURE,
         }
     }
 
@@ -126,7 +144,7 @@ impl EventDetail<'_> {
                 arguments.push(HostArgument::Number(width));
                 arguments.push(HostArgument::Number(height));
             }
-            Self::Empty => {}
+            Self::Empty | Self::Exposure => {}
         }
     }
 }
@@ -212,8 +230,8 @@ pub(crate) struct DocumentIngredients {
     /// [`ViewSources::screen`](crate::ViewSources::screen).
     pub(crate) viewport: Viewport,
     /// The page configuration the view was built with. The boot module is
-    /// written with its four switches as literals, and hands them back to the
-    /// `createDocument` that builds the document as four boolean arguments.
+    /// written with its five switches as literals, and hands them back to the
+    /// `createDocument` that builds the document as five boolean arguments.
     /// What the document is actually built with is therefore the realm's
     /// copy, not this one.
     pub(crate) config: PageConfig,
@@ -396,6 +414,16 @@ struct DocumentSlot {
     /// document because the `image` component is the far end of it and
     /// reaches nothing else; the runtime drains it once per entry.
     component_events: ComponentEvents,
+    /// The document's exposure registrations and the transitions they owe
+    /// script, built with the document from the page's
+    /// `enableExposureUIMargin`.
+    ///
+    /// Beside the document rather than inside it because exposure is Lynx's
+    /// and `dom` knows nothing of it: each registration is one of `dom`'s
+    /// intersection observers, and what those deliver is turned into
+    /// exposure here and drained into the realm by the intersection delivery
+    /// entry ([`MainThreadRuntime::notify_intersection_observers`]).
+    exposure: Exposure,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
     /// Where committed frames leave for the painting side.
@@ -425,6 +453,9 @@ impl DocumentSlot {
             bound: false,
             held: None,
             component_events: ComponentEvents::default(),
+            // Replaced by `create_document`, which knows the page's switch;
+            // nothing reaches it before then.
+            exposure: Exposure::new(false),
             removals: 0,
             outbox,
         }))
@@ -491,7 +522,33 @@ impl DocumentSlot {
             document
         })?;
         self.document = Some(document);
+        self.exposure = Exposure::new(config.enable_exposure_ui_margin);
         Ok(())
+    }
+
+    /// An exposure attribute of the live element `node` was written or
+    /// removed; see [`Exposure::attribute_changed`].
+    fn exposure_attribute_changed(&mut self, node: dom::NodeId) {
+        let Self {
+            document, exposure, ..
+        } = self;
+        exposure.attribute_changed(document.as_mut().expect(DOCUMENT_EXISTS), node);
+    }
+
+    /// The realm's `exposureEvents`; see [`Exposure::set_listens`].
+    fn exposure_events(&mut self, node: dom::NodeId, wants: bool) {
+        let Self {
+            document, exposure, ..
+        } = self;
+        exposure.set_listens(document.as_mut().expect(DOCUMENT_EXISTS), node, wants);
+    }
+
+    /// The realm's `switchExposure`; see [`Exposure::switch`].
+    fn switch_exposure(&mut self, on: bool, send_event: bool) {
+        let Self {
+            document, exposure, ..
+        } = self;
+        exposure.switch(document.as_mut().expect(DOCUMENT_EXISTS), on, send_event);
     }
 
     /// Adopts whatever metrics an attached painter has named, and records
@@ -751,7 +808,7 @@ pub(crate) struct MainThreadRuntime {
     /// it. Held from construction because boot writes the three numbers into
     /// its own module source, which runs after the realm exists.
     screen: ScreenMetrics,
-    /// The page configuration boot writes into its own module source as four
+    /// The page configuration boot writes into its own module source as five
     /// boolean literals, held for the same reason as [`Self::screen`].
     config: PageConfig,
     /// The URL the view named its MTS entry by, which boot writes into its
@@ -1443,41 +1500,155 @@ impl MainThreadRuntime {
             .is_some_and(|document| document.update_intersection_observations(time))
     }
 
+    /// Whether exposure transitions wait for a delivery entry — the page's
+    /// cue to post one even when no observer has entries queued: a
+    /// teardown, a `stopExposure` that sent records, or a freed element that
+    /// was exposed queues its transition outside any update.
+    ///
+    /// One `is_empty`, because nearly every entry's answer is no.
+    pub(crate) fn has_pending_exposure(&self) -> bool {
+        self.slot.borrow().exposure.has_transitions()
+    }
+
     /// Delivers every observer's queued entries to its handler, in creation
     /// order — "notify intersection observers"
     /// ([§3.2.5](https://w3c.github.io/IntersectionObserver/#notify-intersection-observers-algo)),
-    /// which `dom` runs whole, call included.
+    /// which `dom` runs whole, call included — and then the exposure
+    /// transitions that loop and the entries before it left, into the realm.
     ///
-    /// Every observer this runtime creates today belongs to one of the
-    /// engine's own components, a `dom::CustomElement` definition, through a
-    /// [`dom::ElementHandler`]: `dom` calls that element's
-    /// `intersections_changed` hook in its own `[CEReactions]` scope, and
-    /// drops the entries if the element is not a constructed component.
-    /// **No realm is entered** for one, as for
-    /// [`Self::dispatch_content_visibility_changes`]: it has no script form,
-    /// and nothing about it is published to the painting or the background
-    /// side.
+    /// Two kinds of observer exist today. An engine component's, a
+    /// `dom::CustomElement` definition's, carries a [`dom::ElementHandler`]:
+    /// `dom` calls that element's `intersections_changed` hook in its own
+    /// `[CEReactions]` scope, and drops the entries if the element is not a
+    /// constructed component; **no realm is entered** for one. An exposure
+    /// registration's carries the exposure handler, which only records
+    /// transitions: it cannot call the realm from inside `dom`'s loop, because
+    /// the realm is not the document's to lend, so the realm half runs here,
+    /// after the loop, with the document released. The MTS
+    /// `IntersectionObserver` binding's handler, once it exists, is the same
+    /// shape: it queues `(observer, entries)` and this entry drains them after
+    /// the loop.
     ///
-    /// A hook may mutate the tree. Whatever it wrote is committed by the
-    /// delivery entry's own epilogue, whose update then runs again against
-    /// the new frame.
+    /// That half is web-core's order (`ExposureServices.ts:209-275`): each
+    /// `uiappear`/`uidisappear` in the order the transitions formed — one
+    /// non-bubbling, non-composed dispatch at the element, with
+    /// [`EventDetail::Exposure`] — then one `exposure` record list, then one
+    /// `disexposure` list, each one call of `bobcat:runtime`'s
+    /// `__BobcatSendExposure` (see [`Self::send_exposure_records`]). An
+    /// element freed since its transition formed hears nothing, as a routed
+    /// event at a freed target does, and its record is still sent: the id
+    /// and scene were copied when it formed.
     ///
-    /// `js` stays for the realm's observers. The MTS `IntersectionObserver`
-    /// binding's handler cannot call the realm from inside `dom`'s loop —
-    /// the realm is not the document's to lend — so it queues
-    /// `(observer, entries)` on a runtime queue, the `ComponentEvents` shape,
-    /// and this same entry drains that queue into the realm after the loop:
-    /// the entries encoded into one export call per observer, a callback
-    /// that throws reported as `ListenerFailed` with the rest still
-    /// delivered. The realm borrow therefore stays here.
-    pub(crate) fn notify_intersection_observers(&mut self, js: &mut ScriptRuntime) {
+    /// A hook or a listener may mutate the tree. Whatever it wrote is
+    /// committed by the delivery entry's own epilogue, whose update then runs
+    /// again against the new frame.
+    ///
+    /// Returns what failed: a listener that threw, or a record list the realm
+    /// did not take. Each is nonfatal and reported as `ListenerFailed`; the
+    /// rest is still delivered.
+    pub(crate) fn notify_intersection_observers(
+        &mut self,
+        js: &mut ScriptRuntime,
+    ) -> Vec<MainThreadError> {
         self.slot
             .borrow_mut()
             .document_mut()
             .notify_intersection_observers();
-        // The realm's half: the binding's queue is drained here, after the
-        // loop, once the binding exists.
-        let _ = js;
+        let transitions = self.slot.borrow().exposure.take_transitions();
+        if transitions.is_empty() {
+            return Vec::new();
+        }
+        let timestamp = self.timeline_milliseconds;
+        let mut failures = Vec::new();
+        for transition in transitions.iter().filter(|t| t.element_event) {
+            let name = if transition.appeared {
+                APPEAR_EVENT
+            } else {
+                DISAPPEAR_EVENT
+            };
+            // web-core's `bubbles: false, composed: false`
+            // (`ExposureServices.ts:210-218`).
+            if let Err(error) = self.dispatch(
+                js,
+                transition.node,
+                name,
+                false,
+                false,
+                timestamp,
+                &EventDetail::Exposure,
+            ) {
+                failures.push(error);
+            }
+        }
+        for (kind, appeared) in [("exposure", true), ("disexposure", false)] {
+            let mut record = String::new();
+            for transition in transitions.iter().filter(|t| t.appeared == appeared) {
+                let Some(id) = &transition.exposure_id else {
+                    continue;
+                };
+                write_record_field(&mut record, &packed_node_id(transition.node).to_string());
+                write_record_field(&mut record, id);
+                write_record_field(&mut record, &transition.scene);
+            }
+            if record.is_empty() {
+                continue;
+            }
+            if let Err(error) = self.send_exposure_records(js, kind, &record) {
+                failures.push(error);
+            }
+        }
+        failures
+    }
+
+    /// Hands one global record list to the realm: `bobcat:runtime`'s
+    /// `__BobcatSendExposure(kind, record)`, `kind` being `"exposure"` or
+    /// `"disexposure"` and `record` a `bobcat:record` payload of three fields
+    /// per element — its packed node id, its `exposure-id`, its scene. The
+    /// realm builds web-core's record objects out of them and sends the list
+    /// to the BTS as the global event of that name; nothing about their shape
+    /// is decided here.
+    ///
+    /// A realm that publishes no such export is a failure rather than a
+    /// silent drop, as it is not for the exports a bundle may lack: this one
+    /// is the engine's own, and records that reach nobody are lost.
+    fn send_exposure_records(
+        &mut self,
+        js: &mut ScriptRuntime,
+        kind: &str,
+        record: &str,
+    ) -> Result<(), MainThreadError> {
+        const CONTEXT: &str = "delivering exposure records";
+        let called = self
+            .core
+            .engine
+            .call_module_export(
+                js,
+                RUNTIME_MODULE_SPECIFIER,
+                EXPOSURE_EXPORT,
+                &[HostArgument::String(kind), HostArgument::String(record)],
+            )
+            .map_err(|error| MainThreadError::from_engine(CONTEXT, error));
+        let finished = self.finish_batch(js, called.is_ok());
+        called
+            .and_then(|published| {
+                if published {
+                    Ok(())
+                } else {
+                    Err(MainThreadError::from_engine(
+                        CONTEXT,
+                        ScriptError {
+                            kind: crate::script::ScriptErrorKind::Other,
+                            phase: crate::script::ScriptErrorPhase::CallModuleExport,
+                            message: format!(
+                                "{RUNTIME_MODULE_SPECIFIER} publishes no {EXPOSURE_EXPORT}"
+                            )
+                            .into(),
+                            location: None,
+                        },
+                    ))
+                }
+            })
+            .and(finished)
     }
 
     /// When the earliest armed timer comes due, if one is armed, for a test
@@ -1539,7 +1710,7 @@ impl MainThreadRuntime {
     /// connecting the BTS, and the flush, the listed sheets included.
     ///
     /// The only literals written into it are the screen's three numbers, the
-    /// page configuration's four switches, the entry's URL and the BTS
+    /// page configuration's five switches, the entry's URL and the BTS
     /// entry's — facts Rust owns, written as primitives rather than as JSON
     /// the realm would parse and hand back. Each URL is written as a JSON
     /// string literal, which is the one quoting that is also a JavaScript
@@ -1565,6 +1736,7 @@ impl MainThreadRuntime {
             default_overflow_visible,
             enable_css_selector,
             enable_js_data_processor,
+            enable_exposure_ui_margin,
         } = self.config;
         let entry = serde_json::to_string(&self.entry).expect("a string serializes");
         let background_entry = self.background_entry.as_ref().map_or_else(
@@ -1583,6 +1755,7 @@ const config = {{
   defaultOverflowVisible: {default_overflow_visible},
   enableCssSelector: {enable_css_selector},
   enableJSDataProcessor: {enable_js_data_processor},
+  enableExposureUIMargin: {enable_exposure_ui_margin},
 }};
 
 // The realm's document, created out of that configuration and held by this
@@ -2023,6 +2196,7 @@ fn install_host_module(
 
     install_document_members(engine, js_runtime, handle)?;
     install_attribute_members(engine, js_runtime, handle)?;
+    install_exposure_members(engine, js_runtime, handle)?;
     install_readback_members(engine, js_runtime, handle)?;
 
     let tree = Rc::clone(handle);
@@ -2084,8 +2258,8 @@ fn install_document_members(
 ) -> Result<(), MainThreadError> {
     const NAME: &str = "bobcat-internal:host.createDocument";
     let tree = Rc::clone(handle);
-    install(engine, js_runtime, "createDocument", 4, move |arguments| {
-        // The four switches, in `PageConfig`'s order, as the boot module
+    install(engine, js_runtime, "createDocument", 5, move |arguments| {
+        // The five switches, in `PageConfig`'s order, as the boot module
         // wrote them. Read rather than passed through because Rust itself
         // needs the fields: the UA cascade and the document's own switches are
         // built out of them. A missing or non-boolean one fails the
@@ -2095,6 +2269,7 @@ fn install_document_members(
             default_overflow_visible: boolean_argument(NAME, arguments, 1)?,
             enable_css_selector: boolean_argument(NAME, arguments, 2)?,
             enable_js_data_processor: boolean_argument(NAME, arguments, 3)?,
+            enable_exposure_ui_margin: boolean_argument(NAME, arguments, 4)?,
         };
         // The page id is not this member's answer: `createPage` is still what
         // hands the realm the permanent root, and it now has a document to
@@ -2323,22 +2498,16 @@ fn install_readback_members(
 /// `src` — is reflected by that tag's own component, in the
 /// `attribute_changed_callback` [`LynxDocument`] raises and drains inside the
 /// write below. This layer only performs the DOM mutation: it neither knows
-/// which names mean something nor which tag they mean it on.
+/// which names mean something nor which tag they mean it on — with the one
+/// exception [`install_attribute_writes`] makes for the exposure attributes.
 fn install_attribute_members(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
     handle: &Rc<RefCell<DocumentSlot>>,
 ) -> Result<(), MainThreadError> {
+    install_attribute_writes(engine, js_runtime, handle)?;
+
     tree_members! { engine, js_runtime, handle;
-        fn setAttribute(
-            node: node_id_argument,
-            name: string_argument,
-            value: string_argument
-        ) |document| {
-            validate_live_element(document, NAME, node)?;
-            document.set_attribute(node, name, value);
-            Ok(HostValue::Undefined)
-        }
         // Deliberately name-based: this PAPI receives record keys, custom
         // properties have no numeric id, and Stylo's internal PropertyId is
         // not a stable script ABI. A future numeric-key `__AddInlineStyle`
@@ -2386,11 +2555,6 @@ fn install_attribute_members(
             }
             Ok(HostValue::String(ids.into_iter().map(|id| id.to_bits().to_string()).collect::<Vec<_>>().join(",")))
         }
-        fn removeAttribute(node: node_id_argument, name: string_argument) |document| {
-            validate_live_element(document, NAME, node)?;
-            document.remove_attribute(node, name);
-            Ok(HostValue::Undefined)
-        }
         fn getAttribute(node: node_id_argument, name: string_argument) |document| {
             let element = validate_live_element(document, NAME, node)?;
             let value = element.attribute(name).map(str::to_owned);
@@ -2425,6 +2589,95 @@ fn install_attribute_members(
             Ok(HostValue::String(ids))
         }
     }
+
+    Ok(())
+}
+
+/// Installs `setAttribute` and `removeAttribute`, written out rather than
+/// generated because each tells the slot when the name is an exposure
+/// attribute.
+///
+/// That is the one exception to "this layer knows no attribute names". The
+/// exposure attributes (`exposure-id`, `exposure-scene`, `exposure-area`, the
+/// screen and ui margins and `enable-exposure-ui-margin`) belong to every
+/// tag, so no tag's component can own them, and what they drive — the
+/// document's exposure registrations — sits beside the document in the slot,
+/// out of a component's reach. The slot is told after the mutation, so the
+/// registration reads the attributes as they now are.
+fn install_attribute_writes(
+    engine: &mut ScriptEngine,
+    js_runtime: &mut ScriptRuntime,
+    handle: &Rc<RefCell<DocumentSlot>>,
+) -> Result<(), MainThreadError> {
+    let tree = Rc::clone(handle);
+    install(engine, js_runtime, "setAttribute", 3, move |arguments| {
+        const NAME: &str = "bobcat-internal:host.setAttribute";
+        let node = node_id_argument(NAME, arguments, 0)?;
+        let name = string_argument(NAME, arguments, 1)?;
+        let value = string_argument(NAME, arguments, 2)?;
+        let mut handle = borrow_slot(NAME, &tree)?;
+        let document = handle.document_mut();
+        validate_live_element(document, NAME, node)?;
+        document.set_attribute(node, name, value);
+        if is_exposure_attribute(name) {
+            handle.exposure_attribute_changed(node);
+        }
+        Ok(HostValue::Undefined)
+    })?;
+
+    let tree = Rc::clone(handle);
+    install(engine, js_runtime, "removeAttribute", 2, move |arguments| {
+        const NAME: &str = "bobcat-internal:host.removeAttribute";
+        let node = node_id_argument(NAME, arguments, 0)?;
+        let name = string_argument(NAME, arguments, 1)?;
+        let mut handle = borrow_slot(NAME, &tree)?;
+        let document = handle.document_mut();
+        validate_live_element(document, NAME, node)?;
+        document.remove_attribute(node, name);
+        if is_exposure_attribute(name) {
+            handle.exposure_attribute_changed(node);
+        }
+        Ok(HostValue::Undefined)
+    })?;
+
+    Ok(())
+}
+
+/// Installs the two members the realm's exposure surface speaks to, both
+/// answered by the document's [`Exposure`] beside the document in the slot.
+///
+/// `exposureEvents(node, wants)` is the realm reporting whether an element
+/// has a `uiappear`/`uidisappear` handler, on each change of that answer:
+/// the registrations live in the realm, and an element with a handler is
+/// detected whether or not it carries an `exposure-id`. `switchExposure(on,
+/// sendEvent)` is `lynx.stopExposure`/`lynx.resumeExposure` as native runs
+/// them. Both flags are `0` or `1`, as every flag a tree member takes, and
+/// neither member answers anything: what they change is delivered by the
+/// next intersection delivery entry.
+fn install_exposure_members(
+    engine: &mut ScriptEngine,
+    js_runtime: &mut ScriptRuntime,
+    handle: &Rc<RefCell<DocumentSlot>>,
+) -> Result<(), MainThreadError> {
+    let tree = Rc::clone(handle);
+    install(engine, js_runtime, "exposureEvents", 2, move |arguments| {
+        const NAME: &str = "bobcat-internal:host.exposureEvents";
+        let node = node_id_argument(NAME, arguments, 0)?;
+        let wants = flag_argument(NAME, arguments, 1)?;
+        let mut handle = borrow_slot(NAME, &tree)?;
+        validate_live_element(handle.document_mut(), NAME, node)?;
+        handle.exposure_events(node, wants);
+        Ok(HostValue::Undefined)
+    })?;
+
+    let tree = Rc::clone(handle);
+    install(engine, js_runtime, "switchExposure", 2, move |arguments| {
+        const NAME: &str = "bobcat-internal:host.switchExposure";
+        let on = flag_argument(NAME, arguments, 0)?;
+        let send_event = flag_argument(NAME, arguments, 1)?;
+        borrow_slot(NAME, &tree)?.switch_exposure(on, send_event);
+        Ok(HostValue::Undefined)
+    })?;
 
     Ok(())
 }
@@ -2652,7 +2905,7 @@ fn flag_argument(function: &str, arguments: &[HostValue], index: usize) -> Resul
 }
 
 /// A JavaScript boolean, which is what the boot module hands `createDocument`
-/// its four switches as.
+/// its five switches as.
 fn boolean_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
     match *argument(arguments, index) {
         HostValue::Boolean(value) => Ok(value),
