@@ -614,8 +614,8 @@ synchronous load — carries an absolute URL Rust resolved, in its WHATWG
 serialization; a font carries the absolute URL the document resolved; a
 stylesheet or fetch carries the URL as it was named, and the fetcher resolves
 it against its own base, which must equal `ViewSources::base_url`. The fetcher owns transport policy. That call, the optional
-`preload_source` hint, `request_image`, `service_images` and the `FrameImages`
-supertrait are the whole protocol. Every method is synchronous — no transport
+`preload_source` hint, `request_image`, `request_document`, `service_images`
+and the `FrameImages` supertrait are the whole protocol. Every method is synchronous — no transport
 future crosses this interface, and core
 names none of a fetcher's own transport API. The protocol carries no
 response-size limit; each fetcher owns the bound for the response it
@@ -1800,7 +1800,11 @@ or `dom`. The paint walk names each source it meets; the view reports those
 names to the host on its own turn and asks for each
 (`request_image`), the fetcher answers through the view's
 `ImageReports` with the intrinsic size, and the document records the load and
-recommits. A frame that names a source not yet loaded paints nothing for it,
+recommits. An SVG document is not decoded but parsed by the fetcher, with the
+engine's own parser, and reported as the parsed document
+(`ImageReports::parsed_document`); the markup of an `<svg content>` reaches
+the fetcher the same turn as a document request (`request_document`), under
+the synthetic source the document filed it as. A frame that names a source not yet loaded paints nothing for it,
 the same not-yet-loaded state a browser shows. Each `LynxView::pump` gives the
 fetcher a moment of its own (`service_images`) to forward loads that completed
 elsewhere, before the sources that turn discovered are named. A painter asks
