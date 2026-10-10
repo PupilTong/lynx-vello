@@ -29,8 +29,8 @@
 //!   the engine's own parser ([`bobcat_core::ImageEvent::parse_document`]), and reported through
 //!   [`ImageReports::parsed_document`]; the engine draws the document itself. Markup a page wrote
 //!   (`<svg content>`) arrives as a document request with its bytes and is parsed the same way. A
-//!   document holds no bitmap, so the memory tier and draw-sized decoding do not apply; the parsed
-//!   document is kept to answer later requests.
+//!   document holds no bitmap, so the memory tier and draw-sized decoding do not apply, and it is
+//!   never retained: every request is parsed and reported, and the engine owns what it encodes.
 //! - **Draw-sized decoding.** The frame reads each image with the size it draws it at
 //!   ([`bobcat_core::ImageSizeHint`]); a bitmap far larger than its draw is re-decoded at the drawn
 //!   size in the background, so a photo shown as a thumbnail costs a thumbnail.
@@ -832,10 +832,8 @@ impl Resources {
     }
 
     /// Bytes the memory tier holds: decoded bitmaps, plus the encoded
-    /// images nothing else could restore and the parsed documents (SVG) kept
-    /// to answer later requests. A parsed document counts as the byte length
-    /// of the source it was parsed from, captured at the parse: an
-    /// approximation of the command list it holds.
+    /// images nothing else could restore. A parsed document (SVG) is never
+    /// retained, so it counts nothing.
     #[must_use]
     pub fn memory_used_bytes(&self) -> usize {
         let state = self.local.borrow();
@@ -859,7 +857,10 @@ impl Resources {
         self.local.borrow().resident_size(source)
     }
 
-    /// Whether `source` has been asked for.
+    /// Whether `source` has been asked for, through
+    /// [`ResourceFetcher::request_image`]. A document request
+    /// ([`ResourceFetcher::request_document`]) files nothing, so it never
+    /// makes a source known.
     #[must_use]
     pub fn knows_image(&self, source: &str) -> bool {
         self.local.borrow().knows(source)
