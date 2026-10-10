@@ -57,7 +57,8 @@
 //! Each is a structural invariant rather than a default, which is the test
 //! `docs/style-assumptions.md` §D.15 sets for an important UA declaration;
 //! [`super::ua_sheet`]'s pinned test lists them. `direction: rtl` still
-//! reverses the row; right-to-left paging is out of scope.
+//! reverses the row, and `selectTab` aligns the page's inline-start edge,
+//! which `rtl` mirrors; right-to-left paging is out of scope.
 //!
 //! # What the attributes do
 //!
@@ -126,11 +127,13 @@
 //!   not draw, and `scroll-snap-stop` on the pager itself (`:27`) applies to snap areas only, so
 //!   all three are left out.
 
-use dom::scroll::ScrollBehavior;
-use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Vector2D};
+use dom::scroll::{
+    ScrollBehavior, ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition,
+};
+use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId};
 use serde_json::Value;
 
-use super::{LynxDocument, is_truthy};
+use super::{LynxDocument, element_child, is_truthy};
 
 /// Native's pager tag, and the one `x-viewpager-ng` stands for in web-core.
 pub(super) const VIEWPAGER_TAG: &str = "viewpager";
@@ -201,29 +204,46 @@ impl CustomElement<()> for Viewpager {
 pub(super) struct InvalidParams;
 
 /// `selectTab({index, smooth = true})` on `pager`, with `params` as the JSON
-/// text the realm serialized.
+/// text the realm serialized: CSSOM-View's "scroll an element into view"
+/// ([`dom::Document::scroll_into_view`]) on the pager's element child number
+/// `index`, the same algorithm the base set's `scrollIntoView` runs
+/// ([`super::base_methods`]).
 ///
-/// The target is `index` times the scrollport width, which is web-core's
-/// formula (`XViewpagerNg.ts:26-35`): a fractional index lands between two
-/// pages and the pager's `mandatory` snapping settles it, and an index past
-/// either end clamps to the scroll range, where native answers an error
-/// (Android `LynxUIViewPager.kt:151,168-170`, Harmony
-/// `ui_viewpager.cc:229-235`). The width is the last completed layout's: a
-/// UI method never flushes. A missing `index`, or one that is not a JSON
-/// number — `NaN` and the infinities serialize as `null` — is refused with
-/// nothing moved, which is Android's and Harmony's answer
-/// (`LynxUIViewPager.kt:172-174`, `ui_viewpager.cc:224-227`); web-core
-/// multiplies whatever it is given and scrolls to 0 for a `NaN`.
+/// - `index` must be a JSON number; a missing one, or one that is not a number — `NaN` and the
+///   infinities serialize as `null` — is code 4 with nothing moved, which is Android's and
+///   Harmony's answer (`LynxUIViewPager.kt:172-174`, `ui_viewpager.cc:224-227`); web-core
+///   multiplies whatever it is given.
+/// - A fraction is truncated toward zero, as iOS (`intValue`, `LynxUIViewPager.m:771`) and Harmony
+///   (`static_cast<int32_t>`, `ui_viewpager.cc:222`) read it, and as `scroll-view`'s
+///   `scrollTo({index})` reads its own; web-core multiplies it as given.
+/// - The page is the pager's element child number `index`, text nodes skipped ([`element_child`]).
+///   A negative index, or one past the last page, names no page and is code 4 with nothing moved,
+///   which is Android's and Harmony's answer (`LynxUIViewPager.kt:168-170`,
+///   `ui_viewpager.cc:229-235`; iOS answers its generic code 1); web-core clamps.
+///
+/// The options:
+///
+/// - `inline: start` puts the page's start edge at the pager's start edge, the position web-core's
+///   `clientWidth * index` (`XViewpagerNg.ts:26-35`) stands for when every page is as wide as the
+///   pager.
+/// - `block: nearest` leaves the axis the method is not about where it is.
+/// - `container: nearest` scrolls the pager and never an ancestor of it, the same choice as the
+///   base set's `scrollIntoView` (user ruling 2026-10-10). A pager that is no scroll container (an
+///   author restyled its `overflow`) is left alone rather than handing the scroll to the scroll
+///   container above it.
+///
+/// What the standard algorithm adds: the page's own layout position, so pages an author sized
+/// narrower than the pager, and a `wrapper` child holding a page, land where they are laid out;
+/// the pager's `scroll-padding` and the page's `scroll-margin`; and the inline start edge mirrored
+/// under `direction: rtl`. Positions are the last completed layout's: a UI method never flushes.
 ///
 /// `smooth` is read with JavaScript truthiness, as web-core's
 /// `smooth ? 'smooth' : 'instant'` reads it, and a missing one is `true`. A
 /// smooth turn is animated by the painter and leaves the document's offset
 /// where it was until the painter posts it back; an instant one moves the
-/// document at once ([`dom::Document::scroll_to_with`]). A `display: none`
-/// pager has a zero-width scrollport, so it turns to offset 0 in a request no
-/// frame carries, and one restyled into no scroll container records nothing;
-/// either way the call succeeds, as web-core's does against a zero
-/// `clientWidth`.
+/// document at once. A pager or page with no box (`display: none`) has
+/// nothing to scroll, and the call still succeeds with nothing moved and
+/// nothing recorded, as web-core's does against a zero `clientWidth`.
 pub(super) fn select_tab(
     document: &mut LynxDocument,
     pager: NodeId,
@@ -233,24 +253,28 @@ pub(super) fn select_tab(
     let index = params
         .get("index")
         .and_then(Value::as_f64)
-        .ok_or(InvalidParams)?;
+        .ok_or(InvalidParams)?
+        .trunc();
     let behavior = if params.get("smooth").is_none_or(is_truthy) {
         ScrollBehavior::Smooth
     } else {
         ScrollBehavior::Instant
     };
-    let Some(scroll_box) = document.scroll_box(pager) else {
+    let page = element_child(document, pager, index).ok_or(InvalidParams)?;
+    // `container: nearest` is the page's nearest scroll container, which is
+    // an ancestor of the pager when the pager itself is none.
+    if document.scroll_box(pager).is_none() {
         return Ok(());
-    };
-    // Clamped in f64 first: an index as large as JSON allows would make the
-    // product infinite in f32, and the range is all the document keeps.
-    let max = f64::from(scroll_box.max_offset().x);
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "clamped to the scroll range, which is an f32"
-    )]
-    let x = (index * f64::from(scroll_box.scrollport.width)).clamp(0.0, max) as f32;
-    document.scroll_to_with(pager, Vector2D::new(x, scroll_box.offset.y), behavior);
+    }
+    document.scroll_into_view(
+        page,
+        ScrollIntoViewOptions {
+            behavior,
+            block: ScrollLogicalPosition::Nearest,
+            inline: ScrollLogicalPosition::Start,
+            container: ScrollIntoViewContainer::Nearest,
+        },
+    );
     Ok(())
 }
 
@@ -931,8 +955,11 @@ mod tests {
             .map(|request| (request.target, request.behavior))
     }
 
+    /// The page's start edge lands at the pager's start edge: page 2 of a
+    /// row of 200px pages is at 400. An instant turn moves the document at
+    /// once; a smooth one is a request the painter carries out.
     #[test]
-    fn select_tab_turns_to_index_times_the_width() {
+    fn select_tab_scrolls_the_page_into_view() {
         let (mut document, pager) = four_pages();
         assert_eq!(
             select_tab(&mut document, pager, r#"{"index":2,"smooth":false}"#),
@@ -954,6 +981,42 @@ mod tests {
             pending(&mut document, pager),
             Some((Vector2D::new(200.0, 0.0), ScrollBehavior::Smooth))
         );
+    }
+
+    /// The page's laid-out position decides, not `index` times the pager's
+    /// width: pages an author made half as wide put page 2 at 200. The
+    /// pager's `scroll-padding` insets the start edge the page aligns to.
+    #[test]
+    fn select_tab_uses_the_pages_layout_position_not_an_assumed_width() {
+        let mut document = document();
+        document.add_stylesheet(".page { width: 50%; }", StylesheetOrigin::Author);
+        let (pager, items) = build_pager(
+            &mut document,
+            SPELLINGS[0],
+            "width: 200px; height: 100px",
+            4,
+        );
+        for item in &items {
+            document.add_class(*item, "page");
+        }
+        document.layout();
+        assert_eq!(rect(&document, items[2]), (200.0, 0.0, 100.0, 100.0));
+        assert_eq!(
+            select_tab(&mut document, pager, r#"{"index":2,"smooth":false}"#),
+            Ok(())
+        );
+        assert_eq!(document.scroll_offset(pager), Vector2D::new(200.0, 0.0));
+
+        document.set_inline_style(
+            pager,
+            "width: 200px; height: 100px; scroll-padding-left: 10px",
+        );
+        document.layout();
+        assert_eq!(
+            select_tab(&mut document, pager, r#"{"index":1,"smooth":false}"#),
+            Ok(())
+        );
+        assert_eq!(document.scroll_offset(pager), Vector2D::new(90.0, 0.0));
     }
 
     #[test]
@@ -979,10 +1042,16 @@ mod tests {
         }
     }
 
+    /// A fraction is truncated toward zero; an index naming no page, past
+    /// the end or below zero, is code 4 with nothing moved and nothing
+    /// recorded.
     #[test]
-    fn select_tab_clamps_and_multiplies_a_fractional_index() {
-        for (index, expected) in [("9", 600.0), ("-3", 0.0), ("1.5", 300.0), ("1e308", 600.0)] {
+    fn select_tab_truncates_a_fraction_and_refuses_an_index_naming_no_page() {
+        // `-0.5` truncates to page 0, as `intValue` and `static_cast` read
+        // it and as `scroll-view`'s `scrollTo({index})` does here.
+        for (index, expected) in [("2.9", 400.0), ("1.5", 200.0), ("-0.5", 0.0)] {
             let (mut document, pager) = four_pages();
+            document.scroll_to(pager, Vector2D::new(600.0, 0.0));
             let params = format!(r#"{{"index":{index},"smooth":false}}"#);
             assert_eq!(select_tab(&mut document, pager, &params), Ok(()), "{index}");
             assert_eq!(
@@ -991,6 +1060,42 @@ mod tests {
                 "{index}"
             );
         }
+        for index in ["4", "9", "-1", "-3", "1e308", "-1e308"] {
+            let (mut document, pager) = four_pages();
+            let params = format!(r#"{{"index":{index},"smooth":false}}"#);
+            assert_eq!(
+                select_tab(&mut document, pager, &params),
+                Err(InvalidParams),
+                "{index}"
+            );
+            assert_eq!(document.scroll_offset(pager), Vector2D::zero(), "{index}");
+            assert_eq!(document.pending_scroll_request(pager), None, "{index}");
+        }
+    }
+
+    /// Only element children are pages: a text node between two pages does
+    /// not shift the index.
+    #[test]
+    fn select_tab_counts_element_children_only() {
+        let mut document = document();
+        let pager = child(&mut document, VIEWPAGER_TAG, "width: 200px; height: 100px");
+        element_under(&mut document, pager, VIEWPAGER_ITEM_TAG, "");
+        let text = document.create_text_node("between", ());
+        document.append_child(pager, text);
+        for _ in 0..2 {
+            element_under(&mut document, pager, VIEWPAGER_ITEM_TAG, "");
+        }
+        document.layout();
+        assert_eq!(
+            select_tab(&mut document, pager, r#"{"index":2,"smooth":false}"#),
+            Ok(())
+        );
+        assert_eq!(document.scroll_offset(pager), Vector2D::new(400.0, 0.0));
+        assert_eq!(
+            select_tab(&mut document, pager, r#"{"index":3,"smooth":false}"#),
+            Err(InvalidParams),
+            "three element children, whatever else the pager holds"
+        );
     }
 
     #[test]
@@ -1017,9 +1122,10 @@ mod tests {
         }
     }
 
-    /// A pager with no box, or one that is no scroll container, has nothing
-    /// to turn: the call succeeds, nothing moves, and no frame carries a
-    /// request for it.
+    /// A pager with no box (`display: none`) gives its pages none, so
+    /// `scroll_into_view` has nothing to scroll; a pager an author made no
+    /// scroll container (`overflow: visible`) is left alone. Either way the
+    /// call succeeds, nothing moves, and no frame carries a request for it.
     #[test]
     fn select_tab_on_a_pager_that_cannot_scroll_moves_nothing() {
         for style in ["display: none", "overflow: visible"] {
@@ -1036,5 +1142,37 @@ mod tests {
             assert_eq!(frame.slot_of(pager), None, "{style}");
             assert_eq!(document.pending_scroll_request(pager), None, "{style}");
         }
+    }
+
+    /// `selectTab` scrolls the pager alone: a pager that is no scroll
+    /// container does not hand the scroll to the scroll container above it,
+    /// which would otherwise be the page's nearest one.
+    #[test]
+    fn select_tab_never_scrolls_an_ancestor_of_the_pager() {
+        let mut document = document();
+        let outer = child(&mut document, "scroll-view", "width: 200px; height: 100px");
+        document.set_attribute(outer, "scroll-x", "");
+        let pager = element_under(
+            &mut document,
+            outer,
+            VIEWPAGER_TAG,
+            "width: 200px; height: 100px; overflow: visible; contain: none; flex-shrink: 0",
+        );
+        for _ in 0..4 {
+            element_under(&mut document, pager, VIEWPAGER_ITEM_TAG, "");
+        }
+        document.layout();
+        assert!(
+            document
+                .scroll_box(outer)
+                .is_some_and(|scroll_box| scroll_box.max_offset().x > 0.0),
+            "the outer scroller could reach page 2"
+        );
+        assert_eq!(
+            select_tab(&mut document, pager, r#"{"index":2,"smooth":false}"#),
+            Ok(())
+        );
+        assert_eq!(document.scroll_offset(outer), Vector2D::zero());
+        assert_eq!(document.pending_scroll_request(outer), None);
     }
 }

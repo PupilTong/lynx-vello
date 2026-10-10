@@ -112,6 +112,30 @@ pub(super) fn is_truthy(value: &serde_json::Value) -> bool {
     }
 }
 
+/// `parent`'s element child number `index`, counting element children only
+/// (a text node between two elements is skipped), or `None` when `index` is
+/// negative or names no child. `index` is a whole number: the caller has
+/// truncated it, as `scroll-view`'s `scrollTo({index})` and the pager's
+/// `selectTab({index})` do.
+pub(super) fn element_child(document: &LynxDocument, parent: NodeId, index: f64) -> Option<NodeId> {
+    if index < 0.0 {
+        return None;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a non-negative integer; one past any child count saturates and names none"
+    )]
+    let index = index as usize;
+    document
+        .get(parent)?
+        .child_ids()
+        .iter()
+        .copied()
+        .filter(|child| document.get(*child).is_some_and(dom::Node::is_element))
+        .nth(index)
+}
+
 /// One event a component owes script: always non-bubbling, at the element
 /// the component belongs to.
 #[derive(Debug, Clone, Copy, PartialEq)]

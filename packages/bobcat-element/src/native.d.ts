@@ -85,9 +85,10 @@ interface BobcatNative {
    *   `scrollY`, `scrollRange`, `maxScrollOffset` in that order.
    *
    * `selectTab({index, smooth = true})` exists on `viewpager` and
-   * `x-viewpager-ng` only: it scrolls the pager to `index` times its
-   * scrollport width, clamped to the range, smoothly unless `smooth` is
-   * falsy.
+   * `x-viewpager-ng` only: it scrolls the pager's element child number
+   * `index` (truncated) into view at the pager's inline start edge,
+   * smoothly unless `smooth` is falsy; an `index` that is not a number, is
+   * negative, or names no page is code 4 and moves nothing.
    *
    * `scrollTo({index?, offset = 0, smooth = false})`, `scrollBy({offset})`
    * and `getScrollInfo()` exist on `scroll-view` only, on the axis its
