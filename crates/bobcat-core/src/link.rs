@@ -287,6 +287,11 @@ pub(crate) enum ViewNotice {
     PreloadSource(SourceRequest),
     /// Sources the last paint walk met that the store has not been asked for.
     RequestImages(Vec<Arc<str>>),
+    /// Documents the page handed over as markup (`<svg content>`), each
+    /// under the synthetic source the document filed it as, with its bytes
+    /// and kind, for the store to parse and report like a fetched document
+    /// (`ResourceFetcher::request_document`).
+    RequestDocuments(Vec<dom::DocumentRequest>),
     /// One source — a stylesheet, an imported module or a worker script —
     /// and the right to answer it. Whoever holds the receiving end
     /// is the destination, which is why the host never learns which.

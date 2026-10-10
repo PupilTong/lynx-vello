@@ -894,9 +894,10 @@ fn a_recursive_use_draws_nothing() {
     assert_eq!(paths(&parsed).len(), 1, "only the rect, once");
 }
 
-/// Parses `body` inside a root `svg` on a thread with the stack the native
-/// blocking pool gives the parse (tokio's 2 MiB), so a walk too deep for
-/// it fails the test the way it would abort the process.
+/// Parses `body` inside a root `svg` on a thread with the stack a native
+/// host's decode pool gives the parse (tokio's 2 MiB blocking pool, in
+/// `bobcat-resources`), so a walk too deep for it fails the test the way
+/// it would abort the process.
 fn document_on_pool_stack(body: String) -> VectorDocument {
     std::thread::Builder::new()
         .stack_size(2 << 20)

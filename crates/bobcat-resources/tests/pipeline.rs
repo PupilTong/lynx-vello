@@ -4,8 +4,8 @@
 //!
 //! Every raster image here goes through the real platform decoder, so these
 //! need `ImageIO` or gdk-pixbuf and fail rather than skip without one. SVG
-//! documents are handed over as their bytes for the engine to parse, and
-//! need nothing from the platform.
+//! documents are parsed with the engine's own parser and reported as the
+//! parsed document, and need nothing from the platform.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -13,7 +13,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use bobcat_core::resource::ResourceFetcher;
-use bobcat_core::{DocumentKind, FrameImages, ImageEvent, ImageInbox, ImageSizeHint};
+use bobcat_core::{
+    DocumentKind, FrameImages, ImageEvent, ImageInbox, ImageSizeHint, VectorDocument,
+};
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 
 /// A width x height PNG whose quadrants are red, green, blue and white.
@@ -81,9 +83,6 @@ impl Harness {
                 ImageEvent::Loaded {
                     source: reported, ..
                 }
-                | ImageEvent::LoadedDocument {
-                    source: reported, ..
-                }
                 | ImageEvent::ParsedDocument {
                     source: reported, ..
                 }
@@ -107,17 +106,19 @@ impl Harness {
         }
     }
 
-    /// Requests `source` and returns the SVG document bytes it loads as.
-    fn load_svg(&self, source: &str) -> bytes::Bytes {
+    /// Requests `source` and returns the document it was parsed into.
+    fn load_svg(&self, source: &str) -> Arc<VectorDocument> {
         self.view.request_image(source);
+        self.parsed(source)
+    }
+
+    /// Drives turns until `source` reports, and returns the document it was
+    /// parsed into.
+    fn parsed(&self, source: &str) -> Arc<VectorDocument> {
         match self.settle(source) {
-            ImageEvent::LoadedDocument {
-                bytes,
-                kind: DocumentKind::Svg,
-                ..
-            } => bytes,
+            ImageEvent::ParsedDocument { document, .. } => document,
             other => panic!(
-                "`{source}` did not load as an SVG document: {other:?} {:?}",
+                "`{source}` did not load as a parsed document: {other:?} {:?}",
                 self.resources.take_notes()
             ),
         }
@@ -397,23 +398,37 @@ fn svg(attributes: &str) -> String {
     )
 }
 
-/// A registered SVG document is neither decoded nor parsed: it loads as its
-/// own bytes with [`DocumentKind::Svg`], and keeps those bytes (and no
-/// bitmap) to answer later requests. Sizing is the engine's, pinned in
-/// `dom`.
+/// What the engine's parser makes of `svg`, as text: a reported document
+/// prints the same exactly when it was parsed from the same bytes. The
+/// document has no public members, so its `Debug` is what a test outside
+/// `dom` can compare.
+fn parse_of(svg: &[u8]) -> String {
+    match ImageEvent::parse_document(Arc::from("app:///expected.svg"), svg, DocumentKind::Svg) {
+        ImageEvent::ParsedDocument { document, .. } => format!("{document:?}"),
+        other => panic!("the expected document does not parse: {other:?}"),
+    }
+}
+
+/// A registered SVG document is not decoded: the fetcher parses it with the
+/// engine's parser and reports the parsed document, keeping it (and no
+/// bitmap) to answer later requests. It counts as its source's byte length.
+/// Sizing is the engine's, pinned in `dom`.
 #[test]
-fn a_registered_svg_loads_as_its_document_bytes() {
+fn a_registered_svg_loads_as_the_document_it_parses_to() {
     let harness = Harness::new(Harness::quiet());
     let document = svg(r#"width="40" height="30px""#);
     harness
         .resources
         .register("app:///icon.svg", document.clone().into_bytes(), None)
         .expect("register");
-    assert_eq!(harness.load_svg("app:///icon.svg"), document.as_bytes());
+    assert_eq!(
+        format!("{:?}", harness.load_svg("app:///icon.svg")),
+        parse_of(document.as_bytes())
+    );
     assert_eq!(
         harness.resources.memory_used_bytes(),
         document.len(),
-        "no bitmap; the document's bytes, counted as encoded bytes"
+        "no bitmap; the parsed document, counted as its source's bytes"
     );
     assert!(harness.wakeups.load(Ordering::SeqCst) >= 1);
 }
@@ -428,23 +443,34 @@ fn svg_data_urls_load_in_base64_form() {
         "data:image/svg+xml;base64,{}",
         base64_encode(document.as_bytes())
     );
-    assert_eq!(harness.load_svg(&source), document.as_bytes(), "{source}");
+    assert_eq!(
+        format!("{:?}", harness.load_svg(&source)),
+        parse_of(document.as_bytes()),
+        "{source}"
+    );
 }
 
-/// Whether a document parses is the engine's question: the host hands over
-/// bytes it cannot read as readily as any others, and records no failure.
+/// A document that does not parse is the load's failure, reported and
+/// noted like a decode that failed, and terminal like one.
 #[test]
-fn a_malformed_svg_is_handed_over_as_it_is() {
+fn a_malformed_svg_fails_its_source() {
     let harness = Harness::new(Harness::quiet());
     let broken = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><rect></svg>";
     harness
         .resources
         .register("app:///broken.svg", broken.to_vec(), None)
         .expect("register");
-    assert_eq!(harness.load_svg("app:///broken.svg"), &broken[..]);
+    let notes = harness.fail("app:///broken.svg");
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.contains("not a document the engine can draw")),
+        "{notes:?}"
+    );
     assert!(harness.resources.knows_image("app:///broken.svg"));
     assert!(!harness.resources.is_resident("app:///broken.svg"));
-    assert!(harness.resources.take_notes().is_empty());
+    assert_eq!(harness.resources.memory_used_bytes(), 0);
+    harness.fail("app:///broken.svg");
 }
 
 /// An SVG is the one image that is text, so it is recognised from its bytes
@@ -476,8 +502,13 @@ fn an_svg_is_sniffed_from_its_bytes_only_under_a_label_that_says_nothing() {
         )
         .expect("register");
 
-    assert_eq!(harness.load_svg("app:///octet"), document.as_bytes());
-    assert_eq!(harness.load_svg("app:///unlabelled"), document.as_bytes());
+    for source in ["app:///octet", "app:///unlabelled"] {
+        assert_eq!(
+            format!("{:?}", harness.load_svg(source)),
+            parse_of(document.as_bytes()),
+            "{source}"
+        );
+    }
     let notes = harness.fail("app:///text.svg");
     assert!(
         notes.iter().any(|note| note.contains("not an image")),
@@ -486,9 +517,10 @@ fn an_svg_is_sniffed_from_its_bytes_only_under_a_label_that_says_nothing() {
 }
 
 /// A source already loaded answers a second request, from the same view or
-/// another, at once and with the same bytes.
+/// another, at once and with the same document, shared rather than parsed
+/// again.
 #[test]
-fn a_repeated_request_for_an_svg_re_reports_the_same_bytes() {
+fn a_repeated_request_for_an_svg_re_reports_the_same_document() {
     let harness = Harness::new(Harness::quiet());
     let document = svg(r#"width="20" height="10""#);
     harness
@@ -496,7 +528,6 @@ fn a_repeated_request_for_an_svg_re_reports_the_same_bytes() {
         .register("app:///repeat.svg", document.clone().into_bytes(), None)
         .expect("register");
     let first = harness.load_svg("app:///repeat.svg");
-    assert_eq!(first, document.as_bytes());
 
     harness.view.request_image("app:///repeat.svg");
     let (reports, inbox) = ImageInbox::new();
@@ -506,17 +537,85 @@ fn a_repeated_request_for_an_svg_re_reports_the_same_bytes() {
         assert!(
             matches!(
                 drained.as_slice(),
-                [ImageEvent::LoadedDocument { source, bytes, kind: DocumentKind::Svg }]
-                    if &**source == "app:///repeat.svg" && *bytes == first
+                [ImageEvent::ParsedDocument { source, document }]
+                    if &**source == "app:///repeat.svg" && Arc::ptr_eq(document, &first)
             ),
             "{drained:?}"
         );
     }
 }
 
+/// Markup a page handed over arrives as a document request under the
+/// synthetic source the engine named: nothing is resolved or fetched, the
+/// bytes are parsed as a fetched document's are, and the entry answers a
+/// repeated request, from any view, with the same document. Markup that does
+/// not parse fails its source.
+#[test]
+fn a_document_request_is_parsed_under_its_synthetic_source() {
+    const SOURCE: &str = "svg-content:0123456789abcdef0123456789abcdef";
+    const BROKEN: &str = "svg-content:fedcba9876543210fedcba9876543210";
+    let harness = Harness::new(Harness::quiet());
+    let document = svg(r#"width="24" height="12""#);
+    harness.view.request_document(
+        SOURCE,
+        bytes::Bytes::from(document.clone()),
+        DocumentKind::Svg,
+    );
+    let first = harness.parsed(SOURCE);
+    assert_eq!(format!("{first:?}"), parse_of(document.as_bytes()));
+    assert!(harness.resources.knows_image(SOURCE));
+    assert!(!harness.resources.is_resident(SOURCE));
+    assert!(
+        harness
+            .view
+            .read(SOURCE, ImageSizeHint::UNBOUNDED)
+            .is_none()
+    );
+    assert_eq!(
+        harness.resources.memory_used_bytes(),
+        document.len(),
+        "counted as the markup's bytes"
+    );
+
+    let (reports, inbox) = ImageInbox::new();
+    let second = harness.resources.for_view(reports);
+    second.request_document(SOURCE, bytes::Bytes::new(), DocumentKind::Svg);
+    harness
+        .view
+        .request_document(SOURCE, bytes::Bytes::new(), DocumentKind::Svg);
+    for drained in [harness.inbox.drain(), inbox.drain()] {
+        assert!(
+            matches!(
+                drained.as_slice(),
+                [ImageEvent::ParsedDocument { source, document }]
+                    if &**source == SOURCE && Arc::ptr_eq(document, &first)
+            ),
+            "a repeat is answered from the entry: {drained:?}"
+        );
+    }
+
+    harness.view.request_document(
+        BROKEN,
+        bytes::Bytes::from_static(b"<svg xmlns='http://www.w3.org/2000/svg'><rect></svg>"),
+        DocumentKind::Svg,
+    );
+    assert!(
+        matches!(harness.settle(BROKEN), ImageEvent::Failed { .. }),
+        "markup that does not parse fails"
+    );
+    assert!(
+        harness
+            .resources
+            .take_notes()
+            .iter()
+            .all(|note| !note.contains("cannot be resolved")),
+        "a synthetic source is never resolved"
+    );
+}
+
 /// The engine draws a document itself, so the pixel seam has nothing for
 /// it: no read answers, nothing is resident, and no read starts a
-/// refinement. What the entry holds is the document's bytes.
+/// refinement. What the entry holds is the parsed document.
 #[test]
 fn an_svg_document_is_never_read_and_never_resident() {
     let harness = Harness::new(Harness::quiet());

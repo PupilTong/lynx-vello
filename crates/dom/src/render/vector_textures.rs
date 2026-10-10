@@ -400,10 +400,8 @@ mod tests {
         let _wanted = doc.dom.take_wanted_images();
         let events: Vec<ImageEvent> = images
             .iter()
-            .map(|(source, svg)| ImageEvent::LoadedDocument {
-                source: Arc::from(*source),
-                bytes: bytes::Bytes::from(svg.to_string()),
-                kind: DocumentKind::Svg,
+            .map(|(source, svg)| {
+                ImageEvent::parse_document(Arc::from(*source), svg.as_bytes(), DocumentKind::Svg)
             })
             .collect();
         doc.dom.apply_image_events(&events);

@@ -2,10 +2,11 @@
 //! `mask-image` naming an SVG document, and an element handed a document as
 //! its markup (`Document::set_image_document`, what the Lynx
 //! `<svg content>` calls), over the full test pipeline —
-//! `flashbulb::TestImages::insert_svg` reports the document's bytes the way a
-//! host does, `flashbulb::pump_images` parses an element's markup the way
-//! the wasm32 runtime does, `Document::apply_image_events` files either in
-//! the registry, the paint walk records one vector draw per visible tile, and
+//! `flashbulb::TestImages::insert_svg` parses a document and reports it the
+//! way a host does, `flashbulb::pump_images` hands an element's markup to the
+//! store as a document request, which parses it the same way,
+//! `Document::apply_image_events` files either in the registry, the paint
+//! walk records one vector draw per visible tile, and
 //! the headless renderer's raster cache bakes each draw's texture before the
 //! frame composes.
 //!
@@ -291,15 +292,29 @@ fn size_of(doc: &mut Doc, node: NodeId) -> (f32, f32) {
     (layout.size.width, layout.size.height)
 }
 
-/// Parses and applies every pending document, as the wasm32 runtime does.
-fn parse_pending(doc: &mut Doc) -> Vec<ImageOutcome> {
-    doc.dom.apply_pending_documents()
+/// What a host makes of one document request: the engine's parser run over
+/// its bytes, reported for its source.
+fn host_parse((source, bytes, kind): dom::DocumentRequest) -> dom::ImageEvent {
+    dom::ImageEvent::parse_document(source, &bytes, kind)
+}
+
+/// Answers every document request the way a host does, and applies what
+/// it reported.
+fn answer_requests(doc: &mut Doc) -> Vec<ImageOutcome> {
+    let events: Vec<_> = doc
+        .dom
+        .take_document_requests()
+        .into_iter()
+        .map(host_parse)
+        .collect();
+    doc.dom.apply_image_events(&events)
 }
 
 /// An element handed [`ICON`] as markup draws exactly what an `<image>`
 /// whose URL the host answers with the same document draws: the markup goes
 /// through the same parse, the same kind of registry entry and the same
-/// raster cache, and the host is never asked for it.
+/// raster cache, and reaches the host as a document request with its bytes
+/// rather than as a source to fetch.
 #[test]
 fn a_document_set_as_markup_draws_as_one_loaded_from_a_url() {
     const TEST: &str = "a_document_set_as_markup_draws_as_one_loaded_from_a_url";
@@ -325,8 +340,8 @@ fn a_document_set_as_markup_draws_as_one_loaded_from_a_url() {
     let source = source_of(&by_markup, node);
     let by_markup = capture(TEST, &mut by_markup, &markup_images);
     assert!(
-        !markup_images.was_asked_for(&source),
-        "the host is never asked for markup"
+        markup_images.was_asked_for(&source),
+        "the markup reached the host as a document request"
     );
 
     assert_eq!(
@@ -363,13 +378,10 @@ fn identical_markup_on_two_elements_is_one_source_and_one_parse() {
         "nothing for the host"
     );
 
-    let pending = doc.dom.take_pending_documents();
-    assert_eq!(pending.len(), 1, "one parse for both elements");
-    assert!(doc.dom.take_pending_documents().is_empty(), "drained once");
-    let events: Vec<_> = pending
-        .into_iter()
-        .map(|(source, bytes, kind)| dom::ImageEvent::parse_document(source, &bytes, kind))
-        .collect();
+    let requests = doc.dom.take_document_requests();
+    assert_eq!(requests.len(), 1, "one parse for both elements");
+    assert!(doc.dom.take_document_requests().is_empty(), "drained once");
+    let events: Vec<_> = requests.into_iter().map(host_parse).collect();
     assert_eq!(
         doc.dom.apply_image_events(&events),
         [first, second].map(|node| ImageOutcome::Loaded {
@@ -392,7 +404,7 @@ fn identical_markup_on_two_elements_is_one_source_and_one_parse() {
             height: 24,
         })
     );
-    assert!(doc.dom.take_pending_documents().is_empty());
+    assert!(doc.dom.take_document_requests().is_empty());
 }
 
 /// New markup rebinds the element to a new source and forgets the old one,
@@ -412,21 +424,17 @@ fn changed_markup_rebinds_and_forgets_the_old_source() {
     assert_ne!(icon, tile);
     assert!(!doc.dom.knows_image_source(&icon), "the old source is gone");
 
-    let pending = doc.dom.take_pending_documents();
+    let requests = doc.dom.take_document_requests();
     assert_eq!(
-        pending
+        requests
             .iter()
             .map(|(source, ..)| &**source)
             .collect::<Vec<_>>(),
         [tile.as_str()],
-        "only the markup the element still presents is parsed"
+        "only the markup the element still presents is requested"
     );
-    doc.dom.apply_image_events(
-        &pending
-            .into_iter()
-            .map(|(source, bytes, kind)| dom::ImageEvent::parse_document(source, &bytes, kind))
-            .collect::<Vec<_>>(),
-    );
+    doc.dom
+        .apply_image_events(&requests.into_iter().map(host_parse).collect::<Vec<_>>());
     assert_eq!(size_of(&mut doc, node), (20.0, 20.0));
 
     assert_eq!(
@@ -435,14 +443,14 @@ fn changed_markup_rebinds_and_forgets_the_old_source() {
         None,
         "the same markup again changes nothing"
     );
-    assert!(doc.dom.take_pending_documents().is_empty());
+    assert!(doc.dom.take_document_requests().is_empty());
 
     // Back to the first markup: a new parse, and the settled one is gone.
     doc.dom
         .set_image_document(node, ImageRole::Source, ICON.as_bytes(), DocumentKind::Svg);
     assert!(!doc.dom.knows_image_source(&tile));
     assert_eq!(
-        parse_pending(&mut doc),
+        answer_requests(&mut doc),
         [ImageOutcome::Loaded {
             node,
             width: 48,
@@ -453,8 +461,8 @@ fn changed_markup_rebinds_and_forgets_the_old_source() {
 }
 
 /// A synthetic source outlives every element but the last presenting it:
-/// freeing one of two keeps it, freeing the second forgets it, and a parse
-/// that lands afterwards applies to nothing.
+/// freeing one of two keeps it, freeing the second forgets it, and a host's
+/// report that lands afterwards applies to nothing.
 #[test]
 fn freeing_the_last_element_forgets_its_source() {
     let mut doc = page("");
@@ -466,7 +474,7 @@ fn freeing_the_last_element_forgets_its_source() {
             .set_image_document(node, ImageRole::Source, ICON.as_bytes(), DocumentKind::Svg);
     }
     let source = source_of(&doc, first);
-    let pending = doc.dom.take_pending_documents();
+    let requests = doc.dom.take_document_requests();
 
     doc.dom.drop_element(first);
     assert!(doc.dom.knows_image_source(&source), "one element is left");
@@ -476,10 +484,7 @@ fn freeing_the_last_element_forgets_its_source() {
         "forgotten with the last element"
     );
 
-    let events: Vec<_> = pending
-        .into_iter()
-        .map(|(source, bytes, kind)| dom::ImageEvent::parse_document(source, &bytes, kind))
-        .collect();
+    let events: Vec<_> = requests.into_iter().map(host_parse).collect();
     assert!(doc.dom.apply_image_events(&events).is_empty());
     assert!(!doc.dom.knows_image_source(&source), "and stays forgotten");
 }

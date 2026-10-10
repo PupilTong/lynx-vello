@@ -1,14 +1,15 @@
 //! SVG documents as vector images: the engine's own converter.
 //!
-//! One converter serves every SVG the engine draws, whether a host reported
+//! One converter serves every SVG the engine draws, whether a host fetched
 //! its bytes (`<image src="x.svg">`, CSS `url(x.svg)`) or a page wrote the
-//! markup itself (`docs/svg-lynx-component-design.md`, contract C). It has
-//! two halves that run on different threads:
+//! markup itself (`docs/svg-lynx-component-design.md`, contract C and
+//! revision 4.1). It has two halves that run on different threads:
 //!
 //! - [`parse`] turns the bytes into a [`VectorDocument`]: one `roxmltree` parse, one walk, and a
 //!   flat list of [`Item`]s in paint order, in viewport units, every transform absolute and every
 //!   paint a final peniko brush. Geometry is resolved here; text is collected but not shaped, so
-//!   the parse needs no fonts and can run on a blocking pool. `Send + Sync`.
+//!   the parse needs no fonts and runs in the host, on the pool it decodes bitmaps on, reached
+//!   through `ImageEvent::parse_document`. `Send + Sync`.
 //! - [`encode`] turns a document into a [`Scene`](crate::vello::Scene) on the document thread,
 //!   shaping its text through the document's own [`TextContext`](hughie::text::TextContext),
 //!   created on the first text shaped, so SVG glyphs come from the same fonts and `@font-face`
@@ -51,8 +52,8 @@
 //! below with its subtree. Markup nested deeper than that is removed before
 //! `roxmltree` parses it, and a document whose entities' replacement text
 //! could nest markup past the bound is refused. Both the walk and
-//! `roxmltree` recurse once per level, and natively the parse runs on a
-//! blocking pool thread with a 2 MiB stack.
+//! `roxmltree` recurse once per level, and natively the host parses on a
+//! decode pool thread with a 2 MiB stack.
 //!
 //! # Inheritance
 //!
@@ -145,9 +146,11 @@ use crate::vello::peniko::{BlendMode, Brush, Fill};
 /// A parsed SVG document, ready to encode: its sizes and a flat command
 /// list in viewport units.
 ///
-/// `pub` only because [`ImageEvent::ParsedDocument`](crate::ImageEvent)
-/// carries it from the parsing thread to the document's; no field or
-/// method is public, and no crate outside `dom` reads it.
+/// `pub` only because a host reports it
+/// ([`ImageReports::parsed_document`](crate::ImageReports::parsed_document))
+/// and [`ImageEvent::ParsedDocument`](crate::ImageEvent) carries it from the
+/// host's parsing thread to the document's; no field or method is public,
+/// and no crate outside `dom` reads it.
 #[derive(Clone, Debug)]
 pub struct VectorDocument {
     /// The size layout is told, in whole CSS px (CSS Images 3 default
@@ -260,8 +263,8 @@ impl std::fmt::Display for SvgError {
 
 impl std::error::Error for SvgError {}
 
-/// The document crosses from the parsing thread to the document's inside an
-/// `ImageEvent`.
+/// The document crosses from the host's parsing thread to the document's
+/// inside an `ImageEvent`, shared with the host's own entry.
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<VectorDocument>();

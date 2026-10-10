@@ -30,7 +30,7 @@ const DEFAULT_OBJECT_SIZE: (f32, f32) = (300.0, 150.0);
 /// An element (with its subtree) or a `use` target past it is skipped, and
 /// markup nested deeper never reaches `roxmltree` ([`nesting::bound`]).
 ///
-/// Both recurse once per level, and natively the parse runs on a blocking
+/// Both recurse once per level, and natively the host parses on a decode
 /// pool thread with a 2 MiB stack, where an overflow aborts the process.
 pub(super) const MAX_NESTING: u32 = 256;
 

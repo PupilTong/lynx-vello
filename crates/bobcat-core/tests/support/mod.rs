@@ -304,6 +304,12 @@ impl ResourceFetcher for FetcherDouble {
         }
     }
 
+    fn request_document(&self, source: &str, bytes: bytes::Bytes, kind: bobcat_core::DocumentKind) {
+        if let Some(images) = self.images.as_ref() {
+            images.request_document(source, &bytes, kind);
+        }
+    }
+
     fn service_images(&self) {
         self.image_services.fetch_add(1, Ordering::Relaxed);
     }
