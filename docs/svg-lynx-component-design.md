@@ -8,7 +8,10 @@ was silent or wrong is recorded under
 moves the parse out of the engine into the resource fetcher; where the
 contracts below say the engine parses (`loaded_document`,
 `take_pending_documents`, the `parse_document` task, the wasm32 inline
-parse), revision 4.1 is what is in force. This
+parse), revision 4.1 is what is in force, with the fetcher retaining no
+document (ruling 2026-10-11). Where contracts C and D name the vello #1198
+plumbing (`opens_blend`, `blend`, `isolate`) or `VectorImage`'s natural
+size, the [Simplification pass](#simplification-pass-2026-10-11) is. This
 document supersedes `docs/svg-vector-images-design.md`, whose revision 3 (the
 standard inline `<svg>` element whose DOM subtree is serialised and parsed by
 `usvg`) is withdrawn. Rulings in this document were made by the project owner
