@@ -855,7 +855,6 @@ fn layout_in_flow_items<T>(
     rows: &TrackSet,
     inner_size: Size<f32>,
     content_origin: Point<f32>,
-    outer_size: Size<f32>,
     // The goal the container hands its items: a measurement passes through;
     // a commit carries the independence the container can vouch for, which
     // each item narrows per axis.
@@ -876,7 +875,7 @@ where
         .count();
     let needs_baseline_pass = baseline_item_count != 0;
     let mut pending = Vec::with_capacity(baseline_item_count);
-    let mut content_size = outer_size;
+    let mut content_size = Size::ZERO;
     let mut direct_baseline_candidate = None::<(i32, i32, f32)>;
 
     for item in items {
@@ -1286,7 +1285,7 @@ where
     T: LayoutTree + 'tree,
     T::Style<'tree>: GridStyle,
 {
-    let mut content_size = outer_size;
+    let mut content_size = Size::ZERO;
     let padding_box_origin = Point::new(border.left, border.top);
     let padding_box_size = Size::new(
         (outer_size.width - border.horizontal_sum()).max(0.0),
@@ -1641,7 +1640,6 @@ where
         &rows,
         final_inner,
         content_origin,
-        outer_size,
         container_content_independence(input, style_definite).map_or(
             input.goal,
             |content_independent| LayoutGoal::Commit {
@@ -1670,10 +1668,10 @@ where
             content_size,
         );
         let absolute = absolute.expect("commit keeps out-of-flow grid items");
-        // With no out-of-flow box to lay out, the pass answers `outer_size`.
+        // With no out-of-flow box to lay out, the pass adds nothing.
         let absolute_content_size =
             if absolute.is_empty() && !tree.has_hoisted_children(state, node) {
-                outer_size
+                Size::ZERO
             } else {
                 layout_absolute_items(
                     tree,
@@ -1694,7 +1692,7 @@ where
             };
         content_size = content_size.zip_map(absolute_content_size, f32::max);
     }
-    let content_size = own_scrollable_overflow(&style, outer_size, content_size);
+    let content_size = own_scrollable_overflow(&style, outer_size, metrics.border, content_size);
     let baselines = if layout_contained {
         Point::NONE
     } else {

@@ -189,6 +189,10 @@ impl LayoutInput {
 #[non_exhaustive]
 pub struct LayoutOutput {
     pub size: Size<f32>,
+    /// The box's scrollable overflow rectangle, in border-box coordinates:
+    /// the union of its padding box and the reach of its contents, so it
+    /// ends at the padding box's far edge at the least and never takes in
+    /// the far border. See [`Layout::content_size`].
     pub content_size: Size<f32>,
     pub first_baselines: Point<Option<f32>>,
 }
@@ -223,6 +227,14 @@ pub struct Layout {
     pub order: u32,
     pub location: Point<f32>,
     pub size: Size<f32>,
+    /// The box's scrollable overflow rectangle measured from its border-box
+    /// origin ([css-overflow-3 §3.3](https://drafts.csswg.org/css-overflow-3/#scrollable)):
+    /// the union of its own padding box and its contents' reach — each
+    /// child's border box, its margin area in a scroll container, and its
+    /// own `content_size` where its overflow is `visible`. An empty box's
+    /// ends at its padding box's far edge, inside the far border, so a scroll
+    /// container's scrolling area is `content_size` less the start border,
+    /// never smaller than its padding box.
     pub content_size: Size<f32>,
     pub border: Edges<f32>,
     pub padding: Edges<f32>,

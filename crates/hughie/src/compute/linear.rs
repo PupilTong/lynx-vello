@@ -17,9 +17,10 @@ use super::util::{
     Axis, EdgeMask, ItemGeometry, ItemKey as LayoutItemKey, OrderedItem, PendingLayoutItem,
     ResolvedContainerBox, accumulate_scrollable_overflow, apply_aspect_ratio, auto_edges_to_zero,
     axis_has_intrinsic_style, clamp_axis, container_content_independence, is_scroll_container,
-    item_value_stability, mirror_ratio_definiteness, own_scrollable_overflow, relative_offset,
-    resolve_container_box, resolve_insets, resolve_intrinsic, resolve_item_geometry,
-    resolve_margins, resolve_padding, sort_and_assign_layout_order, store_committed_child,
+    item_value_stability, mirror_ratio_definiteness, own_scrollable_overflow, padding_box_end,
+    relative_offset, resolve_container_box, resolve_insets, resolve_intrinsic,
+    resolve_item_geometry, resolve_margins, resolve_padding, sort_and_assign_layout_order,
+    store_committed_child,
 };
 use super::{AbsoluteContainingBlock, compute_absolute_layout_in, measure_absolute_layout};
 use crate::geometry::{Edges, Point, Size};
@@ -1179,7 +1180,6 @@ fn commit_in_flow<T>(
     items: &mut [LinearItem<T::NodeId>],
     axes: LinearAxes,
     inner_size: Size<f32>,
-    outer_size: Size<f32>,
     content_origin: Point<f32>,
     scroll_container: bool,
 ) -> Size<f32>
@@ -1187,7 +1187,7 @@ where
     T: LayoutTree,
 {
     let parent_size = inner_size.map(Some);
-    let mut content_size = outer_size;
+    let mut content_size = Size::ZERO;
     for item in items {
         let target_size = axes.main.pack(item.main_size, item.cross_size);
         let mut input = LayoutInput::commit(
@@ -1423,7 +1423,7 @@ where
         );
         let final_outer_size =
             completed_outer_size(outer_size, natural, container_inset, min_size, max_size);
-        return LayoutOutput::new(final_outer_size, final_outer_size);
+        return LayoutOutput::new(final_outer_size, padding_box_end(final_outer_size, border));
     }
     let inner_size = Size::new(
         outer_size
@@ -1581,7 +1581,7 @@ where
         } else {
             container_baseline(&items, axes, final_inner_size, content_origin)
         };
-        return LayoutOutput::new(final_outer_size, final_outer_size)
+        return LayoutOutput::new(final_outer_size, padding_box_end(final_outer_size, border))
             .with_first_baselines(Point::new(None, baseline));
     }
 
@@ -1603,7 +1603,6 @@ where
         &mut items,
         axes,
         final_inner_size,
-        final_outer_size,
         content_origin,
         is_scroll_container(style.overflow()),
     );
@@ -1636,7 +1635,7 @@ where
             style.direction() == direction::T::Rtl,
         );
     }
-    let content_size = own_scrollable_overflow(&style, final_outer_size, content_size);
+    let content_size = own_scrollable_overflow(&style, final_outer_size, border, content_size);
     let baseline = if layout_contained {
         None
     } else {

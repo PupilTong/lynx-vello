@@ -3,9 +3,9 @@
 use stylo::computed_values::box_sizing;
 
 use super::util::{
-    apply_aspect_ratio, apply_box_sizing, auto_edges_to_zero, clamp, resolve_border,
-    resolve_margins, resolve_max_sizes, resolve_padding, resolve_size, subtract_available_space,
-    used_aspect_ratio,
+    apply_aspect_ratio, apply_box_sizing, auto_edges_to_zero, clamp, padding_box_end,
+    resolve_border, resolve_margins, resolve_max_sizes, resolve_padding, resolve_size,
+    subtract_available_space, used_aspect_ratio,
 };
 use crate::geometry::{Edges, Point, Size};
 use crate::style::CoreStyle;
@@ -65,6 +65,7 @@ where
 
     let LeafSizing {
         margin,
+        border,
         padding_border_size,
         content_origin,
         mut node_size,
@@ -94,7 +95,10 @@ where
             max_size,
             padding_border_size,
         );
-        return LayoutOutput::new(size, size.zip_map(padding_border_size, f32::max));
+        return LayoutOutput::new(
+            size,
+            padding_box_end(size.zip_map(padding_border_size, f32::max), border),
+        );
     }
 
     let mut measure_known_dimensions = Size::new(
@@ -193,7 +197,7 @@ where
         padding_border_size,
     );
 
-    let content_size = size.zip_map(measured_border_box, f32::max);
+    let content_size = padding_box_end(size.zip_map(measured_border_box, f32::max), border);
     let first_baselines = Point::new(
         measurement
             .first_baselines
@@ -423,6 +427,7 @@ impl PreferredAspectRatio {
 /// call; all optional dimensions are border-box sizes.
 struct LeafSizing {
     margin: Edges<f32>,
+    border: Edges<f32>,
     padding_border_size: Size<f32>,
     content_origin: Point<f32>,
     node_size: Size<Option<f32>>,
@@ -511,6 +516,7 @@ fn resolve_leaf_sizing(
 
     LeafSizing {
         margin,
+        border,
         padding_border_size,
         content_origin,
         node_size,

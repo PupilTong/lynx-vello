@@ -738,7 +738,7 @@ v1 box-layout effects:
   (`LayoutOutput::first_baselines = NONE` at each algorithm's output construction; Relative already
   exports none), and it **changes scrollable overflow**: with `overflow: visible`, a layout-contained
   box's descendant overflow is *ink* overflow ([css-contain-2 §3.3](https://drafts.csswg.org/css-contain-2/#containment-layout),
-  item 3), so its `content_size` collapses to its own border box; a scroll container instead keeps
+  item 3), so its `content_size` collapses to its own padding box; a scroll container instead keeps
   its interior union as its scroll range. This is applied at each algorithm's output construction by
   the `own_scrollable_overflow` helper. Each display mode is already its own formatting context and
   there is no margin collapsing yet, so IFC establishment is structural (a `debug_assert`/comment
@@ -752,6 +752,15 @@ v1 box-layout effects:
   concern, and this engine has no counters/quotes. Effect bits are queried individually via
   `Contain::contains` (never the `CONTENT`/`STRICT` marker composites, which carry serialization
   marker bits).
+
+**The `content_size` floor (css-overflow-3 §3.3).** A box's `content_size` is its scrollable overflow
+rectangle in border-box coordinates: each algorithm accumulates its children's reach from zero and,
+at its output construction (`own_scrollable_overflow`), takes the union with the box's own padding
+box — the area's floor is "the scroll container's own padding box", so an empty box's `content_size`
+ends at its padding box's far edge (`padding_box_end`), never inside its far border. A leaf's is its
+measured contents plus the end padding, floored the same way. `dom::scroll` subtracts the start
+border to get the scrolling area from the scrollport's origin, so an empty bordered scroll container
+has a scrolling area equal to its scrollport and no scroll range.
 
 **Scrollable-overflow trapping (css-overflow-3 §3.3).** Orthogonally to containment, every **scroll
 container** (any `overflow` axis other than `visible` — under the lynx stylo grammar that means
