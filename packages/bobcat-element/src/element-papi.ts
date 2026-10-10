@@ -6,6 +6,7 @@ import {
   createElement,
   createPage,
   dropElement,
+  exposureEvents,
   flushElementTree,
   getAttribute,
   getComputedStyleMap,
@@ -151,6 +152,12 @@ import { splitRecord } from "bobcat:record";
 //   `height`, in px.
 // - `DETAIL_EMPTY` — an `<image>`'s `error`: no numbers, and a `detail` of
 //   `{}`.
+// - `DETAIL_EXPOSURE` — an element's `uiappear` or `uidisappear`: no numbers
+//   either. The `detail` is web-core's (`ExposureServices.ts:198-208`), built
+//   here out of the event's own target: its node id as `unique-id`, and its
+//   `exposure-id` (null when it has none) and `exposure-scene` (`""` when it
+//   has none), each under both of web-core's spellings. The target is live,
+//   because the host resolves it before it calls, so its attributes answer.
 //
 // From there this file runs the standard's dispatch over that path: the
 // capture pass from the last entry to the first, the bubble pass from the
@@ -193,6 +200,14 @@ import { splitRecord } from "bobcat:record";
 // a name's first registration appears or its last disappears. A handle's own
 // counted names travel with it into the `FinalizationRegistry`'s held record,
 // so a collected element closes what it held open.
+//
+// It learns one fact per element as well: whether the element has any
+// registration at all for `uiappear` or `uidisappear`, which is what makes the
+// host detect it for exposure whether or not it carries an `exposure-id`. The
+// native `exposureEvents` is told on each change of that answer and at no
+// other time, from the same reconciliation, and the answer it is told from is
+// the handle's own counted names. A collected element tells nothing: the host
+// lets go of a freed element's registration itself.
 //
 // # `__AddEvent`, the other registration form
 //
@@ -645,7 +660,7 @@ const registry = new FinalizationRegistry(
 );
 
 /**
- * The four Lynx page switches a document is built with, as the boot module
+ * The five Lynx page switches a document is built with, as the boot module
  * is written with them.
  *
  * The host writes them into the boot module as boolean literals; the boot
@@ -661,6 +676,12 @@ export interface PageConfig {
   readonly enableCssSelector: boolean;
   /** Whether page data reaches BTS without the MTS processor running. */
   readonly enableJSDataProcessor: boolean;
+  /**
+   * Whether an element's `exposure-ui-margin-*` attributes apply when it
+   * names no `enable-exposure-ui-margin` of its own. Read by the host's
+   * exposure detection; nothing in this realm reads it.
+   */
+  readonly enableExposureUIMargin: boolean;
 }
 
 /**
@@ -685,6 +706,7 @@ export class Document {
       config.defaultOverflowVisible,
       config.enableCssSelector,
       config.enableJSDataProcessor,
+      config.enableExposureUIMargin,
     );
   }
 
@@ -1944,6 +1966,23 @@ function hasRegistration(handle: Handle, name: string): boolean {
 }
 
 /**
+ * The two names an element hears its exposure by. A registration for either
+ * is what registers the element for exposure detection; see [`reconcile`].
+ */
+const APPEAR = "uiappear";
+const DISAPPEAR = "uidisappear";
+
+/**
+ * Whether a handle's counted names include either exposure name: the answer
+ * the host was last told through `exposureEvents`, since every change of it
+ * goes through [`reconcile`].
+ */
+function hearsExposure(collected: Collected): boolean {
+  return collected.names !== undefined &&
+    (collected.names.has(APPEAR) || collected.names.has(DISAPPEAR));
+}
+
+/**
  * Reconciles the two realm-wide registries for one (handle, name) against
  * everything registered on that handle now. Every registration change calls
  * it, and it is where a name edge reaches the host.
@@ -1952,17 +1991,36 @@ function hasRegistration(handle: Handle, name: string): boolean {
  * the decision is a membership test rather than a sum, and the transitions
  * are the only thing that crosses: the first handle to want a name opens it,
  * the last to give it up closes it.
+ *
+ * The exposure edge is a transition of the same kind, taken over the two
+ * exposure names together: the host is told through `exposureEvents` when the
+ * handle's first registration for `uiappear` or `uidisappear` appears, and
+ * when its last for either goes, and never in between — a second handler, of
+ * the other name or the other kind, changes nothing it was told. Every
+ * registration form counts, the `__AddEventListener` closures included. That
+ * is native's rule: `FiberAddEventListener` syncs the name into the element's
+ * event set for every form it files
+ * (`core/runtime/lepus/bindings/renderer_functions.cc:1077`), and native
+ * exposure fires `uiappear` at an element whose event set has it
+ * (`UIExposure.java:543-547`). web-core marks an element from `__AddEvent`
+ * alone (`createElementAPI.ts:160-170`), so a closure-only listener there is
+ * never detected and never hears the event.
  */
 function reconcile(handle: Handle, name: string): undefined {
   const collected = collectedOf(handle);
   const wanted = hasRegistration(handle, name);
   if (wanted !== (collected.names?.has(name) ?? false)) {
+    const exposure = name === APPEAR || name === DISAPPEAR;
+    const heard = exposure && hearsExposure(collected);
     if (wanted) {
       (collected.names ??= new Set()).add(name);
       openName(name);
     } else {
       collected.names?.delete(name);
       closeName(name);
+    }
+    if (exposure && heard !== hearsExposure(collected)) {
+      exposureEvents(collected.nodeId, heard ? 0 : 1);
     }
   }
   const maps = handlersOf(handle);
@@ -2103,6 +2161,25 @@ function addEvent(
   eventName: unknown,
   handler: unknown,
 ): undefined {
+  const name = fileEvent(handle, eventType, eventName, handler);
+  if (name !== undefined) {
+    reconcile(handle, name);
+  }
+  return undefined;
+}
+
+/**
+ * [`addEvent`]'s filing alone, without the [`reconcile`] after it: answers the
+ * lower-cased name whose registrations it changed, or undefined for a handler
+ * it ignored. Split out so `__SetEvents` can reconcile once, after the whole
+ * replacement.
+ */
+function fileEvent(
+  handle: Handle,
+  eventType: unknown,
+  eventName: unknown,
+  handler: unknown,
+): string | undefined {
   const type = String(eventType).toLowerCase();
   const name = String(eventName).toLowerCase();
   const slot = type === GLOBAL_BIND ? GLOBAL : STATIC;
@@ -2122,8 +2199,7 @@ function addEvent(
     // no main-thread place to run one and this runtime does not invent one.
     return undefined;
   }
-  reconcile(handle, name);
-  return undefined;
+  return name;
 }
 
 /**
@@ -2238,34 +2314,51 @@ export function __GetEvents(
  *
  * An entry whose `name` or `type` is not a string is skipped, as native
  * does, and a non-array clears and stops.
+ *
+ * Every name the element held or is handed is reconciled once, after the
+ * whole replacement: what the host is told describes the element before and
+ * after the call, not the empty element between the clear and the adds. So a
+ * name handed back neither closes nor reopens, a `global-bindEvent` handed
+ * back keeps its delivery position, and an element that keeps a `uiappear`
+ * handler is not unregistered from exposure and registered again — which
+ * would have made a visible element hear `uiappear` a second time.
  */
 export function __SetEvents(element: unknown, events: unknown): undefined {
   const handle = element as Handle;
+  const names = new Set<string>();
   const maps = handlersOf(handle);
   if (maps !== undefined) {
-    const names: string[] = [];
     for (const slot of maps) {
       for (const kind of slot) {
-        names.push(...kind.keys());
+        for (const name of kind.keys()) {
+          names.add(name);
+        }
         kind.clear();
       }
     }
-    for (const name of names) {
-      reconcile(handle, name);
+  }
+  if (Array.isArray(events)) {
+    for (const event of events) {
+      const record = event as Record<string, unknown>;
+      if (
+        typeof record?.["name"] !== "string" ||
+        typeof record["type"] !== "string"
+      ) {
+        continue;
+      }
+      const name = fileEvent(
+        handle,
+        record["type"],
+        record["name"],
+        record["function"],
+      );
+      if (name !== undefined) {
+        names.add(name);
+      }
     }
   }
-  if (!Array.isArray(events)) {
-    return undefined;
-  }
-  for (const event of events) {
-    const record = event as Record<string, unknown>;
-    if (
-      typeof record?.["name"] !== "string" ||
-      typeof record["type"] !== "string"
-    ) {
-      continue;
-    }
-    addEvent(handle, record["type"], record["name"], record["function"]);
+  for (const name of names) {
+    reconcile(handle, name);
   }
   return undefined;
 }
@@ -2409,18 +2502,53 @@ interface DispatchedEvent {
  * dispatch and each kind writes its own: a routed input event writes the
  * device position in viewport CSS px and — for `wheel` alone — the scroll
  * delta; an `<image>`'s `load` writes the bitmap's intrinsic size; its
- * `error` writes nothing, and the detail is `{}`. A key a kind does not write
+ * `error` writes nothing, and the detail is `{}`; an element's `uiappear` or
+ * `uidisappear` writes the five exposure keys. A key a kind does not write
  * is absent, not `undefined`-valued: the transport carries an
  * `undefined`-valued key as one. A listener may write into this object; it is
  * minted per dispatch, like the event that carries it.
  */
-interface EventDetail {
+interface EventDetail extends Partial<ExposureDetail> {
   x?: number;
   y?: number;
   deltaX?: number;
   deltaY?: number;
   width?: number;
   height?: number;
+}
+
+/**
+ * web-core's `ExposureEventDetail` (`ExposureServices.ts:202-208`): an
+ * element's node id, which is its Lynx `unique-id`, and the `exposure-id`
+ * and `exposure-scene` it is exposed under, each under both spellings
+ * web-core reports them by. The id is null for an element that has no
+ * `exposure-id`, which only one with a listener can be; the scene is `""`
+ * when absent.
+ */
+interface ExposureDetail {
+  "unique-id": number;
+  exposureID: string | null;
+  exposureScene: string;
+  "exposure-id": string | null;
+  "exposure-scene": string;
+}
+
+/** The two attributes an exposure detail reads off its element. */
+const EXPOSURE_ID = "exposure-id";
+const EXPOSURE_SCENE = "exposure-scene";
+
+function exposureDetail(
+  uid: number,
+  exposureId: string | null,
+  scene: string,
+): ExposureDetail {
+  return {
+    "unique-id": uid,
+    exposureID: exposureId,
+    exposureScene: scene,
+    "exposure-id": exposureId,
+    "exposure-scene": scene,
+  };
 }
 
 /**
@@ -2431,19 +2559,31 @@ interface EventDetail {
 const DETAIL_POSITION = 0;
 const DETAIL_SIZE = 1;
 const DETAIL_EMPTY = 2;
+const DETAIL_EXPOSURE = 3;
 
 /**
- * The `detail` object one kind's numbers make.
+ * The `detail` object one kind's numbers make, for an event at `target`.
  *
  * `DETAIL_EMPTY` spends none and is web-core's `error` detail exactly.
+ * `DETAIL_EXPOSURE` spends none either: it is web-core's exposure detail,
+ * read off `target` itself — the event's own target, which the host resolved
+ * before it called, so its attributes answer — and is the only kind that
+ * reads the target at all.
  * `DETAIL_SIZE` spends two, an image `load`'s `naturalWidth`/`naturalHeight`.
  * `DETAIL_POSITION` spends two, then two more for a wheel delta that may be
  * absent; whatever follows those four is the touch numbers, which
  * [`touchLists`] reads.
  */
-function detailOf(kind: number, numbers: unknown[]): EventDetail {
+function detailOf(kind: number, numbers: unknown[], target: number): EventDetail {
   if (kind === DETAIL_EMPTY) {
     return {};
+  }
+  if (kind === DETAIL_EXPOSURE) {
+    return exposureDetail(
+      target,
+      getAttribute(target, EXPOSURE_ID),
+      getAttribute(target, EXPOSURE_SCENE) ?? "",
+    );
   }
   if (kind === DETAIL_SIZE) {
     return { width: Number(numbers[0]), height: Number(numbers[1]) };
@@ -2574,6 +2714,102 @@ function backgroundEvent(event: DispatchedEvent): Record<string, unknown> {
     target: backgroundTargetInfo(event.target),
     currentTarget: backgroundTargetInfo(event.currentTarget),
   };
+}
+
+/**
+ * One element as a global exposure record describes it: the background
+ * descriptor's shape, `{ dataset, id, uid }`, which is web-core's
+ * `generateTargetObject` (`WASMJSBinding.ts:64-74`).
+ */
+interface ExposureTarget {
+  dataset: Record<string, unknown>;
+  id: string | null;
+  uid: number;
+}
+
+/**
+ * web-core's `GlobalExposureEvent` (`ExposureServices.ts:229-240`): one
+ * element's entry in the list a background `exposure` or `disexposure`
+ * listener receives.
+ */
+interface GlobalExposureEvent extends ExposureDetail {
+  dataset: Record<string, unknown>;
+  type: string;
+  target: ExposureTarget;
+  currentTarget: ExposureTarget;
+  detail: ExposureDetail;
+  timestamp: number;
+}
+
+/**
+ * The descriptor of one element a global exposure record names, read now.
+ *
+ * Unlike an event's target, that element may be gone: a `disexposure` is owed
+ * to an exposed element that was freed, and the entry that delivers it runs
+ * after the free. The host refuses every read of a freed element, so a read
+ * that throws for an element whose handle is gone answers what a freed
+ * element has left — no dataset and no id. A live handle holds its element,
+ * so a read that throws while the handle is live is something else, and is
+ * thrown on. An element whose handle is gone and which the collection has not
+ * freed yet still answers its attributes; its typed dataset went with the
+ * handle, as [`datasetOf`] says.
+ */
+function exposureTarget(nodeId: number): ExposureTarget {
+  try {
+    return {
+      dataset: datasetOf(nodeId),
+      id: getAttribute(nodeId, "id") || null,
+      uid: nodeId,
+    };
+  } catch (error) {
+    if (handleOf(nodeId) !== undefined) {
+      throw error;
+    }
+    return { dataset: {}, id: null, uid: nodeId };
+  }
+}
+
+/**
+ * The list one `exposure` or `disexposure` global event carries, out of the
+ * host's record: three `bobcat:record` fields per element — its node id, and
+ * the `exposure-id` and `exposure-scene` it was exposed under. The host copied
+ * those two when the transition formed, so a `disexposure` names what the
+ * element was exposed under even after its attributes changed or it was
+ * freed; the `dataset` and `id` are read now, from the element as it is.
+ *
+ * Each entry is web-core's exactly (`ExposureServices.ts:221-240`): the
+ * detail's five keys at the top level beside the target's `dataset`, `type`
+ * as the list's own name, one descriptor as both `target` and
+ * `currentTarget`, a `detail` whose `unique-id` is `0`, and an epoch
+ * `timestamp` from `Date.now()` — read once for the list, where a dispatched
+ * event's is on the view's timeline.
+ *
+ * `bobcat:runtime`'s `__BobcatSendExposure` is the caller, and sends the list
+ * to the background thread; it lives here because the element state it reads
+ * does.
+ */
+export function __BobcatExposureEvents(
+  kind: string,
+  record: string,
+): GlobalExposureEvent[] {
+  const fields = splitRecord(record);
+  const timestamp = Date.now();
+  const events: GlobalExposureEvent[] = [];
+  for (let at = 0; at + 2 < fields.length; at += 3) {
+    const uid = Number(fields[at]);
+    const detail = exposureDetail(uid, fields[at + 1]!, fields[at + 2]!);
+    const target = exposureTarget(uid);
+    events.push({
+      dataset: target.dataset,
+      ...detail,
+      type: kind,
+      target,
+      currentTarget: target,
+      detail: { ...detail, "unique-id": 0 },
+      timestamp,
+    });
+  }
+  return events;
 }
 
 /**
@@ -2717,7 +2953,7 @@ function dispatchEvent(
   // the time origin rather than `NaN`.
   const stamp = Number(timestamp ?? 0);
   const kind = Number(detailKind);
-  const detail = detailOf(kind, detailNumbers);
+  const detail = detailOf(kind, detailNumbers, targetNodeId);
   const event: DispatchedEvent = {
     type: name,
     eventPhase: NONE,

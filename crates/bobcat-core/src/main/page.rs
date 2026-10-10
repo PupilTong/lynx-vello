@@ -256,9 +256,10 @@ pub(super) struct Page {
     /// already gone. One post per batch.
     content_visibility_posted: Cell<bool>,
     /// Whether an entry that will deliver the entries `dom`'s intersection
-    /// observers have queued is already queued and has not run yet — the
-    /// spec's per-document `IntersectionObserverTaskQueued` flag, set where
-    /// it queues the task and cleared as that task's first step.
+    /// observers have queued, and the exposure transitions waiting with them,
+    /// is already queued and has not run yet — the spec's per-document
+    /// `IntersectionObserverTaskQueued` flag, set where it queues the task
+    /// and cleared as that task's first step.
     ///
     /// The same latch as [`Self::content_visibility_posted`], for the same
     /// reason: the queues outlive the epilogue whose update filled them —
@@ -384,20 +385,24 @@ impl Page {
     /// epilogue, and a delivery never runs inside a commit. A view that ends
     /// in between delivers nothing.
     ///
-    /// **Nothing here enters JavaScript yet.** No observer is the realm's
-    /// today: every one belongs to one of the engine's own components, whose
-    /// `intersections_changed` hook its `dom::ElementHandler` calls, and the
-    /// realm's will be the MTS `IntersectionObserver` binding's, which is
-    /// what will make this entry call into script. It goes through
-    /// [`owner::enter`] all the same, because everything that touches this
-    /// view's document does.
+    /// The loop itself enters no JavaScript: an engine component's observer
+    /// calls its `intersections_changed` hook through `dom::ElementHandler`,
+    /// and an exposure registration's records a transition. What enters the
+    /// realm is the exposure drain after the loop — each element's
+    /// `uiappear`/`uidisappear`, then the `exposure` and `disexposure` record
+    /// lists (`crate::main::exposure`) — and that is why this is also the
+    /// entry posted for exposure transitions that formed outside any update:
+    /// a teardown, a `stopExposure` that sent records, a freed element. A
+    /// listener that throws, or a record list the realm did not take, is
+    /// nonfatal — `ListenerFailed`, the standing every listener here has —
+    /// and the rest is still delivered.
     ///
     /// One entry for every observer's queue, in creation order: `dom` runs
     /// the loop and calls each observer's handler. The latch is cleared at
     /// the start, before the loop, as §3.2.5's first step clears the flag:
-    /// what a hook's own mutation moves is seen by this entry's epilogue,
-    /// whose update queues a batch of its own, and that batch owes an entry
-    /// of its own too.
+    /// what a hook's or a listener's own mutation moves is seen by this
+    /// entry's epilogue, whose update queues a batch of its own, and that
+    /// batch owes an entry of its own too.
     ///
     /// The chain ends where the observations stop moving: the epilogue's
     /// update queues an entry only where a target's `(thresholdIndex,
@@ -416,7 +421,9 @@ impl Page {
             // batch of this entry's own epilogue, which owes an entry of
             // its own.
             page.intersections_posted.set(false);
-            runtime.notify_intersection_observers(js);
+            for failure in runtime.notify_intersection_observers(js) {
+                policy::report(&page, Scene::Listener, failure.into_script_error());
+            }
         }));
     }
 
@@ -972,16 +979,22 @@ impl RealmOwner for Page {
     /// the intersection observations, updated against that commit's layout
     /// and the live scroll offsets whether or not the commit built anything —
     /// a scroll composed inside the encode window moves an offset and commits
-    /// nothing — and their entries, the `contentvisibilityautostatechange`
-    /// deliveries that commit decided and the component events this entry
-    /// produced — `<image>` `load`s and `error`s, `<dialog>` `cancel`s and
-    /// `close`s — each posted as an entry of its own and never run here: see
+    /// nothing — and their entries, which the same entry delivers with any
+    /// exposure transition that formed outside an update, the
+    /// `contentvisibilityautostatechange` deliveries that commit decided and
+    /// the component events this entry produced — `<image>` `load`s and
+    /// `error`s, `<dialog>` `cancel`s and `close`s — each posted as an entry
+    /// of its own and never run here: see
     /// [`Page::post_intersection_notifications`],
     /// [`Page::post_content_visibility_changes`] and
     /// [`Page::post_component_events`].
     fn after_timers(page: &Rc<Self>, runtime: &mut MainThreadRuntime) {
         runtime.commit_if_dirty();
-        if runtime.update_intersection_observations() && !page.intersections_posted.replace(true) {
+        // The update first, always: it must run whether or not exposure
+        // transitions are already waiting.
+        if (runtime.update_intersection_observations() || runtime.has_pending_exposure())
+            && !page.intersections_posted.replace(true)
+        {
             page.post_intersection_notifications();
         }
         if runtime.has_pending_content_visibility_changes()
