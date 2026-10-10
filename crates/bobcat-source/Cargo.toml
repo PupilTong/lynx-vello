@@ -28,6 +28,7 @@ zip = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
 divan = { workspace = true }
+flashbulb = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = { workspace = true }

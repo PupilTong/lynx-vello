@@ -30,6 +30,36 @@ consequential choice about whether to follow the spec or the quirk.
   algorithm** (reuse stylo/Servo's existing stacking-context logic) —
   apps relying on Lynx's actual buggy z-index behavior may render
   differently, and that's intentional.
+- **`justify-content: start | end` mean different things in flex and in
+  linear (user, 2026-09-25)** — css-align-3 resolves them against the writing
+  mode, so on a `*-reverse` container `start` sits at the opposite end from
+  `flex-start`. Lynx's own value table instead aliases them to `flex-start`
+  and `flex-end` (`css_defines/58-justify-content.json` gives `start` the
+  align-type `flex-start`), and web-core rewrites the declaration outright —
+  `("start", &[("justify-content", "flex-start")])` in its
+  `style_transformer/rules.rs`, which also poisons `left`/`right` into
+  `--lynx-invalid-invalid-invalid`. **Decision: flexbox implements the W3C
+  meaning; `display: linear` keeps Lynx's.** `linear` is a layout mode only
+  Lynx has, so its keywords mean what Lynx says they mean, while `flex` is a
+  CSS box and answers to CSS. The two therefore differ on a reversed
+  container, which is the only place either pair parts, and
+  `computed_main_gravity` in `crates/hughie/src/compute/linear.rs` is where
+  the alias lives.
+- **`defaultOverflowVisible` never reaches `page` (user, 2026-09-25)** — the
+  switch releases `view` and the two blur-view tags back to `visible`, and
+  nothing else. Both references pin the page: native calls
+  `SetDefaultOverflow(false)` in `PageElement`'s constructor under the comment
+  "make sure page's default overflow is hidden" and reads the config in
+  `ViewElement` (and `ComponentElement`) alone; web-core's page is a plain
+  `div` with no UA overflow, and its release selector is
+  `[lynx-default-overflow-visible="true"] x-view`, so the root clip comes from
+  `lynx-view { contain: strict }` instead. A card asking for visible overflow
+  asks it of its views, not of the window it is drawn in. Two related
+  divergences between the references, not resolved here because nothing in
+  this engine reaches them yet: native's decoder *raises* an absent key to
+  true for any `targetSdkVersion >= 2.0`, where web-core needs the key to say
+  `"true"` (this engine follows web-core — an absent key is false); and native
+  also applies the switch to `<component>`, which has no DOM counterpart.
 - **`overflow`/`overflow-x`/`overflow-y` default** — Lynx defaults to
   `hidden`; CSS defaults to `visible`. **Decision: match Lynx's default**,
   not CSS's — this is a values/defaults divergence, not an algorithm one,
@@ -665,6 +695,18 @@ consequential choice about whether to follow the spec or the quirk.
   native-Lynx gate is documented as a config-gated fallback design
   (doctored parent `ComputedValues`, allowlist mask) but not implemented.
   Custom properties inherit unconditionally in both worlds.
+  **The premise no longer holds for the flag set to `true` (found
+  2026-10-06):** since lynx-stack #3907 (`8d0b358bf`, 2026-09-11) web-core
+  writes `lynx-enable-css-inheritance="true"` on the page and
+  `web-core/css/in_shadow.css` then lets a `<text>` directly under a `<view>`
+  inherit `color`, the gradient text colour and a typography list. This engine
+  still resets `color` unconditionally (`text { color: initial }` in
+  `crates/bobcat-core/src/main/tree/text.rs`) and reads no such flag, so
+  `config-css-inheritance-true` in the web-core-e2e corpus paints black where
+  native and web-core both paint the view's red. The decision above was made
+  against a web-core that ignored the flag and has not been looked at again;
+  the corpus's three `config-css-inheritance-*` cards stay pending until it
+  is.
   **Landed 2026-08-21** in `bobcat_core::tree`'s UA sheet, which had carried
   the decision unimplemented until then — until it landed an ancestor `view`'s
   `color` really did reach the text under it. The port is `color: initial` on
@@ -760,6 +802,27 @@ consequential choice about whether to follow the spec or the quirk.
   web-core runs on the browser's parser and accepts them; web-core is
   followed. The fork change that enabled them (lynx fork `76f6a809b`) did so
   for the UA `<dialog>` rules.
+- **Component-scoped CSS applies globally**, so two components styling the
+  same class name collide. A bundle compiled with `enableRemoveCSSScope:
+  false` keeps each component's rules in its own `css_id` fragment, and
+  web-core reproduces the scope by guarding every rule with
+  `:where([l-css-id="N"])`. This engine synthesizes no guard:
+  `crates/bobcat-source/src/lower_style.rs::to_preparsed_style_sheet` walks
+  `fragment_order(style_info)` and extends one flat rule list with every
+  fragment's rules, and `crates/bobcat-source/src/page.rs` reports the
+  consequence as `CompatibilityWarning::ComponentScopedCss` rather than
+  fixing it. So a selector written in one component matches elements in
+  another, and the tie goes to whichever fragment `fragment_order` puts last
+  — ascending `css_id` among non-imports, which is the later component. The
+  corpus card `config-css-remove-scope-false-with-descendant-combinator` is
+  built to test exactly this and shows the collision: `index.css`'s
+  `.a .b { background: green }` loses to `sub.css`'s
+  `.a .b { background-color: orange }` on the index-owned child, so both
+  boxes paint orange where the first should be green. Recorded, not fixed:
+  guard synthesis belongs to the runtime-adapter layer
+  ([`style-assumptions.md`](../style-assumptions.md) D.16, D.21), which is
+  not implemented. A bundle compiled with the default
+  `enableRemoveCSSScope: true` has one fragment and is unaffected.
 
 ## Components (see [components.md](components.md))
 
@@ -1892,6 +1955,16 @@ consequential choice about whether to follow the spec or the quirk.
   twice — and unscoped, where per-component css-id scoping is not implemented
   at all here. A container's `config` is ignored too: page policy is the
   page's.
+  **Known gap (found 2026-10-06): a `.web.bundle` container has nothing to
+  answer that ask with.** `lazy_bundle_sources` registers a named sheet only
+  for a custom section with `encoding: "CSS"`, which a native container
+  carries; a web container keeps its rules in `StyleInfo`, so the card's
+  `__AdoptStyleSheet('<container>/index.css')` throws
+  (`loading stylesheet …: UnsupportedScheme`) and none of the lazy
+  component's class rules apply. Inline-styled lazy components are
+  unaffected, which is why seven `basic-lazy-component*` cards of the
+  web-core-e2e corpus are verified while every one that styles through a
+  class is pending.
 - **`NativeModules.<name>` for a module the host does not have** — native's
   `LynxJSIModuleBinding::get` answers `null`
   (`lynx_jsi_module_binding.cc:23`), while web-core builds a plain object out

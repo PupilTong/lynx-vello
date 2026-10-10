@@ -157,6 +157,7 @@ Rust parses structured input only when Rust behavior actually needs its fields
 | `crates/flashbulb` | Screenshot testing: RGBA image, PNG codec, pixelmatch port, golden store. | [→](#cratesflashbulb) |
 | `packages/bobcat-element` | Dependency-free TypeScript sources of the ESMs `bobcat-core` preloads into its realms. | [→](#packagesbobcat-element) |
 | `packages/reactlynx-test-fixtures` | ReactLynx source fixtures and bundle generators for Bobcat integration tests. | [→](#other-pnpm-packages) |
+| `packages/web-core-e2e-fixtures` | `lynx-stack`'s web-core end-to-end cards, compiled for the targeted engine version. | [→](#other-pnpm-packages) |
 | `packages/explorer-homepage` | The Lynx Explorer home screen, written in ReactLynx. | [→](#other-pnpm-packages) |
 | `packages/explorer-lib` | Navigation, launch-command, history and theme helpers shared by the Explorer pages. | [→](#other-pnpm-packages) |
 | `packages/explorer-showcase` | The Lynx Explorer showcase menu in ReactLynx, and the `@lynx-example` packages. | [→](#other-pnpm-packages) |
@@ -2086,6 +2087,33 @@ process isolation, and page subresources use the ordinary resource transport.
 synchronous view teardown. Source fetching, HTTP policy, BMP encoding,
 queueing, and server lifecycle stay outside core.
 
+`crates/bobcat-source/tests/web_core_e2e.rs` boots that corpus without this
+server — the cards reach their own bitmaps and fonts through `file:` URLs the
+build bakes in — and holds each card to a rendering **someone read the case
+for and judged right**. Every card is in one of two lists: `verified.rs`, whose
+cards have a golden beside the test, and `pending.rs`, whose cards have a
+reason instead and deliberately no golden, because a picture of an unjudged
+rendering reads as a decision. Two invariants keep that honest:
+`no_pending_case_has_a_golden` and `unlisted_cases_are_an_error`. Comparing
+against web-core's own screenshots was tried and dropped: the two stacks
+rasterize text differently and several cases are about behaviour an image only
+indirectly shows, so a pixel distance to chromium answers a question nobody
+asked. Accepting a rendering is `FLASHBULB_UPDATE_SNAPSHOTS=1` on one test,
+after the reading, in the same change that moves the card to `verified!`.
+
+A first screen is not the whole of most cases, so `web_core_e2e/driven.rs`
+restates, per card, what upstream's Playwright spec drives — a tap, a drag or
+a wheel turn at a viewport point, `updateData`, `updateGlobalProps`, `reload`,
+`sendGlobalEvent`, a wait for a console line, a fresh start where upstream
+opens one card in several tests — and the suite pins one more
+golden per frame of that script (`<case>.<label>.png`). A script is not a
+verdict: a pending card may carry one and still has no golden. The harness
+boots every card the way upstream's shell does
+(`web-core-e2e/shell-project/index.ts`: page data, the two native modules,
+`/dist/` and `/resources/`), and a card that renders wrong is checked against
+that file before the engine is blamed — four separate omissions there each
+made a family of cards test nothing until they were found.
+
 ### crates/bobcat-wasm
 
 The pure-Rust `wasm-bindgen` browser embedder and npm facade, built for
@@ -2450,6 +2478,19 @@ of the element path in the same file.
   `scripts/lynx-bytecode.ts` hook to disable BTS manifest bytecode. MTS keeps
   the compiler's default encoding. The fixture-only source repack remains
   necessary for Bobcat's source evaluator.
+- `packages/web-core-e2e-fixtures` — `lynx-stack`'s web-core end-to-end cards,
+  vendored as ReactLynx source and compiled here at `engineVersion` 4.1.0. That
+  version is the reason to vendor them at all: ReactLynx picks its lazy-bundle
+  implementation at compile time, and upstream's own `dist/` is built without
+  one, so its whole `basic-lazy-component-*` family calls `__QueryComponent`
+  rather than `lynx.fetchBundle`. `groups.js` restates the 21 upstream rspeedy
+  config files as one entry per distinct compiler configuration — re-read them
+  when re-syncing `src/`, or a case compiles with the wrong switches and the
+  suite blames the engine. Its one consumer is
+  `crates/bobcat-source/tests/web_core_e2e.rs`, which reads `dist/` and
+  `resources/` at run time; its build (`pnpm --filter web-core-e2e-fixtures
+  build`) is separate from the fixtures build every other Rust test depends
+  on, and CI runs it in the job that runs tests.
 - `packages/explorer-homepage`, `packages/explorer-showcase` and
   `packages/explorer-lib` — the Lynx Explorer home screen and showcase menu in
   ReactLynx, over the navigation, launch-command, history and theme helpers the
