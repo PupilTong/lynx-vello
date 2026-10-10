@@ -9,9 +9,11 @@
 
 use std::str::FromStr;
 
+use hughie::text::{ResolvedFont, ResolvedFontStyle};
 use smallvec::SmallVec;
 use svgtypes::{Length, LengthListParser, LengthUnit, PaintFallback};
 
+use super::text::TextAnchor;
 use crate::vello::kurbo::{Affine, Cap, Join};
 use crate::vello::peniko::Fill;
 
@@ -29,7 +31,12 @@ const PROPERTIES: &[&str] = &[
     "fill-opacity",
     "fill-rule",
     "filter",
+    "font-family",
     "font-size",
+    "font-stretch",
+    "font-style",
+    "font-weight",
+    "letter-spacing",
     "mask",
     "opacity",
     "paint-order",
@@ -43,6 +50,7 @@ const PROPERTIES: &[&str] = &[
     "stroke-miterlimit",
     "stroke-opacity",
     "stroke-width",
+    "text-anchor",
     "transform",
     "visibility",
 ];
@@ -170,6 +178,21 @@ pub(super) fn parse_length(
         .filter(|length| length.is_finite())
 }
 
+/// The first length of a list attribute (`x="10 20 30"` reads `10`), the
+/// documented subset for `text` positions.
+pub(super) fn parse_first_length(
+    value: &str,
+    font_size: f64,
+    viewport: Viewport,
+    axis: Axis,
+) -> Option<f64> {
+    LengthListParser::from(value)
+        .next()
+        .and_then(Result::ok)
+        .map(|length| resolve_length(length, font_size, viewport, axis))
+        .filter(|length| length.is_finite())
+}
+
 /// A `<number>` or `<percentage>` clamped to the unit interval, as every
 /// opacity is.
 pub(super) fn parse_opacity(value: &str) -> Option<f32> {
@@ -211,8 +234,9 @@ pub(super) struct Style {
     /// The `color` property, what `currentColor` resolves to.
     pub(super) color: svgtypes::Color,
     pub(super) visible: bool,
-    /// `font-size` in px, what `em` and `ex` lengths resolve against.
-    pub(super) font_size: f32,
+    pub(super) font: ResolvedFont,
+    pub(super) text_anchor: TextAnchor,
+    pub(super) letter_spacing: f32,
     pub(super) clip_rule: Fill,
     // Not inherited.
     /// `display` is not `none`.
@@ -243,7 +267,15 @@ impl Style {
             stroke_first: false,
             color: svgtypes::Color::black(),
             visible: true,
-            font_size: 16.0,
+            font: ResolvedFont {
+                families: Vec::new(),
+                size: 16.0,
+                weight: 400,
+                style: ResolvedFontStyle::Normal,
+                stretch: 1.0,
+            },
+            text_anchor: TextAnchor::Start,
+            letter_spacing: 0.0,
             clip_rule: Fill::NonZero,
             display: true,
             opacity: 1.0,
@@ -277,13 +309,13 @@ impl Style {
         if let Some(value) = declared
             .get("font-size")
             .filter(|value| *value != "inherit")
-            && let Some(size) = font_size(value, f64::from(parent.font_size), viewport)
+            && let Some(size) = font_size(value, f64::from(parent.font.size), viewport)
         {
             #[expect(clippy::cast_possible_truncation, reason = "a font size fits an f32")]
             let size = size as f32;
-            style.font_size = size;
+            style.font.size = size;
         }
-        let font_size = f64::from(style.font_size);
+        let font_size = f64::from(style.font.size);
         let length = |value: &str, axis: Axis| parse_length(value, font_size, viewport, axis);
 
         for (name, value) in declared
@@ -397,6 +429,49 @@ impl Style {
                 }
                 "mask" => style.masked = *value != "none",
                 "transform" => style.transform = transform(value),
+                "font-family" => {
+                    if let Ok(families) = svgtypes::parse_font_families(value) {
+                        style.font.families = families.into_iter().map(family_name).collect();
+                    }
+                }
+                "font-weight" => {
+                    if let Some(weight) = font_weight(value, parent.font.weight) {
+                        style.font.weight = weight;
+                    }
+                }
+                "font-style" => {
+                    style.font.style = match value.split_whitespace().next() {
+                        Some("normal") => ResolvedFontStyle::Normal,
+                        Some("italic") => ResolvedFontStyle::Italic,
+                        Some("oblique") => ResolvedFontStyle::Oblique,
+                        _ => style.font.style,
+                    };
+                }
+                "font-stretch" => {
+                    if let Some(stretch) = font_stretch(value) {
+                        style.font.stretch = stretch;
+                    }
+                }
+                "text-anchor" => {
+                    style.text_anchor = match *value {
+                        "start" => TextAnchor::Start,
+                        "middle" => TextAnchor::Middle,
+                        "end" => TextAnchor::End,
+                        _ => style.text_anchor,
+                    };
+                }
+                "letter-spacing" => {
+                    if *value == "normal" {
+                        style.letter_spacing = 0.0;
+                    } else if let Some(spacing) = length(value, Axis::Horizontal) {
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            reason = "a spacing fits an f32"
+                        )]
+                        let spacing = spacing as f32;
+                        style.letter_spacing = spacing;
+                    }
+                }
                 // Read elsewhere (`stop`), or ignored (`filter`).
                 _ => {}
             }
@@ -528,4 +603,70 @@ fn font_size(value: &str, parent: f64, viewport: Viewport) -> Option<f64> {
         _ => resolve_length(length, parent, viewport, Axis::Diagonal),
     };
     (size.is_finite() && size >= 0.0).then_some(size)
+}
+
+/// A `font-weight`: a number, `normal`, `bold`, or `bolder`/`lighter`
+/// relative to the parent's weight (CSS Fonts 4 §2.2).
+fn font_weight(value: &str, parent: u16) -> Option<u16> {
+    Some(match value {
+        "normal" => 400,
+        "bold" => 700,
+        "bolder" => match parent {
+            0..350 => 400,
+            350..550 => 700,
+            550..900 => 900,
+            _ => parent,
+        },
+        "lighter" => match parent {
+            0..100 => parent,
+            100..550 => 100,
+            550..750 => 400,
+            _ => 700,
+        },
+        number => {
+            let weight = number.parse::<f32>().ok()?;
+            if !(1.0..=1000.0).contains(&weight) {
+                return None;
+            }
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "checked to lie within 1..=1000"
+            )]
+            let weight = weight.round() as u16;
+            weight
+        }
+    })
+}
+
+/// A `font-stretch` as a ratio of normal.
+fn font_stretch(value: &str) -> Option<f32> {
+    Some(match value {
+        "ultra-condensed" => 0.5,
+        "extra-condensed" => 0.625,
+        "condensed" => 0.75,
+        "semi-condensed" => 0.875,
+        "normal" => 1.0,
+        "semi-expanded" => 1.125,
+        "expanded" => 1.25,
+        "extra-expanded" => 1.5,
+        "ultra-expanded" => 2.0,
+        percentage => {
+            let number = percentage.strip_suffix('%')?.trim().parse::<f32>().ok()?;
+            (number.is_finite() && number > 0.0).then_some(number / 100.0)?
+        }
+    })
+}
+
+/// A parsed `font-family` entry as the name the shaper reads: a generic
+/// family by its CSS keyword, a named one by its name.
+fn family_name(family: svgtypes::FontFamily) -> String {
+    match family {
+        svgtypes::FontFamily::Serif => "serif".to_owned(),
+        svgtypes::FontFamily::SansSerif => "sans-serif".to_owned(),
+        svgtypes::FontFamily::Cursive => "cursive".to_owned(),
+        svgtypes::FontFamily::Fantasy => "fantasy".to_owned(),
+        svgtypes::FontFamily::Monospace => "monospace".to_owned(),
+        svgtypes::FontFamily::Named(name) => name,
+    }
 }

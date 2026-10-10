@@ -2,7 +2,7 @@
 //!
 //! Every element goes through [`Converter::convert_element`], which
 //! resolves its style, opens the layers its group effects need, converts
-//! its content (children, shape, referenced element) and closes the
+//! its content (children, shape, text, referenced element) and closes the
 //! layers. Layer bounds and the vello #1198 `isolate` flags depend on the
 //! content, so they are patched into the already-pushed items once the
 //! content is in.
@@ -14,7 +14,10 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use super::paint_server::{self, GradientSpec};
-use super::style::{Axis, Fallback, Paint, Style, Viewport, declarations, parse_length};
+use super::style::{
+    Axis, Fallback, Paint, Style, Viewport, declarations, parse_first_length, parse_length,
+};
+use super::text::{Space, TextChunk, TextItem, TextPaint, TextSpan, normalize_whitespace};
 use super::{FillPaint, Item, LayerClip, StrokePaint, SvgError, VectorDocument, nesting, shapes};
 use crate::render::image::{AspectAlign, AspectRatio};
 use crate::vello::kurbo::{Affine, BezPath, Rect, Shape, Stroke};
@@ -65,6 +68,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<VectorDocument, SvgError> {
     let mut converter = Converter {
         ids: &ids,
         items: Vec::new(),
+        has_text: false,
         gradients: FxHashMap::default(),
         references: Vec::new(),
     };
@@ -84,6 +88,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<VectorDocument, SvgError> {
         viewport,
         aspect,
         items: converter.items,
+        has_text: converter.has_text,
     })
 }
 
@@ -274,6 +279,7 @@ struct Converter<'a> {
     /// Every element with an `id`, by id.
     ids: &'a Ids<'a>,
     items: Vec<Item>,
+    has_text: bool,
     /// Gradient specifications by element, built on first use.
     gradients: FxHashMap<roxmltree::NodeId, Option<Arc<GradientSpec>>>,
     /// The `use` targets being converted, against reference cycles.
@@ -296,6 +302,7 @@ fn is_rendered(name: &str) -> bool {
             | "line"
             | "polyline"
             | "polygon"
+            | "text"
     )
 }
 
@@ -367,6 +374,7 @@ impl<'a> Converter<'a> {
                     self.convert_element(child, context);
                 }
             }
+            "text" => self.convert_text(node, context),
             _ => self.convert_shape(node, name, context),
         }
         self.close_layers(layers, content_start, transform);
@@ -524,7 +532,7 @@ impl<'a> Converter<'a> {
         context: Context<'_>,
         size: Option<(Option<f64>, Option<f64>)>,
     ) {
-        let font_size = f64::from(context.style.font_size);
+        let font_size = f64::from(context.style.font.size);
         let length = |name: &str, axis: Axis| {
             node.attribute(name)
                 .and_then(|value| parse_length(value, font_size, context.viewport, axis))
@@ -595,7 +603,7 @@ impl<'a> Converter<'a> {
         {
             return;
         }
-        let font_size = f64::from(context.style.font_size);
+        let font_size = f64::from(context.style.font.size);
         let length = |name: &str, axis: Axis| {
             node.attribute(name)
                 .and_then(|value| parse_length(value, font_size, context.viewport, axis))
@@ -694,7 +702,7 @@ impl<'a> Converter<'a> {
         name: &str,
         context: Context<'_>,
     ) -> Option<BezPath> {
-        let font_size = f64::from(context.style.font_size);
+        let font_size = f64::from(context.style.font.size);
         let length = |name: &str, axis: Axis| {
             node.attribute(name)
                 .and_then(|value| parse_length(value, font_size, context.viewport, axis))
@@ -769,6 +777,33 @@ impl<'a> Converter<'a> {
         }
     }
 
+    /// The text paint for `paint`, resolved as far as the parse can.
+    fn resolve_text_paint(
+        &mut self,
+        paint: &Paint,
+        opacity: f32,
+        style: &Style,
+        context: Context<'_>,
+    ) -> Option<TextPaint> {
+        let solid = |color: svgtypes::Color| {
+            Some(TextPaint::Solid(paint_server::with_opacity(color, opacity)))
+        };
+        match paint {
+            Paint::None => None,
+            Paint::Color(color) => solid(*color),
+            Paint::CurrentColor => solid(style.color),
+            Paint::Server { id, fallback } => match self.paint_server(id, context) {
+                PaintServer::Gradient(spec) => Some(TextPaint::Gradient(spec, opacity)),
+                PaintServer::Pattern => None,
+                PaintServer::Missing => match fallback {
+                    Some(Fallback::Color(color)) => solid(*color),
+                    Some(Fallback::CurrentColor) => solid(style.color),
+                    Some(Fallback::None) | None => None,
+                },
+            },
+        }
+    }
+
     /// What `url(#id)` names.
     fn paint_server(&mut self, id: &str, context: Context<'_>) -> PaintServer {
         let Some(node) = self.ids.get(id).copied() else {
@@ -781,7 +816,7 @@ impl<'a> Converter<'a> {
                         node,
                         self.ids,
                         context.viewport,
-                        f64::from(context.style.font_size),
+                        f64::from(context.style.font.size),
                     )
                 });
                 spec.clone()
@@ -826,7 +861,7 @@ impl<'a> Converter<'a> {
                 };
                 let use_declared = declarations(child);
                 let use_style = style.resolve(&use_declared, context.viewport);
-                let font_size = f64::from(use_style.font_size);
+                let font_size = f64::from(use_style.font.size);
                 let at = |name: &str, axis: Axis| {
                     child
                         .attribute(name)
@@ -882,6 +917,130 @@ impl<'a> Converter<'a> {
             outer,
         })
     }
+
+    /// A `text` element as one [`Item::Text`].
+    fn convert_text(&mut self, node: roxmltree::Node<'a, 'a>, context: Context<'_>) {
+        let style = context.style;
+        let font_size = f64::from(style.font.size);
+        let first = |node: roxmltree::Node<'a, 'a>, name: &str, size: f64, axis: Axis| {
+            node.attribute(name)
+                .and_then(|value| parse_first_length(value, size, context.viewport, axis))
+        };
+        #[expect(clippy::cast_possible_truncation, reason = "text positions fit an f32")]
+        let as_f32 = |value: f64| value as f32;
+        let mut chunks = vec![TextChunk {
+            x: as_f32(first(node, "x", font_size, Axis::Horizontal).unwrap_or(0.0)),
+            y: as_f32(first(node, "y", font_size, Axis::Vertical).unwrap_or(0.0)),
+            anchor: style.text_anchor,
+            spans: Vec::new(),
+        }];
+        let mut pending = (
+            as_f32(first(node, "dx", font_size, Axis::Horizontal).unwrap_or(0.0)),
+            as_f32(first(node, "dy", font_size, Axis::Vertical).unwrap_or(0.0)),
+        );
+        self.collect_spans(node, context, &mut chunks, &mut pending);
+        let space = node
+            .ancestors()
+            .find_map(|ancestor| {
+                ancestor.attribute(("http://www.w3.org/XML/1998/namespace", "space"))
+            })
+            .map_or(Space::Default, |value| {
+                if value == "preserve" {
+                    Space::Preserve
+                } else {
+                    Space::Default
+                }
+            });
+        normalize_whitespace(&mut chunks, space);
+        if chunks.is_empty() {
+            return;
+        }
+        self.has_text = true;
+        self.items.push(Item::Text(TextItem {
+            chunks,
+            transform: context.transform,
+        }));
+    }
+
+    /// Appends the text and `tspan`s under `node` to `chunks`, in order.
+    /// `pending` is the `dx`/`dy` the next span takes.
+    fn collect_spans(
+        &mut self,
+        node: roxmltree::Node<'a, 'a>,
+        context: Context<'_>,
+        chunks: &mut Vec<TextChunk>,
+        pending: &mut (f32, f32),
+    ) {
+        let style = context.style;
+        for child in node.children() {
+            // `Node::text` answers an element's first text child too, so
+            // the node type decides, not the text.
+            if child.is_text() {
+                let text = child.text().unwrap_or_default();
+                if !style.visible {
+                    continue;
+                }
+                let fill = self.resolve_text_paint(&style.fill, style.fill_opacity, style, context);
+                let stroke = (style.stroke_width > 0.0)
+                    .then(|| {
+                        self.resolve_text_paint(&style.stroke, style.stroke_opacity, style, context)
+                    })
+                    .flatten()
+                    .map(|paint| (stroke_style(style), paint));
+                let (dx, dy) = std::mem::take(pending);
+                chunks
+                    .last_mut()
+                    .expect("a text element starts with one chunk")
+                    .spans
+                    .push(TextSpan {
+                        text: text.to_owned(),
+                        dx,
+                        dy,
+                        font: style.font.clone(),
+                        letter_spacing: style.letter_spacing,
+                        fill,
+                        stroke,
+                        fill_first: !style.stroke_first,
+                    });
+            } else if child.is_element()
+                && (child.has_tag_name("tspan") || child.has_tag_name("a"))
+                && context.depth < MAX_NESTING
+            {
+                let declared = declarations(child);
+                let child_style = style.resolve(&declared, context.viewport);
+                if !child_style.display {
+                    continue;
+                }
+                let font_size = f64::from(child_style.font.size);
+                let first = |name: &str, axis: Axis| {
+                    child.attribute(name).and_then(|value| {
+                        parse_first_length(value, font_size, context.viewport, axis)
+                    })
+                };
+                #[expect(clippy::cast_possible_truncation, reason = "text positions fit an f32")]
+                let as_f32 = |value: f64| value as f32;
+                let (x, y) = (first("x", Axis::Horizontal), first("y", Axis::Vertical));
+                if x.is_some() || y.is_some() {
+                    let previous = chunks.last().expect("a text element starts with one chunk");
+                    chunks.push(TextChunk {
+                        x: x.map_or(previous.x, as_f32),
+                        y: y.map_or(previous.y, as_f32),
+                        anchor: child_style.text_anchor,
+                        spans: Vec::new(),
+                    });
+                    *pending = (0.0, 0.0);
+                }
+                pending.0 += as_f32(first("dx", Axis::Horizontal).unwrap_or(0.0));
+                pending.1 += as_f32(first("dy", Axis::Vertical).unwrap_or(0.0));
+                let child_context = Context {
+                    style: &child_style,
+                    depth: context.depth + 1,
+                    ..context
+                };
+                self.collect_spans(child, child_context, chunks, pending);
+            }
+        }
+    }
 }
 
 /// What a `url(#id)` paint resolved to.
@@ -908,6 +1067,7 @@ fn stroke_style(style: &Style) -> Stroke {
 
 /// The bounding box of every path in `items`, mapped by `into` (the
 /// inverse of the target space's transform), strokes included when asked.
+/// Text is not counted: its extent is known only once shaped.
 fn items_bounds(items: &[Item], into: Affine, include_stroke: bool) -> Option<Rect> {
     let mut bounds: Option<Rect> = None;
     for item in items {
@@ -951,7 +1111,7 @@ pub(super) fn opens_blend_in(items: &[Item]) -> bool {
             }
             Item::PushClip { .. } => depth += 1,
             Item::Pop => depth = depth.saturating_sub(1),
-            Item::Path { .. } => {}
+            Item::Path { .. } | Item::Text(_) => {}
         }
     }
     false

@@ -1116,8 +1116,10 @@ impl<T> Document<T> {
     /// intrinsic dimensions, and marks failures.
     ///
     /// A [`ImageEvent::ParsedDocument`] is encoded here, on this thread,
-    /// when its source is still pending: its scene is built once, so it
-    /// settles as a loaded vector image. Natively `bobcat-core` parses off this thread first
+    /// when its source is still pending: its text is shaped through this
+    /// document's own text context (created on the first document with
+    /// text) and its scene built once, so it settles as a loaded vector
+    /// image. Natively `bobcat-core` parses off this thread first
     /// ([`ImageEvent::parse_document`]) and hands that event over. A
     /// [`ImageEvent::LoadedDocument`] is parsed here as well, inline, on the
     /// path with no blocking pool behind it — this crate's own tests and the
@@ -1137,7 +1139,11 @@ impl<T> Document<T> {
         for event in events {
             // `None` is a source reported twice, which one URL with one
             // content makes a no-op: nothing moved, so nothing is dirtied.
-            let Some(applied) = self.images.apply(event) else {
+            let applied = {
+                let (images, text_context) = self.image_apply_parts();
+                images.apply(event, text_context)
+            };
+            let Some(applied) = applied else {
                 continue;
             };
             for (node, role) in applied.nodes {

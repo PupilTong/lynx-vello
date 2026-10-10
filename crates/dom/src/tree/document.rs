@@ -287,6 +287,18 @@ impl<T> Document<T> {
         &mut self.layout
     }
 
+    /// The image registry beside the layout state's text context, borrowed
+    /// together: applying a parsed vector document shapes its text through
+    /// the one and files the encoded image in the other.
+    pub(crate) fn image_apply_parts(
+        &mut self,
+    ) -> (
+        &mut crate::render::image::ImageRegistry,
+        &mut Option<Box<hughie::text::TextContext>>,
+    ) {
+        (&mut self.images, &mut self.layout.text_context)
+    }
+
     pub(crate) fn layout_parts(
         &mut self,
     ) -> (&TreeArenas<T>, &mut DocumentLayoutState, &FxHashSet<NodeId>) {
