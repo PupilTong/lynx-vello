@@ -49,7 +49,7 @@ use crate::compute::single_axis::flow_to_physical;
 use crate::compute::util::{
     accumulate_scrollable_overflow, container_content_independence, is_scroll_container,
     item_end_margin, normalize_content_alignment, normalize_item_alignment,
-    own_scrollable_overflow, resolve_gap_axis, resolve_length_percentage,
+    own_scrollable_overflow, padding_box_end, resolve_gap_axis, resolve_length_percentage,
     sort_and_assign_layout_order,
 };
 use crate::geometry::{Edges, Point, Size};
@@ -872,7 +872,7 @@ where
     // inline-start edge, which is the right one.
     let stacking_reverse = rtl && stacking_axis == Axis::Horizontal;
     let scroll_container = is_scroll_container(style.overflow());
-    let mut content_size = outer_size;
+    let mut content_size = Size::ZERO;
     for placed in &mut pass.items {
         let physical = flow_to_physical(
             stacking_offset + placed.stacking_start,
@@ -902,7 +902,9 @@ where
             // extends the latter over its scrolling contents.
             let start = stacking_axis.start(metrics.border) + stacking_axis.start(metrics.padding);
             let end = if scroll_container {
-                stacking_axis.size(content_size) - stacking_axis.end(metrics.padding)
+                let scrolling_end =
+                    content_size.zip_map(padding_box_end(outer_size, metrics.border), f32::max);
+                stacking_axis.size(scrolling_end) - stacking_axis.end(metrics.padding)
             } else {
                 start + stacking_inner
             };
@@ -953,10 +955,10 @@ where
             content_size,
         );
         let absolute = absolute.expect("commit keeps out-of-flow grid-lanes items");
-        // With no out-of-flow box to lay out, the pass answers `outer_size`.
+        // With no out-of-flow box to lay out, the pass adds nothing.
         let absolute_content_size =
             if absolute.is_empty() && !tree.has_hoisted_children(state, node) {
-                outer_size
+                Size::ZERO
             } else {
                 layout_absolute_items(
                     tree,
@@ -977,7 +979,7 @@ where
             };
         content_size = content_size.zip_map(absolute_content_size, f32::max);
     }
-    let content_size = own_scrollable_overflow(&style, outer_size, content_size);
+    let content_size = own_scrollable_overflow(&style, outer_size, metrics.border, content_size);
     LayoutOutput::new(outer_size, content_size).with_first_baselines(baselines)
 }
 

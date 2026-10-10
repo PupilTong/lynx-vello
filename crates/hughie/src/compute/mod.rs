@@ -348,7 +348,10 @@ pub fn compute_skipped_contents_size<S: CoreStyle>(style: &S, input: LayoutInput
         }),
     );
 
-    LayoutOutput::new(outer_size, outer_size)
+    LayoutOutput::new(
+        outer_size,
+        util::padding_box_end(outer_size, metrics.border),
+    )
 }
 
 #[must_use = "the returned layout is in containing-block space; the host must convert and store it"]

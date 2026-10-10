@@ -2664,3 +2664,75 @@ fn a_non_scrolling_container_keeps_its_item_margins_to_itself() {
     // The inner container's own 10px margin ends at 110, inside its 180.
     assert_size(output.content_size, Size::new(180.0, 20.0));
 }
+
+/// `content_size` is the union of the padding box and the items' reach,
+/// in border-box coordinates: an empty bordered scroll container's ends at
+/// its padding box's far edge, not its border box's; an item that ends
+/// exactly at the padding edge adds nothing; one past it by less than the
+/// far border still shows, which a border-box floor would have hidden.
+#[test]
+fn content_size_floors_at_the_padding_box_not_the_border_box() {
+    let container_style = || TestStyle {
+        padding: Edges::uniform(npx(5.0)),
+        border: Edges::uniform(border_px(10.0)),
+        overflow: Point::new(Overflow::Hidden, Overflow::Hidden),
+        ..TestStyle::default()
+    };
+    let item_style = |width: f32| TestStyle {
+        flex_shrink: nn(0.0),
+        ..fixed_leaf_style(width, 60.0)
+    };
+
+    let mut empty = TestTree::default();
+    let root = flex_container(&mut empty, container_style(), &[]);
+    let output = definite_layout(&empty, root, 100.0, 100.0);
+    assert_size(output.size, Size::new(100.0, 100.0));
+    assert_size(output.content_size, Size::new(90.0, 90.0));
+
+    // Content origin 15: a 75px item ends at 90, the padding edge.
+    let mut fitted = TestTree::default();
+    let item = fitted.push_leaf(item_style(75.0), Size::new(75.0, 60.0), None);
+    let root = flex_container(&mut fitted, container_style(), &[item]);
+    let output = definite_layout(&fitted, root, 100.0, 100.0);
+    assert_point(fitted.layout(item).location, Point::new(15.0, 15.0));
+    assert_size(output.content_size, Size::new(90.0, 90.0));
+
+    // A 78px item ends at 93: 3px past the padding edge, inside the border.
+    let mut overflowing = TestTree::default();
+    let item = overflowing.push_leaf(item_style(78.0), Size::new(78.0, 60.0), None);
+    let root = flex_container(&mut overflowing, container_style(), &[item]);
+    let output = definite_layout(&overflowing, root, 100.0, 100.0);
+    assert_size(output.content_size, Size::new(93.0, 90.0));
+}
+
+/// A leaf's `content_size` ends at its padding edge too: its measured
+/// contents plus the end padding, never the far border.
+#[test]
+fn leaf_content_size_ends_at_its_padding_edge() {
+    let style = TestStyle {
+        max_size: Size::new(max_px(70.0), max_none()),
+        padding: Edges::uniform(npx(5.0)),
+        border: Edges::uniform(border_px(10.0)),
+        ..TestStyle::default()
+    };
+    let output = compute_leaf_layout(
+        LayoutInput::commit(
+            Size::NONE,
+            Size::new(Some(500.0), Some(500.0)),
+            Size::new(
+                AvailableSpace::Definite(500.0),
+                AvailableSpace::Definite(500.0),
+            ),
+            Size::new(false, false),
+        ),
+        &style,
+        NaturalSize::from_size(Size::new(120.0, 20.0)),
+    );
+    // A 70px content box under 5px padding and a 10px border: 100 wide, and
+    // the 20px contents make it 50 tall.
+    assert_size(output.size, Size::new(100.0, 50.0));
+    // Width: the 120px contents from the content origin at 15 reach 135,
+    // plus the end padding, 140 — not the measured border box's 150.
+    // Height: nothing overflows, so the padding edge, 40.
+    assert_size(output.content_size, Size::new(140.0, 40.0));
+}

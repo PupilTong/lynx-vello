@@ -1399,16 +1399,37 @@ pub(super) fn item_end_margin(scroll_container: bool, margin: Edges<f32>) -> Siz
     }
 }
 
+/// Where a box's scrollable overflow rectangle ends at the least, in
+/// border-box coordinates: the far edge of its padding box, which
+/// [css-overflow-3 §3.3](https://drafts.csswg.org/css-overflow-3/#scrollable)
+/// puts in the area as "the scroll container's own padding box". The far
+/// border lies outside it, so a scroll container with no contents has a
+/// scrolling area the size of its scrollport.
+#[inline]
+pub(super) fn padding_box_end(outer: Size<f32>, border: Edges<f32>) -> Size<f32> {
+    Size::new(
+        (outer.width - border.right).max(0.0),
+        (outer.height - border.bottom).max(0.0),
+    )
+}
+
+/// A box's own `content_size` from the reach of its contents, `interior`
+/// (border-box coordinates, accumulated from zero): the union with its
+/// padding box ([`padding_box_end`]), or, for a layout-contained box that
+/// is not a scroll container, the padding box alone — its descendants'
+/// overflow is ink overflow (css-contain-2 §3.3).
 #[inline]
 pub(super) fn own_scrollable_overflow<S: CoreStyle>(
     style: &S,
-    border_box: Size<f32>,
+    outer: Size<f32>,
+    border: Edges<f32>,
     interior: Size<f32>,
 ) -> Size<f32> {
+    let floor = padding_box_end(outer, border);
     if style.containment().contains(Contain::LAYOUT) && !is_scroll_container(style.overflow()) {
-        border_box
+        floor
     } else {
-        interior
+        interior.zip_map(floor, f32::max)
     }
 }
 

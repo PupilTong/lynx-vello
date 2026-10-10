@@ -3,11 +3,11 @@
 
 #![allow(clippy::float_cmp)]
 
-use euclid::default::Vector2D;
+use euclid::default::{Size2D, Vector2D};
 use stylo::queries::values::PrefersColorScheme;
 
 use crate::input::{InputEvent, PointerKind, PointerPhase};
-use crate::scroll::ScrollAxes;
+use crate::scroll::{ScrollAxes, ScrollBehavior};
 use crate::test_common::{Doc, device_with};
 use crate::visual::{PaintItemKind, PaintOrder};
 use crate::{NodeId, Point2D};
@@ -421,4 +421,75 @@ fn input_targets_through_the_scrolled_frame() {
     ));
 
     assert_eq!(target, Some(rows[1]));
+}
+
+const BORDERED_SCROLLER: &str = "page { display: flex; width: 800px; height: 600px; }
+     .scroller { display: flex; flex-direction: column; overflow-y: scroll;
+                 box-sizing: border-box; width: 100px; height: 100px;
+                 border: 10px solid black; padding: 5px; }
+     .row { flex-shrink: 0; width: 70px; }
+     .fit { height: 75px; }
+     .over { height: 78px; }";
+
+/// css-overflow-3 §3.3: the scrolling area is at the least the scroll
+/// container's own padding box, so an empty bordered scroller has no scroll
+/// range at all — its far border is outside the area, not scrollable
+/// content.
+#[test]
+fn an_empty_bordered_scroller_has_a_scrolling_area_the_size_of_its_scrollport() {
+    let mut h = Harness::new(BORDERED_SCROLLER);
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    h.doc.dom.layout();
+
+    let scroll_box = h.doc.dom.scroll_box(scroller).expect("scroller scrolls");
+    assert_eq!(scroll_box.scrollport, Size2D::new(80.0, 80.0));
+    assert_eq!(scroll_box.scroll_size, Size2D::new(80.0, 80.0));
+    assert_eq!(scroll_box.max_offset(), Vector2D::zero());
+    assert_eq!(
+        h.doc
+            .dom
+            .scroll_to_with(scroller, Vector2D::new(0.0, 40.0), ScrollBehavior::Instant),
+        Vector2D::zero(),
+        "a request past the range clamps to the top, not to the far border's width",
+    );
+    assert_eq!(h.doc.dom.scroll_offset(scroller), Vector2D::zero());
+}
+
+/// A child that ends exactly at the padding edge adds nothing to the
+/// scrolling area; one that ends past it by less than the far border's width
+/// adds exactly that overhang.
+#[test]
+fn a_child_ending_at_the_padding_edge_adds_no_scroll_range() {
+    let mut h = Harness::new(BORDERED_SCROLLER);
+    let root = h.root();
+    let fitted = h.el(root, "view.scroller");
+    // Content origin 15 + 75 = 90, the padding edge of the 100px box.
+    h.el(fitted, "view.row.fit");
+    let overflowing = h.el(root, "view.scroller");
+    // 15 + 78 = 93: 3px past the padding edge, inside the 10px border.
+    h.el(overflowing, "view.row.over");
+    h.doc.dom.layout();
+
+    let scroll_box = h.doc.dom.scroll_box(fitted).expect("scroller scrolls");
+    assert_eq!(scroll_box.scroll_size, Size2D::new(80.0, 80.0));
+    assert_eq!(scroll_box.max_offset(), Vector2D::zero());
+    assert_eq!(
+        h.doc
+            .dom
+            .scroll_to_with(fitted, Vector2D::new(0.0, 40.0), ScrollBehavior::Instant),
+        Vector2D::zero(),
+    );
+
+    let scroll_box = h.doc.dom.scroll_box(overflowing).expect("scroller scrolls");
+    assert_eq!(scroll_box.scroll_size, Size2D::new(80.0, 83.0));
+    assert_eq!(scroll_box.max_offset(), Vector2D::new(0.0, 3.0));
+    assert_eq!(
+        h.doc.dom.scroll_to_with(
+            overflowing,
+            Vector2D::new(0.0, 40.0),
+            ScrollBehavior::Instant
+        ),
+        Vector2D::new(0.0, 3.0),
+    );
 }

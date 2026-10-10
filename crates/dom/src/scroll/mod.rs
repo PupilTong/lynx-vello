@@ -473,6 +473,11 @@ pub(crate) fn resolve(
         (layout.size.width - layout.border.left - layout.border.right).max(0.0),
         (layout.size.height - layout.border.top - layout.border.bottom).max(0.0),
     );
+    // `content_size` is the scrollable overflow rectangle in border-box
+    // coordinates, floored at the padding box's far edge (css-overflow-3
+    // §3.3's "the scroll container's own padding box"), so less the start
+    // border it is the scrolling area from the scrollport's origin: an empty
+    // container's is its scrollport, whatever its far border.
     let scroll_size = Size2D::new(
         (layout.content_size.width - layout.border.left).max(scrollport.width),
         (layout.content_size.height - layout.border.top).max(scrollport.height),

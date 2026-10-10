@@ -25,8 +25,8 @@ use super::util::{
     axis_has_intrinsic_style, axis_sizing_is_stable, clamp_axis, container_content_independence,
     debug_assert_tree_order, edges_depend_on_inline_basis, is_scroll_container,
     normalize_content_alignment, normalize_item_alignment, own_scrollable_overflow,
-    relative_offset, resolve_container_box, resolve_gap, resolve_gap_axis, resolve_insets,
-    resolve_item_geometry, resolve_length_percentage, resolve_style_size,
+    padding_box_end, relative_offset, resolve_container_box, resolve_gap, resolve_gap_axis,
+    resolve_insets, resolve_item_geometry, resolve_length_percentage, resolve_style_size,
     sort_and_assign_layout_order, store_committed_child, style_size_behaves_auto,
     style_size_depends_on_basis,
 };
@@ -1641,14 +1641,13 @@ fn perform_in_flow_layout<T>(
     axes: Axes,
     inner_size: Size<f32>,
     content_origin: Point<f32>,
-    container_size: Size<f32>,
     scroll_container: bool,
 ) -> (Size<f32>, Option<f32>)
 where
     T: LayoutTree,
 {
     let parent_size = inner_size.map(Some);
-    let mut content_size = container_size;
+    let mut content_size = Size::ZERO;
     let mut first_baseline = None;
 
     for line in lines {
@@ -1772,7 +1771,7 @@ where
 {
     let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
     let parent_size = inner_size.map(Some);
-    let mut content_size = container_size;
+    let mut content_size = Size::ZERO;
     let padding_box_size = Size::new(
         (container_size.width - border.horizontal_sum()).max(0.0),
         (container_size.height - border.vertical_sum()).max(0.0),
@@ -2249,7 +2248,7 @@ where
         } else {
             provisional_baseline
         };
-        return LayoutOutput::new(outer_size, outer_size)
+        return LayoutOutput::new(outer_size, padding_box_end(outer_size, border))
             .with_first_baselines(Point::new(None, baseline));
     }
 
@@ -2261,7 +2260,6 @@ where
         axes,
         inner_size,
         content_origin,
-        outer_size,
         is_scroll_container(style.overflow()),
     );
     for (document_index, child) in hidden {
@@ -2277,10 +2275,10 @@ where
         border,
         content_size,
     );
-    // With no out-of-flow box to lay out, the pass answers `outer_size`.
+    // With no out-of-flow box to lay out, the pass adds nothing.
     let absolute_content_size =
         if absolute_items.is_empty() && !tree.has_hoisted_children(state, node) {
-            outer_size
+            Size::ZERO
         } else {
             perform_absolute_children(
                 tree,
@@ -2298,7 +2296,7 @@ where
             )
         };
     content_size = content_size.zip_map(absolute_content_size, f32::max);
-    let content_size = own_scrollable_overflow(&style, outer_size, content_size);
+    let content_size = own_scrollable_overflow(&style, outer_size, border, content_size);
 
     let baseline = if layout_contained {
         None

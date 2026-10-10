@@ -7,9 +7,10 @@ use stylo::values::computed::{PositionProperty, Size as StyleSize};
 use super::util::{
     Axis, ItemGeometry, ItemKey, OrderedItem, ResolvedContainerBox, accumulate_scrollable_overflow,
     axis_has_intrinsic_style, clamp_axis, container_content_independence, is_scroll_container,
-    item_value_stability, own_scrollable_overflow, relative_offset, resolve_container_box,
-    resolve_intrinsic, resolve_item_geometry_with_bases, resolve_length_percentage,
-    sort_and_assign_layout_order, store_committed_child, subtract_available_space,
+    item_value_stability, own_scrollable_overflow, padding_box_end, relative_offset,
+    resolve_container_box, resolve_intrinsic, resolve_item_geometry_with_bases,
+    resolve_length_percentage, sort_and_assign_layout_order, store_committed_child,
+    subtract_available_space,
 };
 use super::{AbsoluteContainingBlock, compute_absolute_layout_in};
 use crate::geometry::{Edges, Line, Point, Size};
@@ -894,8 +895,6 @@ fn measure_item<T>(
             floor.height,
         );
     }
-    output.content_size.width = output.content_size.width.max(output.size.width);
-    output.content_size.height = output.content_size.height.max(output.size.height);
     item.output = output;
     item.last_measure = Some(input);
     item.size_is_definite = Size::new(
@@ -1279,7 +1278,6 @@ fn commit_in_flow<T>(
     items: &mut [RelativeItem<T::NodeId>],
     content_size: Size<f32>,
     content_origin: Point<f32>,
-    container_size: Size<f32>,
     scroll_container: bool,
 ) -> Size<f32>
 where
@@ -1287,7 +1285,7 @@ where
 {
     let parent_size = content_size.map(Some);
     let available = content_size.map(AvailableSpace::Definite);
-    let mut scrollable_size = container_size;
+    let mut scrollable_size = Size::ZERO;
 
     for item in items {
         let mut input = LayoutInput::commit(
@@ -1345,7 +1343,7 @@ where
         (container_size.width - border.horizontal_sum()).max(0.0),
         (container_size.height - border.vertical_sum()).max(0.0),
     );
-    let mut scrollable_size = container_size;
+    let mut scrollable_size = Size::ZERO;
     super::util::debug_assert_tree_order(items.iter().map(|item| item.document_index));
     let mut hoisted = super::HoistedPass::new(padding_box_size, border, rtl);
     for pending in items {
@@ -1444,7 +1442,7 @@ where
                 max_size.height,
             ),
         );
-        return LayoutOutput::new(outer_size, outer_size);
+        return LayoutOutput::new(outer_size, padding_box_end(outer_size, border));
     }
 
     let initial_parent_size = Size::new(
@@ -1574,7 +1572,7 @@ where
         (outer_size.height - box_inset.height).max(0.0),
     );
     if !commits_layout {
-        return LayoutOutput::new(outer_size, outer_size);
+        return LayoutOutput::new(outer_size, padding_box_end(outer_size, border));
     }
 
     let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
@@ -1584,7 +1582,6 @@ where
         &mut items,
         content_size,
         content_origin,
-        outer_size,
         is_scroll_container(style.overflow()),
     );
     for (document_index, child) in hidden {
@@ -1600,9 +1597,9 @@ where
         border,
         scrollable_size,
     );
-    // With no out-of-flow box to lay out, the pass answers `outer_size`.
+    // With no out-of-flow box to lay out, the pass adds nothing.
     let out_of_flow_size = if absolute_items.is_empty() && !tree.has_hoisted_children(state, node) {
-        outer_size
+        Size::ZERO
     } else {
         commit_out_of_flow(
             tree,
@@ -1616,7 +1613,7 @@ where
     };
     scrollable_size = scrollable_size.zip_map(out_of_flow_size, f32::max);
 
-    let scrollable_size = own_scrollable_overflow(&style, outer_size, scrollable_size);
+    let scrollable_size = own_scrollable_overflow(&style, outer_size, border, scrollable_size);
     LayoutOutput::new(outer_size, scrollable_size)
 }
 
