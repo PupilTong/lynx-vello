@@ -1611,9 +1611,9 @@ mod vector_tests {
 
     /// What a host does with a document's bytes: parse them with the
     /// engine's parser and report the document through `parsed_document`.
-    /// The report carries the very document the host keeps, and applying it
-    /// settles a vector image with the document's natural size and an
-    /// encoded scene.
+    /// The report shares the host's parse rather than copying it, and
+    /// applying it encodes the scene there and then and settles a vector
+    /// image with the document's natural size.
     #[test]
     fn a_document_the_host_parsed_and_reported_settles_as_a_vector_image() {
         let ImageEvent::ParsedDocument { document, .. } = ImageEvent::parse_document(
@@ -1646,27 +1646,6 @@ mod vector_tests {
         let vector = vector.expect("a vector image");
         assert!(!vector.scene().encoding().is_empty());
         assert_eq!(vector.viewport(), (10.0, 10.0));
-    }
-
-    /// A parsed document is encoded at apply, on the thread that applies it.
-    #[test]
-    fn a_parsed_document_is_encoded_at_apply() {
-        let mut registry = ImageRegistry::default();
-        let mut context = Some(Box::new(TextContext::without_system_fonts()));
-        let event = ImageEvent::parse_document(
-            Arc::from("app:///icon.svg"),
-            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 10"><g opacity="0.5"><rect width="6" height="4"/></g></svg>"#,
-            DocumentKind::Svg,
-        );
-        assert!(matches!(event, ImageEvent::ParsedDocument { .. }));
-        let applied = registry
-            .apply(&event, &mut context)
-            .expect("the load moved the entry");
-        assert_eq!(applied.loaded, Some((300, 75)));
-        let (_, _, vector) = registry.resolve("app:///icon.svg").expect("loaded");
-        let vector = vector.expect("a vector image");
-        assert_eq!(vector.viewport(), (40.0, 10.0));
-        assert!(!vector.scene().encoding().is_empty());
     }
 
     /// A document that does not parse is the source's failure.
