@@ -209,8 +209,7 @@ fn run_group(style_threads: StyleThreads, link: GroupLink) {
     });
     // By value: the context — and with it this thread's one sender to
     // `bobcat-workers` — is dropped with the loop, which drops the queue, then
-    // the tasks, then shuts the runtime down without joining its blocking
-    // pool: a document parse still running there is detached, not waited for.
+    // the tasks, then the runtime.
     thread.run(group_task(context, attach));
     drop(thread);
 }
