@@ -593,12 +593,17 @@ impl ImageEvent {
     /// with a 2 MiB stack.
     #[must_use]
     pub fn parse_document(source: Arc<str>, bytes: &[u8], kind: DocumentKind) -> Self {
-        match parse_document(bytes, kind) {
-            Some(document) => Self::ParsedDocument {
+        let parsed = match kind {
+            DocumentKind::Svg => svg::parse(bytes),
+        };
+        // The error itself goes nowhere: the source's failure is what the
+        // document records, and the engine has no log to write it to.
+        match parsed {
+            Ok(document) => Self::ParsedDocument {
                 source,
                 document: Arc::new(document),
             },
-            None => Self::Failed { source },
+            Err(_) => Self::Failed { source },
         }
     }
 
@@ -609,15 +614,6 @@ impl ImageEvent {
             | Self::ParsedDocument { source, .. }
             | Self::Failed { source } => source,
         }
-    }
-}
-
-/// Parses `bytes` as a document of `kind`; `None` for one that does not
-/// parse. The error itself goes nowhere: the source's failure is what the
-/// document records, and the engine has no log to write the message to.
-fn parse_document(bytes: &[u8], kind: DocumentKind) -> Option<VectorDocument> {
-    match kind {
-        DocumentKind::Svg => svg::parse(bytes).ok(),
     }
 }
 
