@@ -14,7 +14,7 @@
 //! # `src` and `content`
 //!
 //! `src` is relayed as written to [`dom::Document::set_image_source`]: the
-//! host fetches it and reports the document's bytes, as it does for an
+//! host fetches it, parses the document and reports it, as it does for an
 //! `<image src="x.svg">`.
 //!
 //! `content` goes to [`dom::Document::set_image_document`] as its bytes. No
@@ -40,8 +40,9 @@
 //!
 //! Cost: a `content` document stays in the registry while some element
 //! presents it, and is forgotten with the last one (a new `content` or `src`
-//! on it, or its release). A `src` URL stays for the document's life, as
-//! every host source does.
+//! on it, or its release); the host keeps nothing of it, so markup that
+//! comes back after that is requested and parsed again. A `src` URL stays
+//! for the document's life, as every host source does.
 //!
 //! No `placeholder`, `mode` or `blur-radius`: neither reference has them on
 //! `<svg>`.
