@@ -922,9 +922,10 @@ const WATCHED_SCROLLPORT: usize = 100;
 /// Defines `watcher` as `x-watcher` and builds one under the card's page
 /// element, beside a column scroller of [`WATCHED_ROWS`] rows, then creates
 /// the watcher's observer — root the scroller, thresholds `[0, 0.5, 1]` —
-/// and observes every row, in row order. One probe, because an
-/// `Element`-owned observer needs its owner constructed, which
-/// `create_element` has done by the time it returns.
+/// and observes every row, in row order, through a `dom::ElementHandler`
+/// bound to the watcher. One probe, because the handler is bound to a live
+/// element and hears only a constructed one, which `create_element` has made
+/// by the time it returns.
 ///
 /// The watcher is positioned out of flow, so the scroller and its rows lay
 /// out exactly as they would without it. Returns the scroller, which a
@@ -967,7 +968,7 @@ async fn build_watched_rows(
             .collect();
 
         let observer = document.create_intersection_observer(
-            dom::IntersectionObserverOwner::Element(watcher),
+            Box::new(dom::ElementHandler(watcher)),
             Some(scroller),
             dom::RootMargin::ZERO,
             vec![0.0, 0.5, 1.0],
@@ -992,7 +993,7 @@ fn watched(
 }
 
 /// The W3C "queue an intersection observer task": the entry whose epilogue
-/// ran the update only queues what it found, and the observer's owner hears
+/// ran the update only queues what it found, and the observer's handler hears
 /// it from an entry of its own — one per batch, whether or not the update's
 /// own entry committed anything.
 ///

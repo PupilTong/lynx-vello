@@ -362,10 +362,11 @@ pub(crate) fn take_watched(log: &WatcherLog) -> Vec<String> {
     std::mem::take(&mut *log.lock().expect("the log is never poisoned"))
 }
 
-/// An engine component that owns intersection observers, for the tests that
-/// pin when their entries are delivered: a `dom::CustomElement` defined by
-/// the test itself, through a document probe, rather than a component the
-/// engine ships.
+/// An engine component that observes intersection, for the tests that pin
+/// when its entries are delivered: a `dom::CustomElement` defined by the test
+/// itself, through a document probe, rather than a component the engine
+/// ships. Its observers are created with a `dom::ElementHandler` naming it,
+/// which calls its `intersections_changed`.
 ///
 /// It records every entry it hears as `observer:target:intersecting:ratio`,
 /// naming the target by its `id` attribute, and does nothing on connection —

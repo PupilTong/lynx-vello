@@ -1440,16 +1440,17 @@ impl MainThreadRuntime {
             .is_some_and(|document| document.update_intersection_observations(time))
     }
 
-    /// Delivers every observer's queued entries to whoever owns it, in
-    /// creation order — "notify intersection observers"
+    /// Delivers every observer's queued entries to its handler, in creation
+    /// order — "notify intersection observers"
     /// ([§3.2.5](https://w3c.github.io/IntersectionObserver/#notify-intersection-observers-algo)),
-    /// with the call routed by the observer's owner.
+    /// which `dom` runs whole, call included.
     ///
-    /// An [`dom::IntersectionObserverOwner::Element`] observer belongs to one
-    /// of the engine's own components, a `dom::CustomElement` definition:
-    /// `dom` calls that element's `intersections_changed` hook in its own
-    /// `[CEReactions]` scope, and drops the entries if the element has been
-    /// freed since. **No realm is entered** for one, as for
+    /// Every observer this runtime creates today belongs to one of the
+    /// engine's own components, a `dom::CustomElement` definition, through a
+    /// [`dom::ElementHandler`]: `dom` calls that element's
+    /// `intersections_changed` hook in its own `[CEReactions]` scope, and
+    /// drops the entries if the element is not a constructed component.
+    /// **No realm is entered** for one, as for
     /// [`Self::dispatch_content_visibility_changes`]: it has no script form,
     /// and nothing about it is published to the painting or the background
     /// side.
@@ -1458,33 +1459,22 @@ impl MainThreadRuntime {
     /// delivery entry's own epilogue, whose update then runs again against
     /// the new frame.
     ///
-    /// `js` is taken for the other owner. No
-    /// [`dom::IntersectionObserverOwner::Host`] observer is created by this
-    /// runtime yet; the MTS `IntersectionObserver` binding is what will
-    /// create them, and it fills that arm with the realm call, so the
-    /// signature already has what the arm will need.
+    /// `js` stays for the realm's observers. The MTS `IntersectionObserver`
+    /// binding's handler cannot call the realm from inside `dom`'s loop —
+    /// the realm is not the document's to lend — so it queues
+    /// `(observer, entries)` on a runtime queue, the `ComponentEvents` shape,
+    /// and this same entry drains that queue into the realm after the loop:
+    /// the entries encoded into one export call per observer, a callback
+    /// that throws reported as `ListenerFailed` with the rest still
+    /// delivered. The realm borrow therefore stays here.
     pub(crate) fn notify_intersection_observers(&mut self, js: &mut ScriptRuntime) {
-        let mut slot = self.slot.borrow_mut();
-        let document = slot.document_mut();
-        for notification in document.take_intersection_notifications() {
-            match notification.owner {
-                dom::IntersectionObserverOwner::Element(element) => document
-                    .deliver_intersections_to_element(
-                        element,
-                        notification.observer,
-                        notification.entries,
-                    ),
-                dom::IntersectionObserverOwner::Host => {
-                    // Nothing creates a host-owned observer yet. The MTS
-                    // `IntersectionObserver` binding delivers these to the
-                    // realm through `js` — the entries encoded into one
-                    // export call per observer — and reports a callback that
-                    // throws as `ListenerFailed`, the standing every listener
-                    // here has, with the rest of the batch still delivered.
-                    let _ = js;
-                }
-            }
-        }
+        self.slot
+            .borrow_mut()
+            .document_mut()
+            .notify_intersection_observers();
+        // The realm's half: the binding's queue is drained here, after the
+        // loop, once the binding exists.
+        let _ = js;
     }
 
     /// When the earliest armed timer comes due, if one is armed, for a test

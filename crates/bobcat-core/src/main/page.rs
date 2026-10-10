@@ -385,18 +385,19 @@ impl Page {
     /// in between delivers nothing.
     ///
     /// **Nothing here enters JavaScript yet.** No observer is the realm's
-    /// today: an `Element`-owned one belongs to one of the engine's own
-    /// components, whose `intersections_changed` hook `dom` calls, and the
+    /// today: every one belongs to one of the engine's own components, whose
+    /// `intersections_changed` hook its `dom::ElementHandler` calls, and the
     /// realm's will be the MTS `IntersectionObserver` binding's, which is
     /// what will make this entry call into script. It goes through
     /// [`owner::enter`] all the same, because everything that touches this
     /// view's document does.
     ///
-    /// One entry for every observer's queue, in creation order. The latch is
-    /// cleared at the start, before the drain, as §3.2.5's first step clears
-    /// the flag: what a hook's own mutation moves is seen by this entry's
-    /// epilogue, whose update queues a batch of its own, and that batch owes
-    /// an entry of its own too.
+    /// One entry for every observer's queue, in creation order: `dom` runs
+    /// the loop and calls each observer's handler. The latch is cleared at
+    /// the start, before the loop, as §3.2.5's first step clears the flag:
+    /// what a hook's own mutation moves is seen by this entry's epilogue,
+    /// whose update queues a batch of its own, and that batch owes an entry
+    /// of its own too.
     ///
     /// The chain ends where the observations stop moving: the epilogue's
     /// update queues an entry only where a target's `(thresholdIndex,
@@ -411,7 +412,7 @@ impl Page {
     fn post_intersection_notifications(self: &Rc<Self>) {
         let page = Rc::clone(self);
         drop(owner::enter(self, move |runtime, js| {
-            // Cleared before the drain, not after: what a hook moves is a
+            // Cleared before the loop, not after: what a hook moves is a
             // batch of this entry's own epilogue, which owes an entry of
             // its own.
             page.intersections_posted.set(false);

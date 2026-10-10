@@ -82,7 +82,7 @@ pub struct Document<T> {
     /// ([`crate::visual::intersection`]). A field rather than a
     /// [`TreeArenas`] table: nothing in style, layout or paint reads it, and
     /// its one reader, the update, holds the document mutably.
-    pub(crate) intersections: crate::visual::intersection::IntersectionObservers,
+    pub(crate) intersections: crate::visual::intersection::IntersectionObservers<T>,
     pending_snapshots: SnapshotMap,
     relayout_roots: Vec<PendingRelayout>,
     relayout_root_ids: FxHashSet<NodeId>,
@@ -863,13 +863,14 @@ impl<T> Document<T> {
             .remove(&OpaqueNode(id.arena_key()))
             .is_some();
         self.animations.forget(&[id]);
-        // An intersection observer names nodes three ways — as its owner, as
-        // a target, as its root — and an entry names its target. This is the
-        // one place a name stops meaning anything, and an id retired here is
-        // never reissued, so the registry forgets the node here, before the
-        // arenas do: an observer never outlives its element owner, an entry
-        // handed out always names a live node, and a freed root becomes one
-        // whose targets report leaving. One test when nothing observes.
+        // An intersection observer names nodes three ways — as the node its
+        // handler is bound to, as a target, as its root — and an entry names
+        // its target. This is the one place a name stops meaning anything,
+        // and an id retired here is never reissued, so the registry forgets
+        // the node here, before the arenas do: an observer never outlives the
+        // node it is bound to, an entry handed out always names a live node,
+        // and a freed root becomes one whose targets report leaving. One test
+        // when nothing observes.
         if !self.intersections.is_empty() {
             self.intersections.forget_node(id);
         }

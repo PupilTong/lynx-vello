@@ -721,22 +721,24 @@ the embedder's to fire, and there is no focus, no source or trigger, and no
 ## Intersection observations
 
 The Intersection Observer primitive lives in `visual/intersection/`:
-`geometry.rs` is §3.2.7 "compute the intersection", `mod.rs` the registry
-and §3.2.10 "update intersection observations". It is Rust-only
+`geometry.rs` is §3.2.7 "compute the intersection", `mod.rs` the registry,
+§3.2.10 "update intersection observations" and §3.2.5 "notify intersection
+observers". It is Rust-only
 (user-directed 2026-10-08): no script constructor exists yet, and the
 consumers are the engine's own components and, later, a realm binding.
 
-**Registry.** `Document.intersections` is a `Vec` of observers in creation
-order — the spec's notify order — each with an owner tag
-(`IntersectionObserverOwner::Element(node)`, a constructed custom element,
-or `Host`, the embedder's), a root (`Implicit`, `Element(node)`, or `Freed`
-once that element is gone), a `RootMargin`, sorted thresholds (`[0]` when
-empty) and its registrations: a target and the `(thresholdIndex,
-isIntersecting)` pair the last update stored, `None` until the first one so
-that update always queues. Ids are monotone and never reissued; a dropped
-id is a caller bug (a panic), like a freed `NodeId`. A `Document` field, not
-a `TreeArenas` table: nothing in style, layout or paint reads it, and the
-one reader holds `&mut Document`.
+**Registry.** `Document.intersections` is a `Vec` of
+`IntersectionObserver<T>`s in creation order — the spec's notify order, and
+ascending by id, so a lookup is a binary search — each with a handler
+(`Box<dyn IntersectionEventHandler<T>>`), the node that handler is bound to
+(cached at creation), a root (`IntersectionObserverRoot::Implicit`,
+`Element(node)`, or `Freed` once that element is gone), a `RootMargin`,
+sorted thresholds (`[0]` when empty) and its registrations: a target and the
+`(thresholdIndex, isIntersecting)` pair the last update stored, `None` until
+the first one so that update always queues. Ids are monotone and never
+reissued; a dropped id is a caller bug (a panic), like a freed `NodeId`. A
+`Document` field, not a `TreeArenas` table: nothing in style, layout or
+paint reads it, and the one reader holds `&mut Document`.
 
 **The update** (`update_intersection_observations(time)`) runs no pass: it
 reads the last layout, the live scroll offsets, sticky and anchor shifts
@@ -752,16 +754,29 @@ and an entry is queued iff the pair moved. A `Freed` or unrendered root
 makes every target unrendered, so each intersecting one gets one leave
 entry.
 
-**Delivery is the host's.** `take_intersection_notifications` hands out
-`(observer, owner, entries)` in creation order and drains; `dom` invokes
-nothing itself. `deliver_intersections_to_element(element, observer,
-entries)` is the `Element` owner's half: the element's
-`CustomElement::intersections_changed` hook inside one `[CEReactions]`
-scope, as `dispatch_element_event` wraps `handle_event`; an element freed or
-not constructed drops its entries. The host calls both from a posted task,
-never inside the commit — the spec's "queue an intersection observer task".
-`disconnect` unregisters the targets and keeps the queue, as `unobserve`
-does; `takeRecords` or the next delivery still hands those entries out.
+**Delivery is a boxed handler per observer.** `notify_intersection_observers`
+is §3.2.5's whole loop, call included: the ids with entries queued, in
+creation order, each looked up again when its turn comes; its queue and its
+handler are taken out, `IntersectionEventHandler::notify(document, id,
+entries)` is called, and the handler goes back unless the observer was
+dropped meanwhile. A handler may mutate the tree and create, observe
+through, disconnect or drop any observer, its own included; a loop run from
+inside a notification skips the observer whose handler is out and leaves its
+new entries queued for the next loop. The loop opens no `[CEReactions]`
+scope. `dyn` is the user's ruling (2026-10-10), chosen for simplicity: one
+document holds observers of any number of handler types, and no host type is
+threaded through `Document<T>`, for one `Box` per observer and one indirect
+call per delivery. `ElementHandler(node)` is `dom`'s handler for an engine
+component: the element's `CustomElement::intersections_changed` hook inside
+one `[CEReactions]` scope, as `dispatch_element_event` wraps `handle_event`;
+an element not constructed drops its entries. A realm's observer cannot call
+the realm from inside the loop — the realm is not the document's to lend —
+so the MTS binding's handler will queue `(observer, entries)` on a runtime
+queue that the host drains into the realm after the loop. The host runs the
+loop from a posted task, never inside the commit — the spec's "queue an
+intersection observer task". `disconnect` unregisters the targets and keeps
+the queue, as `unobserve` does; `takeRecords` or the next delivery still
+hands those entries out.
 
 **Geometry** (`geometry.rs`, its module doc is the algorithm): the target's
 border box is carried up the containing-block chain — the
@@ -788,10 +803,13 @@ stays transform-free; out by design: `clip-path`, masks, rounded corners,
 `position-visibility` (a hidden box stays geometric).
 
 **Node lifetime.** `free_node` — the one retirement path — drops the
-observers an `Element(id)` owns, removes `id` from every target list, drops
-queued entries naming it, and turns an `Element(id)` root into `Freed`. A
-`Host` observer lives until `drop_intersection_observer`. An unlinked but
-live target stays observed and reports not rendered at the next update.
+observers whose handler is bound to `id` (`IntersectionEventHandler::bound_to`,
+asked once at creation, which asserts the node is live; an observer whose
+notification is running loses its handler when that returns), removes `id`
+from every target list, drops queued entries naming it, and turns an
+`Element(id)` root into `Freed`. An observer bound to no node lives until
+`drop_intersection_observer`. An unlinked but live target stays observed
+and reports not rendered at the next update.
 
 ## Scroll, input and event paths
 

@@ -218,25 +218,21 @@ pub trait CustomElement<T> {
     }
 
     /// Entries one of this element's intersection observers queued — the
-    /// observers it created with an
-    /// [`IntersectionObserverOwner::Element`](crate::IntersectionObserverOwner::Element)
-    /// owner naming itself.
+    /// observers created with an [`ElementHandler`](crate::ElementHandler)
+    /// naming this element.
     ///
-    /// Not a lifecycle callback either: it is called by
-    /// [`Document::deliver_intersections_to_element`], which the host calls
-    /// for each `Element`-owned notification
-    /// [`Document::take_intersection_notifications`] hands it — from a
-    /// delivery of its own, after the update that queued them, never inside
-    /// a render or a commit. `observer` says which of the element's
-    /// observers this is ([`Document::intersection_observers_owned_by`]
-    /// lists them in creation order); `entries` are in the order the updates
-    /// queued them.
+    /// Not a lifecycle callback either: it is called by that handler's
+    /// [`IntersectionEventHandler::notify`](crate::IntersectionEventHandler::notify)
+    /// from [`Document::notify_intersection_observers`], which the host runs
+    /// from a delivery of its own, after the update that queued them, never
+    /// inside a render or a commit. `observer` says which of the element's
+    /// observers this is — the id
+    /// [`Document::create_intersection_observer`] answered; `entries` are in
+    /// the order the updates queued them.
     ///
     /// **This path never reaches script**, as [`Self::handle_event`]'s does
     /// not: it is how the engine's own components observe intersection. A
-    /// realm's observer is a
-    /// [`IntersectionObserverOwner::Host`](crate::IntersectionObserverOwner::Host)
-    /// one, delivered by the embedder.
+    /// realm's observer carries a handler of its own.
     ///
     /// Each call is its own `[CEReactions]` scope: the reactions the
     /// handler's mutations raise run before the delivery returns. A panic

@@ -1586,11 +1586,14 @@ yet). The page's epilogue runs `Document::update_intersection_observations`
 right after its commit — whether or not that commit built a frame, because a
 scroll adopted inside the encode window commits nothing and still moves every
 answer — and, when a registration crossed a threshold, posts one fresh entry
-whose job is `take_intersection_notifications` and routing: an observer owned
-by an element is delivered through `deliver_intersections_to_element` to its
-`CustomElement::intersections_changed` hook, one reaction scope per call; a
-`Host`-owned observer has no consumer in this runtime yet (the MTS binding's
-seam). The update is the spec's §3.2.10 pass — threshold index and
+whose job is `Document::notify_intersection_observers`, §3.2.5's whole loop:
+each observer's boxed `IntersectionEventHandler` is called in creation order
+(`dyn`, user ruling 2026-10-10, for simplicity). An engine component's
+observer carries `ElementHandler(node)`, which calls its
+`CustomElement::intersections_changed` hook, one reaction scope per call, and
+is bound to the element; the MTS binding's handler will queue
+`(observer, entries)` on a runtime queue the same entry drains into the realm
+after the loop. The update is the spec's §3.2.10 pass — threshold index and
 `isIntersecting` compared with the registration's previous pair — over
 transform-aware, clip-aware geometry; see `docs/dom-architecture.md`
 "Intersection observations".
@@ -2695,16 +2698,19 @@ Rulings and limits to know before touching it:
   shown, `beforetoggle`/`toggle` are the embedder's to fire, and no script
   reaches a popover (`docs/style-assumptions.md` §31).
 - A W3C **IntersectionObserver primitive** (`crates/dom/src/visual/intersection/`,
-  user-directed 2026-10-08, Rust-only): observers carry an owner tag
-  (`Element(node)`, a constructed custom element the observer is dropped
-  with, or `Host`), an implicit or element root, a `rootMargin`, sorted
-  thresholds and ordered targets. `update_intersection_observations(time)`
-  is §3.2.10 over the last layout and the live scroll offsets — run by the
-  host after each commit or adopted scroll, gated by a stale bit `render`, a
-  moved `scroll_to` and `observe` set — and `take_intersection_notifications`
-  hands the queued entries out in creation order for the host to route;
-  `deliver_intersections_to_element` calls `CustomElement::intersections_changed`
-  in its own reaction scope. Geometry includes transforms (the painter's
+  user-directed 2026-10-08, Rust-only): observers carry a
+  `Box<dyn IntersectionEventHandler<T>>` (user ruling 2026-10-10: `dyn` for
+  simplicity, so one document holds any number of handler types with no new
+  bound on `Document<T>`; one `Box` per observer, one indirect call per
+  delivery), the node that handler is bound to (the observer is dropped with
+  it), an implicit or element root, a `rootMargin`, sorted thresholds and
+  ordered targets. `update_intersection_observations(time)` is §3.2.10 over
+  the last layout and the live scroll offsets — run by the host after each
+  commit or adopted scroll, gated by a stale bit `render`, a moved
+  `scroll_to` and `observe` set — and `notify_intersection_observers` is
+  §3.2.5's whole loop, re-entrant: each handler is out of its observer only
+  while its own notification runs. `ElementHandler(node)` calls
+  `CustomElement::intersections_changed` in its own reaction scope. Geometry includes transforms (the painter's
   `ContextMatrix`), clips through every on-chain overflow-clipping ancestor's
   padding box edge-inclusively (Chromium's `isIntersecting`), resolves
   `rootMargin` percentages by height/width, and reports skipped contents as

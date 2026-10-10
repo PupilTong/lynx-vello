@@ -1,22 +1,27 @@
 //! Intersection observers (`dom::visual::intersection`) through a real
 //! document: the registry, the spec's "update intersection observations"
-//! steps (§3.2.10), the owner-tagged delivery, and node lifetime.
+//! steps (§3.2.10), the "notify intersection observers" loop (§3.2.5) over
+//! boxed handlers, and node lifetime.
 //!
-//! `Host`-owned observers are read through `take_intersection_records` and
-//! `take_intersection_notifications`; the `Element` owner's delivery runs
-//! through a recording component.
+//! Every handler here is a test struct implementing
+//! `IntersectionEventHandler<()>`, several types in one document: a
+//! [`Recorder`] that only logs, and handlers that log and then mutate the
+//! tree, drop an observer, create one, or run the loop again. Observers whose
+//! handler only logs are also read through `take_intersection_records`; an
+//! engine component's deliver through `ElementHandler` to a recording
+//! component.
 
 #![allow(clippy::float_cmp)]
 
 mod common;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use common::{Doc, device};
 use dom::{
-    CustomElement, Document, IntersectionObserverEntry, IntersectionObserverId,
-    IntersectionObserverOwner, NodeId, Rect, RootMargin, Vector2D,
+    CustomElement, Document, ElementHandler, IntersectionEventHandler, IntersectionObserverEntry,
+    IntersectionObserverId, IntersectionObserverRoot, NodeId, Rect, RootMargin, Vector2D,
 };
 
 /// Every box is a flex container, and a `view` a non-shrinking one, so the
@@ -26,13 +31,190 @@ const BASE: &str = "page { display: flex; } view { display: flex; flex-shrink: 0
 /// The time every update in these cases runs with.
 const TIME: f64 = 12.5;
 
+type Log = Rc<RefCell<Vec<String>>>;
+
+/// What a handler writes for one notification:
+/// `observer N: target:intersecting,…`.
+fn heard(observer: IntersectionObserverId, entries: &[IntersectionObserverEntry]) -> String {
+    let targets: Vec<String> = entries
+        .iter()
+        .map(|entry| format!("{}:{}", entry.target, entry.is_intersecting))
+        .collect();
+    format!("observer {}: {}", observer.get(), targets.join(","))
+}
+
+/// What every test handler does first: checks that its own handler is out of
+/// its observer while it runs, and logs what it heard.
+fn hear(
+    log: &Log,
+    document: &Document<()>,
+    observer: IntersectionObserverId,
+    entries: &[IntersectionObserverEntry],
+) {
+    assert!(
+        document.intersection_observer(observer).handler().is_none(),
+        "a handler is out of its observer while its notification runs"
+    );
+    log.borrow_mut().push(heard(observer, entries));
+}
+
+/// Only logs; bound to `bound`, if any.
+struct Recorder {
+    log: Log,
+    bound: Option<NodeId>,
+}
+
+impl IntersectionEventHandler<()> for Recorder {
+    fn notify(
+        &mut self,
+        document: &mut Document<()>,
+        observer: IntersectionObserverId,
+        entries: Vec<IntersectionObserverEntry>,
+    ) {
+        hear(&self.log, document, observer, &entries);
+    }
+
+    fn bound_to(&self) -> Option<NodeId> {
+        self.bound
+    }
+}
+
+/// Logs, then appends a `view` to `parent`.
+struct Appender {
+    log: Log,
+    parent: NodeId,
+}
+
+impl IntersectionEventHandler<()> for Appender {
+    fn notify(
+        &mut self,
+        document: &mut Document<()>,
+        observer: IntersectionObserverId,
+        entries: Vec<IntersectionObserverEntry>,
+    ) {
+        hear(&self.log, document, observer, &entries);
+        let child = document.create_element("view", ());
+        document.append_child(self.parent, child);
+        self.log.borrow_mut().push(format!("appended {child}"));
+    }
+}
+
+/// Logs, then drops the observer `victim` names — its own when `None`. The
+/// victim is a cell so a test can name an observer created after this one.
+/// `_alive` counts the droppers not yet dropped.
+struct Dropper {
+    log: Log,
+    victim: Rc<Cell<Option<IntersectionObserverId>>>,
+    _alive: Rc<()>,
+}
+
+impl IntersectionEventHandler<()> for Dropper {
+    fn notify(
+        &mut self,
+        document: &mut Document<()>,
+        observer: IntersectionObserverId,
+        entries: Vec<IntersectionObserverEntry>,
+    ) {
+        hear(&self.log, document, observer, &entries);
+        let victim = self.victim.get().unwrap_or(observer);
+        document.drop_intersection_observer(victim);
+        self.log
+            .borrow_mut()
+            .push(format!("dropped {}", victim.get()));
+    }
+}
+
+/// Logs, then creates a [`Recorder`] observer of the viewport and observes
+/// `target` through it.
+struct Spawner {
+    log: Log,
+    target: NodeId,
+}
+
+impl IntersectionEventHandler<()> for Spawner {
+    fn notify(
+        &mut self,
+        document: &mut Document<()>,
+        observer: IntersectionObserverId,
+        entries: Vec<IntersectionObserverEntry>,
+    ) {
+        hear(&self.log, document, observer, &entries);
+        let spawned = document.create_intersection_observer(
+            Box::new(Recorder {
+                log: Rc::clone(&self.log),
+                bound: None,
+            }),
+            None,
+            RootMargin::ZERO,
+            Vec::new(),
+        );
+        document.observe_intersection(spawned, self.target);
+        self.log
+            .borrow_mut()
+            .push(format!("spawned {}", spawned.get()));
+    }
+}
+
+/// Logs, then moves `target` out of the viewport, renders, updates, and runs
+/// the notify loop again from inside its own notification.
+struct Renotifier {
+    log: Log,
+    target: NodeId,
+}
+
+impl IntersectionEventHandler<()> for Renotifier {
+    fn notify(
+        &mut self,
+        document: &mut Document<()>,
+        observer: IntersectionObserverId,
+        entries: Vec<IntersectionObserverEntry>,
+    ) {
+        hear(&self.log, document, observer, &entries);
+        document.set_inline_style(self.target, "transform: translateY(1000px)");
+        document.render();
+        document.update_intersection_observations(TIME);
+        document.notify_intersection_observers();
+        self.log.borrow_mut().push("renotified".to_owned());
+    }
+}
+
+/// Runs the notify loop and answers what the handlers logged, leaving `log`
+/// empty.
+fn notify(doc: &mut Doc, log: &Log) -> Vec<String> {
+    doc.dom.notify_intersection_observers();
+    std::mem::take(&mut *log.borrow_mut())
+}
+
 fn page(css: &str) -> Doc {
     Doc::with_css(&format!("{BASE}\n{css}"))
 }
 
-fn host(doc: &mut Doc, root: Option<NodeId>, thresholds: &[f64]) -> IntersectionObserverId {
+/// An observer whose [`Recorder`] logs into `log` and is bound to `bound`.
+fn recording(
+    doc: &mut Doc,
+    log: &Log,
+    bound: Option<NodeId>,
+    root: Option<NodeId>,
+) -> IntersectionObserverId {
     doc.dom.create_intersection_observer(
-        IntersectionObserverOwner::Host,
+        Box::new(Recorder {
+            log: Rc::clone(log),
+            bound,
+        }),
+        root,
+        RootMargin::ZERO,
+        Vec::new(),
+    )
+}
+
+/// An unbound observer whose [`Recorder`] logs where no one reads, for the
+/// cases that read it through `take_intersection_records`.
+fn unbound(doc: &mut Doc, root: Option<NodeId>, thresholds: &[f64]) -> IntersectionObserverId {
+    doc.dom.create_intersection_observer(
+        Box::new(Recorder {
+            log: Log::default(),
+            bound: None,
+        }),
         root,
         RootMargin::ZERO,
         thresholds.to_vec(),
@@ -70,8 +252,6 @@ fn records(doc: &mut Doc, observer: IntersectionObserverId) -> Vec<(NodeId, bool
     states(&doc.dom.take_intersection_records(observer))
 }
 
-type Log = Rc<RefCell<Vec<String>>>;
-
 /// A component that records its connection and every delivery it hears,
 /// and appends a `child` element from its hook when it has one.
 struct Probe {
@@ -91,15 +271,9 @@ impl CustomElement<()> for Probe {
         observer: IntersectionObserverId,
         entries: Vec<IntersectionObserverEntry>,
     ) {
-        let targets: Vec<String> = entries
-            .iter()
-            .map(|entry| format!("{}:{}", entry.target, entry.is_intersecting))
-            .collect();
-        self.log.borrow_mut().push(format!(
-            "observer {} at {element}: {}",
-            observer.get(),
-            targets.join(",")
-        ));
+        self.log
+            .borrow_mut()
+            .push(format!("{} at {element}", heard(observer, &entries)));
         if let Some(tag) = self.child {
             let child = document.create_element(tag, ());
             document.append_child(element, child);
@@ -130,9 +304,11 @@ fn components(css: &str) -> (Doc, Log) {
     (doc, log)
 }
 
-fn element_owned(doc: &mut Doc, owner: NodeId) -> IntersectionObserverId {
+/// An observer of the viewport delivering through an [`ElementHandler`] to
+/// `element`'s component, and so bound to it.
+fn element_owned(doc: &mut Doc, element: NodeId) -> IntersectionObserverId {
     doc.dom.create_intersection_observer(
-        IntersectionObserverOwner::Element(owner),
+        Box::new(ElementHandler(element)),
         None,
         RootMargin::ZERO,
         Vec::new(),
@@ -149,7 +325,7 @@ fn the_first_update_after_observe_queues_one_entry_per_target() {
     );
     let inside = doc.el(doc.root, "view.cell");
     let outside = doc.el(doc.root, "view.cell.below");
-    let observer = host(&mut doc, None, &[]);
+    let observer = unbound(&mut doc, None, &[]);
     doc.dom.observe_intersection(observer, inside);
     doc.dom.observe_intersection(observer, outside);
     doc.dom.render();
@@ -191,7 +367,7 @@ fn the_first_update_after_observe_queues_one_entry_per_target() {
 fn no_update_runs_before_the_first_render() {
     let mut doc = page(".cell { width: 100px; height: 100px; }");
     let cell = doc.el(doc.root, "view.cell");
-    let observer = host(&mut doc, None, &[]);
+    let observer = unbound(&mut doc, None, &[]);
     doc.dom.observe_intersection(observer, cell);
     doc.flush();
     assert!(!update(&mut doc), "no frame was ever committed");
@@ -218,7 +394,7 @@ fn thresholds_are_crossed_both_ways_by_scrolling_alone() {
     let scroller = doc.el(doc.root, "view.scroller");
     doc.el(scroller, "view.spacer");
     let cell = doc.el(scroller, "view.cell");
-    let observer = host(&mut doc, None, &[1.0, 0.0, 0.5]);
+    let observer = unbound(&mut doc, None, &[1.0, 0.0, 0.5]);
     doc.dom.observe_intersection(observer, cell);
     doc.dom.render();
     assert!(update(&mut doc));
@@ -260,7 +436,7 @@ fn a_zero_area_target_on_the_edge_intersects_with_ratio_one() {
     );
     let spacer = doc.el(doc.root, "view.spacer");
     let sentinel = doc.el(doc.root, "view.sentinel");
-    let observer = host(&mut doc, None, &[]);
+    let observer = unbound(&mut doc, None, &[]);
     doc.dom.observe_intersection(observer, sentinel);
     doc.dom.render();
     assert!(update(&mut doc));
@@ -282,7 +458,7 @@ fn a_transform_moves_a_target_out() {
          .target {{ width: 100px; height: 100px; }}"
     ));
     let target = doc.el(doc.root, "view.target");
-    let observer = host(&mut doc, None, &[]);
+    let observer = unbound(&mut doc, None, &[]);
     doc.dom.observe_intersection(observer, target);
     doc.dom.render();
     update(&mut doc);
@@ -308,7 +484,7 @@ fn a_target_outside_its_root_reports_once_with_the_roots_bounds() {
     let mut doc = page(".cell { width: 100px; height: 100px; }");
     let target = doc.el(doc.root, "view.cell");
     let root = doc.el(doc.root, "view.cell");
-    let observer = host(&mut doc, Some(root), &[]);
+    let observer = unbound(&mut doc, Some(root), &[]);
     doc.dom.observe_intersection(observer, target);
     doc.dom.render();
     assert!(update(&mut doc));
@@ -328,7 +504,7 @@ fn a_target_outside_its_root_reports_once_with_the_roots_bounds() {
 fn observing_twice_is_observing_once() {
     let mut doc = page(".cell { width: 100px; height: 100px; }");
     let cell = doc.el(doc.root, "view.cell");
-    let observer = host(&mut doc, None, &[]);
+    let observer = unbound(&mut doc, None, &[]);
     doc.dom.observe_intersection(observer, cell);
     doc.dom.render();
     update(&mut doc);
@@ -341,7 +517,7 @@ fn observing_twice_is_observing_once() {
 fn unobserving_stops_entries() {
     let mut doc = page(".cell { width: 100px; height: 100px; }");
     let cell = doc.el(doc.root, "view.cell");
-    let observer = host(&mut doc, None, &[]);
+    let observer = unbound(&mut doc, None, &[]);
     doc.dom.observe_intersection(observer, cell);
     doc.dom.render();
     update(&mut doc);
@@ -360,7 +536,7 @@ fn disconnecting_clears_targets_but_keeps_the_queue() {
     let mut doc = page(".cell { width: 100px; height: 100px; }");
     let first = doc.el(doc.root, "view.cell");
     let second = doc.el(doc.root, "view.cell");
-    let observer = host(&mut doc, None, &[]);
+    let observer = unbound(&mut doc, None, &[]);
     doc.dom.observe_intersection(observer, first);
     doc.dom.observe_intersection(observer, second);
     doc.dom.render();
@@ -390,7 +566,7 @@ fn disconnecting_clears_targets_but_keeps_the_queue() {
 fn taking_records_empties_the_queue() {
     let mut doc = page(".cell { width: 100px; height: 100px; }");
     let cell = doc.el(doc.root, "view.cell");
-    let observer = host(&mut doc, None, &[]);
+    let observer = unbound(&mut doc, None, &[]);
     doc.dom.observe_intersection(observer, cell);
     doc.dom.render();
     update(&mut doc);
@@ -398,84 +574,146 @@ fn taking_records_empties_the_queue() {
     assert_eq!(records(&mut doc, observer), vec![(cell, true, 1.0)]);
     assert!(doc.dom.take_intersection_records(observer).is_empty());
     assert!(!doc.dom.has_pending_intersection_notifications());
-    assert!(doc.dom.take_intersection_notifications().is_empty());
+    let log = Log::default();
+    assert!(
+        notify(&mut doc, &log).is_empty(),
+        "nothing is left to notify"
+    );
 }
 
 #[test]
-fn notifications_come_in_creation_order_and_drain() {
-    let (mut doc, _) = components(".cell { width: 100px; height: 100px; }");
+fn an_observer_reads_back_what_it_was_created_with() {
+    let (mut doc, log) = components(".cell { width: 100px; height: 100px; }");
+    let probe = doc.el(doc.root, "x-probe.cell");
+    let root = doc.el(doc.root, "view.cell");
+    let owned = element_owned(&mut doc, probe);
+    let bound = recording(&mut doc, &log, Some(root), Some(root));
+    let free = unbound(&mut doc, None, &[1.0, 0.0, 0.5]);
+    assert!(owned < bound && bound < free, "ids are monotone");
+
+    let observer = doc.dom.intersection_observer(owned);
+    assert_eq!(observer.id(), owned);
+    assert_eq!(observer.root(), IntersectionObserverRoot::Implicit);
+    assert_eq!(observer.thresholds(), [0.0], "an empty list is [0]");
+    assert_eq!(
+        observer.bound_to(),
+        Some(probe),
+        "an ElementHandler's element"
+    );
+    assert!(observer.handler().is_some());
+
+    let observer = doc.dom.intersection_observer(bound);
+    assert_eq!(observer.root(), IntersectionObserverRoot::Element(root));
+    assert_eq!(
+        observer.bound_to(),
+        Some(root),
+        "whatever the handler names"
+    );
+
+    let observer = doc.dom.intersection_observer_mut(free);
+    assert_eq!(observer.thresholds(), [0.0, 0.5, 1.0], "sorted");
+    assert_eq!(observer.bound_to(), None);
+    assert_eq!(
+        observer
+            .handler_mut()
+            .and_then(|handler| handler.bound_to()),
+        None
+    );
+}
+
+// --- The notify loop --------------------------------------------------------
+
+/// Two handler types in one document — a [`Recorder`] and an engine
+/// component's [`ElementHandler`] — heard in creation order, not observe
+/// order, with an observer that has nothing queued left out.
+#[test]
+fn notifications_come_in_creation_order_over_any_handler_types() {
+    let (mut doc, log) = components(".cell { width: 100px; height: 100px; }");
     let probe = doc.el(doc.root, "x-probe.cell");
     let cell = doc.el(doc.root, "view.cell");
-    let first = host(&mut doc, None, &[]);
+    let first = recording(&mut doc, &log, None, None);
     let second = element_owned(&mut doc, probe);
-    let idle = host(&mut doc, None, &[]);
-    for observer in [second, first] {
+    let idle = recording(&mut doc, &log, None, None);
+    let third = recording(&mut doc, &log, None, None);
+    for observer in [third, second, first] {
         doc.dom.observe_intersection(observer, cell);
     }
     doc.dom.render();
     assert!(update(&mut doc));
+    log.borrow_mut().clear();
 
-    let notifications = doc.dom.take_intersection_notifications();
-    let summary: Vec<_> = notifications
-        .iter()
-        .map(|notification| {
-            (
-                notification.observer,
-                notification.owner,
-                states(&notification.entries),
-            )
-        })
-        .collect();
+    let heard = notify(&mut doc, &log);
+    let child = doc
+        .dom
+        .get(probe)
+        .and_then(dom::Node::last_child)
+        .map(dom::Node::id)
+        .expect("the hook appended a child");
     assert_eq!(
-        summary,
+        heard,
         vec![
-            (
-                first,
-                IntersectionObserverOwner::Host,
-                vec![(cell, true, 1.0)]
-            ),
-            (
-                second,
-                IntersectionObserverOwner::Element(probe),
-                vec![(cell, true, 1.0)]
-            ),
+            format!("observer {}: {cell}:true", first.get()),
+            format!("observer {}: {cell}:true at {probe}", second.get()),
+            format!("connected {child}"),
+            "hook returned".to_owned(),
+            format!("observer {}: {cell}:true", third.get()),
         ],
-        "creation order, and an observer with nothing queued is left out",
     );
-    assert!(doc.dom.take_intersection_notifications().is_empty());
+    assert!(!doc.dom.has_pending_intersection_notifications());
+    assert!(notify(&mut doc, &log).is_empty(), "the queues drained");
     assert!(doc.dom.take_intersection_records(idle).is_empty());
+    for observer in [first, second, third] {
+        assert!(
+            doc.dom.intersection_observer(observer).handler().is_some(),
+            "every handler is back in its observer"
+        );
+    }
 }
 
+/// A handler that mutates the tree from inside its notification: the loop
+/// goes on, and what it wrote is the next render's.
 #[test]
-fn an_elements_observers_are_listed_in_creation_order() {
-    let (mut doc, _) = components(".cell { width: 100px; height: 100px; }");
-    let probe = doc.el(doc.root, "x-probe.cell");
-    let other = doc.el(doc.root, "x-probe.cell");
-    let first = element_owned(&mut doc, probe);
-    host(&mut doc, None, &[]);
-    element_owned(&mut doc, other);
-    let second = element_owned(&mut doc, probe);
-    assert_eq!(
-        doc.dom
-            .intersection_observers_owned_by(probe)
-            .collect::<Vec<_>>(),
-        vec![first, second]
+fn a_handler_may_mutate_the_tree() {
+    let mut doc = page(".cell { width: 100px; height: 100px; }");
+    let log = Log::default();
+    let cell = doc.el(doc.root, "view.cell");
+    let appender = doc.dom.create_intersection_observer(
+        Box::new(Appender {
+            log: Rc::clone(&log),
+            parent: doc.root,
+        }),
+        None,
+        RootMargin::ZERO,
+        Vec::new(),
     );
-    assert!(first < second, "ids are monotone");
+    let after = recording(&mut doc, &log, None, None);
+    doc.dom.observe_intersection(appender, cell);
+    doc.dom.observe_intersection(after, cell);
+    doc.dom.render();
+    assert!(update(&mut doc));
+
+    let heard = notify(&mut doc, &log);
+    let child = doc
+        .dom
+        .get(doc.root)
+        .and_then(dom::Node::last_child)
+        .map(dom::Node::id)
+        .expect("the handler appended a child");
     assert_eq!(
-        doc.dom
-            .intersection_observers_owned_by(doc.root)
-            .collect::<Vec<_>>(),
-        Vec::new()
+        heard,
+        vec![
+            format!("observer {}: {cell}:true", appender.get()),
+            format!("appended {child}"),
+            format!("observer {}: {cell}:true", after.get()),
+        ]
     );
+    assert!(doc.dom.render(), "the append is the next render's");
 }
 
-// --- Delivery to an element owner -------------------------------------------
-
-/// The hook runs in its own reaction scope: the child it appends is
-/// connected before the delivery returns.
+/// [`ElementHandler`] runs the hook in its own reaction scope: the child it
+/// appends is connected before the notification returns.
 #[test]
-fn delivery_runs_the_elements_hook_in_its_own_reaction_scope() {
+fn an_element_handler_runs_the_hook_in_its_own_reaction_scope() {
     let (mut doc, log) = components(".cell { width: 100px; height: 100px; }");
     let probe = doc.el(doc.root, "x-probe.cell");
     let observer = element_owned(&mut doc, probe);
@@ -484,16 +722,7 @@ fn delivery_runs_the_elements_hook_in_its_own_reaction_scope() {
     assert!(update(&mut doc));
     log.borrow_mut().clear();
 
-    for notification in doc.dom.take_intersection_notifications() {
-        let IntersectionObserverOwner::Element(element) = notification.owner else {
-            panic!("only the probe's observer exists");
-        };
-        doc.dom.deliver_intersections_to_element(
-            element,
-            notification.observer,
-            notification.entries,
-        );
-    }
+    let heard = notify(&mut doc, &log);
     let child = doc
         .dom
         .get(probe)
@@ -501,34 +730,172 @@ fn delivery_runs_the_elements_hook_in_its_own_reaction_scope() {
         .map(dom::Node::id)
         .expect("the hook appended a child");
     assert_eq!(
-        *log.borrow(),
+        heard,
         vec![
-            format!("observer {} at {probe}: {probe}:true", observer.get()),
+            format!("observer {}: {probe}:true at {probe}", observer.get()),
             format!("connected {child}"),
             "hook returned".to_owned(),
         ]
     );
 }
 
+/// An element that is not a constructed component hears nothing through the
+/// loop, and neither does a freed one called directly — its free dropped the
+/// observer, so only a direct call can name it.
 #[test]
-fn delivery_to_a_freed_or_undefined_element_is_dropped() {
+fn an_element_handler_drops_entries_for_a_freed_or_unconstructed_element() {
     let (mut doc, log) = components(".cell { width: 100px; height: 100px; }");
     let probe = doc.el(doc.root, "x-probe.cell");
     let plain = doc.el(doc.root, "view.cell");
-    let observer = element_owned(&mut doc, probe);
+    let observer = element_owned(&mut doc, plain);
     doc.dom.observe_intersection(observer, plain);
     doc.dom.render();
-    update(&mut doc);
-    let entries = doc.dom.take_intersection_records(observer);
-    assert_eq!(entries.len(), 1);
+    assert!(update(&mut doc));
     log.borrow_mut().clear();
 
-    doc.dom
-        .deliver_intersections_to_element(plain, observer, entries.clone());
+    assert!(notify(&mut doc, &log).is_empty());
+    assert!(!doc.dom.has_pending_intersection_notifications());
+
+    doc.set_inline(plain, "transform: translateY(1000px)");
+    doc.dom.render();
+    assert!(update(&mut doc));
+    let entries = doc.dom.take_intersection_records(observer);
+    assert_eq!(entries.len(), 1);
     doc.dom.drop_element(probe);
-    doc.dom
-        .deliver_intersections_to_element(probe, observer, entries);
+    ElementHandler(probe).notify(&mut doc.dom, observer, entries);
     assert!(log.borrow().is_empty(), "{:?}", log.borrow());
+}
+
+/// A handler drops its own observer, and another drops one later in the
+/// list: the later one is skipped, its queue gone with it, the own one's
+/// handler is dropped once its notification returns, and the loop panics on
+/// neither.
+#[test]
+fn a_handler_may_drop_its_own_observer_or_a_later_one() {
+    let mut doc = page(".cell { width: 100px; height: 100px; }");
+    let log = Log::default();
+    let alive = Rc::new(());
+    let cell = doc.el(doc.root, "view.cell");
+    let dropper = |doc: &mut Doc, victim: &Rc<Cell<Option<IntersectionObserverId>>>| {
+        doc.dom.create_intersection_observer(
+            Box::new(Dropper {
+                log: Rc::clone(&log),
+                victim: Rc::clone(victim),
+                _alive: Rc::clone(&alive),
+            }),
+            None,
+            RootMargin::ZERO,
+            Vec::new(),
+        )
+    };
+    let own = dropper(&mut doc, &Rc::default());
+    let victim = Rc::default();
+    let survivor = dropper(&mut doc, &victim);
+    let later = recording(&mut doc, &log, None, None);
+    victim.set(Some(later));
+    for observer in [own, survivor, later] {
+        doc.dom.observe_intersection(observer, cell);
+    }
+    doc.dom.render();
+    assert!(update(&mut doc));
+    assert_eq!(Rc::strong_count(&alive), 3);
+
+    assert_eq!(
+        notify(&mut doc, &log),
+        vec![
+            format!("observer {}: {cell}:true", own.get()),
+            format!("dropped {}", own.get()),
+            format!("observer {}: {cell}:true", survivor.get()),
+            format!("dropped {}", later.get()),
+        ]
+    );
+    assert_eq!(
+        Rc::strong_count(&alive),
+        2,
+        "the self-dropped observer's handler went when it returned"
+    );
+    assert!(doc.dom.intersection_observer(survivor).handler().is_some());
+    assert!(!doc.dom.has_pending_intersection_notifications());
+    doc.set_inline(cell, "transform: translateY(1000px)");
+    doc.dom.render();
+    assert!(update(&mut doc), "the survivor still observes");
+    assert_eq!(records(&mut doc, survivor), vec![(cell, false, 0.0)]);
+}
+
+/// A handler creates an observer and observes through it: the new one is
+/// not in the loop that created it, and the next update reports to it.
+#[test]
+fn a_handler_may_create_and_observe() {
+    let mut doc = page(".cell { width: 100px; height: 100px; }");
+    let log = Log::default();
+    let cell = doc.el(doc.root, "view.cell");
+    let other = doc.el(doc.root, "view.cell");
+    let spawner = doc.dom.create_intersection_observer(
+        Box::new(Spawner {
+            log: Rc::clone(&log),
+            target: other,
+        }),
+        None,
+        RootMargin::ZERO,
+        Vec::new(),
+    );
+    doc.dom.observe_intersection(spawner, cell);
+    doc.dom.render();
+    assert!(update(&mut doc));
+
+    let heard = notify(&mut doc, &log);
+    assert_eq!(heard.len(), 2);
+    assert_eq!(heard[0], format!("observer {}: {cell}:true", spawner.get()));
+    let created = heard[1]
+        .strip_prefix("spawned ")
+        .expect("the handler created one");
+    assert!(update(&mut doc), "the observe made the update stale");
+    assert_eq!(
+        notify(&mut doc, &log),
+        vec![format!("observer {created}: {other}:true")]
+    );
+}
+
+/// A loop run from inside a notification: the running observer's handler is
+/// out, so what its own update queued waits for the next loop, while a later
+/// observer is delivered by the inner loop and skipped by the outer one.
+#[test]
+fn a_loop_inside_a_notification_leaves_the_running_observers_entries_queued() {
+    let mut doc = page(".cell { width: 100px; height: 100px; }");
+    let log = Log::default();
+    let cell = doc.el(doc.root, "view.cell");
+    let renotifier = doc.dom.create_intersection_observer(
+        Box::new(Renotifier {
+            log: Rc::clone(&log),
+            target: cell,
+        }),
+        None,
+        RootMargin::ZERO,
+        Vec::new(),
+    );
+    let later = recording(&mut doc, &log, None, None);
+    doc.dom.observe_intersection(renotifier, cell);
+    doc.dom.observe_intersection(later, cell);
+    doc.dom.render();
+    assert!(update(&mut doc));
+
+    assert_eq!(
+        notify(&mut doc, &log),
+        vec![
+            format!("observer {}: {cell}:true", renotifier.get()),
+            format!("observer {}: {cell}:true,{cell}:false", later.get()),
+            "renotified".to_owned(),
+        ]
+    );
+    assert!(doc.dom.has_pending_intersection_notifications());
+    assert_eq!(
+        notify(&mut doc, &log),
+        vec![
+            format!("observer {}: {cell}:false", renotifier.get()),
+            "renotified".to_owned(),
+        ]
+    );
+    assert!(!doc.dom.has_pending_intersection_notifications());
 }
 
 // --- Node lifetime ----------------------------------------------------------
@@ -538,7 +905,7 @@ fn a_freed_target_leaves_its_registration_and_queue() {
     let mut doc = page(".cell { width: 100px; height: 100px; }");
     let kept = doc.el(doc.root, "view.cell");
     let freed = doc.el(doc.root, "view.cell");
-    let observer = host(&mut doc, None, &[]);
+    let observer = unbound(&mut doc, None, &[]);
     doc.dom.observe_intersection(observer, kept);
     doc.dom.observe_intersection(observer, freed);
     doc.dom.render();
@@ -554,34 +921,41 @@ fn a_freed_target_leaves_its_registration_and_queue() {
     assert!(!update(&mut doc), "and it is observed no more");
 }
 
+/// Freeing a node drops the observers bound to it — an [`ElementHandler`]'s
+/// and a [`Recorder`] bound to it alike, queues and all — while an unbound
+/// one lives until `drop_intersection_observer`.
 #[test]
-fn a_freed_owner_takes_its_observers_while_a_host_observer_stays() {
-    let (mut doc, _) = components(".cell { width: 100px; height: 100px; }");
+fn a_freed_node_takes_its_bound_observers_while_an_unbound_one_stays() {
+    let (mut doc, log) = components(".cell { width: 100px; height: 100px; }");
     let cell = doc.el(doc.root, "view.cell");
     let probe = doc.el(doc.root, "x-probe.cell");
     let owned = element_owned(&mut doc, probe);
-    let hosted = host(&mut doc, None, &[]);
-    doc.dom.observe_intersection(owned, cell);
-    doc.dom.observe_intersection(hosted, cell);
+    let bound = recording(&mut doc, &log, Some(probe), None);
+    let free = recording(&mut doc, &log, None, None);
+    for observer in [owned, bound, free] {
+        doc.dom.observe_intersection(observer, cell);
+    }
     doc.dom.render();
     assert!(update(&mut doc));
+    log.borrow_mut().clear();
 
     doc.dom.drop_element(probe);
-    assert_eq!(doc.dom.intersection_observers_owned_by(probe).count(), 0);
-    let notifications = doc.dom.take_intersection_notifications();
     assert_eq!(
-        notifications.len(),
-        1,
-        "the owned observer went, queue and all"
+        notify(&mut doc, &log),
+        vec![format!("observer {}: {cell}:true", free.get())],
+        "the bound observers went, queues and all"
     );
-    assert_eq!(notifications[0].observer, hosted);
 
     doc.set_inline(cell, "transform: translateY(1000px)");
     doc.dom.render();
     assert!(update(&mut doc));
-    assert_eq!(records(&mut doc, hosted), vec![(cell, false, 0.0)]);
+    assert_eq!(records(&mut doc, free), vec![(cell, false, 0.0)]);
+    assert!(
+        !doc.dom.has_pending_intersection_notifications(),
+        "no bound observer is left to queue"
+    );
 
-    doc.dom.drop_intersection_observer(hosted);
+    doc.dom.drop_intersection_observer(free);
     doc.set_inline(cell, "transform: none");
     doc.dom.render();
     assert!(!update(&mut doc), "no observer is left");
@@ -597,13 +971,17 @@ fn a_freed_root_reports_its_targets_leaving_once() {
     );
     let root = doc.el(doc.root, "view.root");
     let target = doc.el(root, "view.cell");
-    let observer = host(&mut doc, Some(root), &[]);
+    let observer = unbound(&mut doc, Some(root), &[]);
     doc.dom.observe_intersection(observer, target);
     doc.dom.render();
     update(&mut doc);
     assert_eq!(records(&mut doc, observer), vec![(target, true, 1.0)]);
 
     doc.dom.drop_element(root);
+    assert_eq!(
+        doc.dom.intersection_observer(observer).root(),
+        IntersectionObserverRoot::Freed
+    );
     assert!(update(&mut doc));
     let entries = doc.dom.take_intersection_records(observer);
     assert_eq!(states(&entries), vec![(target, false, 0.0)]);
@@ -625,7 +1003,7 @@ fn a_shrunk_viewport_leaves_targets_behind() {
     );
     doc.el(doc.root, "view.spacer");
     let cell = doc.el(doc.root, "view.cell");
-    let observer = host(&mut doc, None, &[]);
+    let observer = unbound(&mut doc, None, &[]);
     doc.dom.observe_intersection(observer, cell);
     doc.dom.render();
     update(&mut doc);
@@ -645,22 +1023,23 @@ fn a_shrunk_viewport_leaves_targets_behind() {
 #[should_panic(expected = "finite and in [0, 1]")]
 fn a_threshold_out_of_range_panics() {
     let mut doc = page("");
-    host(&mut doc, None, &[0.5, 1.5]);
+    unbound(&mut doc, None, &[0.5, 1.5]);
 }
 
 #[test]
-#[should_panic(expected = "constructed custom element")]
-fn an_element_owner_must_be_a_constructed_component() {
+#[should_panic(expected = "which must be a live node")]
+fn a_handler_must_be_bound_to_a_live_node() {
     let mut doc = page("");
-    let plain = doc.el(doc.root, "view");
-    element_owned(&mut doc, plain);
+    let freed = doc.el(doc.root, "view");
+    doc.dom.drop_element(freed);
+    element_owned(&mut doc, freed);
 }
 
 #[test]
 #[should_panic(expected = "names no live intersection observer")]
 fn a_dropped_observer_names_nothing() {
     let mut doc = page("");
-    let observer = host(&mut doc, None, &[]);
+    let observer = unbound(&mut doc, None, &[]);
     doc.dom.drop_intersection_observer(observer);
-    let _ = doc.dom.take_intersection_records(observer);
+    let _ = doc.dom.intersection_observer(observer);
 }

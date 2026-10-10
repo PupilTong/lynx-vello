@@ -1974,11 +1974,12 @@ and §D.16 with what the wire format actually permits.)*
     - **Implemented, Rust-only.** `crates/dom/src/visual/intersection/`
       (`docs/dom-architecture.md` "Intersection observations"): the
       registry, §3.2.10's update after each commit or adopted scroll,
-      §3.2.7's geometry, and delivery as a posted task routed by owner —
-      `Element` to `CustomElement::intersections_changed`, `Host` reserved
-      for the realm binding. No script surface: neither an
-      `IntersectionObserver` global nor `lynx.createIntersectionObserver`
-      exists yet.
+      §3.2.7's geometry, and §3.2.5's notify loop run from a posted task,
+      calling each observer's boxed `IntersectionEventHandler` —
+      `ElementHandler` to `CustomElement::intersections_changed` for the
+      engine's components; the realm binding will add a handler of its own.
+      No script surface: neither an `IntersectionObserver` global nor
+      `lynx.createIntersectionObserver` exists yet.
     - **Rulings.** Geometry includes transforms (the painter's own matrix),
       as a browser's does, while `invoke('boundingClientRect')` keeps its
       transform-free engine walk (`docs/tracking/deviations.md`).
