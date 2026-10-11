@@ -2090,10 +2090,11 @@ the pending request into the container's `ScrollSlot`, re-admitted against
 the built geometry (clamped to the built range, or normalized into the built
 period on a circular axis). The painter handles each serial once, when it
 adopts the frame that first carries it: whatever was moving the container
-stops, an instant
-request puts the live offset on the target, and a smooth one glides there
-from rest (to the snap position the target settles on, for a snapping
-container). Every post for the container from then on names the newest
+stops, an instant request puts the live offset on the target, and a smooth
+one glides there from rest (to the snap position the target settles on, for
+a snapping container; on a circular axis along the shorter arc of the
+circle, through the seam when that is shorter). Every post for the
+container from then on names the newest
 serial the painter has handled there — the per-slot epoch — and main drops
 a post naming an older serial than the pending request, which the painter
 made before it saw the request, and acknowledges the request with one that

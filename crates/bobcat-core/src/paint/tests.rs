@@ -928,6 +928,102 @@ fn a_wrapped_offset_posts_through_the_seam_unclamped() {
     );
 }
 
+/// A smooth request on a circular axis glides along the shorter arc of the
+/// circle (period 1000: `max_offset` 800 plus the 200px scrollport), across
+/// the seam when that is shorter. Standing at 900, a request to 50 runs
+/// forward through 1000, 150px, rather than back 850px, and rests at 50;
+/// standing at 50, a request to 900 runs back through 0, 150px, and rests
+/// at 900. Each glide moves one way only, so the live offset never leaves
+/// the arc between its start and its target.
+#[test]
+fn a_smooth_request_on_a_circular_axis_glides_along_the_shorter_arc() {
+    for (from, to, arc) in [
+        (900.0_f32, 50.0_f32, 900.0..=1050.0),
+        (50.0, 900.0, -100.0..=50.0),
+    ] {
+        let label = format!("{from} to {to}");
+        let mut document = document();
+        let root = document.document_element().id();
+        let scroller = document.create_element("view", ());
+        document.set_inline_style(
+            scroller,
+            "display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px;\
+             overscroll-behavior:circular",
+        );
+        document.append_child(root, scroller);
+        let filler = document.create_element("view", ());
+        document.set_inline_style(filler, "flex-shrink:0;width:200px;height:1000px");
+        document.append_child(scroller, filler);
+        let (mut painter, main) = detached();
+        main.outbox.publish_frame(document.commit());
+        painter.poll_link();
+        painter.clock.pin(0.0);
+
+        // Stand at `from`: an instant request, which the painter carries out
+        // when it adopts the frame.
+        document.scroll_to_with(
+            scroller,
+            dom::Vector2D::new(0.0, from),
+            dom::scroll::ScrollBehavior::Instant,
+        );
+        main.outbox.publish_frame(document.commit());
+        painter.poll_link();
+        let frame = painter.frame().cloned().expect("the new frame is adopted");
+        painter.scroll_intents.rebase(&frame, 0.0);
+        let slot = &frame.scroll_slots()[frame.slot_of(scroller).expect("a slot") as usize];
+        assert_eq!(slot.wrap_period(), (None, Some(1000.0)), "{label}");
+        let standing = painter
+            .scroll_intents
+            .offset_for(scroller)
+            .unwrap_or(slot.offset);
+        assert_eq!(standing, dom::Vector2D::new(0.0, from), "{label}");
+
+        document.scroll_to_with(
+            scroller,
+            dom::Vector2D::new(0.0, to),
+            dom::scroll::ScrollBehavior::Smooth,
+        );
+        main.outbox.publish_frame(document.commit());
+        painter.poll_link();
+        let frame = painter.frame().cloned().expect("the new frame is adopted");
+        painter.scroll_intents.rebase(&frame, 0.0);
+        assert!(painter.scroll_intents.is_gliding(scroller), "{label}");
+
+        let mut rested = None;
+        let mut travelled = false;
+        for step in 1..240_u16 {
+            let now = f64::from(step) / 60.0;
+            painter.scroll_intents.tick(&frame, now);
+            let live = painter
+                .scroll_intents
+                .offset_for(scroller)
+                .expect("the glide moved the scroller")
+                .y;
+            assert!(
+                arc.contains(&live),
+                "{label}: {live} left the shorter arc {arc:?}"
+            );
+            travelled |= !(0.0..=1000.0).contains(&live);
+            painter.publish_scroll(now, None);
+            let (entries, _) = take(&main);
+            if let Some(rest) = entries
+                .into_iter()
+                .find(|(node, _)| *node == scroller)
+                .and_then(|(_, entry)| entry.rest)
+            {
+                rested = Some(rest);
+                break;
+            }
+        }
+        assert!(travelled, "{label}: the glide crossed the seam");
+        assert_eq!(
+            rested,
+            Some(dom::Vector2D::new(0.0, to)),
+            "{label}: at rest"
+        );
+    }
+}
+
 /// A rebase brings a circular axis's live offset back into its period and
 /// moves the drag's origin by the same whole period, so the release still
 /// settles from where the drag found the container. Five 200px cards that

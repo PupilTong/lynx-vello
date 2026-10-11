@@ -602,8 +602,10 @@ impl ScrollIntents {
     /// puts the live offset on the target, where a drag holding the
     /// container continues from; a smooth one glides there from rest, to
     /// the position the at-rest snap rule would move the target to, so a
-    /// snapping container does not jump at the end. Either way the
-    /// container is posted, naming the request.
+    /// snapping container does not jump at the end. On a circular axis the
+    /// glide runs along the shorter arc of the circle
+    /// ([`nearest_copy`]), across the seam when that is shorter. Either way
+    /// the container is posted, naming the request.
     fn apply_request(
         &mut self,
         frame: &CommittedFrame,
@@ -636,6 +638,8 @@ impl ScrollIntents {
                     snap_x,
                     snap_y,
                 );
+                // `live` is in the period: `rebase` normalizes before `apply_requests`.
+                let target = nearest_copy(slot, live, target);
                 self.glide_to(frame, node, live, target, now);
             }
         }
@@ -927,6 +931,31 @@ fn slot_step(
         wrap_axes(slot),
         snap_x,
         snap_y,
+    )
+}
+
+/// `target` on each axis `slot` wraps, moved to its copy nearest `live`: a
+/// whole period down when it lies more than half a period ahead of `live`,
+/// a whole period up when more than half a period behind, and unchanged
+/// otherwise (a tie keeps it). A glide from `live` to the result runs along
+/// the shorter arc of the circle, across the seam when that is shorter; a
+/// glide target outside `[0, period)` is brought back with the offset by
+/// the next rebase ([`ScrollIntents::shift_motion`]). A bounded axis keeps
+/// its target.
+fn nearest_copy(
+    slot: &dom::ScrollSlot,
+    live: Vector2D<f32>,
+    target: Vector2D<f32>,
+) -> Vector2D<f32> {
+    let (period_x, period_y) = slot.wrap_period();
+    let axis = |live: f32, target: f32, period: Option<f32>| match period {
+        Some(period) if target - live > period / 2.0 => target - period,
+        Some(period) if target - live < -period / 2.0 => target + period,
+        _ => target,
+    };
+    Vector2D::new(
+        axis(live.x, target.x, period_x),
+        axis(live.y, target.y, period_y),
     )
 }
 

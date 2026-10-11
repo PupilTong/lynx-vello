@@ -910,11 +910,12 @@ and §D.16 with what the wire format actually permits.)*
       is the whole scrolling area and never re-centres, so a
       `content-visibility: auto` box inside it is always relevant on that
       axis. An axis whose content does not overflow wraps nothing. A
-      programmatic scroll takes its target as the document admitted it and
-      moves there the direct way inside `[0, P)`, never across the period's
-      start: a target past `max_offset` is reached through the end of the
-      scrolling area even where going back across the start would be
-      shorter. Known approximations of the seam copy: a sticky or anchored box
+      programmatic scroll takes its target as the document admitted it: an
+      instant one jumps there, and a smooth one glides along the shorter arc
+      of the circle between the offset and the target, through the seam when
+      that is shorter (from 80 to 320 on a period of 360 it runs back 120
+      across the start, not forward 240). Known approximations of the seam
+      copy: a sticky or anchored box
       and an exported animation inside it sample the unshifted offset, so
       they are positioned as in the first copy; a backdrop texture inside it
       is the one baked for the original; nested circular containers that
