@@ -18,8 +18,8 @@ use dom::scroll::{
 use dom::{MethodCall, MethodError, MethodOutcome, NodeId};
 use serde_json::{Map, Value};
 
-use super::LynxDocument;
-use super::scroll_container::{InvalidParams, object};
+use super::scroll_container::object;
+use super::{InvalidParams, LynxDocument};
 
 /// Runs the base method `call` names on `element`, or answers
 /// [`MethodOutcome::NotFound`] for a name the base set does not build.

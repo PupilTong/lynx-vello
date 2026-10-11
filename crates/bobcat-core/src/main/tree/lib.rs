@@ -13,9 +13,9 @@
 //! flow through `attr()`; boolean flags use attribute selectors. Only `image`,
 //! `blur_view`, `swiper`, `refresh_view`, `viewpager`, `scroll_container`,
 //! `dialog` and `overlay` need components: for image resources, blur hints,
-//! the swiper's UA shadow tree and item count, the refresh view's UA shadow
-//! tree and its header and footer slot assignment, the viewpager's
-//! `selectTab` UI method, the `scroll-view`'s `scrollTo`, `scrollBy` and
+//! the swiper's UA shadow tree, item count and `scrollTo` UI method, the
+//! refresh view's UA shadow tree and its header and footer slot assignment,
+//! the viewpager's `selectTab` UI method, the `scroll-view`'s `scrollTo`, `scrollBy` and
 //! `getScrollInfo` UI methods, the dialog's
 //! `:open`/`:modal` state, top-layer membership and four UI methods
 //! ([`dialog`]), and the overlay's UA shadow tree, the top-layer membership of
@@ -28,8 +28,7 @@
 //! `scrollIntoView` today).
 //! `scroll_coordinator` needs no component, and has no UI method: its ten tags
 //! are UA rules over anchor-sized absolute boxes, a sticky toolbar and
-//! `scroll-capture-y`. `swiper`, `refresh_view` and `overlay` have no UI
-//! method.
+//! `scroll-capture-y`. `refresh_view` and `overlay` have no UI method.
 //!
 //! [`NodeId`]: dom::NodeId
 
@@ -44,7 +43,7 @@ pub(crate) mod raw_text;
 mod refresh_view;
 mod scroll_container;
 mod scroll_coordinator;
-mod swiper;
+pub(crate) mod swiper;
 #[cfg(test)]
 mod test_support;
 mod text;
@@ -97,6 +96,12 @@ pub(crate) fn new_document(
     );
     document
 }
+
+/// A UI method's params do not have the shape it reads, or name nothing it
+/// can act on: the UI-method status table's code 4, `PARAM_INVALID`. Nothing
+/// moved. Shared by every component method and the base set.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct InvalidParams;
 
 /// JavaScript's `ToBoolean` over the values JSON can carry: how a component
 /// method reads a boolean param, such as `selectTab`'s and `scrollTo`'s

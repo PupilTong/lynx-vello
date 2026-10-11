@@ -1,6 +1,7 @@
 //! The `x-swiper` and `x-swiper-item` tags: a row (or, with `vertical`, a
 //! column) of items the user swipes through one item at a time, in one of
-//! five layouts, with a strip of dots.
+//! five layouts, with a strip of dots, and the `scrollTo` UI method that turns
+//! to an item from script.
 //!
 //! Translated from web-elements'
 //! `lynx-stack/packages/web-platform/web-elements/src/elements/XSwiper/x-swiper.css`
@@ -186,10 +187,22 @@
 //!   but `"true"` therefore agrees with both references, and `"true"` with native.
 //!   `docs/tracking/deviations.md` records each side.
 //!
+//! # `scrollTo` is the standard algorithm
+//!
+//! The component's one UI method is web-core's `scrollTo({index, smooth = true})` overload
+//! (`XSwiper.ts:142-170`), [`scroll_to`], which the runtime's `callElementMethod` reaches through
+//! [`dom::Document::invoke_element_method`]. It runs CSSOM-View's "scroll an element into view"
+//! ([`dom::Document::scroll_into_view`]) on the swiper's element child number `index`, aligned on
+//! the main axis as the item's own `scroll-snap-align` aligns it, in `#content`. That is the
+//! item's snap position, which is where web-core's per-mode offsets (`XSwiper.ts:104-129`) end up
+//! after mandatory snapping, in every mode. A bad or out-of-range `index` is code 4, Android's
+//! answer, where web-core does nothing and answers 0; Android's `direction` is not read.
+//!
 //! # What is not implemented
 //!
 //! - `autoplay`, `interval` and `smooth-scroll`: not implemented for now, the user deferred them;
-//!   `smooth-scroll` only matters to autoplay (web-core's `XSwiperAutoScroll.ts`).
+//!   `smooth-scroll` only matters to autoplay (web-core's `XSwiperAutoScroll.ts`) and to Android's
+//!   default for `scrollTo`'s `smooth`.
 //! - The 3D rotation of `coverflow`, above.
 //! - `page-margin`, `previous-margin`, `next-margin` and `duration` have no rule, following
 //!   web-core, where they change nothing on screen: the three margins become custom properties on
@@ -198,15 +211,20 @@
 //!   (`XSwiperUI.java:569`), `previous-margin`/`next-margin` size and offset the page in
 //!   `coverflow`, `flat-coverflow` and `carry` (`:617-638`), and `duration` is the turn's animation
 //!   length, 500 ms by default (`:91,855-863`).
-//! - Every event (`change`, `scrollstart`, `scrollend`, `transition`) and every UI method.
+//! - Every event (`change`, `scrollstart`, `scrollend`, `transition`).
 //! - `contain: strict` and `content-visibility: auto` from the twentieth item
 //!   (`x-swiper.css:77-80`), `scrollbar-width` and the per-item `view-timeline-name` rules: a
 //!   browser shortcut, a scrollbar this engine does not draw, and web-core's per-dot timelines.
 
 use dom::event::{ElementEvent, ElementEventKind, EventPhase};
-use dom::{CustomElement, Node, NodeId, ShadowRootMode};
+use dom::scroll::{
+    ScrollBehavior, ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition,
+};
+use dom::stylo::values::specified::box_::ScrollSnapAlignKeyword;
+use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, Node, NodeId, ShadowRootMode};
+use serde_json::Value;
 
-use super::LynxDocument;
+use super::{InvalidParams, LynxDocument, element_child, is_truthy};
 
 /// The swiper tag, web-core's only spelling of it.
 pub(super) const SWIPER_TAG: &str = "x-swiper";
@@ -349,8 +367,8 @@ pub(super) fn define(document: &mut LynxDocument) {
 }
 
 /// The `x-swiper` component: builds the shadow tree when the element is
-/// constructed and keeps `--swiper-count` equal to the number of its
-/// element children.
+/// constructed, keeps `--swiper-count` equal to the number of its element
+/// children, and answers the `scrollTo` UI method ([`scroll_to`]).
 ///
 /// The shadow tree is built in `constructed`, not on connection: the element
 /// is new and detached then, and `__CreateElement` mints a swiper before
@@ -383,6 +401,142 @@ impl CustomElement<()> for Swiper {
             count_items(document, element);
         }
     }
+
+    fn invoke(
+        &self,
+        document: &mut LynxDocument,
+        element: NodeId,
+        call: MethodCall<'_>,
+    ) -> MethodOutcome {
+        match call.name {
+            "scrollTo" => match scroll_to(document, element, call.params) {
+                Ok(()) => MethodOutcome::Done,
+                Err(InvalidParams) => MethodOutcome::Failed(MethodError::InvalidParams),
+            },
+            _ => MethodOutcome::NotFound,
+        }
+    }
+}
+
+/// `scrollTo({index, smooth = true})` on `swiper`, with `params` as the JSON
+/// text the realm serialized: CSSOM-View's "scroll an element into view"
+/// ([`dom::Document::scroll_into_view`]) on the swiper's element child number
+/// `index`, at the item's own snap alignment on the swiper's main axis.
+///
+/// web-core overrides `HTMLElement.scrollTo` on the swiper
+/// (`XSwiper.ts:142-170`, documented at `index.ts:31-33`; lynx-stack#1197
+/// replaced `scrollToNext` and `scrollToPrevious` with it): a first argument
+/// with a numeric `index` turns to that item, and anything else falls through
+/// to the standard method. `scrollTo` is also a name in the base set every
+/// element has ([`super::base_methods`]); a kind's
+/// [`CustomElement::invoke`] runs first, so this overload wins on a swiper
+/// the same way. Android's `scrollTo({index, smooth, direction})` is
+/// `XSwiperUI.java:651-680`; iOS and Harmony have no swiper.
+///
+/// - `index` must be a JSON number; a missing one, or one that is not a number — `NaN` and the
+///   infinities serialize as `null` — is code 4 with nothing moved. Android reads a missing one as
+///   -1 and answers code 4; web-core falls through to the standard `scrollTo` and answers 0.
+/// - A fraction is truncated toward zero, as `children.item(index)`'s `unsigned long` conversion
+///   truncates it in web-core.
+/// - The item is the swiper's element child number `index`, text nodes skipped ([`element_child`]),
+///   web-core's `children.item(index)`. A negative index, or one past the last child, names no item
+///   and is code 4 with nothing moved, which is Android's answer and the rule `selectTab` follows;
+///   web-core does nothing and answers 0.
+/// - `smooth` is read with JavaScript truthiness, as web-core's `smooth ? 'smooth' : 'instant'`
+///   reads it, and a missing one is `true`, web-core's default. Android's default is the
+///   `smooth-scroll` attribute (`mSmoothScroll`, `XSwiperUI.java:89`, itself `true` by default),
+///   which this engine does not read.
+/// - Android's `direction` (`"begin"` or `"end"`: which way a circular swiper turns,
+///   `XSwiperUI.java:767-772`) is not read: web-core has no such param.
+///
+/// Where the item lands: on the main axis, the [`ScrollLogicalPosition`] of
+/// the item's computed `scroll-snap-align` — `start` at the start, `center` at
+/// the center, `end` at the end, and `none` at the start; on the cross axis,
+/// `nearest`. css-scroll-snap-1 places a snap position with the same snapport
+/// (`scroll-padding`) and `scroll-margin` terms the scroll-into-view position
+/// uses (`crates/dom/src/scroll/snap.rs`, `crates/dom/src/scroll/into_view.rs`),
+/// so the item comes to rest exactly on its snap position. web-core computes
+/// an offset per mode instead (`XSwiper.ts:104-129`): the item's
+/// `offsetLeft`/`offsetTop`, less a third of the item's size in
+/// `flat-coverflow`, which centres that mode's 60% items; in `coverflow` and
+/// `carry` it aims at the start and the items' mandatory
+/// `scroll-snap-align: center` moves the swiper on to the centre. Both end on
+/// the same position in every mode. The snap alignment avoids web-core's
+/// second movement in `coverflow` and `carry`, and follows an author's own
+/// `scroll-snap-align` on an item.
+///
+/// `container: nearest` is the item's nearest scroll container over the flat
+/// tree, the shadow `#content` ([`content`]), the same box an item's
+/// `scroll-initial-target` finds. Its `overflow` is a shadow-sheet declaration
+/// no author rule reaches, so it is always a scroll container and, unlike
+/// `selectTab`, the method needs no guard against scrolling an ancestor.
+///
+/// A smooth turn is animated by the painter and leaves the document's offset
+/// where it was until the painter posts it back; an instant one moves the
+/// document at once. A swiper or item with no box (`display: none`, or a
+/// `wrapper` child, which is `display: contents`) has nothing to scroll, and
+/// the call succeeds with nothing moved, as `selectTab` does. Positions are
+/// the last completed layout's: a UI method never flushes.
+pub(super) fn scroll_to(
+    document: &mut LynxDocument,
+    swiper: NodeId,
+    params: &str,
+) -> Result<(), InvalidParams> {
+    let params: Value = serde_json::from_str(params).map_err(|_| InvalidParams)?;
+    let index = params
+        .get("index")
+        .and_then(Value::as_f64)
+        .ok_or(InvalidParams)?
+        .trunc();
+    let behavior = if params.get("smooth").is_none_or(is_truthy) {
+        ScrollBehavior::Smooth
+    } else {
+        ScrollBehavior::Instant
+    };
+    let item = element_child(document, swiper, index).ok_or(InvalidParams)?;
+    let vertical = is_vertical(document, swiper);
+    let align = document.get(item).and_then(Node::computed_style).map_or(
+        ScrollSnapAlignKeyword::None,
+        |style| {
+            let align = style.get_scroll_snap_align();
+            if vertical {
+                align.block()
+            } else {
+                align.inline()
+            }
+        },
+    );
+    let main = match align {
+        ScrollSnapAlignKeyword::None | ScrollSnapAlignKeyword::Start => {
+            ScrollLogicalPosition::Start
+        }
+        ScrollSnapAlignKeyword::Center => ScrollLogicalPosition::Center,
+        ScrollSnapAlignKeyword::End => ScrollLogicalPosition::End,
+    };
+    let (block, inline) = if vertical {
+        (main, ScrollLogicalPosition::Nearest)
+    } else {
+        (ScrollLogicalPosition::Nearest, main)
+    };
+    document.scroll_into_view(
+        item,
+        ScrollIntoViewOptions {
+            behavior,
+            block,
+            inline,
+            container: ScrollIntoViewContainer::Nearest,
+        },
+    );
+    Ok(())
+}
+
+/// Whether `swiper` is a column: `vertical` present and not `"false"`, the
+/// UA rules' `[vertical]:not([vertical="false"])`.
+fn is_vertical(document: &LynxDocument, swiper: NodeId) -> bool {
+    document
+        .get(swiper)
+        .and_then(|node| node.attribute("vertical"))
+        .is_some_and(|value| value != "false")
 }
 
 /// Writes the number of elements assigned to `swiper`'s slot into its
@@ -427,11 +581,11 @@ mod tests {
     use dom::scroll::ScrollBehavior;
     use dom::stylo::properties::PropertyId;
     use dom::stylo::values::computed::{Display, Overflow};
-    use dom::{NodeId, StylesheetOrigin, Vector2D};
+    use dom::{MethodCall, MethodError, MethodOutcome, NodeId, StylesheetOrigin, Vector2D};
 
-    use super::super::LynxDocument;
     use super::super::test_support::{child, display, document, element_under, overflow, style_of};
-    use super::{SWIPER_ITEM_TAG, SWIPER_TAG};
+    use super::super::{InvalidParams, LynxDocument};
+    use super::{SWIPER_ITEM_TAG, SWIPER_TAG, scroll_to};
 
     /// One computed longhand, as CSSOM serializes it.
     fn value(document: &LynxDocument, element: NodeId, property: &str) -> String {
@@ -1474,5 +1628,317 @@ mod tests {
                 "hidden={hidden}"
             );
         }
+    }
+
+    // --- `scrollTo` ---------------------------------------------------------
+
+    /// `offset` on the swiper's main axis, the cross axis 0.
+    fn main_axis(vertical: bool, offset: f32) -> Vector2D<f32> {
+        if vertical {
+            Vector2D::new(0.0, offset)
+        } else {
+            Vector2D::new(offset, 0.0)
+        }
+    }
+
+    /// A laid-out `normal` row of `count` 200px items in a 200px swiper.
+    fn row(count: usize) -> (LynxDocument, NodeId, Vec<NodeId>) {
+        let (mut document, swiper, items) = mode_swiper("normal", false, count);
+        document.layout();
+        (document, swiper, items)
+    }
+
+    /// An instant `scrollTo` puts the item on its snap position — its start,
+    /// or its centre in the three centred modes — in every mode and
+    /// orientation, and the painter's at-rest snap rule leaves it there.
+    #[test]
+    fn scroll_to_lands_on_the_items_snap_position_in_every_mode() {
+        for case in &GEOMETRY {
+            for index in [1, 2] {
+                let (mut document, swiper, _) = mode_swiper(case.mode, case.vertical, 3);
+                document.layout();
+                let params = format!(r#"{{"index":{index},"smooth":false}}"#);
+                let label = format!("{} vertical={} index={index}", case.mode, case.vertical);
+                assert_eq!(scroll_to(&mut document, swiper, &params), Ok(()), "{label}");
+                let content = scroller(&document, swiper);
+                let expected = main_axis(case.vertical, case.snaps[index]);
+                assert_eq!(document.scroll_offset(content), expected, "{label}");
+                assert_eq!(
+                    document.settle_scroll(content, expected),
+                    expected,
+                    "already on a snap position: {label}"
+                );
+            }
+        }
+    }
+
+    /// Smooth by default: a request the painter carries out, with the
+    /// document's offset where it was.
+    #[test]
+    fn scroll_to_is_smooth_by_default() {
+        let (mut document, swiper, _) = row(3);
+        assert_eq!(scroll_to(&mut document, swiper, r#"{"index":2}"#), Ok(()));
+        assert_eq!(
+            document.scroll_offset(scroller(&document, swiper)),
+            Vector2D::zero(),
+            "the painter moves it"
+        );
+        assert_eq!(
+            pending(&mut document, swiper),
+            Some((Vector2D::new(400.0, 0.0), ScrollBehavior::Smooth))
+        );
+    }
+
+    #[test]
+    fn scroll_to_reads_smooth_with_javascript_truthiness() {
+        for (smooth, behavior) in [
+            ("true", ScrollBehavior::Smooth),
+            ("1", ScrollBehavior::Smooth),
+            ("\"no\"", ScrollBehavior::Smooth),
+            ("{}", ScrollBehavior::Smooth),
+            ("false", ScrollBehavior::Instant),
+            ("0", ScrollBehavior::Instant),
+            ("\"\"", ScrollBehavior::Instant),
+            ("null", ScrollBehavior::Instant),
+        ] {
+            let (mut document, swiper, _) = row(3);
+            let params = format!(r#"{{"index":1,"smooth":{smooth}}}"#);
+            assert_eq!(
+                scroll_to(&mut document, swiper, &params),
+                Ok(()),
+                "{smooth}"
+            );
+            let instant = behavior == ScrollBehavior::Instant;
+            assert_eq!(
+                document.scroll_offset(scroller(&document, swiper)),
+                if instant {
+                    Vector2D::new(200.0, 0.0)
+                } else {
+                    Vector2D::zero()
+                },
+                "{smooth}"
+            );
+            assert_eq!(
+                pending(&mut document, swiper),
+                Some((Vector2D::new(200.0, 0.0), behavior)),
+                "{smooth}"
+            );
+        }
+    }
+
+    /// A fraction is truncated toward zero; an index naming no item, past
+    /// the end or below zero, is code 4 with nothing moved and nothing
+    /// recorded.
+    #[test]
+    fn scroll_to_truncates_a_fraction_and_refuses_an_index_naming_no_item() {
+        for (index, expected) in [("1.9", 200.0), ("-0.5", 0.0)] {
+            let (mut document, swiper, _) = row(3);
+            let content = scroller(&document, swiper);
+            document.scroll_to(content, Vector2D::new(400.0, 0.0));
+            let params = format!(r#"{{"index":{index},"smooth":false}}"#);
+            assert_eq!(scroll_to(&mut document, swiper, &params), Ok(()), "{index}");
+            assert_eq!(
+                document.scroll_offset(content),
+                Vector2D::new(expected, 0.0),
+                "{index}"
+            );
+        }
+        for index in ["3", "9", "-1", "1e308", "-1e308"] {
+            let (mut document, swiper, _) = row(3);
+            let content = scroller(&document, swiper);
+            let params = format!(r#"{{"index":{index},"smooth":false}}"#);
+            assert_eq!(
+                scroll_to(&mut document, swiper, &params),
+                Err(InvalidParams),
+                "{index}"
+            );
+            assert_eq!(document.scroll_offset(content), Vector2D::zero(), "{index}");
+            assert_eq!(document.pending_scroll_request(content), None, "{index}");
+        }
+    }
+
+    #[test]
+    fn scroll_to_refuses_params_without_a_numeric_index() {
+        for params in [
+            "{}",
+            r#"{"index":"1"}"#,
+            r#"{"index":null}"#,
+            r#"{"index":true}"#,
+            r#"{"smooth":false}"#,
+            "null",
+            "[1]",
+            "1",
+            "not json",
+        ] {
+            let (mut document, swiper, _) = row(3);
+            let content = scroller(&document, swiper);
+            assert_eq!(
+                scroll_to(&mut document, swiper, params),
+                Err(InvalidParams),
+                "{params}"
+            );
+            assert_eq!(
+                document.scroll_offset(content),
+                Vector2D::zero(),
+                "{params}"
+            );
+            assert_eq!(document.pending_scroll_request(content), None, "{params}");
+        }
+    }
+
+    /// Only element children are items: a text node between two items does
+    /// not shift the index.
+    #[test]
+    fn scroll_to_counts_element_children_only() {
+        let mut document = document();
+        let (swiper, _) = build(&mut document, "width: 200px; height: 100px", &[], 1);
+        let text = document.create_text_node("between", ());
+        document.append_child(swiper, text);
+        for _ in 0..2 {
+            element_under(&mut document, swiper, SWIPER_ITEM_TAG, "");
+        }
+        document.layout();
+        assert_eq!(
+            scroll_to(&mut document, swiper, r#"{"index":2,"smooth":false}"#),
+            Ok(())
+        );
+        assert_eq!(
+            document.scroll_offset(scroller(&document, swiper)),
+            Vector2D::new(400.0, 0.0)
+        );
+        assert_eq!(
+            scroll_to(&mut document, swiper, r#"{"index":3,"smooth":false}"#),
+            Err(InvalidParams),
+            "three element children, whatever else the swiper holds"
+        );
+    }
+
+    /// An item's `scroll-margin` moves its snap position, and `scrollTo`
+    /// moves with it, at the start and at the centre alike. The modes are the
+    /// two whose items stay narrower than the port with the margin added, so
+    /// each snap position is a single offset.
+    #[test]
+    fn scroll_to_follows_the_items_scroll_margin() {
+        for (mode, unmargined) in [("carousel", 160.0), ("flat-coverflow", 120.0)] {
+            let (mut document, swiper, items) = mode_swiper(mode, false, 3);
+            document.set_inline_style(items[1], "scroll-margin-left: 10px");
+            document.layout();
+            let snap = snap_points(&document, swiper, false)[1];
+            assert_eq!(
+                snap,
+                unmargined - if mode == "carousel" { 10.0 } else { 5.0 }
+            );
+            assert_eq!(
+                scroll_to(&mut document, swiper, r#"{"index":1,"smooth":false}"#),
+                Ok(()),
+                "{mode}"
+            );
+            assert_eq!(
+                document.scroll_offset(scroller(&document, swiper)),
+                Vector2D::new(snap, 0.0),
+                "{mode}"
+            );
+        }
+    }
+
+    /// The item's own `scroll-snap-align` decides, an author's included:
+    /// `end` puts its end edge at the scrollport's end, and `none` (no snap
+    /// area) its start at the start. In `flat-coverflow` item 1 is laid out
+    /// at 160 to 280 in a 200px port.
+    #[test]
+    fn scroll_to_aligns_as_the_items_own_scroll_snap_align() {
+        for (align, expected) in [("none", 160.0), ("end", 80.0), ("center", 120.0)] {
+            let (mut document, swiper, items) = mode_swiper("flat-coverflow", false, 3);
+            document.set_inline_style(items[1], &format!("scroll-snap-align: {align}"));
+            document.layout();
+            assert_eq!(rect(&document, items[1]), (160.0, 0.0, 120.0, 100.0));
+            assert_eq!(
+                scroll_to(&mut document, swiper, r#"{"index":1,"smooth":false}"#),
+                Ok(()),
+                "{align}"
+            );
+            assert_eq!(
+                document.scroll_offset(scroller(&document, swiper)),
+                Vector2D::new(expected, 0.0),
+                "{align}"
+            );
+        }
+    }
+
+    /// A `display: none` swiper gives its items no box, so there is nothing
+    /// to scroll: the call succeeds and nothing moves or is recorded.
+    #[test]
+    fn scroll_to_on_a_swiper_with_no_box_moves_nothing() {
+        let mut document = document();
+        let (swiper, _) = build(&mut document, "display: none", &[], 3);
+        document.layout();
+        let content = scroller(&document, swiper);
+        assert_eq!(
+            scroll_to(&mut document, swiper, r#"{"index":1,"smooth":false}"#),
+            Ok(())
+        );
+        assert_eq!(document.scroll_offset(content), Vector2D::zero());
+        assert_eq!(document.pending_scroll_request(content), None);
+    }
+
+    /// A `wrapper` child is an element child, so `index` counts it, but it is
+    /// `display: contents` and has no box of its own: naming it succeeds with
+    /// nothing moved. The item after it is the next index.
+    #[test]
+    fn scroll_to_counts_a_wrapper_which_has_no_box_to_scroll_to() {
+        let mut document = document();
+        let (swiper, _) = build(&mut document, "width: 200px; height: 100px", &[], 1);
+        let wrapper = element_under(&mut document, swiper, "wrapper", "");
+        element_under(&mut document, wrapper, SWIPER_ITEM_TAG, "");
+        let last = element_under(&mut document, swiper, SWIPER_ITEM_TAG, "");
+        document.layout();
+        let content = scroller(&document, swiper);
+        assert_eq!(
+            scroll_to(&mut document, swiper, r#"{"index":1,"smooth":false}"#),
+            Ok(())
+        );
+        assert_eq!(document.scroll_offset(content), Vector2D::zero());
+        assert_eq!(document.pending_scroll_request(content), None);
+
+        let (start, ..) = rect(&document, last);
+        assert!(start > 0.0, "the last item lies past the first");
+        assert_eq!(
+            scroll_to(&mut document, swiper, r#"{"index":2,"smooth":false}"#),
+            Ok(())
+        );
+        assert_eq!(document.scroll_offset(content), Vector2D::new(start, 0.0));
+    }
+
+    /// `invoke` answers `scrollTo` alone; bad params are code 4, and any
+    /// other name is the kind's `NotFound`, which leaves it to the base set.
+    #[test]
+    fn invoke_answers_scroll_to_and_nothing_else() {
+        let (mut document, swiper, _) = row(3);
+        let mut invoke = |name: &str, params: &str| {
+            document.invoke_element_method(swiper, MethodCall { name, params })
+        };
+        assert_eq!(
+            invoke("scrollTo", r#"{"index":1,"smooth":false}"#),
+            MethodOutcome::Done
+        );
+        assert_eq!(
+            invoke("scrollTo", r#"{"index":3}"#),
+            MethodOutcome::Failed(MethodError::InvalidParams)
+        );
+        assert_eq!(
+            invoke("scrollTo", "{}"),
+            MethodOutcome::Failed(MethodError::InvalidParams)
+        );
+        for name in ["selectTab", "scrollBy", "scrollToNext", "getScrollInfo"] {
+            assert_eq!(
+                invoke(name, r#"{"index":1}"#),
+                MethodOutcome::NotFound,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            document.scroll_offset(scroller(&document, swiper)),
+            Vector2D::new(200.0, 0.0)
+        );
     }
 }

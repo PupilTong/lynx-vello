@@ -65,7 +65,7 @@ Landed and not to be regressed:
 - Page data and global props are JSON text Rust never parses.
 - Not implemented on purpose: list cell recycling, UI methods other than
   `boundingClientRect` and `scrollIntoView` (both on every element), a
-  pager's `selectTab`, a `scroll-view`'s
+  pager's `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s
   `scrollTo`/`scrollBy`/`getScrollInfo` and a dialog's four (every other
   name is code 3), per-component css-id scoping (every fragment mounts
   globally, which is what web-core emits for `enableRemoveCSSScope = true`), and

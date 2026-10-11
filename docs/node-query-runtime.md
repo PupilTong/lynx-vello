@@ -43,6 +43,11 @@ queue without clearing it. Selection captures its root at select time.
   inline start edge, the pager alone scrolling, smoothly unless `smooth` is
   falsy; a missing, non-numeric or negative `index`, or one naming no page,
   fails with code 4, `PARAM_INVALID`, and moves nothing.
+  `scrollTo({index, smooth = true})` on an `x-swiper` succeeds the same way:
+  the swiper's element child number `index` (truncated toward zero) is
+  scrolled into view in its shadow `#content` at the item's snap position
+  (its own `scroll-snap-align` on the main axis), with the same code 4 rules
+  for `index`; Android's `direction` is ignored.
   `scrollTo({index?, offset = 0, smooth = false})`, `scrollBy({offset})` and
   `getScrollInfo()` on a `scroll-view` work on the axis it scrolls (x under
   `scroll-x` / `scroll-orientation="horizontal"`, else y): `scrollTo`
@@ -112,7 +117,7 @@ native numeric-length conversion remain unsupported.
 ## Remaining boundaries
 
 Legacy component-scoped roots, direct MTS selector PAPI, UI invoke methods
-other than `boundingClientRect`, `selectTab`, a `scroll-view`'s three and a dialog's four, animation methods,
+other than `boundingClientRect`, `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s three and a dialog's four, animation methods,
 dataset-to-DOM reflection and cross-realm host objects remain pending.
 `boundingClientRect` takes no `relativeTo`, `androidEnableTransformProps` or
 `iOSEnableAnimationProps`: it reads nothing from its `params`, since each of

@@ -226,7 +226,8 @@ recorded so the comparison is complete.
 | `x-foldview-ng` / `scroll-coordinator` | `setFoldExpanded`, `getScrollInfo`, `scrollBy` | yes |
 | `x-input` / `x-textarea` | `addText`, `setValue`, `getValue`, `sendDelEvent`, `controlKeyBoard`, `setInputFilter`, `select`, `setSelectionRange` | yes |
 | `x-audio-tt`, `x-markdown`, `x-webview` | playback / readback / `reload` | yes |
-| `x-swiper`, `x-overlay-ng`, `x-image` | none in web-core | — |
+| `x-swiper` | `scrollTo({index, smooth})` (built 2026-10-11; web-core `XSwiper.ts:142-170`, Android `XSwiperUI.java:651`) | — |
+| `x-overlay-ng`, `x-image` | none in web-core | — |
 
 ## 7. Recommendation
 
