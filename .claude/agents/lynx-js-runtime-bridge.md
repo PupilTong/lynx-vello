@@ -256,7 +256,9 @@ Landed and not to be regressed:
   and **never flush**: the caller decides when to `__FlushElementTree`, so a
   job that mutates and then measures sees the pre-mutation geometry.
 - Not implemented on purpose: per-component css-id scoping, UI methods other
-  than `boundingClientRect`, import maps, import attributes, JSON *ESM*
+  than the base set's `boundingClientRect`, `scrollIntoView` and
+  `scrollTo`/`scrollBy` and the kinds' methods `AGENTS.md` lists (`focus`/`blur`
+  have no focus model), import maps, import attributes, JSON *ESM*
   modules (`require` does parse a `.json` response), transfer lists.
 
 ## Reference repos

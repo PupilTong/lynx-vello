@@ -1446,7 +1446,7 @@ consequential choice about whether to follow the spec or the quirk.
   position") called with `container: "nearest"`, not an algorithm of its
   own. `dom::Document::scroll_into_view`
   (`crates/dom/src/scroll/into_view.rs:188`) is the algorithm, and the base
-  method (`crates/bobcat-core/src/main/tree/base_methods.rs:84`) reads the
+  method (`crates/bobcat-core/src/main/tree/base_methods.rs:252`) reads the
   params into its options. References: iOS `LynxUI.m:1549-1615` and
   `scroll_view/LynxUIScroller.m:1027-1065`, Android `LynxBaseUI.java:1055-1119`
   and `scroll/UIScrollView.java:762-810`, Harmony `ui_scroll.cc:157-200`,
@@ -1484,6 +1484,42 @@ consequential choice about whether to follow the spec or the quirk.
   - *`block`/`inline` values other than the four keywords read as
     `"start"`*, as the natives' string compares and web-core's `switch`
     default leave them; a non-string value too.
+
+- **Base-set `scrollTo`/`scrollBy` UI methods (2026-10-11): CSSOM-View's
+  `Element.scrollTo(options)` and `Element.scrollBy(options)`, on every
+  element whose kind has no method of the name.** User ruling 2026-10-09
+  puts them in the base set; web-core reaches `HTMLElement.prototype`'s on
+  every element (`createInvokeUIMethod.ts:29-31`). The base method
+  (`crates/bobcat-core/src/main/tree/base_methods.rs:143`) reads `params`
+  as a `ScrollToOptions` dictionary and runs the standard steps over
+  `dom::Document::scroll_to_with`. Where it leaves the standard or web-core, and the rules a reader might not expect:
+  - *`behavior: "auto"` is instant.* CSSOM-View's `auto` takes the
+    element's computed `scroll-behavior`, and this engine has no
+    `scroll-behavior` property, so `auto` is its initial value's instant
+    scroll. Only `"smooth"` is smooth.
+  - *A box that is no scroll container, or has no box, answers code 0 and
+    does nothing*, as web-core's `HTMLElement.scrollTo` on a plain box does;
+    CSSOM-View terminates the steps there and has no failure to report.
+  - *Params that do not convert are code 4*, web-core's answer: a
+    `behavior` that is present and not one of `"auto"`, `"instant"`,
+    `"smooth"`, and params that are a number, a string or a boolean, make
+    Web IDL throw a `TypeError`, which web-core's `__InvokeUIMethod`
+    answers as 4 (`createInvokeUIMethod.ts:35-41`). The params convert
+    before the algorithm runs, so this holds on an element with no box too.
+    `null` and an array read as `{}`, as Web IDL converts them.
+  - *A numeric value that is not a JSON number* converts as ECMAScript's
+    `ToNumber` for a boolean or a decimal string, and reads as 0 for a
+    hexadecimal, octal or binary string, an array or an object, where
+    `ToNumber` reads `"0x10"` as 16 and `[5]` as 5. A non-finite result is 0
+    in both, CSSOM-View's normalisation.
+  - *A target equal to the current offset records no scroll request* unless
+    one is pending, as `Document::scroll_into_view` does; a pending one is
+    replaced, which is CSSOM-View's abort of the ongoing smooth scroll.
+  - *A kind's own method shadows it*: a `scroll-view`'s `scrollTo`/`scrollBy`
+    and an `x-swiper`'s `scrollTo` read their Lynx params (`index`,
+    `offset`, `smooth`) and not `left`/`top`/`behavior`, as web-core's
+    `ScrollView.scrollTo` override and `XSwiper.scrollTo` shadow
+    `HTMLElement.prototype.scrollTo` there.
 
 - **`x-swiper` (2026-10-06): a component with web-core's shadow `#content`
   scroll container and a dot strip, and its layouts are UA rules.** `crates/bobcat-core/src/main/tree/swiper.rs` translates

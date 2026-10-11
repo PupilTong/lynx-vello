@@ -167,7 +167,7 @@ fn with_axis(vector: Vector2D<f32>, horizontal: bool, value: f32) -> Vector2D<f3
     clippy::cast_possible_truncation,
     reason = "clamped to the scroll range, which is an f32"
 )]
-fn clamp_to_range(value: f64, max: f32) -> f32 {
+pub(super) fn clamp_to_range(value: f64, max: f32) -> f32 {
     value.clamp(0.0, f64::from(max)) as f32
 }
 

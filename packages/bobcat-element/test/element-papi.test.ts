@@ -3499,7 +3499,7 @@ describe("__InvokeUIMethod", () => {
     const view = __CreateView(0);
     __SetID(view, "target");
     __SetDataset(view, { index: 2 });
-    mock.answerElementMethod = () => "20,0,100,50";
+    mock.answerElementMethod = () => styleRecord("0", "20", "0", "100", "50");
     mock.calls.length = 0;
     const callback = rstest.fn();
 
@@ -3524,22 +3524,23 @@ describe("__InvokeUIMethod", () => {
     ]);
   });
 
-  it("tells each status, a rect and a record apart", () => {
+  it("tells each status and a record apart", () => {
     const view = __CreateView(0);
     const answers: unknown[] = [];
     for (const answer of [4, 7, 8, 0, "1:0"]) {
       mock.answerElementMethod = () => answer;
       __InvokeUIMethod(view, "selectTab", {}, (result: unknown) => answers.push(result));
     }
-    mock.answerElementMethod = () => "1,2,3,4";
+    mock.answerElementMethod = () => styleRecord("0", "1", "2", "3", "4");
     __InvokeUIMethod(view, "boundingClientRect", {}, (result: unknown) => answers.push(result));
     expect(answers[0]).toStrictEqual({ code: 4, data: undefined });
     expect(answers[1]).toStrictEqual({ code: 7, data: undefined });
     expect(answers[2]).toStrictEqual({ code: 8, data: undefined });
     expect(answers[3]).toStrictEqual({ code: 0, data: undefined });
-    // A string for any method but `boundingClientRect` is a record, never a
-    // rect: the code field and no data fields.
+    // A string is always a record: the code field and here no data fields.
     expect(answers[4]).toStrictEqual({ code: 0, data: [] });
+    // `boundingClientRect`'s record is the same envelope, its four fields
+    // after the code.
     expect(answers[5]).toMatchObject({
       code: 0,
       data: { left: 1, top: 2, width: 3, height: 4, right: 4, bottom: 6 },
@@ -3602,7 +3603,7 @@ describe("__InvokeUIMethod", () => {
 
   it("reports an element carrying no id as the empty string", () => {
     const view = __CreateView(0);
-    mock.answerElementMethod = () => "0,0,0,0";
+    mock.answerElementMethod = () => styleRecord("0", "0", "0", "0", "0");
     const callback = rstest.fn();
 
     __InvokeUIMethod(view, "boundingClientRect", undefined, callback);
@@ -3616,7 +3617,7 @@ describe("__InvokeUIMethod", () => {
   it("hands over a dataset copy the caller owns", () => {
     const view = __CreateView(0);
     __SetDataset(view, { index: 2 });
-    mock.answerElementMethod = () => "0,0,0,0";
+    mock.answerElementMethod = () => styleRecord("0", "0", "0", "0", "0");
     const callback = rstest.fn();
 
     __InvokeUIMethod(view, "boundingClientRect", {}, callback);

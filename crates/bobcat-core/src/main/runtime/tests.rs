@@ -2301,8 +2301,10 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
             // `selectTab` belongs to the pager tags alone.
             expectCode(viaPapi(held[2], 'selectTab', {index: 1}), 3);
             expectCode(viaQuery('#plain', 'selectTab', {index: 1}), 3);
-            // And the pager has no other method than the ones every element has.
-            expectCode(viaPapi(held[1], 'scrollTo', {index: 1}), 3);
+            // And the pager has no other method than the ones every element
+            // has. `scrollTo` is the base set's CSSOM-View method, which reads
+            // no `index`: it answers 0 and keeps the offset.
+            expectCode(viaPapi(held[1], 'scrollTo', {index: 1}), 0);
             expectCode(viaQuery('#pager', 'selectPage', {index: 1}), 3);
             // `boundingClientRect` still answers its rect, params or none.
             for (const answer of [viaPapi(held[1], 'boundingClientRect', {index: 1}),
@@ -2327,8 +2329,9 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
 /// which for four 200px `normal` items is `index` times 200; an instant turn
 /// moves the document at once, a smooth one — the default — only records the
 /// request for the painter. Bad params, and an index naming no item, are
-/// code 4 and move nothing; `scrollTo` on a plain view is the base set's,
-/// which does not build it: code 3.
+/// code 4 and move nothing; `scrollTo` on a plain view is the base set's
+/// CSSOM-View method, which finds no scroll container there: code 0, and
+/// nothing moves.
 #[test]
 #[expect(clippy::too_many_lines, reason = "one scenario over both invoke paths")]
 fn scroll_to_turns_a_swiper_through_both_invoke_paths() {
@@ -2502,10 +2505,11 @@ fn scroll_to_turns_a_swiper_through_both_invoke_paths() {
         &mut runtime,
         &mut js_runtime,
         r"
-            // On a plain view `scrollTo` is the base set's, which is not
-            // built: code 3.
-            expectCode(viaPapi(held[2], 'scrollTo', {index: 1}), 3);
-            expectCode(viaQuery('#plain', 'scrollTo', {index: 1}), 3);
+            // On a plain view `scrollTo` is the base set's CSSOM-View method,
+            // which does nothing on a box that is no scroll container and
+            // answers 0, as web-core's `HTMLElement.scrollTo` does.
+            expectCode(viaPapi(held[2], 'scrollTo', {index: 1}), 0);
+            expectCode(viaQuery('#plain', 'scrollTo', {index: 1}), 0);
             // And the swiper has no other method than the ones every element has.
             expectCode(viaPapi(held[1], 'selectTab', {index: 1}), 3);
             expectCode(viaQuery('#swiper', 'scrollToNext', undefined), 3);
@@ -2662,6 +2666,164 @@ fn every_element_answers_scroll_into_view_and_one_with_no_scroller_above_fails()
     assert_eq!(
         elements.tree().scroll_offset(scroller),
         dom::Vector2D::new(0.0, 60.0)
+    );
+}
+
+/// The base set's `scrollTo` and `scrollBy`, CSSOM-View's `ScrollToOptions`
+/// methods, through both paths a card reaches a UI method by:
+/// `__InvokeUIMethod` and the selector-query `invoke` (`__BobcatQueryNodes`).
+/// A 100px square `view` with `overflow: scroll` over a 300px child, a range
+/// of 200, scrolls to `top` and by `top`; a `scroll-view` of the same size
+/// answers its own `scrollTo`, which reads `index` and `offset` and no `top`
+/// (as web-core's `ScrollView.scrollTo` override shadows the standard one),
+/// so `{top: 50}` there scrolls to offset 0. An unknown `behavior` and
+/// params that are no dictionary are code 4. `boundingClientRect` answers
+/// the same object on either path.
+#[test]
+#[expect(clippy::too_many_lines, reason = "one scenario over both invoke paths")]
+fn every_element_answers_scroll_to_and_scroll_by_unless_its_kind_has_its_own() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const box = __CreateView(0);
+                  __SetID(box, 'box');
+                  __SetInlineStyles(box,
+                    'width:100px;height:100px;overflow:scroll;flex-shrink:0;margin-left:10px');
+                  __AppendElement(page, box);
+                  const tall = __CreateView(0);
+                  __SetInlineStyles(tall, 'width:100px;height:300px;flex-shrink:0');
+                  __AppendElement(box, tall);
+                  const scroller = __CreateElement('scroll-view', 0);
+                  __SetID(scroller, 'scroller');
+                  __SetInlineStyles(scroller, 'width:100px;height:100px;flex-shrink:0');
+                  __AppendElement(page, scroller);
+                  for (let i = 0; i < 5; i++) {
+                    const item = __CreateView(0);
+                    __SetInlineStyles(item, 'height:40px;flex-shrink:0');
+                    __AppendElement(scroller, item);
+                  }
+                  globalThis.held = [page, box, scroller];
+                };
+                ",
+            "app:///scroll-to-options.js",
+        )
+        .expect("main-thread script");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import {
+                  __BobcatQueryNodes,
+                  __FlushElementTree,
+                  __InvokeUIMethod,
+                } from 'bobcat:element';
+                __FlushElementTree();
+                globalThis.viaPapi = (element, method, params) => {
+                  let answer;
+                  __InvokeUIMethod(element, method, params, result => { answer = result; });
+                  return answer;
+                };
+                globalThis.viaQuery = (selector, method, params) => __BobcatQueryNodes({
+                  bobcat: 'runtime', method: 'nodeQuery', operation: 'invoke',
+                  token: {type: 0, identifier: selector, component_id: '',
+                          first_only: true, root_unique_id: undefined},
+                  params: {method, params},
+                });
+                globalThis.expectCode = (answer, code) => {
+                  if (answer.code !== code || answer.data !== undefined) {
+                    throw new Error('expected ' + code + ', got ' + JSON.stringify(answer));
+                  }
+                };
+                ",
+            "app:///helpers.js",
+            "helpers",
+        )
+        .expect("helpers");
+    let (scroll_box, scroller) = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let children = tree.get(page).expect("the page").child_ids();
+        (children[0], children[1])
+    };
+    let offset = |id| elements.tree().scroll_offset(id);
+    let steps = std::cell::Cell::new(0);
+    let run = |runtime: &mut MainThreadRuntime, js_runtime: &mut ScriptRuntime, source: &str| {
+        steps.set(steps.get() + 1);
+        let name = format!("app:///step-{}.js", steps.get());
+        runtime
+            .evaluate_module(js_runtime, source, &name, "step")
+            .expect("step");
+    };
+
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        "expectCode(viaPapi(held[1], 'scrollTo', {top: 50}), 0);",
+    );
+    assert_eq!(offset(scroll_box), dom::Vector2D::new(0.0, 50.0));
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        "expectCode(viaQuery('#box', 'scrollBy', {top: 30}), 0);
+         expectCode(viaPapi(held[1], 'scrollBy', {top: 30}), 0);",
+    );
+    assert_eq!(offset(scroll_box), dom::Vector2D::new(0.0, 110.0));
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        "expectCode(viaQuery('#box', 'scrollTo', {top: 1e9}), 0);",
+    );
+    assert_eq!(offset(scroll_box), dom::Vector2D::new(0.0, 200.0));
+    // A `behavior` outside the enum, and params that are no dictionary, are
+    // code 4 and move nothing, as web-core answers the `TypeError` Web IDL
+    // throws; an array is a dictionary with no members.
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        "expectCode(viaPapi(held[1], 'scrollTo', {top: 0, behavior: 'bogus'}), 4);
+         expectCode(viaQuery('#box', 'scrollBy', {top: -10, behavior: 1}), 4);
+         expectCode(viaPapi(held[1], 'scrollTo', 5), 4);
+         expectCode(viaQuery('#box', 'scrollBy', 'top'), 4);
+         expectCode(viaPapi(held[1], 'scrollTo', []), 0);",
+    );
+    assert_eq!(offset(scroll_box), dom::Vector2D::new(0.0, 200.0));
+
+    // The scroll-view's own `scrollTo` answers: `{index: 1}` lands on the
+    // second child, and `{top: 50}` is its offset-less call, which scrolls
+    // to 0.
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        "expectCode(viaPapi(held[2], 'scrollTo', {index: 1}), 0);",
+    );
+    assert_eq!(offset(scroller), dom::Vector2D::new(0.0, 40.0));
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        "expectCode(viaQuery('#scroller', 'scrollTo', {top: 50}), 0);",
+    );
+    assert_eq!(offset(scroller), dom::Vector2D::zero());
+
+    // `boundingClientRect` is the base set's on every element, its answer
+    // the object `element-papi.ts` builds on either path.
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        r"
+            for (const answer of [viaPapi(held[1], 'boundingClientRect', {top: 1}),
+                                  viaQuery('#box', 'boundingClientRect', undefined)]) {
+              const {code, data} = answer;
+              if (code !== 0 || data.id !== 'box' || data.left !== 10 || data.top !== 0 ||
+                  data.width !== 100 || data.height !== 100 || data.right !== 110 ||
+                  data.bottom !== 100 || typeof data.dataset !== 'object') {
+                throw new Error(JSON.stringify(answer));
+              }
+            }
+            ",
     );
 }
 

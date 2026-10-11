@@ -60,30 +60,32 @@ interface BobcatNative {
   /**
    * Dispatches one Lynx UI method by name on the element, with `params` as
    * JSON text — the empty string for `boundingClientRect`, which reads
-   * none — and answers either a status code or the method's data as text.
-   * `boundingClientRect` is answered by the host for every element; every
-   * other name is asked of the element's kind (its component's
-   * `dom::CustomElement::invoke`) and, when the kind has no method of that
-   * name, of the base set every element has (`scrollIntoView`):
+   * none — and answers either a status code or the method's data as a
+   * record. Every name is asked of the element's kind first (its
+   * component's `dom::CustomElement::invoke`) and, when the kind has no
+   * method of that name, of the base set every element has
+   * (`boundingClientRect`, `scrollIntoView`, `scrollTo`, `scrollBy`); the
+   * host matches no name itself:
    *
    * - `3` (`METHOD_NOT_FOUND`): neither the element's kind nor the base set
-   *   has a method of that name.
+   *   has a method of that name. `focus`, `blur` and `takeScreenshot` are
+   *   among them.
    * - `4` (`PARAM_INVALID`): the method refused `params` and did nothing.
    * - `7` (`INVALID_STATE_ERROR`): the element's state refused the method
    *   (a dialog's `InvalidStateError`), and it did nothing.
    * - `8` (`OPERATION_ERROR`): the method ran and its operation failed.
    * - `0` (`SUCCESS`): the method ran and has no data to answer.
-   * - for `boundingClientRect`, a string `"<left>,<top>,<width>,<height>"`:
-   *   the border box in viewport CSS px as of the last completed layout
-   *   pass, ancestor scroll offsets applied, transforms ignored (native's
-   *   own conversion ignores them too), zeros for an element with no box.
-   * - for any other method, a string: a record (`bobcat:record`) whose
-   *   first field is the status code `0` and whose remaining fields are the
-   *   method's data, as its component wrote them. Two methods answer one,
-   *   each field a number in CSS px: a `scroll-view`'s `scrollBy`, whose
-   *   fields are `consumedX`, `consumedY`, `unconsumedX`, `unconsumedY` in
-   *   that order, and its `getScrollInfo`, whose fields are `scrollX`,
-   *   `scrollY`, `scrollRange`, `maxScrollOffset` in that order.
+   * - a string: a record (`bobcat:record`) whose first field is the status
+   *   code `0` and whose remaining fields are the method's data, as the
+   *   method wrote them. Three methods answer one, each field a number in
+   *   CSS px: `boundingClientRect`, whose fields are `left`, `top`, `width`,
+   *   `height` in that order, the border box in viewport CSS px as of the
+   *   last completed layout pass, ancestor scroll offsets applied,
+   *   transforms ignored (native's own conversion ignores them too), zeros
+   *   for an element with no box; a `scroll-view`'s `scrollBy`, whose fields
+   *   are `consumedX`, `consumedY`, `unconsumedX`, `unconsumedY` in that
+   *   order; and its `getScrollInfo`, whose fields are `scrollX`, `scrollY`,
+   *   `scrollRange`, `maxScrollOffset` in that order.
    *
    * `selectTab({index, smooth = true})` exists on `viewpager` and
    * `x-viewpager-ng` only: it scrolls the pager's element child number
@@ -116,6 +118,21 @@ interface BobcatNative {
    * `"end"` and `"nearest"`, any other value reading as `"start"`. A
    * missing `scrollIntoViewOptions` object is code 4; an element with no
    * box or no scroll container above it is code 8. It answers no data.
+   *
+   * `scrollTo({left?, top?, behavior?})` and `scrollBy({left?, top?,
+   * behavior?})` exist on every element whose kind has no method of the
+   * name: CSSOM-View's `Element.scrollTo`/`Element.scrollBy` with a
+   * `ScrollToOptions` dictionary. `left` and `top` are CSS px, a value that
+   * is not a finite number after Web IDL's conversion reading as 0; a
+   * missing one keeps that axis for `scrollTo` and adds 0 for `scrollBy`.
+   * The target clamps to the scroll range; `behavior: "smooth"` is smooth,
+   * and `"auto"` and `"instant"` are instant, since there is no
+   * `scroll-behavior`. A `behavior` that is present and not one of those
+   * three strings, or params that are a JSON number, string or boolean, is
+   * code 4 and nothing moves (web-core's answer to Web IDL's `TypeError`);
+   * `null` and an array read as `{}`. An element with no box or that is no
+   * scroll container does nothing. Otherwise both answer `0` and no data. A `scroll-view`'s and an `x-swiper`'s own `scrollTo`, and a
+   * `scroll-view`'s own `scrollBy`, are asked first and answer instead.
    *
    * `show`, `showModal`, `close` and `requestClose` exist on `dialog` only:
    * HTML's `HTMLDialogElement` methods, `params` unread. `close` and

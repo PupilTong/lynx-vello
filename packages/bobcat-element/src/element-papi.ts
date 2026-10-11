@@ -1619,15 +1619,15 @@ interface InvokeResult {
 /**
  * Runs one UI method on one element and shapes its answer.
  *
- * The host asks the element's kind for the method by name, and answers a
- * status code, the rect text for `boundingClientRect`, or a record of fields
- * for a method with data. The status codes are the table every `invoke` path
+ * The host asks the element's kind for the method by name, then the base set
+ * every element has, and answers a status code, or a record of fields for a
+ * method with data. The status codes are the table every `invoke` path
  * reports:
  *
  * | Code | Name | Meaning |
  * | --- | --- | --- |
  * | 0 | `SUCCESS` | The method ran. |
- * | 3 | `METHOD_NOT_FOUND` | The element's kind has no method of that name; web-core's code rather than native's generic 1. |
+ * | 3 | `METHOD_NOT_FOUND` | Neither the element's kind nor the base set has a method of that name; web-core's code rather than native's generic 1. |
  * | 4 | `PARAM_INVALID` | The method refused its params. |
  * | 7 | `INVALID_STATE_ERROR` | The element is not in a state the method can run in, such as `show` on a modal `dialog`; native's code (web-core answers 4). |
  * | 8 | `OPERATION_ERROR` | The method ran and its operation failed; native's code. |
@@ -1635,26 +1635,12 @@ interface InvokeResult {
  * A method with nothing to report answers a bare code and no `data`. A
  * method with data answers a record (`bobcat:record`) whose first field is
  * the code and whose remaining fields are the method's own, which
- * `decodeMethodData` turns into its `data`. `boundingClientRect` answers
- * four numbers instead: `left`, `top`, `width`, `height`. `right` and
- * `bottom` are derived here rather than sent, because they are sums.
+ * `decodeMethodData` turns into its `data`.
  *
  * `params` crosses as JSON text. A value JSON cannot carry — a cycle, a
- * BigInt — crosses as `null`, which a method that reads params refuses.
+ * BigInt — crosses as `null`, which a method that requires params refuses.
  * `boundingClientRect` reads none and is the frequent call, so it sends the
  * empty string without serializing anything.
- *
- * `id` and `dataset` ride along as native iOS does (`LynxUI.m:1491`;
- * web-core reports the id only): `id` is the attribute, empty when the
- * element carries none, the way `element.id` is, and `dataset` is the copy
- * `__GetDataset` hands out, so what the caller receives is the caller's own.
- *
- * The rect is the last completed layout pass's, in viewport CSS px with
- * ancestor scroll offsets applied and transforms ignored — native's own
- * conversion has no transform support either. Nothing here flushes: a job
- * that mutates and measures sees the pre-mutation geometry until it calls
- * `__FlushElementTree`, which is also the order ReactLynx's
- * `Element.invoke` uses.
  */
 function invokeUIMethod(handle: Handle, method: string, params: unknown): InvokeResult {
   let text = "";
@@ -1669,49 +1655,59 @@ function invokeUIMethod(handle: Handle, method: string, params: unknown): Invoke
   if (typeof answer === "number") {
     return { code: answer, data: undefined };
   }
-  if (method !== "boundingClientRect") {
-    const fields = splitRecord(answer);
-    return {
-      code: Number(fields[0]),
-      data: decodeMethodData(method, fields.slice(1)),
-    };
-  }
-  const [left = 0, top = 0, width = 0, height = 0] = answer
-    .split(",")
-    .map(Number);
+  const fields = splitRecord(answer);
   return {
-    code: 0,
-    data: {
-      id: __GetID(handle) ?? "",
-      dataset: __GetDataset(handle),
-      left,
-      top,
-      right: left + width,
-      bottom: top + height,
-      width,
-      height,
-    },
+    code: Number(fields[0]),
+    data: decodeMethodData(handle, method, fields.slice(1)),
   };
 }
 
 /**
  * The `data` of a UI method that answered a record, from the fields the
- * element's component wrote after the status code.
+ * method wrote after the status code.
  *
  * The host passes those fields through unread (`AGENTS.md`, "JavaScript
  * data ownership"), so the object a caller receives is built here, one arm
- * per method name, each field a number in CSS px. The two that answer data
- * are a `scroll-view`'s:
+ * per method name, each field a number in CSS px:
  *
- * - `scrollBy`: `{consumedX, consumedY, unconsumedX, unconsumedY}`, what the
- *   scrolling axis moved and what neither axis did.
- * - `getScrollInfo`: `{scrollX, scrollY, scrollRange, maxScrollOffset}`, the
- *   offset and the scrolling axis's maximum offset, under both names.
+ * - `boundingClientRect`, the base set's:
+ *   `{id, dataset, left, top, right, bottom, width, height}`. The host sends
+ *   `left`, `top`, `width`, `height`; `right` and `bottom` are derived here
+ *   rather than sent, because they are sums. `id` and `dataset` ride along
+ *   as native iOS does (`LynxUI.m:1491`; web-core reports the id only):
+ *   `id` is the attribute, empty when the element carries none, the way
+ *   `element.id` is, and `dataset` is the copy `__GetDataset` hands out, so
+ *   what the caller receives is the caller's own. The rect is the last
+ *   completed layout pass's, in viewport CSS px with ancestor scroll offsets
+ *   applied and transforms ignored — native's own conversion has no
+ *   transform support either. Nothing here flushes: a job that mutates and
+ *   measures sees the pre-mutation geometry until it calls
+ *   `__FlushElementTree`, which is also the order ReactLynx's
+ *   `Element.invoke` uses.
+ * - `scrollBy`, a `scroll-view`'s: `{consumedX, consumedY, unconsumedX,
+ *   unconsumedY}`, what the scrolling axis moved and what neither axis did.
+ *   The base set's `scrollBy` answers no data.
+ * - `getScrollInfo`, a `scroll-view`'s: `{scrollX, scrollY, scrollRange,
+ *   maxScrollOffset}`, the offset and the scrolling axis's maximum offset,
+ *   under both names.
  *
  * A method without an arm gets the fields themselves.
  */
-function decodeMethodData(method: string, fields: string[]): unknown {
+function decodeMethodData(handle: Handle, method: string, fields: string[]): unknown {
   switch (method) {
+    case "boundingClientRect": {
+      const [left = 0, top = 0, width = 0, height = 0] = fields.map(Number);
+      return {
+        id: __GetID(handle) ?? "",
+        dataset: __GetDataset(handle),
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+        width,
+        height,
+      };
+    }
     case "scrollBy": {
       const [consumedX, consumedY, unconsumedX, unconsumedY] = fields.map(Number);
       return { consumedX, consumedY, unconsumedX, unconsumedY };
@@ -1734,8 +1730,8 @@ function decodeMethodData(method: string, fields: string[]): unknown {
  * The callback runs synchronously inside the call, exactly once, as
  * web-core's does: the answer is already in hand when the host returns, and
  * a card that measures and then acts in the same job depends on it. A
- * `selectTab` or a `scroll-view`'s `scrollTo` answers as soon as the scroll
- * is requested, not when a smooth one ends, as web-core's does.
+ * `selectTab`, a `scrollTo` or a `scrollIntoView` answers as soon as the
+ * scroll is requested, not when a smooth one ends, as web-core's does.
  */
 export function __InvokeUIMethod(
   element: unknown,

@@ -217,7 +217,7 @@ recorded so the comparison is complete.
 
 | Kind | Methods (web-core names) | Data? |
 | --- | --- | --- |
-| every element (`LynxElement`) | `boundingClientRect` (built), `scrollIntoView`, `scrollTo`/`scrollBy` (CSSOM-View), `focus`/`blur` where focus exists | rect |
+| every element (`LynxElement`) | `boundingClientRect`, `scrollIntoView` (built 2026-10-10), `scrollTo`/`scrollBy` (CSSOM-View `ScrollToOptions`, built 2026-10-11) in `tree::base_methods`; `focus`/`blur` not built: no primitive, `dom` has no focus model; `takeScreenshot` not built: no pixel readback | rect |
 | `dialog` | `show`, `showModal`, `close`, `requestClose` (built) | — |
 | `viewpager` / `x-viewpager-ng` | `selectTab` (built); `setDragGesture` is iOS/Android-only, undocumented, and left at code 3 (user ruling 2026-10-11) | — |
 | `scroll-view` | `scrollTo` (Lynx overload), `autoScroll`, `getScrollInfo` (native) | yes |
@@ -318,7 +318,10 @@ impl<T> Document<T> {
   being a unit struct.
 - `Data` needs the realm-side envelope §4.1 describes: a record whose first
   field is the code and whose remaining fields `element-papi.ts` decodes by
-  method name. `boundingClientRect` keeps its string fast path.
+  method name. `boundingClientRect` kept a string fast path ahead of the
+  kind until 2026-10-11; it is now a base-set member answering that record
+  envelope (`left`, `top`, `width`, `height`), and `callElementMethod`
+  matches no name of its own.
 - `docs/dom-public-api.md` row "Custom elements" gains `invoke`,
   `MethodCall`, `MethodOutcome`, `MethodError` and
   `Document::invoke_element_method`.
