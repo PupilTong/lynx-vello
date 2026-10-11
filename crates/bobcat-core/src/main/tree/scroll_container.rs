@@ -16,7 +16,9 @@
 //!
 //! `list` is the other Lynx scroller and carries the same axis rules, written
 //! against its own attribute spellings. They live with the rest of that tag's
-//! policy in [`super::list`], one module per tag.
+//! policy in [`super::list`], one module per tag, as do its own methods,
+//! which share this module's `scrollBy` ([`scroll_by`]) whole and its
+//! offset reader ([`offset_px`]) and cell geometry ([`rect_in_scroller`]).
 //!
 //! # The references
 //!
@@ -64,7 +66,9 @@
 //! exist.
 
 use dom::scroll::{ScrollBehavior, ScrollBox};
-use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Vector2D};
+use dom::{
+    CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Point2D, Rect, Size2D, Vector2D,
+};
 use serde_json::{Map, Value};
 
 use super::{InvalidParams, LynxDocument, element_child, is_truthy};
@@ -125,7 +129,13 @@ impl CustomElement<()> for ScrollView {
     ) -> MethodOutcome {
         let answer = match call.name {
             "scrollTo" => scroll_to(document, element, call.params).map(|()| None),
-            "scrollBy" => scroll_by(document, element, call.params).map(|by| Some(by.record())),
+            "scrollBy" => scroll_by(
+                document,
+                element,
+                call.params,
+                is_horizontal(document, element),
+            )
+            .map(|by| Some(by.record())),
             "getScrollInfo" => Ok(Some(scroll_info(document, element).record())),
             _ => return MethodOutcome::NotFound,
         };
@@ -148,12 +158,12 @@ fn is_horizontal(document: &LynxDocument, view: NodeId) -> bool {
 }
 
 /// The scrolling axis's component of `vector`.
-fn along(vector: Vector2D<f32>, horizontal: bool) -> f32 {
+pub(super) fn along(vector: Vector2D<f32>, horizontal: bool) -> f32 {
     if horizontal { vector.x } else { vector.y }
 }
 
 /// `vector` with its scrolling-axis component replaced by `value`.
-fn with_axis(vector: Vector2D<f32>, horizontal: bool, value: f32) -> Vector2D<f32> {
+pub(super) fn with_axis(vector: Vector2D<f32>, horizontal: bool, value: f32) -> Vector2D<f32> {
     if horizontal {
         Vector2D::new(value, vector.y)
     } else {
@@ -246,7 +256,8 @@ pub(super) fn scroll_to(
 }
 
 /// `params` as a JSON object, or code 4. Shared with the base set's
-/// `scrollIntoView` ([`super::base_methods`]).
+/// `scrollIntoView` ([`super::base_methods`]) and `list`'s methods
+/// ([`super::list`]).
 pub(super) fn object(params: &str) -> Result<Map<String, Value>, InvalidParams> {
     match serde_json::from_str(params) {
         Ok(Value::Object(params)) => Ok(params),
@@ -264,25 +275,41 @@ fn child_position(
     horizontal: bool,
 ) -> Result<f32, InvalidParams> {
     let child = element_child(document, view, index).ok_or(InvalidParams)?;
-    let (Some(layout), Some(container)) = (
-        document.rounded_layout(child),
-        document.rounded_layout(view),
-    ) else {
-        return Ok(0.0);
-    };
-    Ok(if horizontal {
-        layout.location.x - container.border.left
-    } else {
-        layout.location.y - container.border.top
-    })
+    Ok(rect_in_scroller(document, view, child)
+        .map_or(0.0, |rect| along(rect.origin.to_vector(), horizontal)))
+}
+
+/// `child`'s border box in its parent `scroller`'s scroll coordinates: its
+/// layout location less the scroller's border, which puts it relative to
+/// the scroller's padding-box origin with no scroll offset applied, the
+/// coordinates a scroll offset is written in. `None` when either has no
+/// layout. `child` must be a box child of `scroller`, as an element child
+/// of a `scroll-view` or a cell of a `list` is: its layout location is
+/// relative to its parent's border box. Shared with `list`'s methods
+/// ([`super::list`]).
+pub(super) fn rect_in_scroller(
+    document: &LynxDocument,
+    scroller: NodeId,
+    child: NodeId,
+) -> Option<Rect<f32>> {
+    let layout = document.rounded_layout(child)?;
+    let container = document.rounded_layout(scroller)?;
+    Some(Rect::new(
+        Point2D::new(
+            layout.location.x - container.border.left,
+            layout.location.y - container.border.top,
+        ),
+        Size2D::new(layout.size.width, layout.size.height),
+    ))
 }
 
 /// A `scrollTo` offset in CSS px: a JSON number as given, or a string that
 /// is a number followed by `px`, `rpx` (the viewport width over 750, the
 /// unit [`super::blur_view`] also resolves), `ppx` (device pixels, divided
 /// by the device pixel ratio) or nothing. Anything else, a non-finite number
-/// included, is `None`.
-fn offset_px(document: &LynxDocument, offset: &Value) -> Option<f64> {
+/// included, is `None`. Shared with `list`'s `scrollToPosition`
+/// ([`super::list`]).
+pub(super) fn offset_px(document: &LynxDocument, offset: &Value) -> Option<f64> {
     let text = match offset {
         Value::Number(number) => return number.as_f64(),
         Value::String(text) => text.as_str(),
@@ -312,7 +339,7 @@ pub(super) struct ScrolledBy {
 impl ScrolledBy {
     /// The data fields, in the order `element-papi.ts` reads them:
     /// `consumedX`, `consumedY`, `unconsumedX`, `unconsumedY`.
-    fn record(self) -> String {
+    pub(super) fn record(self) -> String {
         let mut record = String::new();
         for value in [
             self.consumed.x,
@@ -327,7 +354,11 @@ impl ScrolledBy {
 }
 
 /// `scrollBy({offset})` on `view`: scrolls the axis by `offset` CSS px at
-/// once, clamped to the scroll range, and answers what moved.
+/// once, clamped to the scroll range, and answers what moved. `horizontal`
+/// is the scrolling axis, which the caller reads from its own tag's
+/// attributes: [`is_horizontal`] for a `scroll-view`, `list`'s own
+/// `scroll-orientation` reading for a `list` ([`super::list`]), which shares
+/// this method whole.
 ///
 /// `params` must be a JSON object with a numeric `offset`, else code 4 and
 /// nothing moves, as Android (`:965-968`) and iOS (`:1224-1228`) refuse a
@@ -349,13 +380,13 @@ pub(super) fn scroll_by(
     document: &mut LynxDocument,
     view: NodeId,
     params: &str,
+    horizontal: bool,
 ) -> Result<ScrolledBy, InvalidParams> {
     let params = object(params)?;
     let delta = params
         .get("offset")
         .and_then(Value::as_f64)
         .ok_or(InvalidParams)?;
-    let horizontal = is_horizontal(document, view);
     let (before, after) = match document.scroll_box(view) {
         None => (0.0, 0.0),
         Some(scroll_box) => {
@@ -948,7 +979,7 @@ mod tests {
                 "{style}"
             );
             assert_eq!(
-                scroll_by(&mut document, view, r#"{"offset":10}"#),
+                scroll_by(&mut document, view, r#"{"offset":10}"#, false),
                 Ok(ScrolledBy {
                     consumed: Vector2D::zero(),
                     unconsumed: Vector2D::new(10.0, 10.0),
@@ -977,7 +1008,7 @@ mod tests {
     fn scroll_by_answers_what_it_consumed() {
         let (mut document, view) = vertical(5);
         assert_eq!(
-            scroll_by(&mut document, view, r#"{"offset":100}"#),
+            scroll_by(&mut document, view, r#"{"offset":100}"#, false),
             Ok(ScrolledBy {
                 consumed: Vector2D::new(0.0, 100.0),
                 unconsumed: Vector2D::new(100.0, 0.0),
@@ -996,7 +1027,7 @@ mod tests {
         );
         assert_eq!(document.scroll_offset(view), Vector2D::new(0.0, 120.0));
         assert_eq!(
-            scroll_by(&mut document, view, r#"{"offset":-200.5}"#),
+            scroll_by(&mut document, view, r#"{"offset":-200.5}"#, false),
             Ok(ScrolledBy {
                 consumed: Vector2D::new(0.0, -120.0),
                 unconsumed: Vector2D::new(-200.5, -80.5),
@@ -1007,7 +1038,7 @@ mod tests {
         let (mut document, view) = scroller(Some(("scroll-x", "")), 5);
         document.scroll_to(view, Vector2D::new(0.0, 30.0));
         assert_eq!(
-            scroll_by(&mut document, view, r#"{"offset":130}"#),
+            scroll_by(&mut document, view, r#"{"offset":130}"#, true),
             Ok(ScrolledBy {
                 consumed: Vector2D::new(120.0, 0.0),
                 unconsumed: Vector2D::new(10.0, 130.0),

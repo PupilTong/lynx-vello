@@ -1521,6 +1521,54 @@ consequential choice about whether to follow the spec or the quirk.
     `ScrollView.scrollTo` override and `XSwiper.scrollTo` shadow
     `HTMLElement.prototype.scrollTo` there.
 
+- **`list` UI methods (2026-10-11): `scrollToPosition`, `scrollBy`,
+  `getScrollContainerInfo` and `getVisibleCells`, on a `list` component's
+  `CustomElement::invoke` (`crates/bobcat-core/src/main/tree/list.rs`).**
+  The architect's decision, to be confirmed by the user. Every cell is a
+  real element child here (no recycling), so an index is an element child
+  and a position is the cell's last layout. Where it leaves a reference:
+  - *The index rules.* `scrollToPosition` names the cell by a string
+    `itemKey` equal to an element child's `item-key` when one matches, else
+    by `index` (read first), else by `position`, truncated toward zero. A
+    missing, non-numeric, negative or out-of-range number is code 4 and
+    moves nothing: this engine's index rule (`scroll-view`'s `scrollTo`, the
+    pager's `selectTab`), which the iOS older list answers too
+    (`LynxUICollection+Delegate.m:323-480`). The iOS list container
+    (`LynxUIListContainer.mm:1107-1215`) and Android
+    (`UIListContainer.java:815-1042`) answer code 8, `OPERATION_ERROR`;
+    web-core moves nothing and answers 0 (`XList.ts:89-107`); Android reads a
+    missing number as 0. iOS reads `index` after `position`, Android before
+    it; here `index` is read first.
+  - *`alignTo` and `itemKey` are honoured*, as both natives honour them;
+    web-core ignores both. `"middle"` and `"bottom"` place the cell's centre
+    or end at the scrollport's; anything else is `"top"`.
+  - *`offset` moves the scrolling axis alone*, read as `scroll-view`'s
+    `scrollTo` reads it (a number, or a `px`/`rpx`/`ppx` string); web-core
+    `parseFloat`s a string, ignores its unit and writes the value to both
+    axes. A bad `offset` is code 4.
+  - *A list or cell with no box answers code 0 and moves nothing.* web-core
+    reads such a cell's `offsetTop` as 0 and scrolls to `offset`.
+  - *`getVisibleCells` reports rects relative to the list's scrollport*
+    (the padding-box origin less the scroll offset), the docs' "relative to
+    the list" and what iOS (`visibleCellsInfo`, `:1704`) and Android
+    (`:966-1002`) report; web-core reports viewport coordinates
+    (`getBoundingClientRect`, `XList.ts:220-250`). A cell is visible when
+    its border box overlaps the scrollport by a positive area; web-core's
+    fallback test counts a touching edge, and its usual path reports every
+    cell `content-visibility: auto` has found relevant, a wider set. A cell
+    held in a `wrapper` is not reported. Android's extra `position` field
+    is not written.
+  - *`scrollBy` is `scroll-view`'s*: the scrolling axis consumes what it
+    moved, and the cross axis consumes nothing and leaves the whole `offset`
+    unconsumed, as the natives answer; web-core has no `scrollBy` of its
+    own and `HTMLElement.scrollBy` reads no `offset`.
+  - *`autoScroll` and `getScrollInfo` are code 3*: `autoScroll` for
+    `scroll-view`'s reason (no constant-rate scroll request the painter
+    drives), `getScrollInfo` because only the natives answer it on a list
+    and the docs do not list it (the `setDragGesture` ruling, 2026-10-11).
+    The list has no `scrollTo` of its own, as web-core's `XList` has none,
+    so the base set's CSSOM-View `scrollTo` answers.
+
 - **`x-swiper` (2026-10-06): a component with web-core's shadow `#content`
   scroll container and a dot strip, and its layouts are UA rules.** `crates/bobcat-core/src/main/tree/swiper.rs` translates
   `x-swiper.css` and its template (`htmlTemplates.ts:225-275`) onto web-core's

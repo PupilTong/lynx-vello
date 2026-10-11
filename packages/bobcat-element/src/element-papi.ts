@@ -1684,12 +1684,20 @@ function invokeUIMethod(handle: Handle, method: string, params: unknown): Invoke
  *   measures sees the pre-mutation geometry until it calls
  *   `__FlushElementTree`, which is also the order ReactLynx's
  *   `Element.invoke` uses.
- * - `scrollBy`, a `scroll-view`'s: `{consumedX, consumedY, unconsumedX,
- *   unconsumedY}`, what the scrolling axis moved and what neither axis did.
- *   The base set's `scrollBy` answers no data.
+ * - `scrollBy`, a `scroll-view`'s and a `list`'s: `{consumedX, consumedY,
+ *   unconsumedX, unconsumedY}`, what the scrolling axis moved and what
+ *   neither axis did. The base set's `scrollBy` answers no data.
  * - `getScrollInfo`, a `scroll-view`'s: `{scrollX, scrollY, scrollRange,
  *   maxScrollOffset}`, the offset and the scrolling axis's maximum offset,
  *   under both names.
+ * - `getScrollContainerInfo`, a `list`'s: `{scrollTop, scrollLeft,
+ *   scrollHeight, scrollWidth}`, web-core's names and order.
+ * - `getVisibleCells`, a `list`'s: an array of `{id, itemKey, index, left,
+ *   top, right, bottom}`, one per cell in the scrollport, in child order.
+ *   The host writes the cell count first and then seven fields per cell in
+ *   that order; `id` and `itemKey` are strings (empty when the cell carries
+ *   no such attribute), the rest numbers, the rect relative to the list's
+ *   scrollport rather than web-core's viewport.
  *
  * A method without an arm gets the fields themselves.
  */
@@ -1715,6 +1723,20 @@ function decodeMethodData(handle: Handle, method: string, fields: string[]): unk
     case "getScrollInfo": {
       const [scrollX, scrollY, scrollRange, maxScrollOffset] = fields.map(Number);
       return { scrollX, scrollY, scrollRange, maxScrollOffset };
+    }
+    case "getScrollContainerInfo": {
+      const [scrollTop, scrollLeft, scrollHeight, scrollWidth] = fields.map(Number);
+      return { scrollTop, scrollLeft, scrollHeight, scrollWidth };
+    }
+    case "getVisibleCells": {
+      const count = Number(fields[0] ?? 0);
+      const cells = [];
+      for (let cell = 0; cell < count; cell++) {
+        const [id = "", itemKey = "", ...numbers] = fields.slice(1 + cell * 7, 8 + cell * 7);
+        const [index, left, top, right, bottom] = numbers.map(Number);
+        cells.push({ id, itemKey, index, left, top, right, bottom });
+      }
+      return cells;
     }
     default:
       return fields;

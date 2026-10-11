@@ -2603,6 +2603,93 @@ fn a_scroll_view_answers_its_scroll_info_and_what_scroll_by_consumed() {
     );
 }
 
+/// A `list`'s `scrollToPosition`, `scrollBy`, `getScrollContainerInfo` and
+/// `getVisibleCells` through `__InvokeUIMethod`: the data methods' records
+/// come back as the objects `element-papi.ts` builds from them, in CSS px,
+/// and the list's missing `scrollTo` is the base set's CSSOM-View one. The
+/// list is 100px tall over five 40px cells, a range of 100.
+#[test]
+fn a_list_answers_its_methods_and_the_base_set_answers_scroll_to() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const list = __CreateElement('list', 0);
+                  __SetInlineStyles(list, 'width:100px;height:100px');
+                  __AppendElement(page, list);
+                  const cells = [];
+                  for (let i = 0; i < 5; i++) {
+                    const cell = __CreateElement('list-item', 0);
+                    __SetInlineStyles(cell, 'height:40px');
+                    __AppendElement(list, cell);
+                    cells.push(cell);
+                  }
+                  __SetAttribute(cells[2], 'item-key', 'a,b');
+                  __SetID(cells[4], 'last');
+                  __SetAttribute(cells[4], 'item-key', 'k4');
+                  globalThis.held = [page, list];
+                };
+                ",
+            "app:///list.js",
+        )
+        .expect("main-thread script");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __FlushElementTree, __InvokeUIMethod } from 'bobcat:element';
+                __FlushElementTree();
+                const viaPapi = (method, params) => {
+                  let answer;
+                  __InvokeUIMethod(held[1], method, params, result => { answer = result; });
+                  return answer;
+                };
+                const expectAnswer = (answer, code, data) => {
+                  if (answer.code !== code || JSON.stringify(answer.data) !== JSON.stringify(data)) {
+                    throw new Error('expected ' + JSON.stringify({code, data}) + ', got ' +
+                                    JSON.stringify(answer));
+                  }
+                };
+                // Cell 2 (80..120) with its end at the 100px port's end: 20.
+                expectAnswer(viaPapi('scrollToPosition', {position: 2, alignTo: 'bottom'}), 0,
+                             undefined);
+                expectAnswer(viaPapi('scrollBy', {offset: 50}), 0,
+                             {consumedX: 0, consumedY: 50, unconsumedX: 50, unconsumedY: 0});
+                expectAnswer(viaPapi('getScrollContainerInfo', undefined), 0,
+                             {scrollTop: 70, scrollLeft: 0, scrollHeight: 200, scrollWidth: 100});
+                expectAnswer(viaPapi('getVisibleCells', {}), 0, [
+                  {id: '', itemKey: '', index: 1, left: 0, top: -30, right: 100, bottom: 10},
+                  {id: '', itemKey: 'a,b', index: 2, left: 0, top: 10, right: 100, bottom: 50},
+                  {id: '', itemKey: '', index: 3, left: 0, top: 50, right: 100, bottom: 90},
+                  {id: 'last', itemKey: 'k4', index: 4, left: 0, top: 90, right: 100, bottom: 130},
+                ]);
+                expectAnswer(viaPapi('scrollToPosition', {position: 5}), 4, undefined);
+                expectAnswer(viaPapi('scrollBy', {}), 4, undefined);
+                expectAnswer(viaPapi('autoScroll', {rate: 60, start: true}), 3, undefined);
+                expectAnswer(viaPapi('getScrollInfo', {}), 3, undefined);
+                // The base set's `scrollTo`, which the list does not shadow.
+                expectAnswer(viaPapi('scrollTo', {top: 50}), 0, undefined);
+                expectAnswer(viaPapi('getScrollContainerInfo', {}), 0,
+                             {scrollTop: 50, scrollLeft: 0, scrollHeight: 200, scrollWidth: 100});
+                ",
+            "app:///list-methods.js",
+            "list methods",
+        )
+        .expect("list methods");
+    let list = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        tree.get(page).expect("the page").child_ids()[0]
+    };
+    assert_eq!(
+        elements.tree().scroll_offset(list),
+        dom::Vector2D::new(0.0, 50.0)
+    );
+}
+
 /// `scrollIntoView` through `__InvokeUIMethod` is the base method every
 /// element has: a child view of a `scroll-view` scrolls the scroller (code
 /// 0, no data), and the page, with no scroll container above it, answers

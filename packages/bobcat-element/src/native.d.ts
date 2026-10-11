@@ -77,15 +77,21 @@ interface BobcatNative {
    * - `0` (`SUCCESS`): the method ran and has no data to answer.
    * - a string: a record (`bobcat:record`) whose first field is the status
    *   code `0` and whose remaining fields are the method's data, as the
-   *   method wrote them. Three methods answer one, each field a number in
-   *   CSS px: `boundingClientRect`, whose fields are `left`, `top`, `width`,
-   *   `height` in that order, the border box in viewport CSS px as of the
-   *   last completed layout pass, ancestor scroll offsets applied,
-   *   transforms ignored (native's own conversion ignores them too), zeros
-   *   for an element with no box; a `scroll-view`'s `scrollBy`, whose fields
-   *   are `consumedX`, `consumedY`, `unconsumedX`, `unconsumedY` in that
-   *   order; and its `getScrollInfo`, whose fields are `scrollX`, `scrollY`,
-   *   `scrollRange`, `maxScrollOffset` in that order.
+   *   method wrote them. Five methods answer one: `boundingClientRect`,
+   *   whose fields are `left`, `top`, `width`, `height` in that order, the
+   *   border box in viewport CSS px as of the last completed layout pass,
+   *   ancestor scroll offsets applied, transforms ignored (native's own
+   *   conversion ignores them too), zeros for an element with no box; a
+   *   `scroll-view`'s and a `list`'s `scrollBy`, whose fields are
+   *   `consumedX`, `consumedY`, `unconsumedX`, `unconsumedY` in that order;
+   *   a `scroll-view`'s `getScrollInfo`, whose fields are `scrollX`,
+   *   `scrollY`, `scrollRange`, `maxScrollOffset` in that order; a `list`'s
+   *   `getScrollContainerInfo`, whose fields are `scrollTop`, `scrollLeft`,
+   *   `scrollHeight`, `scrollWidth` in that order; and a `list`'s
+   *   `getVisibleCells`, whose first field is the number of cells, followed
+   *   by seven fields per cell: `id`, `itemKey` (both strings, empty when
+   *   the cell carries no such attribute), `index`, `left`, `top`, `right`,
+   *   `bottom`. Every numeric field is CSS px but `index` and the count.
    *
    * `selectTab({index, smooth = true})` exists on `viewpager` and
    * `x-viewpager-ng` only: it scrolls the pager's element child number
@@ -109,6 +115,22 @@ interface BobcatNative {
    * index naming no child is code 4. `scrollBy` scrolls by a numeric
    * `offset` at once and answers what it consumed; `getScrollInfo` answers
    * the offset and the axis's maximum offset.
+   *
+   * `scrollToPosition({position, index?, itemKey?, offset = 0, alignTo =
+   * "top", smooth = false})`, `scrollBy({offset})`,
+   * `getScrollContainerInfo()` and `getVisibleCells()` exist on `list`
+   * only, on the axis its `scroll-orientation` attribute scrolls.
+   * `scrollToPosition` scrolls to the list's element child named by a
+   * string `itemKey` that equals a child's `item-key`, else by `index`, else
+   * by `position` (truncated), aligned by `alignTo` (`"middle"`,
+   * `"bottom"`, anything else `"top"`), plus `offset` (read as
+   * `scroll-view`'s `scrollTo` reads it), clamped to the range, smoothly
+   * when `smooth` is truthy; a missing, non-numeric, negative or
+   * out-of-range number is code 4. `scrollBy` is `scroll-view`'s.
+   * `getVisibleCells` reports the `list-item` children whose border box
+   * overlaps the scrollport, `index` counting `list-item` children, the
+   * rect relative to the scrollport. `autoScroll` and `getScrollInfo` are
+   * code 3. A `list` has no `scrollTo` of its own: the base set's answers.
    *
    * `scrollIntoView({scrollIntoViewOptions: {behavior?, block?, inline?}})`
    * exists on every element: CSSOM-View's `scrollIntoView` on the nearest
