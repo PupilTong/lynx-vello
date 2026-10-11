@@ -27,7 +27,12 @@
 //! compose puts that slot at, clamped to the scroll range and unsnapped as
 //! the cascade reads it, through the same [`iteration_progress`] the main
 //! thread writes `Animation::timeline_sample` with. So it is sampled at
-//! compose time from the live offset, with no commit and no clock.
+//! compose time from the live offset, with no commit and no clock. On an
+//! `overscroll-behavior: circular` axis a scroll progress timeline first
+//! takes an offset through the seam at its representative nearer the range
+//! ([`ScrollSlot::unwrap`](super::ScrollSlot::unwrap)), as the main thread
+//! does; a view progress timeline reads the offset as it stands
+//! ([`ProgressKind`]).
 
 use euclid::default::Transform3D;
 use stylo::properties::animated_properties::{AnimationValue, AnimationValueMap};
@@ -40,7 +45,7 @@ use super::ScrollOffsets;
 use super::reach::{Interval, Reach, Segment, eased_range};
 use super::transform::{ContextMatrix, planar};
 use crate::NodeId;
-use crate::style::timeline::{Axis, ProgressTiming, iteration_progress};
+use crate::style::timeline::{Axis, ProgressKind, ProgressTiming, iteration_progress};
 use crate::vello::kurbo::Affine;
 
 const OPACITY: OwnedPropertyDeclarationId =
@@ -93,22 +98,30 @@ pub(crate) struct ScrollTimeline {
     pub(crate) slot: Option<u32>,
     pub(crate) axis: Axis,
     pub(crate) timing: ProgressTiming,
+    /// Whether this is a scroll or a view progress timeline: where an offset
+    /// through a circular axis's seam samples.
+    pub(crate) kind: ProgressKind,
 }
 
 impl ScrollTimeline {
     /// Where the animation stands with `slot` at `offsets`: the offset along
-    /// `axis`, clamped to the scroll range as the document clamps it (a
+    /// `axis` — on a scroll progress timeline through a circular axis's seam,
+    /// its representative nearer the range ([`ScrollSlot::unwrap`]) — then
+    /// clamped to the scroll range as the main thread clamps it (a
     /// `contain-bounce` stretch is no scroll offset) and unsnapped.
+    ///
+    /// [`ScrollSlot::unwrap`]: super::ScrollSlot::unwrap
     fn progress(
         &self,
         slot: u32,
         offsets: &ScrollOffsets<'_>,
     ) -> Option<stylo::servo::animation::AnimationProgress> {
-        let offset = self
-            .axis
-            .of_vector(offsets.of(slot))
-            .max(0.0)
-            .min(self.timing.limit);
+        let offset = offsets.of(slot);
+        let offset = match self.kind {
+            ProgressKind::Scroll => offsets.slots[slot as usize].unwrap(offset),
+            ProgressKind::View => offset,
+        };
+        let offset = self.axis.of_vector(offset).max(0.0).min(self.timing.limit);
         iteration_progress(&self.timing, offset)
     }
 }

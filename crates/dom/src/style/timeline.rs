@@ -17,6 +17,12 @@
 //! - [`Document::advance_scroll_timelines`] re-samples, between commits, the animations a moved
 //!   scroll container drives.
 //!
+//! Both sample the source's offset clamped to its scroll range `[0, max]`, as the painter's
+//! exported curves do. On an `overscroll-behavior: circular` axis the document's offset stands
+//! anywhere in the period `[0, P)`; a scroll progress timeline reads an offset past `max` at its
+//! representative nearer the range ([`ProgressKind`]), a view progress timeline reads it as it
+//! stands.
+//!
 //! Where the specifications are silent or disagree this follows Blink;
 //! `docs/tracking/css-animation.md` lists each choice.
 
@@ -41,6 +47,7 @@ use stylo::values::specified::animation::{Scroller, TimelineRangeName};
 use stylo_atoms::Atom;
 
 use crate::layout::{DisplayMode, display_mode};
+use crate::scroll::ScrollBox;
 use crate::scroll::snap::scroll_padding;
 use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeId};
 use crate::visual::sticky::{self, StickyAxis};
@@ -277,15 +284,46 @@ pub(crate) fn iteration_progress(
     })
 }
 
+/// The kind of progress timeline a binding reads, for the one rule that
+/// tells the two apart: where an offset through the seam of an
+/// `overscroll-behavior: circular` axis samples. On every other axis they
+/// sample alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProgressKind {
+    /// A scroll progress timeline (`scroll()`, `scroll-timeline`): an offset
+    /// past the scroll range stands at its representative nearer the range
+    /// ([`ScrollBox::unwrapped_offset`], the painter's
+    /// [`ScrollSlot::unwrap`](crate::visual::ScrollSlot::unwrap)), so a
+    /// scrollport just before the start reads the start, not the end.
+    Scroll,
+    /// A view progress timeline (`view()`, `view-timeline`): the offset as it
+    /// stands in the period, clamped to the range like any other. Inside
+    /// the seam copy this samples the unshifted offset, the approximation
+    /// `docs/style-assumptions.md` §25 records.
+    View,
+}
+
+impl ProgressKind {
+    /// `scroll_box`'s offset as a timeline of this kind reads it, before the
+    /// clamp to the scroll range.
+    pub(crate) fn offset_of(self, scroll_box: &ScrollBox) -> Vector2D<f32> {
+        match self {
+            Self::Scroll => scroll_box.unwrapped_offset(),
+            Self::View => scroll_box.offset,
+        }
+    }
+}
+
 /// What one progress-driven animation is attached to.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Binding {
-    /// An active timeline: `source`'s offset along `axis`, read through
-    /// `timing`.
+    /// An active timeline: `source`'s offset along `axis`, read as `kind`
+    /// reads it and through `timing`.
     Active {
         source: NodeId,
         axis: Axis,
         timing: ProgressTiming,
+        kind: ProgressKind,
     },
     /// No timeline, or an inactive one: no effect, and the animation is not
     /// current (an animation on an inactive timeline is idle).
@@ -297,13 +335,27 @@ impl Binding {
         matches!(self, Self::Active { .. })
     }
 
-    fn sample(&self, offset_of: impl Fn(NodeId) -> Vector2D<f32>) -> Option<AnimationProgress> {
+    /// The progress at the offset of the scroll box `scroll_box_of` answers
+    /// for the source — read as the binding's [`ProgressKind`] reads it,
+    /// then clamped to the scroll range `[0, limit]` as the painter's
+    /// exported curve clamps it — or at offset 0 when the source has no
+    /// scroll box.
+    fn sample(
+        &self,
+        scroll_box_of: impl Fn(NodeId) -> Option<ScrollBox>,
+    ) -> Option<AnimationProgress> {
         match self {
             Self::Active {
                 source,
                 axis,
                 timing,
-            } => iteration_progress(timing, axis.of_vector(offset_of(*source))),
+                kind,
+            } => {
+                let offset = scroll_box_of(*source)
+                    .map_or_else(Vector2D::zero, |scroll_box| kind.offset_of(&scroll_box));
+                let offset = axis.of_vector(offset).max(0.0).min(timing.limit);
+                iteration_progress(timing, offset)
+            }
             Self::Inactive => None,
         }
     }
@@ -729,7 +781,7 @@ impl<T: Sync> Document<T> {
                     let paused = matches!(animation.state, AnimationState::Paused(_));
                     if !skipped && (!paused || !sampled) {
                         sampled = true;
-                        let sample = binding.sample(|source| document.scroll_offset(source));
+                        let sample = binding.sample(|source| document.scroll_box(source));
                         if animation.timeline_sample != sample {
                             animation.timeline_sample = sample;
                             changed = true;
@@ -803,7 +855,7 @@ impl<T: Sync> Document<T> {
                     {
                         continue;
                     }
-                    let sample = bound.binding.sample(|source| self.scroll_offset(source));
+                    let sample = bound.binding.sample(|source| self.scroll_box(source));
                     if animation.timeline_sample != sample {
                         animation.timeline_sample = sample;
                         if !hinted.contains(&id) {
@@ -892,10 +944,10 @@ impl<T: Sync> Document<T> {
         ui: &UI,
         index: usize,
     ) -> Option<(Binding, Option<TimelineRanges>)> {
-        let (source, axis, ranges) = match timeline {
+        let (source, axis, ranges, kind) = match timeline {
             &Timeline::Scroll { source, axis } => {
                 let max = axis.of_vector(self.scroll_box(source)?.max_offset());
-                (source, axis, NamedRanges::scroll(max))
+                (source, axis, NamedRanges::scroll(max), ProgressKind::Scroll)
             }
             Timeline::View {
                 subject,
@@ -904,7 +956,7 @@ impl<T: Sync> Document<T> {
             } => {
                 let source = self.nearest_scroll_container(*subject)?;
                 let ranges = self.view_ranges(*subject, source, *axis, inset)?;
-                (source, *axis, ranges)
+                (source, *axis, ranges, ProgressKind::View)
             }
         };
         (ranges.cover[1] > ranges.cover[0]).then(|| {
@@ -913,6 +965,7 @@ impl<T: Sync> Document<T> {
                 source,
                 axis,
                 timing: timing(ui, index, attachment, ranges.scroll[1]),
+                kind,
             };
             (binding, keyframe_ranges(attachment, &ranges))
         })

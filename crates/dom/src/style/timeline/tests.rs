@@ -363,6 +363,7 @@ fn attached(doc: &Doc, id: NodeId) -> Option<(NodeId, Axis, [f32; 2])> {
             source,
             axis,
             timing,
+            ..
         } => Some((source, axis, [timing.start, timing.end])),
         Binding::Inactive => None,
     }
@@ -904,6 +905,45 @@ fn a_binding_samples_the_live_offset() {
     doc.dom.scroll_to(container, Vector2D::new(0.0, 225.0));
     doc.dom.advance_scroll_timelines(&[container]);
     assert_eq!(doc.value(element, "opacity"), "0.5");
+}
+
+/// On an `overscroll-behavior: circular` axis (`max` 370, period 570) the
+/// document's offset stands anywhere in the period. A scroll progress
+/// timeline reads an offset past `max` at its representative nearer the
+/// range: 20px before the period's end is −20, the start, and 20px past
+/// `max` is itself, the end; the seam's midpoint, 470, keeps the offset.
+/// A view progress timeline reads the offset as it stands, clamped to the
+/// range: at 550 the first subject's cover range `[-200, 50]` is behind
+/// it.
+#[test]
+fn a_scroll_timeline_through_the_seam_reads_the_nearer_end_of_the_range() {
+    let mut doc = Doc::with_css(PAGE);
+    let root = doc.root;
+    let container = doc.el(root, "view.scroller");
+    doc.set_inline(container, "overscroll-behavior-y: circular");
+    let subject = doc.el(container, "view.subject.animated");
+    doc.set_inline(subject, "animation-timeline: view()");
+    let mover = doc.el(container, "view.mover.animated");
+    doc.set_inline(mover, "animation-timeline: scroll()");
+    doc.el(container, "view.tail");
+    doc.flush();
+    let scroll_box = doc.dom.scroll_box(container).expect("a scroll box");
+    assert_eq!(scroll_box.wrap_period(), (None, Some(570.0)));
+    for (offset, scroll, view) in [
+        (550.0, "0", "1"),
+        (390.0, "1", "1"),
+        (470.0, "1", "1"),
+        (185.0, "0.5", "1"),
+        (0.0, "0", "0.8"),
+    ] {
+        assert_eq!(
+            doc.dom.scroll_to(container, Vector2D::new(0.0, offset)),
+            Vector2D::new(0.0, offset)
+        );
+        doc.dom.advance_scroll_timelines(&[container]);
+        assert_eq!(doc.value(mover, "opacity"), scroll, "scroll() at {offset}");
+        assert_eq!(doc.value(subject, "opacity"), view, "view() at {offset}");
+    }
 }
 
 /// The timeline boundary is the scroll limit (web-animations-2 §2.4.4): a

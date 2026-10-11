@@ -230,12 +230,14 @@ fn exported_animations(
                 source,
                 axis,
                 timing,
+                kind,
             }) if progress_driven && animation.state == AnimationState::Running => {
                 Timeline::Scroll(ScrollTimeline {
                     source,
                     slot: None,
                     axis,
                     timing,
+                    kind,
                 })
             }
             _ => Timeline::Clock,
