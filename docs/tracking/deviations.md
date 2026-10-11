@@ -1575,8 +1575,14 @@ consequential choice about whether to follow the spec or the quirk.
     (`x-swiper.css:122-131`); native loops its ViewPager
     (`XSwiperUI.java:865-868`, `setLoop`). Here snapping stays, so a drag or
     flick pages across the seam like any other page, and script-facing
-    offsets never leave `0..=max`: while the seam is in view the document
-    reports the end of the range.
+    offsets stand in the period `[0, P)`: while the seam is in view the
+    document reports the offset past `max_offset` the screen shows, and an
+    end item's position past `max_offset` or before `0` — the last
+    `carousel` item's start, the first centred item's centre — is admitted
+    there, so `current` and `scrollTo({index})` land on the item. A scroll
+    timeline through the seam reads the nearer end of the range, so the dot
+    strip shows the first dot while the first item is centred across the
+    seam.
   - *`scrollTo` (2026-10-11)* is CSSOM-View's "scroll an element into view"
     (`Document::scroll_into_view`) on the swiper's element child number
     `index`, in the shadow `#content`, at the item's own `scroll-snap-align`

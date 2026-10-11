@@ -448,10 +448,10 @@ pub(super) struct ScrollIntents {
     /// boundary, and its scrolling area repeats every
     /// [`dom::ScrollSlot::wrap_period`]. Such an offset is composed, hit
     /// tested and sampled modulo the period (`dom` normalizes it at every
-    /// entry point), posted modulo the period and then clamped
-    /// ([`Self::drain_changed`]), and brought back into `[0, period)` by
-    /// each rebase, which shifts the drag origins and glide targets that
-    /// refer to it by the same amount.
+    /// entry point), posted modulo the period and unclamped, which the
+    /// document admits as it stands ([`Self::drain_changed`]), and brought
+    /// back into `[0, period)` by each rebase, which shifts the drag origins
+    /// and glide targets that refer to it by the same amount.
     pub(super) offsets: FxHashMap<NodeId, Vector2D<f32>>,
     rebased_commit: Option<u64>,
     generation: u64,
@@ -602,8 +602,10 @@ impl ScrollIntents {
     /// puts the live offset on the target, where a drag holding the
     /// container continues from; a smooth one glides there from rest, to
     /// the position the at-rest snap rule would move the target to, so a
-    /// snapping container does not jump at the end. Either way the
-    /// container is posted, naming the request.
+    /// snapping container does not jump at the end. On a circular axis the
+    /// glide runs along the shorter arc of the circle
+    /// ([`nearest_copy`]), across the seam when that is shorter. Either way
+    /// the container is posted, naming the request.
     fn apply_request(
         &mut self,
         frame: &CommittedFrame,
@@ -636,6 +638,8 @@ impl ScrollIntents {
                     snap_x,
                     snap_y,
                 );
+                // `live` is in the period: `rebase` normalizes before `apply_requests`.
+                let target = nearest_copy(slot, live, target);
                 self.glide_to(frame, node, live, target, now);
             }
         }
@@ -838,11 +842,13 @@ impl ScrollIntents {
     /// bounces them — and forgets them. A container `frame` no longer carries
     /// is dropped. Both buffers keep their capacity.
     ///
-    /// A circular axis is normalized into its period first and then
-    /// clamped, so while the scrollport straddles the seam — the normalized
-    /// offset past `max_offset` — main sees `max_offset`, the way it sees
-    /// the edge a `contain-bounce` stretch stands past. The document never
-    /// wraps.
+    /// An axis with a [`dom::ScrollSlot::wrap_period`] is normalized into
+    /// its period and posted unclamped: the document admits the whole
+    /// period on such an axis, so while the scrollport straddles the seam —
+    /// the normalized offset past `max_offset` — main holds the offset the
+    /// screen shows, and its readbacks, its `scrollIntoView` and its scroll
+    /// timeline samples agree with the painter. Every other axis is clamped,
+    /// so main sees the edge a `contain-bounce` stretch stands past.
     fn drain_changed(
         &mut self,
         frame: Option<&CommittedFrame>,
@@ -856,9 +862,17 @@ impl ScrollIntents {
                 };
                 let slot = &frame.scroll_slots()[index as usize];
                 let live = slot.wrap(self.offsets.get(&node).copied().unwrap_or(slot.offset));
+                let wrap = wrap_axes(slot);
+                let axis = |value: f32, max: f32, wraps: bool| {
+                    if wraps {
+                        value
+                    } else {
+                        clamp_scroll_axis(value, max)
+                    }
+                };
                 let offset = Vector2D::new(
-                    clamp_scroll_axis(live.x, slot.max_offset.x),
-                    clamp_scroll_axis(live.y, slot.max_offset.y),
+                    axis(live.x, slot.max_offset.x, wrap.x),
+                    axis(live.y, slot.max_offset.y, wrap.y),
                 );
                 let moving = self.is_held(node)
                     || self.is_flinging(frame, node)
@@ -917,6 +931,31 @@ fn slot_step(
         wrap_axes(slot),
         snap_x,
         snap_y,
+    )
+}
+
+/// `target` on each axis `slot` wraps, moved to its copy nearest `live`: a
+/// whole period down when it lies more than half a period ahead of `live`,
+/// a whole period up when more than half a period behind, and unchanged
+/// otherwise (a tie keeps it). A glide from `live` to the result runs along
+/// the shorter arc of the circle, across the seam when that is shorter; a
+/// glide target outside `[0, period)` is brought back with the offset by
+/// the next rebase ([`ScrollIntents::shift_motion`]). A bounded axis keeps
+/// its target.
+fn nearest_copy(
+    slot: &dom::ScrollSlot,
+    live: Vector2D<f32>,
+    target: Vector2D<f32>,
+) -> Vector2D<f32> {
+    let (period_x, period_y) = slot.wrap_period();
+    let axis = |live: f32, target: f32, period: Option<f32>| match period {
+        Some(period) if target - live > period / 2.0 => target - period,
+        Some(period) if target - live < -period / 2.0 => target + period,
+        _ => target,
+    };
+    Vector2D::new(
+        axis(live.x, target.x, period_x),
+        axis(live.y, target.y, period_y),
     )
 }
 

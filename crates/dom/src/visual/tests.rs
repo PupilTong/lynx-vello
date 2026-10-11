@@ -2767,6 +2767,65 @@ fn a_scroll_self_timeline_binds_the_scrollers_own_slot() {
     assert_eq!(alpha(-80.0), Some(1.0));
 }
 
+/// On a circular axis (`max` 1000, period 1200) the painter samples a
+/// scroll progress timeline through the seam at the offset's
+/// representative nearer the range, as the main thread does: 50px before
+/// the period's end reads −50, the start, and 50px past `max` reads
+/// itself, the end; the seam's midpoint keeps the offset, and an offset off
+/// the circle is wrapped first. A view progress timeline reads the offset
+/// as it stands, clamped to the range: the card's cover range `[-200, 100]`
+/// is behind every offset past `max`.
+#[test]
+fn a_circular_scroll_timeline_samples_the_nearer_end_through_the_seam() {
+    use crate::visual::{ScrollOffsets, ScrollSlot};
+
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     overscroll-behavior-y: circular; width: 200px; height: 200px;
+                     animation: fade linear; animation-timeline: scroll(self); }
+         .card { flex-shrink: 0; width: 200px; height: 100px;
+                 animation: fade linear both; animation-timeline: view(); }
+         .filler { flex-shrink: 0; width: 200px; height: 1100px; }
+         @keyframes fade { from { opacity: 1; } to { opacity: 0; } }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let card = h.el(scroller, "view.card");
+    h.el(scroller, "view.filler");
+    let frame = h.doc.dom.commit();
+    let own = frame.slot_of(scroller).expect("the scroller has a slot");
+    assert_eq!(
+        frame.scroll_slots()[own as usize].wrap_period(),
+        (None, Some(1200.0))
+    );
+    let alpha = |node: NodeId, y: f32| {
+        let slot = frame
+            .animation_slots()
+            .iter()
+            .find(|slot| slot.node == node)
+            .expect("the fade exports");
+        let offset_of =
+            |slot: &ScrollSlot| (slot.node == scroller).then_some(crate::Vector2D::new(0.0, y));
+        let offsets = ScrollOffsets {
+            slots: frame.scroll_slots(),
+            offset_of: &offset_of,
+        };
+        slot.sample(None, &offsets, &mut AnimationValueMap::default())
+            .alpha
+    };
+    for (y, scroll, view) in [
+        (1150.0, 1.0, 0.0),
+        (2350.0, 1.0, 0.0),
+        (1050.0, 0.0, 0.0),
+        (1100.0, 0.0, 0.0),
+        (500.0, 0.5, 0.0),
+    ] {
+        assert_eq!(alpha(scroller, y), Some(scroll), "scroll(self) at {y}");
+        assert_eq!(alpha(card, y), Some(view), "view() at {y}");
+    }
+}
+
 /// A circular scroller whose scrollport straddles the seam is hit through
 /// both copies of its content: the end of the scrolling area at the offset
 /// itself, and its start one period back below it. An offset off the

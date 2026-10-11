@@ -872,15 +872,16 @@ fn a_stretched_offset_posts_clamped() {
     assert_eq!(entries[0].1.offset, dom::Vector2D::zero());
 }
 
-/// An `overscroll-behavior: circular` offset is the painter's alone past
-/// the end: what it posts is the live offset modulo the period (1000 here:
-/// `max_offset` 800 plus the 200px scrollport), clamped into range. Wheeled
-/// to 800, a drag of 108px (100 after the 8px slop) puts the live offset at
-/// 900 — the scrollport straddles the seam, and main is told 800, the edge.
-/// A second drag of 158px (150 after the slop) puts it at 1050, past the
-/// seam, and main is told 50.
+/// An `overscroll-behavior: circular` offset is posted modulo the period
+/// (1000 here: `max_offset` 800 plus the 200px scrollport) and unclamped,
+/// since the document admits the whole period on such an axis. Wheeled to
+/// 800, a drag of 108px (100 after the 8px slop) puts the live offset at
+/// 900 — the scrollport straddles the seam, and main is told 900, past
+/// `max_offset`. A second drag of 158px (150 after the slop) puts it at
+/// 1050, past the seam, and main is told 50. A bounded axis still posts
+/// clamped (`a_stretched_offset_posts_clamped`).
 #[test]
-fn a_wrapped_offset_posts_the_edge_through_the_seam() {
+fn a_wrapped_offset_posts_through_the_seam_unclamped() {
     use dom::input::PointerPhase::{Down, Move, Up};
 
     let (mut painter, main, scroller) = scrolling("overscroll-behavior:circular");
@@ -898,12 +899,16 @@ fn a_wrapped_offset_posts_the_edge_through_the_seam() {
         .expect("the drag moved the scroller");
     assert!((live.y - 900.0).abs() < 0.01, "got {live:?}");
     let (entries, _) = take(&main);
-    assert_eq!(entries[0].1.offset, dom::Vector2D::new(0.0, 800.0));
-    // Let go at one clock reading, so without velocity: at rest on the
-    // edge as main sees it.
+    assert_eq!(
+        entries[0].1.offset,
+        dom::Vector2D::new(0.0, 900.0),
+        "across the seam, as the screen shows it"
+    );
+    // Let go at one clock reading, so without velocity: at rest where it
+    // stands.
     touch(&mut painter, Up, 82.0);
     let (entries, _) = take(&main);
-    assert_eq!(entries[0].1.rest, Some(dom::Vector2D::new(0.0, 800.0)));
+    assert_eq!(entries[0].1.rest, Some(dom::Vector2D::new(0.0, 900.0)));
 
     touch(&mut painter, Down, 190.0);
     touch(&mut painter, Move, 32.0);
@@ -921,6 +926,102 @@ fn a_wrapped_offset_posts_the_edge_through_the_seam() {
         posted.x == 0.0 && (posted.y - 50.0).abs() < 0.01,
         "past the seam main sees the start again, got {posted:?}"
     );
+}
+
+/// A smooth request on a circular axis glides along the shorter arc of the
+/// circle (period 1000: `max_offset` 800 plus the 200px scrollport), across
+/// the seam when that is shorter. Standing at 900, a request to 50 runs
+/// forward through 1000, 150px, rather than back 850px, and rests at 50;
+/// standing at 50, a request to 900 runs back through 0, 150px, and rests
+/// at 900. Each glide moves one way only, so the live offset never leaves
+/// the arc between its start and its target.
+#[test]
+fn a_smooth_request_on_a_circular_axis_glides_along_the_shorter_arc() {
+    for (from, to, arc) in [
+        (900.0_f32, 50.0_f32, 900.0..=1050.0),
+        (50.0, 900.0, -100.0..=50.0),
+    ] {
+        let label = format!("{from} to {to}");
+        let mut document = document();
+        let root = document.document_element().id();
+        let scroller = document.create_element("view", ());
+        document.set_inline_style(
+            scroller,
+            "display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px;\
+             overscroll-behavior:circular",
+        );
+        document.append_child(root, scroller);
+        let filler = document.create_element("view", ());
+        document.set_inline_style(filler, "flex-shrink:0;width:200px;height:1000px");
+        document.append_child(scroller, filler);
+        let (mut painter, main) = detached();
+        main.outbox.publish_frame(document.commit());
+        painter.poll_link();
+        painter.clock.pin(0.0);
+
+        // Stand at `from`: an instant request, which the painter carries out
+        // when it adopts the frame.
+        document.scroll_to_with(
+            scroller,
+            dom::Vector2D::new(0.0, from),
+            dom::scroll::ScrollBehavior::Instant,
+        );
+        main.outbox.publish_frame(document.commit());
+        painter.poll_link();
+        let frame = painter.frame().cloned().expect("the new frame is adopted");
+        painter.scroll_intents.rebase(&frame, 0.0);
+        let slot = &frame.scroll_slots()[frame.slot_of(scroller).expect("a slot") as usize];
+        assert_eq!(slot.wrap_period(), (None, Some(1000.0)), "{label}");
+        let standing = painter
+            .scroll_intents
+            .offset_for(scroller)
+            .unwrap_or(slot.offset);
+        assert_eq!(standing, dom::Vector2D::new(0.0, from), "{label}");
+
+        document.scroll_to_with(
+            scroller,
+            dom::Vector2D::new(0.0, to),
+            dom::scroll::ScrollBehavior::Smooth,
+        );
+        main.outbox.publish_frame(document.commit());
+        painter.poll_link();
+        let frame = painter.frame().cloned().expect("the new frame is adopted");
+        painter.scroll_intents.rebase(&frame, 0.0);
+        assert!(painter.scroll_intents.is_gliding(scroller), "{label}");
+
+        let mut rested = None;
+        let mut travelled = false;
+        for step in 1..240_u16 {
+            let now = f64::from(step) / 60.0;
+            painter.scroll_intents.tick(&frame, now);
+            let live = painter
+                .scroll_intents
+                .offset_for(scroller)
+                .expect("the glide moved the scroller")
+                .y;
+            assert!(
+                arc.contains(&live),
+                "{label}: {live} left the shorter arc {arc:?}"
+            );
+            travelled |= !(0.0..=1000.0).contains(&live);
+            painter.publish_scroll(now, None);
+            let (entries, _) = take(&main);
+            if let Some(rest) = entries
+                .into_iter()
+                .find(|(node, _)| *node == scroller)
+                .and_then(|(_, entry)| entry.rest)
+            {
+                rested = Some(rest);
+                break;
+            }
+        }
+        assert!(travelled, "{label}: the glide crossed the seam");
+        assert_eq!(
+            rested,
+            Some(dom::Vector2D::new(0.0, to)),
+            "{label}: at rest"
+        );
+    }
 }
 
 /// A rebase brings a circular axis's live offset back into its period and

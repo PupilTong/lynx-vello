@@ -15,8 +15,9 @@
 //!   document's own offset at once, as [`Document::scroll_to`] does; a [`ScrollBehavior::Smooth`]
 //!   one leaves it where it is, because the painter animates it and the offsets come back through
 //!   the painter's posts like a fling's.
-//! - The paint build copies a container's pending request into its [`ScrollSlot`], re-clamped to
-//!   the built range; a request whose container has no slot in the frame the render publishes is
+//! - The paint build copies a container's pending request into its [`ScrollSlot`], re-admitted
+//!   against the built geometry (clamped to the built range, or on a circular axis normalized into
+//!   the built period); a request whose container has no slot in the frame the render publishes is
 //!   dropped.
 //! - The painter handles each serial once, and every offset it posts for the container afterwards
 //!   names the newest serial it has handled there. The runtime drops a post naming an older serial
@@ -29,7 +30,6 @@ use std::num::NonZeroU64;
 
 use euclid::default::Vector2D;
 
-use super::clamp_to;
 use crate::NodeId;
 use crate::tree::document::Document;
 
@@ -53,14 +53,18 @@ pub struct ScrollRequest {
     /// Orders this request against every other one of the document, and so
     /// against the serial a painter's post names.
     pub serial: NonZeroU64,
-    /// Where the container is to end, clamped to its scroll range.
+    /// Where the container is to end, as its scroll box admits it
+    /// ([`ScrollBox::admit`](super::ScrollBox::admit)): clamped to its
+    /// scroll range, or on a circular axis normalized into `[0, period)`.
     pub target: Vector2D<f32>,
     pub behavior: ScrollBehavior,
 }
 
 impl<T> Document<T> {
     /// Scrolls `id` to `offset` as a script-facing request with `behavior`,
-    /// and returns the clamped target; see the module documentation.
+    /// and returns the target as the scroll box admits it
+    /// ([`ScrollBox::admit`](super::ScrollBox::admit)); see the module
+    /// documentation.
     ///
     /// A node that is no scroll container records nothing and answers zero,
     /// as [`Self::scroll_to`] does. A second request for the same container
@@ -80,7 +84,7 @@ impl<T> Document<T> {
         let Some(scroll_box) = self.scroll_box(id) else {
             return Vector2D::zero();
         };
-        let target = clamp_to(offset, scroll_box.max_offset());
+        let target = scroll_box.admit(offset);
         if behavior == ScrollBehavior::Instant {
             self.scroll_to(id, target);
         }
@@ -208,6 +212,40 @@ mod tests {
         document.add_stylesheet(".content { height: 200px; }", StylesheetOrigin::Author);
         let request = slot_request(&mut document, scroller).expect("the slot carries it");
         assert_eq!(request.target, Vector2D::new(0.0, 100.0));
+    }
+
+    /// On a circular axis the target stands anywhere in the period: the
+    /// 100px scroller over 400px of content (`max` 300, period 400) keeps a
+    /// target of 350, whose scrollport straddles the seam, and normalizes
+    /// one before the start. The build re-admits it against the period it
+    /// built: content shrunk to 200px (`max` 100, period 200) moves 350 to
+    /// 150, past the new `max` and still inside the new period.
+    #[test]
+    fn a_circular_target_stands_anywhere_in_the_period_and_the_build_keeps_it_there() {
+        let circular = || {
+            let (mut document, node) = scroller();
+            document.set_inline_style(node, "overscroll-behavior-y: circular");
+            document.commit();
+            (document, node)
+        };
+        let (mut document, node) = circular();
+        assert_eq!(
+            document.scroll_to_with(node, Vector2D::new(0.0, 350.0), ScrollBehavior::Smooth),
+            Vector2D::new(0.0, 350.0),
+        );
+        let request = slot_request(&mut document, node).expect("the slot carries it");
+        assert_eq!(request.target, Vector2D::new(0.0, 350.0), "past max, kept");
+        assert_eq!(
+            document.scroll_to_with(node, Vector2D::new(0.0, -30.0), ScrollBehavior::Instant),
+            Vector2D::new(0.0, 370.0),
+        );
+        assert_eq!(document.scroll_offset(node), Vector2D::new(0.0, 370.0));
+
+        let (mut document, node) = circular();
+        document.scroll_to_with(node, Vector2D::new(0.0, 350.0), ScrollBehavior::Smooth);
+        document.add_stylesheet(".content { height: 200px; }", StylesheetOrigin::Author);
+        let request = slot_request(&mut document, node).expect("the slot carries it");
+        assert_eq!(request.target, Vector2D::new(0.0, 150.0));
     }
 
     #[test]
