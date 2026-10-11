@@ -12,16 +12,17 @@
 //! Each tag owns its UA rules and tests. Numeric text and list attributes
 //! flow through `attr()`; boolean flags use attribute selectors. Only `image`,
 //! `svg`, `blur_view`, `swiper`, `refresh_view`, `viewpager`,
-//! `scroll_container`, `list`, `dialog` and `overlay` need components: for
-//! image resources (an `svg`'s `content` as a document handed to the host as
-//! its bytes), blur hints,
+//! `scroll_container`, `list`, `scroll_coordinator`, `dialog` and `overlay`
+//! need components: for image resources (an `svg`'s `content` as a document
+//! handed to the host as its bytes), blur hints,
 //! the swiper's UA shadow tree, item count and `scrollTo` UI method, the
 //! refresh view's UA shadow tree, its header and footer slot assignment and
 //! its `finishRefresh`, `finishLoadMore` and `autoStartRefresh` UI methods
 //! ([`refresh_view`]), the viewpager's `selectTab` UI method, the
 //! `scroll-view`'s `scrollTo`, `scrollBy` and `getScrollInfo` UI methods, the `list`'s
 //! `scrollToPosition`, `scrollBy`, `getScrollContainerInfo` and
-//! `getVisibleCells` UI methods ([`list`]), the dialog's
+//! `getVisibleCells` UI methods ([`list`]), the scroll coordinator's
+//! `setFoldExpanded` UI method ([`scroll_coordinator`]), the dialog's
 //! `:open`/`:modal` state, top-layer membership and four UI methods
 //! ([`dialog`]), and the overlay's UA shadow tree, the top-layer membership of
 //! the `dialog` in it, and its `showoverlay` and `dismissoverlay` events
@@ -31,9 +32,10 @@
 //! every element has whatever its kind, which `callElementMethod` runs when
 //! the kind has no method of the name, are [`base_methods`]'
 //! (`boundingClientRect`, `scrollIntoView`, `scrollTo` and `scrollBy`).
-//! `scroll_coordinator` needs no component, and has no UI method: its ten tags
-//! are UA rules over anchor-sized absolute boxes, a sticky toolbar and
-//! `scroll-capture-y`. `overlay` has no UI method.
+//! `scroll_coordinator`'s layout needs no component: its ten tags are UA
+//! rules over anchor-sized absolute boxes, a sticky toolbar and
+//! `scroll-capture-y`, and the component on its two coordinator tags exists
+//! for `setFoldExpanded` alone. `overlay` has no UI method.
 //!
 //! [`NodeId`]: dom::NodeId
 
@@ -98,6 +100,7 @@ pub(crate) fn new_document(
     viewpager::define(&mut document);
     scroll_container::define(&mut document);
     list::define(&mut document);
+    scroll_coordinator::define(&mut document);
     dialog::define(&mut document, events.clone());
     // After `dialog`: every overlay builds one in its shadow tree.
     overlay::define(&mut document, events);

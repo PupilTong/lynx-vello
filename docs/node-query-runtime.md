@@ -62,6 +62,16 @@ queue without clearing it. Selection captures its root at select time.
   once it is at least 90% visible, so from rest a smooth request to it
   would be settled back to `#content`. A smooth version needs a request
   the painter does not settle at request time, a follow-up for the user.
+  `setFoldExpanded({offset, smooth = true})` on a `scroll-coordinator` or
+  `x-foldview-ng` succeeds with no data
+  (`crates/bobcat-core/src/main/tree/scroll_coordinator.rs`): the
+  coordinator, its own vertical scroll container, scrolls to `offset` (a
+  number in px or a `px`/`rpx`/`ppx` string) clamped to its range, the
+  header height less the toolbar height, smoothly unless `smooth` is falsy.
+  A missing or unreadable `offset` fails with code 4 and moves nothing.
+  iOS's `getScrollInfo` is code 3, and its `scrollBy({offset})` is not
+  built: the name reaches the base set's CSSOM-View `scrollBy`, which reads
+  no `offset`.
   `scrollTo({index?, offset = 0, smooth = false})`, `scrollBy({offset})` and
   `getScrollInfo()` on a `scroll-view` work on the axis it scrolls (x under
   `scroll-x` / `scroll-orientation="horizontal"`, else y): `scrollTo`
@@ -175,8 +185,12 @@ native numeric-length conversion remain unsupported.
 
 Legacy component-scoped roots, direct MTS selector PAPI, UI invoke methods
 other than the base set's four (`boundingClientRect`, `scrollIntoView`,
-`scrollTo`, `scrollBy`), `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s three, a `list`'s four, an `x-refresh-view`'s three and a dialog's four (a `list`'s `autoScroll` among them), animation methods,
+`scrollTo`, `scrollBy`), `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s three, a `list`'s four, an `x-refresh-view`'s three, a scroll coordinator's `setFoldExpanded` and a dialog's four (a `list`'s `autoScroll` and a coordinator's `getScrollInfo` among them), animation methods,
 dataset-to-DOM reflection and cross-realm host objects remain pending.
+An `image`'s `startAnimate`/`pauseAnimation`/`resumeAnimation`/`stopAnimation`
+and a `text`'s `getTextBoundingRect`/`getSelectedText`/`setTextSelection`
+are code 3 for want of a primitive: the engine plays no image frames, and has
+no text selection model and no query from a character range to rects.
 `boundingClientRect` takes no `relativeTo`, `androidEnableTransformProps` or
 `iOSEnableAnimationProps`: it reads nothing from its `params`, since each of
 those names behavior this engine does not have. Query failures and invalid legacy ReactRef chaining

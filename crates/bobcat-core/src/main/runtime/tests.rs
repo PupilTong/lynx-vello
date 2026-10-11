@@ -2682,6 +2682,129 @@ fn a_refresh_view_answers_its_three_methods_through_both_invoke_paths() {
     assert_eq!(offset(), dom::Vector2D::new(0.0, 120.0));
 }
 
+/// `setFoldExpanded` on an `x-foldview-ng`, through `__InvokeUIMethod` and
+/// the selector-query `invoke`. The coordinator is 300px tall with a 20px
+/// toolbar, a 100px header and a slot, a fold range of 80. Each instant
+/// call moves the document at once and answers code 0; an offset past the
+/// range clamps to it; a missing `offset` is code 4. `getScrollInfo` is
+/// iOS-only and not built: code 3. `scrollTo` and `scrollBy` are the base
+/// set's CSSOM-View methods, which read `top` and not `offset`.
+#[test]
+#[expect(clippy::too_many_lines, reason = "one scenario over both invoke paths")]
+fn a_foldview_answers_set_fold_expanded_through_both_invoke_paths() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const fold = __CreateElement('x-foldview-ng', 0);
+                  __SetID(fold, 'fold');
+                  __SetInlineStyles(fold, 'width:200px;height:300px');
+                  __AppendElement(page, fold);
+                  const toolbar = __CreateElement('x-foldview-toolbar-ng', 0);
+                  __SetInlineStyles(toolbar, 'height:20px');
+                  const header = __CreateElement('x-foldview-header-ng', 0);
+                  __SetInlineStyles(header, 'height:100px');
+                  const slot = __CreateElement('x-foldview-slot-ng', 0);
+                  __AppendElement(fold, toolbar);
+                  __AppendElement(fold, header);
+                  __AppendElement(fold, slot);
+                  globalThis.held = [page, fold];
+                };
+                ",
+            "app:///foldview.js",
+        )
+        .expect("main-thread script");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import {
+                  __BobcatQueryNodes,
+                  __FlushElementTree,
+                  __InvokeUIMethod,
+                } from 'bobcat:element';
+                __FlushElementTree();
+                globalThis.viaPapi = (method, params) => {
+                  let answer;
+                  let calls = 0;
+                  __InvokeUIMethod(held[1], method, params, result => {
+                    answer = result;
+                    calls += 1;
+                  });
+                  if (calls !== 1) throw new Error('the callback ran ' + calls + ' times');
+                  return answer;
+                };
+                globalThis.viaQuery = (method, params) => __BobcatQueryNodes({
+                  bobcat: 'runtime', method: 'nodeQuery', operation: 'invoke',
+                  token: {type: 0, identifier: '#fold', component_id: '',
+                          first_only: true, root_unique_id: undefined},
+                  params: {method, params},
+                });
+                globalThis.expectCode = (answer, code) => {
+                  if (answer.code !== code || answer.data !== undefined) {
+                    throw new Error('expected ' + code + ', got ' + JSON.stringify(answer));
+                  }
+                };
+                ",
+            "app:///helpers.js",
+            "helpers",
+        )
+        .expect("helpers");
+    let fold = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        tree.get(page).expect("the page").child_ids()[0]
+    };
+    assert_eq!(
+        elements
+            .tree()
+            .scroll_box(fold)
+            .map(|scroll_box| scroll_box.max_offset()),
+        Some(dom::Vector2D::new(0.0, 80.0)),
+        "the header height less the toolbar height"
+    );
+    let offset = || elements.tree().scroll_offset(fold).y;
+    let steps = std::cell::Cell::new(0);
+    let run = |runtime: &mut MainThreadRuntime, js_runtime: &mut ScriptRuntime, source: &str| {
+        steps.set(steps.get() + 1);
+        let name = format!("app:///step-{}.js", steps.get());
+        runtime
+            .evaluate_module(js_runtime, source, &name, "step")
+            .expect("step");
+    };
+    for (source, expected) in [
+        (
+            "expectCode(viaPapi('setFoldExpanded', {offset: 50, smooth: false}), 0);",
+            50.0,
+        ),
+        (
+            "expectCode(viaQuery('setFoldExpanded', {offset: 500, smooth: false}), 0);",
+            80.0,
+        ),
+        (
+            "expectCode(viaQuery('setFoldExpanded', {offset: '10px', smooth: false}), 0);",
+            10.0,
+        ),
+        ("expectCode(viaPapi('setFoldExpanded', {}), 4);", 10.0),
+        (
+            "expectCode(viaQuery('setFoldExpanded', undefined), 4);",
+            10.0,
+        ),
+        ("expectCode(viaPapi('getScrollInfo', {}), 3);", 10.0),
+        ("expectCode(viaQuery('getScrollInfo', {}), 3);", 10.0),
+        // The base set's `scrollBy` reads `left`/`top`: `offset` moves nothing.
+        ("expectCode(viaPapi('scrollBy', {offset: 30}), 0);", 10.0),
+        ("expectCode(viaQuery('scrollTo', {top: 70}), 0);", 70.0),
+        ("expectCode(viaPapi('scrollTo', {top: 10}), 0);", 10.0),
+    ] {
+        run(&mut runtime, &mut js_runtime, source);
+        assert!((offset() - expected).abs() < f32::EPSILON, "{source}");
+    }
+}
+
 /// A `scroll-view`'s `getScrollInfo`, `scrollBy` and `scrollTo` through
 /// `__InvokeUIMethod`: the data methods' records come back as the objects
 /// `element-papi.ts` builds from them, in CSS px, and every method moves the

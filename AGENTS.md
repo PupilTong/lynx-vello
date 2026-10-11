@@ -1478,7 +1478,8 @@ write through and read back, among them `__SetInlineStyles` and the name-based
 `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s
 `scrollTo`/`scrollBy`/`getScrollInfo`, a `list`'s
 `scrollToPosition`/`scrollBy`/`getScrollContainerInfo`/`getVisibleCells`, an
-`x-refresh-view`'s `finishRefresh`/`finishLoadMore`/`autoStartRefresh` and a
+`x-refresh-view`'s `finishRefresh`/`finishLoadMore`/`autoStartRefresh`, a
+scroll coordinator's `setFoldExpanded` and a
 dialog's `show`/`showModal`/`close`/`requestClose`, and
 `__GetComputedStyleByKey`, neither of which commits anything
 — both read the last completed pass and leave the decision to flush to the
@@ -1708,8 +1709,11 @@ painter would settle a smooth request back to `#content`),
 coordinator a vertical scroll container, the header and slot absolutely
 positioned with the slot placed and sized by `anchor-size()` of the header and
 the toolbar, a sticky toolbar, `scroll-capture-y: nearest forward` inside the
-slot for the fold order, and the structure pinned in the cascade; no
-component, no UI method), `tree::dialog` (HTML's `<dialog>` on `dom`'s top
+slot for the fold order, and the structure pinned in the cascade; a component
+on the two coordinator tags whose only member is the `setFoldExpanded` UI
+method, its `CustomElement::invoke`, a scroll of the coordinator to `offset`
+clamped to the fold range; iOS's `getScrollInfo` and `scrollBy` are not
+built), `tree::dialog` (HTML's `<dialog>` on `dom`'s top
 layer: HTML's UA rules adapted — the display `defaultDisplayLinear` picks,
 `Canvas`/`CanvasText` (light scheme), `overflow: scroll` and `top`/`bottom`
 on `:modal`, `-servo-top-layer: auto` on `:modal` and `::backdrop` so Stylo's
@@ -2453,7 +2457,8 @@ plus the element's `id` and `dataset` as native reports them —
 `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s `scrollTo`, `scrollBy`
 and `getScrollInfo`, a `list`'s `scrollToPosition`, `scrollBy`,
 `getScrollContainerInfo` and `getVisibleCells`, an `x-refresh-view`'s
-`finishRefresh`, `finishLoadMore` and `autoStartRefresh`, and a dialog's four methods, and fails every other method with
+`finishRefresh`, `finishLoadMore` and `autoStartRefresh`, a scroll
+coordinator's `setFoldExpanded`, and a dialog's four methods, and fails every other method with
 code 3, `METHOD_NOT_FOUND`,
 alongside the selection failures it already delivered. No callback or document handle crosses into
 Rust's Worker transport. See `docs/node-query-runtime.md` for the supported
@@ -2988,7 +2993,8 @@ would host it:
   `scrollTo`/`scrollBy`, `selectTab`, a swiper's `scrollTo`, a
   `scroll-view`'s `scrollTo`/`scrollBy`/`getScrollInfo`, a `list`'s
   `scrollToPosition`/`scrollBy`/`getScrollContainerInfo`/`getVisibleCells`,
-  an `x-refresh-view`'s `finishRefresh`/`finishLoadMore`/`autoStartRefresh`
+  an `x-refresh-view`'s `finishRefresh`/`finishLoadMore`/`autoStartRefresh`,
+  a scroll coordinator's `setFoldExpanded`
   and a dialog's `show`/`showModal`/`close`/`requestClose`.** Those dispatch
   by name (`boundingClientRect`, `scrollIntoView` and CSSOM-View's
   `scrollTo`/`scrollBy` on every element, `selectTab` on
@@ -2996,10 +3002,15 @@ would host it:
   the three scroll methods on `scroll-view` only, where they shadow the
   standard two, the four list methods on `list` only, whose `scrollBy`
   shadows the standard one, the refresh view's three on `x-refresh-view`
-  only, the dialog's on `dialog` only) through
+  only, `setFoldExpanded` on `scroll-coordinator` and `x-foldview-ng` only,
+  the dialog's on `dialog` only) through
   `__InvokeUIMethod`; every other name — the base set's `focus`/`blur` (no
   focus model), a `scroll-view`'s `autoScroll` and `takeContentScreenshot`,
-  a `list`'s `autoScroll` and `getScrollInfo`, `requestUIInfo`,
+  a `list`'s `autoScroll` and `getScrollInfo`, a scroll coordinator's
+  `getScrollInfo`, an `image`'s four animation methods (nothing plays image
+  frames), a `text`'s `getTextBoundingRect`, `getSelectedText` and
+  `setTextSelection` (no selection model and no character-range-to-rects
+  query), `requestUIInfo`,
   `takeScreenshot` (no pixel readback) and the rest of the per-component
   catalog — answers code 3, `METHOD_NOT_FOUND`. The rect itself ignores
   transforms and never flushes.
