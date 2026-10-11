@@ -2418,8 +2418,10 @@ const UI_METHOD_OPERATION_ERROR: f64 = 8.0;
 /// What `callElementMethod` answers for a method's outcome, a kind's or the
 /// base set's: the status code, or for `Data` a record whose first field is
 /// the code `0` followed by the method's fields unchanged, which
-/// `element-papi.ts` reads by method name. `boundingClientRect` answers such
-/// a record too, so the realm sees one of two shapes: a number, or a record.
+/// `element-papi.ts` reads by method name (`boundingClientRect`, a
+/// `scroll-view`'s and a `list`'s data methods, and a `text`'s
+/// `getTextBoundingRect`), so the realm sees one of two shapes: a number, or
+/// a record.
 fn method_answer(outcome: MethodOutcome) -> HostValue {
     HostValue::Number(match outcome {
         MethodOutcome::NotFound => UI_METHOD_NOT_FOUND,
@@ -2440,7 +2442,8 @@ fn method_answer(outcome: MethodOutcome) -> HostValue {
 /// document, one of which also runs the UI methods.
 ///
 /// Neither runs a pipeline step. Both read what the last completed pass
-/// left behind, and the realm decides when the next one runs by calling
+/// left behind, `boundingClientRect` and a `text`'s `getTextBoundingRect`
+/// included, and the realm decides when the next one runs by calling
 /// `__FlushElementTree` — measuring must not be able to move layout out from
 /// under the job that measures, and a card that wants current numbers says
 /// so. The UI methods that write record what the next commit carries:
@@ -2484,7 +2487,8 @@ fn install_readback_members(
             // `x-swiper`'s `scrollTo` (`tree::swiper`), an `x-refresh-view`'s
             // `finishRefresh`, `finishLoadMore` and `autoStartRefresh`
             // (`tree::refresh_view`), a scroll coordinator's
-            // `setFoldExpanded` (`tree::scroll_coordinator`), and a dialog's
+            // `setFoldExpanded` (`tree::scroll_coordinator`), a `text`'s
+            // `getTextBoundingRect` (`tree::text`), and a dialog's
             // `show`, `showModal`, `close` and `requestClose`
             // (`tree::dialog`). On `NotFound` the shared base set every
             // element has answers (`tree::base_methods`): the documented UI

@@ -69,7 +69,7 @@ Landed and not to be regressed:
   `scrollTo`/`scrollBy`/`getScrollInfo`, a `list`'s
   `scrollToPosition`/`scrollBy`/`getScrollContainerInfo`/`getVisibleCells`,
   an `x-refresh-view`'s `finishRefresh`/`finishLoadMore`/`autoStartRefresh`,
-  a scroll coordinator's `setFoldExpanded`
+  a scroll coordinator's `setFoldExpanded`, a `text`'s `getTextBoundingRect`
   and a dialog's four (every other name is code 3), per-component css-id scoping (every fragment mounts
   globally, which is what web-core emits for `enableRemoveCSSScope = true`), and
   gesture detectors.

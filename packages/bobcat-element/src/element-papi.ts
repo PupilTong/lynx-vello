@@ -1698,6 +1698,14 @@ function invokeUIMethod(handle: Handle, method: string, params: unknown): Invoke
  *   that order; `id` and `itemKey` are strings (empty when the cell carries
  *   no such attribute), the rest numbers, the rect relative to the list's
  *   scrollport rather than web-core's viewport.
+ * - `getTextBoundingRect`, a `text`'s: `{boundingRect, boxes}`, each rect
+ *   `{left, top, right, bottom, width, height}` in viewport CSS px, the
+ *   space `boundingClientRect` answers in. The host writes the box count
+ *   and then `left`, `top`, `width`, `height` per box, one box per line the
+ *   range shows content on; `boundingRect` is their union, built here as
+ *   iOS's `CGRectUnion` builds it (`LynxUIText.m:867-887`), so one box is
+ *   its own union. No `id` or `dataset` rides along: the natives send only
+ *   the two keys.
  *
  * A method without an arm gets the fields themselves.
  */
@@ -1737,6 +1745,25 @@ function decodeMethodData(handle: Handle, method: string, fields: string[]): unk
         cells.push({ id, itemKey, index, left, top, right, bottom });
       }
       return cells;
+    }
+    case "getTextBoundingRect": {
+      const count = Number(fields[0] ?? 0);
+      const boxes = [];
+      for (let box = 0; box < count; box++) {
+        const [left = 0, top = 0, width = 0, height = 0] = fields
+          .slice(1 + box * 4, 5 + box * 4)
+          .map(Number);
+        boxes.push({ left, top, right: left + width, bottom: top + height, width, height });
+      }
+      let boundingRect = boxes[0] ?? { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+      for (const box of boxes.slice(1)) {
+        const left = Math.min(boundingRect.left, box.left);
+        const top = Math.min(boundingRect.top, box.top);
+        const right = Math.max(boundingRect.right, box.right);
+        const bottom = Math.max(boundingRect.bottom, box.bottom);
+        boundingRect = { left, top, right, bottom, width: right - left, height: bottom - top };
+      }
+      return { boundingRect: { ...boundingRect }, boxes };
     }
     default:
       return fields;

@@ -33,7 +33,8 @@ subtree is inline content rather than child boxes.
 
 - `crates/hughie/src/text/block/`: `mod.rs` (`TextBlock::probe`/`commit`),
   `content.rs` (flattened paragraph, inline atomic boxes), `shape.rs`,
-  `position.rs`, `style.rs`, `truncate.rs`. `crates/hughie/src/text/context.rs`
+  `position.rs`, `style.rs`, `truncate.rs`, `range.rs`
+  (`TextBlock::range_boxes`, a source UTF-16 range to per-line boxes). `crates/hughie/src/text/context.rs`
   and `font.rs` hold `TextContext` and `FontBlob`, both re-exported by `dom`.
 - `TextContainerStyle` (`crates/hughie/src/style/text.rs`) supplies
   paragraph-wide `text_maxline`/`text_maxlength`, defaulting to unlimited.
@@ -58,6 +59,11 @@ Landed and not to be regressed:
   of scope.
 - Per-line data for the Lynx `layout` event is produced but not yet wired to a
   dispatched event.
+- `getTextBoundingRect({start, end})` is the `text` component's UI method
+  (`tree/text.rs`), over `Document::text_range_boxes` and
+  `TextBlock::range_boxes`: iOS's per-line glyph extents, the natives' zero
+  box for `start == end`. `getSelectedText`/`setTextSelection` are code 3
+  (no selection model).
 - Relayout damage on an element evicts its direct text children's measurement
   caches and retained artifacts, because text nodes carry no stylo damage record.
 

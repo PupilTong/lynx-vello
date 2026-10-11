@@ -1,9 +1,28 @@
 //! The `text` tag's attribute-to-CSS limits and defaults: what color a run wears,
-//! and what may generate a box inside one.
+//! and what may generate a box inside one; and the `text` component, whose
+//! one UI method is `getTextBoundingRect` ([`text_bounding_rect`]).
 //!
 //! The other half of Lynx text — how a run reaches the engine and where it
 //! lays out — is [`super::raw_text`], which owns the `raw-text` generated-content rule and
 //! the rules that dissolve a carrier into the `text` it is written inside.
+//!
+//! # UI methods
+//!
+//! The Lynx docs give `text` three (`lynxjs.org/api/elements/built-in/text`,
+//! the typings in `lynx/js_libraries/types/types/common/element/text.d.ts:220-258`,
+//! `@since 2.18`); web-core's `XText` has none of them.
+//!
+//! - `getTextBoundingRect({start, end})` is built ([`text_bounding_rect`]), over
+//!   [`dom::Document::text_range_boxes`], with iOS's per-line answer
+//!   (`lynx/platform/darwin/ios/lynx/ui/text/LynxUIText.m:790-807`, `LynxTextView.m:205-235`).
+//! - `getSelectedText()` and `setTextSelection({startX, startY, endX, endY, ...})` are not built
+//!   and answer code 3: the engine has no text selection model, so there is nothing selected to
+//!   report and nothing a selection could be set on.
+//!
+//! The component holds no state and has no lifecycle callback, so defining
+//! the tag changes nothing else about it: `:defined` already matches every
+//! element in `dom`, and `display: -lynx-text` and the `raw-text` rules are
+//! selector rules on the tag name, which a definition does not touch.
 
 /// `text`'s own defaults, from `web-elements`' `x-text.css`.
 ///
@@ -108,6 +127,144 @@ text > inline-truncation { display: -lynx-text !important; --lynx-inline-truncat
 text > text, text > wrapper > text { color: inherit; }
 text > image, text > wrapper > image, inline-text > image, inline-text > wrapper > image, text > inline-truncation > image, text > inline-truncation > wrapper > image { padding: 0 !important; }
 "#;
+
+use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId};
+use serde_json::{Map, Value};
+
+use super::scroll_container::object;
+use super::{InvalidParams, LynxDocument};
+use crate::main::record::write_record_field;
+
+/// The paragraph tag the component is defined on. A nested `text` is a run
+/// of its ancestor's paragraph and establishes none, so its method answers
+/// code 8.
+const TEXT_TAG: &str = "text";
+
+/// Installs the `text` component. Must run before any element could carry
+/// the tag, which is [`Document::define`](dom::Document::define)'s own
+/// precondition.
+pub(super) fn define(document: &mut LynxDocument) {
+    document.define(TEXT_TAG, Box::new(Text));
+}
+
+/// The `text` component: `getTextBoundingRect` ([`text_bounding_rect`]).
+/// See the module documentation for the two methods it does not build.
+struct Text;
+
+impl CustomElement<()> for Text {
+    fn invoke(
+        &self,
+        document: &mut LynxDocument,
+        element: NodeId,
+        call: MethodCall<'_>,
+    ) -> MethodOutcome {
+        if call.name != "getTextBoundingRect" {
+            return MethodOutcome::NotFound;
+        }
+        match text_bounding_rect(document, element, call.params) {
+            Ok(Some(fields)) => MethodOutcome::Data(fields),
+            Ok(None) => MethodOutcome::Failed(MethodError::Operation),
+            Err(InvalidParams) => MethodOutcome::Failed(MethodError::InvalidParams),
+        }
+    }
+}
+
+/// `getTextBoundingRect({start, end})` on `text`, with `params` as the JSON
+/// text the realm serialized: the boxes the source range `[start, end)` of
+/// the paragraph occupies, one per line, in viewport CSS px.
+///
+/// - `params` must be a JSON object, and `start` and `end` JSON numbers, else code 4. Each is
+///   truncated toward zero, as iOS's `integerValue` and Android's `getInt` truncate
+///   (`LynxUIText.m:790-807`, `UIText.java:343-364`), and must then be non-negative, else code 4
+///   (iOS and Android). A missing one is code 4, iOS's answer; Android's `getInt` throws and its
+///   catch answers 1. `start > end` is code 4 too, which is Android's answer; iOS answers 1. A
+///   string is code 4, where iOS's `intValue` would read its digits. Offsets are UTF-16 units of
+///   the paragraph's source text, an inline image or view counting one, as both natives count them
+///   (an `NSString`, a Java `String`).
+/// - The boxes are [`dom::Document::text_range_boxes`]: one per line the range shows content on,
+///   from the first selected cluster's inline start to the last one's inline end, with the line's
+///   top and height. That is iOS's reading (`enumerateEnclosingRectsForGlyphRange`,
+///   `LynxTextView.m:205-235`); Android widens every line but the first and the last to the full
+///   layout width (`AndroidText.java:438-475`). `start == end` is one zero-width box at the content
+///   box's origin, as tall as the line holding `start`, which is both natives' answer.
+/// - Each box moves from the paragraph's own space into the space of `boundingClientRect`: plus the
+///   element's [`dom::Document::bounding_client_rect`] origin and its border and padding, the
+///   content box's offset in the border box, as iOS's `getMapFromRect:lineBox:` adds them
+///   (`LynxUIText.m:890-903`). `relativeTo` is not read, as `boundingClientRect` reads none of its
+///   params here.
+/// - `Ok(None)`, code 8, when nothing answers: the element has no box, establishes no paragraph (a
+///   nested `text`), `end` is past the source length, or the range shows no content (text past a
+///   truncation cut, the whitespace a soft wrap consumed). The natives answer 1, `UNKNOWN`, "Can
+///   not find text bounding rect"; the engine has no code 1, and 8, `OPERATION_ERROR`, is its code
+///   for a method that ran and found nothing to act on.
+///
+/// The data fields are the number of boxes and then `left`, `top`, `width`,
+/// `height` per box; `element-papi.ts` builds `{boundingRect, boxes}` from
+/// them. It reads the last completed layout and never flushes, as every UI
+/// method does here.
+fn text_bounding_rect(
+    document: &LynxDocument,
+    text: NodeId,
+    params: &str,
+) -> Result<Option<String>, InvalidParams> {
+    let params = object(params)?;
+    let start = range_offset(&params, "start")?;
+    let end = range_offset(&params, "end")?;
+    if start > end {
+        return Err(InvalidParams);
+    }
+    let Some(element_box) = document.bounding_client_rect(text) else {
+        return Ok(None);
+    };
+    let Some(layout) = document.rounded_layout(text) else {
+        return Ok(None);
+    };
+    let Some(boxes) = document
+        .text_range_boxes(text, start, end)
+        .filter(|boxes| !boxes.is_empty())
+    else {
+        return Ok(None);
+    };
+    let origin = dom::Vector2D::new(
+        element_box.origin.x + layout.border.left + layout.padding.left,
+        element_box.origin.y + layout.border.top + layout.padding.top,
+    );
+    let mut record = String::new();
+    write_record_field(&mut record, &boxes.len().to_string());
+    for rect in boxes {
+        let rect = rect.translate(origin);
+        for value in [
+            rect.origin.x,
+            rect.origin.y,
+            rect.size.width,
+            rect.size.height,
+        ] {
+            write_record_field(&mut record, &value.to_string());
+        }
+    }
+    Ok(Some(record))
+}
+
+/// `start` or `end` of `getTextBoundingRect`'s params: a JSON number
+/// truncated toward zero, non-negative after truncation, else code 4. A
+/// count past `u32::MAX` saturates, which is past every paragraph's length
+/// and so answers code 8 for `end`.
+fn range_offset(params: &Map<String, Value>, key: &str) -> Result<u32, InvalidParams> {
+    let offset = params
+        .get(key)
+        .and_then(Value::as_f64)
+        .ok_or(InvalidParams)?
+        .trunc();
+    if offset < 0.0 {
+        return Err(InvalidParams);
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a non-negative integer; one past u32::MAX saturates and is past every paragraph"
+    )]
+    Ok(offset as u32)
+}
 
 #[cfg(test)]
 mod tests {
@@ -663,6 +820,173 @@ mod tests {
             display(&document, outside),
             Display::Flex,
             "and the suppression reaches no further than a text's own children"
+        );
+    }
+
+    /// Runs `getTextBoundingRect` (or `name`) on `text` with `params`.
+    fn invoke(
+        document: &mut LynxDocument,
+        text: dom::NodeId,
+        name: &str,
+        params: &str,
+    ) -> dom::MethodOutcome {
+        document.invoke_element_method(text, dom::MethodCall { name, params })
+    }
+
+    /// The record `text_bounding_rect` answers: the count, then `left`,
+    /// `top`, `width`, `height` per box.
+    fn boxes_record(boxes: &[[f32; 4]]) -> dom::MethodOutcome {
+        let mut record = String::new();
+        crate::main::record::write_record_field(&mut record, &boxes.len().to_string());
+        for values in boxes {
+            for value in values {
+                crate::main::record::write_record_field(&mut record, &value.to_string());
+            }
+        }
+        dom::MethodOutcome::Data(record)
+    }
+
+    #[test]
+    fn get_text_bounding_rect_answers_one_box_per_line_in_viewport_coordinates() {
+        const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
+        let mut document = document();
+        assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+        let text = child(
+            &mut document,
+            "text",
+            "position:absolute;left:20px;top:30px;padding:5px;border:2px solid;width:100px;\
+             font-family:Ahem;font-size:20px;line-height:21px",
+        );
+        append_run(&mut document, text, "abc def");
+        document.layout();
+        // The content box starts at (20 + 2 + 5, 30 + 2 + 5) = (27, 37); the
+        // paragraph wraps after "abc ", 21px lines.
+        assert_eq!(
+            invoke(
+                &mut document,
+                text,
+                "getTextBoundingRect",
+                r#"{"start":1,"end":6}"#
+            ),
+            boxes_record(&[[47.0, 37.0, 40.0, 21.0], [27.0, 58.0, 40.0, 21.0]]),
+        );
+        assert_eq!(
+            invoke(
+                &mut document,
+                text,
+                "getTextBoundingRect",
+                r#"{"start":0,"end":3}"#
+            ),
+            boxes_record(&[[27.0, 37.0, 60.0, 21.0]]),
+        );
+        assert_eq!(
+            invoke(
+                &mut document,
+                text,
+                "getTextBoundingRect",
+                r#"{"start":5,"end":5}"#
+            ),
+            boxes_record(&[[27.0, 37.0, 0.0, 21.0]]),
+            "an empty range is the natives' zero box at the content box's origin"
+        );
+        assert_eq!(
+            invoke(
+                &mut document,
+                text,
+                "getTextBoundingRect",
+                r#"{"start":1.9,"end":2.5}"#
+            ),
+            boxes_record(&[[47.0, 37.0, 20.0, 21.0]]),
+            "offsets truncate toward zero"
+        );
+        assert_eq!(
+            invoke(
+                &mut document,
+                text,
+                "getTextBoundingRect",
+                r#"{"start":-0.5,"end":1,"x":0}"#
+            ),
+            boxes_record(&[[27.0, 37.0, 20.0, 21.0]]),
+            "-0.5 truncates to 0, which is not negative; other keys are ignored"
+        );
+    }
+
+    #[test]
+    fn get_text_bounding_rect_refuses_bad_params_and_finds_nothing_with_code_8() {
+        let (mut document, text) = paragraph("abc def");
+        let nested = element_under(&mut document, text, "text", "");
+        append_run(&mut document, nested, "gh");
+        let view = child(&mut document, "view", "width:10px;height:10px");
+        document.layout();
+        let invalid = dom::MethodOutcome::Failed(dom::MethodError::InvalidParams);
+        let not_found = dom::MethodOutcome::Failed(dom::MethodError::Operation);
+        for params in [
+            "{}",
+            "null",
+            "[]",
+            "3",
+            r#"{"start":1}"#,
+            r#"{"end":1}"#,
+            r#"{"start":"1","end":"2"}"#,
+            r#"{"start":-1,"end":2}"#,
+            r#"{"start":0,"end":-1}"#,
+            r#"{"start":3,"end":1}"#,
+            "not json",
+        ] {
+            assert_eq!(
+                invoke(&mut document, text, "getTextBoundingRect", params),
+                invalid,
+                "{params}"
+            );
+        }
+        for params in [
+            // Past the source: "abc def" and the nested "gh" are nine units.
+            r#"{"start":0,"end":10}"#,
+            r#"{"start":1e12,"end":1e12}"#,
+            // The space the soft wrap consumed is on no line.
+            r#"{"start":3,"end":4}"#,
+        ] {
+            assert_eq!(
+                invoke(&mut document, text, "getTextBoundingRect", params),
+                not_found,
+                "{params}"
+            );
+        }
+        assert!(matches!(
+            invoke(
+                &mut document,
+                text,
+                "getTextBoundingRect",
+                r#"{"start":7,"end":9}"#
+            ),
+            dom::MethodOutcome::Data(_)
+        ));
+        assert_eq!(
+            invoke(
+                &mut document,
+                nested,
+                "getTextBoundingRect",
+                r#"{"start":0,"end":1}"#
+            ),
+            not_found,
+            "a nested text is a run of its ancestor's paragraph and establishes none"
+        );
+        for name in ["getSelectedText", "setTextSelection", "boundingClientRect"] {
+            assert_eq!(
+                invoke(&mut document, text, name, "{}"),
+                dom::MethodOutcome::NotFound,
+                "{name}: no selection model; the base set answers the rest"
+            );
+        }
+        assert_eq!(
+            invoke(
+                &mut document,
+                view,
+                "getTextBoundingRect",
+                r#"{"start":0,"end":1}"#
+            ),
+            dom::MethodOutcome::NotFound,
+            "only `text` has the method"
         );
     }
 }
