@@ -1557,9 +1557,31 @@ consequential choice about whether to follow the spec or the quirk.
     flick pages across the seam like any other page, and script-facing
     offsets never leave `0..=max`: while the seam is in view the document
     reports the end of the range.
+  - *`scrollTo` (2026-10-11)* is CSSOM-View's "scroll an element into view"
+    (`Document::scroll_into_view`) on the swiper's element child number
+    `index`, in the shadow `#content`, at the item's own `scroll-snap-align`
+    on the main axis (`crates/bobcat-core/src/main/tree/swiper.rs`). Where it
+    leaves each reference:
+    - A missing, non-numeric, negative or out-of-range `index` is code 4 and
+      moves nothing (Android `XSwiperUI.java:651-680`), where web-core does
+      nothing and answers 0 (`XSwiper.ts:104-129,142-170`: a non-numeric
+      `index` falls through to `HTMLElement.scrollTo`, and
+      `children.item(index)` names nothing for the others).
+    - `smooth` defaults to `true` (web-core), where Android defaults to the
+      `smooth-scroll` prop (`XSwiperUI.java:89`).
+    - Android's `direction` (`"begin"`/`"end"`, `XSwiperUI.java:767-772`) is
+      not read; web-core has none.
+    - The target is the item's snap position in every mode, where web-core
+      aims at the item's start in `coverflow` and `carry` and lets mandatory
+      snapping move it on to the centre; both end on the same offset, the
+      engine without the second movement. An author's own
+      `scroll-snap-align` on an item decides where it lands.
+    **Native over web-core for the index rules; the standard algorithm for
+    the position; the architect's decision, to be confirmed by the user.**
   - *Not implemented:* `autoplay`, `interval` and `smooth-scroll`, deferred by the user
     (web-core's `XSwiperAutoScroll.ts`; `smooth-scroll` only matters to
-    autoplay); every event; every UI method; `contain: strict`/
+    autoplay and to Android's `scrollTo` default); every event; every UI
+    method but `scrollTo`; `contain: strict`/
     `content-visibility` from the twentieth item (`x-swiper.css:77-80`), a
     browser shortcut.
   - *A child that is neither an `x-swiper-item` nor a `wrapper` generates no

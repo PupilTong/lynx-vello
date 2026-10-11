@@ -67,7 +67,7 @@ use dom::scroll::{ScrollBehavior, ScrollBox};
 use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Vector2D};
 use serde_json::{Map, Value};
 
-use super::{LynxDocument, element_child, is_truthy};
+use super::{InvalidParams, LynxDocument, element_child, is_truthy};
 use crate::main::record::write_record_field;
 
 /// The tag native registers and web-core defines (`@Component('scroll-view',
@@ -136,11 +136,6 @@ impl CustomElement<()> for ScrollView {
         }
     }
 }
-
-/// A method's params do not have the shape it reads: the UI-method status
-/// table's code 4, `PARAM_INVALID`. Nothing moved.
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct InvalidParams;
 
 /// Whether `view` scrolls x rather than y: the attributes [`UA_RULES`] select
 /// the horizontal rule by. `scroll-x` wins over `scroll-y` when both are

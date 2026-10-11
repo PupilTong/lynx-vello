@@ -1475,7 +1475,8 @@ write through and read back, among them `__SetInlineStyles` and the name-based
 `__AddInlineStyle`, with `__SetCSSId` accepted and ignored; the readback pair
 `__InvokeUIMethod`, whose UI methods are `boundingClientRect` and
 `scrollIntoView` on every element, a pager's
-`selectTab`, a `scroll-view`'s `scrollTo`/`scrollBy`/`getScrollInfo` and a
+`selectTab`, a swiper's `scrollTo`, a `scroll-view`'s
+`scrollTo`/`scrollBy`/`getScrollInfo` and a
 dialog's `show`/`showModal`/`close`/`requestClose`, and
 `__GetComputedStyleByKey`, neither of which commits anything
 — both read the last completed pass and leave the decision to flush to the
@@ -1650,8 +1651,9 @@ layer a `steps()` animation on `#content`'s scroll timeline moves, sized by
 the item count the component keeps in `--swiper-count` on `slotchange` at its
 slot; the five `mode` layouts with `coverflow` and `carry` as
 compositor-exported `view()` scale animations and `current` by the viewpager
-recipe; `autoplay`, `interval` and `smooth-scroll` deferred, no UI method, no
-events), `tree::refresh_view` (`x-refresh-view`/`x-refresh-header`/
+recipe; `autoplay`, `interval` and `smooth-scroll` deferred, no events; its
+one UI method, `scrollTo({index, smooth})`, scrolls the item into view at its
+snap position through `Document::scroll_into_view`, its `CustomElement::invoke`), `tree::refresh_view` (`x-refresh-view`/`x-refresh-header`/
 `x-refresh-footer`: a component with web-core's UA shadow tree, a `#container`
 scroll container snapping `y mandatory` with 30% placeholders above and below,
 the header and footer in named slots (the component sets their `slot` on
@@ -2385,8 +2387,8 @@ selector engine, including the query root, and returns fields/path data, while
 `invoke` answers `boundingClientRect` — the last layout pass's border box,
 plus the element's `id` and `dataset` as native reports them — and
 `scrollIntoView` on every element, a pager's
-`selectTab`, a `scroll-view`'s `scrollTo`, `scrollBy` and `getScrollInfo`, and
-a dialog's four methods, and fails every other method with
+`selectTab`, a swiper's `scrollTo`, a `scroll-view`'s `scrollTo`, `scrollBy`
+and `getScrollInfo`, and a dialog's four methods, and fails every other method with
 code 3, `METHOD_NOT_FOUND`,
 alongside the selection failures it already delivered. No callback or document handle crosses into
 Rust's Worker transport. See `docs/node-query-runtime.md` for the supported
@@ -2909,13 +2911,15 @@ would host it:
   natural size) and `error` fire, non-bubbling, through the component-event
   queue; `cap-insets` and the animated-image events do not.
 - **UI methods other than `boundingClientRect`, `scrollIntoView`,
-  `selectTab`, a `scroll-view`'s `scrollTo`/`scrollBy`/`getScrollInfo` and a
+  `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s
+  `scrollTo`/`scrollBy`/`getScrollInfo` and a
   dialog's `show`/`showModal`/`close`/`requestClose`.** Those dispatch by name
   (`boundingClientRect` and `scrollIntoView` on every element, `selectTab` on
-  the two pager tags only, the three scroll methods on `scroll-view` only,
+  the two pager tags only, `scrollTo({index, smooth})` on `x-swiper` only,
+  the three scroll methods on `scroll-view` only,
   the dialog's on `dialog` only) through `__InvokeUIMethod`; every other
   name — the base set's `scrollTo`/`scrollBy` and `focus`/`blur` on an
-  element that is not a `scroll-view`, a `scroll-view`'s `autoScroll` and
+  element that is neither a `scroll-view` nor an `x-swiper`, a `scroll-view`'s `autoScroll` and
   `takeContentScreenshot`, `requestUIInfo`, `takeScreenshot` and the rest of
   the per-component catalog — answers code 3, `METHOD_NOT_FOUND`. The rect
   itself ignores transforms and never flushes.

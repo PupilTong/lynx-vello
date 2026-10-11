@@ -90,6 +90,13 @@ interface BobcatNative {
    * smoothly unless `smooth` is falsy; an `index` that is not a number, is
    * negative, or names no page is code 4 and moves nothing.
    *
+   * `scrollTo({index, smooth = true})` on `x-swiper` is the swiper's own
+   * overload: it scrolls the swiper's element child number `index`
+   * (truncated) into view in its shadow `#content`, at the item's snap
+   * position, smoothly unless `smooth` is falsy; an `index` that is not a
+   * number, is negative, or names no item is code 4 and moves nothing.
+   * Android's `direction` is not read.
+   *
    * `scrollTo({index?, offset = 0, smooth = false})`, `scrollBy({offset})`
    * and `getScrollInfo()` exist on `scroll-view` only, on the axis its
    * `scroll-x` / `scroll-orientation` attributes scroll. `scrollTo` scrolls

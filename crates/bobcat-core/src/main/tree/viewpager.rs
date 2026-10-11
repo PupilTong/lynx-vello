@@ -133,7 +133,7 @@ use dom::scroll::{
 use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId};
 use serde_json::Value;
 
-use super::{LynxDocument, element_child, is_truthy};
+use super::{InvalidParams, LynxDocument, element_child, is_truthy};
 
 /// Native's pager tag, and the one `x-viewpager-ng` stands for in web-core.
 pub(super) const VIEWPAGER_TAG: &str = "viewpager";
@@ -197,11 +197,6 @@ impl CustomElement<()> for Viewpager {
         }
     }
 }
-
-/// `selectTab`'s params were not `{index: <number>, …}`: the UI-method
-/// status table's code 4, `PARAM_INVALID`.
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct InvalidParams;
 
 /// `selectTab({index, smooth = true})` on `pager`, with `params` as the JSON
 /// text the realm serialized: CSSOM-View's "scroll an element into view"

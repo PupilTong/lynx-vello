@@ -207,6 +207,21 @@ async fn compiled_viewpager_select_tab_turns_to_the_fourth_page() {
     .await;
 }
 
+/// A compiled `<x-swiper>` of four 240px items starts on the item its
+/// `current={1}` names, green, and the tap's selector-query
+/// `scrollTo({index: 3, smooth: false})` crosses from the background thread
+/// and turns it to the fourth, yellow, in the next frame.
+#[tokio::test]
+async fn compiled_swiper_scroll_to_turns_to_the_fourth_item() {
+    paint_and_tap(
+        fixtures::fixture("react-swiper-scroll-to").page,
+        [120, 120],
+        &[[0, 128, 0, 255], [255, 255, 0, 255]],
+        None,
+    )
+    .await;
+}
+
 /// A compiled `<dialog>` over a red page that fills the 240px view. A tap on
 /// the page calls `showModal()` through the background thread's selector
 /// query: the dialog enters the top layer, centred by the UA sheet's
