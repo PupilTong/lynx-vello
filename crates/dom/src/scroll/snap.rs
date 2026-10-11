@@ -19,9 +19,9 @@
 //!   engine has no UA-chosen inset. §6.3 `scroll-margin`: a snap area is the border box outset by
 //!   it.
 //! - §6.4 `scroll-snap-align` per axis, `start`, `end` or `center`, each clamped into the
-//!   scrollable range. An area larger than the snapport on an axis is a *range* of valid positions
-//!   (§6.2: the scroll position may rest anywhere the snapport is inside the area) rather than a
-//!   point.
+//!   scrollable range (normalized into the period on a circular axis, below). An area larger than
+//!   the snapport on an axis is a *range* of valid positions (§6.2: the scroll position may rest
+//!   anywhere the snapport is inside the area) rather than a point.
 //! - §6.5 `scroll-snap-stop: always`: an operation cannot pass such a position — one that would
 //!   travel past it settles on it instead.
 //! - §7 choosing: a drag settles on the position nearest to where it ended. A discrete directed
@@ -38,8 +38,14 @@
 //! period and search the three copies around it — that period and its two
 //! neighbours — so their work does not depend on how far the offset has
 //! travelled. A flick forward from the last page therefore lands on the
-//! first page's next copy instead of stopping at the end. The document
-//! never wraps, so its own axes carry no period.
+//! first page's next copy instead of stopping at the end. The document's own
+//! axes carry the period too ([`SnapAxisPositions::period`]), and each
+//! position it computes there is normalized into `[0, period)` instead of
+//! clamped into the scrollable range, so an alignment that needs an offset
+//! past `max_offset` or before `0` is a position across the seam;
+//! [`Document::settle_scroll`] and the directed chain steps
+//! ([`Document::scroll_chain_directed`]) find positions across the seam as
+//! the painter does.
 //!
 //! Deliberately absent: css-scroll-snap-2's `scrollsnapchange` and
 //! `scrollsnapchanging` events (scoped out of the request), snap
@@ -62,7 +68,7 @@ use stylo::values::computed::{
 };
 use stylo::values::specified::box_::ScrollSnapAlignKeyword;
 
-use super::{ScrollAxes, clamp_to, is_scroll_container};
+use super::{ScrollAxes, clamp_to, is_scroll_container, wrap_axis};
 use crate::NodeId;
 use crate::layout::{DisplayMode, StyleView, box_parent, display_mode};
 use crate::tree::document::Document;
@@ -289,6 +295,11 @@ pub struct SnapAxisPositions {
     pub strictness: SnapStrictness,
     /// Sorted by `min`.
     pub points: Vec<SnapPoint>,
+    /// The axis's wrap period on a circular axis with content to scroll
+    /// ([`ScrollBox::wrap_period`](super::ScrollBox::wrap_period)), `None`
+    /// on a bounded one. With a period every point's `min` lies in
+    /// `[0, period)`.
+    pub period: Option<f32>,
 }
 
 impl SnapAxisPositions {
@@ -297,7 +308,7 @@ impl SnapAxisPositions {
         SnapAxis {
             strictness: self.strictness,
             points: &self.points,
-            period: None,
+            period: self.period,
         }
     }
 }
@@ -343,10 +354,12 @@ pub enum ScrollKind {
 /// `mandatory` axis with no position ahead — absorbs nothing, so the tick
 /// chains on the way any boundary does.
 ///
-/// An axis in `wrap` has no boundary (the painter's view of
-/// `overscroll-behavior: circular`): its natural end is not clamped, and
-/// the caller normalizes the result into the period where it consumes it.
-/// The document never wraps and passes [`ScrollAxes::NONE`].
+/// An axis in `wrap` has no boundary (`overscroll-behavior: circular` with
+/// content to scroll, [`ScrollBox::wrap_axes`](super::ScrollBox::wrap_axes)):
+/// its natural end is not clamped, so the step absorbs its whole delta, and
+/// the caller normalizes the result into the period where it consumes it —
+/// the document through [`Document::scroll_to`], the painter at compose and
+/// at each rebase.
 #[must_use]
 #[allow(
     clippy::float_cmp,
@@ -417,11 +430,18 @@ pub fn settle_offset(
 
 /// The snap position one area contributes on one axis, given the area's
 /// and the snapport's extents in the container's scrolling coordinates.
+///
+/// On a bounded axis the position is clamped into the scrollable range
+/// `0..=max`. On an axis that wraps with `period` nothing is clamped: a
+/// single position is normalized into `[0, period)`, and a range moves its
+/// `min` into `[0, period)` and its `max` by the same shift, so the range
+/// keeps its length and starts inside one period.
 fn snap_point(
     align: ScrollSnapAlignKeyword,
     area: (f32, f32),
     snapport: (f32, f32),
     max: f32,
+    period: Option<f32>,
     stop: bool,
 ) -> SnapPoint {
     let clamp = |offset: f32| offset.clamp(0.0, max.max(0.0));
@@ -430,8 +450,16 @@ fn snap_point(
     if area_end - area_start > port_end - port_start {
         // Larger than the snapport: every offset that keeps the snapport
         // inside the area is valid, whatever the alignment asked for.
-        let min = clamp(area_start - port_start);
-        let max = clamp(area_end - port_end);
+        let (min, max) = (area_start - port_start, area_end - port_end);
+        if let Some(period) = period {
+            let start = wrap_axis(min, period);
+            return SnapPoint {
+                min: start,
+                max: max + (start - min),
+                stop,
+            };
+        }
+        let (min, max) = (clamp(min), clamp(max));
         if min <= max {
             return SnapPoint { min, max, stop };
         }
@@ -442,7 +470,10 @@ fn snap_point(
         ScrollSnapAlignKeyword::Center => (area_start + area_end - port_start - port_end) / 2.0,
         ScrollSnapAlignKeyword::None => unreachable!("an area with no alignment is not collected"),
     };
-    let offset = clamp(offset);
+    let offset = match period {
+        Some(period) => wrap_axis(offset, period),
+        None => clamp(offset),
+    };
     SnapPoint {
         min: offset,
         max: offset,
@@ -463,7 +494,9 @@ impl<T> Document<T> {
     /// This scroll container's snap positions, from the last layout, or
     /// `None` when it is not a scroll container or its `scroll-snap-type`
     /// is `none`. Each returned axis is one the container snaps on, even
-    /// when no area contributes a point to it.
+    /// when no area contributes a point to it. On an axis with a
+    /// [`ScrollBox::wrap_period`](super::ScrollBox::wrap_period) the axis
+    /// carries the period and its positions are normalized into it.
     #[must_use]
     pub fn snap_positions(&self, id: NodeId) -> Option<SnapPositions> {
         let node = self.get(id)?;
@@ -482,6 +515,7 @@ impl<T> Document<T> {
         let scroll_box = self.scroll_box(id)?;
         let port = scroll_box.scrollport;
         let max = scroll_box.max_offset();
+        let (period_x, period_y) = scroll_box.wrap_period();
         let snapport_x = (
             scroll_padding(style.get_scroll_padding_left(), port.width),
             port.width - scroll_padding(style.get_scroll_padding_right(), port.width),
@@ -526,10 +560,24 @@ impl<T> Document<T> {
                         rect.max_y() + values.get_scroll_margin_bottom().px(),
                     );
                     if wants_x {
-                        x.push(snap_point(align.inline(), area_x, snapport_x, max.x, stop));
+                        x.push(snap_point(
+                            align.inline(),
+                            area_x,
+                            snapport_x,
+                            max.x,
+                            period_x,
+                            stop,
+                        ));
                     }
                     if wants_y {
-                        y.push(snap_point(align.block(), area_y, snapport_y, max.y, stop));
+                        y.push(snap_point(
+                            align.block(),
+                            area_y,
+                            snapport_y,
+                            max.y,
+                            period_y,
+                            stop,
+                        ));
                     }
                 }
             }
@@ -542,18 +590,25 @@ impl<T> Document<T> {
         }
         x.sort_by(|a, b| a.min.total_cmp(&b.min));
         y.sort_by(|a, b| a.min.total_cmp(&b.min));
-        let axis = |snaps: bool, points: Vec<SnapPoint>| {
-            snaps.then_some(SnapAxisPositions { strictness, points })
+        let axis = |snaps: bool, points: Vec<SnapPoint>, period: Option<f32>| {
+            snaps.then_some(SnapAxisPositions {
+                strictness,
+                points,
+                period,
+            })
         };
         Some(SnapPositions {
-            x: axis(snaps_x, x),
-            y: axis(snaps_y, y),
+            x: axis(snaps_x, x, period_x),
+            y: axis(snaps_y, y, period_y),
         })
     }
 
     /// Settles `id` after a scrolling operation that began at `start` —
     /// [`settle_offset`] over live geometry — and returns the offset it
-    /// rests at. A container that does not snap keeps its offset.
+    /// rests at. A container that does not snap keeps its offset. On a
+    /// circular axis the positions repeat every period, so the nearest one
+    /// may lie across the seam; [`Self::scroll_to`] admits it into the
+    /// period.
     pub fn settle_scroll(&mut self, id: NodeId, start: Vector2D<f32>) -> Vector2D<f32> {
         let Some(scroll_box) = self.scroll_box(id) else {
             return Vector2D::zero();
@@ -1090,6 +1145,108 @@ mod tests {
         assert_eq!(
             document.settle_scroll(scroller, Vector2D::new(0.0, 100.0)),
             Vector2D::new(0.0, 50.0),
+        );
+    }
+
+    /// A circular snapping axis carries its period and normalizes each
+    /// position into it instead of clamping. Four 50px pages centred in a
+    /// 100px scrollport: `max` 100, period 200. The first page's centre
+    /// needs −25, which is 175 on the circle; the last page's needs 125,
+    /// past `max`, and keeps it.
+    #[test]
+    fn a_circular_axis_publishes_its_period_and_positions_across_the_seam() {
+        let (document, scroller) = snapping_page(
+            "scroll-snap-type: y mandatory; overscroll-behavior-y: circular;",
+            "scroll-snap-align: center;",
+            &[50.0; 4],
+        );
+        let positions = document.snap_positions(scroller).expect("snaps on y");
+        let y = positions.y.as_ref().expect("y axis");
+        assert_eq!(y.period, Some(200.0));
+        assert_eq!(
+            y.axis().period,
+            Some(200.0),
+            "the borrowed axis repeats too"
+        );
+        assert_eq!(
+            offsets(y),
+            [(25.0, 25.0), (75.0, 75.0), (125.0, 125.0), (175.0, 175.0)]
+        );
+
+        let (mut document, scroller) = snapping_page(
+            "scroll-snap-type: y mandatory; overscroll-behavior-y: circular;",
+            "",
+            &[300.0, 50.0, 50.0],
+        );
+        let tall = document
+            .get(scroller)
+            .and_then(|node| node.child_ids().first().copied())
+            .expect("the tall page");
+        document.set_inline_style(tall, "height: 300px; scroll-margin-top: 20px");
+        document.layout();
+        let positions = document.snap_positions(scroller).expect("snaps on y");
+        let y = positions.y.as_ref().expect("y axis");
+        assert_eq!(y.period, Some(400.0));
+        assert_eq!(
+            offsets(y),
+            [(300.0, 300.0), (350.0, 350.0), (380.0, 600.0)],
+            "a range starting before 0 moves into the period whole",
+        );
+
+        let (document, scroller) = snapping_page("scroll-snap-type: y mandatory;", "", &[50.0; 4]);
+        let positions = document.snap_positions(scroller).expect("snaps on y");
+        assert_eq!(positions.y.expect("y axis").period, None, "bounded");
+    }
+
+    /// The document settles and steps across the seam on a circular axis,
+    /// as the painter does. Standing just past `max` (110 of `max` 100,
+    /// period 200), the nearest position is the last page's 125, not the
+    /// clamped 100; a wheel tick forward from the first page's 175 moves on
+    /// to the second page's 25, one period on.
+    #[test]
+    fn the_document_settles_and_steps_across_the_seam() {
+        let (mut document, scroller) = snapping_page(
+            "scroll-snap-type: y mandatory; overscroll-behavior-y: circular;",
+            "scroll-snap-align: center;",
+            &[50.0; 4],
+        );
+        assert_eq!(
+            document.scroll_to(scroller, Vector2D::new(0.0, 110.0)),
+            Vector2D::new(0.0, 110.0)
+        );
+        assert_eq!(
+            document.settle_scroll(scroller, Vector2D::new(0.0, 110.0)),
+            Vector2D::new(0.0, 125.0)
+        );
+        assert_eq!(
+            document.settle_scroll(scroller, Vector2D::new(0.0, 125.0)),
+            Vector2D::new(0.0, 125.0),
+            "at rest on a position"
+        );
+
+        document.scroll_to(scroller, Vector2D::new(0.0, 190.0));
+        assert_eq!(
+            document.settle_scroll(scroller, Vector2D::new(0.0, 190.0)),
+            Vector2D::new(0.0, 175.0),
+            "the first page, across the seam"
+        );
+        let page = document
+            .get(scroller)
+            .and_then(|node| node.child_ids().first().copied())
+            .expect("a page");
+        assert_eq!(
+            document.scroll_chain_directed(page, Vector2D::new(0.0, 10.0)),
+            Some((scroller, Vector2D::new(0.0, 10.0))),
+        );
+        assert_eq!(document.scroll_offset(scroller), Vector2D::new(0.0, 25.0));
+        assert_eq!(
+            document.scroll_chain_directed(page, Vector2D::new(0.0, -10.0)),
+            Some((scroller, Vector2D::new(0.0, -10.0))),
+        );
+        assert_eq!(
+            document.scroll_offset(scroller),
+            Vector2D::new(0.0, 175.0),
+            "and back across it"
         );
     }
 
