@@ -1476,7 +1476,8 @@ write through and read back, among them `__SetInlineStyles` and the name-based
 `__InvokeUIMethod`, whose UI methods are `boundingClientRect`,
 `scrollIntoView` and CSSOM-View's `scrollTo`/`scrollBy` on every element, a pager's
 `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s
-`scrollTo`/`scrollBy`/`getScrollInfo` and a
+`scrollTo`/`scrollBy`/`getScrollInfo`, a `list`'s
+`scrollToPosition`/`scrollBy`/`getScrollContainerInfo`/`getVisibleCells` and a
 dialog's `show`/`showModal`/`close`/`requestClose`, and
 `__GetComputedStyleByKey`, neither of which commits anything
 — both read the last completed pass and leave the decision to flush to the
@@ -1661,6 +1662,11 @@ way the subtree stacks, from `web-elements`' own `scroll-view.css` and
 script can move — and a `scroll-view` component whose `CustomElement::invoke`
 answers the `scrollTo`, `scrollBy` and `getScrollInfo` UI methods on the axis
 the tag scrolls; `autoScroll` and `takeContentScreenshot` are not built),
+`tree::list` (`list`'s scroll axis, `list-type` layout modes and cell
+virtualization as UA rules, and a `list` component whose `CustomElement::invoke`
+answers `scrollToPosition`, `scrollBy` (`scroll-view`'s, on the list's axis),
+`getScrollContainerInfo` and `getVisibleCells`; `autoScroll` and
+`getScrollInfo` are not built, and the base set's `scrollTo` answers on a list),
 `tree::base_methods` (the UI methods every element has, which
 `callElementMethod` runs when the element's kind has no method of the name:
 `boundingClientRect` over `Document::bounding_client_rect`,
@@ -2439,7 +2445,8 @@ selector engine, including the query root, and returns fields/path data, while
 plus the element's `id` and `dataset` as native reports them —
 `scrollIntoView` and CSSOM-View's `scrollTo`/`scrollBy` on every element, a pager's
 `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s `scrollTo`, `scrollBy`
-and `getScrollInfo`, and a dialog's four methods, and fails every other method with
+and `getScrollInfo`, a `list`'s `scrollToPosition`, `scrollBy`,
+`getScrollContainerInfo` and `getVisibleCells`, and a dialog's four methods, and fails every other method with
 code 3, `METHOD_NOT_FOUND`,
 alongside the selection failures it already delivered. No callback or document handle crosses into
 Rust's Worker transport. See `docs/node-query-runtime.md` for the supported
@@ -2957,9 +2964,11 @@ would host it:
   Underneath it, the data protocol —
   `__SetAttribute(element, "update-list-info", …)` — delivers a compiled
   `<list>`'s cells as real element children, which is the only path one
-  receives children on. `<list>` is not a `dom::CustomElement`: there is no
-  cell recycling, no scroll-to-index, no threshold or scroll events, no list
-  UI method, and no sticky-bottom or snap rules (`docs/tracking/deviations.md`).
+  receives children on. `<list>` is a `dom::CustomElement` for its UI
+  methods only (`scrollToPosition`, `scrollBy`, `getScrollContainerInfo`,
+  `getVisibleCells`): there is no cell recycling, no `autoScroll`, no
+  threshold or scroll events, and no sticky-bottom or snap rules
+  (`docs/tracking/deviations.md`).
 - **Gesture detectors and the arena.** `crates/bobcat-core/src/paint/gesture.rs`
   has no fling or velocity, no `:active` driving, no `consume-slide-event`, no
   per-element `GestureDetector`/arena relations and no `click`; `tapSlop` is
@@ -2970,23 +2979,27 @@ would host it:
   queue; `cap-insets` and the animated-image events do not.
 - **UI methods other than `boundingClientRect`, `scrollIntoView`,
   `scrollTo`/`scrollBy`, `selectTab`, a swiper's `scrollTo`, a
-  `scroll-view`'s `scrollTo`/`scrollBy`/`getScrollInfo` and a
-  dialog's `show`/`showModal`/`close`/`requestClose`.** Those dispatch by name
-  (`boundingClientRect`, `scrollIntoView` and CSSOM-View's
+  `scroll-view`'s `scrollTo`/`scrollBy`/`getScrollInfo`, a `list`'s
+  `scrollToPosition`/`scrollBy`/`getScrollContainerInfo`/`getVisibleCells`
+  and a dialog's `show`/`showModal`/`close`/`requestClose`.** Those dispatch
+  by name (`boundingClientRect`, `scrollIntoView` and CSSOM-View's
   `scrollTo`/`scrollBy` on every element, `selectTab` on
   the two pager tags only, `scrollTo({index, smooth})` on `x-swiper` only,
   the three scroll methods on `scroll-view` only, where they shadow the
-  standard two, the dialog's on `dialog` only) through `__InvokeUIMethod`;
-  every other name — the base set's `focus`/`blur` (no focus model), a
-  `scroll-view`'s `autoScroll` and `takeContentScreenshot`, `requestUIInfo`,
+  standard two, the four list methods on `list` only, whose `scrollBy`
+  shadows the standard one, the dialog's on `dialog` only) through
+  `__InvokeUIMethod`; every other name — the base set's `focus`/`blur` (no
+  focus model), a `scroll-view`'s `autoScroll` and `takeContentScreenshot`,
+  a `list`'s `autoScroll` and `getScrollInfo`, `requestUIInfo`,
   `takeScreenshot` (no pixel readback) and the rest of the per-component
   catalog — answers code 3, `METHOD_NOT_FOUND`. The rect itself ignores
   transforms and never flushes.
 - **The text `layout` event.** The per-line ranges `hughie`'s
   `text/block/content.rs` computes have no delivery path.
-- **`rpx`-aware view/device policy** and the `<list>` *component* (its UI methods,
-  scroll and threshold events, sticky cells and snapping; the layout mapping
-  and virtualization are UA rules already).
+- **`rpx`-aware view/device policy** and the rest of the `<list>` component
+  (`autoScroll`, scroll and threshold events, sticky cells and snapping; the
+  layout mapping and virtualization are UA rules already, and four UI methods
+  are built).
 - **Animated image playback.** `bobcat-resources` decodes an image's first
   frame only, with no `region-to-decode` and no `blur-radius`
   post-processing.

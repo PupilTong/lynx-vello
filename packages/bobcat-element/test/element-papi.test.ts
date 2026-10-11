@@ -3582,6 +3582,35 @@ describe("__InvokeUIMethod", () => {
     });
   });
 
+  it("builds a list's getScrollContainerInfo and getVisibleCells data from their records", () => {
+    const list = __CreateElement("list", 0);
+    const answers: unknown[] = [];
+    mock.answerElementMethod = () => "1:0" + "4:70.5" + "1:0" + "3:470" + "3:180";
+    __InvokeUIMethod(list, "getScrollContainerInfo", {}, (result: unknown) => answers.push(result));
+    mock.answerElementMethod = () =>
+      "1:0" + "1:2"
+      + "3:a,b" + "2:k0" + "1:0" + "1:0" + "3:-50" + "3:180" + "2:30"
+      + "0:" + "0:" + "1:2" + "1:0" + "2:30" + "3:180" + "2:70";
+    __InvokeUIMethod(list, "getVisibleCells", {}, (result: unknown) => answers.push(result));
+    mock.answerElementMethod = () => "1:0" + "1:0";
+    __InvokeUIMethod(list, "getVisibleCells", {}, (result: unknown) => answers.push(result));
+
+    expect(answers[0]).toStrictEqual({
+      code: 0,
+      data: { scrollTop: 70.5, scrollLeft: 0, scrollHeight: 470, scrollWidth: 180 },
+    });
+    // The count, then seven fields per cell; a field holding the record's
+    // own delimiter and an empty one both survive as strings.
+    expect(answers[1]).toStrictEqual({
+      code: 0,
+      data: [
+        { id: "a,b", itemKey: "k0", index: 0, left: 0, top: -50, right: 180, bottom: 30 },
+        { id: "", itemKey: "", index: 2, left: 0, top: 30, right: 180, bottom: 70 },
+      ],
+    });
+    expect(answers[2]).toStrictEqual({ code: 0, data: [] });
+  });
+
   it("sends missing params as an empty object and uncarriable ones as null", () => {
     const view = __CreateView(0);
     const cyclic: Record<string, unknown> = {};

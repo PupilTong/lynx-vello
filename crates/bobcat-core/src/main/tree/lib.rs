@@ -12,13 +12,14 @@
 //! Each tag owns its UA rules and tests. Numeric text and list attributes
 //! flow through `attr()`; boolean flags use attribute selectors. Only `image`,
 //! `svg`, `blur_view`, `swiper`, `refresh_view`, `viewpager`,
-//! `scroll_container`, `dialog` and `overlay` need components: for image
-//! resources (an `svg`'s `content` as a document handed to the host as its
-//! bytes), blur hints,
+//! `scroll_container`, `list`, `dialog` and `overlay` need components: for
+//! image resources (an `svg`'s `content` as a document handed to the host as
+//! its bytes), blur hints,
 //! the swiper's UA shadow tree, item count and `scrollTo` UI method, the
 //! refresh view's UA shadow tree and its header and footer slot assignment,
 //! the viewpager's `selectTab` UI method, the `scroll-view`'s `scrollTo`, `scrollBy` and
-//! `getScrollInfo` UI methods, the dialog's
+//! `getScrollInfo` UI methods, the `list`'s `scrollToPosition`, `scrollBy`,
+//! `getScrollContainerInfo` and `getVisibleCells` UI methods ([`list`]), the dialog's
 //! `:open`/`:modal` state, top-layer membership and four UI methods
 //! ([`dialog`]), and the overlay's UA shadow tree, the top-layer membership of
 //! the `dialog` in it, and its `showoverlay` and `dismissoverlay` events
@@ -94,6 +95,7 @@ pub(crate) fn new_document(
     refresh_view::define(&mut document);
     viewpager::define(&mut document);
     scroll_container::define(&mut document);
+    list::define(&mut document);
     dialog::define(&mut document, events.clone());
     // After `dialog`: every overlay builds one in its shadow tree.
     overlay::define(&mut document, events);
@@ -139,13 +141,22 @@ pub(super) fn element_child(document: &LynxDocument, parent: NodeId, index: f64)
         reason = "a non-negative integer; one past any child count saturates and names none"
     )]
     let index = index as usize;
+    element_children(document, parent).nth(index)
+}
+
+/// `parent`'s element children in tree order, a text node between two
+/// elements skipped; none when `parent` is not in the document. What
+/// [`element_child`] counts, and what `list`'s `scrollToPosition` searches
+/// for an `item-key` and its `getVisibleCells` filters for cells.
+pub(super) fn element_children(
+    document: &LynxDocument,
+    parent: NodeId,
+) -> impl Iterator<Item = NodeId> + '_ {
     document
-        .get(parent)?
-        .child_ids()
-        .iter()
-        .copied()
+        .get(parent)
+        .into_iter()
+        .flat_map(|node| node.child_ids().iter().copied())
         .filter(|child| document.get(*child).is_some_and(dom::Node::is_element))
-        .nth(index)
 }
 
 /// One event a component owes script: always non-bubbling, at the element

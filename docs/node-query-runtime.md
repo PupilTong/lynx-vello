@@ -62,6 +62,31 @@ queue without clearing it. Selection captures its root at select time.
   maxScrollOffset}`, the last two both the axis's maximum offset, all in CSS
   px. Bad params, or an index naming no child, fail with code 4 and move
   nothing.
+  `scrollToPosition({position, index?, itemKey?, offset = 0, alignTo =
+  "top", smooth = false})`, `scrollBy({offset})`, `getScrollContainerInfo()`
+  and `getVisibleCells()` on a `list` work on the axis it scrolls (x under
+  `scroll-orientation="horizontal"`, else y)
+  (`crates/bobcat-core/src/main/tree/list.rs`). `scrollToPosition` succeeds
+  with no data: the cell is the list's element child whose `item-key`
+  equals a string `itemKey`, else element child number `index`, else
+  number `position` (truncated toward zero; `index` is read first), and
+  the target is its start in the list's scroll coordinates, less half of
+  what the scrollport has beyond the cell for `alignTo: "middle"` or all of
+  it for `"bottom"` (anything else is `"top"`), plus `offset` (read as
+  `scroll-view`'s `scrollTo` reads it), clamped to the range; smoothly when
+  `smooth` is truthy. A missing, non-numeric, negative or out-of-range
+  number, or a bad `offset`, fails with code 4 and moves nothing; a list or
+  cell with no box succeeds and moves nothing. `scrollBy` is
+  `scroll-view`'s. `getScrollContainerInfo` succeeds with web-core's
+  `{scrollTop, scrollLeft, scrollHeight, scrollWidth}`, the offset and the
+  scrolling area. `getVisibleCells` succeeds with an array of `{id, itemKey,
+  index, left, top, right, bottom}` for each `list-item` child whose border
+  box overlaps the scrollport, `id` and `itemKey` the attributes (empty when
+  absent), `index` the position among the list's `list-item` children, the
+  rect in CSS px relative to the list's scrollport (native's coordinates;
+  web-core reports the viewport's). `autoScroll` and `getScrollInfo` are
+  code 3, and a `list` has no `scrollTo` of its own, so the base set's
+  CSSOM-View `scrollTo` answers one.
   `show`, `showModal`, `close` and `requestClose` on a `dialog` are HTML's
   `HTMLDialogElement` methods and succeed with no data; HTML's
   `InvalidStateError` (`show` on a modal dialog, `showModal` on an open
@@ -139,7 +164,7 @@ native numeric-length conversion remain unsupported.
 
 Legacy component-scoped roots, direct MTS selector PAPI, UI invoke methods
 other than the base set's four (`boundingClientRect`, `scrollIntoView`,
-`scrollTo`, `scrollBy`), `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s three and a dialog's four, animation methods,
+`scrollTo`, `scrollBy`), `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s three, a `list`'s four and a dialog's four (a `list`'s `autoScroll` among them), animation methods,
 dataset-to-DOM reflection and cross-realm host objects remain pending.
 `boundingClientRect` takes no `relativeTo`, `androidEnableTransformProps` or
 `iOSEnableAnimationProps`: it reads nothing from its `params`, since each of
