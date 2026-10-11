@@ -716,7 +716,7 @@ mod tests {
     /// the engine's UA sheet alone: the top-left one starts on the blue item
     /// its `current={2}` names, the `vertical` top-right one on the green
     /// item of its `current={1}`, and the `coverflow` bottom-left one shows
-    /// its green item centred with its red one scaled down at its left. The
+    /// its green item centred with its red one turned toward it at its left. The
     /// bottom-right one starts on its green item, `current={1}`.
     ///
     /// The dots: a 9.6px dot every 13.44px (`1rem` is 16px), the strip

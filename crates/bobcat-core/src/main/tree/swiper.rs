@@ -66,7 +66,7 @@
 //!   80%, start-aligned, the last item followed by a 20% margin so it can reach its start
 //!   (`:181-195`). `flat-coverflow` — items 60%, centre-aligned, 20% margin before the first and
 //!   after the last (`:271-297`). `coverflow` — `flat-coverflow`'s geometry plus a scroll-driven
-//!   scale (`:205-267`). `carry` — items 100%, centre-aligned, plus a scroll-driven scale
+//!   turn (`:205-267`). `carry` — items 100%, centre-aligned, plus a scroll-driven scale
 //!   (`:299-317`). Each margin sits on the main axis; web-core writes the carousel's as
 //!   `margin-right` in both orientations (`:193-195`), here it is `margin-bottom` under `vertical`.
 //!   Under `circular` there is no margin (web-core's margin rules all carry `:not([circular])`,
@@ -111,20 +111,57 @@
 //! running web-core's rules. Under `circular` there is no margin and no end to the range: the
 //! last item's position is admitted on the circle (above).
 //!
-//! # The two animated modes are scroll-driven, and flat
+//! # The two animated modes are scroll-driven, and 2D
 //!
-//! `coverflow` and `carry` scale each item by where it stands in the scrollport:
+//! `coverflow` and `carry` transform each item by where it stands in the scrollport:
 //! `animation-timeline: view(inline)` (`view(block)` under `vertical`; this engine's `inline` is
-//! x), `animation-duration: auto`, `animation-fill-mode: both`, linear timing. `coverflow` runs
-//! web-core's keyframes without their `rotateY`/`rotateX` and without `perspective`,
-//! `transform-style` and `z-index`: `25%` `scale(0.8)`, `45%, 55%` `scale(1)`, `100%`
-//! `scale(0.8)`. `carry` runs `0%` `scale(0.6)`, `45%, 55%` `scale(1)`, `100%` `scale(0.6)`.
-//! Dropping the rotation is deliberate — a 3D transform keyframe refuses the curve export
-//! (`crates/dom/src/style/curve_export.rs`), and then every item would re-cascade on the main
-//! thread at every scroll frame. Flat, both export: the painter samples them from `#content`'s
-//! live offset, with no main-thread tick and no commit while the user drags. `fill-mode: both` is
-//! what lets them export at any committed offset (`docs/tracking/css-animation.md`, "Base-value
-//! rule"). web-core leaves the timing at `ease` per segment; linear is this engine's choice.
+//! x), `animation-duration: auto`, `animation-fill-mode: both`, linear timing. `carry` runs `0%`
+//! `scale(0.6)`, `45%, 55%` `scale(1)`, `100%` `scale(0.6)`.
+//!
+//! web-core's `coverflow` turns each item about the axis across the swiper's main one — `rotateY`,
+//! `rotateX` under `vertical` — by up to 50° with `scale(0.8)`, under `perspective: 200px` on
+//! `#content` (`x-swiper.css:205-267`). A rotation under a perspective is no 2D affine, and a 2D
+//! affine is all the painter composes a curve with: such a keyframe refuses the curve export
+//! (`TransformTrack::new`, `crates/dom/src/visual/curves.rs`), and then every item would
+//! re-cascade on the main thread at every scroll frame. `coverflow` here draws the same turn in a
+//! parallel projection, which is a 2D affine, as three functions every keyframe lists in the same
+//! order, so each interpolates on its own and no sample leaves the plane:
+//!
+//! - `scale(0.514, 0.8)` (`scale(0.8, 0.514)` under `vertical`): web-core's `scale(0.8)`, and on
+//!   the main axis the width a turned item shows, `0.8 × cos 50°`.
+//! - `skewY(14deg)` (`skewX`): the depth cue the perspective gave. The projection looks at a row
+//!   from above, so an item's outer edge, the one nearer the viewer in web-core's turn, drops and
+//!   its inner edge rises; a column is the row transposed. About its centre, so the item keeps its
+//!   place on the cross axis. The sign flips with the side.
+//! - `translateX(-24.3%)` (`translateY`): half of the width the scale removed, `(1 − 0.514) / 2`,
+//!   toward the current item. The edge of the item that faces the current one therefore stays where
+//!   layout put it at every sample, and the item gives up width at its outer edge alone. Two
+//!   consequences: no item ever overlaps its neighbour — paint order is tree order here, because
+//!   web-core's `z-index: 1` keyframe has no painter curve — and the item beside the current one
+//!   keeps the 20% of the scrollport layout gave it, where a scale about its centre would leave
+//!   under 10%. The sign flips with the side.
+//!
+//! The stops are `0%` and `100%` turned and `45%, 55%` flat, so an item is turned the more the
+//! farther it stands from the middle. web-core's are `25%` (−50°), `45%, 55%` and `100%` (40°)
+//! with nothing at `0%`, so an item entering at the end edge starts flat, turns, and turns back.
+//! At rest the two items beside the current one stand at 12.5% and 87.5% of their timelines — a
+//! 60% item in a 100% scrollport — which is 72% of the way to the full pose: `scale(0.649,
+//! 0.856)`, the width of a 41° turn, and `skewY(10.1deg)`. web-core's `ease` segments leave them
+//! at −40° and 38° there.
+//!
+//! Both modes export: the painter samples them from `#content`'s live offset, with no main-thread
+//! tick and no commit while the user drags. `fill-mode: both` is what lets them export at any
+//! committed offset (`docs/tracking/css-animation.md`, "Base-value rule"). web-core leaves the
+//! timing at `ease` per segment; linear is this engine's choice, and is what keeps the inner edge
+//! still: the translation stays half of what the scale removed only while the two interpolate at
+//! the same rate.
+//!
+//! What a parallel projection cannot show is the perspective's convergence: a turned item is a
+//! parallelogram, not a trapezoid, its two cross-axis edges the same length. The skew moves an
+//! item's corners along the cross axis: at rest by 5.8% of the item's main-axis size (`tan 10.1°
+//! × 0.649 / 2`), against the 7.2% of its cross-axis size the scale freed. On a swiper more than
+//! 2.1 times as long as it is across, a corner therefore passes the swiper's box, where `#content`
+//! clips it, as it clips the edge web-core's perspective enlarges.
 //!
 //! # `current` is CSS
 //!
@@ -216,7 +253,7 @@
 //! - `autoplay`, `interval` and `smooth-scroll`: not implemented for now, the user deferred them;
 //!   `smooth-scroll` only matters to autoplay (web-core's `XSwiperAutoScroll.ts`) and to Android's
 //!   default for `scrollTo`'s `smooth`.
-//! - The 3D rotation of `coverflow`, above.
+//! - The perspective of `coverflow`: its turn is drawn in a parallel projection, above.
 //! - `page-margin`, `previous-margin`, `next-margin` and `duration` have no rule, following
 //!   web-core, where they change nothing on screen: the three margins become custom properties on
 //!   the indicator container (`XSwiperIndicator.ts:54-74`), so the items always see `0px`, and
@@ -291,12 +328,20 @@ x-swiper:is([mode="coverflow"], [mode="carry"]) > x-swiper-item {
 x-swiper:is([mode="coverflow"], [mode="carry"])[vertical]:not([vertical="false"]) > x-swiper-item {
   animation-timeline: view(block);
 }
-x-swiper[mode="coverflow"] > x-swiper-item { animation-name: x-swiper-coverflow; }
+x-swiper[mode="coverflow"] > x-swiper-item { animation-name: x-swiper-coverflow-horizontal; }
+x-swiper[mode="coverflow"][vertical]:not([vertical="false"]) > x-swiper-item {
+  animation-name: x-swiper-coverflow-vertical;
+}
 x-swiper[mode="carry"] > x-swiper-item { animation-name: x-swiper-carry; }
-@keyframes x-swiper-coverflow {
-  25% { transform: scale(0.8); }
-  45%, 55% { transform: scale(1); }
-  100% { transform: scale(0.8); }
+@keyframes x-swiper-coverflow-horizontal {
+  0% { transform: translateX(-24.3%) skewY(14deg) scale(0.514, 0.8); }
+  45%, 55% { transform: translateX(0%) skewY(0deg) scale(1, 1); }
+  100% { transform: translateX(24.3%) skewY(-14deg) scale(0.514, 0.8); }
+}
+@keyframes x-swiper-coverflow-vertical {
+  0% { transform: translateY(-24.3%) skewX(14deg) scale(0.8, 0.514); }
+  45%, 55% { transform: translateY(0%) skewX(0deg) scale(1, 1); }
+  100% { transform: translateY(24.3%) skewX(-14deg) scale(0.8, 0.514); }
 }
 @keyframes x-swiper-carry {
   0% { transform: scale(0.6); }
@@ -593,8 +638,11 @@ mod tests {
 
     use dom::scroll::ScrollBehavior;
     use dom::stylo::properties::PropertyId;
-    use dom::stylo::values::computed::{Display, Overflow};
-    use dom::{MethodCall, MethodError, MethodOutcome, NodeId, StylesheetOrigin, Vector2D};
+    use dom::stylo::values::computed::{CSSPixelLength, Display, Overflow};
+    use dom::{
+        MethodCall, MethodError, MethodOutcome, NodeId, Point2D, Rect, Size2D, StylesheetOrigin,
+        Vector2D,
+    };
 
     use super::super::test_support::{child, display, document, element_under, overflow, style_of};
     use super::super::{InvalidParams, LynxDocument};
@@ -1191,12 +1239,13 @@ mod tests {
         }
     }
 
-    /// `coverflow` and `carry` export their scale to the painter as a curve
-    /// that reads the swiper's scroll slot: nothing ticks on the main
-    /// thread and no curve reads the clock. `normal`, `carousel` and
-    /// `flat-coverflow` animate nothing.
+    /// `coverflow` and `carry` export their transform to the painter as a
+    /// curve that reads the swiper's scroll slot: nothing ticks on the main
+    /// thread and no curve reads the clock. `coverflow`'s turn is a
+    /// translation, a skew and a scale, which a 2D affine follows. `normal`,
+    /// `carousel` and `flat-coverflow` animate nothing.
     #[test]
-    fn the_animated_modes_export_a_scroll_driven_scale() {
+    fn the_animated_modes_export_a_scroll_driven_transform() {
         for vertical in [false, true] {
             for (mode, animated) in [
                 ("normal", false),
@@ -1250,18 +1299,97 @@ mod tests {
         }
     }
 
-    /// `coverflow`'s keyframes carry no rotation: the item beside the
-    /// current one is scaled, in 2D.
-    #[test]
-    fn coverflow_scales_without_rotating() {
-        let (mut document, _, items) = mode_swiper("coverflow", false, 3);
-        document.commit();
-        assert_eq!(value(&document, items[0], "transform"), "scale(1)");
-        let beside = value(&document, items[1], "transform");
-        assert!(
-            beside.starts_with("scale(") && beside != "scale(1)",
-            "{beside}"
+    /// What `item`'s computed transform does to its border box, read along
+    /// the swiper's main axis.
+    struct Turn {
+        /// The scale along the main axis.
+        along: f32,
+        /// The scale along the cross axis.
+        across: f32,
+        /// The cross-axis movement per unit along the main axis.
+        skew: f32,
+        /// Where the transform puts the item's two main-axis edges, as
+        /// offsets from its centre: the start one, then the end one.
+        edges: [f32; 2],
+    }
+
+    fn turn(document: &LynxDocument, item: NodeId, vertical: bool) -> Turn {
+        let (.., width, height) = rect(document, item);
+        let reference = Rect::new(
+            Point2D::origin(),
+            Size2D::new(CSSPixelLength::new(width), CSSPixelLength::new(height)),
         );
+        let (matrix, _) = style_of(document, item)
+            .get_box()
+            .transform
+            .to_transform_3d_matrix(Some(&reference))
+            .expect("a transform list with a reference box converts");
+        let (along, across, skew, shift, half) = if vertical {
+            (matrix.m22, matrix.m11, matrix.m21, matrix.m42, height / 2.0)
+        } else {
+            (matrix.m11, matrix.m22, matrix.m12, matrix.m41, width / 2.0)
+        };
+        Turn {
+            along,
+            across,
+            skew,
+            edges: [shift - half * along, shift + half * along],
+        }
+    }
+
+    /// `coverflow` at rest on the middle one of three 120px items, a row and
+    /// a column: the current item is untransformed, and the items beside it,
+    /// at 87.5% and 12.5% of their view timelines, stand 72% of the way to
+    /// the full pose. Each shows `0.649` of its main-axis size and `0.856` of
+    /// its cross-axis one, skewed by `0.649 × tan 10.1°` with the sign of its
+    /// side, and the edge it turns to the current item — its end edge before
+    /// the current item, its start edge after — is where layout put it, 60px
+    /// from its centre, so it takes nothing from its neighbour.
+    #[test]
+    fn coverflow_turns_the_items_beside_the_current_one() {
+        let close = |actual: f32, expected: f32| (actual - expected).abs() < 1e-3;
+        for vertical in [false, true] {
+            let (mut document, swiper, items) = mode_swiper("coverflow", vertical, 3);
+            document.commit();
+            let along = snap_points(&document, swiper, vertical)[1];
+            let offset = if vertical {
+                Vector2D::new(0.0, along)
+            } else {
+                Vector2D::new(along, 0.0)
+            };
+            document.scroll_to(scroller(&document, swiper), offset);
+            document.note_scroll_windows_stale();
+            document.commit();
+
+            let current = turn(&document, items[1], vertical);
+            assert!(
+                close(current.along, 1.0)
+                    && close(current.across, 1.0)
+                    && close(current.skew, 0.0)
+                    && close(current.edges[0], -60.0)
+                    && close(current.edges[1], 60.0),
+                "vertical={vertical}: the current item is flat"
+            );
+            for (item, side, inner) in [(items[0], -1.0, 1), (items[2], 1.0, 0)] {
+                let beside = turn(&document, item, vertical);
+                assert!(
+                    close(beside.along, 0.649) && close(beside.across, 0.8556),
+                    "vertical={vertical} side={side}: {} by {}",
+                    beside.along,
+                    beside.across
+                );
+                assert!(
+                    close(beside.skew, side * 0.1157),
+                    "vertical={vertical} side={side}: skew {}",
+                    beside.skew
+                );
+                assert!(
+                    close(beside.edges[inner], -side * 60.0),
+                    "vertical={vertical} side={side}: the inner edge is at {}",
+                    beside.edges[inner]
+                );
+            }
+        }
     }
 
     // --- current ------------------------------------------------------------

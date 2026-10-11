@@ -1623,15 +1623,30 @@ consequential choice about whether to follow the spec or the quirk.
     `!important` kept as a structural invariant. The main axis itself is a
     plain declaration on `#content`, which no author rule reaches, as in
     web-core. An item's `position` is not pinned.
-  - *`coverflow` is flat.* web-core's keyframes rotate each item
-    (`rotateY`/`rotateX`, `x-swiper.css:244-267`) under `perspective: 200px`
-    and `transform-style: preserve-3d`; here only their `scale()` is kept,
-    so the animation exports to the painter and is sampled from the live
-    scroll offset with no main-thread work per frame (a 3D keyframe refuses
-    the export). `coverflow` and `carry` also drop web-core's `z-index: 1`
-    keyframe, and run linear rather than web-core's default `ease` per
-    segment. **The architect's decision (performance), to be confirmed by
-    the user.**
+  - *`coverflow` turns its items in a parallel projection, not a
+    perspective one* (2026-10-12, on the user's request). web-core's
+    keyframes rotate each item (`rotateY`/`rotateX`, up to 50°, with
+    `scale(0.8)`, `x-swiper.css:244-267`) under `perspective: 200px` and
+    `transform-style: preserve-3d`. A 3D keyframe refuses the painter's
+    curve export, so here the turn is three 2D functions per keyframe:
+    `scale(0.514, 0.8)` (web-core's scale, and `0.8 × cos 50°` along the
+    main axis, the width a turned item shows), `skewY(14deg)` (`skewX` under
+    `vertical`; the depth cue, the row seen from above, so the outer edge
+    drops) and `translateX(24.3%)` toward the current item (half of what the
+    scale removed, so the edge facing the current item stays where layout
+    put it and no item overlaps its neighbour). It exports, and is sampled
+    from the live scroll offset with no main-thread work per frame. What
+    differs on screen: a turned item is a parallelogram, where web-core's is
+    a trapezoid whose nearer edge is longer; its inner edge stays at its
+    layout position, where web-core's rotation about the item's centre moves
+    it; the stops are `0%`/`100%` turned and `45%, 55%` flat, where
+    web-core's are `25%` (−50°) and `100%` (40°) with nothing at `0%`, so an
+    item entering there starts flat; at rest the items beside the current
+    one show the width of a 41° turn at scale 0.86, web-core's −40° and 38°
+    at 0.84 and 0.81. `coverflow` and `carry` also drop web-core's
+    `z-index: 1` keyframe, and run linear rather than web-core's default
+    `ease` per segment (linear is also what keeps the inner edge still).
+    **The numbers are the architect's, to be confirmed by the user.**
   - *Under `vertical`, the 20% margins resolve against the swiper's width*,
     as CSS resolves every percentage margin and as web-core does; native
     offsets the first page by 20% of the main axis (`XSwiperUI.java:582-604`).

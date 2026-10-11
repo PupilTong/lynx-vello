@@ -421,8 +421,8 @@ async fn compiled_scroll_coordinator_folds_its_header_before_the_content() {
 /// A compiled card of six 120px `<x-swiper>`s in a 240px by 360px grid,
 /// laid out by the engine's UA sheet: `current={2}` starts on its blue item,
 /// a `vertical` one with `current={1}` on its green item, a `coverflow` one
-/// with `current={1}` shows its green item centred and its red one scaled
-/// down at its left, and a plain one with `current={1}` its green item, its
+/// with `current={1}` shows its green item centred and its red one turned
+/// toward it at its left, and a plain one with `current={1}` its green item, its
 /// white current dot the middle of its three, centred at (180, 227.2): the
 /// strip is three dots long because the component counted the items its
 /// slot was assigned. The third row's dots are hidden on the left and
