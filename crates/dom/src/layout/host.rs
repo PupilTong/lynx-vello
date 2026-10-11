@@ -588,7 +588,7 @@ pub(super) fn run_layout<T: Sync>(
     let mut deferred = Vec::new();
     let mut escalated = false;
     {
-        let (tree, state, _) = document.layout_parts();
+        let (tree, state) = document.layout_parts();
         let root = tree.live_slot(root_id);
         state.begin_container_interleave(interleave);
         if !full {
@@ -648,24 +648,21 @@ pub(super) fn run_layout<T: Sync>(
     // and nothing above it has to be laid out again — but its subtree was
     // finished after the boundaries the pass had parked, so the incremental
     // rounding tail has to be told about it.
-    let parked_ids = if settled.is_empty() {
-        None
-    } else {
+    if !settled.is_empty() {
         let mut ids: FxHashSet<NodeId> = parked.iter().map(|&(_, p)| p.node_id).collect();
         for &pending in &settled {
             if ids.insert(pending.node_id) {
                 parked.push((boundary_depth(document, pending.node_id), pending));
             }
         }
-        Some(ids)
-    };
+    }
     let relayed: FxHashSet<NodeId> = if relays_in_place {
         parked.iter().map(|&(_, pending)| pending.node_id).collect()
     } else {
         FxHashSet::default()
     };
     {
-        let (tree, state, live_parked_ids) = document.layout_parts();
+        let (tree, state) = document.layout_parts();
         let root = tree.live_slot(root_id);
         state.begin_container_interleave(false);
         state.in_rounding_tail = true;
@@ -675,15 +672,7 @@ pub(super) fn run_layout<T: Sync>(
             };
             round_with(tree, state, root, scale, Point::ZERO, rescale, position);
         } else {
-            position_and_round_parked_boundaries(
-                tree,
-                state,
-                parked_ids.as_ref().unwrap_or(live_parked_ids),
-                &parked,
-                viewport,
-                scale,
-                &relayed,
-            );
+            position_and_round_parked_boundaries(tree, state, &parked, viewport, scale, &relayed);
         }
         state.in_rounding_tail = false;
         // Every text node this pass measured but did not commit still holds
@@ -782,7 +771,7 @@ fn settle_deferred_containers<T: Sync>(
             document.flush_styles_with_damage_sink(&mut |_, _| {});
         }
         let last = pass + 1 == committed_box::CONTAINER_PASSES;
-        let (tree, state, _) = document.layout_parts();
+        let (tree, state) = document.layout_parts();
         state.begin_container_interleave(!last);
         for &DeferredContainer { node, input } in deferred.iter() {
             let Some(slot) = tree.slot(node) else {
@@ -822,10 +811,25 @@ fn collect_parked_boundaries<T>(document: &Document<T>) -> Vec<(usize, PendingRe
     parked
 }
 
+/// The incremental rounding tail: every parked boundary's subtree is
+/// positioned and rounded from its parent's accumulated unrounded origin,
+/// which is what the whole-tree walk would reach it with, since every
+/// unrounded box is final before the tail runs.
+///
+/// A parked boundary under another parked boundary is walked on its own
+/// too. The outer one's walk descends only through nodes a layout write
+/// marked, and the boxes between the two — a `display: contents` wrapper, or
+/// any box neither relayout wrote — are marked by nobody: the inner
+/// boundary's invalidation stopped at the inner boundary and the outer's at
+/// the outer. Left to the outer walk, the inner subtree would keep its old
+/// rounded boxes, and a box the tail alone places (`pre_position`: one whose
+/// containing block is the initial one, a top-layer element among them) would
+/// never be placed. Where the outer boundary's own box did change, its walk
+/// forces its whole subtree and rounds the inner one a second time, to the
+/// same values: rounding is a function of the unrounded boxes alone.
 fn position_and_round_parked_boundaries<T: Sync>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
-    parked_ids: &FxHashSet<NodeId>,
     parked: &[(usize, PendingRelayout)],
     viewport: Size<f32>,
     scale: f32,
@@ -844,9 +848,6 @@ fn position_and_round_parked_boundaries<T: Sync>(
         {
             continue;
         }
-        if has_parked_ancestor(tree, node, parked_ids) {
-            continue;
-        }
         let parent_origin = node.flat_parent_slot().map_or(Point::ZERO, |parent| {
             accumulated_unrounded_origin(tree, state, parent)
         });
@@ -855,22 +856,6 @@ fn position_and_round_parked_boundaries<T: Sync>(
         };
         round_with(tree, state, slot, scale, parent_origin, false, position);
     }
-}
-
-fn has_parked_ancestor<T>(
-    tree: &TreeArenas<T>,
-    node: &Node<T>,
-    parked_ids: &FxHashSet<NodeId>,
-) -> bool {
-    let mut current = node.flat_parent_slot();
-    while let Some(slot) = current {
-        let ancestor = tree.at(slot);
-        if parked_ids.contains(&ancestor.id()) {
-            return true;
-        }
-        current = ancestor.flat_parent_slot();
-    }
-    false
 }
 
 fn accumulated_unrounded_origin<T>(
