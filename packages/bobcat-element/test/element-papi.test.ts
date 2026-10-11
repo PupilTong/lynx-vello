@@ -3611,6 +3611,41 @@ describe("__InvokeUIMethod", () => {
     expect(answers[2]).toStrictEqual({ code: 0, data: [] });
   });
 
+  it("builds a text's getTextBoundingRect data with the union of its boxes", () => {
+    const text = __CreateText(0);
+    const answers: unknown[] = [];
+    mock.answerElementMethod = () =>
+      "1:0" + "1:2"
+      + "2:47" + "2:37" + "2:40" + "2:21"
+      + "2:27" + "2:58" + "4:40.5" + "2:21";
+    __InvokeUIMethod(text, "getTextBoundingRect", { start: 1, end: 6 }, (result: unknown) => answers.push(result));
+    mock.answerElementMethod = () => "1:0" + "1:1" + "2:27" + "2:37" + "1:0" + "2:21";
+    __InvokeUIMethod(text, "getTextBoundingRect", { start: 5, end: 5 }, (result: unknown) => answers.push(result));
+    mock.answerElementMethod = () => 8;
+    __InvokeUIMethod(text, "getTextBoundingRect", { start: 0, end: 99 }, (result: unknown) => answers.push(result));
+
+    expect(mock.named("callElementMethod").slice(-1)[0]?.[3]).toBe('{"start":0,"end":99}');
+    expect(answers[0]).toStrictEqual({
+      code: 0,
+      data: {
+        boundingRect: { left: 27, top: 37, right: 87, bottom: 79, width: 60, height: 42 },
+        boxes: [
+          { left: 47, top: 37, right: 87, bottom: 58, width: 40, height: 21 },
+          { left: 27, top: 58, right: 67.5, bottom: 79, width: 40.5, height: 21 },
+        ],
+      },
+    });
+    // One box is its own union, and the empty range's zero box is kept.
+    expect(answers[1]).toStrictEqual({
+      code: 0,
+      data: {
+        boundingRect: { left: 27, top: 37, right: 27, bottom: 58, width: 0, height: 21 },
+        boxes: [{ left: 27, top: 37, right: 27, bottom: 58, width: 0, height: 21 }],
+      },
+    });
+    expect(answers[2]).toStrictEqual({ code: 8, data: undefined });
+  });
+
   it("sends missing params as an empty object and uncarriable ones as null", () => {
     const view = __CreateView(0);
     const cyclic: Record<string, unknown> = {};

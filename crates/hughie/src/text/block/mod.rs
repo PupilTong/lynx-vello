@@ -27,6 +27,7 @@
 
 pub(in crate::text) mod content;
 mod position;
+mod range;
 mod shape;
 pub(in crate::text) mod style;
 mod truncate;
@@ -239,6 +240,13 @@ struct LayoutResult {
 struct DisplayPart {
     layout: Layout<TextBrush>,
     sources: Vec<SourceItem>,
+    /// Where the source content ends in this layout's text: the bytes before
+    /// it are the content's own normalized text, the bytes from it on the
+    /// tail (the dots or the truncation content), which is no source text.
+    cut_byte: u32,
+    /// How many of this layout's box slots are content boxes. They come
+    /// first, in the content's own order; the truncation content's follow.
+    content_slots: usize,
 }
 
 /// A shaped, breakable, truncatable Lynx text block. One per text element.
@@ -750,6 +758,10 @@ impl TextBlock {
             })
             .collect();
         let hidden = self.hidden_boxes(plan);
+        let content_slots = slots
+            .iter()
+            .filter(|slot| matches!(slot, SlotSource::Content(_)))
+            .count();
         let (lines, boxes, size, first_baseline) = assemble(
             &display,
             Some(&self.natural),
@@ -764,6 +776,8 @@ impl TextBlock {
             display: Some(DisplayPart {
                 layout: display,
                 sources,
+                cut_byte: plan.cut_byte,
+                content_slots,
             }),
             lines,
             boxes,
@@ -1234,13 +1248,13 @@ mod tests {
 
     const AHEM: &[u8] = include_bytes!("../../../tests/fixtures/Ahem.ttf");
 
-    fn text_context() -> TextContext {
+    pub(super) fn text_context() -> TextContext {
         let mut context = TextContext::without_system_fonts();
         assert_eq!(context.register_fonts(FontBlob::from_static(AHEM)), 1);
         context
     }
 
-    fn ahem_style() -> RunStyle {
+    pub(super) fn ahem_style() -> RunStyle {
         RunStyle {
             font_family: FontFamily {
                 families: FontFamilyList {

@@ -77,7 +77,7 @@ interface BobcatNative {
    * - `0` (`SUCCESS`): the method ran and has no data to answer.
    * - a string: a record (`bobcat:record`) whose first field is the status
    *   code `0` and whose remaining fields are the method's data, as the
-   *   method wrote them. Five methods answer one: `boundingClientRect`,
+   *   method wrote them. Six methods answer one: `boundingClientRect`,
    *   whose fields are `left`, `top`, `width`, `height` in that order, the
    *   border box in viewport CSS px as of the last completed layout pass,
    *   ancestor scroll offsets applied, transforms ignored (native's own
@@ -87,11 +87,13 @@ interface BobcatNative {
    *   a `scroll-view`'s `getScrollInfo`, whose fields are `scrollX`,
    *   `scrollY`, `scrollRange`, `maxScrollOffset` in that order; a `list`'s
    *   `getScrollContainerInfo`, whose fields are `scrollTop`, `scrollLeft`,
-   *   `scrollHeight`, `scrollWidth` in that order; and a `list`'s
+   *   `scrollHeight`, `scrollWidth` in that order; a `list`'s
    *   `getVisibleCells`, whose first field is the number of cells, followed
    *   by seven fields per cell: `id`, `itemKey` (both strings, empty when
    *   the cell carries no such attribute), `index`, `left`, `top`, `right`,
-   *   `bottom`. Every numeric field is CSS px but `index` and the count.
+   *   `bottom`; and a `text`'s `getTextBoundingRect`, whose first field is
+   *   the number of boxes, followed by `left`, `top`, `width`, `height` per
+   *   box. Every numeric field is CSS px but `index` and the counts.
    *
    * `selectTab({index, smooth = true})` exists on `viewpager` and
    * `x-viewpager-ng` only: it scrolls the pager's element child number
@@ -176,6 +178,22 @@ interface BobcatNative {
    * `null` and an array read as `{}`. An element with no box or that is no
    * scroll container does nothing. Otherwise both answer `0` and no data. A `scroll-view`'s and an `x-swiper`'s own `scrollTo`, and a
    * `scroll-view`'s own `scrollBy`, are asked first and answer instead.
+   *
+   * `getTextBoundingRect({start, end})` exists on `text` only: the boxes
+   * the source range `[start, end)` of the paragraph the element
+   * establishes occupies, in UTF-16 units of its text (an inline image or
+   * view counting one), one box per line the range shows content on, from
+   * the first selected glyph's left edge to the last one's right edge with
+   * the line's top and height, in viewport CSS px (the space
+   * `boundingClientRect` answers in; `relativeTo` is not read). `start`
+   * and `end` must be numbers, are truncated toward zero, and must then be
+   * non-negative with `start <= end`, else code 4. `start == end` answers
+   * one zero-width box at the content box's origin, as tall as the line
+   * holding `start`. A range past the text's end, a range that shows no
+   * content (text past a truncation cut, the whitespace a soft wrap
+   * consumed), a nested `text` (a run of its ancestor's paragraph) and an
+   * element with no box are code 8. `getSelectedText` and
+   * `setTextSelection` are code 3: there is no text selection model.
    *
    * `show`, `showModal`, `close` and `requestClose` exist on `dialog` only:
    * HTML's `HTMLDialogElement` methods, `params` unread. `close` and

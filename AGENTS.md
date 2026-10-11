@@ -1479,7 +1479,7 @@ write through and read back, among them `__SetInlineStyles` and the name-based
 `scrollTo`/`scrollBy`/`getScrollInfo`, a `list`'s
 `scrollToPosition`/`scrollBy`/`getScrollContainerInfo`/`getVisibleCells`, an
 `x-refresh-view`'s `finishRefresh`/`finishLoadMore`/`autoStartRefresh`, a
-scroll coordinator's `setFoldExpanded` and a
+scroll coordinator's `setFoldExpanded`, a `text`'s `getTextBoundingRect` and a
 dialog's `show`/`showModal`/`close`/`requestClose`, and
 `__GetComputedStyleByKey`, neither of which commits anything
 — both read the last completed pass and leave the decision to flush to the
@@ -1656,7 +1656,11 @@ PAPI member surface live in `packages/bobcat-element`. The module is one file
 per tag, each owning that tag's UA rules and its tests: `tree::raw_text`
 (generated-content CSS and the rules that dissolve a carrier into the `text` it
 is written inside), `tree::text` (the paragraph attribute limits and what may
-generate a box inside a run), `tree::image` (the `src`-to-replaced-content
+generate a box inside a run, and a `text` component whose
+`CustomElement::invoke` answers `getTextBoundingRect` with the per-line boxes
+`Document::text_range_boxes` reads off the committed paragraph, in viewport
+px; `getSelectedText` and `setTextSelection` are not built, there being no
+selection model), `tree::image` (the `src`-to-replaced-content
 reflection and its UA box), `tree::scroll_container` (`scroll-view` and
 `list` as scroll containers — which axis scrolls, which one clips, and which
 way the subtree stacks, from `web-elements`' own `scroll-view.css` and
@@ -2458,7 +2462,7 @@ plus the element's `id` and `dataset` as native reports them —
 and `getScrollInfo`, a `list`'s `scrollToPosition`, `scrollBy`,
 `getScrollContainerInfo` and `getVisibleCells`, an `x-refresh-view`'s
 `finishRefresh`, `finishLoadMore` and `autoStartRefresh`, a scroll
-coordinator's `setFoldExpanded`, and a dialog's four methods, and fails every other method with
+coordinator's `setFoldExpanded`, a `text`'s `getTextBoundingRect`, and a dialog's four methods, and fails every other method with
 code 3, `METHOD_NOT_FOUND`,
 alongside the selection failures it already delivered. No callback or document handle crosses into
 Rust's Worker transport. See `docs/node-query-runtime.md` for the supported
@@ -2994,7 +2998,7 @@ would host it:
   `scroll-view`'s `scrollTo`/`scrollBy`/`getScrollInfo`, a `list`'s
   `scrollToPosition`/`scrollBy`/`getScrollContainerInfo`/`getVisibleCells`,
   an `x-refresh-view`'s `finishRefresh`/`finishLoadMore`/`autoStartRefresh`,
-  a scroll coordinator's `setFoldExpanded`
+  a scroll coordinator's `setFoldExpanded`, a `text`'s `getTextBoundingRect`
   and a dialog's `show`/`showModal`/`close`/`requestClose`.** Those dispatch
   by name (`boundingClientRect`, `scrollIntoView` and CSSOM-View's
   `scrollTo`/`scrollBy` on every element, `selectTab` on
@@ -3003,14 +3007,13 @@ would host it:
   standard two, the four list methods on `list` only, whose `scrollBy`
   shadows the standard one, the refresh view's three on `x-refresh-view`
   only, `setFoldExpanded` on `scroll-coordinator` and `x-foldview-ng` only,
-  the dialog's on `dialog` only) through
+  `getTextBoundingRect` on `text` only, the dialog's on `dialog` only) through
   `__InvokeUIMethod`; every other name — the base set's `focus`/`blur` (no
   focus model), a `scroll-view`'s `autoScroll` and `takeContentScreenshot`,
   a `list`'s `autoScroll` and `getScrollInfo`, a scroll coordinator's
   `getScrollInfo`, an `image`'s four animation methods (nothing plays image
-  frames), a `text`'s `getTextBoundingRect`, `getSelectedText` and
-  `setTextSelection` (no selection model and no character-range-to-rects
-  query), `requestUIInfo`,
+  frames), a `text`'s `getSelectedText` and `setTextSelection` (no
+  selection model), `requestUIInfo`,
   `takeScreenshot` (no pixel readback) and the rest of the per-component
   catalog — answers code 3, `METHOD_NOT_FOUND`. The rect itself ignores
   transforms and never flushes.

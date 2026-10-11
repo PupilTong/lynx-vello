@@ -2805,6 +2805,92 @@ fn a_foldview_answers_set_fold_expanded_through_both_invoke_paths() {
     }
 }
 
+/// `getTextBoundingRect` on a `text`, through `__InvokeUIMethod` and the
+/// selector-query `invoke`: a 10px Ahem paragraph at (20, 30) with 5px of
+/// padding answers its range's box in viewport CSS px, from the content
+/// box's origin, with `boundingRect` the union `element-papi.ts` builds. A
+/// reversed range is code 4, a range past the text's end code 8, the
+/// selection methods code 3, and the method on a `view` code 3.
+#[test]
+fn a_text_answers_get_text_bounding_rect_through_both_invoke_paths() {
+    let (mut js_runtime, mut runtime, _elements) = text_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const text = __CreateText(0);
+                  __SetID(text, 'label');
+                  __SetInlineStyles(text,
+                    'position:absolute;left:20px;top:30px;padding:5px;' +
+                    'font-family:Ahem;font-size:10px');
+                  __AppendElement(text, __CreateRawText('abcdef'));
+                  __AppendElement(page, text);
+                  const view = __CreateView(0);
+                  __AppendElement(page, view);
+                  globalThis.held = [page, text, view];
+                };
+                ",
+            "app:///text-methods.js",
+        )
+        .expect("main-thread script");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import {
+                  __BobcatQueryNodes,
+                  __FlushElementTree,
+                  __InvokeUIMethod,
+                } from 'bobcat:element';
+                __FlushElementTree();
+                const viaPapi = (element, method, params) => {
+                  let answer;
+                  let calls = 0;
+                  __InvokeUIMethod(element, method, params, result => {
+                    answer = result;
+                    calls += 1;
+                  });
+                  if (calls !== 1) throw new Error('the callback ran ' + calls + ' times');
+                  return answer;
+                };
+                const viaQuery = (method, params) => __BobcatQueryNodes({
+                  bobcat: 'runtime', method: 'nodeQuery', operation: 'invoke',
+                  token: {type: 0, identifier: '#label', component_id: '',
+                          first_only: true, root_unique_id: undefined},
+                  params: {method, params},
+                });
+                const expectAnswer = (answer, code, data) => {
+                  if (answer.code !== code || JSON.stringify(answer.data) !== JSON.stringify(data)) {
+                    throw new Error('expected ' + JSON.stringify({code, data}) + ', got ' +
+                                    JSON.stringify(answer));
+                  }
+                };
+                // Units 1 and 2, b and c, at x 10..30 of the paragraph, whose
+                // content box starts at (25, 35).
+                const box = {left: 35, top: 35, right: 55, bottom: 45, width: 20, height: 10};
+                const found = {boundingRect: box, boxes: [box]};
+                expectAnswer(viaPapi(held[1], 'getTextBoundingRect', {start: 1, end: 3}), 0, found);
+                expectAnswer(viaQuery('getTextBoundingRect', {start: 1, end: 3}), 0, found);
+                expectAnswer(viaPapi(held[1], 'getTextBoundingRect', {start: 3, end: 1}), 4,
+                             undefined);
+                expectAnswer(viaQuery('getTextBoundingRect', {start: 3, end: 1}), 4, undefined);
+                expectAnswer(viaPapi(held[1], 'getTextBoundingRect', {start: 0, end: 99}), 8,
+                             undefined);
+                expectAnswer(viaQuery('getTextBoundingRect', {start: 0, end: 99}), 8, undefined);
+                expectAnswer(viaPapi(held[1], 'getSelectedText', {}), 3, undefined);
+                expectAnswer(viaQuery('setTextSelection',
+                                      {startX: 0, startY: 0, endX: 10, endY: 10}), 3, undefined);
+                expectAnswer(viaPapi(held[2], 'getTextBoundingRect', {start: 0, end: 1}), 3,
+                             undefined);
+                ",
+            "app:///text-method-calls.js",
+            "text methods",
+        )
+        .expect("text methods");
+}
+
 /// A `scroll-view`'s `getScrollInfo`, `scrollBy` and `scrollTo` through
 /// `__InvokeUIMethod`: the data methods' records come back as the objects
 /// `element-papi.ts` builds from them, in CSS px, and every method moves the

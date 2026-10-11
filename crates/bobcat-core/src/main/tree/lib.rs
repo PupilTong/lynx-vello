@@ -101,6 +101,7 @@ pub(crate) fn new_document(
     scroll_container::define(&mut document);
     list::define(&mut document);
     scroll_coordinator::define(&mut document);
+    text::define(&mut document);
     dialog::define(&mut document, events.clone());
     // After `dialog`: every overlay builds one in its shadow tree.
     overlay::define(&mut document, events);

@@ -1210,3 +1210,61 @@ mod generated_content_tests {
         assert_ne!(doc.text_block_rebuilds(text), builds);
     }
 }
+
+#[cfg(test)]
+mod range_box_tests {
+    use euclid::default::{Point2D, Rect, Size2D};
+
+    use crate::{Document, FontBlob, StylesheetOrigin};
+
+    #[test]
+    fn a_laid_out_paragraph_answers_its_range_boxes_in_content_box_coordinates() {
+        let mut doc = Document::new(crate::tree::document::tests::device(), "page", ());
+        doc.register_fonts(FontBlob::from_static(include_bytes!(
+            "../../../hughie/tests/fixtures/Ahem.ttf"
+        )));
+        doc.add_stylesheet(
+            "page { display: flex; align-items: flex-start; } \
+             text { display: -lynx-text; font-family: Ahem; font-size: 10px; } \
+             text > text { display: -lynx-text; }",
+            StylesheetOrigin::Author,
+        );
+        let text = doc.create_element("text", ());
+        // The padding and border move the box, not the paragraph's own space.
+        doc.set_inline_style(text, "width: 35px; padding: 5px; border: 2px solid;");
+        doc.append_child(doc.document_element().id(), text);
+        let run = doc.create_text_node("abc ", ());
+        doc.append_child(text, run);
+        let nested = doc.create_element("text", ());
+        doc.append_child(text, nested);
+        let tail = doc.create_text_node("def", ());
+        doc.append_child(nested, tail);
+        assert_eq!(doc.text_range_boxes(text, 0, 1), None, "no pass has run");
+        doc.layout();
+
+        let rect = |left: f32, top: f32, width: f32| {
+            Rect::new(Point2D::new(left, top), Size2D::new(width, 10.0))
+        };
+        assert_eq!(
+            doc.text_range_boxes(text, 1, 6),
+            Some(vec![rect(10.0, 0.0, 20.0), rect(0.0, 10.0, 20.0)]),
+            "one box per line, across the nested run's style boundary"
+        );
+        assert_eq!(
+            doc.text_range_boxes(text, 7, 7),
+            Some(vec![rect(0.0, 0.0, 0.0)])
+        );
+        assert_eq!(doc.text_range_boxes(text, 3, 4), Some(Vec::new()));
+        assert_eq!(doc.text_range_boxes(text, 0, 8), None, "past the source");
+        assert_eq!(doc.text_range_boxes(text, 2, 1), None);
+        assert_eq!(
+            doc.text_range_boxes(nested, 0, 1),
+            None,
+            "a nested scope is content of its paragraph, not one of its own"
+        );
+        assert_eq!(
+            doc.text_range_boxes(doc.document_element().id(), 0, 0),
+            None
+        );
+    }
+}

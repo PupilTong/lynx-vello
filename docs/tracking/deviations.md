@@ -1569,6 +1569,46 @@ consequential choice about whether to follow the spec or the quirk.
     The list has no `scrollTo` of its own, as web-core's `XList` has none,
     so the base set's CSSOM-View `scrollTo` answers.
 
+- **`text` UI methods (2026-10-11): `getTextBoundingRect({start, end})` on a
+  `text` component's `CustomElement::invoke`
+  (`crates/bobcat-core/src/main/tree/text.rs`), over
+  `Document::text_range_boxes` and `hughie`'s `TextBlock::range_boxes`
+  (`crates/hughie/src/text/block/range.rs`).** The architect's decision, to
+  be confirmed by the user. web-core's `XText` has none of the three text
+  methods, so the references are the natives (iOS `LynxUIText.m:790-807`,
+  `LynxTextView.m:205-235`; Android `UIText.java:343-364`,
+  `AndroidText.java:438-475`). Where it leaves them:
+  - *Per-line glyph extents, iOS's reading.* Each line's box spans from the
+    first selected cluster's left edge to the last one's right edge, as
+    iOS's `enumerateEnclosingRectsForGlyphRange` gives it. Android clips
+    only the first and the last line to the range's horizontal ends, so its
+    middle lines span the whole layout width. Both take the line's top and
+    height. The collapsible whitespace a soft wrap leaves hanging at a line's
+    end adds nothing to the box (it belongs to no line, as in the `layout`
+    event's ranges).
+  - *Nothing found is code 8*, `OPERATION_ERROR`: a range past the text's
+    end, one that shows no content (text past a truncation cut, the
+    truncation marker, a hanging space), a nested `text`, an element with no
+    box. The natives answer 1, `UNKNOWN`, "Can not find text bounding
+    rect"; the engine has no code 1.
+  - *Params.* `start` and `end` must be JSON numbers, truncated toward zero
+    as iOS's `integerValue` and Android's `getInt` truncate, and then
+    non-negative, else code 4. `start > end` is code 4, Android's answer;
+    iOS answers 1. A missing one is 4, iOS's answer; Android's `getInt`
+    throws and its catch answers 1. A numeric string is 4, where iOS's
+    `intValue` reads its digits.
+  - *`relativeTo` is not read*: the boxes are in viewport CSS px, the space
+    `boundingClientRect` answers in, as `boundingClientRect` reads none of
+    its params here. Both natives offset the boxes by the element's
+    position relative to `relativeTo` when one is named.
+  - *`start == end` keeps the natives' zero box*: one box of zero width at
+    the content box's origin, as tall as the line holding `start`, which
+    says nothing about where `start` is; kept for parity rather than
+    answering a caret position.
+  - *Selection methods absent.* `getSelectedText` and `setTextSelection`
+    are code 3: there is no text selection model, nothing selects text, and
+    so there is nothing to read or set.
+
 - **`x-swiper` (2026-10-06): a component with web-core's shadow `#content`
   scroll container and a dot strip, and its layouts are UA rules.** `crates/bobcat-core/src/main/tree/swiper.rs` translates
   `x-swiper.css` and its template (`htmlTemplates.ts:225-275`) onto web-core's

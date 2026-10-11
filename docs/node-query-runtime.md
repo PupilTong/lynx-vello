@@ -72,6 +72,23 @@ queue without clearing it. Selection captures its root at select time.
   iOS's `getScrollInfo` is code 3, and its `scrollBy({offset})` is not
   built: the name reaches the base set's CSSOM-View `scrollBy`, which reads
   no `offset`.
+  `getTextBoundingRect({start, end})` on a `text` succeeds with
+  `{boundingRect, boxes}` (`crates/bobcat-core/src/main/tree/text.rs`, over
+  `Document::text_range_boxes`): the boxes of the source range
+  `[start, end)` of the paragraph the element establishes, in UTF-16 units
+  of its text with an inline image or view counting one, one per line the
+  range shows content on, each from the first selected glyph's left edge to
+  the last one's right edge with the line's top and height, as
+  `{left, top, right, bottom, width, height}` in viewport CSS px (the space
+  `boundingClientRect` answers in), and `boundingRect` their union. `start`
+  and `end` must be numbers, are truncated toward zero, and must then be
+  non-negative with `start <= end`, else code 4; `start == end` succeeds
+  with one zero-width box at the content box's origin, as tall as the line,
+  which is the natives' answer. A range past the text's end, one that shows
+  no content (text past a truncation cut, the whitespace a soft wrap
+  consumed), a nested `text` and an element with no box fail with code 8,
+  where the natives answer 1. `relativeTo` is not read, and no `id` or
+  `dataset` rides along.
   `scrollTo({index?, offset = 0, smooth = false})`, `scrollBy({offset})` and
   `getScrollInfo()` on a `scroll-view` work on the axis it scrolls (x under
   `scroll-x` / `scroll-orientation="horizontal"`, else y): `scrollTo`
@@ -185,12 +202,12 @@ native numeric-length conversion remain unsupported.
 
 Legacy component-scoped roots, direct MTS selector PAPI, UI invoke methods
 other than the base set's four (`boundingClientRect`, `scrollIntoView`,
-`scrollTo`, `scrollBy`), `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s three, a `list`'s four, an `x-refresh-view`'s three, a scroll coordinator's `setFoldExpanded` and a dialog's four (a `list`'s `autoScroll` and a coordinator's `getScrollInfo` among them), animation methods,
+`scrollTo`, `scrollBy`), `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s three, a `list`'s four, an `x-refresh-view`'s three, a scroll coordinator's `setFoldExpanded`, a `text`'s `getTextBoundingRect` and a dialog's four (a `list`'s `autoScroll` and a coordinator's `getScrollInfo` among them), animation methods,
 dataset-to-DOM reflection and cross-realm host objects remain pending.
 An `image`'s `startAnimate`/`pauseAnimation`/`resumeAnimation`/`stopAnimation`
-and a `text`'s `getTextBoundingRect`/`getSelectedText`/`setTextSelection`
-are code 3 for want of a primitive: the engine plays no image frames, and has
-no text selection model and no query from a character range to rects.
+and a `text`'s `getSelectedText`/`setTextSelection` are code 3 for want of a
+primitive: the engine plays no image frames, and has no text selection
+model.
 `boundingClientRect` takes no `relativeTo`, `androidEnableTransformProps` or
 `iOSEnableAnimationProps`: it reads nothing from its `params`, since each of
 those names behavior this engine does not have. Query failures and invalid legacy ReactRef chaining

@@ -618,6 +618,50 @@ impl<T> Document<T> {
         Some(self.text_block(id)?.size())
     }
 
+    /// The boxes the source range `[start, end)` of the paragraph `id`
+    /// establishes occupies, from the last committed layout: one per line the
+    /// range shows content on, each from the first selected cluster's inline
+    /// start to the last one's inline end on that line, with the line's top
+    /// and height.
+    ///
+    /// Offsets are the paragraph's source UTF-16 units, the units Lynx's
+    /// `layout` event and `text-maxlength` count, with an inline image or
+    /// view counting one; such a box's unit selects its placed margin box.
+    /// Coordinates are the paragraph's own, whose origin is the element's
+    /// content-box top-left, the space [`Self::text_block_size`] measures in.
+    /// Text past a truncation cut, the truncation marker, and the collapsible
+    /// whitespace hanging at a soft wrap show no content and contribute no
+    /// box, so a range covering only those answers an empty list.
+    ///
+    /// `start == end` answers one zero-width box at `(0, 0)` as tall as the
+    /// line holding `start`. That is a quirk kept for parity with native
+    /// Lynx, whose `getTextBoundingRect` answers exactly that for an empty
+    /// range, not a caret position.
+    ///
+    /// `None` when `id` establishes no committed paragraph, when `end` is
+    /// past the source length, or when `start > end`. Nothing here runs a
+    /// pass, so the answer is the last one's.
+    #[must_use]
+    pub fn text_range_boxes(
+        &self,
+        id: crate::NodeId,
+        start: u32,
+        end: u32,
+    ) -> Option<Vec<Rect<f32>>> {
+        let boxes = self.text_block(id)?.range_boxes(start, end)?;
+        Some(
+            boxes
+                .into_iter()
+                .map(|rect| {
+                    Rect::new(
+                        Point2D::new(rect.origin.x, rect.origin.y),
+                        Size2D::new(rect.size.width, rect.size.height),
+                    )
+                })
+                .collect(),
+        )
+    }
+
     /// The nodes behind `id`'s paragraph items, indexed the way
     /// [`SourceItem::Content`](hughie::text::block::SourceItem) indexes them.
     ///
