@@ -934,46 +934,66 @@ consequential choice about whether to follow the spec or the quirk.
   it is connected. Accepted: a compiled ReactLynx card writes `src` and
   appends in the same render, so the two differ only for a card that holds an
   element out of the tree across a turn.
-- **SVG (2026-10-08): one vector image, rendered wherever web-core renders
-  it; `<svg>` is the standard element, not the Lynx component.** Native draws
-  SVG only in `<svg>`, through ServalSVG at the element's frame size, and its
-  `<image>` refuses SVG (`js_libraries/types/skills/image.md:268-269`);
-  web-core's `x-svg` and `x-image` are shadow `<img>`s, so the browser renders
-  SVG in `<svg src|content>`, `<image src>`, `background-image` and
-  `mask-image`. Here the engine parses the document with `usvg` and `dom`
-  paints it as a vello fragment (pipeline in
+- **SVG (2026-10-09): one vector image, rendered wherever web-core renders
+  it; `<svg>` is the Lynx component.** Native draws SVG only in `<svg>`,
+  through ServalSVG at the element's frame size, and its `<image>` refuses SVG
+  (`js_libraries/types/skills/image.md:268-269`); web-core's `x-svg` and
+  `x-image` are shadow `<img>`s, so the browser renders SVG in
+  `<svg src|content>`, `<image src>`, `background-image` and `mask-image`.
+  Here the engine parses every SVG with its own converter
+  (`crates/dom/src/render/svg/`) and the painter rasterises each draw at its
+  device size (`crates/dom/src/render/vector_textures.rs`); design in
+  `docs/svg-lynx-component-design.md`, pipeline in
   [media-resources.md](media-resources.md), status in
-  [components.md](components.md)'s `x-svg` row). Where the references
-  disagree, and which side was followed (user rulings, 2026-10-08):
+  [components.md](components.md)'s `x-svg` row. Where the references
+  disagree, and which side was followed (user rulings 2026-10-08 and
+  2026-10-09):
   - *`<image src="x.svg">`, `background-image` and `mask-image` render*
     (web-core).
-  - *Intrinsic size is CSS Images 3 §4.1 default sizing* (web-core). Native
-    sizes an `<svg>` from CSS alone (`skills/svg.md:117-118`).
-  - *The Lynx `<svg src|content|bindload>` component is not provided*
-    (revision 3; neither reference). `svg` is the browser's standard element
-    as a subset: its children are DOM nodes and the root's subtree is
-    serialised and parsed into a vector image (`crates/dom/src/tree/inline_svg.rs`).
-    A compiled ReactLynx card's `<svg src>` and `<svg content>` draw nothing,
-    and its `bindload` never fires; such a card has to move the URL to
-    `<image src>` or write the markup as JSX children.
-  - *SVG descendants are not styled by the cascade, not hit-tested and take
-    no events* (a subset of the browser's inline SVG): presentation
-    attributes, `style` attributes and `<style>` elements inside the SVG are
-    what `usvg` sees.
-  - *A root with a `viewBox` and no `width`/`height` takes the `<img>` rule*
-    (the viewBox ratio fitted into 300×150), where a browser gives an inline
-    `<svg>` its containing block's width; one sizing rule for every SVG.
-  - *A sized root stretches its picture to the box* (`object-fit: fill`, the
-    replaced-element path), where a browser letterboxes it by the root's
-    `preserveAspectRatio` (default `xMidYMid meet`). A root whose CSS box has
-    the `viewBox`'s ratio draws the same either way. The correct route, a
-    follow-up, is paint-side `preserveAspectRatio` against the CSS box (the
-    viewport set to the `viewBox`, the root's `preserveAspectRatio` stored on
-    the parsed image), not an `object-fit` UA rule.
+  - *Intrinsic size is CSS Images 3 §4.1 default sizing* (web-core): an
+    unsized `<svg>` lays out at it. Native sizes an `<svg>` from CSS alone
+    (`skills/svg.md:117-118`).
+  - *`<svg>`'s `load` detail is the element's border-box layout size* (native,
+    ruled 2026-10-08), 0×0 without a box, read when the event is delivered.
+    web-core re-dispatches its shadow `<img>`'s `load` with
+    `naturalWidth`/`naturalHeight`, the document's intrinsic size. `<svg>`
+    fires no `error` (web-core fires none).
+  - *An empty or removed `content` keeps the current source* (web-core's
+    `_handleContent` revokes its `Blob` URL and leaves the `<img>`'s `src`).
+  - *Children generate no box and are never read* (web-core's `x-svg`
+    renders no light-DOM child): the markup is the `content` attribute, not
+    the subtree.
+  - *`preserveAspectRatio` is honoured.* A draw maps the document's viewport
+    onto its box by the root's `preserveAspectRatio` (`none` stretches,
+    `meet`/`slice` scale uniformly and align), as the browser does; the
+    revision-3 stretch to the box is gone.
+  - *Fonts come from the SVG's own attributes* (architect's choice under the
+    owner's permission): `font-family`, `font-weight`, `font-style`,
+    `font-stretch` and `font-size`, inherited down the SVG tree; the host
+    element's computed style is not read, which is also what an SVG inside
+    web-core's `<img>` sees. A missing family resolves through the document's
+    default family; glyphs come from the document's own `TextContext`, so
+    `@font-face` faces apply, but text shaped before a face arrives keeps its
+    fallback glyphs.
+  - *CSS inside an SVG document is ignored* (native, ruled 2026-10-09): the
+    converter reads presentation attributes only, so a `<style>` element's
+    rules and a `style` attribute change nothing, `!important` included.
+    web-core's shadow `<img>` hands the document to the browser, which
+    applies both; native's ServalSVG has no `style` element in its tag
+    subset. The project keeps one styling engine, stylo, and adds no second
+    one for SVG. A document coloured only by a `<style>` sheet (an
+    Illustrator export's `.st0 { fill: … }` classes) draws with the initial
+    black fill here.
+  - *Masks, filters, patterns, markers and a nested `image` draw nothing*,
+    where the browser draws them all and native's subset lists `image`: a
+    masked group is skipped with its subtree (drawing it unmasked would show
+    what the author hid), a filter is ignored, a pattern paint is `none`.
+  - *Text is a subset*: `<text>`/`<tspan>` with absolute `x`/`y` starting a
+    chunk and `dx`/`dy` moving it (first list value only), `text-anchor` and
+    `letter-spacing`; no `textPath`, `dominant-baseline` or bidi reordering
+    within a chunk, and the `font` shorthand is not read.
   - *`current-color` is not implemented* (web-core lacks it; native resolves
     `currentColor` from it).
-  - *`<text>` inside an SVG is dropped*, though native's tag subset lists it
-    and the browser renders it: `usvg` is built without text support.
 - **`<blur-view>`'s `blur-radius` is a CSS length here, where web-core and iOS
   read a number and throw the unit away.** The attribute is the whole of the
   component: it is reflected into a `backdrop-filter: blur(…)` presentational

@@ -76,21 +76,51 @@ pub trait ResourceFetcher: dom::FrameImages {
 
     /// Names `source` and begins loading it. Non-blocking.
     ///
-    /// Idempotent and single-flight: repeated or concurrent requests for one
-    /// source join one load, and a request for an already-loaded source
-    /// starts nothing. The engine asks for a source exactly once per
+    /// Single-flight: concurrent requests for one source join one load, and
+    /// a request for an already-loaded bitmap starts nothing. A parsed
+    /// document is not retained (the engine owns the scene it encodes from
+    /// the report), so a later request for one may fetch and parse it again.
+    /// The engine asks for a source exactly once per
     /// document, keyed by the raw string the page wrote — two specifiers a
     /// host canonicalises to one resource are simply asked for twice.
     ///
     /// For every source it is asked for, a host eventually calls exactly one
-    /// of [`ImageReports::loaded`](dom::ImageReports::loaded) or
-    /// [`ImageReports::failed`](dom::ImageReports::failed), unless the view is
-    /// torn down first. Reporting and asking for the turn that drains the
-    /// report are both the host's, and both happen on this thread.
+    /// of [`ImageReports::loaded`](dom::ImageReports::loaded),
+    /// [`ImageReports::parsed_document`](dom::ImageReports::parsed_document)
+    /// or [`ImageReports::failed`](dom::ImageReports::failed), unless the view
+    /// is torn down first. A source whose bytes are an SVG document is not
+    /// decoded but parsed, with the engine's own parser
+    /// ([`ImageEvent::parse_document`](dom::ImageEvent::parse_document)), on
+    /// whatever thread the host decodes bitmaps on, and reported as the
+    /// parsed document, or as a failure when it does not parse. Reporting and
+    /// asking for the turn that drains the report are both the host's, and
+    /// both happen on this thread.
     ///
     /// The default serves nothing, which is what a host with no image support
     /// wants: a source is asked for once and then never drawn.
     fn request_image(&self, _source: &str) {}
+
+    /// Hands over `bytes`, a document of `kind` the page wrote itself (the
+    /// Lynx `<svg content>`), to be parsed and reported under `source`.
+    /// Non-blocking.
+    ///
+    /// `source` is a synthetic name the document chose (`svg-content:` and a
+    /// hash of the bytes), not a URL: there is nothing to fetch. The host
+    /// parses the bytes exactly as it parses a fetched document of that kind
+    /// — with [`ImageEvent::parse_document`](dom::ImageEvent::parse_document),
+    /// where it decodes bitmaps — and reports exactly one of
+    /// [`ImageReports::parsed_document`](dom::ImageReports::parsed_document)
+    /// or [`ImageReports::failed`](dom::ImageReports::failed) for `source`.
+    /// The document asks once per distinct markup while some element
+    /// presents it, and again after it forgot the source with the last
+    /// element presenting it. Every request is parsed and reported on its
+    /// own, and the host keeps nothing of the document: the engine owns the
+    /// scene it encodes, and ignores a report for a source that has settled
+    /// or been forgotten since it asked.
+    ///
+    /// The default serves nothing: on a host without document support an
+    /// `<svg content>` stays pending and draws nothing.
+    fn request_document(&self, _source: &str, _bytes: bytes::Bytes, _kind: dom::DocumentKind) {}
 
     /// The host's own moment in every [`LynxView::pump`](crate::LynxView::pump),
     /// on this thread, before the turn reads the reports queued so far.
@@ -157,6 +187,10 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
 
     fn request_image(&self, source: &str) {
         (**self).request_image(source);
+    }
+
+    fn request_document(&self, source: &str, bytes: bytes::Bytes, kind: dom::DocumentKind) {
+        (**self).request_document(source, bytes, kind);
     }
 
     fn service_images(&self) {

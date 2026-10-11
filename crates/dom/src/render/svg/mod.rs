@@ -1,19 +1,19 @@
 //! SVG documents as vector images: the engine's own converter.
 //!
-//! One converter serves every SVG the engine draws, whether a host reported
+//! One converter serves every SVG the engine draws, whether a host fetched
 //! its bytes (`<image src="x.svg">`, CSS `url(x.svg)`) or a page wrote the
-//! markup itself (`docs/svg-lynx-component-design.md`, contract C). It has
-//! two halves that run on different threads:
+//! markup itself (`docs/svg-lynx-component-design.md`, contract C and
+//! revision 4.1). It has two halves that run on different threads:
 //!
 //! - [`parse`] turns the bytes into a [`VectorDocument`]: one `roxmltree` parse, one walk, and a
 //!   flat list of [`Item`]s in paint order, in viewport units, every transform absolute and every
 //!   paint a final peniko brush. Geometry is resolved here; text is collected but not shaped, so
-//!   the parse needs no fonts and can run on a blocking pool. `Send + Sync`.
+//!   the parse needs no fonts and runs in the host, on the pool it decodes bitmaps on, reached
+//!   through `ImageEvent::parse_document`. `Send + Sync`.
 //! - [`encode`] turns a document into a [`Scene`](crate::vello::Scene) on the document thread,
 //!   shaping its text through the document's own [`TextContext`](hughie::text::TextContext),
 //!   created on the first text shaped, so SVG glyphs come from the same fonts and `@font-face`
-//!   registrations as `<text>`. [`opens_blend`] is the vello #1198 test the layer around a
-//!   whole-image draw needs.
+//!   registrations as `<text>`.
 //!
 //! # The supported subset
 //!
@@ -51,8 +51,8 @@
 //! below with its subtree. Markup nested deeper than that is removed before
 //! `roxmltree` parses it, and a document whose entities' replacement text
 //! could nest markup past the bound is refused. Both the walk and
-//! `roxmltree` recurse once per level, and natively the parse runs on a
-//! blocking pool thread with a 2 MiB stack.
+//! `roxmltree` recurse once per level, and natively the host parses on a
+//! decode pool thread with a 2 MiB stack.
 //!
 //! # Inheritance
 //!
@@ -81,12 +81,9 @@
 //!   not available at parse).
 //! - An element with a `mask` is skipped with its whole subtree: drawing it unmasked would show
 //!   what the author hid.
-//! - A blend layer never opens directly inside a clip layer (vello [#1198](https://github.com/linebender/vello/issues/1198)):
-//!   where a clip layer would enclose a non-`normal` blend with no layer between them, the
-//!   innermost clip layer is a full `Normal` layer instead ([`Item::PushClip`]'s `isolate`), and
-//!   [`opens_blend`] answers the same question for the layer a draw of the whole image opens.
-//!   `mix-blend-mode` and `isolation` have no presentation attribute and CSS is not read, so no
-//!   layer blends and both always compute `false`; the plumbing stays for the raster cache.
+//! - Every compositing layer is `Normal`: `mix-blend-mode` and `isolation` have no presentation
+//!   attribute and CSS is not read, so nothing blends, and no clip layer ever has to stand in for
+//!   an isolating layer (vello [#1198](https://github.com/linebender/vello/issues/1198)).
 //! - A nested `svg` and a `symbol` clip to their viewport (`overflow: hidden`) and map their
 //!   `viewBox` by their `preserveAspectRatio`. The root's `preserveAspectRatio` is not applied
 //!   here: it is carried as [`VectorDocument::aspect`] for the painter, which maps the viewport
@@ -134,24 +131,27 @@ mod shapes;
 mod style;
 mod text;
 
-pub(crate) use encode::{encode, opens_blend};
+pub(crate) use encode::encode;
 pub(crate) use parse::parse;
 pub(crate) use text::TextItem;
 
 use crate::render::image::AspectRatio;
 use crate::vello::kurbo::{Affine, BezPath, Rect, Stroke};
-use crate::vello::peniko::{BlendMode, Brush, Fill};
+use crate::vello::peniko::{Brush, Fill};
 
 /// A parsed SVG document, ready to encode: its sizes and a flat command
 /// list in viewport units.
 ///
-/// `pub` only because [`ImageEvent::ParsedDocument`](crate::ImageEvent)
-/// carries it from the parsing thread to the document's; no field or
-/// method is public, and no crate outside `dom` reads it.
+/// `pub` only because a host reports it
+/// ([`ImageReports::parsed_document`](crate::ImageReports::parsed_document))
+/// and [`ImageEvent::ParsedDocument`](crate::ImageEvent) carries it from the
+/// host's parsing thread to the document's; no field or method is public,
+/// and no crate outside `dom` reads it.
 #[derive(Clone, Debug)]
 pub struct VectorDocument {
     /// The size layout is told, in whole CSS px (CSS Images 3 default
-    /// sizing over the root's `width`, `height` and `viewBox`).
+    /// sizing over the root's `width`, `height` and `viewBox`), at least one
+    /// on each axis.
     pub(crate) natural: (u32, u32),
     /// The rectangle the items are drawn in: the `viewBox` size when the
     /// root has one, else the natural size.
@@ -182,21 +182,17 @@ pub(crate) enum Item {
         /// `paint-order`: the fill before the stroke.
         fill_first: bool,
     },
-    /// A compositing layer, popped by a matching [`Item::Pop`].
+    /// A `Normal` compositing layer, popped by a matching [`Item::Pop`].
     PushLayer {
-        blend: BlendMode,
         alpha: f32,
         clip: LayerClip,
         transform: Affine,
     },
-    /// A clip layer, popped by a matching [`Item::Pop`]. `isolate` makes
-    /// it a full `Normal` layer, per the vello #1198 rule in the module
-    /// docs.
+    /// A clip layer, popped by a matching [`Item::Pop`].
     PushClip {
         shape: BezPath,
         rule: Fill,
         transform: Affine,
-        isolate: bool,
     },
     Pop,
     Text(TextItem),
@@ -259,13 +255,6 @@ impl std::fmt::Display for SvgError {
 }
 
 impl std::error::Error for SvgError {}
-
-/// The document crosses from the parsing thread to the document's inside an
-/// `ImageEvent`.
-const _: () = {
-    const fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<VectorDocument>();
-};
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

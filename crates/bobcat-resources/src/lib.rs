@@ -24,11 +24,13 @@
 //! - **Platform image decoding.** No codec is compiled in: `ImageIO` on macOS, gdk-pixbuf on Linux,
 //!   the main thread's `Image` element in the browser, each asked to downsample during decode
 //!   ([`decode`]).
-//! - **SVG documents handed to the engine.** An SVG is neither decoded to pixels nor parsed here:
-//!   on every target, the browser included, its bytes are reported through
-//!   [`ImageReports::loaded_document`] with [`bobcat_core::DocumentKind::Svg`], and the engine
-//!   parses and draws the document itself. It holds no bitmap, so the memory tier and draw-sized
-//!   decoding do not apply; the bytes are kept to answer later requests.
+//! - **SVG documents parsed for the engine.** An SVG is not decoded to pixels: on every target, the
+//!   browser included, it is parsed where a bitmap would be decoded, under a decode permit, with
+//!   the engine's own parser ([`bobcat_core::ImageEvent::parse_document`]), and reported through
+//!   [`ImageReports::parsed_document`]; the engine draws the document itself. Markup a page wrote
+//!   (`<svg content>`) arrives as a document request with its bytes and is parsed the same way. A
+//!   document holds no bitmap, so the memory tier and draw-sized decoding do not apply, and it is
+//!   never retained: every request is parsed and reported, and the engine owns what it encodes.
 //! - **Draw-sized decoding.** The frame reads each image with the size it draws it at
 //!   ([`bobcat_core::ImageSizeHint`]); a bitmap far larger than its draw is re-decoded at the drawn
 //!   size in the background, so a photo shown as a thumbnail costs a thumbnail.
@@ -42,10 +44,10 @@
 //! protocol and carries that view's [`ImageReports`]. The painter's thread
 //! asks for a load and services what came back; the load itself is one task
 //! on the crate's own tokio runtime, whose blocking pool runs the transport,
-//! the preprocessing and then, for a raster image, the platform decoder (in
-//! the browser, a local task on the Render Worker instead). A load therefore
-//! ends as a decoded bitmap, the bytes of a document the engine parses, or a
-//! failure. Images wake the painter to service
+//! the preprocessing and then, for a raster image, the platform decoder, or
+//! for an SVG document the engine's parser (in the browser, a local task on
+//! the Render Worker instead). A load therefore ends as a decoded bitmap, a
+//! parsed document, or a failure. Images wake the painter to service
 //! reports; source completions send directly to main through the concrete
 //! handle supplied with each request.
 
@@ -830,8 +832,8 @@ impl Resources {
     }
 
     /// Bytes the memory tier holds: decoded bitmaps, plus the encoded
-    /// images nothing else could restore and the documents (SVG) kept to
-    /// answer later requests.
+    /// images nothing else could restore. A parsed document (SVG) is never
+    /// retained, so it counts nothing.
     #[must_use]
     pub fn memory_used_bytes(&self) -> usize {
         let state = self.local.borrow();
@@ -855,7 +857,10 @@ impl Resources {
         self.local.borrow().resident_size(source)
     }
 
-    /// Whether `source` has been asked for.
+    /// Whether `source` has been asked for, through
+    /// [`ResourceFetcher::request_image`]. A document request
+    /// ([`ResourceFetcher::request_document`]) files nothing, so it never
+    /// makes a source known.
     #[must_use]
     pub fn knows_image(&self, source: &str) -> bool {
         self.local.borrow().knows(source)
@@ -966,6 +971,10 @@ impl ResourceFetcher for ViewResources {
 
     fn request_image(&self, source: &str) {
         images::request(&self.resources, source, &self.reports);
+    }
+
+    fn request_document(&self, source: &str, bytes: Bytes, kind: bobcat_core::DocumentKind) {
+        images::request_document(&self.resources, source, bytes, kind, &self.reports);
     }
 
     fn service_images(&self) {

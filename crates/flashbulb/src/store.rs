@@ -11,19 +11,24 @@
 //! source returns a clone sharing the same `Blob`, which is what vello keys
 //! its atlas on.
 //!
-//! An SVG document published through [`TestImages::insert_svg`] is reported
-//! as its bytes, the way a production host reports one: this store parses
-//! nothing, and the document parses them inline in
-//! [`Document::apply_image_events`].
-//! [`FrameImages::read`] never answers for it, because the engine never asks.
+//! An SVG document is parsed here, the way a production host parses one:
+//! with the engine's own parser ([`ImageEvent::parse_document`]), and
+//! reported as the parsed document, or as a failure when it does not parse.
+//! A document is published through [`TestImages::insert_svg`], or handed
+//! over by the page as markup, which reaches the store as a document request
+//! ([`TestImages::request_document`], driven by [`pump_images`]). A
+//! document request keeps nothing, as a production host keeps nothing:
+//! every one is parsed and reported on its own. [`FrameImages::read`] never
+//! answers for either, because the engine never asks.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use bytes::Bytes;
 use dom::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
-use dom::{Document, DocumentKind, FrameImages, ImageEvent, ImageReports, ImageSizeHint};
+use dom::{
+    Document, DocumentKind, FrameImages, ImageEvent, ImageReports, ImageSizeHint, VectorDocument,
+};
 
 /// What this store answers for one source.
 ///
@@ -36,17 +41,24 @@ enum Entry {
     #[default]
     Pending,
     Ready(ImageData),
-    /// A document the engine parses, kept as its bytes so a later request
-    /// reports them again.
-    Document {
-        bytes: Bytes,
-        kind: DocumentKind,
-    },
+    /// An SVG document a test published, parsed at publication: what the
+    /// store answers its source with, as [`Entry::Ready`] holds a test's
+    /// pixels.
+    Svg(Arc<VectorDocument>),
     /// Named as one that will never produce pixels.
     Failed,
 }
 
 impl Entry {
+    /// What `bytes`, a document of `kind` for `source`, settle as: the
+    /// document the engine's parser makes of them, or a failure.
+    fn parsed(source: &str, bytes: &[u8], kind: DocumentKind) -> Self {
+        match ImageEvent::parse_document(Arc::from(source), bytes, kind) {
+            ImageEvent::ParsedDocument { document, .. } => Entry::Svg(document),
+            ImageEvent::Loaded { .. } | ImageEvent::Failed { .. } => Entry::Failed,
+        }
+    }
+
     /// The report this entry settles as, or `None` while it is pending.
     fn event(&self, source: &str) -> Option<ImageEvent> {
         let source = Arc::from(source);
@@ -57,23 +69,11 @@ impl Entry {
                 width: image.width,
                 height: image.height,
             }),
-            Entry::Document { bytes, kind } => Some(ImageEvent::LoadedDocument {
+            Entry::Svg(document) => Some(ImageEvent::ParsedDocument {
                 source,
-                bytes: bytes.clone(),
-                kind: *kind,
+                document: Arc::clone(document),
             }),
             Entry::Failed => Some(ImageEvent::Failed { source }),
-        }
-    }
-
-    /// Makes the same report as [`Entry::event`] through `sink`. A pending
-    /// entry has settled as nothing and reports nothing.
-    fn report_to(&self, source: &str, sink: &ImageReports) {
-        match self {
-            Entry::Pending => {}
-            Entry::Ready(image) => sink.loaded(source, image.width, image.height),
-            Entry::Document { bytes, kind } => sink.loaded_document(source, bytes.clone(), *kind),
-            Entry::Failed => sink.failed(source),
         }
     }
 }
@@ -144,22 +144,16 @@ impl TestImages {
         self.insert(source, rgba8(width, height, pixels));
     }
 
-    /// Publishes the SVG document `svg` under `source`, and reports it as its
-    /// bytes through [`ImageReports::loaded_document`] with
-    /// [`DocumentKind::Svg`], the way [`Self::insert`] reports a bitmap.
-    ///
-    /// Nothing is parsed here, as nothing is in a production host: the
-    /// document parses the bytes inside [`Document::apply_image_events`], and
-    /// one that does not parse fails its source there. The entry keeps the
-    /// bytes, so a later request reports them again.
+    /// Publishes the SVG document `svg` under `source`: parses it with the
+    /// engine's parser, as a production host does, and reports the document
+    /// through [`ImageReports::parsed_document`], the way [`Self::insert`]
+    /// reports a bitmap, or reports a failure when it does not parse. The
+    /// published document is what a later request for `source` is answered
+    /// with, as published pixels are.
     pub fn insert_svg(&self, source: impl Into<String>, svg: &str) {
-        self.publish(
-            source.into(),
-            Entry::Document {
-                bytes: Bytes::from(svg.to_owned()),
-                kind: DocumentKind::Svg,
-            },
-        );
+        let source = source.into();
+        let entry = Entry::parsed(&source, svg.as_bytes(), DocumentKind::Svg);
+        self.publish(source, entry);
     }
 
     /// Names `source` as one that will never produce pixels, and reports the
@@ -215,7 +209,7 @@ impl TestImages {
     pub fn len(&self) -> usize {
         self.entries()
             .values()
-            .filter(|entry| matches!(entry, Entry::Ready(_) | Entry::Document { .. }))
+            .filter(|entry| matches!(entry, Entry::Ready(_) | Entry::Svg(_)))
             .count()
     }
 
@@ -242,10 +236,20 @@ impl TestImages {
         let Some(event) = entry.event(source) else {
             return;
         };
-        self.pending.lock().expect("test image reports").push(event);
         if let Some(sink) = self.sink.borrow().as_ref() {
-            entry.report_to(source, sink);
+            match &event {
+                ImageEvent::Loaded {
+                    source,
+                    width,
+                    height,
+                } => sink.loaded(source, *width, *height),
+                ImageEvent::ParsedDocument { source, document } => {
+                    sink.parsed_document(source, Arc::clone(document));
+                }
+                ImageEvent::Failed { source } => sink.failed(source),
+            }
         }
+        self.pending.lock().expect("test image reports").push(event);
     }
 
     /// Takes the reports made since the last drain.
@@ -266,7 +270,7 @@ impl FrameImages for TestImages {
             .push((source.to_owned(), hint));
         match self.entries().get(source)? {
             Entry::Ready(image) => Some(image.clone()),
-            Entry::Pending | Entry::Document { .. } | Entry::Failed => None,
+            Entry::Pending | Entry::Svg(_) | Entry::Failed => None,
         }
     }
 
@@ -292,6 +296,19 @@ impl TestImages {
         let entry = entries.entry(source.to_owned()).or_default();
         self.report(source, entry);
     }
+
+    /// Answers a document request: `bytes`, a document of `kind` a page
+    /// handed over as markup, filed by the engine under `source`. Parses
+    /// them with the engine's parser, as a production host does, and
+    /// reports the document, or a failure when it does not parse.
+    ///
+    /// Keeps nothing, as a production host keeps nothing: every request is
+    /// a parse and a report of its own, and the source is not asked for
+    /// ([`Self::was_asked_for`]). Inherent for the reason [`Self::request`]
+    /// is.
+    pub fn request_document(&self, source: &str, bytes: &[u8], kind: DocumentKind) {
+        self.report(source, &Entry::parsed(source, bytes, kind));
+    }
 }
 
 /// Wraps tightly packed, row-major, straight-alpha RGBA8 pixels as the
@@ -308,22 +325,27 @@ pub fn rgba8(width: u32, height: u32, pixels: Vec<u8>) -> ImageData {
 }
 
 /// Drives one round of the document-to-host image protocol, the same loop a
-/// painter runs: request every source the last walk discovered, then apply
-/// whatever the host reported.
+/// painter runs: request every source the last walk discovered, hand the
+/// store every document the page handed over as markup
+/// ([`Document::set_image_document`], drained through
+/// [`Document::take_document_requests`] as the runtime drains it), then
+/// apply whatever the store reported. The store parses each such document as
+/// a host does ([`TestImages::request_document`]); nothing parses inside the
+/// document.
 ///
 /// Returns whether anything moved, so a caller can loop to quiescence.
 pub fn pump_images<T>(document: &mut Document<T>, store: &TestImages) -> bool {
     for source in document.take_wanted_images() {
         store.request(&source);
     }
-    let events = store.drain_events();
-    if events.is_empty() {
-        return false;
+    for (source, bytes, kind) in document.take_document_requests() {
+        store.request_document(&source, &bytes, kind);
     }
+    let events = store.drain_events();
     // The outcomes go nowhere: they are what an embedder turns into `load`
     // and `error` events, and a screenshot has no realm to dispatch one in.
     let _outcomes = document.apply_image_events(&events);
-    true
+    !events.is_empty()
 }
 
 /// Renders until every image the page needs has been requested, reported and
@@ -337,4 +359,132 @@ pub fn render_with_images<T: Sync>(document: &mut Document<T>, store: &TestImage
         }
     }
     document.render();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use dom::{Device, Document, DocumentKind, ImageEvent, ImageOutcome, ImageRole, NodeId};
+
+    use super::{TestImages, pump_images};
+
+    const ICON: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="6"/>"#;
+    const BROKEN: &str = r#"<svg xmlns="http://www.w3.org/2000/svg"><rect></svg>"#;
+
+    /// A document with one `image` element under its root.
+    fn page() -> (Document<()>, NodeId) {
+        let mut document = Document::new(Device::new(200.0, 200.0, 1.0), "page", ());
+        let root = document.document_element().id();
+        let image = document.create_element("image", ());
+        document.append_child(root, image);
+        (document, image)
+    }
+
+    /// The store parses a published document as a host does: a well-formed
+    /// one is reported as the parsed document, which no read answers for,
+    /// and one that does not parse is reported as a failure.
+    #[test]
+    fn a_published_svg_is_reported_parsed_and_a_malformed_one_failed() {
+        let store = TestImages::new();
+        store.insert_svg("app:///icon.svg", ICON);
+        store.insert_svg("app:///broken.svg", BROKEN);
+
+        let events = store.drain_events();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    ImageEvent::ParsedDocument { source: parsed, .. },
+                    ImageEvent::Failed { source: failed },
+                ] if &**parsed == "app:///icon.svg" && &**failed == "app:///broken.svg"
+            ),
+            "{events:?}"
+        );
+        assert_eq!(store.len(), 1, "only the parsed document is held");
+        assert!(
+            dom::FrameImages::read(&store, "app:///icon.svg", dom::ImageSizeHint::UNBOUNDED)
+                .is_none(),
+            "the engine draws a document itself and never reads it"
+        );
+    }
+
+    /// Markup a page handed over reaches the store as a document request in
+    /// `pump_images`, the store parses it, and its report settles the
+    /// element; a second round has nothing to do.
+    #[test]
+    fn pump_images_answers_a_document_request_by_parsing_it() {
+        let store = TestImages::new();
+        let (mut document, image) = page();
+        assert_eq!(
+            document.set_image_document(
+                image,
+                ImageRole::Source,
+                ICON.as_bytes(),
+                DocumentKind::Svg
+            ),
+            None,
+            "pending until the store reports"
+        );
+        let source = document
+            .image_source(image, ImageRole::Source)
+            .expect("a synthetic source")
+            .to_owned();
+
+        assert!(
+            pump_images(&mut document, &store),
+            "the request was answered"
+        );
+        assert!(
+            !store.was_asked_for(&source),
+            "a document request files nothing"
+        );
+        assert!(!pump_images(&mut document, &store), "nothing more moves");
+
+        let root = document.document_element().id();
+        let second = document.create_element("image", ());
+        document.append_child(root, second);
+        assert_eq!(
+            document.set_image_document(
+                second,
+                ImageRole::Source,
+                ICON.as_bytes(),
+                DocumentKind::Svg
+            ),
+            Some(ImageOutcome::Loaded {
+                node: second,
+                width: 12,
+                height: 6,
+            }),
+            "the store's report settled the shared source"
+        );
+    }
+
+    /// Every document request is a parse and a report of its own: two for
+    /// one source are two documents, and markup that does not parse is
+    /// reported as a failure.
+    #[test]
+    fn every_document_request_is_parsed_and_reported() {
+        let store = TestImages::new();
+        store.request_document("svg-content:1", ICON.as_bytes(), DocumentKind::Svg);
+        store.request_document("svg-content:1", ICON.as_bytes(), DocumentKind::Svg);
+        store.request_document("svg-content:2", BROKEN.as_bytes(), DocumentKind::Svg);
+
+        let events = store.drain_events();
+        let [
+            ImageEvent::ParsedDocument {
+                document: first, ..
+            },
+            ImageEvent::ParsedDocument {
+                document: again, ..
+            },
+            ImageEvent::Failed { source },
+        ] = events.as_slice()
+        else {
+            panic!("two parsed documents and a failure: {events:?}");
+        };
+        assert!(!Arc::ptr_eq(first, again), "parsed twice");
+        assert_eq!(&**source, "svg-content:2");
+        assert!(store.is_empty(), "nothing is kept");
+    }
 }

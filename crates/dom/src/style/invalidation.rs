@@ -436,7 +436,6 @@ impl<T> Document<T> {
         }
         let slot_assignment = is_slot_assignment_attribute(name);
         let popover = is_popover_attribute(name).then(|| self.popover_state(id));
-        let attribute = name;
         let name = LocalName::from(name);
         let base = self.begin_reactions();
         self.enqueue_attribute_changed(id, &name, Some(value));
@@ -449,7 +448,6 @@ impl<T> Document<T> {
         if let Some(old) = popover {
             self.note_popover_attribute_change(id, old);
         }
-        self.reflect_svg_size_attribute(id, attribute, Some(value));
         self.drain_reactions(base);
     }
 
@@ -480,7 +478,6 @@ impl<T> Document<T> {
         }
         let slot_assignment = is_slot_assignment_attribute(name);
         let popover = is_popover_attribute(name).then(|| self.popover_state(id));
-        let attribute = name;
         let name = LocalName::from(name);
         let base = self.begin_reactions();
         self.enqueue_attribute_changed(id, &name, None);
@@ -492,7 +489,6 @@ impl<T> Document<T> {
         if let Some(old) = popover {
             self.note_popover_attribute_change(id, old);
         }
-        self.reflect_svg_size_attribute(id, attribute, None);
         self.drain_reactions(base);
     }
 
@@ -564,8 +560,6 @@ impl<T> Document<T> {
         // is now box-caches only, so the re-shape is asked for explicitly.
         self.invalidate_text_artifact(id);
         self.invalidate_layout(id);
-        // A `<style>` sheet inside an inline SVG root is its text.
-        self.note_inline_svg_mutation(id);
     }
 
     pub fn set_text_node_data(&mut self, id: NodeId, text: impl Into<String>) {
@@ -743,7 +737,6 @@ impl<T> Document<T> {
     }
 
     fn note_class_attribute_change(&mut self, id: NodeId) {
-        self.note_inline_svg_mutation(id);
         self.note_generated_attribute_change(id, &CLASS);
         if let Some(snapshot) = self.ensure_snapshot(id) {
             snapshot.class_changed = true;
@@ -754,7 +747,6 @@ impl<T> Document<T> {
     }
 
     fn note_id_attribute_change(&mut self, id: NodeId) {
-        self.note_inline_svg_mutation(id);
         self.note_generated_attribute_change(id, &ID);
         if let Some(snapshot) = self.ensure_snapshot(id) {
             snapshot.id_changed = true;
@@ -765,9 +757,6 @@ impl<T> Document<T> {
     }
 
     fn note_attribute_change(&mut self, id: NodeId, name: &LocalName) {
-        // Every attribute is part of an inline SVG root's markup, `style`
-        // included (`apply_inline_style_block` comes through here).
-        self.note_inline_svg_mutation(id);
         self.note_generated_attribute_change(id, name);
         // Attributes are an element-only concept. The check used to ride on
         // `ensure_snapshot`, which the gate below can skip, so it is taken here

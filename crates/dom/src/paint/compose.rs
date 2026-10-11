@@ -81,10 +81,9 @@ use crate::render::image::{
     AspectAlign, AspectRatio, ImageSizeHint, MAX_RENDERABLE_DIMENSION, is_renderable,
 };
 use crate::vello::Scene;
-use crate::vello::kurbo::{Affine, Point, Rect, Shape, Size};
+use crate::vello::kurbo::{Affine, Point, Rect, Size};
 use crate::vello::peniko::{
-    BlendMode, BrushRef, Compose, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
-    Mix,
+    BlendMode, BrushRef, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
 };
 use crate::visual::anchored::AnchoredSlot;
 use crate::visual::space::{self, Space, SpaceSamples};
@@ -185,9 +184,8 @@ fn device_length(length: f64) -> u32 {
 /// scale `extent / texture size`. `anchor`, `extent`, `sampler` and `area`
 /// mean what they mean on [`ImageDraw`]; the rest is what the bake needs:
 /// the scene, the identity its texture is cached under, the viewport the
-/// scene is encoded in, how that viewport maps onto a box of another ratio,
-/// and whether the scene opens a blend layer at its top level (the vello
-/// #1198 rule: such a scene is baked inside one full `Normal` layer).
+/// scene is encoded in, and how that viewport maps onto a box of another
+/// ratio.
 pub(crate) struct VectorDraw {
     pub(crate) scene: Arc<Scene>,
     /// The image's process-unique identity (`VectorImage::key`), half of
@@ -196,7 +194,6 @@ pub(crate) struct VectorDraw {
     /// The rectangle of scene units the draw maps onto `extent`.
     pub(crate) viewport: (f32, f32),
     pub(crate) aspect: AspectRatio,
-    pub(crate) opens_blend: bool,
     /// Item-local space to device px.
     pub(crate) transform: Affine,
     /// Where the destination rectangle starts, item-local.
@@ -326,28 +323,29 @@ fn encode_vector(
 /// destination rectangle — the pre-cache shape, kept for the monolithic walk
 /// the equivalence tests run, which has no renderer to bake with.
 ///
-/// The layers around the append are the ones the texture fill of the same
-/// [`ImageArea`] would open, closed in this one call so a fragment cut can
-/// never land between them; when the scene opens a blend layer at its top
-/// level they are full `Normal` layers rather than clip layers (vello #1198),
-/// which also keeps the picture's blending inside the picture. The append
-/// is never of an empty scene — the producers refuse one — so the
-/// `FORCE_NEXT_*` flags a preceding glyph run set are never cleared.
+/// The clip layers around the append are the ones the texture fill of the
+/// same [`ImageArea`] would open, closed in this one call so a fragment cut
+/// can never land between them. The append is never of an empty scene — the
+/// producers refuse one — so the `FORCE_NEXT_*` flags a preceding glyph run
+/// set are never cleared.
 pub(crate) fn encode_vector_inline(scene: &mut Scene, draw: &VectorDraw, outer: Affine) {
     let transform = outer * draw.transform;
-    let isolate = draw.opens_blend;
     let layers = match &draw.area {
         ImageArea::Fill(CapturedShape::Rect(rect)) => {
-            push_vector_layer(scene, isolate, transform, rect);
+            scene.push_clip_layer(Fill::NonZero, transform, rect);
             1
         }
         ImageArea::Fill(CapturedShape::Box(shape)) => {
-            with_shape!(shape, |s| push_vector_layer(scene, isolate, transform, s));
+            with_shape!(shape, |s| scene.push_clip_layer(
+                Fill::NonZero,
+                transform,
+                s
+            ));
             1
         }
         ImageArea::Clipped { clip, draw: rect } => {
-            with_shape!(clip, |s| push_vector_layer(scene, isolate, transform, s));
-            push_vector_layer(scene, isolate, transform, rect);
+            with_shape!(clip, |s| scene.push_clip_layer(Fill::NonZero, transform, s));
+            scene.push_clip_layer(Fill::NonZero, transform, rect);
             2
         }
     };
@@ -357,22 +355,6 @@ pub(crate) fn encode_vector_inline(scene: &mut Scene, draw: &VectorDraw, outer: 
     scene.append(&draw.scene, Some(placement));
     for _ in 0..layers {
         scene.pop_layer();
-    }
-}
-
-/// One layer around an inline vector draw: a clip layer, or a full `Normal`
-/// layer when `isolate`.
-fn push_vector_layer(scene: &mut Scene, isolate: bool, transform: Affine, shape: &impl Shape) {
-    if isolate {
-        scene.push_layer(
-            Fill::NonZero,
-            BlendMode::new(Mix::Normal, Compose::SrcOver),
-            1.0,
-            transform,
-            shape,
-        );
-    } else {
-        scene.push_clip_layer(Fill::NonZero, transform, shape);
     }
 }
 
@@ -1572,6 +1554,7 @@ fn is_integer_translation(affine: Affine) -> bool {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::vello::peniko::{Compose, Mix};
 
     fn assembly() -> ComposeAssembly {
         ComposeAssembly::with_storage(
@@ -2283,7 +2266,6 @@ mod tests {
             key: 7,
             viewport: (8.0, 8.0),
             aspect: AspectRatio::default(),
-            opens_blend: false,
             transform,
             anchor: Point::ZERO,
             extent: Size::new(8.0, 8.0),
