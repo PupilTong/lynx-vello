@@ -2750,6 +2750,16 @@ Rulings and limits to know before touching it:
   parent's non-inherited custom property `INHERITS_RESET_STYLE`. Scope,
   choices, the Blink differences and the known typed-`attr()` gap are in
   `docs/style-assumptions.md` §27.
+- The fork's `lynx` feature also parses css-cascade-6 `@scope` (user-directed
+  2026-10-12; Lynx's CSS compiler drops the rule and the `.web.bundle` wire
+  cannot carry it, so it reaches the engine through CSS-text sheets only).
+  Matching, proximity, invalidation and the sharing cache's scope check are
+  stylo's. `dom` adds one thing: a shadow tree's sheets are
+  `ShadowStyleSheet`s (`crates/dom/src/style/engine.rs`), whose implicit
+  `@scope` root is the shadow host (`ImplicitScopeRoot::Constructed`), where
+  a document sheet's is the document element. WPT ports are in
+  `crates/dom/tests/scope.rs`; scope and rulings in
+  `docs/style-assumptions.md` §33.
 - css-anchor-position-1 (the Editor's Draft module, user-directed
   2026-09-29/30; not in Lynx) is `dom`'s host half: an anchor-name index and
   each element's position options (cascaded at the style harvest with the
