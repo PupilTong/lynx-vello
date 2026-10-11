@@ -734,7 +734,7 @@ impl<T> Document<T> {
             id
         };
         let (pending, reached_root) = {
-            let (tree, state, _) = self.layout_parts();
+            let (tree, state) = self.layout_parts();
             let slot = tree
                 .slot(id)
                 .expect("stale NodeId passed to Document::invalidate_layout");
@@ -1812,7 +1812,7 @@ mod tests {
         let lines = document.text_block(label).expect("committed").lines().len();
 
         let slot = document.live_slot(label);
-        let (tree, state, _) = document.layout_parts();
+        let (tree, state) = document.layout_parts();
         tree.compute_layout(
             state,
             slot,
@@ -2746,6 +2746,79 @@ mod tests {
         assert!(
             !doc.layout_requires_full_pass(viewport, 1.0),
             "a mutation under a content-independent linear ancestor stays incremental",
+        );
+    }
+
+    /// Two boundaries parked in one pass, one under the other with a
+    /// `display: contents` wrapper between them. The inner boundary's subtree
+    /// is rounded and its top-layer box placed, although no layout write
+    /// marked the wrapper: the outer boundary's walk descends through marked
+    /// nodes alone, so the inner boundary walks its own subtree.
+    #[test]
+    fn a_parked_boundary_under_another_parked_boundary_is_rounded_on_its_own() {
+        let mut doc: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
+        doc.add_stylesheet(
+            "page { display: flex; width: 300px; height: 100px; }
+             .outer { display: flex; contain: strict; width: 200px; height: 80px; }
+             .wrapper { display: contents; }
+             .inner { display: flex; contain: strict; width: 100px; height: 40px; }
+             .leaf { width: 10px; height: 10px; }
+             .top { position: fixed; top: 10px; left: 10px; width: 20px; height: 20px; }
+             .hidden { display: none; }",
+            StylesheetOrigin::Author,
+        );
+        let root = doc.document_element().id();
+
+        let outer = doc.create_element("view", ());
+        doc.add_class(outer, "outer");
+        doc.append_child(root, outer);
+        let wrapper = doc.create_element("view", ());
+        doc.add_class(wrapper, "wrapper");
+        doc.append_child(outer, wrapper);
+        let inner = doc.create_element("view", ());
+        doc.add_class(inner, "inner");
+        doc.append_child(wrapper, inner);
+        let top = doc.create_element("view", ());
+        doc.set_classes(top, "top hidden");
+        doc.append_child(inner, top);
+        doc.add_to_top_layer(top, false);
+        let leaf = doc.create_element("view", ());
+        doc.add_class(leaf, "leaf");
+        doc.append_child(outer, leaf);
+        doc.layout();
+        assert!(
+            doc.bounding_client_rect(top).is_none(),
+            "hidden until shown"
+        );
+
+        // Shown under the inner boundary, and a change under the outer one,
+        // in the same pass: the flush parks both, and neither reaches the
+        // root.
+        doc.set_classes(top, "top");
+        doc.set_inline_style(leaf, "height: 20px");
+        doc.flush_styles_with_damage_sink(&mut |_, _| {});
+        assert!(!doc.layout_requires_full_pass(Size::new(800.0, 600.0), 1.0));
+        assert_eq!(doc.relayout_roots().len(), 2, "both boundaries park");
+        doc.layout();
+
+        let placed = doc
+            .bounding_client_rect(top)
+            .expect("the top-layer box is placed against the viewport");
+        assert_eq!(
+            (
+                placed.origin.x,
+                placed.origin.y,
+                placed.size.width,
+                placed.size.height
+            ),
+            (10.0, 10.0, 20.0, 20.0)
+        );
+        let leaf_rect = doc.bounding_client_rect(leaf).expect("the leaf has a box");
+        assert_eq!(
+            (leaf_rect.size.width, leaf_rect.size.height),
+            (10.0, 20.0),
+            "the outer boundary's change"
         );
     }
 

@@ -639,6 +639,50 @@ mod tests {
         }
     }
 
+    /// An overlay with an author `display` is a relayout boundary of its own
+    /// (`contain: strict`). Shown in the same commit as a change under a
+    /// boundary above it, with a `wrapper` between the two, its dialog is
+    /// placed and its content shown all the same: the boxes between the two
+    /// boundaries carry no rounding marks for the outer walk to follow, so
+    /// the overlay's subtree is rounded on its own.
+    #[test]
+    fn an_author_display_host_shown_beside_a_change_under_an_outer_boundary_shows() {
+        for tag in TAGS {
+            let mut document = document();
+            document.add_stylesheet(HOST_CLASS, StylesheetOrigin::Author);
+            let container = child(
+                &mut document,
+                "view",
+                "display: flex; contain: strict; width: 300px; height: 300px",
+            );
+            let wrapper = element_under(&mut document, container, "wrapper", "");
+            let overlay = element_under(&mut document, wrapper, tag, "");
+            document.set_classes(overlay, "host");
+            let content =
+                element_under(&mut document, overlay, "view", "width: 100px; height: 50px");
+            let sibling = element_under(
+                &mut document,
+                container,
+                "view",
+                "width: 10px; height: 10px",
+            );
+            document.layout();
+            assert!(document.bounding_client_rect(content).is_none(), "{tag}");
+
+            document.set_attribute(overlay, "visible", "");
+            document.set_inline_style(sibling, "width: 20px; height: 10px");
+            document.layout();
+            let dialog = shadow_dialog(&document, overlay);
+            assert_eq!(
+                rect(&document, dialog),
+                (0.0, 0.0, VIEWPORT.0, VIEWPORT.1),
+                "{tag}"
+            );
+            assert_eq!(rect(&document, content), (0.0, 0.0, 100.0, 50.0), "{tag}");
+            assert_eq!(rect(&document, sibling).2, 20.0, "{tag}: the outer change");
+        }
+    }
+
     /// The box that fills the viewport is the shadow dialog, and it is
     /// transparent, its `::backdrop` too: an author background on the host
     /// paints on a zero-sized box, and an author rule for `dialog` does not

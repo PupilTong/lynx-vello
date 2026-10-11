@@ -1859,7 +1859,7 @@ impl<T> crate::tree::document::Document<T> {
     /// The second half of §6.5.1.1: every box with position options records
     /// the option it is now laid out with as its last successful one.
     pub(crate) fn record_last_successful_options(&mut self) {
-        let (tree, state, _) = self.layout_parts();
+        let (tree, state) = self.layout_parts();
         for (&id, entry) in &mut state.anchored {
             entry.last_successful = tree
                 .anchors()

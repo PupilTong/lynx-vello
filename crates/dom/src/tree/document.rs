@@ -301,10 +301,8 @@ impl<T> Document<T> {
         (&mut self.images, &mut self.layout.text_context)
     }
 
-    pub(crate) fn layout_parts(
-        &mut self,
-    ) -> (&TreeArenas<T>, &mut DocumentLayoutState, &FxHashSet<NodeId>) {
-        (&self.tree, &mut self.layout, &self.relayout_root_ids)
+    pub(crate) fn layout_parts(&mut self) -> (&TreeArenas<T>, &mut DocumentLayoutState) {
+        (&self.tree, &mut self.layout)
     }
 
     pub(crate) fn visual_parts(&self) -> (&TreeArenas<T>, &DocumentLayoutState) {

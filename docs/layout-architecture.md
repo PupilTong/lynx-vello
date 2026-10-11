@@ -1126,11 +1126,16 @@ the painting — layout's job is to never be the frame's bottleneck.
   traversal: when nothing has been invalidated since the last pass and the
   viewport/scale are unchanged it **skips the whole pass** (an idle frame is
   `O(1)`, not an `O(N)` re-walk); when every pending change is confined to
-  parked containment boundaries it runs the fused traversal **only over each
-  outermost parked boundary's subtree**, re-snapping from the parent's
-  accumulated unrounded origin byte-identically to a full re-round and leaving
-  clean subtrees untouched. Only a change that reached the document root or a
-  viewport/scale move falls back to a whole-tree traversal. This keeps a single
+  parked containment boundaries it runs the fused traversal **over each parked
+  boundary's subtree**, re-snapping from the parent's accumulated unrounded
+  origin byte-identically to a full re-round and leaving clean subtrees
+  untouched. A parked boundary under another parked boundary is walked on its
+  own: the boxes between the two carry no rounding marks, since each
+  invalidation stopped at its own boundary, so the outer walk would not
+  descend to it; where the outer boundary's own box changed, its walk rounds
+  the inner subtree a second time, to the same values. Only a change that
+  reached the document root or a viewport/scale move falls back to a
+  whole-tree traversal. This keeps a single
   contained mutation `O(boundary subtree)` end-to-end.
 - **Allocation strategy (current).** Algorithms use bounded transient `Vec`
   scratch. Relative deduplicates each item's at-most-eight dependencies in a
