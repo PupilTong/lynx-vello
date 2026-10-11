@@ -569,6 +569,17 @@ the specifications are silent or disagree.
     source's scroll range as the commit resolved it, rather than to the
     slot's `max_offset`: the two are the same value, and reading the timing's
     keeps the timeline-boundary comparison exact.
+  - On an `overscroll-behavior: circular` axis (the engine's own value,
+    [style-assumptions.md](../style-assumptions.md) §25) the source's offset
+    stands anywhere in the period `[0, P)`, past `max` while the scrollport
+    straddles the seam. A scroll progress timeline reads such an offset at
+    its representative nearer the range before the clamp — `offset − P`
+    when the period's end is nearer than `max`, otherwise the offset, a tie
+    keeping it — on the main thread (`ScrollBox::unwrapped_offset`) and the
+    painter (`ScrollSlot::unwrap`) alike, so a scrollport just before the
+    start reads progress 0, not 1. A view progress timeline reads the offset
+    as it stands, clamped: inside the seam copy it samples the unshifted
+    offset, an approximation §25 records.
 
 ---
 

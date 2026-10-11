@@ -2062,9 +2062,10 @@ over, and a wheel step that moves a gliding container ends its glide where
 the wheel put it. The router decides what it always did, no event is
 involved, and nothing waits on the main thread — a stretch composes the
 edge's own content, and what the painter posts for it is the edge, since
-every posted offset is clamped to the committed range. A slot published with
-`overscroll-behavior: circular` (the `circular` axes, on an axis whose content
-overflows) has no edge at all: its intent stands anywhere on an unbounded
+every posted offset on a bounded axis is clamped to the committed range. A
+slot published with `overscroll-behavior: circular` (the `circular` axes, on
+an axis whose content overflows) has no edge at all: its intent stands
+anywhere on an unbounded
 line, every drag, fling or wheel step on it is absorbed whole (so nothing
 chains past it and no fling meets a wall), its snap positions repeat every
 period (the scrolling area's extent, `ScrollSlot::wrap_period`), and each
@@ -2072,8 +2073,10 @@ rebase brings it back into one period, moving the drag origins and glide
 targets that refer to it by the same whole periods. `dom` normalizes it
 wherever the frame composes, bakes, hit-tests or samples, and replays the
 container's content one period back while the scrollport straddles the
-seam; the painter posts it modulo the period and then clamped, so through
-the seam main sees `max_offset`.
+seam; the painter posts it modulo the period and unclamped, and the
+document, which admits the whole period on such an axis
+(`ScrollBox::admit`), holds it as it stands, so through the seam main holds
+the offset the screen shows.
 
 A script-facing scroll is a **request** the committed frame carries to the
 painter (`crates/dom/src/scroll/request.rs`, CSSOM-View's
@@ -2083,9 +2086,11 @@ and a smooth scroll has nothing on the main thread to animate it.
 `Document::scroll_to_with` records the latest request per container with a
 serial from one counter per document; an instant one also moves the
 document's offset at once, a smooth one leaves it. The paint build copies
-the pending request into the container's `ScrollSlot`, clamped to the built
-range. The painter handles each serial once, when it adopts the frame that
-first carries it: whatever was moving the container stops, an instant
+the pending request into the container's `ScrollSlot`, re-admitted against
+the built geometry (clamped to the built range, or normalized into the built
+period on a circular axis). The painter handles each serial once, when it
+adopts the frame that first carries it: whatever was moving the container
+stops, an instant
 request puts the live offset on the target, and a smooth one glides there
 from rest (to the snap position the target settles on, for a snapping
 container). Every post for the container from then on names the newest
@@ -2451,8 +2456,12 @@ the timing normalized into scroll-offset px — and after the build's walk each
 binding is bound to its source's scroll slot (an element's own slot, and a
 later-painted source's, do not exist yet when its curve is built). The
 compositor samples it at compose time from the offset it composes that slot at,
-clamped to the scroll range (a `contain-bounce` stretch is no offset; a
-circular offset is taken modulo its period first, then clamped) and
+clamped to the scroll range (a `contain-bounce` stretch is no offset; on a
+circular axis a scroll progress timeline first reads an offset through the
+seam at its representative nearer the range, `offset − period` when the
+period's end is nearer than `max_offset` (`ScrollSlot::unwrap`, the rule main
+samples with through `ScrollBox::unwrapped_offset`), and a view progress
+timeline reads the offset modulo its period) and
 unsnapped, through the `iteration_progress` main writes the sample with, then
 stylo's `sample_at` — so a drag or a fling moves it with no commit and no frame
 post, and at rest the painter owes nothing. A filter bake whose range such a

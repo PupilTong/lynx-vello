@@ -876,7 +876,7 @@ and §D.16 with what the wire format actually permits.)*
       that axis (`max_offset` plus the scrollport), so scrolling past the end
       continues from the start and back. Chaining is fenced as for `contain`:
       a circular axis absorbs every delta, so nothing reaches the container
-      above. It is the painter's alone. The painter's live offset stands on
+      above. The painter's live offset stands on
       the circle: a drag, fling or wheel step never meets a wall or a
       stretch, snap positions repeat every period (a flick forward from the
       last page lands on the first), and the offset is normalized into the
@@ -886,22 +886,43 @@ and §D.16 with what the wire format actually permits.)*
       after the container's own content in paint order and inside the same
       clip, so whatever paints over the container later still paints over
       the copy; hit testing tries an item at its place and then at its copy
-      in the same front-to-back walk. The document treats the value as
-      `contain` and keeps clamping every offset it writes to `0..=max`; what
-      the painter posts is its offset modulo the period, clamped, so through
-      the seam main sees `max_offset` (a scroll timeline reads its end until
-      the wrap completes), as it sees the edge of a `contain-bounce` stretch.
-      On a circular axis the committed encode window is the whole scrolling
-      area and never re-centres, so a `content-visibility: auto` box inside
-      it is always relevant on that axis. An axis whose content does not
-      overflow wraps nothing. A programmatic scroll takes its target as the
-      document clamped it and moves there the direct way, never round the
-      seam. Known approximations of the seam copy: a sticky or anchored box
+      in the same front-to-back walk. The document admits the whole period
+      `[0, P)` on such an axis: every offset it writes (`scroll_to`,
+      `scroll_to_with`, `scroll_into_view`, the stored offset it re-reads
+      against each layout), each snap position it computes and each scroll
+      request the build carries is normalized into the period instead of
+      clamped to `0..=max`, so an offset above `max_offset` is one whose
+      scrollport straddles the seam, and a step the document drives itself
+      is absorbed whole. An end item's snap position past `max_offset` or
+      before `0` is therefore a position across the seam, and
+      `scroll-initial-target` and `scrollIntoView` land on it. What the
+      painter posts is its offset modulo the period, unclamped, so main
+      holds the offset the screen shows. A scroll progress timeline samples
+      an offset through the seam at its representative nearer the range,
+      `offset − P` when the period's end is nearer than `max_offset` and the
+      offset itself otherwise (a tie keeps it), on the painter
+      (`ScrollSlot::unwrap`) and on the main thread
+      (`ScrollBox::unwrapped_offset`) alike, then clamps it to the range: so
+      the swiper's dots show the first item when the first item is centred
+      across the seam, and the last item when the last item stands past
+      `max_offset`. A view progress timeline samples the normalized offset
+      clamped to the range. On a circular axis the committed encode window
+      is the whole scrolling area and never re-centres, so a
+      `content-visibility: auto` box inside it is always relevant on that
+      axis. An axis whose content does not overflow wraps nothing. A
+      programmatic scroll takes its target as the document admitted it and
+      moves there the direct way inside `[0, P)`, never across the period's
+      start: a target past `max_offset` is reached through the end of the
+      scrolling area even where going back across the start would be
+      shorter. Known approximations of the seam copy: a sticky or anchored box
       and an exported animation inside it sample the unshifted offset, so
       they are positioned as in the first copy; a backdrop texture inside it
       is the one baked for the original; nested circular containers that
       straddle at once each draw only their own copy, not the
-      wrapped-inside-wrapped combination; and the copy's offset is snapped
+      wrapped-inside-wrapped combination; element measurement
+      (`boundingClientRect`) and intersection observation place an element
+      at its original position only, so an element the copy shows measures
+      one period from where it is drawn; and the copy's offset is snapped
       to device pixels on its own, so with a non-integer period × device
       pixel ratio the two copies may meet one device pixel apart.
       `x-swiper[circular]` is wired to it
