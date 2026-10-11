@@ -683,6 +683,36 @@ mod tests {
         }
     }
 
+    /// The same overlay shown in a commit whose other change reached the
+    /// document root: the whole-tree walk prunes at the unmarked `wrapper`
+    /// above the host, and the host's own walk places the dialog.
+    #[test]
+    fn an_author_display_host_shown_beside_a_root_reaching_change_shows() {
+        for tag in TAGS {
+            let mut document = document();
+            document.add_stylesheet(HOST_CLASS, StylesheetOrigin::Author);
+            let wrapper = child(&mut document, "wrapper", "");
+            let overlay = element_under(&mut document, wrapper, tag, "");
+            document.set_classes(overlay, "host");
+            let content =
+                element_under(&mut document, overlay, "view", "width: 100px; height: 50px");
+            document.layout();
+            assert!(document.bounding_client_rect(content).is_none(), "{tag}");
+
+            document.set_attribute(overlay, "visible", "");
+            let added = child(&mut document, "view", "width: 10px; height: 10px");
+            document.layout();
+            let dialog = shadow_dialog(&document, overlay);
+            assert_eq!(
+                rect(&document, dialog),
+                (0.0, 0.0, VIEWPORT.0, VIEWPORT.1),
+                "{tag}"
+            );
+            assert_eq!(rect(&document, content), (0.0, 0.0, 100.0, 50.0), "{tag}");
+            assert_eq!(rect(&document, added).2, 10.0, "{tag}: the appended child");
+        }
+    }
+
     /// The box that fills the viewport is the shadow dialog, and it is
     /// transparent, its `::backdrop` too: an author background on the host
     /// paints on a zero-sized box, and an author rule for `dialog` does not
