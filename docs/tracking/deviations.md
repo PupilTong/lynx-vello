@@ -1710,8 +1710,9 @@ consequential choice about whether to follow the spec or the quirk.
   header slot, `#content` with the default slot (the one box that snaps at
   rest, centred), the footer slot and a second placeholder. The component sets
   `slot` on the header and the footer when they reach its default slot, where
-  web-core's header and footer set it themselves when they connect. No events
-  and no UI methods. Where it leaves a reference:
+  web-core's header and footer set it themselves when they connect. No
+  events; the three UI methods since 2026-10-11 (the last item). Where it
+  leaves a reference:
   - *The header holds at 90% visible* (web-core: the `IntersectionObserver`
     threshold of `XRefreshSubElementIntersectionObserver.ts`, the footer
     alike). Native triggers when the pull reaches the header's full height
@@ -1733,10 +1734,10 @@ consequential choice about whether to follow the spec or the quirk.
     (`start` for the header from `cover 0%` to `exit 0%`, `none` from `exit
     20%`; the footer's mirror on `entry`), so the discrete change sits at 90%
     visible. web-core sets `x-magnet-enable` at that threshold and keeps it
-    until `finishRefresh`/`finishLoadMore` removes it. With no events and no
-    methods here, a header that snapped in stays until the user scrolls it
-    out: a drag on the header moves the shadow scroller, a drag on the
-    content scrolls the content first. The alignment re-cascades on the
+    until `finishRefresh`/`finishLoadMore` removes it. Here a header that
+    snapped in stays until the user scrolls it out or `finishRefresh`
+    scrolls the content back: a drag on the header moves the shadow
+    scroller, a drag on the content scrolls the content first. The alignment re-cascades on the
     main thread when it adopts a scroll of `#container`; a release that
     reaches the painter before the main thread has published the new snap
     position settles on the content.
@@ -1756,6 +1757,31 @@ consequential choice about whether to follow the spec or the quirk.
     `<refresh>` and `<refresh-header>` into `x-refresh-view` and
     `x-refresh-header` (`web-core/ts/constants.ts:112-113`); only the
     `x-refresh-*` spellings are tags here.
+  - *The three UI methods (2026-10-11) are the standard scroll-into-view
+    rather than the attribute latch* (the architect's decision, to be
+    confirmed by the user). web-core's `finishRefresh`/`finishLoadMore`
+    remove `x-magnet-enable` from the first header (footer) and let the
+    browser re-snap to `#content`, and `autoStartRefresh` sets it on the
+    header and smooth-scrolls `#container` to `top: 0`
+    (`XRefreshView.ts:26-44`). Here there is no latch to remove: the first
+    two smoothly scroll `#content` into view at `block: center`, its snap
+    position, and `autoStartRefresh` scrolls the header into view at
+    `block: start`, where web-core's scroll plus the magnet leaves it.
+    `autoStartRefresh` is instant where web-core's is smooth (the
+    coordinator's ruling, 2026-10-11): the painter glides a smooth request
+    to where the frame's at-rest snap rule would settle its target, and the
+    header is a snap position only once it is at least 90% visible, so from
+    rest a smooth request to it is settled back to `#content` and nothing
+    moves. The instant request moves the document at once, and the commit
+    carrying it re-samples the header's alignment, so the painter rests on
+    the header. A smooth version needs a request the painter does not
+    settle at request time, left as a follow-up for the user.
+    web-core's `autoStartRefresh` also marks the next refresh as not manual
+    (`_nextRefreshIsManual = false`), which only its `startrefresh` event
+    reads; with no events here, no such flag is kept. `autoStartRefresh`
+    on a view with no header, or with `enable-refresh="false"`, moves
+    nothing, where web-core still scrolls to the top placeholder. iOS has
+    no footer method (`LynxUIRefresh.m:373-388`).
 
 - **`<scroll-coordinator>` (2026-09-29): the authored coordinator is the
   scroll container, its slot is anchor-sized, and the fold is

@@ -222,7 +222,7 @@ recorded so the comparison is complete.
 | `viewpager` / `x-viewpager-ng` | `selectTab` (built); `setDragGesture` is iOS/Android-only, undocumented, and left at code 3 (user ruling 2026-10-11) | — |
 | `scroll-view` | `scrollTo` (Lynx overload), `autoScroll`, `getScrollInfo` (native) | yes |
 | `x-list` | `scrollToPosition`, `getScrollContainerInfo`, `getVisibleCells` (web-core) and `scrollBy` (native; `scroll-view`'s own, on the list's axis), built 2026-10-11 in `tree::list`; `autoScroll` not built (no constant-rate scroll request, as for `scroll-view`); `getScrollInfo` is iOS/Android-only, undocumented on `list`, and left at code 3 (the `setDragGesture` ruling, 2026-10-11) | yes |
-| `x-refresh-view` | `autoStartRefresh`, `finishRefresh`, `finishLoadMore` | — |
+| `x-refresh-view` | `autoStartRefresh`, `finishRefresh`, `finishLoadMore` (built 2026-10-11 in `tree::refresh_view`: each a `Document::scroll_into_view` in the shadow `#container`: `#content` at `block: center`, smooth, for the two finishing methods, the header at `block: start`, instant, for `autoStartRefresh`, because the painter settles a smooth request's target onto the frame's snap positions and the header is none from rest; no params, always code 0) | — |
 | `x-foldview-ng` / `scroll-coordinator` | `setFoldExpanded`, `getScrollInfo`, `scrollBy` | yes |
 | `x-input` / `x-textarea` | `addText`, `setValue`, `getValue`, `sendDelEvent`, `controlKeyBoard`, `setInputFilter`, `select`, `setSelectionRange` | yes |
 | `x-audio-tt`, `x-markdown`, `x-webview` | playback / readback / `reload` | yes |

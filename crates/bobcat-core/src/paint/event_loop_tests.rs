@@ -3220,3 +3220,122 @@ fn a_pull_on_a_refresh_view_holds_its_container_then_settles_on_release() {
         );
     }
 }
+
+/// A 200px x 400px refresh view (node 3) with a 50px header, a content
+/// `scroll-view` over a 1000px child and a 50px footer: `#container` opens
+/// on `#content` at 170, with the header's start at 120. Each tap on the
+/// view runs the next of `autoStartRefresh` and `finishRefresh` and logs
+/// `<method>:<code>` in the view's `log` attribute. Answers the engine and
+/// `#container`'s node.
+fn booted_refresh_view_with_methods() -> (TestEngine, u64) {
+    let mut engine = booted(
+        r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const view = __CreateElement('x-refresh-view', 0);
+          const header = __CreateElement('x-refresh-header', 0);
+          const inner = __CreateScrollView(0);
+          const tall = __CreateView(0);
+          const footer = __CreateElement('x-refresh-footer', 0);
+          __AppendElement(page, view);
+          __AppendElement(view, header);
+          __AppendElement(view, inner);
+          __AppendElement(inner, tall);
+          __AppendElement(view, footer);
+          globalThis.held = [page, view, header, inner, tall, footer];
+          __SetInlineStyles(view, 'width:200px;height:400px');
+          __SetInlineStyles(header, 'height:50px');
+          __SetInlineStyles(inner, 'width:100%;height:100%');
+          __SetInlineStyles(tall, 'flex-shrink:0;width:200px;height:1000px');
+          __SetInlineStyles(footer, 'height:50px');
+          const methods = ['autoStartRefresh', 'finishRefresh'];
+          __AddEventListener(view, 'tap', () => {
+            const method = methods.shift();
+            __InvokeUIMethod(view, method, {}, result => {
+              __SetAttribute(view, 'log', method + ':' + result.code);
+              __FlushElementTree();
+            });
+          }, {});
+          __FlushElementTree();
+        };
+        ",
+    );
+    let container = engine
+        .probe_document(|document| {
+            let page = document.document_element().id();
+            let view = document
+                .query_selector_all(page, "x-refresh-view")
+                .expect("a valid selector")[0];
+            let shadow = document.shadow_root(view)?;
+            Some(document.get(shadow)?.child_ids()[0].to_bits())
+        })
+        .flatten()
+        .expect("the refresh view has a shadow `#container`");
+    adopt_at(&mut engine, 0.0);
+    (engine, container)
+}
+
+/// Taps the refresh view at `at`, waits for its method's answer and for
+/// the commit that carries the request, and adopts that commit.
+fn tap_refresh_view(engine: &mut TestEngine, at: f64, log: &str) {
+    let before = engine.published_frame().expect("booted").commit_id();
+    engine.painter.clock.pin(at);
+    engine.dispatch_input(touch(1, PointerPhase::Down, 100.0));
+    engine.dispatch_input(touch(1, PointerPhase::Up, 100.0));
+    wait_for_log(engine, log);
+    next_commit(engine, before);
+    adopt_at(engine, at);
+}
+
+/// Runs display frames from `at` until nothing animates; answers where
+/// `#container` came to rest and the time it did.
+fn refresh_frames_until_rest(engine: &mut TestEngine, container: u64, mut at: f64) -> (f32, f64) {
+    let deadline = at + 3.0;
+    while engine.is_animating() {
+        at += 1.0 / 60.0;
+        assert!(at < deadline, "never came to rest");
+        frame_at(engine, at);
+    }
+    (live_offset(engine, container).y, at)
+}
+
+/// `autoStartRefresh` from rest: the instant request puts `#container` on
+/// the header's start (120) in the document and on the painter, and the
+/// frame that carries it publishes the header as a snap position, so the
+/// at-rest snap rule leaves it there rather than settling back on
+/// `#content` (170).
+#[test]
+fn auto_start_refresh_rests_the_refresh_view_on_its_header() {
+    let (mut engine, container) = booted_refresh_view_with_methods();
+    assert!((live_offset(&mut engine, container).y - 170.0).abs() < f32::EPSILON);
+
+    tap_refresh_view(&mut engine, 1.0, "autoStartRefresh:0");
+    assert_eq!(
+        scroll_offset_of(&mut engine, container),
+        dom::Vector2D::new(0.0, 120.0),
+        "the document moves at once"
+    );
+    let (rest, _) = refresh_frames_until_rest(&mut engine, container, 1.0);
+    assert!(
+        (rest - 120.0).abs() < f32::EPSILON,
+        "rests on the header's start, not {rest}"
+    );
+}
+
+/// From the header, `finishRefresh` glides `#container` back to `#content`
+/// (170) over several frames and rests there.
+#[test]
+fn finish_refresh_glides_the_refresh_view_back_to_its_content() {
+    let (mut engine, container) = booted_refresh_view_with_methods();
+    tap_refresh_view(&mut engine, 1.0, "autoStartRefresh:0");
+    let (rest, at) = refresh_frames_until_rest(&mut engine, container, 1.0);
+    assert!((rest - 120.0).abs() < f32::EPSILON, "on the header: {rest}");
+
+    tap_refresh_view(&mut engine, at + 0.5, "finishRefresh:0");
+    assert!(engine.is_animating(), "a glide, not a jump");
+    let (rest, _) = refresh_frames_until_rest(&mut engine, container, at + 0.5);
+    assert!(
+        (rest - 170.0).abs() < f32::EPSILON,
+        "rests on `#content`, not {rest}"
+    );
+}

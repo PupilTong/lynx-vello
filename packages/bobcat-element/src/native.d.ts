@@ -132,6 +132,18 @@ interface BobcatNative {
    * rect relative to the scrollport. `autoScroll` and `getScrollInfo` are
    * code 3. A `list` has no `scrollTo` of its own: the base set's answers.
    *
+   * `finishRefresh()`, `finishLoadMore()` and `autoStartRefresh()` exist on
+   * `x-refresh-view` only, `params` unread, and always answer `0` and no
+   * data. The first two smoothly scroll the view's shadow `#container` so
+   * its `#content` is back at the scrollport's center, the position the
+   * view opens on; `autoStartRefresh` instantly scrolls it so the first
+   * header's start is at the scrollport's start, and records nothing when
+   * no header has a box. `autoStartRefresh` is instant where web-core's is
+   * smooth: the painter settles a smooth request's target onto the frame's
+   * snap positions when it receives it, and the header is a snap position
+   * only once it is at least 90% visible, so from rest a smooth request to
+   * it would be settled back to `#content`.
+   *
    * `scrollIntoView({scrollIntoViewOptions: {behavior?, block?, inline?}})`
    * exists on every element: CSSOM-View's `scrollIntoView` on the nearest
    * scroll container above the element alone (`container: "nearest"`),

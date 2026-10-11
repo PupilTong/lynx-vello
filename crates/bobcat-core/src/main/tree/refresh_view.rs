@@ -62,7 +62,7 @@
 //! it adopts a scroll of `#container`, and the commit that follows publishes the snap positions
 //! the release reads. web-core keeps the attribute until `finishRefresh` removes it; here the
 //! alignment follows the header's visibility, so a header that snapped in stays until the user
-//! scrolls it out (`docs/tracking/deviations.md`).
+//! scrolls it out or `finishRefresh` scrolls `#content` back in (`docs/tracking/deviations.md`).
 //!
 //! # Attributes
 //!
@@ -96,6 +96,50 @@
 //! the inner scroller's own bounce; here the inner scroller does not bounce on y inside a
 //! refresh view.
 //!
+//! # The three UI methods
+//!
+//! web-core's `XRefreshView` has three methods (`XRefreshView.ts:26-44`, documented at
+//! `index.ts:27-29`), none of which reads params, and [`RefreshView`]'s
+//! [`CustomElement::invoke`] answers each with code 0, whatever `params` is and on a view with no
+//! box too. Each is CSSOM-View's "scroll an element into view"
+//! ([`dom::Document::scroll_into_view`]) in the element's nearest scroll container, `#container`:
+//! smooth for the two finishing methods, instant for `autoStartRefresh`. A UI method never
+//! flushes, so the positions are the last completed layout's.
+//!
+//! - `finishRefresh` and `finishLoadMore` ([`finish`]) smoothly scroll `#content` back into view at
+//!   `block: center`. web-core removes `x-magnet-enable` from the first header (footer), and the
+//!   browser re-snaps `#container` to `#content`. `#content` snaps at `center` and is exactly the
+//!   scrollport's size, so `center` is its snap position, the one the view opens on, and the
+//!   painter's at-rest snap rule leaves it there. As the header (footer) leaves the scrollport its
+//!   alignment animation turns it to `none`, so the next release does not snap back to it. A view
+//!   already resting on `#content` records no request: the standard call compares the position with
+//!   the current one. Both methods scroll whichever end is shown, which is what web-core's re-snap
+//!   does too.
+//! - `autoStartRefresh` ([`auto_start_refresh`]) scrolls the header into view at `block: start`,
+//!   instantly. The header is the first element assigned to the `header` slot (the first
+//!   `x-refresh-header` child). web-core sets `x-magnet-enable` on it and smooth-scrolls
+//!   `#container` to `top: 0`, which shows the top placeholder above the header, after which the
+//!   magnet's `start` snaps the header to the scrollport's start: this call aims at that resting
+//!   position directly. A view with no header, or with `enable-refresh="false"` (the header
+//!   generates no box), records nothing; web-core's optional chaining skips the attribute there and
+//!   its `scroll({top: 0})` still scrolls to the top placeholder.
+//!
+//! `autoStartRefresh` is instant where web-core's is smooth. The painter glides a smooth request
+//! to where the frame's at-rest snap rule would settle its target (`apply_request` in
+//! `crates/bobcat-core/src/paint/lib.rs`), and the header is a snap position only once it is at
+//! least 90% visible. From rest it is not, so a smooth request to it would be settled back to
+//! `#content` and nothing would move. An instant request moves the document at once; the
+//! commit that carries it lays out, which re-samples the header's alignment animation at the new
+//! offset (`Document::layout` resolves every timeline), so the same frame publishes the header
+//! as a snap position and the painter's at-rest rule leaves `#container` on it. A smooth version
+//! needs a request the painter does not settle at request time; that is left as a follow-up for
+//! the user. The two finishing methods aim at `#content`, which is always a snap position, so
+//! their smooth requests are not affected.
+//!
+//! web-core's `autoStartRefresh` also sets `_nextRefreshIsManual = false`, which only its
+//! `startrefresh` event reads. Events are not implemented here, so that flag has no reader and is
+//! not kept.
+//!
 //! # Deviations and what is not implemented
 //!
 //! - web-core gives `#container`, `#content` and the slot the host's display mode (`--lynx-display:
@@ -104,11 +148,17 @@
 //!   `!important`: web-core's demo card writes `position: absolute` on its header
 //!   (`basic-element-x-refresh-view-demo/index.css`). `docs/style-assumptions.md` §D.15 records
 //!   them, with the content children's `overscroll-behavior-y`.
-//! - Every event (`startrefresh`, `headeroffset`, `startloadmore`, …) and every UI method
-//!   (`finishRefresh`, `autoStartRefresh`, `finishLoadMore`).
+//! - The UI methods are the standard scroll-into-view rather than web-core's attribute latch;
+//!   `autoStartRefresh` is instant where web-core's is smooth; no manual/automatic refresh flag is
+//!   kept, events being absent; `autoStartRefresh` without a header moves nothing
+//!   (`docs/tracking/deviations.md`).
+//! - Every event (`startrefresh`, `headeroffset`, `startloadmore`, …).
 
 use dom::event::{ElementEvent, ElementEventKind, EventPhase};
-use dom::{CustomElement, Node, NodeId, ShadowRootMode};
+use dom::scroll::{
+    ScrollBehavior, ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition,
+};
+use dom::{CustomElement, MethodCall, MethodOutcome, Node, NodeId, ShadowRootMode};
 
 use super::LynxDocument;
 
@@ -179,8 +229,8 @@ pub(super) fn define(document: &mut LynxDocument) {
 }
 
 /// The `x-refresh-view` component: builds the shadow tree when the element
-/// is constructed, and moves the header and the footer into their named
-/// slots.
+/// is constructed, moves the header and the footer into their named slots,
+/// and answers the three UI methods.
 ///
 /// The shadow tree is built in `constructed`, as the swiper's is: the
 /// element is new and detached then, so every child arrives as a
@@ -232,6 +282,84 @@ impl CustomElement<()> for RefreshView {
             document.set_attribute(node, "slot", name);
         }
     }
+
+    /// `finishRefresh`, `finishLoadMore` and `autoStartRefresh`; see the
+    /// module documentation. None reads `params`, and each answers
+    /// [`MethodOutcome::Done`], including when it has nothing to scroll.
+    fn invoke(
+        &self,
+        document: &mut LynxDocument,
+        element: NodeId,
+        call: MethodCall<'_>,
+    ) -> MethodOutcome {
+        match call.name {
+            "finishRefresh" | "finishLoadMore" => finish(document, element),
+            "autoStartRefresh" => auto_start_refresh(document, element),
+            _ => return MethodOutcome::NotFound,
+        }
+        MethodOutcome::Done
+    }
+}
+
+/// `finishRefresh()` and `finishLoadMore()` on `view`: a smooth scroll of
+/// `#container` that puts `#content` back at its snap position, the
+/// scrollport's center. Nothing is recorded when `#container` already rests
+/// there, or when the view has no box.
+pub(super) fn finish(document: &mut LynxDocument, view: NodeId) {
+    if let Some(content) = content(document, view) {
+        scroll_into_view(
+            document,
+            content,
+            ScrollLogicalPosition::Center,
+            ScrollBehavior::Smooth,
+        );
+    }
+}
+
+/// `autoStartRefresh()` on `view`: an instant scroll of `#container` that
+/// puts the header's start on the scrollport's start, the header's own snap
+/// position once it is shown. Nothing is recorded when the view has no
+/// header or the header generates no box (`enable-refresh="false"`).
+///
+/// Instant rather than web-core's smooth: from rest the header is no snap
+/// position, and the painter settles a smooth request's target onto the
+/// frame's snap positions when it receives it, which would turn it back to
+/// `#content`; see the module documentation.
+///
+/// web-core also marks the next refresh as not manual
+/// (`_nextRefreshIsManual = false`); only its `startrefresh` event reads
+/// that, and events are not implemented, so nothing is kept.
+pub(super) fn auto_start_refresh(document: &mut LynxDocument, view: NodeId) {
+    if let Some(header) = header(document, view) {
+        scroll_into_view(
+            document,
+            header,
+            ScrollLogicalPosition::Start,
+            ScrollBehavior::Instant,
+        );
+    }
+}
+
+/// Scrolls `target` into view with `behavior`, at `block` on y and
+/// `nearest` on x, in its nearest scroll container: `#container`, the
+/// flat-tree scroll container of the header, the footer and `#content`. Its
+/// `overflow` is a shadow-sheet declaration no author rule reaches, so no
+/// ancestor of the view can be scrolled instead.
+fn scroll_into_view(
+    document: &mut LynxDocument,
+    target: NodeId,
+    block: ScrollLogicalPosition,
+    behavior: ScrollBehavior,
+) {
+    document.scroll_into_view(
+        target,
+        ScrollIntoViewOptions {
+            behavior,
+            block,
+            inline: ScrollLogicalPosition::Nearest,
+            container: ScrollIntoViewContainer::Nearest,
+        },
+    );
 }
 
 /// A `div` with `id`.
@@ -250,8 +378,7 @@ fn named_slot(document: &mut LynxDocument, name: &str) -> NodeId {
 
 /// The refresh view's scroll container, `#container`, the one element of
 /// its shadow tree.
-#[cfg(test)]
-fn container(document: &LynxDocument, view: NodeId) -> Option<NodeId> {
+pub(crate) fn container(document: &LynxDocument, view: NodeId) -> Option<NodeId> {
     let root = document.shadow_root(view)?;
     document
         .get(root)?
@@ -260,15 +387,46 @@ fn container(document: &LynxDocument, view: NodeId) -> Option<NodeId> {
         .map(Node::id)
 }
 
+/// The child of `#container` that is `#content`, the box holding the
+/// default slot.
+fn content(document: &LynxDocument, view: NodeId) -> Option<NodeId> {
+    let container = container(document, view)?;
+    document
+        .get(container)?
+        .children()
+        .find(|child| child.attribute("id") == Some("content"))
+        .map(Node::id)
+}
+
+/// The header: the first element assigned to `#container`'s `header`
+/// slot, which is the view's first `x-refresh-header` child once the
+/// component has set its `slot`.
+fn header(document: &LynxDocument, view: NodeId) -> Option<NodeId> {
+    let container = container(document, view)?;
+    let slot = document
+        .get(container)?
+        .children()
+        .find(|child| {
+            child.tag_name() == Some("slot") && child.attribute("name") == Some("header")
+        })?
+        .id();
+    document
+        .assigned_nodes(slot)
+        .iter()
+        .copied()
+        .find(|&node| document.get(node).is_some_and(Node::is_element))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::float_cmp)] // Explicit pixel sizes lay out exactly.
 
+    use dom::scroll::ScrollBehavior;
     use dom::stylo::properties::PropertyId;
     use dom::stylo::values::computed::Display;
-    use dom::{NodeId, StylesheetOrigin, Vector2D};
+    use dom::{MethodCall, MethodOutcome, NodeId, StylesheetOrigin, Vector2D};
 
-    use super::super::test_support::{child, element_under, style_of, with_config};
+    use super::super::test_support::{child, document, element_under, style_of, with_config};
     use super::super::{LynxDocument, PageConfig};
     use super::{REFRESH_FOOTER_TAG, REFRESH_HEADER_TAG, REFRESH_VIEW_TAG};
 
@@ -364,6 +522,44 @@ mod tests {
             self.document.scroll_to(container, Vector2D::new(0.0, y));
             self.document.advance_scroll_timelines(&[container]);
             self.document.commit();
+        }
+
+        /// Commits, and acknowledges the request the first commit's initial
+        /// scroll target left pending, as the painter's first post for
+        /// `#container` does: the view at rest on what it opened on.
+        fn at_rest(&mut self) {
+            self.document.commit();
+            let container = self.container();
+            if let Some(serial) = self.document.pending_scroll_request(container) {
+                self.document.acknowledge_scroll_request(container, serial);
+            }
+        }
+
+        /// Runs the UI method `name` on the view.
+        fn invoke(&mut self, name: &str, params: &str) -> MethodOutcome {
+            self.document
+                .invoke_element_method(self.view, MethodCall { name, params })
+        }
+
+        /// `#container`'s offset in the document.
+        fn offset(&self) -> Vector2D<f32> {
+            self.document.scroll_offset(self.container())
+        }
+
+        /// The scroll request the next commit carries to the painter for
+        /// `#container`. With none pending, a commit of an unchanged
+        /// document hands back the last frame, which still names the
+        /// request it carried; so the pending state is read first.
+        fn pending(&mut self) -> Option<(Vector2D<f32>, ScrollBehavior)> {
+            let container = self.container();
+            self.document.pending_scroll_request(container)?;
+            let frame = self.document.commit();
+            let index = frame
+                .slot_of(container)
+                .expect("`#container` has a scroll slot");
+            frame.scroll_slots()[index as usize]
+                .request
+                .map(|request| (request.target, request.behavior))
         }
     }
 
@@ -721,5 +917,154 @@ mod tests {
             built.document.scroll_offset(container),
             Vector2D::new(0.0, 390.0)
         );
+    }
+
+    // --- the UI methods -----------------------------------------------------
+
+    /// `autoStartRefresh` moves `#container` at once to the header's start
+    /// snap position, 240, and records the instant request the painter
+    /// follows. The commit that carries it publishes the header's `start`
+    /// alignment, so 240 is a snap position the painter's at-rest rule
+    /// leaves alone.
+    #[test]
+    fn auto_start_refresh_moves_the_header_to_its_snap_position_at_once() {
+        let mut built = Built::new(&[], "view");
+        built.at_rest();
+        assert_eq!(built.invoke("autoStartRefresh", "{}"), MethodOutcome::Done);
+        assert_eq!(built.offset(), Vector2D::new(0.0, 240.0), "at once");
+        assert_eq!(
+            built.pending(),
+            Some((Vector2D::new(0.0, 240.0), ScrollBehavior::Instant))
+        );
+        assert_eq!(
+            value(&built.document, built.header, "scroll-snap-align"),
+            "start"
+        );
+        assert_eq!(built.snap_points(), [240.0, 290.0]);
+    }
+
+    /// With the header (240) or the footer (340) shown, either finishing
+    /// method records a smooth request back to `#content` at 290.
+    #[test]
+    fn finish_refresh_and_finish_load_more_scroll_the_content_back() {
+        for (y, shown) in [(240.0, "header"), (340.0, "footer")] {
+            for name in ["finishRefresh", "finishLoadMore"] {
+                let mut built = Built::new(&[], "view");
+                built.at_rest();
+                built.scroll_to(y);
+                assert_eq!(built.invoke(name, "{}"), MethodOutcome::Done, "{name}");
+                assert_eq!(
+                    built.offset(),
+                    Vector2D::new(0.0, y),
+                    "{name} from the {shown}"
+                );
+                assert_eq!(
+                    built.pending(),
+                    Some((Vector2D::new(0.0, 290.0), ScrollBehavior::Smooth)),
+                    "{name} from the {shown}"
+                );
+            }
+        }
+    }
+
+    /// A view resting on `#content` records nothing for either finishing
+    /// method.
+    #[test]
+    fn finishing_at_the_content_records_nothing() {
+        let mut built = Built::new(&[], "view");
+        built.at_rest();
+        for name in ["finishRefresh", "finishLoadMore"] {
+            assert_eq!(built.invoke(name, "{}"), MethodOutcome::Done, "{name}");
+            assert_eq!(built.offset(), Vector2D::new(0.0, 290.0), "{name}");
+            assert_eq!(built.pending(), None, "{name}");
+        }
+    }
+
+    /// `enable-refresh="false"` gives the header no box: `autoStartRefresh`
+    /// answers `Done` and records nothing.
+    #[test]
+    fn auto_start_refresh_without_a_header_box_records_nothing() {
+        let mut built = Built::new(&[("enable-refresh", "false")], "view");
+        built.at_rest();
+        assert_eq!(built.invoke("autoStartRefresh", "{}"), MethodOutcome::Done);
+        assert_eq!(built.offset(), Vector2D::zero());
+        assert_eq!(built.pending(), None);
+    }
+
+    /// A view with no header child: `autoStartRefresh` answers `Done` and
+    /// records nothing.
+    #[test]
+    fn auto_start_refresh_without_a_header_records_nothing() {
+        let mut document = document();
+        let view = child(
+            &mut document,
+            REFRESH_VIEW_TAG,
+            "width: 393px; height: 800px",
+        );
+        element_under(&mut document, view, "view", "height: 100%");
+        element_under(&mut document, view, REFRESH_FOOTER_TAG, "height: 50px");
+        document.commit();
+        let container = super::container(&document, view).expect("every refresh view has one");
+        if let Some(serial) = document.pending_scroll_request(container) {
+            document.acknowledge_scroll_request(container, serial);
+        }
+        let at_rest = document.scroll_offset(container);
+        assert_eq!(
+            at_rest,
+            Vector2D::new(0.0, 240.0),
+            "below the top placeholder"
+        );
+        assert_eq!(
+            document.invoke_element_method(
+                view,
+                MethodCall {
+                    name: "autoStartRefresh",
+                    params: "{}",
+                }
+            ),
+            MethodOutcome::Done
+        );
+        assert_eq!(document.scroll_offset(container), at_rest);
+        assert_eq!(document.pending_scroll_request(container), None);
+    }
+
+    /// `invoke` answers the three names with `Done` whatever `params` is,
+    /// on a laid-out view and on a `display: none` one, and `NotFound` for
+    /// every other name, which leaves it to the base set.
+    #[test]
+    fn invoke_answers_the_three_methods_and_nothing_else() {
+        for style in ["", "display: none"] {
+            let mut built = Built::new(&[], "view");
+            if !style.is_empty() {
+                built.document.set_inline_style(built.view, style);
+            }
+            built.at_rest();
+            for name in ["finishRefresh", "finishLoadMore", "autoStartRefresh"] {
+                for params in ["", "null", "{}"] {
+                    assert_eq!(
+                        built.invoke(name, params),
+                        MethodOutcome::Done,
+                        "{name}({params:?}) on {style:?}"
+                    );
+                }
+            }
+            for name in ["selectTab", "scrollTo", "startRefresh", "finishrefresh"] {
+                assert_eq!(
+                    built.invoke(name, "{}"),
+                    MethodOutcome::NotFound,
+                    "{name} on {style:?}"
+                );
+            }
+            let container = built.container();
+            if style.is_empty() {
+                assert!(
+                    built.document.pending_scroll_request(container).is_some(),
+                    "the last call, `autoStartRefresh`, is pending"
+                );
+            } else {
+                assert_eq!(built.document.scroll_box(container), None, "no box");
+                assert_eq!(built.document.pending_scroll_request(container), None);
+            }
+        }
     }
 }

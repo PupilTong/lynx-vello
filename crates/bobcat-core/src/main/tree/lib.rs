@@ -16,10 +16,12 @@
 //! image resources (an `svg`'s `content` as a document handed to the host as
 //! its bytes), blur hints,
 //! the swiper's UA shadow tree, item count and `scrollTo` UI method, the
-//! refresh view's UA shadow tree and its header and footer slot assignment,
-//! the viewpager's `selectTab` UI method, the `scroll-view`'s `scrollTo`, `scrollBy` and
-//! `getScrollInfo` UI methods, the `list`'s `scrollToPosition`, `scrollBy`,
-//! `getScrollContainerInfo` and `getVisibleCells` UI methods ([`list`]), the dialog's
+//! refresh view's UA shadow tree, its header and footer slot assignment and
+//! its `finishRefresh`, `finishLoadMore` and `autoStartRefresh` UI methods
+//! ([`refresh_view`]), the viewpager's `selectTab` UI method, the
+//! `scroll-view`'s `scrollTo`, `scrollBy` and `getScrollInfo` UI methods, the `list`'s
+//! `scrollToPosition`, `scrollBy`, `getScrollContainerInfo` and
+//! `getVisibleCells` UI methods ([`list`]), the dialog's
 //! `:open`/`:modal` state, top-layer membership and four UI methods
 //! ([`dialog`]), and the overlay's UA shadow tree, the top-layer membership of
 //! the `dialog` in it, and its `showoverlay` and `dismissoverlay` events
@@ -31,7 +33,7 @@
 //! (`boundingClientRect`, `scrollIntoView`, `scrollTo` and `scrollBy`).
 //! `scroll_coordinator` needs no component, and has no UI method: its ten tags
 //! are UA rules over anchor-sized absolute boxes, a sticky toolbar and
-//! `scroll-capture-y`. `refresh_view` and `overlay` have no UI method.
+//! `scroll-capture-y`. `overlay` has no UI method.
 //!
 //! [`NodeId`]: dom::NodeId
 
@@ -43,7 +45,7 @@ mod list;
 mod overlay;
 mod popover;
 pub(crate) mod raw_text;
-mod refresh_view;
+pub(crate) mod refresh_view;
 mod scroll_container;
 mod scroll_coordinator;
 mod svg;
