@@ -11,8 +11,10 @@
 //! each other's sizes through css-anchor-position-1's `anchor-size()`
 //! (`docs/style-assumptions.md` §28), the toolbar is `position: sticky`, and
 //! the fold order is the engine's `scroll-capture-y: nearest forward` on every
-//! box inside the slot (`docs/style-assumptions.md` §25). No component is
-//! defined for any of the tags and no UI method is implemented.
+//! box inside the slot (`docs/style-assumptions.md` §25). The one component
+//! is on the coordinator's two tags, and its only member is the
+//! `setFoldExpanded` UI method ([`set_fold_expanded`]); the other eight tags
+//! have no component.
 //!
 //! Translated from web-elements'
 //! `lynx-stack/packages/web-platform/web-elements/src/elements/XFoldViewNg/x-foldview-ng.css`,
@@ -153,10 +155,31 @@
 //!   and both platforms and changes nothing visible, since the slot already paints after the
 //!   header. Recorded in `docs/tracking/deviations.md`.
 //! - `enable-scroll-bar` / `scroll-bar-enable`: nothing; the engine draws no scrollbars.
-//! - `granularity` and every event, `setFoldExpanded` / `getScrollInfo` / `scrollBy`,
-//!   `refresh-mode`, `tab-movable-enable`, `toolbar-interaction-enable`,
-//!   `header-scrollview-enable`, `compat-container-popup` and every `ios-*` / `android-*` prop: not
-//!   implemented.
+//! - `granularity` and every event, `refresh-mode`, `tab-movable-enable`,
+//!   `toolbar-interaction-enable`, `header-scrollview-enable`, `compat-container-popup` and every
+//!   `ios-*` / `android-*` prop: not implemented.
+//!
+//! # The UI methods
+//!
+//! The coordinator's component ([`ScrollCoordinator`], defined on
+//! `scroll-coordinator` and `x-foldview-ng`) answers one method through its
+//! [`dom::CustomElement::invoke`], which the runtime's `callElementMethod`
+//! reaches through [`dom::Document::invoke_element_method`]:
+//! `setFoldExpanded({offset, smooth = true})` ([`set_fold_expanded`]), the one
+//! method web-core defines on the coordinator (`XFoldviewNg.ts:63-72`).
+//!
+//! iOS also answers `getScrollInfo` (`{scrollX: 0, scrollY, scrollRange}`) and
+//! `scrollBy({offset})` (what it consumed) on the coordinator
+//! (`LynxUIScrollCoordinator.m:771-830`). Neither is in web-core or in the
+//! docs, so neither is built, by the user's 2026-10-11 ruling on
+//! `setDragGesture` (an undocumented native-only method stays unanswered).
+//! `getScrollInfo` is code 3. `scrollBy` is not: the coordinator's kind
+//! answers `NotFound` for it, so the base set's CSSOM-View `scrollBy`
+//! ([`super::base_methods`]) answers instead, which reads `left`/`top` and no
+//! `offset`, and answers code 0 with no data. That is what web-core answers
+//! too, where `HTMLElement.prototype.scrollBy` takes the name. The base set's
+//! `boundingClientRect`, `scrollIntoView` and `scrollTo` answer on the
+//! coordinator as on every element.
 //!
 //! # `scroll-coordinator-slot-drag`
 //!
@@ -194,6 +217,12 @@
 //!   children, so a coordinator nested in another's header or slot reads its own header and
 //!   toolbar.
 //! - No `scrollbar-width` / `::-webkit-scrollbar` rules (`:13-30`): nothing draws a scrollbar here.
+
+use dom::scroll::ScrollBehavior;
+use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Vector2D};
+
+use super::scroll_container::{clamp_to_range, object, offset_px};
+use super::{InvalidParams, LynxDocument, is_truthy};
 
 /// The coordinator: native's tag, and web-core's.
 pub(super) const SCROLL_COORDINATOR_TAG: &str = "scroll-coordinator";
@@ -264,13 +293,115 @@ x-foldview-ng[header-over-slot]:not([header-over-slot="false"]) > x-foldview-hea
 x-foldview-ng[header-over-slot]:not([header-over-slot="false"]) > wrapper > x-foldview-header-ng { z-index: 1; }
 "#;
 
+/// Installs the coordinator component on both of its tags, as
+/// [`super::viewpager`] installs its one component on its two. Must run
+/// before any element could carry either tag, which is
+/// [`Document::define`](dom::Document::define)'s own precondition.
+pub(super) fn define(document: &mut LynxDocument) {
+    document.define(SCROLL_COORDINATOR_TAG, Box::new(ScrollCoordinator));
+    document.define(X_FOLDVIEW_TAG, Box::new(ScrollCoordinator));
+}
+
+/// The coordinator component: no lifecycle reaction and no per-element
+/// state; its only member is the `setFoldExpanded` UI method.
+struct ScrollCoordinator;
+
+impl CustomElement<()> for ScrollCoordinator {
+    /// `setFoldExpanded` ([`set_fold_expanded`]); every other name is
+    /// [`MethodOutcome::NotFound`], so the base set answers `scrollTo`,
+    /// `scrollBy`, `scrollIntoView` and `boundingClientRect`, and
+    /// `getScrollInfo` is code 3. See the module documentation.
+    fn invoke(
+        &self,
+        document: &mut LynxDocument,
+        element: NodeId,
+        call: MethodCall<'_>,
+    ) -> MethodOutcome {
+        if call.name != "setFoldExpanded" {
+            return MethodOutcome::NotFound;
+        }
+        match set_fold_expanded(document, element, call.params) {
+            Ok(()) => MethodOutcome::Done,
+            Err(InvalidParams) => MethodOutcome::Failed(MethodError::InvalidParams),
+        }
+    }
+}
+
+/// `setFoldExpanded({offset, smooth = true})` on `coordinator`, with
+/// `params` as the JSON text the realm serialized: scrolls the coordinator
+/// so its vertical offset is `offset`, which folds `offset` px of the
+/// header away (0 is fully expanded, the range's end fully folded).
+///
+/// - `params` must be a JSON object, else code 4.
+/// - `offset` is read as `scroll-view`'s `scrollTo` reads it ([`offset_px`]): a JSON number in CSS
+///   px, or a string that is a number followed by `px`, `rpx`, `ppx` or nothing. web-core
+///   `parseFloat`s it, its param being typed as a string (`XFoldviewNg.ts:63-72`), which reads the
+///   number and ignores any unit; iOS reads a number or a unit string through `toPtFromUnitValue`
+///   (`LynxUIScrollCoordinator.m:771-830`). A missing or unreadable `offset` is code 4 and nothing
+///   moves, the engine's rule for a required numeric param, where web-core scrolls to 0
+///   (`parseFloat(undefined)` is `NaN`, and `scrollTo({top: NaN})` reads it as 0) and iOS reads 0.
+/// - The target is clamped to `[0, max]`, `max` the coordinator's vertical scroll range. Both
+///   references clamp to the header height less the toolbar height (web-core's `scrollableLength`,
+///   `:43-45`, iOS's `expandHeight`), which the UA rules make the range by construction; an author
+///   slot taller than the rules give it extends the range, and the clamp with it (the module
+///   documentation's deviation list). The horizontal offset is kept.
+/// - `smooth` is read with JavaScript truthiness, and a missing one is `true`, as web-core's
+///   destructuring default `smooth = true` and its `smooth ? 'smooth' : 'instant'` read it, and as
+///   iOS's default `YES`. A smooth scroll is animated by the painter and leaves the document's
+///   offset where it is until the painter posts it back; an instant one moves the document at once.
+///   Either way the request goes through [`dom::Document::scroll_to_with`], the call
+///   [`super::scroll_container::scroll_to`] makes, and the call answers at once.
+///
+/// The painter settles a smooth request's target onto the carrying frame's
+/// snap positions when it receives the request, so on a container that
+/// snaps, a smooth scroll to a position that is not a snap position goes
+/// elsewhere. The coordinator's UA rules declare no `scroll-snap-type`
+/// (the coordinator computes `none`, which the tests check), so its smooth
+/// request lands on the clamped target; an author `scroll-snap-type` on
+/// the coordinator would have its smooth requests settled onto its snap
+/// positions like any other snapping container's.
+///
+/// `enable-scroll="false"` changes nothing here: the coordinator is still a
+/// scroll container, and only the user's drags are refused. A `display:
+/// none` coordinator has a zero scrollport, so it scrolls to 0 in a request
+/// no frame carries, and one restyled into no scroll container records
+/// nothing; either way nothing moves and the call succeeds, as
+/// `scroll-view`'s `scrollTo` does.
+pub(super) fn set_fold_expanded(
+    document: &mut LynxDocument,
+    coordinator: NodeId,
+    params: &str,
+) -> Result<(), InvalidParams> {
+    let params = object(params)?;
+    let offset = params
+        .get("offset")
+        .and_then(|offset| offset_px(document, offset))
+        .ok_or(InvalidParams)?;
+    let behavior = if params.get("smooth").is_none_or(is_truthy) {
+        ScrollBehavior::Smooth
+    } else {
+        ScrollBehavior::Instant
+    };
+    let Some(scroll_box) = document.scroll_box(coordinator) else {
+        return Ok(());
+    };
+    let target = clamp_to_range(offset, scroll_box.max_offset().y);
+    document.scroll_to_with(
+        coordinator,
+        Vector2D::new(scroll_box.offset.x, target),
+        behavior,
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::float_cmp)] // Explicit pixel sizes lay out exactly.
 
+    use dom::scroll::ScrollBehavior;
     use dom::stylo::properties::PropertyId;
     use dom::stylo::values::computed::{Display, Overflow};
-    use dom::{NodeId, StylesheetOrigin, Vector2D};
+    use dom::{MethodCall, MethodError, MethodOutcome, NodeId, StylesheetOrigin, Vector2D};
 
     use super::super::test_support::{
         child, document, element_under, overflow, style_of, with_config,
@@ -965,5 +1096,353 @@ mod tests {
         document.scroll_chain(inner, Vector2D::new(0.0, 150.0));
         assert_eq!(document.scroll_offset(coordinator).y, 0.0);
         assert_eq!(document.scroll_offset(inner).y, 150.0);
+    }
+
+    // --- `setFoldExpanded` --------------------------------------------------
+
+    /// Runs the UI method `name` on `element`, as `callElementMethod` asks
+    /// the element's kind first.
+    fn invoke(
+        document: &mut LynxDocument,
+        element: NodeId,
+        name: &str,
+        params: &str,
+    ) -> MethodOutcome {
+        document.invoke_element_method(element, MethodCall { name, params })
+    }
+
+    /// The request the committed frame carries to the painter for
+    /// `coordinator`.
+    fn carried(
+        document: &mut LynxDocument,
+        coordinator: NodeId,
+    ) -> Option<(Vector2D<f32>, ScrollBehavior)> {
+        let frame = document.commit();
+        let index = frame
+            .slot_of(coordinator)
+            .expect("the coordinator has a scroll slot");
+        frame.scroll_slots()[index as usize]
+            .request
+            .map(|request| (request.target, request.behavior))
+    }
+
+    /// A coordinator 600 tall with a 200px toolbar and a 400px header: a
+    /// range of 200.
+    fn foldable(spelling: Spelling) -> (LynxDocument, NodeId) {
+        let mut document = document();
+        let built = build(&mut document, spelling, "height: 600px", Some(200), 400);
+        document.layout();
+        (document, built.coordinator)
+    }
+
+    /// Both coordinator tags match `:defined`, as `scroll-view`'s check in
+    /// `scroll_container` has it. `dom` matches `:defined`
+    /// on every element, so this pins the selector's answer, not the
+    /// definition; the definition is what `invoke` reaching
+    /// `setFoldExpanded` on both tags shows.
+    #[test]
+    fn both_coordinator_tags_are_defined_elements() {
+        for spelling in SPELLINGS {
+            let mut document = document();
+            let built = build(&mut document, spelling, "", None, 0);
+            document.layout();
+            assert!(
+                document
+                    .matches(built.coordinator, ":defined")
+                    .expect("a valid selector"),
+                "{}",
+                spelling.coordinator
+            );
+        }
+    }
+
+    /// Smooth by default: the painter animates the request, and the
+    /// document keeps its offset until the painter posts one back. The
+    /// coordinator does not snap, so nothing in the painter moves the
+    /// target to a snap position.
+    #[test]
+    fn set_fold_expanded_is_smooth_by_default() {
+        for spelling in SPELLINGS {
+            let (mut document, coordinator) = foldable(spelling);
+            assert_eq!(
+                value(&document, coordinator, "scroll-snap-type"),
+                "none",
+                "{spelling:?}"
+            );
+            assert_eq!(
+                invoke(
+                    &mut document,
+                    coordinator,
+                    "setFoldExpanded",
+                    r#"{"offset":30}"#
+                ),
+                MethodOutcome::Done,
+                "{spelling:?}"
+            );
+            assert_eq!(
+                document.scroll_offset(coordinator),
+                Vector2D::zero(),
+                "{spelling:?}"
+            );
+            assert_eq!(
+                carried(&mut document, coordinator),
+                Some((Vector2D::new(0.0, 30.0), ScrollBehavior::Smooth)),
+                "{spelling:?}"
+            );
+        }
+    }
+
+    /// `smooth` is read with JavaScript truthiness; only a falsy one is
+    /// instant, and an instant scroll moves the document at once.
+    #[test]
+    fn set_fold_expanded_is_instant_for_a_falsy_smooth() {
+        for (smooth, behavior) in [
+            ("false", ScrollBehavior::Instant),
+            ("0", ScrollBehavior::Instant),
+            ("\"\"", ScrollBehavior::Instant),
+            ("null", ScrollBehavior::Instant),
+            ("true", ScrollBehavior::Smooth),
+            ("1", ScrollBehavior::Smooth),
+            ("\"no\"", ScrollBehavior::Smooth),
+        ] {
+            for spelling in SPELLINGS {
+                let (mut document, coordinator) = foldable(spelling);
+                let params = format!(r#"{{"offset":"30px","smooth":{smooth}}}"#);
+                assert_eq!(
+                    invoke(&mut document, coordinator, "setFoldExpanded", &params),
+                    MethodOutcome::Done,
+                    "{spelling:?} {params}"
+                );
+                let moved = if behavior == ScrollBehavior::Instant {
+                    30.0
+                } else {
+                    0.0
+                };
+                assert_eq!(
+                    document.scroll_offset(coordinator),
+                    Vector2D::new(0.0, moved),
+                    "{spelling:?} {params}"
+                );
+                assert_eq!(
+                    carried(&mut document, coordinator),
+                    Some((Vector2D::new(0.0, 30.0), behavior)),
+                    "{spelling:?} {params}"
+                );
+            }
+        }
+    }
+
+    /// The target clamps to the range, the header height less the toolbar
+    /// height, and the call succeeds.
+    #[test]
+    fn set_fold_expanded_clamps_to_the_fold_range() {
+        for spelling in SPELLINGS {
+            let (mut document, coordinator) = foldable(spelling);
+            assert_eq!(
+                invoke(
+                    &mut document,
+                    coordinator,
+                    "setFoldExpanded",
+                    r#"{"offset":"1e9px"}"#
+                ),
+                MethodOutcome::Done
+            );
+            assert_eq!(
+                carried(&mut document, coordinator),
+                Some((Vector2D::new(0.0, 200.0), ScrollBehavior::Smooth)),
+                "{spelling:?}"
+            );
+            for (params, expected) in [
+                (r#"{"offset":1e308,"smooth":false}"#, 200.0),
+                (r#"{"offset":-5,"smooth":false}"#, 0.0),
+                (r#"{"offset":"-5px","smooth":false}"#, 0.0),
+            ] {
+                document.scroll_to(coordinator, Vector2D::new(0.0, 100.0));
+                assert_eq!(
+                    invoke(&mut document, coordinator, "setFoldExpanded", params),
+                    MethodOutcome::Done,
+                    "{spelling:?} {params}"
+                );
+                assert_eq!(
+                    document.scroll_offset(coordinator),
+                    Vector2D::new(0.0, expected),
+                    "{spelling:?} {params}"
+                );
+            }
+        }
+    }
+
+    /// `1rpx` is the viewport width over 750 (393px here); a unitless
+    /// string is px.
+    #[test]
+    fn set_fold_expanded_converts_rpx_and_reads_a_unitless_string() {
+        for spelling in SPELLINGS {
+            let (mut document, coordinator) = foldable(spelling);
+            invoke(
+                &mut document,
+                coordinator,
+                "setFoldExpanded",
+                r#"{"offset":"10rpx","smooth":false}"#,
+            );
+            let offset = document.scroll_offset(coordinator).y;
+            assert!((offset - 5.24).abs() < 1e-4, "{spelling:?} {offset}");
+            invoke(
+                &mut document,
+                coordinator,
+                "setFoldExpanded",
+                r#"{"offset":"12.5","smooth":false}"#,
+            );
+            assert_eq!(
+                document.scroll_offset(coordinator),
+                Vector2D::new(0.0, 12.5),
+                "{spelling:?}"
+            );
+        }
+    }
+
+    /// A missing or unreadable `offset`, or params that are no object, is
+    /// code 4 and records nothing.
+    #[test]
+    fn set_fold_expanded_refuses_a_missing_or_unreadable_offset() {
+        for params in [
+            "{}",
+            r#"{"smooth":false}"#,
+            r#"{"offset":"abc"}"#,
+            r#"{"offset":"10vh"}"#,
+            r#"{"offset":""}"#,
+            r#"{"offset":null}"#,
+            r#"{"offset":true}"#,
+            r#"{"offset":[10]}"#,
+            "null",
+            "[1]",
+            "30",
+            "not json",
+        ] {
+            for spelling in SPELLINGS {
+                let (mut document, coordinator) = foldable(spelling);
+                document.scroll_to(coordinator, Vector2D::new(0.0, 30.0));
+                assert_eq!(
+                    invoke(&mut document, coordinator, "setFoldExpanded", params),
+                    MethodOutcome::Failed(MethodError::InvalidParams),
+                    "{spelling:?} {params}"
+                );
+                assert_eq!(
+                    document.scroll_offset(coordinator),
+                    Vector2D::new(0.0, 30.0),
+                    "{spelling:?} {params}"
+                );
+                assert_eq!(
+                    document.pending_scroll_request(coordinator),
+                    None,
+                    "{spelling:?} {params}"
+                );
+            }
+        }
+    }
+
+    /// `enable-scroll="false"` refuses the user's drags, not script.
+    #[test]
+    fn set_fold_expanded_scrolls_a_coordinator_the_user_cannot() {
+        for attribute in ["enable-scroll", "scroll-enable"] {
+            for spelling in SPELLINGS {
+                let (mut document, coordinator) = foldable(spelling);
+                document.set_attribute(coordinator, attribute, "false");
+                document.layout();
+                assert_eq!(
+                    invoke(
+                        &mut document,
+                        coordinator,
+                        "setFoldExpanded",
+                        r#"{"offset":50,"smooth":false}"#,
+                    ),
+                    MethodOutcome::Done
+                );
+                assert_eq!(
+                    document.scroll_offset(coordinator),
+                    Vector2D::new(0.0, 50.0),
+                    "{spelling:?} {attribute}"
+                );
+            }
+        }
+    }
+
+    /// A coordinator with no box succeeds and moves nothing: its zero
+    /// scrollport takes a request to 0 that no frame carries, so the commit
+    /// ends it.
+    #[test]
+    fn a_coordinator_with_no_box_moves_nothing() {
+        for spelling in SPELLINGS {
+            let mut document = document();
+            let built = build(&mut document, spelling, "display: none", Some(200), 400);
+            document.layout();
+            assert_eq!(
+                invoke(
+                    &mut document,
+                    built.coordinator,
+                    "setFoldExpanded",
+                    r#"{"offset":50}"#
+                ),
+                MethodOutcome::Done,
+                "{spelling:?}"
+            );
+            assert_eq!(
+                document.scroll_offset(built.coordinator),
+                Vector2D::zero(),
+                "{spelling:?}"
+            );
+            let frame = document.commit();
+            assert_eq!(frame.slot_of(built.coordinator), None, "{spelling:?}");
+            assert_eq!(
+                document.pending_scroll_request(built.coordinator),
+                None,
+                "{spelling:?}"
+            );
+        }
+    }
+
+    /// The kind answers `setFoldExpanded` alone. iOS's `getScrollInfo` and
+    /// `scrollBy` are not built; `scrollTo` and `scrollBy` fall to the base
+    /// set, and another kind's method is not the coordinator's.
+    #[test]
+    fn the_coordinator_answers_set_fold_expanded_alone() {
+        for spelling in SPELLINGS {
+            let (mut document, coordinator) = foldable(spelling);
+            for name in ["getScrollInfo", "scrollBy", "scrollTo", "selectTab"] {
+                assert_eq!(
+                    invoke(&mut document, coordinator, name, r#"{"offset":10}"#),
+                    MethodOutcome::NotFound,
+                    "{spelling:?} {name}"
+                );
+            }
+            assert_eq!(document.pending_scroll_request(coordinator), None);
+            assert_eq!(document.scroll_offset(coordinator), Vector2D::zero());
+        }
+    }
+
+    /// The header, the toolbar and the slot have no component, so they
+    /// have no `setFoldExpanded`.
+    #[test]
+    fn the_other_roles_have_no_set_fold_expanded() {
+        for spelling in SPELLINGS {
+            let mut document = document();
+            let built = build(&mut document, spelling, "height: 600px", Some(200), 400);
+            document.layout();
+            for element in [
+                built.header,
+                built.toolbar.expect("built with a toolbar"),
+                built.slot,
+            ] {
+                assert_eq!(
+                    invoke(
+                        &mut document,
+                        element,
+                        "setFoldExpanded",
+                        r#"{"offset":10}"#
+                    ),
+                    MethodOutcome::NotFound,
+                    "{spelling:?}"
+                );
+            }
+        }
     }
 }

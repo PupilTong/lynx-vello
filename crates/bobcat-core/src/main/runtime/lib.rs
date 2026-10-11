@@ -2447,8 +2447,8 @@ fn method_answer(outcome: MethodOutcome) -> HostValue {
 /// `selectTab`, a `scroll-view`'s `scrollTo` and `scrollBy`, a `list`'s
 /// `scrollToPosition` and `scrollBy`, an `x-swiper`'s `scrollTo`, an
 /// `x-refresh-view`'s `finishRefresh`, `finishLoadMore` and
-/// `autoStartRefresh`, and every element's `scrollIntoView`, `scrollTo` and
-/// `scrollBy` a scroll request, a
+/// `autoStartRefresh`, a scroll coordinator's `setFoldExpanded`, and every
+/// element's `scrollIntoView`, `scrollTo` and `scrollBy` a scroll request, a
 /// dialog's four an attribute, a state bit and top-layer membership, and
 /// `close`/`requestClose` the events they queue for an entry of their own. Both still go through
 /// [`validate_live_element`], so a freed element is a script error rather than a zero rect or an
@@ -2483,7 +2483,8 @@ fn install_readback_members(
             // `getVisibleCells` (`tree::list`), an
             // `x-swiper`'s `scrollTo` (`tree::swiper`), an `x-refresh-view`'s
             // `finishRefresh`, `finishLoadMore` and `autoStartRefresh`
-            // (`tree::refresh_view`), and a dialog's
+            // (`tree::refresh_view`), a scroll coordinator's
+            // `setFoldExpanded` (`tree::scroll_coordinator`), and a dialog's
             // `show`, `showModal`, `close` and `requestClose`
             // (`tree::dialog`). On `NotFound` the shared base set every
             // element has answers (`tree::base_methods`): the documented UI

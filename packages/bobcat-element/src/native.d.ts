@@ -144,6 +144,15 @@ interface BobcatNative {
    * only once it is at least 90% visible, so from rest a smooth request to
    * it would be settled back to `#content`.
    *
+   * `setFoldExpanded({offset, smooth = true})` exists on
+   * `scroll-coordinator` and `x-foldview-ng` only: it scrolls the
+   * coordinator to `offset` (a number in px, or a `px`/`rpx`/`ppx` string)
+   * clamped to its range, the header height less the toolbar height,
+   * smoothly unless `smooth` is falsy, and answers `0` and no data; a
+   * missing or unreadable `offset` is code 4. iOS's `getScrollInfo` is
+   * code 3; its `scrollBy({offset})` is not built, so the name reaches the
+   * base set's `scrollBy`, which reads no `offset`.
+   *
    * `scrollIntoView({scrollIntoViewOptions: {behavior?, block?, inline?}})`
    * exists on every element: CSSOM-View's `scrollIntoView` on the nearest
    * scroll container above the element alone (`container: "nearest"`),

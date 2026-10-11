@@ -1888,10 +1888,44 @@ consequential choice about whether to follow the spec or the quirk.
     `LynxUIScrollCoordinatorSlotDrag.kt:114`; web-core implements nothing for
     the tag). With the default, a drag on non-scrolling content in the slot
     already latches the coordinator and folds it.
-  - *Not implemented*: `setFoldExpanded`, `getScrollInfo`, `scrollBy`, the
-    `offset` event, `granularity`, `refresh-mode`, `tab-movable-enable`,
-    `toolbar-interaction-enable`, `header-scrollview-enable`,
-    `compat-container-popup` and every `ios-*`/`android-*` prop.
+  - *Not implemented*: the `offset` event, `granularity`, `refresh-mode`,
+    `tab-movable-enable`, `toolbar-interaction-enable`,
+    `header-scrollview-enable`, `compat-container-popup` and every
+    `ios-*`/`android-*` prop.
+  - *`setFoldExpanded` (2026-10-11)* is a component on the two coordinator
+    tags (`ScrollCoordinator`, its `CustomElement::invoke`). **The
+    architect's decision, to be confirmed by the user.** Where it leaves a
+    reference:
+    - `offset` is read as `scroll-view`'s `scrollTo` reads it: a number in
+      CSS px, or a string that is a number followed by `px`, `rpx`, `ppx` or
+      nothing. web-core `parseFloat`s it (the param is typed as a string,
+      `XFoldviewNg.ts:63-72`), which takes the number and ignores any unit;
+      iOS reads a number or a unit string through `toPtFromUnitValue`
+      (`LynxUIScrollCoordinator.m:771-830`), which knows more units.
+    - A missing or unreadable `offset` is code 4 and nothing moves, the
+      engine's rule for a required numeric param. web-core scrolls to 0
+      (`parseFloat(undefined)` is `NaN`, and `scrollTo({top: NaN})` reads it
+      as 0) and answers 0; iOS reads 0.
+    - The clamp is the coordinator's scroll range, which the UA rules make
+      the header height less the toolbar height, web-core's
+      `scrollableLength` and iOS's `expandHeight`. An author slot taller
+      than the UA height extends the range (the deviation above), and the
+      clamp with it, where web-core and iOS still stop at the fold.
+    - The call answers at once, smooth or not, as web-core's does. The
+      coordinator declares no `scroll-snap-type`, so the painter, which
+      settles a smooth request's target onto the frame's snap positions,
+      does not move this one; an author `scroll-snap-type` on the
+      coordinator would.
+    - iOS's `getScrollInfo` (`{scrollX: 0, scrollY, scrollRange}`) and
+      `scrollBy({offset})` (what it consumed) are not built: web-core has
+      neither and the docs do not list them, the `setDragGesture` ruling
+      (2026-10-11). `getScrollInfo` is code 3. `scrollBy` is not: the
+      coordinator's kind has no method of the name, so the base set's
+      CSSOM-View `scrollBy` answers, which reads `left`/`top`, ignores
+      `offset` and answers 0, the same as `HTMLElement.scrollBy` in
+      web-core. If the ruling is overturned, `scrollBy` is `scroll-view`'s
+      `scroll_by` on y and `getScrollInfo` is `{scrollX: 0, scrollY,
+      scrollRange}` with `scrollRange` the range's maximum.
   - *A coordinator nested in another's header or slot reads its own header
     and toolbar*: `anchor-scope` is not implemented, but anchor targets are
     only the containing block's own children
