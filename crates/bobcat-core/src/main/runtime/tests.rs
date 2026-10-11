@@ -6293,7 +6293,8 @@ fn exposure_observer(
 /// `rpx` in an exposure margin is the viewport width over 750 — stylo's
 /// rule — read from the document's viewport when the element registers: a
 /// `20rpx` top screen margin on this realm's 393px-wide viewport is
-/// `20 × 393 / 750` px of root margin. Written through `__SetAttribute`,
+/// `20 × 393 / 750` px of target margin, on the bottom, the side a positive
+/// screen margin lands on. Written through `__SetAttribute`,
 /// which reaches the registration through the host's `setAttribute`.
 #[test]
 fn an_rpx_exposure_margin_resolves_against_the_viewport_width() {
@@ -6320,8 +6321,8 @@ fn an_rpx_exposure_margin_resolves_against_the_viewport_width() {
         elements
             .tree()
             .intersection_observer(observer)
-            .root_margin()
-            .top,
+            .target_margin()
+            .bottom,
         dom::MarginLength::Px(20.0 * 393.0 / 750.0),
     );
 

@@ -20,8 +20,9 @@ use std::rc::Rc;
 
 use common::{Doc, device};
 use dom::{
-    CustomElement, Document, ElementHandler, IntersectionEventHandler, IntersectionObserverEntry,
-    IntersectionObserverId, IntersectionObserverRoot, NodeId, Rect, RootMargin, Vector2D,
+    CustomElement, Document, ElementHandler, IntersectionEventHandler, IntersectionMargin,
+    IntersectionObserverEntry, IntersectionObserverId, IntersectionObserverInit,
+    IntersectionObserverRoot, MarginLength, NodeId, Rect, Vector2D,
 };
 
 /// Every box is a flex container, and a `view` a non-shrinking one, so the
@@ -144,9 +145,7 @@ impl IntersectionEventHandler<()> for Spawner {
                 log: Rc::clone(&self.log),
                 bound: None,
             }),
-            None,
-            RootMargin::ZERO,
-            Vec::new(),
+            IntersectionObserverInit::default(),
         );
         document.observe_intersection(spawned, self.target);
         self.log
@@ -201,9 +200,10 @@ fn recording(
             log: Rc::clone(log),
             bound,
         }),
-        root,
-        RootMargin::ZERO,
-        Vec::new(),
+        IntersectionObserverInit {
+            root,
+            ..IntersectionObserverInit::default()
+        },
     )
 }
 
@@ -215,9 +215,11 @@ fn unbound(doc: &mut Doc, root: Option<NodeId>, thresholds: &[f64]) -> Intersect
             log: Log::default(),
             bound: None,
         }),
-        root,
-        RootMargin::ZERO,
-        thresholds.to_vec(),
+        IntersectionObserverInit {
+            root,
+            thresholds: thresholds.to_vec(),
+            ..IntersectionObserverInit::default()
+        },
     )
 }
 
@@ -309,9 +311,7 @@ fn components(css: &str) -> (Doc, Log) {
 fn element_owned(doc: &mut Doc, element: NodeId) -> IntersectionObserverId {
     doc.dom.create_intersection_observer(
         Box::new(ElementHandler(element)),
-        None,
-        RootMargin::ZERO,
-        Vec::new(),
+        IntersectionObserverInit::default(),
     )
 }
 
@@ -621,6 +621,53 @@ fn an_observer_reads_back_what_it_was_created_with() {
     );
 }
 
+/// An observer's target margin dilates every target's border box before the
+/// update measures it: the entry reports the dilated rect as its bounding
+/// client rect and takes its ratio over it. A 30px cell moved 10px below the
+/// viewport, grown 20px up, shows 10px of its 50.
+#[test]
+fn a_target_margin_dilates_every_entrys_rects() {
+    let mut doc = page(".cell { width: 100px; height: 30px; transform: translateY(610px); }");
+    let cell = doc.el(doc.root, "view.cell");
+    let target_margin = IntersectionMargin {
+        top: MarginLength::Px(20.0),
+        ..IntersectionMargin::ZERO
+    };
+    let observer = doc.dom.create_intersection_observer(
+        Box::new(Recorder {
+            log: Log::default(),
+            bound: None,
+        }),
+        IntersectionObserverInit {
+            target_margin,
+            ..IntersectionObserverInit::default()
+        },
+    );
+    let read = doc.dom.intersection_observer(observer);
+    assert_eq!(*read.target_margin(), target_margin);
+    assert_eq!(*read.root_margin(), IntersectionMargin::ZERO);
+    doc.dom.observe_intersection(observer, cell);
+    doc.dom.render();
+    assert!(update(&mut doc));
+    let entries = doc.dom.take_intersection_records(observer);
+    assert_eq!(states(&entries), vec![(cell, true, 0.2)]);
+    assert_eq!(
+        tuple(entries[0].bounding_client_rect),
+        (0.0, 590.0, 100.0, 50.0)
+    );
+    assert_eq!(
+        tuple(entries[0].intersection_rect),
+        (0.0, 590.0, 100.0, 10.0)
+    );
+    assert_eq!(tuple(entries[0].root_bounds), (0.0, 0.0, 800.0, 600.0));
+
+    // Without the margin, the same cell is out.
+    let plain = unbound(&mut doc, None, &[]);
+    doc.dom.observe_intersection(plain, cell);
+    assert!(update(&mut doc));
+    assert_eq!(records(&mut doc, plain), vec![(cell, false, 0.0)]);
+}
+
 // --- The notify loop --------------------------------------------------------
 
 /// Two handler types in one document — a [`Recorder`] and an engine
@@ -682,9 +729,7 @@ fn a_handler_may_mutate_the_tree() {
             log: Rc::clone(&log),
             parent: doc.root,
         }),
-        None,
-        RootMargin::ZERO,
-        Vec::new(),
+        IntersectionObserverInit::default(),
     );
     let after = recording(&mut doc, &log, None, None);
     doc.dom.observe_intersection(appender, cell);
@@ -783,9 +828,7 @@ fn a_handler_may_drop_its_own_observer_or_a_later_one() {
                 victim: Rc::clone(victim),
                 _alive: Rc::clone(&alive),
             }),
-            None,
-            RootMargin::ZERO,
-            Vec::new(),
+            IntersectionObserverInit::default(),
         )
     };
     let own = dropper(&mut doc, &Rc::default());
@@ -835,9 +878,7 @@ fn a_handler_may_create_and_observe() {
             log: Rc::clone(&log),
             target: other,
         }),
-        None,
-        RootMargin::ZERO,
-        Vec::new(),
+        IntersectionObserverInit::default(),
     );
     doc.dom.observe_intersection(spawner, cell);
     doc.dom.render();
@@ -869,9 +910,7 @@ fn a_loop_inside_a_notification_leaves_the_running_observers_entries_queued() {
             log: Rc::clone(&log),
             target: cell,
         }),
-        None,
-        RootMargin::ZERO,
-        Vec::new(),
+        IntersectionObserverInit::default(),
     );
     let later = recording(&mut doc, &log, None, None);
     doc.dom.observe_intersection(renotifier, cell);

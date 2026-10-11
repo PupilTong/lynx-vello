@@ -12,9 +12,10 @@
 //!
 //! # The walk
 //!
-//! The target's border box is carried up its containing-block chain
-//! ([`ContainingBlockChain`], the walk `bounding_client_rect` folds too) to
-//! the viewport. Each box on the way contributes, in this order:
+//! The target's border box, dilated by the target margin (see "The target"
+//! below), is carried up its containing-block chain ([`ContainingBlockChain`],
+//! the walk `bounding_client_rect` folds too) to the viewport. Each box on the
+//! way contributes, in this order:
 //!
 //! 1. **Its local matrix**, into its box parent's border-box space: the painter's own
 //!    [`ContextMatrix`] — the transform list, the individual transforms, the motion path,
@@ -62,6 +63,29 @@
 //! Chromium's answers. euclid's `Rect::intersection` drops zero-area
 //! overlaps, hence [`intersect_inclusive`].
 //!
+//! # The target
+//!
+//! What the walk carries is the target's border box dilated by the
+//! observer's target margin, in the target's own border-box space: the rect
+//! starts at `(-left, -top)` and each axis grows by both of its sides. The
+//! dilation comes before the walk's first step, so the target's own matrix
+//! moves the dilated rect — a rotated target's margin rotates with it — and
+//! every clip and the root cut the dilated rect, not the border box.
+//! Percentages resolve against the undilated border box, top and bottom by
+//! its height, left and right by its width, the root margin's rule. A
+//! negative margin that eats the box clamps its size at 0 at the moved
+//! origin, as the root's does, and the zero-area rule above then applies.
+//! The entry's `boundingClientRect`, its `intersectionRect` and the ratio's
+//! denominator are all the dilated rect. The zero margin leaves the border
+//! box exactly as it was.
+//!
+//! The spec has no target margin; this is an extension for Lynx's exposure.
+//! Native grows the element's own rect, then tests it against every scroll
+//! container on its way up, so a positive margin reaches an element that a
+//! scrollport, or a page that clips, has cut out of view. A root margin
+//! cannot: it moves the root's edges after every clip below the root has
+//! cut. An element root's bounds are carried with the zero margin.
+//!
 //! # The root
 //!
 //! The implicit root is the viewport: `(0, 0, viewport size)`, dilated by the
@@ -80,7 +104,7 @@
 //! a scroller root that is not its containing block, a top-layer element),
 //! never passes it, or *is* the root is not a descendant: rendered, zero
 //! rects, the root bounds still reported. At the root the carry is cut to
-//! the dilated rect — in place of the root's own clip, which the margin
+//! the root's dilated rect — in place of the root's own clip, which the margin
 //! extends — and above it nothing clips any more: the carry is only mapped,
 //! so every rect comes out in viewport coordinates.
 //!
@@ -101,6 +125,8 @@
 //!   not narrow them, nor does `overflow-clip-margin` widen them (the frame clips to the padding
 //!   box too).
 //! - **`scrollMargin`**, **`delay`** and **`trackVisibility`**: `isVisible` is not modelled.
+//!   `scrollMargin` dilates only scroll containers' clips and keeps the undilated ratio basis; the
+//!   target margin is what Lynx's exposure needs instead.
 //! - **A transform curve mid-flight on the compositor.** The matrix is the main thread's last
 //!   cascade, as of the document's animation clock, not the painter's sample of an exported curve.
 //! - **`position-visibility`.** A box it hides stays geometric, as it does for
@@ -119,13 +145,14 @@ use crate::visual::build::{clipped_axes, padding_box, unclipped_axes_unbounded};
 use crate::visual::sticky;
 use crate::visual::transform::{ContextMatrix, ParentPerspective};
 
-/// One side of a [`RootMargin`].
+/// One side of an [`IntersectionMargin`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MarginLength {
     /// CSS pixels.
     Px(f32),
-    /// A percentage of the undilated root rect, as written: `20.0` is `20%`.
-    /// Top and bottom take the rect's height, left and right its width.
+    /// A percentage of the undilated rect the margin dilates — the root
+    /// rect or the target's border box — as written: `20.0` is `20%`. Top
+    /// and bottom take the rect's height, left and right its width.
     Percent(f32),
 }
 
@@ -138,17 +165,18 @@ impl MarginLength {
     }
 }
 
-/// An observer's `rootMargin`: how far each side of the root intersection
-/// rectangle moves out (positive) or in (negative).
+/// How far each side of a rect moves out (positive) or in (negative): an
+/// observer's `rootMargin`, which dilates the root intersection rectangle,
+/// or its target margin, which dilates every target's border box.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RootMargin {
+pub struct IntersectionMargin {
     pub top: MarginLength,
     pub right: MarginLength,
     pub bottom: MarginLength,
     pub left: MarginLength,
 }
 
-impl RootMargin {
+impl IntersectionMargin {
     /// `0px` on every side, the spec's default.
     pub const ZERO: Self = Self {
         top: MarginLength::Px(0.0),
@@ -157,11 +185,12 @@ impl RootMargin {
         left: MarginLength::Px(0.0),
     };
 
-    /// Each side in CSS pixels against the `undilated` root rect.
+    /// Each side in CSS pixels against the `undilated` rect.
     ///
     /// Percentages of top and bottom take its height, of left and right its
-    /// width — what Chromium, `WebKit` and Gecko do and WPT `root-margin.html`
-    /// tests, where the spec's sentence says width for all four.
+    /// width — what Chromium, `WebKit` and Gecko do for a root margin and WPT
+    /// `root-margin.html` tests, where the spec's sentence says width for all
+    /// four. A target margin follows the same rule.
     #[must_use]
     pub fn resolve(&self, undilated: &Rect<f32>) -> Edges<f32> {
         let (width, height) = (undilated.size.width, undilated.size.height);
@@ -187,7 +216,7 @@ impl RootMargin {
     }
 }
 
-impl Default for RootMargin {
+impl Default for IntersectionMargin {
     fn default() -> Self {
         Self::ZERO
     }
@@ -226,14 +255,14 @@ pub struct IntersectionGeometry {
     /// Whether target and root intersect, edge-adjacency included, through
     /// every clip between them.
     pub is_intersecting: bool,
-    /// The bounding box of the target's transformed border box — the
-    /// entry's `boundingClientRect`. Zero when the target is not a
-    /// descendant of the root.
+    /// The bounding box of the target's transformed border box, dilated by
+    /// the target margin — the entry's `boundingClientRect`. Zero when the
+    /// target is not a descendant of the root.
     pub target_rect: Rect<f32>,
     /// The root intersection rectangle — the entry's `rootBounds`.
     pub root_bounds: Rect<f32>,
-    /// The part of the target visible through every clip and the root —
-    /// the entry's `intersectionRect`. Zero when not intersecting.
+    /// The part of the dilated target visible through every clip and the
+    /// root — the entry's `intersectionRect`. Zero when not intersecting.
     pub intersection_rect: Rect<f32>,
 }
 
@@ -263,7 +292,7 @@ impl IntersectionGeometry {
     }
 
     /// The entry's `intersectionRatio`: the intersection's area over the
-    /// target's, at most 1.
+    /// dilated target's, at most 1.
     ///
     /// A zero-area target has no ratio to take, so it is 1 when intersecting
     /// (edge-adjacency included) and 0 otherwise, as the spec says.
@@ -290,7 +319,11 @@ impl<T> Document<T> {
     /// [`IntersectionGeometry::UNRENDERED`] for what that covers. Reads the
     /// last completed layout and the live scroll offsets; runs no pass.
     #[must_use]
-    pub fn root_geometry(&self, root: Option<NodeId>, margin: &RootMargin) -> Option<RootGeometry> {
+    pub fn root_geometry(
+        &self,
+        root: Option<NodeId>,
+        margin: &IntersectionMargin,
+    ) -> Option<RootGeometry> {
         let Some(element) = root else {
             let viewport = self.viewport_size();
             let local = margin.dilate(Rect::from_size(Size2D::new(
@@ -303,7 +336,7 @@ impl<T> Document<T> {
                 bounds: local,
             });
         };
-        let carry = self.carry_to_viewport(element, None)?;
+        let carry = self.carry_to_viewport(element, None, &IntersectionMargin::ZERO)?;
         let node = self.get(element)?;
         let style = node.layout_computed_style()?;
         let layout = self.rounded_layout(element)?;
@@ -325,8 +358,9 @@ impl<T> Document<T> {
     }
 
     /// `target`'s geometry against a resolved `root`: Intersection Observer
-    /// §3.2.7 with Chromium's clipping, through transforms. The module doc
-    /// is the algorithm.
+    /// §3.2.7 with Chromium's clipping, through transforms, for the target's
+    /// border box dilated by `target_margin`. The module doc is the
+    /// algorithm.
     ///
     /// Reads the last completed layout and the live scroll offsets; runs no
     /// pass.
@@ -335,8 +369,9 @@ impl<T> Document<T> {
         &self,
         target: NodeId,
         root: &RootGeometry,
+        target_margin: &IntersectionMargin,
     ) -> IntersectionGeometry {
-        let Some(carry) = self.carry_to_viewport(target, Some(root)) else {
+        let Some(carry) = self.carry_to_viewport(target, Some(root), target_margin) else {
             return IntersectionGeometry::UNRENDERED;
         };
         if !carry.descends || carry.degenerate {
@@ -362,20 +397,27 @@ impl<T> Document<T> {
         &self,
         target: NodeId,
         root: Option<NodeId>,
-        margin: &RootMargin,
+        root_margin: &IntersectionMargin,
+        target_margin: &IntersectionMargin,
     ) -> IntersectionGeometry {
-        self.root_geometry(root, margin)
+        self.root_geometry(root, root_margin)
             .map_or(IntersectionGeometry::UNRENDERED, |root| {
-                self.intersection_geometry_in(target, &root)
+                self.intersection_geometry_in(target, &root, target_margin)
             })
     }
 
-    /// Carries `id`'s border box to the viewport, clipping against `clip`'s
-    /// root when there is one: `None` when `id` is not rendered.
+    /// Carries `id`'s border box, dilated by `margin` in its own border-box
+    /// space, to the viewport, clipping against `clip`'s root when there is
+    /// one: `None` when `id` is not rendered.
     ///
     /// With no `clip`, the walk only maps — what an element root's bounds
-    /// need.
-    fn carry_to_viewport(&self, id: NodeId, clip: Option<&RootGeometry>) -> Option<Carry> {
+    /// need, with the zero margin.
+    fn carry_to_viewport(
+        &self,
+        id: NodeId,
+        clip: Option<&RootGeometry>,
+        margin: &IntersectionMargin,
+    ) -> Option<Carry> {
         let node = self.get(id)?;
         let style = StyleView::try_of(node)?;
         if matches!(
@@ -394,7 +436,12 @@ impl<T> Document<T> {
             anchored: !self.layout_state().anchored.is_empty(),
             sticky: Vec::new(),
         };
-        let mut carry = Carry::new(Size2D::new(layout.size.width, layout.size.height));
+        // Dilated before the first step: under the target's own matrix and
+        // inside every clip, and resolved against the undilated box.
+        let mut carry = Carry::new(margin.dilate(Rect::from_size(Size2D::new(
+            layout.size.width,
+            layout.size.height,
+        ))));
         let mut below = Below::of(
             style.values(),
             layout,
@@ -548,7 +595,9 @@ enum Local {
 /// The target on its way up: one matrix from its border-box space into the
 /// current box's, and what the clips met so far left of it.
 struct Carry {
-    size: Size2D<f32>,
+    /// The target's border box dilated by its margin, in its own border-box
+    /// space: `(-left, -top)` and the dilated size, at least 0.
+    rect: Rect<f32>,
     world: Transform3D<f32>,
     visible: Visible,
     /// A projection met a corner behind the viewer.
@@ -560,7 +609,7 @@ struct Carry {
 
 /// What the clips met so far left of the target.
 enum Visible {
-    /// No clip yet: the whole border box, under the carry's matrix.
+    /// No clip yet: the whole dilated border box, under the carry's matrix.
     Whole,
     /// What the last clip left, in that clip's space; `since` maps it into
     /// the current one.
@@ -573,9 +622,9 @@ enum Visible {
 }
 
 impl Carry {
-    fn new(size: Size2D<f32>) -> Self {
+    fn new(rect: Rect<f32>) -> Self {
         Self {
-            size,
+            rect,
             world: Transform3D::identity(),
             visible: Visible::Whole,
             degenerate: false,
@@ -606,7 +655,7 @@ impl Carry {
     /// Cuts what is visible to `clip`, a rect in the current space.
     fn clip(&mut self, clip: &Rect<f32>) {
         let current = match &self.visible {
-            Visible::Whole => map_rect(&self.world, &Rect::from_size(self.size)),
+            Visible::Whole => map_rect(&self.world, &self.rect),
             Visible::Part { rect, since } => map_rect(since, rect),
             Visible::Gone => return,
         };
@@ -626,7 +675,7 @@ impl Carry {
     /// visible there (`None` when a clip removed all of it); `None` when a
     /// corner has no projection.
     fn rects(&self) -> Option<(Rect<f32>, Option<Rect<f32>>)> {
-        let target = map_rect(&self.world, &Rect::from_size(self.size))?;
+        let target = map_rect(&self.world, &self.rect)?;
         let visible = match &self.visible {
             Visible::Whole => Some(target),
             Visible::Part { rect, since } => Some(map_rect(since, rect)?),
@@ -783,9 +832,12 @@ mod tests {
             }
             let painted = map_rect(&item.transform, &Rect::from_size(item.size))
                 .expect("every box here projects in front of the viewer");
-            let geometry = doc
-                .dom
-                .intersection_geometry(item.node, None, &RootMargin::ZERO);
+            let geometry = doc.dom.intersection_geometry(
+                item.node,
+                None,
+                &IntersectionMargin::ZERO,
+                &IntersectionMargin::ZERO,
+            );
             assert!(geometry.rendered, "{:?}", item.node);
             let actual = geometry.target_rect;
             let close = |a: f32, b: f32| (a - b).abs() <= 1e-3;
@@ -926,7 +978,7 @@ mod tests {
 
     #[test]
     fn margins_resolve_percentages_per_axis_and_clamp_eaten_sizes() {
-        let margin = RootMargin {
+        let margin = IntersectionMargin {
             top: MarginLength::Px(10.0),
             right: MarginLength::Percent(20.0),
             bottom: MarginLength::Percent(40.0),
@@ -943,13 +995,13 @@ mod tests {
             }
         );
         assert_eq!(margin.dilate(viewport), rect(-30.0, -10.0, 990.0, 850.0));
-        let eaten = RootMargin {
+        let eaten = IntersectionMargin {
             top: MarginLength::Px(-400.0),
             right: MarginLength::Px(-500.0),
             bottom: MarginLength::Px(-400.0),
             left: MarginLength::Px(-500.0),
         };
         assert_eq!(eaten.dilate(viewport), rect(500.0, 400.0, 0.0, 0.0));
-        assert_eq!(RootMargin::ZERO.dilate(viewport), viewport);
+        assert_eq!(IntersectionMargin::ZERO.dilate(viewport), viewport);
     }
 }

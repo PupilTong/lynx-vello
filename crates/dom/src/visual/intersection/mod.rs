@@ -13,6 +13,16 @@
 //! - **`rootMargin` percentages** resolve top/bottom against the undilated root rect's height and
 //!   left/right against its width, as Chromium, `WebKit` and Gecko do (WPT `root-margin.html`),
 //!   where the spec's sentence says width for all four.
+//! - **A target margin beside the root margin**, a Lynx-motivated extension: it dilates every
+//!   target's border box in the target's own space, before its transform and before any clip, and
+//!   the entry's rects and ratio are over the dilated rect. Lynx native's exposure grows the
+//!   element's own rect and tests it against each scroll container, which reaches an element a
+//!   scrollport or a clipping page has cut; a root margin, applied after every clip, cannot. The
+//!   spec has no `targetMargin`. Its `scrollMargin` is not the same thing: it dilates scroll
+//!   containers' clip rects only, so a non-scrolling `overflow: clip` ancestor such as the page
+//!   still cuts, and it keeps the undilated ratio basis where native's ratio is over the grown
+//!   rect. It has no JavaScript surface; the MTS binding, once it exists, passes the zero target
+//!   margin.
 //! - **Rust only.** No JavaScript surface exists yet. A W3C-shaped MTS constructor and a
 //!   Lynx-shaped `lynx.createIntersectionObserver` are adapters over this primitive, not part of
 //!   it.
@@ -35,8 +45,9 @@
 //! # Observers and their handlers
 //!
 //! An observer is created with [`Document::create_intersection_observer`]
-//! for one handler, one root (the viewport, or an element), one root margin
-//! and a sorted threshold list, and named by an [`IntersectionObserverId`]
+//! for one handler and one [`IntersectionObserverInit`] — one root (the
+//! viewport, or an element), one root margin, one target margin and a
+//! sorted threshold list — and named by an [`IntersectionObserverId`]
 //! that is never reissued. What it observes is a list of targets in observe
 //! order, each with the spec's previous threshold index and intersecting
 //! state; what it has to say is a queue of [`IntersectionObserverEntry`]
@@ -106,7 +117,7 @@ use std::num::NonZeroU32;
 
 use euclid::default::Rect;
 
-pub use self::geometry::{IntersectionGeometry, MarginLength, RootGeometry, RootMargin};
+pub use self::geometry::{IntersectionGeometry, IntersectionMargin, MarginLength, RootGeometry};
 use crate::tree::document::{Document, NodeId};
 
 /// Names one intersection observer for as long as it exists. Ids are
@@ -132,12 +143,15 @@ pub struct IntersectionObserverEntry {
     /// The root intersection rectangle. Zero when the target or an element
     /// root is not rendered.
     pub root_bounds: Rect<f32>,
-    /// The bounding box of the target's transformed border box. Zero when it
-    /// is not rendered or not a descendant of the root.
+    /// The bounding box of the target's transformed border box, dilated by
+    /// the observer's target margin. Zero when it is not rendered or not a
+    /// descendant of the root.
     pub bounding_client_rect: Rect<f32>,
-    /// What of the target is visible through every clip and the root.
+    /// What of the dilated target is visible through every clip and the
+    /// root.
     pub intersection_rect: Rect<f32>,
     pub is_intersecting: bool,
+    /// The intersection's area over the dilated target's.
     pub intersection_ratio: f64,
     pub target: NodeId,
 }
@@ -209,6 +223,27 @@ impl<T> IntersectionEventHandler<T> for ElementHandler {
     }
 }
 
+/// What [`Document::create_intersection_observer`] creates an observer
+/// with: the spec's `IntersectionObserverInit`, with a target margin added
+/// and no `scrollMargin`, `delay` or `trackVisibility`.
+///
+/// The default is the spec's: the implicit root, zero margins and the
+/// threshold list `[0]`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IntersectionObserverInit {
+    /// The intersection root: `None` for the implicit root (the viewport),
+    /// or a live element.
+    pub root: Option<NodeId>,
+    /// Dilates the root intersection rectangle.
+    pub root_margin: IntersectionMargin,
+    /// Dilates every target's border box, in the target's own space, before
+    /// its transform and any clip; the entry's rects and ratio are over the
+    /// dilated rect. Not in the spec — see the module doc's rulings.
+    pub target_margin: IntersectionMargin,
+    /// In `[0, 1]`, in any order; an empty list is the spec's `[0]`.
+    pub thresholds: Vec<f64>,
+}
+
 /// An intersection observer's root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntersectionObserverRoot {
@@ -238,7 +273,8 @@ struct Registration {
 pub struct IntersectionObserver<T> {
     id: IntersectionObserverId,
     root: IntersectionObserverRoot,
-    root_margin: RootMargin,
+    root_margin: IntersectionMargin,
+    target_margin: IntersectionMargin,
     /// Ascending, never empty.
     thresholds: Box<[f64]>,
     /// In observe order.
@@ -264,8 +300,14 @@ impl<T> IntersectionObserver<T> {
     }
 
     #[must_use]
-    pub const fn root_margin(&self) -> &RootMargin {
+    pub const fn root_margin(&self) -> &IntersectionMargin {
         &self.root_margin
+    }
+
+    /// The margin every target's border box is dilated by.
+    #[must_use]
+    pub const fn target_margin(&self) -> &IntersectionMargin {
+        &self.target_margin
     }
 
     /// The thresholds, ascending; the spec's `[0]` for a list created empty.
@@ -304,6 +346,7 @@ impl<T> std::fmt::Debug for IntersectionObserver<T> {
             .field("id", &self.id)
             .field("root", &self.root)
             .field("root_margin", &self.root_margin)
+            .field("target_margin", &self.target_margin)
             .field("thresholds", &self.thresholds)
             .field("targets", &self.targets)
             .field("queue", &self.queue)
@@ -381,15 +424,15 @@ impl<T> Document<T> {
     /// Creates an intersection observer that delivers to `handler`, and
     /// answers its id.
     ///
-    /// `root` is the intersection root: `None` for the implicit root (the
-    /// viewport), or a live element. `thresholds` are sorted ascending; an
-    /// empty list is the spec's `[0]`. Creating observes nothing, so it
-    /// leaves the update with nothing to do. An engine component passes
-    /// `Box::new(ElementHandler(element))`.
+    /// `init.root` is the intersection root: `None` for the implicit root
+    /// (the viewport), or a live element. `init.thresholds` are sorted
+    /// ascending; an empty list is the spec's `[0]`. Creating observes
+    /// nothing, so it leaves the update with nothing to do. An engine
+    /// component passes `Box::new(ElementHandler(element))`.
     ///
     /// # Panics
     ///
-    /// When a threshold is not a finite number in `[0, 1]`, when `root` is
+    /// When a threshold is not a finite number in `[0, 1]`, when the root is
     /// not a live element, or when the node the handler is
     /// [bound to](IntersectionEventHandler::bound_to) is not live — an
     /// observer bound to a node already freed could never be dropped by its
@@ -397,10 +440,14 @@ impl<T> Document<T> {
     pub fn create_intersection_observer(
         &mut self,
         handler: Box<dyn IntersectionEventHandler<T>>,
-        root: Option<NodeId>,
-        root_margin: RootMargin,
-        thresholds: Vec<f64>,
+        init: IntersectionObserverInit,
     ) -> IntersectionObserverId {
+        let IntersectionObserverInit {
+            root,
+            root_margin,
+            target_margin,
+            mut thresholds,
+        } = init;
         assert!(
             thresholds
                 .iter()
@@ -421,7 +468,6 @@ impl<T> Document<T> {
                 "an intersection observer's root {root:?} must be a live element"
             );
         }
-        let mut thresholds = thresholds;
         thresholds.sort_by(f64::total_cmp);
         if thresholds.is_empty() {
             thresholds.push(0.0);
@@ -439,6 +485,7 @@ impl<T> Document<T> {
                 IntersectionObserverRoot::Element,
             ),
             root_margin,
+            target_margin,
             thresholds: thresholds.into_boxed_slice(),
             targets: Vec::new(),
             queue: Vec::new(),
@@ -604,11 +651,12 @@ impl<T> Document<T> {
                 }
                 IntersectionObserverRoot::Freed => None,
             };
+            let target_margin = observer.target_margin;
             for registration in &mut observer.targets {
                 let geometry = root
                     .as_ref()
                     .map_or(IntersectionGeometry::UNRENDERED, |root| {
-                        self.intersection_geometry_in(registration.target, root)
+                        self.intersection_geometry_in(registration.target, root, &target_margin)
                     });
                 let ratio = geometry.intersection_ratio();
                 let threshold_index = observer

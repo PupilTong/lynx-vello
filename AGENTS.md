@@ -1610,11 +1610,17 @@ transform-aware, clip-aware geometry; see `docs/dom-architecture.md`
 2026-10-11) is the first consumer of that primitive, and a bucket-2 adapter
 over it: every element whose `exposure-id` attribute is non-empty, or on which
 the realm has filed a `uiappear`/`uidisappear` handler, gets one observer of
-its own — root the viewport, thresholds `[exposure-area / 100]`, root margins
-the element's `exposure-screen-margin-*` plus, when `enable-exposure-ui-margin`
-(the attribute, else the page config `enableExposureUIMargin`, the fifth
-`PageConfig` switch) is true, its `exposure-ui-margin-*` folded onto the
-opposite sides. The attribute triggers are the `setAttribute`/`removeAttribute`
+its own — root the viewport, thresholds `[exposure-area / 100]`, and a root
+margin and a target margin folded from the element's margins by one rule:
+`exposure-ui-margin-*`, when `enable-exposure-ui-margin` (the attribute, else
+the page config `enableExposureUIMargin`, the fifth `PageConfig` switch) is
+true, on the target margin of the same side, either sign, a `%` of the
+element's own size; a positive `exposure-screen-margin-*` on the target margin
+of the opposite side (native's `frameOfUIInWindow:` without the switch); a
+negative one on the root margin of the same side (`borderOfExposureScreen:`).
+A positive margin so grows the element's own rect, which the primitive clips,
+and reaches an element a scrollport or a clipping page cut, where a root margin
+cannot. The attribute triggers are the `setAttribute`/`removeAttribute`
 host members, which know exactly these names because the attributes belong to
 every tag and so to no component; the listener trigger is the realm's
 `exposureEvents(node, wants)` edge, sent on the first and the last
@@ -2802,9 +2808,16 @@ Rulings and limits to know before touching it:
   simplicity, so one document holds any number of handler types with no new
   bound on `Document<T>`; one `Box` per observer, one indirect call per
   delivery), the node that handler is bound to (the observer is dropped with
-  it), an implicit or element root, a `rootMargin`, sorted thresholds and
-  ordered targets. `update_intersection_observations(time)` is §3.2.10 over
-  the last layout and the live scroll offsets — run by the host after each
+  it), and, from one `IntersectionObserverInit`, an implicit or element root,
+  a `rootMargin`, a target margin, sorted thresholds, plus ordered targets.
+  The target margin is a Lynx-motivated extension the spec does not have: it
+  dilates each target's border box in its own space, before its transform
+  and every clip, and the entry's rects and ratio are over the dilated rect,
+  so a margin reaches an element a clipping ancestor cut, as native
+  exposure's grown element rect does; the spec's `scrollMargin` dilates
+  scroll containers' clips only and stays out.
+  `update_intersection_observations(time)` is §3.2.10 over the last layout
+  and the live scroll offsets — run by the host after each
   commit or adopted scroll, gated by a stale bit `render`, a moved
   `scroll_to` and `observe` set — and `notify_intersection_observers` is
   §3.2.5's whole loop, re-entrant: each handler is out of its observer only
