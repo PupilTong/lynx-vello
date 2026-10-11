@@ -38,9 +38,11 @@ queue without clearing it. Selection captures its root at select time.
   carries none; `dataset` is the typed copy `__GetDataset` hands out, which
   native includes and web-core does not. `selectTab({index, smooth = true})`
   on a `viewpager` or `x-viewpager-ng` succeeds with no data as soon as the
-  scroll is requested: the pager scrolls to `index` times its scrollport
-  width, clamped to its range, smoothly unless `smooth` is falsy; a missing or
-  non-numeric `index` fails with code 4, `PARAM_INVALID`, and moves nothing.
+  scroll is requested: the pager's element child number `index` (truncated
+  toward zero) is scrolled into view with its start edge at the pager's
+  inline start edge, the pager alone scrolling, smoothly unless `smooth` is
+  falsy; a missing, non-numeric or negative `index`, or one naming no page,
+  fails with code 4, `PARAM_INVALID`, and moves nothing.
   `scrollTo({index?, offset = 0, smooth = false})`, `scrollBy({offset})` and
   `getScrollInfo()` on a `scroll-view` work on the axis it scrolls (x under
   `scroll-x` / `scroll-orientation="horizontal"`, else y): `scrollTo`

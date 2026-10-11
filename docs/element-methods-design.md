@@ -219,7 +219,7 @@ recorded so the comparison is complete.
 | --- | --- | --- |
 | every element (`LynxElement`) | `boundingClientRect` (built), `scrollIntoView`, `scrollTo`/`scrollBy` (CSSOM-View), `focus`/`blur` where focus exists | rect |
 | `dialog` | `show`, `showModal`, `close`, `requestClose` (built) | — |
-| `viewpager` / `x-viewpager-ng` | `selectTab` (built), `setDragGesture` | — |
+| `viewpager` / `x-viewpager-ng` | `selectTab` (built); `setDragGesture` is iOS/Android-only, undocumented, and left at code 3 (user ruling 2026-10-11) | — |
 | `scroll-view` | `scrollTo` (Lynx overload), `autoScroll`, `getScrollInfo` (native) | yes |
 | `x-list` | `scrollToPosition`, `autoScroll`, `getScrollContainerInfo`, `getVisibleCells` | yes |
 | `x-refresh-view` | `autoStartRefresh`, `finishRefresh`, `finishLoadMore` | — |

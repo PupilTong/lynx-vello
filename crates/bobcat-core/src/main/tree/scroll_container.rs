@@ -67,7 +67,7 @@ use dom::scroll::{ScrollBehavior, ScrollBox};
 use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Vector2D};
 use serde_json::{Map, Value};
 
-use super::{LynxDocument, is_truthy};
+use super::{LynxDocument, element_child, is_truthy};
 use crate::main::record::write_record_field;
 
 /// The tag native registers and web-core defines (`@Component('scroll-view',
@@ -260,28 +260,15 @@ pub(super) fn object(params: &str) -> Result<Map<String, Value>, InvalidParams> 
 }
 
 /// The position on the scrolling axis, in `view`'s scroll coordinates, of
-/// its element child number `index`, or code 4 when there is none.
+/// its element child number `index` ([`element_child`]), or code 4 when
+/// there is none.
 fn child_position(
     document: &LynxDocument,
     view: NodeId,
     index: f64,
     horizontal: bool,
 ) -> Result<f32, InvalidParams> {
-    let node = document.get(view).ok_or(InvalidParams)?;
-    let mut children = node
-        .child_ids()
-        .iter()
-        .copied()
-        .filter(|child| document.get(*child).is_some_and(dom::Node::is_element));
-    if index < 0.0 {
-        return Err(InvalidParams);
-    }
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "a non-negative integer; one past any child count saturates and names none"
-    )]
-    let child = children.nth(index as usize).ok_or(InvalidParams)?;
+    let child = element_child(document, view, index).ok_or(InvalidParams)?;
     let (Some(layout), Some(container)) = (
         document.rounded_layout(child),
         document.rounded_layout(view),

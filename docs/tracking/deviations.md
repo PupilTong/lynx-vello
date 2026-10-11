@@ -1277,13 +1277,22 @@ consequential choice about whether to follow the spec or the quirk.
     index scrolls to 0 and succeeds, and a numeric string or a boolean is
     coerced. iOS answers its generic code 1. **Native over web-core; the
     architect's decision, to be confirmed by the user.**
-  - *`selectTab` past either end clamps and succeeds*, and a fractional index
-    is multiplied as given (the `mandatory` snap settles the result) — both
-    web-core. Native refuses an out-of-range index (Android code 4,
-    `LynxUIViewPager.kt:168-170`; Harmony code 4, `ui_viewpager.cc:229-235`;
-    iOS code 1), and iOS and Harmony truncate a fraction to an integer
-    (`intValue`, `LynxUIViewPager.m:771`; `static_cast<int32_t>`,
-    `ui_viewpager.cc:222`).
+  - *`selectTab` scrolls the page into view* (2026-10-11): it is CSSOM-View's
+    "scroll an element into view" (`Document::scroll_into_view`,
+    `crates/dom/src/scroll/into_view.rs:188`) on the pager's element child
+    number `index`, with `inline: start`, `block: nearest` and
+    `container: nearest`. So an out-of-range or negative index is code 4 and
+    moves nothing (Android `LynxUIViewPager.kt:168-170`, Harmony
+    `ui_viewpager.cc:229-235`; iOS code 1), where web-core clamps
+    (`XViewpagerNg.ts:26-35`); a fraction is truncated (iOS `intValue`,
+    `LynxUIViewPager.m:771`; Harmony `static_cast<int32_t>`,
+    `ui_viewpager.cc:222`), where web-core multiplies it; and the page's
+    layout position, the pager's `scroll-padding`, the page's `scroll-margin`
+    and `direction: rtl` apply, where web-core and the natives assume uniform
+    full-width pages. A pager an author made no scroll container is left
+    alone, never an ancestor scrolled in its place. **Native over web-core
+    for the index rules; the standard algorithm for the position; the
+    architect's decision, to be confirmed by the user.**
   - *`selectTab` answers at once*, when the scroll is requested, as web-core
     does. iOS answers a smooth turn when it lands and fails the earlier
     callback when a second `selectTab` interrupts it
