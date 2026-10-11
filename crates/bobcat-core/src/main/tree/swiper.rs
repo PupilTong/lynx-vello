@@ -85,10 +85,14 @@
 //!   draws the seam, and its periodic snap rules page across it, so a drag or flick past the last
 //!   item lands on the first and back. Its rules come after `bounces`' and win on the same axis: a
 //!   circular axis has no edge to bounce. The mode margins are off (above), so the period is the
-//!   items' extent alone. web-core re-slots the first and last items into its shadow tree around
-//!   the current one (`XSwiperCircular.ts`) and turns snapping off (`x-swiper.css:122-131`); native
-//!   loops its `ViewPager` (`XSwiperUI.java:865-868`, `setLoop`). Here snapping stays.
-//!   `docs/tracking/deviations.md` records the difference.
+//!   items' extent alone. Without them an end item's snap position can lie past `max_offset` (the
+//!   last `carousel` item's start) or before `0` (the first centred item's centre); the document
+//!   admits the whole period on a circular axis, so such a position is one across the seam — the
+//!   first `flat-coverflow` item centred stands at the period less its offset — and `current` and
+//!   `scrollTo({index})` land on the item in every mode. web-core re-slots the first and last items
+//!   into its shadow tree around the current one (`XSwiperCircular.ts`) and turns snapping off
+//!   (`x-swiper.css:122-131`); native loops its `ViewPager` (`XSwiperUI.java:865-868`, `setLoop`).
+//!   Here snapping stays. `docs/tracking/deviations.md` records the difference.
 //! - `indicator-dots`, `indicator-color`, `indicator-active-color`: the strip, below.
 //!
 //! A child of the swiper that is neither an `x-swiper-item` nor a `wrapper` generates no box
@@ -104,7 +108,8 @@
 //! horizontal `carousel` scrolls its last item to its start, and a horizontal `flat-coverflow` or
 //! `coverflow` centres it. Under `vertical` the margin is 20% of the width, so a last item whose
 //! main axis is longer than its width stops short by the difference, as it does in a browser
-//! running web-core's rules.
+//! running web-core's rules. Under `circular` there is no margin and no end to the range: the
+//! last item's position is admitted on the circle (above).
 //!
 //! # The two animated modes are scroll-driven, and flat
 //!
@@ -130,7 +135,9 @@
 //! the flat tree, is `#content`. The initial target scrolls the item into view (`inline:
 //! nearest`, `block: start`) and the painter's at-rest snap rule settles it on the item's snap
 //! position — its start, or its centre in `flat-coverflow`, `coverflow` and `carry` — which is
-//! where web-core lands too: its `#scrollToIndex` (`XSwiper.ts:104-129`) aims at the centre in
+//! where web-core lands too. Under `circular` that position may lie past `max_offset` or before
+//! `0`; the document admits it on the circle, so the swiper still starts on the item. web-core's
+//! `#scrollToIndex` (`XSwiper.ts:104-129`) aims at the centre in
 //! `flat-coverflow` and at the start elsewhere, and mandatory snapping moves a start in the other
 //! centred modes to the centre. web-core reads `current` at connect (`:172-178`) and on every
 //! change (`XSwiperAutoScroll.ts:35-41`); a change here turns the swiper instantly where web-core
@@ -172,8 +179,14 @@
 //!   `(count − 1) × pitch` under `steps(count, jump-none)`. At rest on item `k` the timeline's
 //!   progress is `k / (count − 1)` — the scroll range is `(count − 1)` snap steps in every mode,
 //!   because the last item's end margin is scroll range (above) — which lies in the `k`-th of the
-//!   `count` steps, whose held value is `k × pitch`. web-core instead runs one animation per dot on
-//!   that item's view timeline, active between 30% and 70% of it (`htmlTemplates.ts:253-266`).
+//!   `count` steps, whose held value is `k × pitch`. Under `circular` there is no end margin and an
+//!   end item at rest may stand across the seam: the timeline reads an offset past `max_offset` at
+//!   its representative nearer the range (`dom::ScrollBox::unwrapped_offset`), so the first item
+//!   centred just before the start shows the first dot and a last item past `max_offset` the last.
+//!   An item between them reads its own offset over `max_offset`, which is not `k / (count − 1)`
+//!   there and need not lie in the `k`-th step once there are five items or more. web-core instead
+//!   runs one animation per dot on that item's view timeline, active between 30% and 70% of it
+//!   (`htmlTemplates.ts:253-266`).
 //! - **Cost**: `background-position` exports to no painter curve, so the strip re-cascades on the
 //!   main thread after each scroll the main thread adopts — one element per swiper. A `"false"`
 //!   strip drops its `animation-name` as well as its box: `display: none` alone does not stop an
@@ -1298,6 +1311,69 @@ mod tests {
                     case.mode,
                     case.vertical
                 );
+            }
+        }
+    }
+
+    /// Under `circular` the items pack without the mode margins, so an end
+    /// item's snap position lies past `max_offset` or before `0`, and the
+    /// document admits it on the circle — a period of `max_offset` plus the
+    /// scrollport — instead of clamping it. `carousel` (items 160, `max`
+    /// 280, period 480): the last item's start is 320. `flat-coverflow`
+    /// (items 120, `max` 160, period 360): the first item's centre is −40,
+    /// so 320 on the circle, and the last item's is 200. `current` settles
+    /// there and `scrollTo` lands there, in both orientations, and the
+    /// active dot is the item's: the scroll timeline reads 320 in
+    /// `flat-coverflow` at its representative −40, the first dot.
+    #[test]
+    fn current_and_scroll_to_land_across_the_seam_under_circular() {
+        for (mode, snaps, cases) in [
+            (
+                "carousel",
+                [0.0, 160.0, 320.0],
+                [(1_usize, 160.0), (2, 320.0)],
+            ),
+            (
+                "flat-coverflow",
+                [80.0, 200.0, 320.0],
+                [(0_usize, 320.0), (2, 200.0)],
+            ),
+        ] {
+            for vertical in [false, true] {
+                for (index, position) in cases {
+                    let label = format!("{mode} vertical={vertical} index={index}");
+                    let (mut document, swiper, _) = mode_swiper(mode, vertical, 3);
+                    document.set_attribute(swiper, "circular", "");
+                    document.set_attribute(swiper, "current", &index.to_string());
+                    document.commit();
+                    let content = scroller(&document, swiper);
+                    assert_eq!(snap_points(&document, swiper, vertical), snaps, "{label}");
+                    let at = document.scroll_offset(content);
+                    assert_eq!(
+                        document.settle_scroll(content, at),
+                        main_axis(vertical, position),
+                        "current settles on the item: {label}"
+                    );
+                    document.advance_scroll_timelines(&[content]);
+                    document.commit();
+                    #[expect(clippy::cast_precision_loss, reason = "index < 3")]
+                    let dot = index as f32 * 13.44;
+                    assert!(
+                        (active_offset(&document, swiper, vertical) - dot).abs() < 0.01,
+                        "the active dot: {label}"
+                    );
+
+                    let (mut document, swiper, _) = mode_swiper(mode, vertical, 3);
+                    document.set_attribute(swiper, "circular", "");
+                    document.layout();
+                    let params = format!(r#"{{"index":{index},"smooth":false}}"#);
+                    assert_eq!(scroll_to(&mut document, swiper, &params), Ok(()), "{label}");
+                    assert_eq!(
+                        document.scroll_offset(scroller(&document, swiper)),
+                        main_axis(vertical, position),
+                        "scrollTo lands on the item: {label}"
+                    );
+                }
             }
         }
     }
