@@ -872,15 +872,16 @@ fn a_stretched_offset_posts_clamped() {
     assert_eq!(entries[0].1.offset, dom::Vector2D::zero());
 }
 
-/// An `overscroll-behavior: circular` offset is the painter's alone past
-/// the end: what it posts is the live offset modulo the period (1000 here:
-/// `max_offset` 800 plus the 200px scrollport), clamped into range. Wheeled
-/// to 800, a drag of 108px (100 after the 8px slop) puts the live offset at
-/// 900 — the scrollport straddles the seam, and main is told 800, the edge.
-/// A second drag of 158px (150 after the slop) puts it at 1050, past the
-/// seam, and main is told 50.
+/// An `overscroll-behavior: circular` offset is posted modulo the period
+/// (1000 here: `max_offset` 800 plus the 200px scrollport) and unclamped,
+/// since the document admits the whole period on such an axis. Wheeled to
+/// 800, a drag of 108px (100 after the 8px slop) puts the live offset at
+/// 900 — the scrollport straddles the seam, and main is told 900, past
+/// `max_offset`. A second drag of 158px (150 after the slop) puts it at
+/// 1050, past the seam, and main is told 50. A bounded axis still posts
+/// clamped (`a_stretched_offset_posts_clamped`).
 #[test]
-fn a_wrapped_offset_posts_the_edge_through_the_seam() {
+fn a_wrapped_offset_posts_through_the_seam_unclamped() {
     use dom::input::PointerPhase::{Down, Move, Up};
 
     let (mut painter, main, scroller) = scrolling("overscroll-behavior:circular");
@@ -898,12 +899,16 @@ fn a_wrapped_offset_posts_the_edge_through_the_seam() {
         .expect("the drag moved the scroller");
     assert!((live.y - 900.0).abs() < 0.01, "got {live:?}");
     let (entries, _) = take(&main);
-    assert_eq!(entries[0].1.offset, dom::Vector2D::new(0.0, 800.0));
-    // Let go at one clock reading, so without velocity: at rest on the
-    // edge as main sees it.
+    assert_eq!(
+        entries[0].1.offset,
+        dom::Vector2D::new(0.0, 900.0),
+        "across the seam, as the screen shows it"
+    );
+    // Let go at one clock reading, so without velocity: at rest where it
+    // stands.
     touch(&mut painter, Up, 82.0);
     let (entries, _) = take(&main);
-    assert_eq!(entries[0].1.rest, Some(dom::Vector2D::new(0.0, 800.0)));
+    assert_eq!(entries[0].1.rest, Some(dom::Vector2D::new(0.0, 900.0)));
 
     touch(&mut painter, Down, 190.0);
     touch(&mut painter, Move, 32.0);

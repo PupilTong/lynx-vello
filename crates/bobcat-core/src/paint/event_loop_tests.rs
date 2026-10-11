@@ -950,15 +950,15 @@ fn a_flick_forward_from_the_last_page_wraps_to_the_first() {
 }
 
 /// The other way round: a drag back from the first card (finger moving
-/// down) shows the last card's end above the seam, and the document —
-/// which never wraps — holds `max_offset` meanwhile (the user's ruling,
-/// as for a `contain-bounce` stretch). 150px of travel less the 8px slop
-/// leaves the live offset at −142, 908 in the period; let go without
+/// down) shows the last card's end above the seam, and the document, which
+/// admits the whole period on a circular axis, holds the offset the screen
+/// shows meanwhile. 150px of travel less the 8px slop leaves the live
+/// offset at −142, 858 in the period, past `max_offset`; let go without
 /// velocity, it is nearer the last card's previous copy (−200, 58px off)
 /// than the first card (142px off), and glides there: 800 in the period,
 /// which the document adopts at rest.
 #[test]
-fn a_drag_back_from_the_first_page_shows_the_last_and_posts_the_edge() {
+fn a_drag_back_from_the_first_page_shows_the_last_and_posts_it_across_the_seam() {
     let mut engine = booted(&snapping_page(
         "overscroll-behavior:circular; scroll-snap-type:y mandatory",
         "scroll-snap-align:start",
@@ -973,10 +973,10 @@ fn a_drag_back_from_the_first_page_shows_the_last_and_posts_the_edge() {
         live_offset(&mut engine, 3).y
     );
     // The probe queues behind the marker the drag step sent.
-    assert_eq!(
-        scroll_offset_of(&mut engine, 3),
-        dom::Vector2D::new(0.0, 800.0),
-        "through the seam the document holds the edge"
+    let held = scroll_offset_of(&mut engine, 3);
+    assert!(
+        held.x == 0.0 && (held.y - 858.0).abs() < 0.5,
+        "through the seam the document holds the offset the screen shows, got {held:?}"
     );
     touch_at(&mut engine, 0.4, PointerPhase::Up, 180.0);
     let at = frames_until_still(&mut engine, 0.4);
