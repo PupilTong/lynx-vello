@@ -19,6 +19,23 @@ driven! {
     "api-bindtap-lynx-view-relative" => [
         "tapped": [Tap(100.0, 100.0)],
     ],
+    // Upstream scrolls `#x`, the 300x500 scroll-view at the origin, to offset 200 and then
+    // 400 by script; here the wheel is turned that far over it, 200px each time.
+    "api-exposure-area" => [
+        "scrolled-200": [Wheel((150.0, 250.0), (0.0, 200.0))],
+        "scrolled-400": [Wheel((150.0, 250.0), (0.0, 200.0))],
+    ],
+    // Upstream scrolls `#x` (the horizontal scroll-view, y 266..500 on screen) to offset
+    // 600 and back to 0, then `#y` (the vertical one, the whole 500px box) to 50 and back
+    // to 0, by script; here the wheel is turned that far, over `#x` for the first two and
+    // over the colour text inside `#y` for the last two. `#x` scrolls 400px at most, so
+    // upstream's 600 stops at 400 too.
+    "api-exposure-basic" => [
+        "right-yellow": [Wheel((196.5, 390.0), (600.0, 0.0))],
+        "white-back": [Wheel((196.5, 390.0), (-600.0, 0.0))],
+        "red-down": [Wheel((196.5, 100.0), (0.0, 50.0))],
+        "white-down-back": [Wheel((196.5, 100.0), (0.0, -50.0))],
+    ],
     // The four numbered texts of the horizontal scroll-view, left to right. The fourth
     // is tapped on its visible part: its centre, (420, 19), is past the viewport, and
     // upstream's click scrolls it into view first.
@@ -27,6 +44,20 @@ driven! {
         "index-2": [Tap(180.0, 19.0)],
         "index-3": [Tap(300.0, 19.0)],
         "index-4": [Tap(382.0, 19.0)],
+    ],
+    // Upstream sets `#y`, the full-viewport scroll-view, to scrollTop 200, 800 and 1000 by
+    // script; here the wheel is turned by the differences over it.
+    "api-exposure-dynamic-screen-margin" => [
+        "orange-half-do-trigger": [Wheel((196.5, 360.0), (0.0, 200.0))],
+        "green-half-not-trigger": [Wheel((196.5, 360.0), (0.0, 600.0))],
+        "green-half-do-trigger": [Wheel((196.5, 360.0), (0.0, 200.0))],
+    ],
+    // Upstream sets `#y`, the full-viewport scroll-view, to scrollTop 200, 800 and 1000 by
+    // script; here the wheel is turned by the differences over it.
+    "api-exposure-dynamic-ui-margin" => [
+        "orange-half-do-trigger": [Wheel((196.5, 360.0), (0.0, 200.0))],
+        "green-half-not-trigger": [Wheel((196.5, 360.0), (0.0, 600.0))],
+        "green-half-do-trigger": [Wheel((196.5, 360.0), (0.0, 200.0))],
     ],
     // `#button`, clicked once.
     "api-exposure-stop-events-has-complex-dataset" => [
@@ -141,6 +172,15 @@ driven! {
     // `#scrollToPosition`, clicked once.
     "basic-element-list-scroll-to-position" => [
         "scrolled-to-position": [Tap(196.5, 508.0)],
+    ],
+    // Upstream's two CDP swipes: from (100, 500) up 450px, 100 ms apart.
+    "basic-element-scroll-view-event-scrolltolower" => [
+        "swiped-to-lower": [
+            Drag((100.0, 500.0), (100.0, 50.0)),
+            Wait(100),
+            Drag((100.0, 500.0), (100.0, 50.0)),
+            Wait(100),
+        ],
     ],
     // `#target`, clicked four times.
     "basic-element-text-set-native-props-with-setData" => [
@@ -335,6 +375,12 @@ driven! {
     "basic-element-x-viewpager-ng-bindchange-select-tab" => [
         "last-selected": [Tap(196.5, 24.0)],
         "first-selected": [Tap(196.5, 8.0)],
+    ],
+    // Upstream's two swipes over the pager (x 39..353, y 80..580): 200px to the left from
+    // (300, 200), then 200px to the right from (50, 200).
+    "basic-element-x-viewpager-ng-exposure" => [
+        "exposure-1": [Drag((300.0, 200.0), (100.0, 200.0))],
+        "exposure-2": [Drag((50.0, 200.0), (250.0, 200.0))],
     ],
     // The centre of the pager, `#target`, clicked once.
     "basic-element-x-viewpager-ng-method-selecttab" => [
