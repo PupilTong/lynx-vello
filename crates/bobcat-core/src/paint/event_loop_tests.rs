@@ -2029,6 +2029,141 @@ fn a_windowed_scroll_delivers_intersections_to_an_engine_component() {
     );
 }
 
+/// A 200×200 scroller (node 3) over eight 60px rows, `row0` to `row7`, each
+/// with that `exposure-id`. At offset 0 the scrollport shows rows 0 to 3 —
+/// row 3 in part — and row 4 starts 40px below its bottom edge; at 70, row 0
+/// ends 10px above its top edge and row 4 shows its top 30px. The rows' 480px
+/// make 280px of scroll range, so 70px is inside the encode window and short
+/// of half its headroom: the scroll recommits nothing.
+const EXPOSURE_ROWS_PAGE: &str = r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const scroller = __CreateView(0);
+          __AppendElement(page, scroller);
+          __SetInlineStyles(scroller,
+            'display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px');
+          const rows = [];
+          for (let index = 0; index < 8; index++) {
+            const row = __CreateView(0);
+            __SetInlineStyles(row, 'flex-shrink:0;width:200px;height:60px');
+            __AppendElement(scroller, row);
+            __SetAttribute(row, 'exposure-id', 'row' + index);
+            rows.push(row);
+          }
+          globalThis.held = [page, scroller, rows];
+          __FlushElementTree();
+        };
+        ";
+
+/// The BTS entry of [`EXPOSURE_ROWS_PAGE`]: one `GlobalEventEmitter`
+/// listener per record list, logging the list's name and the `exposure-id`
+/// of each record in it — and `:malformed` after them if a record is not
+/// web-core's shape for that list.
+const EXPOSURE_LISTENER: &str = r"
+        import { lynx, console } from 'bobcat:bts-runtime';
+        const emitter = lynx.getJSModule('GlobalEventEmitter');
+        for (const name of ['exposure', 'disexposure']) {
+          emitter.addListener(name, (...args) => {
+            const [list] = args;
+            const shaped = args.length === 1 && list.every((record) =>
+              record.type === name &&
+              record.target.uid === record['unique-id'] &&
+              record.currentTarget.uid === record['unique-id'] &&
+              record.exposureID === record['exposure-id'] &&
+              record.detail['unique-id'] === 0 &&
+              typeof record.timestamp === 'number');
+            const ids = list.map((record) => record['exposure-id']).join(',');
+            console.log(`${name}:${ids}${shaped ? '' : ':malformed'}`);
+          });
+        }
+        ";
+
+/// Turns the host until the view's realms have logged `count` console
+/// messages in all, appending each to `heard` in order. A failure any realm
+/// reports, or a view that ends, fails the wait with what it said.
+fn wait_for_console(engine: &mut TestEngine, heard: &mut Vec<String>, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while heard.len() < count {
+        for event in engine.pump() {
+            match event {
+                crate::EngineEvent::ConsoleMessage { message, .. } => heard.push(message),
+                event @ (crate::EngineEvent::StartupFailed(_)
+                | crate::EngineEvent::Panicked(_)
+                | crate::EngineEvent::ScriptRunError(_)
+                | crate::EngineEvent::ListenerFailed(_)
+                | crate::EngineEvent::WorkerThrew { .. }
+                | crate::EngineEvent::WorkerEnded { .. }) => {
+                    panic!("a realm failed: {event:?}");
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected {count} console messages, heard {heard:?}"
+        );
+        std::thread::yield_now();
+    }
+}
+
+/// Exposure end to end through the real painter: a wheel scroll inside the
+/// encode window is composed on the painting side, its offset posted and
+/// adopted on the main thread, the intersection update run against it by that
+/// entry's epilogue, and the entry after it hands the BTS one `exposure` list
+/// for the row that entered and then one `disexposure` list for the row that
+/// left — each reaching a `GlobalEventEmitter` listener as its one argument —
+/// with no commit anywhere along the way.
+///
+/// The view is turned by hand rather than booted with `wait_for_boot`, which
+/// would drop whatever arrived behind `ScriptFinished` in the same turn: the
+/// boot's own `exposure` list can.
+#[test]
+fn a_windowed_scroll_delivers_exposure_records_to_the_bts() {
+    let mut engine = TestViewSpec::new(EXPOSURE_ROWS_PAGE)
+        .with_background_entry(EXPOSURE_LISTENER)
+        .create(Arc::new(crate::view::NoWakeup));
+    let mut heard = Vec::new();
+    wait_for_console(&mut engine, &mut heard, 1);
+    assert_eq!(
+        heard,
+        ["exposure:row0,row1,row2,row3"],
+        "boot's update exposed every row the scrollport shows, the one it shows in part included",
+    );
+    // A later entry: the delivery's own epilogue has run by the time this
+    // answers, so whatever it committed is published.
+    engine
+        .probe_document(|_| ())
+        .expect("the view's task answers probes");
+    let committed = engine
+        .published_frame()
+        .expect("boot published a frame")
+        .commit_id();
+
+    engine.dispatch_input(InputEvent::wheel(
+        Point2D::new(100.0, 100.0),
+        dom::Vector2D::new(0.0, 70.0),
+    ));
+    wait_for_console(&mut engine, &mut heard, 3);
+    assert_eq!(
+        heard[1..],
+        ["exposure:row4", "disexposure:row0"],
+        "the row that entered, then the row that left, each list once",
+    );
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(0.0, 70.0),
+        "the document adopted the posted offset",
+    );
+    assert_eq!(
+        engine
+            .published_frame()
+            .expect("still published")
+            .commit_id(),
+        committed,
+        "a windowed scroll commits nothing, and the delivery wrote nothing",
+    );
+}
+
 /// A 200px scroller (node 3) whose first row (node 4) recolors along a
 /// `scroll()` timeline of 1000px: `color` never exports, so only the main
 /// thread's cascade moves it.

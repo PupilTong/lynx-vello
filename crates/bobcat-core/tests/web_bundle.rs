@@ -29,6 +29,7 @@ fn page_config(template: &bobcat_source::web::WebTemplate) -> PageConfig {
         default_overflow_visible: template.config_flag("defaultOverflowVisible"),
         enable_css_selector: template.config_flag("enableCSSSelector"),
         enable_js_data_processor: template.config_flag("enableJSDataProcessor"),
+        enable_exposure_ui_margin: template.config_flag("enableExposureUIMargin"),
     }
 }
 

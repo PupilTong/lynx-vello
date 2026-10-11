@@ -49,7 +49,7 @@ import {
   type ContextEvent,
   createCrossThreadContext,
 } from "bobcat:cross-thread-context";
-import { __BobcatQueryNodes } from "bobcat:element";
+import { __BobcatExposureEvents, __BobcatQueryNodes } from "bobcat:element";
 // The whole PAPI as one namespace, for the binding list a named Lepus
 // chunk is called with: the export names are this module's only source of
 // truth for what `MTS_CHUNK_PREAMBLE` imports.
@@ -58,7 +58,7 @@ import type { NodeQueryRequest } from "bobcat:selector-query";
 import "bobcat:timers";
 import { cancelAnimationFrame, clearAnimationFrames, requestAnimationFrame } from "bobcat:animation-frame";
 import { createSystemInfo } from "bobcat:system-info";
-import { initialProcessor as getInitialProcessor, globalProps, initData, loadModuleSync, nativeModuleTable, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
+import { initialProcessor as getInitialProcessor, globalProps, initData, loadModuleSync, nativeModuleTable, preloadStyleSheet, adoptStyleSheet, switchExposure } from "bobcat-internal:host";
 import { reportError as _ReportError, console } from "bobcat:diagnostics";
 import { sectionURL, styleSheetURL as sectionStyleSheetURL } from "bobcat:section-url";
 import { type BundleHandle, createBundleFetches } from "bobcat:bundle-fetch";
@@ -100,7 +100,20 @@ type LepusMethodCall = {
 type FromBackground = LepusMethodCall | NodeQueryRequest
   | { bobcat: "runtime"; method: "disposed" }
   | { bobcat: "runtime"; method: "reloadFromJS"; data?: unknown; id?: number }
+  | SwitchExposure
   | (ContextEvent & { bobcat?: never });
+
+/**
+ * The BTS's `lynx.stopExposure` (`on` false) and `lynx.resumeExposure()`
+ * (`on` true), with `sendEvent` already read the way [`sendsDisexposure`]
+ * reads it. Booleans here; the host member takes them as `0 | 1`.
+ */
+type SwitchExposure = {
+  bobcat: "runtime";
+  method: "switchExposure";
+  on: boolean;
+  sendEvent: boolean;
+};
 
 function noop() {
   return undefined;
@@ -262,6 +275,8 @@ export function __BobcatConnectBackground(worker: Worker, data: unknown, entry?:
             sendToBackground({bobcat: "runtime", method: "reloadResult", id: message.id});
           });
         }
+      } else if (message.method === "switchExposure") {
+        switchExposure(message.on ? 1 : 0, message.sendEvent ? 1 : 0);
       }
     } else {
       jsContext.receive(message);
@@ -473,6 +488,37 @@ export function __BobcatUpdateData(json: string, processorName: string, reset: b
 
 export function __BobcatSendGlobalEvent(name: string, json: string) {
   sendToBackground({bobcat:"runtime", method:"sendGlobalEvent", name, args:JSON.parse(json)});
+}
+
+/**
+ * Sends one global exposure record list to the BTS. The host calls this from
+ * its intersection delivery entry, `exposure` before `disexposure`, with
+ * `kind` the list's name and `record` the `bobcat:record` payload
+ * `bobcat:element`'s `__BobcatExposureEvents` builds the list out of. The
+ * list is the global event's one argument, as web-core sends it
+ * (`sendGlobalEvent(kind, [list])`, `ExposureServices.ts:256-271`), so a BTS
+ * `GlobalEventEmitter` listener for `kind` receives the array itself.
+ */
+export function __BobcatSendExposure(kind: string, record: string) {
+  sendToBackground({bobcat:"runtime", method:"sendGlobalEvent", name:kind,
+    args:[__BobcatExposureEvents(kind, record)]});
+}
+
+/**
+ * Whether `lynx.stopExposure(options)` sends a `disexposure` for every exposed
+ * element: web-core's `param.sendEvent ?? true`
+ * (`background-apis/createNativeModules.ts:27-29`), behind lynx-core's shim,
+ * which turns an omitted argument into `{sendEvent: true}`
+ * (`lynx-core/src/app/app.ts:402-408`). The BTS runtime reads it the same way
+ * before it posts `switchExposure` here.
+ *
+ * Native differs for an object that names no `sendEvent`: its `stopExposure`
+ * sends only for a missing argument or a true `sendEvent`
+ * (`UIExposure.java:488-492`, `LynxUIExposure.m:549-553`), so `{}` sends
+ * nothing there and everything here.
+ */
+function sendsDisexposure(options: unknown): boolean {
+  return Boolean((options as {sendEvent?: unknown} | null | undefined)?.sendEvent ?? true);
 }
 
 export function __BobcatUpdateGlobalProps(json: string) {
@@ -692,4 +738,24 @@ export const lynx = {
   },
   loadScript,
   triggerGlobalEventFromLepus: noop,
+  /**
+   * Stops exposure detection, as native does: every detection is dropped,
+   * and with `sendEvent` (the default; see [`sendsDisexposure`]) every
+   * exposed element is sent one `disexposure`. What the stop sends is
+   * delivered by the host's next intersection delivery entry.
+   */
+  stopExposure(options?: {sendEvent?: boolean}) {
+    switchExposure(0, sendsDisexposure(options) ? 1 : 0);
+  },
+  /** Resumes exposure detection after `stopExposure`. */
+  resumeExposure() {
+    switchExposure(1, 1);
+  },
+  /**
+   * Accepted and ignored: exposure is detected by the intersection update
+   * each rendering step runs, not by a polling timer whose rate could be set.
+   */
+  setObserverFrameRate(_options?: unknown) {
+    return undefined;
+  },
 };

@@ -363,9 +363,15 @@ fn build_web_config(
     target_version: &str,
     app_type: &str,
 ) -> Map<String, JsonValue> {
-    // Native's config decoder accepts this switch only as a JSON boolean.
-    // Preserve that decision before the web wire erases the value's type.
-    for key in ["enableQueryComponentSync", "enableJSDataProcessor"] {
+    // Native's config decoder accepts these switches only as JSON booleans
+    // (`enableExposureUIMargin`: `lynx_config_decoder.h:571-574`, an
+    // `IsBool()` test). Preserve that decision before the web wire erases
+    // the value's type.
+    for key in [
+        "enableQueryComponentSync",
+        "enableJSDataProcessor",
+        "enableExposureUIMargin",
+    ] {
         if let Some(value) = page_config.get_mut(key) {
             *value = JsonValue::Bool(value.as_bool().unwrap_or(false));
         }
