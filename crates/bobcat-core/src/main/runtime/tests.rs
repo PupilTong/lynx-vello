@@ -2527,6 +2527,161 @@ fn scroll_to_turns_a_swiper_through_both_invoke_paths() {
     assert_eq!(offset(), dom::Vector2D::new(400.0, 0.0));
 }
 
+/// `autoStartRefresh`, `finishRefresh` and `finishLoadMore` on an
+/// `x-refresh-view`, through `__InvokeUIMethod` and the selector-query
+/// `invoke`. The view is 400px tall with a 50px header, a content `view` of
+/// its full height and a 50px footer, so the 120px top placeholder puts the
+/// header's start at 120 and `#content` at rest at 170. Each method answers
+/// code 0 and records a request for the shadow `#container`:
+/// `autoStartRefresh` an instant one to the header's start, which moves the
+/// document to 120 at once, and the other two a smooth one back to
+/// `#content`, which the painter carries out while the document stays where
+/// it is. `selectTab` is no method of the view: code 3.
+#[test]
+#[expect(clippy::too_many_lines, reason = "one scenario over both invoke paths")]
+fn a_refresh_view_answers_its_three_methods_through_both_invoke_paths() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const view = __CreateElement('x-refresh-view', 0);
+                  __SetID(view, 'refresh');
+                  __SetInlineStyles(view, 'width:200px;height:400px');
+                  __AppendElement(page, view);
+                  const header = __CreateElement('x-refresh-header', 0);
+                  __SetInlineStyles(header, 'height:50px');
+                  const content = __CreateView(0);
+                  __SetInlineStyles(content, 'height:100%');
+                  const footer = __CreateElement('x-refresh-footer', 0);
+                  __SetInlineStyles(footer, 'height:50px');
+                  __AppendElement(view, header);
+                  __AppendElement(view, content);
+                  __AppendElement(view, footer);
+                  globalThis.held = [page, view];
+                };
+                ",
+            "app:///refresh-view.js",
+        )
+        .expect("main-thread script");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import {
+                  __BobcatQueryNodes,
+                  __FlushElementTree,
+                  __InvokeUIMethod,
+                } from 'bobcat:element';
+                __FlushElementTree();
+                globalThis.viaPapi = (method, params) => {
+                  let answer;
+                  let calls = 0;
+                  __InvokeUIMethod(held[1], method, params, result => {
+                    answer = result;
+                    calls += 1;
+                  });
+                  if (calls !== 1) throw new Error('the callback ran ' + calls + ' times');
+                  return answer;
+                };
+                globalThis.viaQuery = (method, params) => __BobcatQueryNodes({
+                  bobcat: 'runtime', method: 'nodeQuery', operation: 'invoke',
+                  token: {type: 0, identifier: '#refresh', component_id: '',
+                          first_only: true, root_unique_id: undefined},
+                  params: {method, params},
+                });
+                globalThis.expectCode = (answer, code) => {
+                  if (answer.code !== code || answer.data !== undefined) {
+                    throw new Error('expected ' + code + ', got ' + JSON.stringify(answer));
+                  }
+                };
+                ",
+            "app:///helpers.js",
+            "helpers",
+        )
+        .expect("helpers");
+    let container = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let view = tree.get(page).expect("the page").child_ids()[0];
+        crate::main::tree::refresh_view::container(&tree, view)
+            .expect("the refresh view's `#container`")
+    };
+    let offset = || elements.tree().scroll_offset(container);
+    let request = || {
+        let mut tree = elements.tree();
+        let frame = tree.commit();
+        let slot = frame
+            .slot_of(container)
+            .expect("`#container` is a scroll container");
+        frame.scroll_slots()[slot as usize]
+            .request
+            .map(|request| (request.target, request.behavior))
+    };
+    let instant = Some((
+        dom::Vector2D::new(0.0, 120.0),
+        dom::scroll::ScrollBehavior::Instant,
+    ));
+    let smooth = Some((
+        dom::Vector2D::new(0.0, 170.0),
+        dom::scroll::ScrollBehavior::Smooth,
+    ));
+    assert_eq!(
+        offset(),
+        dom::Vector2D::new(0.0, 170.0),
+        "opens on `#content`"
+    );
+    let steps = std::cell::Cell::new(0);
+    let run = |runtime: &mut MainThreadRuntime, js_runtime: &mut ScriptRuntime, source: &str| {
+        steps.set(steps.get() + 1);
+        let name = format!("app:///step-{}.js", steps.get());
+        runtime
+            .evaluate_module(js_runtime, source, &name, "step")
+            .expect("step");
+    };
+
+    // After the first `autoStartRefresh` the document rests at 120: a
+    // smooth request leaves it there for the painter, and an instant one to
+    // where it already is still replaces the pending request.
+    for (source, carried) in [
+        ("expectCode(viaPapi('autoStartRefresh', {}), 0);", instant),
+        (
+            "expectCode(viaQuery('finishRefresh', undefined), 0);",
+            smooth,
+        ),
+        (
+            "expectCode(viaQuery('autoStartRefresh', undefined), 0);",
+            instant,
+        ),
+        ("expectCode(viaPapi('finishLoadMore', null), 0);", smooth),
+        (
+            "expectCode(viaPapi('autoStartRefresh', undefined), 0);",
+            instant,
+        ),
+        ("expectCode(viaPapi('finishRefresh', {}), 0);", smooth),
+        ("expectCode(viaQuery('finishLoadMore', {}), 0);", smooth),
+    ] {
+        run(&mut runtime, &mut js_runtime, source);
+        assert_eq!(offset(), dom::Vector2D::new(0.0, 120.0), "{source}");
+        assert_eq!(request(), carried, "{source}");
+    }
+
+    let pending = elements.tree().pending_scroll_request(container);
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        r"
+            expectCode(viaPapi('selectTab', {index: 1}), 3);
+            expectCode(viaQuery('selectTab', {index: 1}), 3);
+            expectCode(viaPapi('startRefresh', {}), 3);
+            ",
+    );
+    assert_eq!(elements.tree().pending_scroll_request(container), pending);
+    assert_eq!(offset(), dom::Vector2D::new(0.0, 120.0));
+}
+
 /// A `scroll-view`'s `getScrollInfo`, `scrollBy` and `scrollTo` through
 /// `__InvokeUIMethod`: the data methods' records come back as the objects
 /// `element-papi.ts` builds from them, in CSS px, and every method moves the

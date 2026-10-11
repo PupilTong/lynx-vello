@@ -1477,7 +1477,8 @@ write through and read back, among them `__SetInlineStyles` and the name-based
 `scrollIntoView` and CSSOM-View's `scrollTo`/`scrollBy` on every element, a pager's
 `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s
 `scrollTo`/`scrollBy`/`getScrollInfo`, a `list`'s
-`scrollToPosition`/`scrollBy`/`getScrollContainerInfo`/`getVisibleCells` and a
+`scrollToPosition`/`scrollBy`/`getScrollContainerInfo`/`getVisibleCells`, an
+`x-refresh-view`'s `finishRefresh`/`finishLoadMore`/`autoStartRefresh` and a
 dialog's `show`/`showModal`/`close`/`requestClose`, and
 `__GetComputedStyleByKey`, neither of which commits anything
 — both read the last completed pass and leave the decision to flush to the
@@ -1696,7 +1697,12 @@ the header and footer in named slots (the component sets their `slot` on
 resting snap target and the initial scroll target; the header's and footer's
 `scroll-snap-align` is a `view(block)` animation, `start`/`end` from 90%
 visible, in place of web-core's `x-magnet-enable`; `enable-refresh`/
-`enable-loadmore="false"` hide an end; no UI method, no events),
+`enable-loadmore="false"` hide an end; no events; three UI methods, its
+`CustomElement::invoke`, each a `Document::scroll_into_view` in
+`#container`: `finishRefresh` and `finishLoadMore` smoothly put `#content`
+back at `block: center`, `autoStartRefresh` instantly puts the first header
+at `block: start`, since from rest the header is no snap position and the
+painter would settle a smooth request back to `#content`),
 `tree::scroll_coordinator` (the ten
 `scroll-coordinator`/`x-foldview-*-ng` tags as a collapsing header: the
 coordinator a vertical scroll container, the header and slot absolutely
@@ -2446,7 +2452,8 @@ plus the element's `id` and `dataset` as native reports them —
 `scrollIntoView` and CSSOM-View's `scrollTo`/`scrollBy` on every element, a pager's
 `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s `scrollTo`, `scrollBy`
 and `getScrollInfo`, a `list`'s `scrollToPosition`, `scrollBy`,
-`getScrollContainerInfo` and `getVisibleCells`, and a dialog's four methods, and fails every other method with
+`getScrollContainerInfo` and `getVisibleCells`, an `x-refresh-view`'s
+`finishRefresh`, `finishLoadMore` and `autoStartRefresh`, and a dialog's four methods, and fails every other method with
 code 3, `METHOD_NOT_FOUND`,
 alongside the selection failures it already delivered. No callback or document handle crosses into
 Rust's Worker transport. See `docs/node-query-runtime.md` for the supported
@@ -2980,14 +2987,16 @@ would host it:
 - **UI methods other than `boundingClientRect`, `scrollIntoView`,
   `scrollTo`/`scrollBy`, `selectTab`, a swiper's `scrollTo`, a
   `scroll-view`'s `scrollTo`/`scrollBy`/`getScrollInfo`, a `list`'s
-  `scrollToPosition`/`scrollBy`/`getScrollContainerInfo`/`getVisibleCells`
+  `scrollToPosition`/`scrollBy`/`getScrollContainerInfo`/`getVisibleCells`,
+  an `x-refresh-view`'s `finishRefresh`/`finishLoadMore`/`autoStartRefresh`
   and a dialog's `show`/`showModal`/`close`/`requestClose`.** Those dispatch
   by name (`boundingClientRect`, `scrollIntoView` and CSSOM-View's
   `scrollTo`/`scrollBy` on every element, `selectTab` on
   the two pager tags only, `scrollTo({index, smooth})` on `x-swiper` only,
   the three scroll methods on `scroll-view` only, where they shadow the
   standard two, the four list methods on `list` only, whose `scrollBy`
-  shadows the standard one, the dialog's on `dialog` only) through
+  shadows the standard one, the refresh view's three on `x-refresh-view`
+  only, the dialog's on `dialog` only) through
   `__InvokeUIMethod`; every other name — the base set's `focus`/`blur` (no
   focus model), a `scroll-view`'s `autoScroll` and `takeContentScreenshot`,
   a `list`'s `autoScroll` and `getScrollInfo`, `requestUIInfo`,

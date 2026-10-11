@@ -51,6 +51,17 @@ queue without clearing it. Selection captures its root at select time.
   scrolled into view in its shadow `#content` at the item's snap position
   (its own `scroll-snap-align` on the main axis), with the same code 4 rules
   for `index`; Android's `direction` is ignored.
+  `finishRefresh()`, `finishLoadMore()` and `autoStartRefresh()` on an
+  `x-refresh-view` read no params and always succeed with no data: the first
+  two smoothly scroll its shadow `#container` back to `#content`, the
+  position the view opens on, and `autoStartRefresh` instantly scrolls the
+  first header's start to the scrollport's start; a view with no header box
+  records nothing. `autoStartRefresh` is instant where web-core's is
+  smooth: the painter glides a smooth request to where the frame's snap
+  rule would settle its target, and the header is a snap position only
+  once it is at least 90% visible, so from rest a smooth request to it
+  would be settled back to `#content`. A smooth version needs a request
+  the painter does not settle at request time, a follow-up for the user.
   `scrollTo({index?, offset = 0, smooth = false})`, `scrollBy({offset})` and
   `getScrollInfo()` on a `scroll-view` work on the axis it scrolls (x under
   `scroll-x` / `scroll-orientation="horizontal"`, else y): `scrollTo`
@@ -164,7 +175,7 @@ native numeric-length conversion remain unsupported.
 
 Legacy component-scoped roots, direct MTS selector PAPI, UI invoke methods
 other than the base set's four (`boundingClientRect`, `scrollIntoView`,
-`scrollTo`, `scrollBy`), `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s three, a `list`'s four and a dialog's four (a `list`'s `autoScroll` among them), animation methods,
+`scrollTo`, `scrollBy`), `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s three, a `list`'s four, an `x-refresh-view`'s three and a dialog's four (a `list`'s `autoScroll` among them), animation methods,
 dataset-to-DOM reflection and cross-realm host objects remain pending.
 `boundingClientRect` takes no `relativeTo`, `androidEnableTransformProps` or
 `iOSEnableAnimationProps`: it reads nothing from its `params`, since each of

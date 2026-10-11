@@ -2445,8 +2445,10 @@ fn method_answer(outcome: MethodOutcome) -> HostValue {
 /// under the job that measures, and a card that wants current numbers says
 /// so. The UI methods that write record what the next commit carries:
 /// `selectTab`, a `scroll-view`'s `scrollTo` and `scrollBy`, a `list`'s
-/// `scrollToPosition` and `scrollBy`, an `x-swiper`'s `scrollTo`, and every
-/// element's `scrollIntoView`, `scrollTo` and `scrollBy` a scroll request, a
+/// `scrollToPosition` and `scrollBy`, an `x-swiper`'s `scrollTo`, an
+/// `x-refresh-view`'s `finishRefresh`, `finishLoadMore` and
+/// `autoStartRefresh`, and every element's `scrollIntoView`, `scrollTo` and
+/// `scrollBy` a scroll request, a
 /// dialog's four an attribute, a state bit and top-layer membership, and
 /// `close`/`requestClose` the events they queue for an entry of their own. Both still go through
 /// [`validate_live_element`], so a freed element is a script error rather than a zero rect or an
@@ -2479,7 +2481,9 @@ fn install_readback_members(
             // and `getScrollInfo` (`tree::scroll_container`), a `list`'s
             // `scrollToPosition`, `scrollBy`, `getScrollContainerInfo` and
             // `getVisibleCells` (`tree::list`), an
-            // `x-swiper`'s `scrollTo` (`tree::swiper`), and a dialog's
+            // `x-swiper`'s `scrollTo` (`tree::swiper`), an `x-refresh-view`'s
+            // `finishRefresh`, `finishLoadMore` and `autoStartRefresh`
+            // (`tree::refresh_view`), and a dialog's
             // `show`, `showModal`, `close` and `requestClose`
             // (`tree::dialog`). On `NotFound` the shared base set every
             // element has answers (`tree::base_methods`): the documented UI
