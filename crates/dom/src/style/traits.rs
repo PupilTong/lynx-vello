@@ -191,6 +191,13 @@ impl<'a, T: Sync> TShadowRoot for &'a Node<T> {
     }
 }
 
+// `implicit_scope_for_sheet_in_shadow_root` (and `TShadowRoot`'s
+// `implicit_scope_for_sheet`) stay at their `None` defaults: stylo only asks
+// them for a `StylistImplicitScopeRoot::Cached` root, which no sheet here
+// produces. Document sheets report no implicit `@scope` root (the document
+// element) and shadow sheets report `ImplicitScopeRoot::Constructed` (the
+// host), both resolved without a per-tree lookup
+// (`style::engine::ShadowStyleSheet`).
 impl<'a, T: Sync> TElement for &'a Node<T> {
     type ConcreteNode = &'a Node<T>;
     type TraversalChildrenIterator = ChildrenIter<'a, T>;
