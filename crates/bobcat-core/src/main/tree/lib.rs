@@ -26,8 +26,8 @@
 //! [`dom::CustomElement::invoke`], which the runtime's `callElementMethod`
 //! reaches through [`dom::Document::invoke_element_method`]. The methods
 //! every element has whatever its kind, which `callElementMethod` runs when
-//! the kind has no method of the name, are [`base_methods`]' (only
-//! `scrollIntoView` today).
+//! the kind has no method of the name, are [`base_methods`]'
+//! (`boundingClientRect`, `scrollIntoView`, `scrollTo` and `scrollBy`).
 //! `scroll_coordinator` needs no component, and has no UI method: its ten tags
 //! are UA rules over anchor-sized absolute boxes, a sticky toolbar and
 //! `scroll-capture-y`. `refresh_view` and `overlay` have no UI method.

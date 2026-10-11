@@ -31,6 +31,9 @@ queue without clearing it. Selection captures its root at select time.
   the callback.
 - `invoke()` calls `success(result.data)` or `fail(result)`. Selecting all nodes
   fails locally with code 5. Missing targets use code 2. `boundingClientRect`
+  exists on every element, a member of the base set the host answers after
+  the element's kind, which never answers it
+  (`crates/bobcat-core/src/main/tree/base_methods.rs:82`), and
   succeeds, with `{id, dataset, left, top, right, bottom, width, height}`: the
   border box in viewport CSS px as of the last completed layout pass, with
   ancestor scroll offsets applied and transforms ignored, `right` and `bottom`
@@ -70,7 +73,7 @@ queue without clearing it. Selection captures its root at select time.
   exists on every element and succeeds with no data once the scroll is
   requested: it is CSSOM-View's `scrollIntoView` with `container: "nearest"`
   (`Document::scroll_into_view`, `crates/dom/src/scroll/into_view.rs:188`,
-  run by `crates/bobcat-core/src/main/tree/base_methods.rs:84`), so only the
+  run by `crates/bobcat-core/src/main/tree/base_methods.rs:252`), so only the
   nearest scroll container above the element moves, to the position
   `block` (default `"start"`) and `inline` (default `"nearest"`) choose
   against its `scroll-padding` and the element's `scroll-margin`, smoothly
@@ -78,6 +81,24 @@ queue without clearing it. Selection captures its root at select time.
   fails with code 4; an element with no box or no scroll container above it
   fails with code 8, `OPERATION_ERROR`, native's answer (web-core answers 0,
   recorded in `docs/tracking/deviations.md`).
+  `scrollTo({left?, top?, behavior?})` and `scrollBy({left?, top?,
+  behavior?})` also exist on every element whose kind has no method of the
+  name, and succeed with no data: they are CSSOM-View's
+  `Element.scrollTo`/`Element.scrollBy` with a `ScrollToOptions` dictionary
+  (`crates/bobcat-core/src/main/tree/base_methods.rs:143`). `left` and `top`
+  are CSS px, a value that is no finite number after Web IDL's conversion
+  reading as 0; a missing one keeps that axis for `scrollTo` and adds 0 for
+  `scrollBy`; the target clamps to the range, smoothly only for
+  `behavior: "smooth"` (`"auto"` and `"instant"` are instant: there is no
+  `scroll-behavior`). A `behavior` that is present and not one of those
+  three strings, or params that are a number, a string or a boolean, fail
+  with code 4 and move nothing, as web-core answers the `TypeError` Web
+  IDL throws for them; `null` and an array read as `{}`. On an element with
+  no box or that is no scroll container they do nothing and succeed, as
+  web-core's do. A `scroll-view`'s and an `x-swiper`'s own `scrollTo`,
+  and a `scroll-view`'s own `scrollBy`, answer instead, and read their Lynx
+  params, not these. `focus`, `blur` and `takeScreenshot` are code 3: there
+  is no focus model and no pixel readback.
   Every other method name, and each kind's method on any other element,
   fails with code 3, `METHOD_NOT_FOUND` — web-core's code, where native answers its
   generic 1. A failure without a fail callback is ignored by the production
@@ -117,7 +138,8 @@ native numeric-length conversion remain unsupported.
 ## Remaining boundaries
 
 Legacy component-scoped roots, direct MTS selector PAPI, UI invoke methods
-other than `boundingClientRect`, `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s three and a dialog's four, animation methods,
+other than the base set's four (`boundingClientRect`, `scrollIntoView`,
+`scrollTo`, `scrollBy`), `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s three and a dialog's four, animation methods,
 dataset-to-DOM reflection and cross-realm host objects remain pending.
 `boundingClientRect` takes no `relativeTo`, `androidEnableTransformProps` or
 `iOSEnableAnimationProps`: it reads nothing from its `params`, since each of

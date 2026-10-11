@@ -2415,10 +2415,11 @@ const UI_METHOD_PARAM_INVALID: f64 = 4.0;
 const UI_METHOD_INVALID_STATE: f64 = 7.0;
 const UI_METHOD_OPERATION_ERROR: f64 = 8.0;
 
-/// What `callElementMethod` answers for a component method's outcome: the
-/// status code, or for `Data` a record whose first field is the code `0`
-/// followed by the component's fields unchanged, which `element-papi.ts`
-/// reads by method name.
+/// What `callElementMethod` answers for a method's outcome, a kind's or the
+/// base set's: the status code, or for `Data` a record whose first field is
+/// the code `0` followed by the method's fields unchanged, which
+/// `element-papi.ts` reads by method name. `boundingClientRect` answers such
+/// a record too, so the realm sees one of two shapes: a number, or a record.
 fn method_answer(outcome: MethodOutcome) -> HostValue {
     HostValue::Number(match outcome {
         MethodOutcome::NotFound => UI_METHOD_NOT_FOUND,
@@ -2443,8 +2444,9 @@ fn method_answer(outcome: MethodOutcome) -> HostValue {
 /// `__FlushElementTree` — measuring must not be able to move layout out from
 /// under the job that measures, and a card that wants current numbers says
 /// so. The UI methods that write record what the next commit carries:
-/// `selectTab`, a `scroll-view`'s `scrollTo` and `scrollBy`, and every
-/// element's `scrollIntoView` a scroll request, a dialog's four an attribute, a state bit
+/// `selectTab`, a `scroll-view`'s `scrollTo` and `scrollBy`, an `x-swiper`'s
+/// `scrollTo`, and every element's `scrollIntoView`, `scrollTo` and
+/// `scrollBy` a scroll request, a dialog's four an attribute, a state bit
 /// and top-layer membership, and `close`/`requestClose` the events they queue
 /// for an entry of their own. Both still go through [`validate_live_element`],
 /// so a freed element is a script error rather than a zero rect or an empty
@@ -2470,38 +2472,27 @@ fn install_readback_members(
             let mut handle = borrow_slot(NAME, &tree)?;
             let document = handle.document_mut();
             validate_live_element(document, NAME, node)?;
-            // `boundingClientRect` is answered here, ahead of the element's
-            // own methods, as web-core answers it ahead of the element
-            // (`createInvokeUIMethod.ts:16-28`). Its answer is the rect text
-            // rather than a record: see `native.d.ts` for the shapes the
-            // realm tells apart.
-            if method == "boundingClientRect" {
-                // A box-less element answers zeros rather than nothing,
-                // which is what both references report for one.
-                let rect = document
-                    .bounding_client_rect(node)
-                    .unwrap_or_else(dom::Rect::zero);
-                return Ok(HostValue::String(format!(
-                    "{},{},{},{}",
-                    rect.origin.x, rect.origin.y, rect.size.width, rect.size.height
-                )));
-            }
-            // Every other name is the element kind's own method first
+            // Every name is the element kind's own method first
             // (`dom::CustomElement::invoke`, run by the kind's component in
             // `tree`). The kinds' methods built are a pager's `selectTab`
             // (`tree::viewpager`), a `scroll-view`'s `scrollTo`, `scrollBy`
-            // and `getScrollInfo` (`tree::scroll_container`), and a dialog's
+            // and `getScrollInfo` (`tree::scroll_container`), an
+            // `x-swiper`'s `scrollTo` (`tree::swiper`), and a dialog's
             // `show`, `showModal`, `close` and `requestClose`
             // (`tree::dialog`). On `NotFound` the shared base set every
             // element has answers (`tree::base_methods`): the documented UI
             // methods `boundingClientRect`, `scrollIntoView`,
             // `scrollTo`/`scrollBy` and `focus`/`blur` (user ruling
-            // 2026-10-09), of which `boundingClientRect`, above, and
-            // `scrollIntoView` are built; a name neither answers is code 3.
-            // The kind's method runs inside the `[CEReactions]` scope
-            // `invoke_element_method` opens and the base method outside it,
-            // which needs none: `scrollIntoView` records scroll requests and
-            // queues no custom element reaction.
+            // 2026-10-09), of which all but `focus`/`blur` are built; a name
+            // neither answers is code 3. No name is matched here. A kind's
+            // `scrollTo`/`scrollBy` shadows the base set's, and no kind
+            // answers `boundingClientRect`, so it is the same method on every
+            // element, as web-core answers it ahead of the element
+            // (`createInvokeUIMethod.ts:16-28`). The kind's method runs
+            // inside the `[CEReactions]` scope `invoke_element_method` opens
+            // and the base method outside it, which needs none: the base set
+            // records scroll requests and reads geometry, and queues no
+            // custom element reaction.
             let call = MethodCall {
                 name: method,
                 params,

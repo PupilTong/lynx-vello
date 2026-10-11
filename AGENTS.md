@@ -1410,19 +1410,19 @@ The members that answer with a list encode it in the return string, since
 the boundary's value type carries no array: `attributeNames` and
 `getComputedStyleMap` as the length-prefixed record `setInlineStyles` accepts,
 the latter a flat name-then-value sequence; `childElementIds` and
-`queryElementIds` as comma-joined ids, and `callElementMethod`'s
-`boundingClientRect` as the four comma-joined numbers `left`, `top`, `width`
-and `height` — none of which needs a length prefix. `callElementMethod`
-answers a number instead when the method has no data: the status code, `0`
-for a success, `3` for no such method, `4` for params it refused, `7` for a
-state that refused it (a dialog's `InvalidStateError`), `8` for an operation
-that failed; a method with data answers a length-prefixed record whose first
-field is the code. Every name but `boundingClientRect` is the element's
-component's `dom::CustomElement::invoke`, reached through
+`queryElementIds` as comma-joined ids — neither of which needs a length
+prefix. `callElementMethod` answers a number when the method has no data:
+the status code, `0` for a success, `3` for no such method, `4` for params
+it refused, `7` for a state that refused it (a dialog's
+`InvalidStateError`), `8` for an operation that failed; a method with data,
+`boundingClientRect` included (`left`, `top`, `width`, `height`), answers a
+length-prefixed record whose first field is the code. It matches no name
+itself: every name is the element's component's
+`dom::CustomElement::invoke`, reached through
 `Document::invoke_element_method`, and on its `NotFound` the base set every
-element has (`tree::base_methods`, today `scrollIntoView` alone). The params
-cross as JSON text, and as the empty string for `boundingClientRect`, which
-reads none.
+element has (`tree::base_methods`: `boundingClientRect`, `scrollIntoView`,
+`scrollTo`, `scrollBy`). The params cross as JSON text, and as the empty
+string for `boundingClientRect`, which reads none.
 
 Each call is a plain owner-thread mutation, and `__FlushElementTree` runs the
 style + layout + paint commit and publishes one immutable `Arc<CommittedFrame>`
@@ -1473,8 +1473,8 @@ every ReactLynx Snapshot constructor except `__CreateFrame`; all six tree
 mutations; the properties and queries a Snapshot's `create`/`update` functions
 write through and read back, among them `__SetInlineStyles` and the name-based
 `__AddInlineStyle`, with `__SetCSSId` accepted and ignored; the readback pair
-`__InvokeUIMethod`, whose UI methods are `boundingClientRect` and
-`scrollIntoView` on every element, a pager's
+`__InvokeUIMethod`, whose UI methods are `boundingClientRect`,
+`scrollIntoView` and CSSOM-View's `scrollTo`/`scrollBy` on every element, a pager's
 `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s
 `scrollTo`/`scrollBy`/`getScrollInfo` and a
 dialog's `show`/`showModal`/`close`/`requestClose`, and
@@ -1663,8 +1663,11 @@ answers the `scrollTo`, `scrollBy` and `getScrollInfo` UI methods on the axis
 the tag scrolls; `autoScroll` and `takeContentScreenshot` are not built),
 `tree::base_methods` (the UI methods every element has, which
 `callElementMethod` runs when the element's kind has no method of the name:
+`boundingClientRect` over `Document::bounding_client_rect`,
 `scrollIntoView`, CSSOM-View's `Document::scroll_into_view` with
-`container: "nearest"`), `tree::viewpager` (`viewpager`/`x-viewpager-ng` as a
+`container: "nearest"`, and CSSOM-View's `scrollTo`/`scrollBy` with a
+`ScrollToOptions` dictionary over `Document::scroll_to_with`; `focus`/`blur`
+are not built, `dom` having no focus model), `tree::viewpager` (`viewpager`/`x-viewpager-ng` as a
 horizontal scroll container that snaps page by page, its pages' row pinned in
 the cascade, the initial page (`select-index`/`initial-select-index`) as a
 typed `attr()` and an `if()` over `sibling-index()` into
@@ -2433,8 +2436,8 @@ over the existing Worker messages; MTS resolves those through the document's
 selector engine, including the query root, and returns fields/path data, while
 `setNativeProps` applies CSS/attributes and commits before the next request.
 `invoke` answers `boundingClientRect` — the last layout pass's border box,
-plus the element's `id` and `dataset` as native reports them — and
-`scrollIntoView` on every element, a pager's
+plus the element's `id` and `dataset` as native reports them —
+`scrollIntoView` and CSSOM-View's `scrollTo`/`scrollBy` on every element, a pager's
 `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s `scrollTo`, `scrollBy`
 and `getScrollInfo`, and a dialog's four methods, and fails every other method with
 code 3, `METHOD_NOT_FOUND`,
@@ -2966,18 +2969,19 @@ would host it:
   natural size) and `error` fire, non-bubbling, through the component-event
   queue; `cap-insets` and the animated-image events do not.
 - **UI methods other than `boundingClientRect`, `scrollIntoView`,
-  `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s
-  `scrollTo`/`scrollBy`/`getScrollInfo` and a
+  `scrollTo`/`scrollBy`, `selectTab`, a swiper's `scrollTo`, a
+  `scroll-view`'s `scrollTo`/`scrollBy`/`getScrollInfo` and a
   dialog's `show`/`showModal`/`close`/`requestClose`.** Those dispatch by name
-  (`boundingClientRect` and `scrollIntoView` on every element, `selectTab` on
+  (`boundingClientRect`, `scrollIntoView` and CSSOM-View's
+  `scrollTo`/`scrollBy` on every element, `selectTab` on
   the two pager tags only, `scrollTo({index, smooth})` on `x-swiper` only,
-  the three scroll methods on `scroll-view` only,
-  the dialog's on `dialog` only) through `__InvokeUIMethod`; every other
-  name — the base set's `scrollTo`/`scrollBy` and `focus`/`blur` on an
-  element that is neither a `scroll-view` nor an `x-swiper`, a `scroll-view`'s `autoScroll` and
-  `takeContentScreenshot`, `requestUIInfo`, `takeScreenshot` and the rest of
-  the per-component catalog — answers code 3, `METHOD_NOT_FOUND`. The rect
-  itself ignores transforms and never flushes.
+  the three scroll methods on `scroll-view` only, where they shadow the
+  standard two, the dialog's on `dialog` only) through `__InvokeUIMethod`;
+  every other name — the base set's `focus`/`blur` (no focus model), a
+  `scroll-view`'s `autoScroll` and `takeContentScreenshot`, `requestUIInfo`,
+  `takeScreenshot` (no pixel readback) and the rest of the per-component
+  catalog — answers code 3, `METHOD_NOT_FOUND`. The rect itself ignores
+  transforms and never flushes.
 - **The text `layout` event.** The per-line ranges `hughie`'s
   `text/block/content.rs` computes have no delivery path.
 - **`rpx`-aware view/device policy** and the `<list>` *component* (its UI methods,
