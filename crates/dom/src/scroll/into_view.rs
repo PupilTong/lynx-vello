@@ -32,8 +32,8 @@ use euclid::default::Vector2D;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::Length;
 
+use super::ScrollBehavior;
 use super::snap::scroll_padding;
-use super::{ScrollBehavior, clamp_to};
 use crate::NodeId;
 use crate::tree::document::Document;
 
@@ -172,7 +172,10 @@ impl<T> Document<T> {
     ///
     /// The containers are taken innermost first. Each is scrolled to the
     /// position [`ScrollIntoViewOptions::block`] and
-    /// [`ScrollIntoViewOptions::inline`] choose, clamped to its range, with
+    /// [`ScrollIntoViewOptions::inline`] choose, as its scroll box admits it
+    /// ([`ScrollBox::admit`](super::ScrollBox::admit): clamped to its range,
+    /// or on a circular axis normalized into its period, so a position past
+    /// `max_offset` or before `0` lands across the seam), with
     /// [`ScrollIntoViewOptions::behavior`], when that position differs from
     /// its current offset or it has a pending request
     /// ([`Self::pending_scroll_request`], the draft's "ongoing smooth
@@ -207,7 +210,7 @@ impl<T> Document<T> {
                 options.inline,
                 inner_offsets,
             ) {
-                let position = clamp_to(position, scroll_box.max_offset());
+                let position = scroll_box.admit(position);
                 if position != scroll_box.offset || self.pending_scroll_request(container).is_some()
                 {
                     offset = self.scroll_to_with(container, position, options.behavior);
@@ -580,6 +583,33 @@ mod tests {
             (request.target, request.behavior),
             (Vector2D::zero(), ScrollBehavior::Instant)
         );
+    }
+
+    /// On a circular axis the position is admitted into the period rather
+    /// than clamped: in a column of five 50px items (`max` 150, period
+    /// 250), item 4 centred needs 175, past `max`, and stands there with the
+    /// scrollport straddling the seam; item 0 centred needs −25, which is
+    /// 225 on the circle. The request carries the same target.
+    #[test]
+    fn a_circular_axis_admits_a_position_past_either_end_of_the_range() {
+        for (item, expected) in [(4, 175.0), (0, 225.0), (2, 75.0)] {
+            let (mut document, scroller, items) =
+                column(5, ".scroller { overscroll-behavior-y: circular; }");
+            let scroll_box = document.scroll_box(scroller).expect("a scroll box");
+            assert_eq!(scroll_box.wrap_period(), (None, Some(250.0)));
+            assert!(document.scroll_into_view(items[item], block(Center)));
+            assert_eq!(
+                document.scroll_offset(scroller),
+                Vector2D::new(0.0, expected),
+                "item {item}"
+            );
+            let frame = document.commit();
+            let index = frame.slot_of(scroller).expect("a slot");
+            let request = frame.scroll_slots()[index as usize]
+                .request
+                .expect("carried");
+            assert_eq!(request.target, Vector2D::new(0.0, expected), "item {item}");
+        }
     }
 
     #[test]

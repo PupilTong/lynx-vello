@@ -19,12 +19,14 @@
 //! - `clip` is not a scroll container at all: it clips and stops, with no scrolling area and no
 //!   offset, and its content does not reach into an ancestor's scrolling area either.
 //!
-//! Offsets are stored per node in the layout arena and clamped against live
-//! geometry on every read, so a relayout that shrinks the scrolling area, or a
-//! restyle that stops the box being a scroll container, corrects the
-//! observable offset without an invalidation hook of its own. Like every other
-//! post-layout query here, the clamp reads the **last committed** layout: call
-//! [`Document::layout`] first if the tree has been mutated since.
+//! Offsets are stored per node in the layout arena and admitted against live
+//! geometry on every read ([`ScrollBox::admit`]: clamped into the range, or on
+//! a `circular` axis normalized into its period), so a relayout that shrinks
+//! the scrolling area, or a restyle that stops the box being a scroll
+//! container, corrects the observable offset without an invalidation hook of
+//! its own. Like every other post-layout query here, the read uses the **last
+//! committed** layout: call [`Document::layout`] first if the tree has been
+//! mutated since.
 //!
 //! # Chaining
 //!
@@ -45,10 +47,15 @@
 //!   [`ScrollBox::bounce`] axes: the runtime's painter reads them off the committed frame and
 //!   stretches the boundary there. Nothing in this crate stretches — a programmatic scroll clamps.
 //!   Its fifth value, **`circular`**, also fences like `contain` and is published as the
-//!   [`ScrollBox::circular`] axes: such an axis has no boundary for the painter, which wraps its
-//!   live offset around a period of the whole scrolling area. The wrap is the painter's alone — the
-//!   document keeps clamping every offset it writes, a programmatic scroll included, and never sees
-//!   an offset outside `0..=max`.
+//!   [`ScrollBox::circular`] axes: such an axis has no boundary. Its scrolling area repeats with a
+//!   period `P` of the whole scrolling area, `max_offset` plus the scrollport
+//!   ([`ScrollBox::wrap_period`]), and on such an axis with content to scroll the document admits
+//!   the whole period `[0, P)` ([`ScrollBox::admit`]): every offset it writes, a programmatic
+//!   scroll's target included, and every snap position it computes is normalized into the period
+//!   instead of clamped to `0..=max`. An offset above `max_offset` is one whose scrollport
+//!   straddles the seam: it shows the end of the scrolling area followed by its start. A drag or
+//!   wheel step on such an axis is absorbed whole. The runtime's painter keeps its live offset
+//!   anywhere on the circle and posts it modulo the period.
 //! - **`scroll-capture`** is this engine's own, with no W3C or Lynx counterpart, and it changes the
 //!   *order*, not the reach. It is a shorthand over the physical longhands `scroll-capture-x` and
 //!   `scroll-capture-y` (no logical pair: a chain walks physical axes), each `auto | nearest [
@@ -94,11 +101,11 @@
 //!   accumulated content size, not discarded here.
 //! - The `scroll-behavior` property is absent, so a script-facing scroll names its
 //!   [`ScrollBehavior`] outright ([`Document::scroll_to_with`], module `request`). Every offset
-//!   this crate writes itself is instantaneous and clamps hard at the boundary, and a snap is a
-//!   jump. A smooth scroll, inertia, the `contain-bounce` stretch and the `circular` wrap exist
-//!   only on the painter's side, over the committed frame; `overscroll-behavior: none` therefore
-//!   does exactly what `contain` does here — there is no document-side boundary effect for it to
-//!   suppress.
+//!   this crate writes itself is instantaneous and clamps hard at the boundary (on a `circular`
+//!   axis it is normalized into the period instead), and a snap is a jump. A smooth scroll,
+//!   inertia, the `contain-bounce` stretch and the drawing of the `circular` seam exist only on the
+//!   painter's side, over the committed frame; `overscroll-behavior: none` therefore does exactly
+//!   what `contain` does here — there is no document-side boundary effect for it to suppress.
 
 use euclid::default::{Size2D, Vector2D};
 use hughie::style::PositionProperty;
@@ -361,7 +368,10 @@ pub struct ScrollBox {
     /// The scrolling area (CSSOM-View `scrollWidth`/`scrollHeight`), never
     /// smaller than [`Self::scrollport`].
     pub scroll_size: Size2D<f32>,
-    /// The current, already-clamped offset (CSSOM-View `scrollLeft`/`scrollTop`).
+    /// The current offset (CSSOM-View `scrollLeft`/`scrollTop`), already
+    /// admitted ([`Self::admit`]): in `0..=max_offset`, or on an axis with a
+    /// [`Self::wrap_period`] in `[0, period)`, where an offset above
+    /// `max_offset` stands across the seam.
     pub offset: Vector2D<f32>,
     /// The axes the user may scroll directly.
     pub user_scrollable: ScrollAxes,
@@ -371,9 +381,11 @@ pub struct ScrollBox {
     /// (`overscroll-behavior: contain-bounce`). Published for the runtime's
     /// painter, which owns the stretch; the document itself always clamps.
     pub bounce: ScrollAxes,
-    /// The axes with no boundary (`overscroll-behavior: circular`). Policy
-    /// only: published for the runtime's painter, which wraps its live
-    /// offset around the scrolling area; the document itself always clamps.
+    /// The axes with no boundary (`overscroll-behavior: circular`). On such
+    /// an axis with content to scroll the scrolling area repeats every
+    /// [`Self::wrap_period`]: the document admits an offset anywhere in the
+    /// period ([`Self::admit`]), and the runtime's painter wraps its live
+    /// offset around it.
     pub circular: ScrollAxes,
     /// Whether the container above goes first, per axis
     /// (`scroll-capture-x` / `scroll-capture-y`).
@@ -399,6 +411,104 @@ impl ScrollBox {
             (self.scroll_size.width - self.scrollport.width).max(0.0),
             (self.scroll_size.height - self.scrollport.height).max(0.0),
         )
+    }
+
+    /// The period each axis wraps with: the extent of the whole scrolling
+    /// area (`max_offset` plus the scrollport) on a [`Self::circular`] axis
+    /// whose content overflows, `None` otherwise. The same rule as the
+    /// committed frame's
+    /// [`ScrollSlot::wrap_period`](crate::visual::ScrollSlot::wrap_period).
+    #[must_use]
+    pub fn wrap_period(&self) -> (Option<f32>, Option<f32>) {
+        let max = self.max_offset();
+        (
+            wrap_period_axis(self.circular.x, max.x, self.scrollport.width),
+            wrap_period_axis(self.circular.y, max.y, self.scrollport.height),
+        )
+    }
+
+    /// The axes with a [`Self::wrap_period`]: those with no boundary.
+    #[must_use]
+    pub fn wrap_axes(&self) -> ScrollAxes {
+        let (x, y) = self.wrap_period();
+        ScrollAxes {
+            x: x.is_some(),
+            y: y.is_some(),
+        }
+    }
+
+    /// `offset` as this box admits it, per axis: on an axis with a
+    /// [`Self::wrap_period`] normalized into `[0, period)`, and on every
+    /// other axis clamped to `0..=max_offset`. A non-finite value is `0`
+    /// either way.
+    #[must_use]
+    pub fn admit(&self, offset: Vector2D<f32>) -> Vector2D<f32> {
+        let max = self.max_offset();
+        let (period_x, period_y) = self.wrap_period();
+        let axis = |value: f32, max: f32, period: Option<f32>| match period {
+            Some(period) => wrap_axis(value, period),
+            None => clamp_axis(value, max),
+        };
+        Vector2D::new(
+            axis(offset.x, max.x, period_x),
+            axis(offset.y, max.y, period_y),
+        )
+    }
+
+    /// [`Self::offset`] as a scroll progress timeline samples it: on an axis
+    /// with a [`Self::wrap_period`], an offset past `max_offset` stands at
+    /// its representative nearer the range `0..=max_offset` —
+    /// `offset - period` when the period's end is nearer than `max_offset`,
+    /// otherwise the offset itself (a tie keeps it) — so a scrollport just
+    /// before the start reads the start, not the end. Unchanged on every
+    /// other axis. The same rule as the committed frame's
+    /// [`ScrollSlot::unwrap`](crate::visual::ScrollSlot::unwrap).
+    #[must_use]
+    pub fn unwrapped_offset(&self) -> Vector2D<f32> {
+        let max = self.max_offset();
+        let (period_x, period_y) = self.wrap_period();
+        Vector2D::new(
+            unwrap_axis(self.offset.x, max.x, period_x),
+            unwrap_axis(self.offset.y, max.y, period_y),
+        )
+    }
+}
+
+/// The period a circular axis wraps with: the whole scrolling area, `max`
+/// plus the scrollport `extent`, when the axis is circular and has content
+/// to scroll. An axis with nothing to scroll has nothing to wrap, and keeps
+/// the ordinary clamp.
+pub(crate) fn wrap_period_axis(circular: bool, max: f32, extent: f32) -> Option<f32> {
+    (circular && max > 0.0).then_some(max + extent)
+}
+
+/// `value` normalized into `[0, period)`; a non-finite value, and the
+/// `rem_euclid` result that rounds up to the period itself, are the start.
+pub(crate) fn wrap_axis(value: f32, period: f32) -> f32 {
+    let wrapped = value.rem_euclid(period);
+    // `rem_euclid` of a tiny negative value rounds up to the period itself,
+    // which is the start again.
+    if wrapped.is_finite() && wrapped < period {
+        wrapped
+    } else {
+        0.0
+    }
+}
+
+/// `value` on an axis that scrolls to `max` and wraps with `period`, read at
+/// its representative nearer the range `0..=max`: normalized into the
+/// period, then, past `max`, `value - period` when the period's end is
+/// nearer than `max` and the normalized value itself otherwise, a tie
+/// keeping it. Unchanged without a period.
+pub(crate) fn unwrap_axis(value: f32, max: f32, period: Option<f32>) -> f32 {
+    let Some(period) = period else {
+        return value;
+    };
+    let wrapped = wrap_axis(value, period);
+    if wrapped > max && period - wrapped < wrapped - max {
+        wrapped - period
+    } else {
+        wrapped
     }
 }
 
@@ -496,7 +606,7 @@ pub(crate) fn resolve(
         circular: circular_axes(style),
         capture: scroll_capture(style),
     };
-    scroll_box.offset = clamp_to(stored, scroll_box.max_offset());
+    scroll_box.offset = scroll_box.admit(stored);
     Some(scroll_box)
 }
 
@@ -517,7 +627,9 @@ impl<T> Document<T> {
         )
     }
 
-    /// Returns the scroll offset clamped to current geometry.
+    /// Returns the scroll offset admitted against current geometry
+    /// ([`ScrollBox::admit`]): clamped into the range, or on a circular axis
+    /// normalized into its period.
     #[must_use]
     pub fn scroll_offset(&self, id: NodeId) -> Vector2D<f32> {
         self.scroll_box(id)
@@ -530,7 +642,10 @@ impl<T> Document<T> {
             .map_or_else(Vector2D::zero, |state| state.scroll_offset)
     }
 
-    /// Scrolls to a clamped offset and returns the applied offset.
+    /// Scrolls to `offset` as the box admits it ([`ScrollBox::admit`]) and
+    /// returns the applied offset: clamped into the range, or on a circular
+    /// axis with content to scroll normalized into the whole period
+    /// `[0, P)`, where an offset above `max_offset` stands across the seam.
     ///
     /// A moved offset does not invalidate the retained frame when that frame
     /// already carries this container as a scroll slot **and still covers the
@@ -542,7 +657,9 @@ impl<T> Document<T> {
     /// [`encode_window`](crate::visual::ScrollSlot::encode_window), which is
     /// the range the frame was culled — and its
     /// `content-visibility: auto` boxes determined — to stay valid over; past
-    /// it, the committed frame simply has no content to compose.
+    /// it, the committed frame simply has no content to compose. On a
+    /// circular axis the window is the whole scrolling area and every offset
+    /// in the period composes.
     ///
     /// Records no request for the painter: this is the write the runtime
     /// adopts the painter's own posted offsets with, so a painter holding an
@@ -556,15 +673,15 @@ impl<T> Document<T> {
         let Some(scroll_box) = self.scroll_box(id) else {
             return Vector2D::zero();
         };
-        let clamped = clamp_to(offset, scroll_box.max_offset());
-        if clamped != scroll_box.offset {
+        let admitted = scroll_box.admit(offset);
+        if admitted != scroll_box.offset {
             // Intersection observations move with the offset whether or not
             // the frame does: a scroll the retained frame composes commits
             // nothing, so no render would say so.
             self.note_intersections_stale();
             let composable = self
                 .committed_frame()
-                .is_some_and(|frame| frame.covers_scroll_offset(id, clamped));
+                .is_some_and(|frame| frame.covers_scroll_offset(id, admitted));
             if !composable {
                 self.note_visual_mutation();
             }
@@ -572,17 +689,24 @@ impl<T> Document<T> {
         let slot = self
             .slot(id)
             .expect("a scroll container is a live node with layout-arena state");
-        self.layout_state_mut().at_mut(slot).scroll_offset = clamped;
-        clamped
+        self.layout_state_mut().at_mut(slot).scroll_offset = admitted;
+        admitted
     }
 
-    /// Scrolls by a delta and returns the unconsumed remainder.
+    /// Scrolls by a delta and returns the unconsumed remainder. An axis with
+    /// a [`ScrollBox::wrap_period`] has no boundary, so it consumes its
+    /// whole delta and leaves no remainder.
     pub fn scroll_by(&mut self, id: NodeId, delta: Vector2D<f32>) -> Vector2D<f32> {
         let Some(scroll_box) = self.scroll_box(id) else {
             return delta;
         };
         let applied = self.scroll_to(id, scroll_box.offset + delta);
-        scroll_box.offset + delta - applied
+        let remainder = scroll_box.offset + delta - applied;
+        let wraps = scroll_box.wrap_axes();
+        Vector2D::new(
+            if wraps.x { 0.0 } else { remainder.x },
+            if wraps.y { 0.0 } else { remainder.y },
+        )
     }
 
     pub(crate) fn scroll_parent(&self, id: NodeId) -> Option<NodeId> {
@@ -707,9 +831,7 @@ impl<T> Document<T> {
                 scroll_box.scrollport,
                 positions.as_ref().and_then(SnapPositions::x),
                 positions.as_ref().and_then(SnapPositions::y),
-                // The document never wraps: a circular axis is the
-                // painter's, and every offset written here clamps.
-                ScrollAxes::NONE,
+                scroll_box.wrap_axes(),
             );
             self.scroll_to(id, applied);
             absorbed
@@ -1111,9 +1233,12 @@ mod tests {
         );
     }
 
-    /// `circular` is `contain`'s fence in the document too: the chain stops
-    /// and every offset the document writes clamps — the wrap is the
-    /// painter's. What the document publishes is the `circular` axis flag.
+    /// `circular` is `contain`'s fence in the document too, and the axis has
+    /// no boundary: the inner scroller's y (max 300 over a 100px scrollport)
+    /// wraps with a period of 400. A drag step on it is absorbed whole and
+    /// every offset the document writes is normalized into `[0, 400)`, one
+    /// past `max` included — the scrollport then straddles the seam. The x
+    /// axis is no circle and still clamps.
     #[test]
     fn circular_fences_like_contain_and_publishes_its_axes() {
         let (mut document, outer, inner) = nested_scrollers_with(
@@ -1123,22 +1248,96 @@ mod tests {
         assert_eq!(scroll_box.circular, ScrollAxes { x: false, y: true });
         assert_eq!(scroll_box.bounce, ScrollAxes::NONE);
         assert_eq!(scroll_box.chains, ScrollAxes { x: true, y: false });
+        assert_eq!(scroll_box.wrap_period(), (None, Some(400.0)));
+        assert_eq!(scroll_box.wrap_axes(), ScrollAxes { x: false, y: true });
         assert_eq!(
-            document.scroll_chain(inner, Vector2D::new(250.0, 400.0)),
-            Some((inner, Vector2D::new(250.0, 300.0))),
+            document.scroll_chain(inner, Vector2D::new(250.0, 350.0)),
+            Some((inner, Vector2D::new(250.0, 350.0))),
+            "the whole y delta is the inner's",
         );
-        assert_eq!(document.scroll_offset(inner), Vector2D::new(200.0, 300.0));
+        assert_eq!(document.scroll_offset(inner), Vector2D::new(200.0, 350.0));
         assert_eq!(
             document.scroll_offset(outer),
             Vector2D::new(50.0, 0.0),
-            "x chains out, y is fenced and clamped",
+            "x chains out, y is fenced and stands across the seam",
         );
-        document.scroll_to(inner, Vector2D::new(0.0, 1000.0));
+        for (to, admitted) in [
+            (Vector2D::new(0.0, 1000.0), Vector2D::new(0.0, 200.0)),
+            (Vector2D::new(0.0, 350.0), Vector2D::new(0.0, 350.0)),
+            (Vector2D::new(0.0, -50.0), Vector2D::new(0.0, 350.0)),
+            (Vector2D::new(-40.0, 400.0), Vector2D::new(0.0, 0.0)),
+            (Vector2D::new(900.0, 0.0), Vector2D::new(200.0, 0.0)),
+        ] {
+            assert_eq!(document.scroll_to(inner, to), admitted, "{to:?}");
+            assert_eq!(document.scroll_offset(inner), admitted, "{to:?}");
+        }
+    }
+
+    /// `scroll_by` on a circular axis consumes its whole delta: the axis has
+    /// no boundary, so nothing remains to hand on. The bounded x axis still
+    /// reports what its range refused.
+    #[test]
+    fn scroll_by_on_a_circular_axis_leaves_no_remainder() {
+        let (mut document, _outer, inner) = nested_scrollers_with(
+            ".inner { overscroll-behavior-y: circular; flex-shrink: 0; } .tall { width: 500px; }",
+        );
+        document.scroll_to(inner, Vector2D::new(150.0, 300.0));
         assert_eq!(
-            document.scroll_offset(inner),
-            Vector2D::new(0.0, 300.0),
-            "a programmatic scroll clamps too",
+            document.scroll_by(inner, Vector2D::new(100.0, 150.0)),
+            Vector2D::new(50.0, 0.0),
         );
+        assert_eq!(document.scroll_offset(inner), Vector2D::new(200.0, 50.0));
+        assert_eq!(
+            document.scroll_by(inner, Vector2D::new(0.0, -100.0)),
+            Vector2D::zero(),
+        );
+        assert_eq!(document.scroll_offset(inner), Vector2D::new(200.0, 350.0));
+    }
+
+    /// The period and the representative a scroll progress timeline reads,
+    /// over a box's own geometry: 100px of scrollport over 400px of
+    /// content, so `max` 300 and a period of 400 on a circular axis. Past
+    /// `max`, the midpoint of the seam (350) decides: below it the offset
+    /// reads as itself, above it as the start's copy one period back.
+    #[test]
+    fn a_circular_box_admits_the_period_and_unwraps_past_the_seams_midpoint() {
+        let scroll_box = |offset: Vector2D<f32>, circular: ScrollAxes| ScrollBox {
+            scrollport: Size2D::new(100.0, 100.0),
+            scroll_size: Size2D::new(400.0, 400.0),
+            offset,
+            user_scrollable: ScrollAxes::BOTH,
+            chains: ScrollAxes::NONE,
+            bounce: ScrollAxes::NONE,
+            circular,
+            capture: CaptureAxes::default(),
+        };
+        let y = ScrollAxes { x: false, y: true };
+        let at = |offset: f32| scroll_box(Vector2D::new(330.0, offset), y).unwrapped_offset();
+        assert_eq!(at(320.0), Vector2D::new(330.0, 320.0), "nearer max");
+        assert_eq!(at(350.0), Vector2D::new(330.0, 350.0), "a tie keeps it");
+        assert_eq!(at(380.0), Vector2D::new(330.0, -20.0), "nearer the end");
+        assert_eq!(at(120.0), Vector2D::new(330.0, 120.0), "inside the range");
+        let circle = scroll_box(Vector2D::zero(), y);
+        assert_eq!(
+            circle.admit(Vector2D::new(f32::NAN, f32::INFINITY)),
+            Vector2D::zero(),
+            "nothing non-finite is admitted",
+        );
+        assert_eq!(
+            circle.admit(Vector2D::new(-1.0e-12, -1.0e-12)),
+            Vector2D::zero(),
+            "a hair below the start is the start, never the period itself",
+        );
+        let flat = ScrollBox {
+            scroll_size: Size2D::new(400.0, 100.0),
+            ..circle
+        };
+        assert_eq!(
+            flat.wrap_period(),
+            (None, None),
+            "nothing to scroll, no circle"
+        );
+        assert_eq!(flat.admit(Vector2D::new(0.0, 50.0)), Vector2D::zero());
     }
 
     #[test]

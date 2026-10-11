@@ -28,7 +28,7 @@
 //! in their containing-block chain. Both escapes are the same rule, which is
 //! why one struct carries both.
 
-use euclid::default::{Point2D, Rect, Size2D, Transform3D, Vector2D};
+use euclid::default::{Point2D, Rect, Size2D, Transform3D};
 use hughie::style::containment::effective_containment;
 use hughie::style::{
     Contain, ContentVisibility, CoreStyle, Overflow, PositionProperty, visibility,
@@ -491,15 +491,15 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 y: positions.y.map(|axis| self.push_snap_axis(&axis)),
             });
         let max_offset = scroll_box.max_offset();
+        // Re-admitted against the geometry this build lays out: the range,
+        // or on a circular axis the period, may have changed since the
+        // request was recorded.
         let request = self
             .state
             .scroll_requests
             .get(&node)
             .map(|request| ScrollRequest {
-                target: Vector2D::new(
-                    request.target.x.clamp(0.0, max_offset.x),
-                    request.target.y.clamp(0.0, max_offset.y),
-                ),
+                target: scroll_box.admit(request.target),
                 ..*request
             });
         self.scratch.scroll_stickies.push(sticky);
