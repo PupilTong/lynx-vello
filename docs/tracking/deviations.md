@@ -3944,11 +3944,18 @@ consequential choice about whether to follow the spec or the quirk.
   here (`lower_style`), the `l-e-name` guard is not, and `__SetCSSId`
   ignores its `entryName`. A container's `config` is ignored too: page policy
   is the page's.
-  **Consequence on the web target (found 2026-10-06, restated 2026-10-13):**
-  a `.web.bundle` lazy container compiled by rspeedy carries its CSS only in
-  that `StyleInfo`; no ReactLynx build writes it as a `CSS` custom section
-  (see the next entry), so `__LoadStyleSheet('CSS', …)` answers `null` and
-  none of a web lazy component's class rules apply. Twelve
+  **Known gap on the web target (found 2026-10-06, corrected 2026-10-13):**
+  a lazy container compiled on the `lynx.fetchBundle` path carries its CSS as
+  the `CSS` custom section, and the web encoder does not keep that section:
+  `WebEncodePlugin.routeSections` (`@lynx-js/template-webpack-plugin`) routes
+  it into the `.web.bundle`'s `StyleInfo` under css id 0, as it routes
+  `main-thread` into the Lepus code and the background into the manifest.
+  `lazy_bundle_sources` answers the two script sections from those slots and
+  has no counterpart for the stylesheet, so `__LoadStyleSheet('CSS', …)`
+  answers `null` and none of a web lazy component's class rules apply. This
+  is not the decision above at work: the card does ask, and what it asks for
+  is in the container. Registering a web container's `StyleInfo` as its `CSS`
+  sheet makes the rules apply (tried, not committed). Twelve
   `basic-lazy-component-css*` cards of the web-core-e2e corpus are pending on
   it; inline-styled lazy components are unaffected.
 - **CSS custom sections are read from the `CustomSectionsStyleInfo` section
