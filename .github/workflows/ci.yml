@@ -37,6 +37,10 @@ jobs:
       # wasm32 C objects.
       - uses: Swatinem/rust-cache@v2
         with:
+          # Seed reusable Rust build artifacts on main. PRs can restore the
+          # base branch's cache, but must not fill the repository's cache quota
+          # with merge-ref entries that other PRs cannot reuse.
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           # The stylo fork's tests below build in vendor/stylo/target, a
           # second Cargo workspace; naming it keeps those dependencies cached.
           workspaces: |
@@ -133,6 +137,8 @@ jobs:
           sudo apt-get install --yes clang-22 llvm-22
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Clippy (wasm32)
         # The macOS job's `cargo clippy` runs for the host, where every
@@ -266,6 +272,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           shared-key: linux-embedders
 
       - name: Clippy
@@ -392,6 +399,8 @@ jobs:
           sudo apt-get install --yes clang-22 llvm-22 libfontconfig1-dev
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-codspeed 5
         uses: taiki-e/install-action@v2
