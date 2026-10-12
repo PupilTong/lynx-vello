@@ -171,7 +171,7 @@ impl ResourceFetcher for Files {
                 _ => Err(unsupported(url)),
             },
             SourceRequest::StyleSheet(url) => {
-                if url == "app:///lazy.bundle/index.css" {
+                if url == "app:///lazy.bundle/custom_section/CSS.css" {
                     Ok(LoadedSource::StyleSheet(StyleSheetSource::Text(
                         ".lazy-box { background-color: blue; }".to_owned(),
                     )))
@@ -334,7 +334,7 @@ async fn both_realms_fetch_a_container_and_load_its_sections_by_url() {
             "mts section loaded app:///lazy.bundle",
             // Its stylesheet adopts without throwing, at the URL
             // `named_style_url` writes.
-            "mts adopted app:///lazy.bundle/index.css",
+            "mts adopted app:///lazy.bundle/custom_section/CSS.css",
             // Inline: the fetcher's probe answered in this very job, so the
             // callback ran before `then` returned.
             "mts inline 0",

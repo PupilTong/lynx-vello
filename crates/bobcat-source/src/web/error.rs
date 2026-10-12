@@ -23,4 +23,6 @@ pub enum DecodeError {
     },
     #[error("invalid StyleInfo section: {0}")]
     StyleInfo(String),
+    #[error("invalid CustomSectionsStyleInfo section: {0}")]
+    CustomSectionsStyleInfo(String),
 }

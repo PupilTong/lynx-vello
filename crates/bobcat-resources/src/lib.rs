@@ -82,7 +82,7 @@ pub mod transport;
 
 use crate::executor::Wakeup;
 use crate::images::{Completion, ImageState};
-use crate::registry::{Registered, Registry};
+use crate::registry::Registered;
 use crate::transport::{Fetched, HttpSettings, Transports};
 
 /// What a load may do with the caches on its way.
@@ -366,13 +366,20 @@ impl FetchIndex {
     /// The base is read here rather than captured once, because
     /// [`Resources::set_base_url`] can move it.
     fn contains(&self, specifier: &str) -> bool {
-        let Ok(url) = transport::join(specifier, self.base_url().as_ref()) else {
+        let Some(url) = self.resolve(specifier) else {
             return false;
         };
         self.fetched
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(&url)
+    }
+
+    /// `specifier` resolved the way a request resolves it — joined to the
+    /// current base by URL rules, or parsed on its own when there is none —
+    /// or `None` when it resolves to nothing.
+    fn resolve(&self, specifier: &str) -> Option<Url> {
+        transport::join(specifier, self.base_url().as_ref()).ok()
     }
 }
 
@@ -663,7 +670,7 @@ impl Resources {
         let (completions, receiver) = tokio::sync::mpsc::unbounded_channel();
         let shared = SharedHandle::new(Shared {
             transports: Transports {
-                registry: Registry::default(),
+                registry: Arc::default(),
                 http: HttpSettings {
                     timeout: config.request_timeout,
                     max_body: config.max_response_bytes,
@@ -717,7 +724,7 @@ impl Resources {
         Self {
             shared: SharedHandle::new(Shared {
                 transports: Transports {
-                    registry: Registry::default(),
+                    registry: Arc::default(),
                     http: self.shared.transports.http.clone(),
                     #[cfg(not(target_arch = "wasm32"))]
                     disk: self.shared.transports.disk.clone(),
@@ -988,6 +995,23 @@ impl ResourceFetcher for ViewResources {
     fn fetch_probe(&self) -> Option<bobcat_core::resource::FetchProbe> {
         let index = Arc::clone(&self.resources.shared.fetches);
         Some(Arc::new(move |specifier: &str| index.contains(specifier)))
+    }
+
+    /// This view's answer to "is a stylesheet registered here?", read from
+    /// `bobcat-main` by `__LoadStyleSheet`. It resolves the specifier the way
+    /// a request would and looks it up in the registry, nothing else: an
+    /// unregistered URL is `false` without any transport being consulted, so
+    /// a stylesheet this system would have to fetch over the network is not
+    /// one a container carries. Any registration counts, a pre-parsed sheet
+    /// or CSS bytes; whether it parses is the adoption's business.
+    fn style_sheet_probe(&self) -> Option<bobcat_core::resource::StyleSheetProbe> {
+        let index = Arc::clone(&self.resources.shared.fetches);
+        let registry = Arc::clone(&self.resources.shared.transports.registry);
+        Some(Arc::new(move |specifier: &str| {
+            index
+                .resolve(specifier)
+                .is_some_and(|url| registry.contains(&url))
+        }))
     }
 }
 

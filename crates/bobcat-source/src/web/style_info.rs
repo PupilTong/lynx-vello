@@ -1,5 +1,6 @@
-//! rkyv 0.7 wire model for the pre-parsed CSS `StyleInfo` section; field and
-//! enum ordering is serialized ABI.
+//! rkyv 0.7 wire model for the pre-parsed CSS sections — `StyleInfo` (label
+//! 2) and `CustomSectionsStyleInfo` (label 7); field and enum ordering is
+//! serialized ABI.
 
 use std::collections::HashMap;
 
@@ -18,6 +19,23 @@ use super::error::DecodeError;
 pub struct StyleInfo {
     pub css_id_to_style_sheet: HashMap<i32, StyleSheet>,
     pub style_text_size_hint: usize,
+}
+
+/// Root of the `CustomSectionsStyleInfo` section (label 7). Mirrors
+/// web-core's `RawStyleInfoMap` (lynx-stack
+/// `packages/web-platform/web-core/src/template/template_sections/style_info/raw_style_info_map.
+/// rs`, added by lynx-stack#4138): every custom section the compiler tagged
+/// `encoding: 'CSS'`, keyed by its section name, each one an ordinary
+/// [`StyleInfo`] holding the section's rule list under css id `0`
+/// (`encodeCSSMap` in `ts/encode/encodeCSS.ts`).
+///
+/// web-core keys an `FnvHashMap`; rkyv 0.7 archives a hash map with its own
+/// hash index whatever the source map's hasher was, so a `HashMap` reads the
+/// same bytes.
+#[derive(Debug, Clone, Default, Archive, RkyvDeserialize, RkyvSerialize)]
+#[archive(check_bytes)]
+pub struct StyleInfoMap {
+    pub name_to_style_info: HashMap<String, StyleInfo>,
 }
 
 /// One CSS fragment. Mirrors web-core's `StyleSheet`.
@@ -183,11 +201,42 @@ const MAX_RULE_DEPTH: usize = 64;
 const MAX_VALIDATION_DEPTH: usize = MAX_RULE_DEPTH + 8;
 
 pub(crate) fn decode_style_info(bytes: &[u8]) -> Result<StyleInfo, DecodeError> {
+    let style_info: StyleInfo =
+        decode_archive(bytes, MAX_VALIDATION_DEPTH).map_err(DecodeError::StyleInfo)?;
+    check_rule_depth(&style_info).map_err(DecodeError::StyleInfo)?;
+    Ok(style_info)
+}
+
+/// Decodes the `CustomSectionsStyleInfo` section under the same bounds as
+/// [`decode_style_info`]: the one section-length cap for the whole map, one
+/// validation level more for the map around the `StyleInfo`s, and the rule
+/// depth limit for every entry.
+pub(crate) fn decode_style_info_map(bytes: &[u8]) -> Result<StyleInfoMap, DecodeError> {
+    let map: StyleInfoMap = decode_archive(bytes, MAX_VALIDATION_DEPTH + 1)
+        .map_err(DecodeError::CustomSectionsStyleInfo)?;
+    for (name, style_info) in &map.name_to_style_info {
+        check_rule_depth(style_info).map_err(|reason| {
+            DecodeError::CustomSectionsStyleInfo(format!("{name:?}: {reason}"))
+        })?;
+    }
+    Ok(map)
+}
+
+/// Validates and deserializes one rkyv root, refusing a section over
+/// [`MAX_SECTION_LEN`] before copying it and bounding validation recursion by
+/// `max_depth`.
+fn decode_archive<T>(bytes: &[u8], max_depth: usize) -> Result<T, String>
+where
+    T: Archive,
+    for<'a> T::Archived: bytecheck::CheckBytes<ArchiveValidator<'a>>
+        + RkyvDeserialize<T, rkyv::de::deserializers::SharedDeserializeMap>,
+    for<'a> <T::Archived as bytecheck::CheckBytes<ArchiveValidator<'a>>>::Error: std::fmt::Display,
+{
     if bytes.len() > MAX_SECTION_LEN {
-        return Err(DecodeError::StyleInfo(format!(
+        return Err(format!(
             "section is {} bytes, over the {MAX_SECTION_LEN}-byte limit",
             bytes.len()
-        )));
+        ));
     }
 
     let mut aligned = rkyv::AlignedVec::with_capacity(bytes.len());
@@ -195,23 +244,25 @@ pub(crate) fn decode_style_info(bytes: &[u8]) -> Result<StyleInfo, DecodeError> 
     // This model contains no shared pointers, so ArchiveValidator supplies
     // every check it needs. No platform-specific threads or unsafe access:
     // excessive nesting fails during validation on the calling thread.
-    let mut validator = ArchiveValidator::with_max_depth(&aligned, MAX_VALIDATION_DEPTH);
-    let archived = check_archived_root_with_context::<StyleInfo, _>(&aligned, &mut validator)
-        .map_err(|e| DecodeError::StyleInfo(e.to_string()))?;
-    let style_info: StyleInfo = archived
+    let mut validator = ArchiveValidator::with_max_depth(&aligned, max_depth);
+    let archived = check_archived_root_with_context::<T, _>(&aligned, &mut validator)
+        .map_err(|e| e.to_string())?;
+    archived
         .deserialize(&mut rkyv::de::deserializers::SharedDeserializeMap::new())
-        .map_err(|e| DecodeError::StyleInfo(format!("{e:?}")))?;
+        .map_err(|e| format!("{e:?}"))
+}
 
-    let depth = nesting_depth(&style_info);
+/// Refuses a rule tree deeper than [`MAX_RULE_DEPTH`]. Validation already
+/// bounded the tree; rejecting and dropping it here cannot recurse to an
+/// input-controlled depth.
+fn check_rule_depth(style_info: &StyleInfo) -> Result<(), String> {
+    let depth = nesting_depth(style_info);
     if depth > MAX_RULE_DEPTH {
-        // Validation already bounded this tree; rejecting and dropping it
-        // here cannot recurse to an input-controlled depth.
-        return Err(DecodeError::StyleInfo(format!(
+        return Err(format!(
             "rule nesting is {depth} levels deep, over the {MAX_RULE_DEPTH}-level limit"
-        )));
+        ));
     }
-
-    Ok(style_info)
+    Ok(())
 }
 
 /// Deepest `children` chain in the section, counted without recursion.
@@ -542,6 +593,126 @@ mod tests {
             ],
         };
         assert_eq!(child.to_css_string(), ".a > ::placeholder");
+    }
+
+    fn class_sheet(class: &str, value: &str) -> StyleInfo {
+        let mut rule = empty_rule();
+        rule.prelude.selectors = vec![Selector {
+            components: vec![SimpleSelector {
+                kind: SimpleSelectorKind::Class,
+                value: class.to_owned(),
+            }],
+        }];
+        rule.declaration_block.declarations = vec![ParsedDeclaration {
+            property: CssProperty {
+                id: CssPropertyId::BackgroundColor,
+                unknown_name: None,
+            },
+            value_tokens: vec![ValueToken {
+                token_type: token_types::IDENT_TOKEN,
+                value: value.to_owned(),
+            }],
+            is_important: false,
+        }];
+        StyleInfo {
+            css_id_to_style_sheet: HashMap::from([(
+                0,
+                StyleSheet {
+                    imports: vec![],
+                    rules: vec![rule],
+                },
+            )]),
+            style_text_size_hint: 32,
+        }
+    }
+
+    /// The label-7 shape web-core's `RawStyleInfoMap::encode` writes: one
+    /// `StyleInfo` per section name, each holding css id 0. Encoded here the
+    /// way the native converter encodes it.
+    #[test]
+    fn style_info_map_round_trips_two_sections() {
+        let original = StyleInfoMap {
+            name_to_style_info: HashMap::from([
+                ("CSS".to_owned(), class_sheet("foo", "blue")),
+                ("A &/中".to_owned(), class_sheet("bar", "green")),
+            ]),
+        };
+        let bytes = rkyv::to_bytes::<_, 1024>(&original).unwrap();
+        let decoded = decode_style_info_map(&bytes).unwrap();
+
+        assert_eq!(decoded.name_to_style_info.len(), 2);
+        for (name, class, value) in [("CSS", ".foo", "blue"), ("A &/中", ".bar", "green")] {
+            let style_info = &decoded.name_to_style_info[name];
+            assert_eq!(style_info.style_text_size_hint, 32);
+            assert_eq!(style_info.css_id_to_style_sheet.len(), 1);
+            let rule = &style_info.css_id_to_style_sheet[&0].rules[0];
+            assert_eq!(rule.prelude.selectors[0].to_css_string(), class);
+            assert_eq!(rule.declaration_block.declarations[0].value_text(), value);
+        }
+    }
+
+    #[test]
+    fn rejects_garbage_and_oversized_style_info_maps() {
+        assert!(matches!(
+            decode_style_info_map(&[0xFF; 64]),
+            Err(DecodeError::CustomSectionsStyleInfo(_))
+        ));
+        // A valid `StyleInfo` root is not a map root.
+        let style_info = rkyv::to_bytes::<_, 1024>(&class_sheet("foo", "red")).unwrap();
+        assert!(matches!(
+            decode_style_info_map(&style_info),
+            Err(DecodeError::CustomSectionsStyleInfo(_))
+        ));
+        let error = decode_style_info_map(&vec![0u8; MAX_SECTION_LEN + 1])
+            .expect_err("over the length cap");
+        assert!(error.to_string().contains("over the"), "{error}");
+    }
+
+    /// The rule depth limit holds per entry, and the map's own level leaves
+    /// a populated tree at the limit decodable.
+    #[test]
+    fn style_info_map_entries_keep_the_rule_depth_limit() {
+        let deep = |levels: usize| {
+            let mut rule = class_sheet("leaf", "red").css_id_to_style_sheet[&0].rules[0].clone();
+            for _ in 1..levels {
+                let mut parent = empty_rule();
+                parent.children.push(rule);
+                rule = parent;
+            }
+            StyleInfo {
+                css_id_to_style_sheet: HashMap::from([(
+                    0,
+                    StyleSheet {
+                        imports: vec![],
+                        rules: vec![rule],
+                    },
+                )]),
+                style_text_size_hint: 0,
+            }
+        };
+        let encode = |depth| {
+            rkyv::to_bytes::<_, 4096>(&StyleInfoMap {
+                name_to_style_info: HashMap::from([
+                    ("shallow".to_owned(), class_sheet("a", "red")),
+                    ("deep".to_owned(), deep(depth)),
+                ]),
+            })
+            .unwrap()
+        };
+        let at_limit = encode(MAX_RULE_DEPTH);
+        let decoded = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || decode_style_info_map(&at_limit).expect("at the limit"))
+            .expect("spawn small-stack caller")
+            .join()
+            .expect("valid input decodes on the caller's stack");
+        assert_eq!(
+            nesting_depth(&decoded.name_to_style_info["deep"]),
+            MAX_RULE_DEPTH
+        );
+        let error = decode_style_info_map(&encode(MAX_RULE_DEPTH + 1)).expect_err("over the limit");
+        assert!(error.to_string().contains("levels deep"), "{error}");
+        assert!(error.to_string().contains("\"deep\""), "{error}");
     }
 
     #[test]

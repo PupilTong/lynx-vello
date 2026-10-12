@@ -16,8 +16,18 @@ resource bounds.
   (1 is the maximum accepted), then repeated `{u32 label, u32 len, bytes}` sections to EOF.
 - Labels (`SectionLabel` in `src/web/mod.rs`): 1 Manifest (binary string map),
   2 StyleInfo (rkyv), 3 LepusCode (binary string map), 4 CustomSections (UTF-16LE JSON),
-  5 ElementTemplates (retained as raw bytes), 6 Configurations (UTF-16LE JSON object).
+  5 ElementTemplates (retained as raw bytes), 6 Configurations (UTF-16LE JSON object),
+  7 CustomSectionsStyleInfo (rkyv `StyleInfoMap { name_to_style_info: HashMap<String,
+  StyleInfo> }`, web-core's `RawStyleInfoMap`, lynx-stack#4138: one `StyleInfo` per
+  `encoding: 'CSS'` custom section, its rules under css id 0; written only when such a
+  section exists, and those sections are then absent from the label-4 JSON).
   An unknown label is an error, not a skip.
+- Named stylesheets (`src/custom_style.rs`): label 7, else a legacy label-4 JSON
+  `{encoding:"CSS", content:{ruleList}}` descriptor (pre-#4138 encoders), else a
+  `.lynx.bundle`'s CSS custom section. Each registers at
+  `<container path>/custom_section/<encoded key>.css` with the `?#` suffix kept
+  (`named_style_url` in `src/page.rs`, `styleSheetURL` in
+  `packages/bobcat-element/src/section-url.ts`).
 - Binary string map: `u32 count`, then `{u32 klen, key, u32 vlen, val}` × count (UTF-8),
   rejecting trailing bytes.
 - StyleInfo is **rkyv 0.7, size_32, root-at-end** serialization of `RawStyleInfo`

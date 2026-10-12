@@ -59,6 +59,8 @@ rstest.mockRequire("bobcat:bundle-fetch", () => bundleFetches);
 rstest.mockRequire("bobcat:future", () => futures);
 rstest.mockRequire("bobcat:diagnostics", () => diagnostics);
 const requestScriptFrame = rstest.fn();
+// Every stylesheet is held unless a test says otherwise.
+const hasStyleSheet = rstest.fn((_url: string) => true);
 const preloadStyleSheet = rstest.fn();
 const adoptStyleSheet = rstest.fn();
 const reportedErrors = rstest.fn();
@@ -71,7 +73,7 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   requestScriptFrame,
   reportScriptError: reportedErrors,
   logScriptMessage: consoleMessages,
-  preloadStyleSheet, adoptStyleSheet,
+  hasStyleSheet, preloadStyleSheet, adoptStyleSheet,
   switchExposure,
   initialProcessor: () => "",
   initData: () => undefined,
@@ -240,22 +242,23 @@ describe("MTS/BTS lifecycle runtime", () => {
 
   it("resolves the card alias to stylesheet URLs and keeps opaque handles", () => {
     expect(mts.__Card__).toBe("https://example.test/page/main.js?version=2#entry");
-    const first = mts.__LoadStyleSheet('CSS', '__Card__');
-    const second = mts.__LoadStyleSheet('CSS', mts.__Card__);
+    // Held, so each is a handle rather than `null`.
+    const first = mts.__LoadStyleSheet('CSS', '__Card__')!;
+    const second = mts.__LoadStyleSheet('CSS', mts.__Card__)!;
     expect(preloadStyleSheet.mock.calls).toEqual([
-      ['https://example.test/page/main.js/index.css?version=2#entry'],
-      ['https://example.test/page/main.js/index.css?version=2#entry'],
+      ['https://example.test/page/main.js/custom_section/CSS.css?version=2#entry'],
+      ['https://example.test/page/main.js/custom_section/CSS.css?version=2#entry'],
     ]);
     expect(first).not.toBe(second);
     expect(mts.__AdoptStyleSheet(first)).toBeNull();
     expect(mts.__AdoptStyleSheet(first)).toBeNull();
     expect(adoptStyleSheet.mock.calls).toEqual([
-      ['https://example.test/page/main.js/index.css?version=2#entry'],
-      ['https://example.test/page/main.js/index.css?version=2#entry'],
+      ['https://example.test/page/main.js/custom_section/CSS.css?version=2#entry'],
+      ['https://example.test/page/main.js/custom_section/CSS.css?version=2#entry'],
     ]);
     // The handle is only as good as the URL it names: no realm state stands
     // behind it any more.
-    expect(first).toEqual({url: 'https://example.test/page/main.js/index.css?version=2#entry'});
+    expect(first).toEqual({url: 'https://example.test/page/main.js/custom_section/CSS.css?version=2#entry'});
     expect(() => mts.__AdoptStyleSheet({} as {url: string})).toThrow();
     expect(() => Reflect.apply(mts.__AdoptStyleSheet, undefined, [null])).toThrow();
     expect(() => Reflect.apply(mts.__LoadStyleSheet, undefined, ['CSS'])).toThrow();
@@ -266,13 +269,33 @@ describe("MTS/BTS lifecycle runtime", () => {
     mts.__LoadStyleSheet('CSS', 'https://cdn.test/component.bundle?rev=3');
     mts.__LoadStyleSheet('A &/中', './component.bundle#entry');
     expect(preloadStyleSheet.mock.calls).toEqual([
-      ['https://cdn.test/component.bundle/index.css?rev=3'],
-      ['./component.bundle/A%20%26%2F%E4%B8%AD/index.css#entry'],
+      ['https://cdn.test/component.bundle/custom_section/CSS.css?rev=3'],
+      ['./component.bundle/custom_section/A%20%26%2F%E4%B8%AD.css#entry'],
+    ]);
+  });
+
+  it("answers null for a section the fetcher does not hold, and preloads nothing", () => {
+    preloadStyleSheet.mockClear();
+    adoptStyleSheet.mockClear();
+    hasStyleSheet.mockClear();
+    hasStyleSheet.mockImplementationOnce(() => false);
+    expect(mts.__LoadStyleSheet('CSS', 'https://cdn.test/no-css.bundle')).toBeNull();
+    // The probe is asked about the composed URL, and nothing is requested.
+    expect(hasStyleSheet.mock.calls).toEqual([
+      ['https://cdn.test/no-css.bundle/custom_section/CSS.css'],
+    ]);
+    expect(preloadStyleSheet).not.toHaveBeenCalled();
+    expect(adoptStyleSheet).not.toHaveBeenCalled();
+    // A held one is still the handle naming its URL, and preloaded.
+    expect(mts.__LoadStyleSheet('CSS', 'https://cdn.test/css.bundle'))
+      .toEqual({url: 'https://cdn.test/css.bundle/custom_section/CSS.css'});
+    expect(preloadStyleSheet.mock.calls).toEqual([
+      ['https://cdn.test/css.bundle/custom_section/CSS.css'],
     ]);
   });
 
   it("throws a load failure from adopt in the same call", () => {
-    const handle = mts.__LoadStyleSheet('CSS', '__Card__');
+    const handle = mts.__LoadStyleSheet('CSS', '__Card__')!;
     adoptStyleSheet.mockImplementationOnce(() => { throw Error('CSS unavailable'); });
     expect(() => mts.__AdoptStyleSheet(handle)).toThrow('CSS unavailable');
   });

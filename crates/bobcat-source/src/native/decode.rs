@@ -290,10 +290,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<crate::web::WebTemplate, ConvertErr
         css_id_to_style_sheet: styles.into_iter().collect(),
         style_text_size_hint: 0,
     };
-    custom_sections.extend(crate::custom_style::named_descriptors(
-        &style_info,
-        named_css,
-    ));
+    let custom_sections_style_info = named_style_infos(&style_info, named_css);
     let config = build_web_config(page_config, &fields, &target_version_source, &app_type);
 
     Ok(crate::web::WebTemplate {
@@ -303,8 +300,37 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<crate::web::WebTemplate, ConvertErr
         manifest,
         style_info: Some(style_info),
         custom_sections: Some(JsonValue::Object(custom_sections)),
+        custom_sections_style_info,
         ..crate::web::WebTemplate::default()
     })
+}
+
+/// Each named CSS section as a sheet of its own, the shape the web encoder's
+/// `CustomSectionsStyleInfo` section carries: the fragment and the fragments
+/// it reaches, flattened unscoped into css id 0. The fragments also stay in
+/// the bundle's `style_info`, where they always were.
+fn named_style_infos(
+    style_info: &crate::web::StyleInfo,
+    named_css: BTreeMap<String, i32>,
+) -> BTreeMap<String, crate::web::StyleInfo> {
+    named_css
+        .into_iter()
+        .map(|(name, id)| {
+            let sheet = StyleSheet {
+                imports: Vec::new(),
+                rules: crate::lower_style::fragment_rules(style_info, id)
+                    .cloned()
+                    .collect(),
+            };
+            (
+                name,
+                crate::web::StyleInfo {
+                    css_id_to_style_sheet: std::iter::once((0, sheet)).collect(),
+                    style_text_size_hint: 0,
+                },
+            )
+        })
+        .collect()
 }
 
 struct NativeHeader {

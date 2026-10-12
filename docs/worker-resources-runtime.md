@@ -268,7 +268,8 @@ still fetches; only a container that will not decode fails the request.
 **The section URL rule.** One rule, shared by the installer and both realms:
 a container at `<url>` answers its section `<name>` at
 `<url path>/<encoded name>.js`, keeping the container URL's `?#` suffix, and
-its named stylesheet `CSS` at `<url path>/index.css`. That is
+its named stylesheet `<key>` at `<url path>/custom_section/<encoded key>.css`
+— `<url path>/custom_section/CSS.css` for the compiler's `CSS` section. That is
 `named_chunk_url`/`named_style_url` in `crates/bobcat-source/src/page.rs` and
 `packages/bobcat-element/src/section-url.ts` on the realm side, which MTS's
 `chunkURL`/`styleSheetURL` and BTS's `bodyUrl` both go through. One leading
@@ -277,7 +278,7 @@ write that URL as the container was named, rooted or relative, and load it
 through `loadModuleSync`, which resolves it against the view's
 `ViewSources::base_url` in Rust. The container's fetch — and so the URLs the
 installer registers its sections at — and a `__LoadStyleSheet('CSS')` of its
-`index.css` are resolved by the fetcher against its own base. The URL a
+`custom_section/CSS.css` are resolved by the fetcher against its own base. The URL a
 section is registered under and the URL a realm loads it by are equal only
 because the embedder gives its fetcher the view's base: every embedder
 in this workspace does, the CLI and the server through `PageSource`'s input

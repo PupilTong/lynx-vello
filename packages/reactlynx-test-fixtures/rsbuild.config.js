@@ -3,6 +3,7 @@ import { defineConfig } from '@rsbuild/core';
 
 import { disableLynxBackgroundBytecode } from '../../scripts/lynx-bytecode.ts';
 
+import { pluginCssCustomSections } from './scripts/css-custom-sections.ts';
 import { pluginSourceBundles } from './scripts/source-bundles.ts';
 
 const engineVersion = '4.1.0';
@@ -15,7 +16,11 @@ export default defineConfig(({ env }) => {
 
   return {
     tools: { bundlerChain: disableLynxBackgroundBytecode },
-    plugins: [pluginReactLynx({ engineVersion }), pluginSourceBundles(mode, engineVersion)],
+    plugins: [
+      pluginReactLynx({ engineVersion }),
+      pluginSourceBundles(mode, engineVersion),
+      pluginCssCustomSections('web-css-custom-sections'),
+    ],
     source: { entry: {} },
     // Each fixture owns a compilation and output directory, so lazy chunks
     // cannot be shared accidentally between otherwise independent test pages.
@@ -34,7 +39,7 @@ export default defineConfig(({ env }) => {
           'basic-performance-large-css', 'basic-mts-run-on-main-thread', 'basic-mts-run-on-background',
           'react-scroll-timeline', 'react-viewpager', 'react-scroll-coordinator', 'react-swiper',
           'react-swiper-scroll-to', 'react-refresh-view', 'react-dialog', 'react-overlay',
-          'react-overlay-pass-through', 'react-svg']
+          'react-overlay-pass-through', 'react-svg', 'css-custom-sections']
           .map(fixture => [`web-${fixture}`, {
             source: { entry: { [fixture]: fixture === 'react-bts-query'
               ? `./src/${fixture}.jsx` : `./src/${fixture}/index.jsx` } },

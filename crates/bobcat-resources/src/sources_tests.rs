@@ -503,3 +503,39 @@ async fn a_failed_fetch_and_every_other_kind_leave_the_probe_false() {
     assert!(!probe("app:///page/sheet.css"));
     assert!(!probe("app:///page/module.js"));
 }
+
+/// The stylesheet probe reads the registry and nothing else: a registered
+/// sheet — pre-parsed or CSS bytes — is `true` by any specifier that resolves
+/// to it, its removal makes it `false` again, and a URL nothing registered is
+/// `false` without any load being started for it.
+#[test]
+fn the_style_sheet_probe_answers_from_the_registry_alone() {
+    let resources = resources();
+    resources
+        .register_style_sheet(
+            "app:///page/child.bundle/custom_section/CSS.css",
+            bobcat_core::PreparsedStyleSheet { rules: Vec::new() },
+        )
+        .unwrap();
+    resources
+        .register("app:///page/text.css", b".a {}".to_vec(), Some("text/css"))
+        .unwrap();
+    let (reports, _inbox) = bobcat_core::ImageInbox::new();
+    let probe =
+        bobcat_core::resource::ResourceFetcher::style_sheet_probe(&resources.for_view(reports))
+            .expect("the reference fetcher always offers a probe");
+
+    assert!(probe("app:///page/child.bundle/custom_section/CSS.css"));
+    // Resolved against the base the way a request is.
+    assert!(probe("child.bundle/custom_section/CSS.css"));
+    assert!(probe("/page/text.css"));
+    // Nothing registered here: `false`, and over HTTP too, where a request
+    // would have gone to the network.
+    assert!(!probe("app:///page/other.bundle/custom_section/CSS.css"));
+    assert!(!probe(
+        "https://cdn.test/child.bundle/custom_section/CSS.css"
+    ));
+    assert!(!probe("::not a url::"));
+    assert!(resources.unregister("app:///page/text.css"));
+    assert!(!probe("app:///page/text.css"));
+}

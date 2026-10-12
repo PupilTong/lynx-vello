@@ -4,7 +4,7 @@ use super::*;
 use crate::background::{WorkerCommand, WorkerEvent, WorkerPayload};
 use crate::esm::build_runtime;
 use crate::jobs::JsThread;
-use crate::link::{DetachedView, detached_outbox};
+use crate::link::{DetachedView, detached_outbox, detached_outbox_probing_style_sheets};
 use crate::main::record::write_record_field;
 use crate::main::tree::{PageConfig, Viewport};
 use crate::main::workers::WorkerFactory;
@@ -337,7 +337,21 @@ fn runtime_over_watching_names(
     DocumentProbe,
     PublishedNames,
 ) {
-    let (outbox, far_end) = detached_outbox(Arc::new(NoWakeup));
+    runtime_over_watching_names_probing(ingredients, None)
+}
+
+/// [`runtime_over_watching_names`], over a view whose fetcher answers
+/// `style_sheet_probe` with `probe`.
+fn runtime_over_watching_names_probing(
+    ingredients: DocumentIngredients,
+    probe: Option<crate::resource::StyleSheetProbe>,
+) -> (
+    ScriptRuntime,
+    MainThreadRuntime,
+    DocumentProbe,
+    PublishedNames,
+) {
+    let (outbox, far_end) = detached_outbox_probing_style_sheets(Arc::new(NoWakeup), probe);
     let mut js_runtime = build_runtime().expect("the test runtime builds");
     let (workers, inbox) = mpsc::unbounded_channel();
     let thread = JsThread::new();
@@ -6216,6 +6230,7 @@ fn an_mts_realm_declares_these_host_members() {
         "getAttribute",
         "getComputedStyleMap",
         "globalProps",
+        "hasStyleSheet",
         "initData",
         "initialProcessor",
         "insertBefore",
@@ -6648,8 +6663,8 @@ fn every_adoption_requests_its_url_and_mounts_the_fetchers_response() {
         };
         let url_a = preload_url(&mut far);
         let url_b = preload_url(&mut far);
-        assert_eq!(url_a, "app:///main.js/index.css");
-        assert_eq!(url_b, "https://cdn.test/bundle/index.css");
+        assert_eq!(url_a, "app:///main.js/custom_section/CSS.css");
+        assert_eq!(url_b, "https://cdn.test/bundle/custom_section/CSS.css");
         assert_eq!(widths(), [20.0, 90.0, 95.0], "preloading does not adopt");
         let mut notices = far.0.notices;
         let host = std::thread::spawn(move || {
@@ -6728,7 +6743,10 @@ fn adopt_waits_for_its_own_request_and_reports_errors_synchronously() {
                 "app:///main.js",
             )
             .unwrap();
-        assert_eq!(preload_url(&mut far), "app:///main.js/index.css");
+        assert_eq!(
+            preload_url(&mut far),
+            "app:///main.js/custom_section/CSS.css"
+        );
         let token = far.0.token.clone();
         let mut notices = far.0.notices;
         let host = std::thread::spawn(move || {
@@ -6759,7 +6777,7 @@ fn adopt_waits_for_its_own_request_and_reports_errors_synchronously() {
             try {{ __AdoptStyleSheet(sheet); }}
             catch (error) {{
                 failed = true;
-                if (!String(error).includes('app:///main.js/index.css')) throw error;
+                if (!String(error).includes('app:///main.js/custom_section/CSS.css')) throw error;
             }}
             if (failed !== {expected_failure}) throw Error('adopt failure was not synchronous');
             if (jobRan) throw Error('adopt ran JS jobs while waiting');
@@ -6797,7 +6815,10 @@ fn collecting_a_js_style_handle_sends_no_native_release_or_load_request() {
             "app:///main.js",
         )
         .unwrap();
-    assert_eq!(preload_url(&mut far), "app:///main.js/index.css");
+    assert_eq!(
+        preload_url(&mut far),
+        "app:///main.js/custom_section/CSS.css"
+    );
     runtime
         .evaluate_module(
             &mut js,
@@ -6813,6 +6834,62 @@ fn collecting_a_js_style_handle_sends_no_native_release_or_load_request() {
             ViewNotice::PreloadSource(_) | ViewNotice::RequestSource { .. }
         ));
     }
+}
+
+/// A stylesheet the view's fetcher does not hold is `null`, asked of the
+/// fetcher's probe with the composed URL and nothing else: no preload hint,
+/// no request. A held one is still the `{url}` handle, preloaded. What a card
+/// such as `rLynxPrepareLazyBundleMTS` does with `null` is adopt nothing,
+/// which is what native's `undefined` for a missing section makes it do.
+#[test]
+fn load_style_sheet_answers_null_for_a_sheet_the_fetcher_does_not_hold() {
+    let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let probe: crate::resource::StyleSheetProbe = {
+        let asked = Arc::clone(&asked);
+        Arc::new(move |url: &str| {
+            asked.lock().unwrap().push(url.to_owned());
+            url.starts_with("https://cdn.test/with-css.bundle/")
+        })
+    };
+    let (mut js, mut runtime, _elements, mut far) =
+        runtime_over_watching_names_probing(ingredients(), Some(probe));
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+            const missing = __LoadStyleSheet('CSS', 'https://cdn.test/no-css.bundle');
+            if (missing !== null) throw Error('a missing sheet is null, got ' + JSON.stringify(missing));
+            const held = __LoadStyleSheet('CSS', 'https://cdn.test/with-css.bundle');
+            if (held === null || held.url !== 'https://cdn.test/with-css.bundle/custom_section/CSS.css')
+                throw Error('a held sheet is its handle, got ' + JSON.stringify(held));
+        ",
+            "app:///main.js",
+        )
+        .unwrap();
+    assert_eq!(
+        *asked.lock().unwrap(),
+        [
+            "https://cdn.test/no-css.bundle/custom_section/CSS.css",
+            "https://cdn.test/with-css.bundle/custom_section/CSS.css",
+        ]
+    );
+    // Only the held sheet was hinted, and nothing was requested at all.
+    let mut preloads = Vec::new();
+    while let Ok(notice) = far.0.notices.try_recv() {
+        match notice {
+            ViewNotice::PreloadSource(crate::resource::SourceRequest::StyleSheet(url)) => {
+                preloads.push(url);
+            }
+            ViewNotice::RequestSource { request, .. } => {
+                panic!("no stylesheet may be requested: {request:?}")
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        preloads,
+        ["https://cdn.test/with-css.bundle/custom_section/CSS.css"]
+    );
 }
 
 /// One `Future` in a view's MTS realm, read both ways over the real

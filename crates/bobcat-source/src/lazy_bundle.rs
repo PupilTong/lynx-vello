@@ -25,8 +25,9 @@
 //! One rule, and it is [`named_chunk_url`]'s: every body of a container at
 //! `<url>` is registered at `<url path>/<encoded section name>.js`, keeping
 //! the container URL's `?#` suffix, and every named stylesheet at
-//! [`named_style_url`] — `<url path>/index.css` for the compiler's `CSS`
-//! section. Both realms write exactly these strings: MTS in
+//! [`named_style_url`] — `<url path>/custom_section/<encoded key>.css`, so
+//! `<url path>/custom_section/CSS.css` for the compiler's `CSS` section.
+//! Both realms write exactly these strings: MTS in
 //! `main-thread-runtime.ts`'s `chunkURL`/`styleSheetURL`, BTS in
 //! `lynx-modules.ts`'s `bodyUrl` for a lazy `bundleName`, both over
 //! `packages/bobcat-element/src/section-url.ts`.
@@ -79,7 +80,9 @@ pub struct LazyBundleSources {
     /// path and a section name, and a URL is one module per realm, so the two
     /// names come to share one entry.
     pub scripts: Vec<(Url, String)>,
-    /// One named stylesheet per `encoding: "CSS"` section.
+    /// One named stylesheet per CSS custom section: an entry of the
+    /// `CustomSectionsStyleInfo` section, a legacy `encoding: "CSS"` JSON
+    /// section, or a `.lynx.bundle`'s CSS custom section.
     pub style_sheets: Vec<(Url, Arc<PreparsedStyleSheet>)>,
 }
 
@@ -257,7 +260,7 @@ mod tests {
         );
         assert_eq!(
             named_style_url(&bundle, "CSS").as_str(),
-            "https://cdn.test/lazy-bundle/child.bundle/index.css"
+            "https://cdn.test/lazy-bundle/child.bundle/custom_section/CSS.css"
         );
     }
 
@@ -270,7 +273,23 @@ mod tests {
         );
         assert_eq!(
             named_style_url(&bundle, "CSS").as_str(),
-            "https://cdn.test/child.bundle/index.css?v=1"
+            "https://cdn.test/child.bundle/custom_section/CSS.css?v=1"
+        );
+    }
+
+    /// Every named stylesheet, the compiler's `CSS` section included, is one
+    /// encoded `.css` file under `custom_section/`, escaped as a section body
+    /// is (`form_urlencoded`, a space as `%20`), the `?#` suffix kept.
+    #[test]
+    fn a_named_stylesheet_hangs_under_custom_section() {
+        let bundle = url("https://cdn.test/child.bundle/#entry");
+        assert_eq!(
+            named_style_url(&bundle, "A &/中").as_str(),
+            "https://cdn.test/child.bundle/custom_section/A%20%26%2F%E4%B8%AD.css#entry"
+        );
+        assert_eq!(
+            named_style_url(&bundle, "CSS").as_str(),
+            "https://cdn.test/child.bundle/custom_section/CSS.css#entry"
         );
     }
 

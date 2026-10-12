@@ -156,11 +156,34 @@ pub trait ResourceFetcher: dom::FrameImages {
     fn fetch_probe(&self) -> Option<FetchProbe> {
         None
     }
+
+    /// Whether this fetcher already holds a stylesheet at a URL, answered
+    /// without loading anything — the question `__LoadStyleSheet` asks
+    /// before it hands out a handle, so that a container section that does
+    /// not exist answers `null`, as native's `LoadStyleSheet` answers
+    /// `undefined` (`lynx/core/runtime/lepus/bindings/renderer_functions.cc`),
+    /// rather than a handle whose adoption fails.
+    ///
+    /// The URL is the realm's, unresolved, as a
+    /// [`SourceRequest::StyleSheet`] carries it. Called from `bobcat-main`,
+    /// never from the view's own thread, so like [`Self::fetch_probe`] it is a
+    /// `Send + Sync` function. It must not block and must not start a load.
+    ///
+    /// The default is no probe: every `__LoadStyleSheet` answers a handle and
+    /// the adoption finds out, which is right for a fetcher that may load a
+    /// stylesheet it does not hold.
+    fn style_sheet_probe(&self) -> Option<StyleSheetProbe> {
+        None
+    }
 }
 
 /// What a fetcher answers [`ResourceFetcher::fetch_probe`] with: "has this
 /// view already fetched `url`?", callable from either engine thread.
 pub type FetchProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// What a fetcher answers [`ResourceFetcher::style_sheet_probe`] with: "is a
+/// stylesheet held at `url`?", callable from `bobcat-main`.
+pub type StyleSheetProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// A shared handle serves whatever it points at.
 ///
@@ -199,6 +222,10 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
 
     fn fetch_probe(&self) -> Option<FetchProbe> {
         (**self).fetch_probe()
+    }
+
+    fn style_sheet_probe(&self) -> Option<StyleSheetProbe> {
+        (**self).style_sheet_probe()
     }
 }
 

@@ -1,80 +1,36 @@
-//! The compiler's `encoding: CSS` custom-section JSON, shared by native
-//! conversion and web bundles. Values lower directly to the core stylesheet
-//! vocabulary; no stylesheet text is synthesized or reparsed.
+//! Named stylesheets: the custom sections a compiler tagged `encoding: CSS`,
+//! which a card loads by name through `__LoadStyleSheet`.
+//!
+//! A container carries them in one of three shapes, all lowered here to the
+//! core stylesheet vocabulary; no stylesheet text is synthesized or reparsed:
+//!
+//! 1. the `.web.bundle` `CustomSectionsStyleInfo` section (label 7), one pre-parsed `StyleInfo` per
+//!    section name — what web-core's encoder writes since lynx-stack#4138;
+//! 2. **legacy**: the compiler's JSON descriptor (`{"encoding": "CSS", "content": {"ruleList":
+//!    [...]}}`) inside the JSON `CustomSections` section, which is where encoders before
+//!    lynx-stack#4138 left it. Kept so such bundles still load; it can go once no supported bundle
+//!    is built by an older encoder (`docs/tracking/deviations.md`);
+//! 3. a `.lynx.bundle`'s CSS custom sections, which `native::decode` puts in the same
+//!    `custom_sections_style_info` map as shape 1.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use bobcat_core::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use crate::web::style_info::{DeclarationBlock, Rule, RuleKind, StyleInfo};
-
-/// The native fragment has already been decoded. Preserve its name with the
-/// same CSS descriptor the compiler supplies to the web encoder.
-pub(crate) fn named_descriptors(
-    style_info: &StyleInfo,
-    names: BTreeMap<String, i32>,
-) -> impl Iterator<Item = (String, Value)> + '_ {
-    names.into_iter().map(|(name, id)| {
-        let rules = crate::lower_style::fragment_rules(style_info, id);
-        (name, json!({"encoding":"CSS", "content":{"ruleList": rules.map(rule_json).collect::<Vec<_>>()}}))
-    })
-}
-
-fn text(value: String) -> Value {
-    let mut text = json!({"loc":{"line":0,"column":0}});
-    text["value"] = Value::String(value);
-    text
-}
-
-fn style_json(block: &DeclarationBlock) -> Vec<Value> {
-    block
-        .declarations
-        .iter()
-        .map(|decl| {
-            let (value, important) = decl.value_and_importance();
-            let value = if important {
-                format!("{value} !important")
-            } else {
-                value
-            };
-            json!({"name":decl.property.name(),"value":value,
-            "keyLoc":{"line":0,"column":0},"valLoc":{"line":0,"column":0}})
-        })
-        .collect()
-}
-
-fn rule_json(rule: &Rule) -> Value {
-    let prelude = || {
-        rule.prelude
-            .selectors
-            .iter()
-            .map(crate::web::style_info::Selector::to_css_string)
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    match rule.kind {
-        RuleKind::Style => {
-            json!({"type":"StyleRule", "selectorText":text(prelude()), "variables":{}, "style":style_json(&rule.declaration_block)})
-        }
-        RuleKind::FontFace => {
-            json!({"type":"FontFaceRule", "style":style_json(&rule.declaration_block)})
-        }
-        RuleKind::Keyframes => {
-            json!({"type":"KeyframesRule", "name":text(prelude()), "styles":rule.children.iter().map(|child| {
-            let key = child.prelude.selectors.iter().map(crate::web::style_info::Selector::to_css_string).collect::<Vec<_>>().join(",");
-            json!({"keyText":text(key), "variables":{}, "style":style_json(&child.declaration_block)})
-        }).collect::<Vec<_>>()})
-        }
-    }
-}
-
-/// Select named compiler CSS descriptors without making unrelated source
-/// sections into stylesheets. Invalid descriptors remain un-loadable.
+/// Every named stylesheet a template carries, by section name.
+///
+/// A name the `CustomSectionsStyleInfo` section carries wins over a legacy
+/// JSON descriptor of the same name; an encoder writes a CSS section in only
+/// one of the two. Each `StyleInfo` is lowered like the bundle's own: a
+/// section holds css id 0 only, so no `l-css-id` guard appears, and a
+/// hand-made section carrying other ids is scoped the way any fragment is.
+/// Invalid legacy descriptors remain un-loadable.
 pub(crate) fn named_style_sheets(
     template: &crate::web::WebTemplate,
-) -> BTreeMap<String, std::sync::Arc<PreparsedStyleSheet>> {
-    template
+) -> BTreeMap<String, Arc<PreparsedStyleSheet>> {
+    let mut sheets: BTreeMap<String, Arc<PreparsedStyleSheet>> = template
         .custom_sections
         .as_ref()
         .and_then(Value::as_object)
@@ -82,16 +38,26 @@ pub(crate) fn named_style_sheets(
         .flat_map(|sections| sections.iter())
         .filter(|(_, section)| section.get("encoding").and_then(Value::as_str) == Some("CSS"))
         .filter_map(|(name, section)| {
-            Some((
-                name.clone(),
-                std::sync::Arc::new(decode(section.get("content")?)?),
-            ))
+            Some((name.clone(), Arc::new(decode(section.get("content")?)?)))
         })
-        .collect()
+        .collect();
+    sheets.extend(
+        template
+            .custom_sections_style_info
+            .iter()
+            .map(|(name, style_info)| {
+                (
+                    name.clone(),
+                    Arc::new(crate::lower_style::to_preparsed_style_sheet(style_info)),
+                )
+            }),
+    );
+    sheets
 }
 
-/// Invalid or unsupported CSS descriptors cannot produce a loadable sheet;
-/// native `LoadStyleSheet` likewise returns null when CSS decoding fails.
+/// Lowers one legacy JSON descriptor's `content`. Invalid or unsupported
+/// descriptors cannot produce a loadable sheet; native `LoadStyleSheet`
+/// likewise returns null when CSS decoding fails.
 pub(crate) fn decode(content: &Value) -> Option<PreparsedStyleSheet> {
     let rules = content
         .get("ruleList")?
@@ -208,7 +174,80 @@ fn declaration(property: String, source: &str) -> PreparsedDeclaration {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+    use crate::web::style_info::{
+        DeclarationBlock, Rule, RuleKind, RulePrelude, Selector, SimpleSelector,
+        SimpleSelectorKind, StyleInfo, StyleSheet,
+    };
+
+    fn class_rule_info(class: &str) -> StyleInfo {
+        StyleInfo {
+            css_id_to_style_sheet: std::collections::HashMap::from([(
+                0,
+                StyleSheet {
+                    imports: vec![],
+                    rules: vec![Rule {
+                        kind: RuleKind::Style,
+                        prelude: RulePrelude {
+                            selectors: vec![Selector {
+                                components: vec![SimpleSelector {
+                                    kind: SimpleSelectorKind::Class,
+                                    value: class.to_owned(),
+                                }],
+                            }],
+                        },
+                        declaration_block: DeclarationBlock::default(),
+                        children: vec![],
+                    }],
+                },
+            )]),
+            style_text_size_hint: 0,
+        }
+    }
+
+    fn selectors(sheet: &PreparsedStyleSheet) -> Vec<&str> {
+        sheet
+            .rules
+            .iter()
+            .map(|rule| match rule {
+                PreparsedRule::Style { selectors, .. } => selectors.as_str(),
+                other => panic!("a style rule, not {other:?}"),
+            })
+            .collect()
+    }
+
+    /// The label-7 map and the legacy JSON descriptors both name sheets; the
+    /// map wins a name both carry, and a JSON section of another encoding is
+    /// no stylesheet.
+    #[test]
+    fn the_style_info_map_wins_over_a_legacy_descriptor_of_the_same_name() {
+        let template = crate::web::WebTemplate {
+            custom_sections: Some(json!({
+            "CSS": {"encoding": "CSS", "content": {"ruleList": [
+                {"type": "StyleRule", "selectorText": {"value": ".legacy"}, "style": []}
+            ]}},
+            "legacy-only": {"encoding": "CSS", "content": {"ruleList": [
+                {"type": "StyleRule", "selectorText": {"value": ".old"}, "style": []}
+            ]}},
+            "background": {"content": "void 0"},
+            })),
+            custom_sections_style_info: BTreeMap::from([
+                ("CSS".to_owned(), class_rule_info("current")),
+                ("A &/中".to_owned(), class_rule_info("named")),
+            ]),
+            ..crate::web::WebTemplate::default()
+        };
+        let sheets = named_style_sheets(&template);
+        assert_eq!(
+            sheets.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["A &/中", "CSS", "legacy-only"]
+        );
+        assert_eq!(selectors(&sheets["CSS"]), [".current"]);
+        assert_eq!(selectors(&sheets["A &/中"]), [".named"]);
+        assert_eq!(selectors(&sheets["legacy-only"]), [".old"]);
+    }
 
     #[test]
     fn compiler_variables_keep_fallbacks_and_token_level_importance() {

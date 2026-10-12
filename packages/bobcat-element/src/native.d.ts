@@ -355,6 +355,13 @@ declare module "bobcat-internal:host" {
   /** Initial processor name, handed over once as a plain string. */
   export function initialProcessor(): string | undefined;
   export function requestScriptFrame(pending: boolean): void;
+  /**
+   * Whether the view's fetcher holds a stylesheet at `url` (as the realm
+   * names it, unresolved), answered synchronously from what is registered:
+   * no request, no wait, no network. `true` for a fetcher that cannot tell.
+   * `__LoadStyleSheet` answers `null` when this is `false`.
+   */
+  export function hasStyleSheet(url: string): boolean;
   export function preloadStyleSheet(url: string): void;
   export function adoptStyleSheet(url: string): void;
   /**

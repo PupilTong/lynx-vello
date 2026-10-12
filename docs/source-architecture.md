@@ -119,21 +119,28 @@ Source custom sections retain their original names and `{content: source}`
 descriptors in `WebTemplate.custom_sections`, alongside the existing script-map
 adaptation. Native-to-web conversion serializes those descriptors instead of
 replacing them with an empty CustomSections object. Native CSS sections retain
-both their aggregate StyleInfo representation and the compiler's named
-`{encoding:"CSS", content:{ruleList}}` descriptors. Each named fragment includes
-only reachable imports, in the same cascade order as the aggregate sheet;
-StyleRule, KeyframesRule and FontFaceRule remain distinct JSON shapes. The
-rkyv 0.7 wire layout is unchanged, and no stylesheet text is synthesized.
+their aggregate StyleInfo representation and also become
+`WebTemplate.custom_sections_style_info` entries, one `StyleInfo` per section
+name with the fragment under css id 0 — the shape of the web encoder's
+`CustomSectionsStyleInfo` section (label 7, lynx-stack#4138), which
+native-to-web conversion writes for them instead of JSON descriptors. Each
+named fragment includes only reachable imports, in the same cascade order as
+the aggregate sheet, and no stylesheet text is synthesized. A web bundle's
+label 7 decodes into the same field; a legacy JSON
+`{encoding:"CSS", content:{ruleList}}` descriptor from an encoder before
+lynx-stack#4138 is still lowered (`crates/bobcat-source/src/custom_style.rs`).
 
 The native decoder normalizes boolean-only `enableQueryComponentSync` and
 `enableJSDataProcessor` fields before web configuration stringification, so a
 native string `"true"` cannot turn into an enabled flag after conversion.
 `PageSource` passes the JS-processor flag through `PageConfig.enable_js_data_processor`;
-see [data lifecycle](data-lifecycle-runtime.md). Lazy bundle registration remains
-separate integration work. `PageSource` registers decoded named CSS under
-entry-relative URLs in the embedder's existing resource registry. MTS requests
-those URLs through the ordinary stylesheet loader; see
-[named stylesheet loading](named-styles-runtime.md).
+see [data lifecycle](data-lifecycle-runtime.md). `PageSource` registers decoded
+named CSS at `<entry>/custom_section/<encoded name>.css` in the embedder's
+existing resource registry, and `LazyBundleInstaller`
+(`crates/bobcat-source/src/lazy_bundle.rs`) does the same under a fetched lazy
+container's URL. MTS requests those URLs through the ordinary stylesheet
+loader; see [named stylesheet loading](named-styles-runtime.md) and
+[worker resources](worker-resources-runtime.md) "Lazy containers".
 Source decoding executes no scripts and fetches no lazy bundles.
 
 ```sh

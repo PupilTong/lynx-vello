@@ -82,7 +82,10 @@ pub(crate) fn join(specifier: &str, base: Option<&Url>) -> Result<Url, url::Pars
 
 /// Every transport, behind one dispatch.
 pub(crate) struct Transports {
-    pub registry: Registry,
+    /// Its own `Arc` so that
+    /// [`ResourceFetcher::style_sheet_probe`](bobcat_core::resource::ResourceFetcher::style_sheet_probe)
+    /// can hand a reader of it to `bobcat-main`, as the fetch index is.
+    pub registry: std::sync::Arc<Registry>,
     pub http: HttpSettings,
     #[cfg(not(target_arch = "wasm32"))]
     pub disk: Option<std::sync::Arc<crate::cache::disk::DiskCache>>,
@@ -429,7 +432,7 @@ mod tests {
 
     fn transports() -> Transports {
         Transports {
-            registry: Registry::default(),
+            registry: std::sync::Arc::default(),
             http: HttpSettings {
                 timeout: Duration::from_secs(5),
                 max_body: 1024,
