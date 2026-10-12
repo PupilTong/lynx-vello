@@ -28,8 +28,6 @@ pending! {
         "a BTS-only throw, same shape: upstream asserts `fileName` (`app-service.js`), where this engine names the realm instead",
     "api-error-mts" =>
         "an MTS-only throw: blank is consistent and the view surviving to `ScriptFinished` is #330 working; upstream asserts the report's `fileName` (`lepus.js`), which this engine does not carry",
-    "api-exposure-dynamic-ui-margin" =>
-        "the frames now show what the 2026-10-11 ruling says, and that is not what upstream's frames show. The card sets `exposure-ui-margin-top` 50% and -50% and never sets `enable-exposure-ui-margin` or `enableExposureUIMargin`; under the ruling ui margins apply only with one of those switches (native, `LynxBaseUI.java:1583-1591`), so here the margins do nothing: nothing turns orange at scrollTop 200, and at 800 both 123 (red, placeholder orange) and 789 (green) are exposed because they are in the viewport. web-core applies ui margins with no switch (`ExposureServices.ts:141-151`), so upstream has orange at 200 and 789 unexposed at 800. awaiting the user's word on which of the two a golden should pin for a card that tests a ui margin without the switch",
     "api-frame-auto-height" =>
         "a `<frame auto-height>` must take its height from the nested card. `<frame>` does not exist here: the compiled card calls `__CreateFrame`, which `packages/bobcat-element/src/element-papi.ts` lists as not implemented, so the main-thread render throws and the screen is blank",
     "api-frame-auto-width" =>
