@@ -232,8 +232,8 @@ pub(crate) struct DocumentIngredients {
     /// [`ViewSources::screen`](crate::ViewSources::screen).
     pub(crate) viewport: Viewport,
     /// The page configuration the view was built with. The boot module is
-    /// written with its five switches as literals, and hands them back to the
-    /// `createDocument` that builds the document as five boolean arguments.
+    /// written with its four switches as literals, and hands them back to the
+    /// `createDocument` that builds the document as four boolean arguments.
     /// What the document is actually built with is therefore the realm's
     /// copy, not this one.
     pub(crate) config: PageConfig,
@@ -417,8 +417,7 @@ struct DocumentSlot {
     /// reaches nothing else; the runtime drains it once per entry.
     component_events: ComponentEvents,
     /// The document's exposure registrations and the transitions they owe
-    /// script, built with the document from the page's
-    /// `enableExposureUIMargin`.
+    /// script.
     ///
     /// Beside the document rather than inside it because exposure is Lynx's
     /// and `dom` knows nothing of it: each registration is one of `dom`'s
@@ -455,9 +454,7 @@ impl DocumentSlot {
             bound: false,
             held: None,
             component_events: ComponentEvents::default(),
-            // Replaced by `create_document`, which knows the page's switch;
-            // nothing reaches it before then.
-            exposure: Exposure::new(false),
+            exposure: Exposure::new(),
             removals: 0,
             outbox,
         }))
@@ -524,7 +521,6 @@ impl DocumentSlot {
             document
         })?;
         self.document = Some(document);
-        self.exposure = Exposure::new(config.enable_exposure_ui_margin);
         Ok(())
     }
 
@@ -1766,7 +1762,7 @@ impl MainThreadRuntime {
     /// connecting the BTS, and the flush, the listed sheets included.
     ///
     /// The only literals written into it are the screen's three numbers, the
-    /// page configuration's five switches, the entry's URL and the BTS
+    /// page configuration's four switches, the entry's URL and the BTS
     /// entry's — facts Rust owns, written as primitives rather than as JSON
     /// the realm would parse and hand back. Each URL is written as a JSON
     /// string literal, which is the one quoting that is also a JavaScript
@@ -1792,7 +1788,6 @@ impl MainThreadRuntime {
             default_overflow_visible,
             enable_css_selector,
             enable_js_data_processor,
-            enable_exposure_ui_margin,
         } = self.config;
         let entry = serde_json::to_string(&self.entry).expect("a string serializes");
         let background_entry = self.background_entry.as_ref().map_or_else(
@@ -1811,7 +1806,6 @@ const config = {{
   defaultOverflowVisible: {default_overflow_visible},
   enableCssSelector: {enable_css_selector},
   enableJSDataProcessor: {enable_js_data_processor},
-  enableExposureUIMargin: {enable_exposure_ui_margin},
 }};
 
 // The realm's document, created out of that configuration and held by this
@@ -2314,8 +2308,8 @@ fn install_document_members(
 ) -> Result<(), MainThreadError> {
     const NAME: &str = "bobcat-internal:host.createDocument";
     let tree = Rc::clone(handle);
-    install(engine, js_runtime, "createDocument", 5, move |arguments| {
-        // The five switches, in `PageConfig`'s order, as the boot module
+    install(engine, js_runtime, "createDocument", 4, move |arguments| {
+        // The four switches, in `PageConfig`'s order, as the boot module
         // wrote them. Read rather than passed through because Rust itself
         // needs the fields: the UA cascade and the document's own switches are
         // built out of them. A missing or non-boolean one fails the
@@ -2325,7 +2319,6 @@ fn install_document_members(
             default_overflow_visible: boolean_argument(NAME, arguments, 1)?,
             enable_css_selector: boolean_argument(NAME, arguments, 2)?,
             enable_js_data_processor: boolean_argument(NAME, arguments, 3)?,
-            enable_exposure_ui_margin: boolean_argument(NAME, arguments, 4)?,
         };
         // The page id is not this member's answer: `createPage` is still what
         // hands the realm the permanent root, and it now has a document to
@@ -2657,8 +2650,8 @@ fn install_attribute_members(
 ///
 /// That is the one exception to "this layer knows no attribute names". The
 /// exposure attributes (`exposure-id`, `exposure-scene`, `exposure-area`, the
-/// screen and ui margins and `enable-exposure-ui-margin`) belong to every
-/// tag, so no tag's component can own them, and what they drive — the
+/// screen and ui margins) belong to every tag, so no tag's component can own
+/// them, and what they drive — the
 /// document's exposure registrations — sits beside the document in the slot,
 /// out of a component's reach. The slot is told after the mutation, so the
 /// registration reads the attributes as they now are.
@@ -2963,7 +2956,7 @@ fn flag_argument(function: &str, arguments: &[HostValue], index: usize) -> Resul
 }
 
 /// A JavaScript boolean, which is what the boot module hands `createDocument`
-/// its five switches as.
+/// its four switches as.
 fn boolean_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
     match *argument(arguments, index) {
         HostValue::Boolean(value) => Ok(value),

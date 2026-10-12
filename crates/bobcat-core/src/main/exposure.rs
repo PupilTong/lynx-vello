@@ -27,10 +27,11 @@
 //! Each observer has two margins, the root margin that dilates the viewport
 //! and the target margin that dilates the element's border box before any
 //! clip, and the element's margins are folded into them by one rule:
-//! - `exposure-ui-margin-*` lands on the target margin of its own side, either sign, and applies
-//!   only when the element's `enable-exposure-ui-margin` is true or, where the element names none,
-//!   when the page's `enableExposureUIMargin` is (`LynxBaseUI.java:1583-1591`). Native grows the
-//!   element's rect by it the same way (`LynxUIExposure.m:266-334` `frameOfUIInWindow:`,
+//! - `exposure-ui-margin-*` lands on the target margin of its own side, either sign, and always
+//!   applies, as web-core's does. Native applies it only under an element's
+//!   `enable-exposure-ui-margin` or the page's `enableExposureUIMargin`
+//!   (`LynxBaseUI.java:1583-1591`); neither is read here. Native grows the element's rect by the
+//!   margin the same way (`LynxUIExposure.m:266-334` `frameOfUIInWindow:`,
 //!   `UIExposure.java:262-296` `getUIRect`).
 //! - A positive `exposure-screen-margin-*` lands on the target margin of the opposite side: growing
 //!   the screen down by `b` is growing the element up by `b`. That is native's logic without the
@@ -43,8 +44,7 @@
 //! the primitive clips the grown rect, while a root margin dilates only the
 //! viewport, after every clip has cut the element. web-core folds every margin into
 //! one `rootMargin` of the nearest scroll container, with signs that cancel
-//! a ui margin rather than add it, and has no page switch
-//! (`ExposureServices.ts:141-151`).
+//! a ui margin rather than add it (`ExposureServices.ts:141-151`).
 //!
 //! **`stopExposure`/`resumeExposure` are native's** (`LynxUIExposure.m:538-569`,
 //! `UIExposure.java:478-505`). Stopping drops every observer, so nothing is
@@ -155,9 +155,6 @@ const EXPOSURE_ID: &str = "exposure-id";
 const EXPOSURE_SCENE: &str = "exposure-scene";
 /// The visible share an element needs, as `parseFloat(value) / 100`.
 const EXPOSURE_AREA: &str = "exposure-area";
-/// The per-element switch that lets the `exposure-ui-margin-*` attributes
-/// apply, over the page's `enableExposureUIMargin`.
-const ENABLE_UI_MARGIN: &str = "enable-exposure-ui-margin";
 /// The screen margins, top, right, bottom, left.
 const SCREEN_MARGINS: [&str; 4] = [
     "exposure-screen-margin-top",
@@ -174,14 +171,14 @@ const UI_MARGINS: [&str; 4] = [
 ];
 
 /// Whether writing or removing `name` can change an element's exposure
-/// registration: every `exposure-` attribute, and the ui-margin switch.
+/// registration: every `exposure-` attribute.
 ///
 /// A prefix test rather than the list, because it is asked on every
 /// attribute write and a name that matches without meaning anything only
 /// costs a re-arm of an element that is registered, and nothing for one that
 /// is not.
 pub(crate) fn is_exposure_attribute(name: &str) -> bool {
-    name.starts_with("exposure-") || name == ENABLE_UI_MARGIN
+    name.starts_with("exposure-")
 }
 
 /// One element's exposure moving: it became visible (`appeared`) or stopped
@@ -533,25 +530,13 @@ struct Attributes {
 }
 
 impl Attributes {
-    /// Reads `node`'s exposure attributes. `ui_margin_default` is the page's
-    /// `enableExposureUIMargin`, which an element without its own
-    /// `enable-exposure-ui-margin` follows; the element's own switch is on
-    /// when present and not `"false"`, the reading every boolean attribute
-    /// gets here (see `tree::dialog`'s `open`).
-    fn read(document: &LynxDocument, node: NodeId, ui_margin_default: bool) -> Self {
+    /// Reads `node`'s exposure attributes.
+    fn read(document: &LynxDocument, node: NodeId) -> Self {
         let element = document
             .get(node)
             .expect("an element is registered for exposure only while it is live");
         let width = document.viewport_size().width;
         let length = |name: &str| parse_length(element.attribute(name), width);
-        let ui_margins = element
-            .attribute(ENABLE_UI_MARGIN)
-            .map_or(ui_margin_default, |value| value != "false");
-        let ui = if ui_margins {
-            UI_MARGINS.map(length)
-        } else {
-            [Length::Px(0.0); 4]
-        };
         Self {
             exposure_id: element
                 .attribute(EXPOSURE_ID)
@@ -562,7 +547,7 @@ impl Attributes {
                 .unwrap_or_default()
                 .to_owned(),
             area: parse_area(element.attribute(EXPOSURE_AREA)),
-            margins: fold_margins(SCREEN_MARGINS.map(length), ui),
+            margins: fold_margins(SCREEN_MARGINS.map(length), UI_MARGINS.map(length)),
         }
     }
 }
@@ -570,32 +555,26 @@ impl Attributes {
 /// A document's exposure registrations, the switch `stopExposure` and
 /// `resumeExposure` turn, and the transitions waiting for a delivery entry.
 ///
-/// Owned by the realm's document slot beside the document, and created with
-/// it, from the page's `enableExposureUIMargin`.
+/// Owned by the realm's document slot beside the document.
 #[derive(Debug)]
 pub(crate) struct Exposure {
     /// Shared with every registration's [`ExposureHandler`].
     shared: Rc<RefCell<Shared>>,
     /// False between `stopExposure` and `resumeExposure`.
     running: bool,
-    /// The page's `enableExposureUIMargin`.
-    ui_margin_default: bool,
 }
 
 impl Exposure {
-    /// No registrations, detection running, and `ui_margin_default` as the
-    /// page's `enableExposureUIMargin`.
-    pub(crate) fn new(ui_margin_default: bool) -> Self {
+    /// No registrations, detection running.
+    pub(crate) fn new() -> Self {
         Self {
             shared: Rc::default(),
             running: true,
-            ui_margin_default,
         }
     }
 
-    /// An `exposure-*` attribute or `enable-exposure-ui-margin` of the live
-    /// element `node` was written or removed: the registration follows the
-    /// attributes as they are now.
+    /// An `exposure-*` attribute of the live element `node` was written or
+    /// removed: the registration follows the attributes as they are now.
     pub(crate) fn attribute_changed(&mut self, document: &mut LynxDocument, node: NodeId) {
         let listens = self
             .shared
@@ -615,7 +594,7 @@ impl Exposure {
     /// Registers, re-arms or tears down `node`: registered while it has an
     /// `exposure-id` or a listener.
     fn update(&mut self, document: &mut LynxDocument, node: NodeId, listens: bool) {
-        let attributes = Attributes::read(document, node, self.ui_margin_default);
+        let attributes = Attributes::read(document, node);
         if attributes.exposure_id.is_some() || listens {
             self.arm(document, node, attributes, listens);
         } else {
@@ -741,7 +720,7 @@ impl Exposure {
             for node in nodes {
                 if document.get(node).is_some() {
                     let listens = self.shared.borrow().entries[&node].listens;
-                    let attributes = Attributes::read(document, node, self.ui_margin_default);
+                    let attributes = Attributes::read(document, node);
                     self.arm(document, node, attributes, listens);
                 } else {
                     let mut shared = self.shared.borrow_mut();

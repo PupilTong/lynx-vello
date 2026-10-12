@@ -62,11 +62,7 @@ fn default_page(native: &[u8], web: bool) -> bobcat_source::PageSource {
 
 #[test]
 fn native_boolean_flags_keep_their_types_through_web_conversion() {
-    for key in [
-        "enableQueryComponentSync",
-        "enableJSDataProcessor",
-        "enableExposureUIMargin",
-    ] {
+    for key in ["enableQueryComponentSync", "enableJSDataProcessor"] {
         for (value, expected) in [
             ("true", true),
             ("false", false),

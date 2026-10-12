@@ -662,7 +662,7 @@ const registry = new FinalizationRegistry(
 );
 
 /**
- * The five Lynx page switches a document is built with, as the boot module
+ * The four Lynx page switches a document is built with, as the boot module
  * is written with them.
  *
  * The host writes them into the boot module as boolean literals; the boot
@@ -678,12 +678,6 @@ export interface PageConfig {
   readonly enableCssSelector: boolean;
   /** Whether page data reaches BTS without the MTS processor running. */
   readonly enableJSDataProcessor: boolean;
-  /**
-   * Whether an element's `exposure-ui-margin-*` attributes apply when it
-   * names no `enable-exposure-ui-margin` of its own. Read by the host's
-   * exposure detection; nothing in this realm reads it.
-   */
-  readonly enableExposureUIMargin: boolean;
 }
 
 /**
@@ -708,7 +702,6 @@ export class Document {
       config.defaultOverflowVisible,
       config.enableCssSelector,
       config.enableJSDataProcessor,
-      config.enableExposureUIMargin,
     );
   }
 

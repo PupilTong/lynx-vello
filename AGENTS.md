@@ -772,8 +772,8 @@ Rust owns, passed as primitives, with no JSON round trip), and its first
 statement is `export const document = new Document(config);`;
 `bobcat:element`'s `Document` constructor calls
 `createDocument(defaultDisplayLinear, defaultOverflowVisible,
-enableCssSelector, enableJSDataProcessor, enableExposureUIMargin)`, which
-reads five `HostValue::Boolean` arguments and builds the document from them plus the
+enableCssSelector, enableJSDataProcessor)`, which
+reads four `HostValue::Boolean` arguments and builds the document from them plus the
 `DocumentIngredients` that never reach the realm: the create-time viewport, the
 validated text context and the group's style pool. It never waits: **the view's
 author sheets are not mounted here** but by the first `__FlushElementTree`
@@ -1612,9 +1612,9 @@ over it: every element whose `exposure-id` attribute is non-empty, or on which
 the realm has filed a `uiappear`/`uidisappear` handler, gets one observer of
 its own — root the viewport, thresholds `[exposure-area / 100]`, and a root
 margin and a target margin folded from the element's margins by one rule:
-`exposure-ui-margin-*`, when `enable-exposure-ui-margin` (the attribute, else
-the page config `enableExposureUIMargin`, the fifth `PageConfig` switch) is
-true, on the target margin of the same side, either sign, a `%` of the
+`exposure-ui-margin-*`, always (neither native's per-element
+`enable-exposure-ui-margin` nor its page config `enableExposureUIMargin` is
+read), on the target margin of the same side, either sign, a `%` of the
 element's own size; a positive `exposure-screen-margin-*` on the target margin
 of the opposite side (native's `frameOfUIInWindow:` without the switch); a
 negative one on the root margin of the same side (`borderOfExposureScreen:`).
@@ -2549,8 +2549,8 @@ whatever is due — before that entry's commit, so a callback's mutation rides
 the same frame. No deadline crosses the link and no host turn is owed for one.
 
 `src/element-papi.ts` also exports `class Document` and the `PageConfig` its
-constructor takes: the five page switches the boot module is written with,
-which the constructor passes to the native `createDocument` as five booleans,
+constructor takes: the four page switches the boot module is written with,
+which the constructor passes to the native `createDocument` as four booleans,
 in `PageConfig`'s order. It is on no collection schedule at all, which is the opposite
 of the element path in the same file.
 

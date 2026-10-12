@@ -193,10 +193,10 @@ QuickJS ESM graph — an MTS realm, on bobcat-main's runtime
   bobcat:boot
     ├──▶ bobcat:element (Document class + flush binding)
     ├──▶ bobcat:timers (timer-global installation)
-    ├──  const config = { defaultDisplayLinear: …, … }  five boolean literals
+    ├──  const config = { defaultDisplayLinear: …, … }  four boolean literals
     ├──  export const document = new Document(config)  the realm's first
     │      └──▶ bobcat-internal:host.createDocument      statement
-    │            └──▶ five booleans + DocumentIngredients ──▶ private dom::Document<()>
+    │            └──▶ four booleans + DocumentIngredients ──▶ private dom::Document<()>
     │   (the author sheets are mounted on this document, in listed order, by
     │    the first __FlushElementTree below, never by a statement here)
     └──▶ await import("<entry URL>")    completed by the view's `load_entry`

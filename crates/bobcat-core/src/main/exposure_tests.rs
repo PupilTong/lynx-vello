@@ -107,7 +107,7 @@ fn in_node_order(mut nodes: Vec<NodeId>) -> Vec<NodeId> {
 #[test]
 fn an_exposure_id_registers_and_the_first_update_reports_what_is_visible() {
     let mut document = fresh_document();
-    let mut exposure = Exposure::new(false);
+    let mut exposure = Exposure::new();
     let shown = boxed(&mut document, 0.0, 100.0);
     let below = boxed(&mut document, 1000.0, 100.0);
     set(&mut exposure, &mut document, shown, "exposure-id", "shown");
@@ -125,7 +125,7 @@ fn an_exposure_id_registers_and_the_first_update_reports_what_is_visible() {
 #[test]
 fn nothing_is_queued_when_nothing_moved() {
     let mut document = fresh_document();
-    let mut exposure = Exposure::new(false);
+    let mut exposure = Exposure::new();
     let node = boxed(&mut document, 0.0, 100.0);
     set(&mut exposure, &mut document, node, "exposure-id", "a");
     assert_eq!(deliver(&exposure, &mut document).len(), 1);
@@ -141,7 +141,7 @@ fn nothing_is_queued_when_nothing_moved() {
 #[test]
 fn exposure_area_asks_for_that_share_of_the_element() {
     let mut document = fresh_document();
-    let mut exposure = Exposure::new(false);
+    let mut exposure = Exposure::new();
     let scroller = child(
         &mut document,
         "view",
@@ -218,7 +218,7 @@ fn margin_lengths_read_px_rpx_percent_and_bare_numbers() {
 #[test]
 fn screen_margins_reach_the_observer() {
     let mut document = fresh_document();
-    let mut exposure = Exposure::new(false);
+    let mut exposure = Exposure::new();
     let node = boxed(&mut document, 0.0, 100.0);
     for (name, value) in [
         ("exposure-screen-margin-top", "20rpx"),
@@ -266,7 +266,7 @@ fn screen_margins_reach_past_a_clipping_page() {
 
 /// [`screen_margins_grow_and_shrink_the_screen`] over `document`.
 fn grow_and_shrink_the_screen(mut document: LynxDocument) {
-    let mut exposure = Exposure::new(false);
+    let mut exposure = Exposure::new();
     let below = boxed(&mut document, VIEWPORT_HEIGHT + 10.0, 20.0);
     let top = boxed(&mut document, 0.0, 20.0);
     set(&mut exposure, &mut document, below, "exposure-id", "below");
@@ -304,7 +304,7 @@ fn grow_and_shrink_the_screen(mut document: LynxDocument) {
 #[test]
 fn screen_margins_reach_past_a_scrollport() {
     let mut document = fresh_document();
-    let mut exposure = Exposure::new(false);
+    let mut exposure = Exposure::new();
     let scroller = child(
         &mut document,
         "scroll-view",
@@ -340,14 +340,14 @@ fn screen_margins_reach_past_a_scrollport() {
     );
 }
 
-/// The ui margins apply only when switched on: by the element's own
-/// `enable-exposure-ui-margin`, present and not `"false"`, or, where it
-/// names none, by the page's `enableExposureUIMargin`. An element 10px below
-/// the viewport whose own top edge a 20px ui margin moves up into it.
+/// The ui margins apply with no switch: an element's own
+/// `enable-exposure-ui-margin` is not read, `"false"` included. An element
+/// 10px below the viewport whose own top edge a 20px ui margin moves up into
+/// it.
 #[test]
-fn ui_margins_apply_only_when_switched_on() {
+fn ui_margins_apply_whatever_the_element_s_switch_says() {
     let mut document = fresh_document();
-    let mut exposure = Exposure::new(false);
+    let mut exposure = Exposure::new();
     let node = boxed(&mut document, VIEWPORT_HEIGHT + 10.0, 20.0);
     set(
         &mut exposure,
@@ -356,20 +356,14 @@ fn ui_margins_apply_only_when_switched_on() {
         "exposure-ui-margin-top",
         "20px",
     );
-    set(&mut exposure, &mut document, node, "exposure-id", "a");
-    assert_eq!(deliver(&exposure, &mut document), Vec::new());
-    assert_eq!(
-        target_margin(&exposure, &document, node).top,
-        MarginLength::Px(0.0)
-    );
-
     set(
         &mut exposure,
         &mut document,
         node,
         "enable-exposure-ui-margin",
-        "true",
+        "false",
     );
+    set(&mut exposure, &mut document, node, "exposure-id", "a");
     assert_eq!(
         target_margin(&exposure, &document, node).top,
         MarginLength::Px(20.0)
@@ -377,45 +371,6 @@ fn ui_margins_apply_only_when_switched_on() {
     assert_eq!(
         deliver(&exposure, &mut document),
         vec![record(node, true, "a")]
-    );
-    set(
-        &mut exposure,
-        &mut document,
-        node,
-        "enable-exposure-ui-margin",
-        "false",
-    );
-    assert_eq!(
-        deliver(&exposure, &mut document),
-        vec![record(node, false, "a")]
-    );
-
-    // The page's switch, which the element's own overrides either way.
-    let mut document = fresh_document();
-    let mut exposure = Exposure::new(true);
-    let node = boxed(&mut document, VIEWPORT_HEIGHT + 10.0, 20.0);
-    set(
-        &mut exposure,
-        &mut document,
-        node,
-        "exposure-ui-margin-top",
-        "20px",
-    );
-    set(&mut exposure, &mut document, node, "exposure-id", "a");
-    assert_eq!(
-        deliver(&exposure, &mut document),
-        vec![record(node, true, "a")]
-    );
-    set(
-        &mut exposure,
-        &mut document,
-        node,
-        "enable-exposure-ui-margin",
-        "false",
-    );
-    assert_eq!(
-        deliver(&exposure, &mut document),
-        vec![record(node, false, "a")]
     );
 }
 
@@ -524,13 +479,13 @@ fn margins_fold_onto_the_target_and_the_root() {
 }
 
 /// Through an element above the viewport, whose bottom edge a 20px ui
-/// margin moves down into it, with the page's switch on: the target margin
-/// of the same side, and no root margin.
+/// margin moves down into it: the target margin of the same side, and no
+/// root margin.
 #[test]
 fn a_ui_margin_grows_the_element_on_its_own_side() {
     let px = |px| MarginLength::Px(px);
     let mut document = fresh_document();
-    let mut exposure = Exposure::new(true);
+    let mut exposure = Exposure::new();
     let node = boxed(&mut document, -30.0, 20.0);
     set(&mut exposure, &mut document, node, "exposure-id", "a");
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
@@ -560,7 +515,7 @@ fn a_ui_margin_grows_the_element_on_its_own_side() {
 #[test]
 fn a_ui_percentage_is_of_the_element_s_own_size() {
     let mut document = fresh_document();
-    let mut exposure = Exposure::new(true);
+    let mut exposure = Exposure::new();
     let node = boxed(&mut document, VIEWPORT_HEIGHT + 10.0, 20.0);
     set(&mut exposure, &mut document, node, "exposure-id", "a");
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
@@ -628,7 +583,7 @@ fn exposure_area_is_parse_float_over_a_hundred() {
 #[test]
 fn a_changed_exposure_id_leaves_under_the_old_id_and_appears_under_the_new() {
     let mut document = fresh_document();
-    let mut exposure = Exposure::new(false);
+    let mut exposure = Exposure::new();
     let node = boxed(&mut document, 0.0, 100.0);
     set(&mut exposure, &mut document, node, "exposure-id", "old");
     assert_eq!(
@@ -652,7 +607,7 @@ fn a_changed_exposure_id_leaves_under_the_old_id_and_appears_under_the_new() {
 #[test]
 fn removing_the_exposure_id_leaves_and_unregisters() {
     let mut document = fresh_document();
-    let mut exposure = Exposure::new(false);
+    let mut exposure = Exposure::new();
     let node = boxed(&mut document, 0.0, 100.0);
     set(&mut exposure, &mut document, node, "exposure-scene", "feed");
     set(&mut exposure, &mut document, node, "exposure-id", "a");
@@ -679,7 +634,7 @@ fn removing_the_exposure_id_leaves_and_unregisters() {
 #[test]
 fn a_listener_alone_registers_and_hears_its_element_events() {
     let mut document = fresh_document();
-    let mut exposure = Exposure::new(false);
+    let mut exposure = Exposure::new();
     let node = boxed(&mut document, 0.0, 100.0);
     exposure.set_listens(&mut document, node, true);
     let event = |appeared| Transition {
@@ -707,7 +662,7 @@ fn a_listener_alone_registers_and_hears_its_element_events() {
 #[test]
 fn a_listener_and_an_id_make_one_transition() {
     let mut document = fresh_document();
-    let mut exposure = Exposure::new(false);
+    let mut exposure = Exposure::new();
     let node = boxed(&mut document, 0.0, 100.0);
     set(&mut exposure, &mut document, node, "exposure-scene", "feed");
     set(&mut exposure, &mut document, node, "exposure-id", "a");
@@ -739,7 +694,7 @@ fn a_listener_and_an_id_make_one_transition() {
 #[test]
 fn stopping_with_send_event_leaves_everything_and_resuming_finds_it_again() {
     let mut document = fresh_document();
-    let mut exposure = Exposure::new(false);
+    let mut exposure = Exposure::new();
     let a = boxed(&mut document, 0.0, 100.0);
     let b = boxed(&mut document, 100.0, 100.0);
     let c = boxed(&mut document, 1000.0, 100.0);
@@ -806,7 +761,7 @@ fn stopping_with_send_event_leaves_everything_and_resuming_finds_it_again() {
 #[test]
 fn stopping_without_send_event_keeps_the_exposed_record() {
     let mut document = fresh_document();
-    let mut exposure = Exposure::new(false);
+    let mut exposure = Exposure::new();
     let kept = boxed(&mut document, 0.0, 100.0);
     let gone = boxed(&mut document, 100.0, 100.0);
     set(&mut exposure, &mut document, kept, "exposure-id", "kept");
@@ -836,7 +791,7 @@ fn stopping_without_send_event_keeps_the_exposed_record() {
 #[test]
 fn a_freed_element_that_was_exposed_leaves_once() {
     let mut document = fresh_document();
-    let mut exposure = Exposure::new(false);
+    let mut exposure = Exposure::new();
     let node = boxed(&mut document, 0.0, 100.0);
     set(&mut exposure, &mut document, node, "exposure-id", "a");
     exposure.set_listens(&mut document, node, true);
@@ -876,7 +831,7 @@ fn a_freed_element_that_was_exposed_leaves_once() {
 #[test]
 fn an_unlinked_element_leaves_through_the_primitive() {
     let mut document = fresh_document();
-    let mut exposure = Exposure::new(false);
+    let mut exposure = Exposure::new();
     let node = boxed(&mut document, 0.0, 100.0);
     set(&mut exposure, &mut document, node, "exposure-id", "a");
     exposure.set_listens(&mut document, node, true);

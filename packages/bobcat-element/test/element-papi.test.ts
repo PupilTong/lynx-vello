@@ -79,7 +79,7 @@ const DOCUMENT_REFUSAL = new Error("the realm already created its document");
 
 /**
  * The page configuration a boot module is written with and hands to the
- * constructor. Its five switches are the host's; nothing in this file reads
+ * constructor. Its four switches are the host's; nothing in this file reads
  * them, and the constructor's only job is to pass them on, in order.
  */
 const PAGE_CONFIG: elementPapi.PageConfig = {
@@ -87,7 +87,6 @@ const PAGE_CONFIG: elementPapi.PageConfig = {
   defaultOverflowVisible: false,
   enableCssSelector: false,
   enableJSDataProcessor: true,
-  enableExposureUIMargin: true,
 };
 
 /**
@@ -559,7 +558,7 @@ describe("installation", () => {
     expect(mock.named("createDocument")).toEqual([
       // `PageConfig`'s order: display, overflow, selectors, processor,
       // exposure ui margin.
-      ["createDocument", true, false, false, true, true],
+      ["createDocument", true, false, false, true],
     ]);
   });
 
