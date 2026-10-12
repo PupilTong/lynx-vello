@@ -1691,8 +1691,9 @@ snapping item by item on its main axis with the items slotted into it, and
 layer a `steps()` animation on `#content`'s scroll timeline moves, sized by
 the item count the component keeps in `--swiper-count` on `slotchange` at its
 slot; the five `mode` layouts with `coverflow` and `carry` as
-compositor-exported `view()` scale animations and `current` by the viewpager
-recipe; `autoplay`, `interval` and `smooth-scroll` deferred, no events; its
+compositor-exported `view()` transform animations — `carry` a scale,
+`coverflow` a turn drawn with 2D functions (scale, skew, translate) — and
+`current` by the viewpager recipe; `autoplay`, `interval` and `smooth-scroll` deferred, no events; its
 one UI method, `scrollTo({index, smooth})`, scrolls the item into view at its
 snap position through `Document::scroll_into_view`, its `CustomElement::invoke`), `tree::refresh_view` (`x-refresh-view`/`x-refresh-header`/
 `x-refresh-footer`: a component with web-core's UA shadow tree, a `#container`

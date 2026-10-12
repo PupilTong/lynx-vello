@@ -10,7 +10,7 @@ import './index.css';
 // - top left: `current={2}`, so it starts on the blue item;
 // - top right: `vertical`, `current={1}`, so it starts on the green item;
 // - bottom left: `mode='coverflow'`, `current={1}`: the green item centred at
-//   full size, the red one scaled down at its left;
+//   full size, the red one turned toward it at its left;
 // - bottom right: `current={1}`, so it starts on the green item with its
 //   middle dot the white one;
 // - third row left: `indicator-dots={false}`, so no dots;
