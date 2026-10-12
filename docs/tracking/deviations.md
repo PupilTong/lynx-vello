@@ -690,6 +690,8 @@ consequential choice about whether to follow the spec or the quirk.
   **Decision (user-confirmed, 2026-07-11): full stylo matching** — everything
   that parses, matches per spec; the native matcher's gaps are not
   replicated. See [docs/style-assumptions.md](../style-assumptions.md) §A.3.
+  Since 2026-10-12 css-id scoping relies on it: `lower_style` synthesizes
+  web-core's `:where([l-css-id="N"])` guards (§D.16 there).
 - **`::before`/`::after` + `content`** — entirely unimplemented in the native
   engine (no box generation, no `content` property at all); only works on the
   web target via passthrough to the real browser. lynx-vello must explicitly
@@ -2336,13 +2338,16 @@ consequential choice about whether to follow the spec or the quirk.
 - **A lazy container's own `StyleInfo` is not applied at fetch** — native
   installs a lazy bundle's CSS only when the card asks for it, through
   `__LoadStyleSheet('CSS', bundleName)` and `__AdoptStyleSheet`, where
-  web-core pushes the container's StyleInfo unscoped during
-  `loadExternalBundle`. (Here the decision is the *installer's*, in
+  web-core pushes the container's StyleInfo during `loadExternalBundle` with
+  the container's URL as its entry name, so each rule also carries
+  `[l-e-name="<url>"]` (`web-core/ts/client/mainthread/LynxViewInstance.ts:181-192`,
+  rule 5 of `style_info_decoder.rs`). (Here the decision is the *installer's*, in
   `bobcat-source`: `bobcat-core` never sees the container at all.) **Decision: native**, because the compiled card
   already makes that call and web-core's extra push would mount the same rules
-  twice — and unscoped, where per-component css-id scoping is not implemented
-  at all here. A container's `config` is ignored too: page policy is the
-  page's.
+  twice — and without that entry-name guard: css-id guards are synthesized
+  here (`lower_style`), the `l-e-name` guard is not, and `__SetCSSId`
+  ignores its `entryName`. A container's `config` is ignored too: page policy
+  is the page's.
 - **`NativeModules.<name>` for a module the host does not have** — native's
   `LynxJSIModuleBinding::get` answers `null`
   (`lynx_jsi_module_binding.cc:23`), while web-core builds a plain object out

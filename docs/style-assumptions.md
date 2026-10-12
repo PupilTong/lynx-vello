@@ -364,16 +364,40 @@ the semantics are stylo's.** Everything below refines that sentence.
       backdrop takes no touch whatever a page writes; the rule is HTML's,
       not a Lynx default (§31).
 
-16. **cssId scoping is a runtime-adapter concern.** The feature exists for
-    pageConfig `enableRemoveCSSScope = false` (that is the exact
-    `.web.bundle` key; this doc previously shortened it to
-    "removeCSSScope"); `dom` stays scope-unaware. Mechanism: the
-    runtime adapter synthesizes `:where([l-css-id="N"])` guards onto
-    selectors at ingest — string-parity with web-core's decoder output,
-    trivially differential-testable, zero specificity perturbation. (With
-    `enableRemoveCSSScope = true` the compiler emits css id `0`, guard
-    synthesis is skipped, and styles are global.) Partitioned per-cssId
-    rule sets remain a possible *measured* optimization, not the design.
+16. **cssId scoping is a runtime-adapter concern — implemented 2026-10-12
+    (user-directed).** It is what a bundle compiled with the ReactLynx
+    option `enableRemoveCSSScope: false` needs; `dom` stays scope-unaware.
+    Mechanism, as web-core's: `bobcat-source`'s `lower_style` repeats each
+    selector of a scoped fragment's style rule once per fragment that
+    imports it (transitively, itself included), inserting
+    `:where([l-css-id="N"])` at the end of the subject compound — before a
+    trailing pseudo-element — for every importer `N`, all in the rule's one
+    selector list (web-core `style_info_decoder.rs:193-221` over
+    `flattened_style_info.rs:21-98`); a rule fragment 0 reaches keeps only
+    its unchanged selector (§D-bis.21). The Element PAPI's `__SetCSSId`
+    writes `l-css-id` on each element, or removes it for id 0
+    (`element_apis/style_apis.rs:16-52`). The same matches as web-core's
+    output, zero specificity perturbation, no cascade reordering; stylo's ordinary attribute matching and attribute
+    invalidation do the rest. `@keyframes` and `@font-face` stay global.
+    **The decision comes from the output alone:** nothing reads
+    `enableRemoveCSSScope` at runtime — web-core never does, and native
+    fiber decodes it but no element class consumes it
+    (`lynx/core/renderer/dom/element.h:567-569`). A bundle built with it
+    carries only fragment 0, whose rules lower unchanged, and its script
+    never calls `__SetCSSId`. **Rejected: css-cascade-6 `@scope`.** Lynx
+    scoping selects by the subject element's own css id; `@scope` selects
+    a subtree under a root and adds scope proximity to the cascade, so it
+    would both match descendants of a scoped element that carry another
+    id and reorder ties web-core resolves by source order. **Deliberately
+    omitted:** web-core's `l-e-name` attribute and `:not([l-e-name])`
+    entry-name guard (they separate a lazy bundle's own `StyleInfo` from its
+    host card's, and that `StyleInfo` is not mounted —
+    `docs/tracking/deviations.md`; `__SetCSSId` ignores `entryName`), and
+    parent-component css-id inheritance through `parentComponentUniqueID`
+    (ReactLynx creates the page as `__CreatePage('0', 0)` and every element
+    under it, so the inherited id would be 0; `__CreateComponent` is not
+    implemented). Partitioned per-cssId rule sets remain a possible
+    *measured* optimization, not the design.
 
 17. **Legacy `css_og` (`enableCSSSelector=false`) bundles: out of scope for
     v1.** Reconfirms the earlier deferral. The decoder may still parse the
@@ -409,21 +433,32 @@ and §D.16 with what the wire format actually permits.)*
     `is_important` flag is never set and the marker travels inside the value
     (see [web-binary-template.md](web-binary-template.md)).
 
-21. **Fragments flatten in reverse-topological order; per-component scoping
-    is not implemented.** All `css_id` fragments mount as one author sheet,
-    imported fragments before importing ones, ties broken by ascending id.
-    That order is what web-core's own TypeScript decoder used
+21. **Fragments flatten in reverse-topological order, then take §D.16's
+    guards.** All `css_id` fragments mount as one author sheet, imported
+    fragments before importing ones, ties broken by ascending id. That
+    order is what web-core's own TypeScript decoder used
     (`processStyleInfo.js` reverses its Kahn sort) and what the C++ engine's
     `ImportOtherFragment` means; shipped web-core lost it to `FnvHashMap`
-    iteration order, so it is deterministic here and undefined there. For the
-    common bundle — `enableRemoveCSSScope = true`, css id `0` only — the
-    result is semantically identical to web-core. For an
-    `enableRemoveCSSScope = false` bundle, the `:where([l-css-id="N"])` guards
-    of §D.16 are absent, so component-scoped rules apply globally and two
-    components styling the same class name collide; the CLI warns, naming the
-    fragment ids, rather than rendering nothing or failing silently. Unlike
+    iteration order, so it is deterministic here and undefined there. Each
+    style rule's selector list is then expanded with the
+    `:where([l-css-id="N"])` guards of §D.16, synthesized from the
+    structured selector components rather than by editing serialized text;
+    the importer sets come from the same live imports, in ascending id
+    order. When fragment 0 is among a rule's importers — every rule of
+    fragment 0 itself, which every scoped fragment imports — only the
+    unchanged selector is emitted. web-core also emits one guarded copy per
+    other importer (`style_info_decoder.rs:193-221`); each would match a
+    strict subset of the unchanged selector's elements, at the same
+    specificity and cascade position, so dropping them changes no computed
+    style. This is a deliberate deviation in selector *text* only, which
+    nothing here reads back (the engine never produces a sheet string), and
+    it keeps a global selector from being repeated once per scoped
+    component (ruled 2026-10-12). For the
+    common bundle — `enableRemoveCSSScope = true`, css id `0` only — nothing
+    is guarded. The compatibility warning that used to name non-zero
+    fragment ids is gone, since they are no longer mounted globally. Unlike
     web-core, an import cycle or a duplicated import edge does not drop a
-    fragment.
+    fragment: the members of a cycle count each other as importers.
 
 22. **web-core's browser-shape selector rewrites are deliberately absent**, as
     is its `:not([l-e-name])` entry guard. The rewrites compensate for a

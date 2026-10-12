@@ -66,8 +66,12 @@ Landed and not to be regressed:
   purpose (AGENTS.md Standards policy). Do not "fix" them toward Lynx.
 - `overflow: auto` stays out by user decision (2026-07-29); `visible` pairs into
   `hidden`, a recorded deviation.
-- Per-component css-id scoping is not implemented — every fragment mounts
-  globally, which is what web-core emits for `enableRemoveCSSScope = true`.
+- Per-component css-id scoping is implemented as web-core does it
+  (2026-10-12): `lower_style` repeats each scoped fragment's selectors per
+  importing fragment with `:where([l-css-id="N"])` on the subject compound,
+  and `__SetCSSId` writes `l-css-id`. Nothing reads `enableRemoveCSSScope`.
+  The `l-e-name` entry-name guard and parent-component css-id inheritance
+  are deliberately absent (`docs/style-assumptions.md` §D.16).
 - Init data and global props are JSON text Rust never parses. No Rust JSON
   models for JS-only payloads.
 

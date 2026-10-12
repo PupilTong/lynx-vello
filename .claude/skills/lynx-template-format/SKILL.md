@@ -25,6 +25,10 @@ resource bounds.
   `crates/bobcat-source/src/web/style_info.rs` ARE the wire format — never
   reorder fields or enum variants there. `rkyv` stays pinned at `0.7` for this
   reason (see AGENTS.md's Dependency policy).
+- The `css_id_to_style_sheet` keys and each fragment's `imports` are live
+  semantics, not just layout: `lower_style.rs` repeats a non-zero fragment's
+  selectors per (transitively) importing fragment with
+  `:where([l-css-id="N"])`, as web-core's decoder does.
 - Validation bounds before a caller gets an owned tree: 1 MiB section length,
   validation subtree depth 72 (rkyv 0.7 `ArchiveValidator::with_max_depth`),
   returned rule depth 64. Decoding is synchronous and thread-free on every

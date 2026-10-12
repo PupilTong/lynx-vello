@@ -74,8 +74,9 @@ CSS supplied as text.
 - **Payloads are opaque.** The payload arena retains the `T` supplied for
   each element/text node, and `Node<T>::payload` exposes a shared reference.
   The DOM core neither mutates the payload nor derives selector-visible state
-  from it. IDs, classes, inline style, CSS scope markers, and dataset entries
-  must be ordinary DOM attributes.
+  from it. IDs, classes, inline style, CSS scope markers (the `l-css-id`
+  attribute `__SetCSSId` writes), and dataset entries must be ordinary DOM
+  attributes.
 - **The public core is crash-on-misuse.** Query methods return `Option`;
   mutation methods treat stale IDs, cycles, a second document element, and
   invalid insertion references as caller bugs. The private runtime validates
@@ -122,7 +123,8 @@ CSS supplied as text.
 | `dom::render` (the DOM-free floor) | The `ImageStore` trait an embedder implements; Vello version/re-export boundary; headed/headless GPU submission and readback helpers | `Document`, `NodeId`, computed styles, layout, paint order, Lynx runtime vocabulary, or DOM mutation policy |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
 | `packages/bobcat-element` (the script half) | The `__*` Element-PAPI members and their arities; Lynx tag vocabulary; handle identity (one plain object per element, carrying its DOM `NodeId` under a realm-local symbol — web-core's `uniqueIdSymbol` shape); Snapshot property/query policy; realm-local event registration; direct named imports from `bobcat-internal:host`; the element ownership graph (a strong per-handle child set, so a connected element's handle is reachable from the permanent page handle) and the `FinalizationRegistry` drop path (cleanup calls the imported `dropElement` at host job checkpoints, which frees that node alone) | Native-ID validation, style/layout/paint behavior, direct DOM access, event-path construction, or any state the native side must gate presentation on |
-| Still unowned | Lynx event dispatch/payload; decoded `StyleInfo` lowering and CSS-scope policy; `rpx` view units; the remaining Element PAPI members | — |
+| `bobcat-source` | Bundle and XML decoding; `StyleInfo` lowering into `PreparsedStyleSheet`, including fragment order and css-id guard synthesis (`lower_style`) | Matching, cascade, runtime state, or reading `enableRemoveCSSScope` |
+| Still unowned | Lynx event dispatch/payload; `rpx` view units; the remaining Element PAPI members | — |
 
 ## Style lifecycle
 
@@ -231,18 +233,19 @@ What that covers, and what it does not:
   per declaration, because the wire format keeps attribute selectors and
   functional pseudo-classes as text and stylo builds specified values only
   through its value parsers;
+- per-component CSS scoping by css id (2026-10-12), as web-core does it:
+  `bobcat-source`'s `lower_style` repeats each selector of a scoped
+  fragment's rule once per importing fragment with `:where([l-css-id="N"])`
+  at the end of its subject compound, and `__SetCSSId` writes `l-css-id`.
+  `dom` is untouched: stylo's attribute matching and attribute invalidation
+  do the scoping. No layer reads `enableRemoveCSSScope`; the entry-name
+  guard and parent-component css-id inheritance are deliberately absent
+  ([style-assumptions.md](style-assumptions.md) §D.16);
 
 **Still open**
 
-- per-component CSS scoping. `StyleInfo` ingestion lands without it: every
-  fragment's rules mount globally, which is exactly web-core's own output for
-  a bundle compiled with `enableRemoveCSSScope = true` (css id `0`), and the
-  CLI warns when a bundle carries non-zero fragment ids. `__SetCSSId` is
-  installed as a sink that records nothing — a card calls it while installing
-  its snapshot runtime, and failing there would block cards whose styles are
-  all global anyway. It starts recording once the guard synthesis
-  (`:where([l-css-id="N"])`) that gives the id meaning exists, together with
-  its parent-component css-id inheritance;
+- the entry-name CSS guard (`l-e-name`, `:not([l-e-name])`), which only
+  matters once a lazy bundle's own `StyleInfo` is mounted;
 - viewport-relative `rpx`/`ppx` units have no owner;
 - the undeliverable half of `__AddEvent`. Registration, the path walk, both
   `catch` forms and worklet handlers all work; a handler given as a
