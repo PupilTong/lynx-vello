@@ -238,11 +238,20 @@ an old page cannot consume the new page's event.
 
 There is no browser create/append/drop/flush/direct-stylesheet API. Element
 mutation is reachable only from the fetched entry MTS module through the named
-exports of `bobcat:element`. `registerFonts(bytes)` and
-`setDefaultFontFamily(family)` retain wrapper state: faces are registered, and
-the family checked against them, inside the call that builds a view, so both
-must precede a load, and a family nothing provides makes that load reject with
-the construction error rather than through a lifecycle event. Author stylesheets
+exports of `bobcat:element`. `registerFonts(bytes)`,
+`registerFallbackFonts(bytes)` and `setDefaultFontFamily(family)` retain
+wrapper state: faces are registered, and the family checked against them,
+inside the call that builds a view, so all three must precede a load, and a
+family nothing provides makes that load reject with the construction error
+rather than through a lifecycle event. The default family is what the generic
+`system-ui`, `sans-serif` and `serif` name; a fallback container's families
+shape text that no family of its own `font-family` covers, in any script — the
+browser gives the engine no system fonts, so a script neither covers renders
+as missing glyphs. The Pages site registers Roboto as the default and, where
+the Local Font Access API exists and the user allows it, the system's Chinese
+family as a fallback. It asks before it builds the renderer, since fonts are
+taken at construction, and after the Wasm module is loaded and instantiated,
+which does not wait for the answer. Author stylesheets
 reach core the way the entry module does — fetched and registered by the Render
 Worker, named in the load, mounted as author-origin rules in listed order by
 boot's first flush, which waits for every one of them before the document is

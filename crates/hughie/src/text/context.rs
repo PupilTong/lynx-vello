@@ -4,7 +4,7 @@ use core::fmt;
 use std::sync::OnceLock;
 
 use parley::fontique::{
-    Collection, CollectionOptions, FontInfoOverride, GenericFamily, SourceCache,
+    Collection, CollectionOptions, FontInfoOverride, GenericFamily, Script, ScriptExt, SourceCache,
 };
 use parley::{FontContext, LayoutContext};
 
@@ -111,6 +111,34 @@ impl TextContext {
                 .set_generic_families(generic, std::iter::once(family));
         }
         true
+    }
+
+    /// Registers an owned font resource and appends each family it holds to
+    /// every script's fallback list.
+    ///
+    /// A fallback list is what shapes a cluster no family of the run's own
+    /// `font-family` covers. Native contexts ask the platform for one per
+    /// script; an embedder without a system-font backend, notably Wasm, has
+    /// none, so text in a script its default family lacks shapes as missing
+    /// glyphs whatever the page's CSS names. The families are offered for
+    /// every script rather than for the ones they are known to cover, because
+    /// selection already checks each candidate's character map per cluster.
+    /// They are taken from the container rather than named by the embedder,
+    /// which may hold a platform font whose family name it cannot predict.
+    ///
+    /// A script given a list here no longer asks the platform for its own, so
+    /// an embedder that has a system-font backend should leave this alone.
+    ///
+    /// Returns how many faces the blob contributed, like
+    /// [`Self::register_fonts`].
+    pub fn register_fallback_fonts(&mut self, data: FontBlob) -> usize {
+        let registered = self.font.collection.register_fonts(data.into_inner(), None);
+        for &(script, _) in Script::all_samples() {
+            self.font
+                .collection
+                .append_fallbacks(script, registered.iter().map(|(family, _)| *family));
+        }
+        registered.iter().map(|(_, fonts)| fonts.len()).sum()
     }
 
     pub(super) fn font_and_layout_contexts(
@@ -233,6 +261,54 @@ mod tests {
                 .generic_families(GenericFamily::Monospace)
                 .next()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn a_fallback_container_serves_every_script() {
+        let mut context = TextContext::without_system_fonts();
+        let han = Script::from_bytes(*b"Hani");
+        assert_eq!(
+            context.register_fallback_fonts(FontBlob::from_static(b"not a font")),
+            0
+        );
+        assert!(
+            context
+                .font
+                .collection
+                .fallback_families(han)
+                .next()
+                .is_none()
+        );
+
+        assert_eq!(
+            context.register_fallback_fonts(FontBlob::from_static(AHEM)),
+            1
+        );
+
+        let ahem = context
+            .font
+            .collection
+            .family_id("Ahem")
+            .expect("registered family");
+        for script in [han, Script::from_bytes(*b"Latn")] {
+            assert_eq!(
+                context
+                    .font
+                    .collection
+                    .fallback_families(script)
+                    .collect::<Vec<_>>(),
+                vec![ahem]
+            );
+        }
+        assert!(
+            context
+                .font
+                .collection
+                .generic_families(GenericFamily::SansSerif)
+                .next()
+                .is_none(),
+            "a fallback family is not a generic family"
         );
     }
 

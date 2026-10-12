@@ -144,6 +144,11 @@ for (const [operation, method, message] of [
     'async setDefaultFontFamily(family: string)',
     'setDefaultFontFamily',
   ],
+  [
+    'registerFallbackFonts',
+    'async registerFallbackFonts(data: ArrayBuffer | Uint8Array)',
+    'registerFallbackFonts',
+  ],
 ] as const) {
   if (
     !facade.includes(method) ||
@@ -209,6 +214,12 @@ if (
   !renderWorker.includes('renderer.setDefaultFontFamily(message.family)')
 ) {
   throw new Error('Render Worker is missing the default-font dispatch case')
+}
+if (
+  !renderWorker.includes("case 'registerFallbackFonts':") ||
+  !renderWorker.includes('renderer.registerFallbackFonts(message.bytes)')
+) {
+  throw new Error('Render Worker is missing the fallback-font dispatch case')
 }
 const lynxXmlDispatchStart = renderWorker.indexOf("case 'loadLynxXml':")
 const lynxXmlDispatchEnd = renderWorker.indexOf("case 'registerFonts':")
@@ -422,6 +433,7 @@ for (const requiredMethod of [
   'pump(',
   'registerFonts(',
   'setDefaultFontFamily(',
+  'registerFallbackFonts(',
   'waitForEngineEvent(',
 ]) {
   if (!glue.includes(requiredMethod)) {
@@ -471,6 +483,7 @@ for (const requiredDeclaration of [
   'loadLynxXml(url: string | URL, options?: LoadOptions)',
   'registerFonts(data: ArrayBuffer | Uint8Array)',
   'setDefaultFontFamily(family: string)',
+  'registerFallbackFonts(data: ArrayBuffer | Uint8Array)',
 ]) {
   if (!declarations.includes(requiredDeclaration)) {
     throw new Error(`browser declarations are missing ${requiredDeclaration}`)

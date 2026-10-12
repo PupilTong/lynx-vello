@@ -258,6 +258,10 @@ pub struct BobcatRenderer {
     /// The selected embedder default is stable wrapper state too; every view
     /// this renderer builds gets the same generic-family map.
     default_font_family: Option<String>,
+    /// The containers every script falls back to, in the order they were
+    /// registered. The browser gives this target no system-font backend, so
+    /// these are the only fallback a view this renderer builds has.
+    fallback_fonts: Vec<FontBlob>,
     /// The Stylo worker count each group this renderer builds gets. The
     /// workers themselves are the group's and retire with it; only the size
     /// is wrapper state.
@@ -419,6 +423,7 @@ impl BobcatRenderer {
                 screen,
                 fonts: Vec::new(),
                 default_font_family: None,
+                fallback_fonts: Vec::new(),
                 style_threads,
                 native_modules,
                 module_bridge: Rc::new(HostModuleBridge {
@@ -610,6 +615,20 @@ impl BobcatRenderer {
     pub fn set_default_font_family(&mut self, family: String) -> Result<(), JsValue> {
         self.ensure_running()?;
         self.default_font_family = Some(family);
+        Ok(())
+    }
+
+    /// Retain a font container every script falls back to, for every view
+    /// this renderer builds: its families shape the text no family of its own
+    /// `font-family` covers. Registered when a view is constructed.
+    #[wasm_bindgen(js_name = registerFallbackFonts)]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen owns JavaScript Uint8Array arguments"
+    )]
+    pub fn register_fallback_fonts(&mut self, bytes: Vec<u8>) -> Result<(), JsValue> {
+        self.ensure_running()?;
+        self.fallback_fonts.push(FontBlob::new(bytes));
         Ok(())
     }
 
@@ -981,6 +1000,7 @@ impl BobcatRenderer {
         self.resources.set_base_url(Some(base_url));
         sources.fonts = self.fonts.clone();
         sources.default_font_family = self.default_font_family.clone();
+        sources.fallback_fonts = self.fallback_fonts.clone();
         // JSON text the host serialized and Rust never reads.
         sources.global_props = global_props;
         // A draw target that failed cannot be reached again, so a page loaded

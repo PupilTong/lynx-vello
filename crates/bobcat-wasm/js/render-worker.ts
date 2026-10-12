@@ -412,6 +412,10 @@ async function dispatchRequest(message: RequestMessage): Promise<void> {
       renderer.setDefaultFontFamily(message.family)
       postResponse(request, true)
       break
+    case 'registerFallbackFonts':
+      renderer.registerFallbackFonts(message.bytes)
+      postResponse(request, true)
+      break
     case 'resize':
       renderer.resize(
         message.width,

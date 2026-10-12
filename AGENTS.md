@@ -395,9 +395,15 @@ embedder builds next, and `LynxView::pump` services every *later* request — im
 `adoptStyleSheet`, worker scripts, fonts, plain fetches — and the view's images
 in ordinary turns. The default family is prepended to the `system-ui`,
 `sans-serif` and `serif` generic maps, so a Wasm embedder can supply its
-otherwise-absent system-font backend without baking a font into core; a name
-neither the containers nor the platform has fails the construction with
-`EngineError::UnknownFontFamily`.
+otherwise-absent system-font backend without baking a font into core.
+`ViewSources::fallback_fonts` does the same for script fallback: every family
+in those containers is appended to every script's fallback list
+(`TextContext::register_fallback_fonts`), so it shapes the clusters no family
+of the run's own `font-family` covers — the Pages site covers Chinese that way
+with a system font read through the Local Font Access API. A script given a
+list stops asking the platform for its own, so an embedder with system fonts
+leaves the field empty. A default family name neither the containers nor the
+platform has fails the construction with `EngineError::UnknownFontFamily`.
 
 Dropping a loading view marks source work cancelled and stops that view before
 QuickJS begins. One `tokio_util::sync::CancellationToken` per view is minted on

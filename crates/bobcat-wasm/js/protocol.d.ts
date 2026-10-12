@@ -135,6 +135,9 @@ export interface RequestFields {
   setDefaultFontFamily: {
     family: string
   }
+  registerFallbackFonts: {
+    bytes: Uint8Array
+  }
   resize: {
     devicePixelRatio: number
     height: number
