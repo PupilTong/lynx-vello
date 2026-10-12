@@ -588,12 +588,25 @@ describe("installation", () => {
     expect("__DropElement" in globalThis).toBe(false);
   });
 
-  it("accepts __SetCSSId and records nothing: the scope it names has no consumer", () => {
-    const element = __CreateView(0);
+  it("__SetCSSId writes l-css-id per element and removes it for 0 or a nullish id", () => {
+    const first = __CreateView(0);
+    const second = __CreateView(0);
     mock.calls.length = 0;
-    expect(__SetCSSId([element], 7, "entry")).toBeUndefined();
-    expect(__SetCSSId([element], null, undefined)).toBeUndefined();
-    expect(mock.calls).toEqual([]);
+    // The entry name is not written: no lazy bundle's StyleInfo is mounted.
+    expect(__SetCSSId([first, second], 7, "entry")).toBeUndefined();
+    expect(mock.calls).toEqual([
+      ["setAttribute", 3, "l-css-id", "7"],
+      ["setAttribute", 4, "l-css-id", "7"],
+    ]);
+    expect(__GetAttributeByName(first, "l-css-id")).toBe("7");
+    for (const cleared of [0, null, undefined]) {
+      mock.calls.length = 0;
+      expect(__SetCSSId([first], cleared, undefined)).toBeUndefined();
+      expect(mock.calls, String(cleared)).toEqual([
+        ["removeAttribute", 3, "l-css-id"],
+      ]);
+    }
+    expect(__GetAttributeByName(first, "l-css-id")).toBe(null);
   });
 
   it("does not publish the native host on globalThis", () => {

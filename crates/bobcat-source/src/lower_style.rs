@@ -6,41 +6,78 @@
 //! contributes its selector list and its declarations, and the engine parses
 //! only those — never a re-serialized sheet.
 //!
-//! # Scope
+//! # Fragments and `css_id` scoping
 //!
-//! `css_id` scoping is deliberately not implemented. web-core keeps one CSS
-//! fragment per `css_id` and guards each rule with a zero-specificity
-//! `:where([l-css-id="N"])` derived from the import graph; here every
-//! fragment's rules mount globally, which is what web-core itself produces
-//! when the compiler emits `css_id` 0 (`enableRemoveCSSScope = true`) — the
-//! shape every non-scoped bundle has. Fragments are still emitted in
-//! **reverse-topological order**, imported before importing, so an importing
-//! fragment's own rules win ties against the ones it imports; that is the
-//! order web-core's TypeScript decoder used and what the C++ engine's
-//! `ImportOtherFragment` means.
+//! A `StyleInfo` keeps one CSS fragment per `css_id`. The compiler puts every
+//! rule outside an `@cssId` block into fragment 0 and makes each scoped
+//! fragment `@import "0"` (lynx-stack
+//! `packages/tools/css-serializer/src/css/debundle.ts:64-146`). Fragments are
+//! emitted in **reverse-topological order**, imported before importing, so
+//! an importing fragment's own rules win ties against the ones it imports;
+//! that is the order web-core's TypeScript decoder used and what the C++
+//! engine's `ImportOtherFragment` means.
 //!
-//! web-core's browser-specific selector rewrites are also absent, because
-//! nothing here needs them: Lynx tag names are this DOM's real element names
-//! (no `view` → `x-view` mapping), the `page` element really is the document
-//! element (so `:root` matches natively), and there is no entry-name
-//! `:not([l-e-name])` guard because there is no shared browser document to
-//! isolate one card from another.
+//! Each style rule is then scoped the way web-core's decoder scopes it (rule 6
+//! of `style_info_decoder.rs:69-275`, over the `imported_by` sets of
+//! `flattened_style_info.rs:21-98`, both under lynx-stack
+//! `packages/web-platform/web-core/src/template/template_sections/style_info/`):
+//! every selector is repeated once per fragment that imports the rule's
+//! fragment, itself included, and the copy for fragment `N` carries
+//! `:where([l-css-id="N"])` at the end of its subject compound, so it matches
+//! only an element the Element PAPI's `__SetCSSId` marked with that id. All
+//! copies stay in the rule's one selector list, so scoping moves no rule in
+//! the cascade and, `:where()` being zero-specificity, changes no specificity
+//! either. Only the subject element's id is tested: the ancestors a
+//! combinator reaches are not guarded, as in web-core.
+//!
+//! One deliberate deviation in the text, not the matching: when fragment 0 is
+//! among a rule's importers — every rule of fragment 0 itself, since each
+//! scoped fragment imports it — web-core emits the unchanged selector *and*
+//! one guarded copy per other importer. Each guarded copy matches a subset of
+//! what the unchanged one matches, at the same specificity and cascade
+//! position, so only the unchanged selector is emitted here. Nothing reads
+//! the selector text back, so dropping the copies changes no computed style.
+//!
+//! Nothing here reads `enableRemoveCSSScope`; web-core does not either. A
+//! bundle built with it carries only fragment 0, whose rules then lower
+//! unchanged, and its script never calls `__SetCSSId`. `@keyframes` and
+//! `@font-face` stay global, as web-core emits them verbatim.
+//!
+//! web-core's other selector rewrites are absent, because nothing here needs
+//! them: Lynx tag names are this DOM's real element names (no `view` →
+//! `x-view` mapping), the `page` element really is the document element (so
+//! `:root` matches natively), and there is no entry-name `:not([l-e-name])`
+//! guard. That guard separates a lazy bundle's own `StyleInfo` from its host
+//! card's, and a lazy bundle's `StyleInfo` is not mounted
+//! (`docs/tracking/deviations.md`).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bobcat_core::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 
 use crate::web::style_info::{
-    DeclarationBlock, Rule, RuleKind, RulePrelude, StyleInfo, StyleSheet,
+    DeclarationBlock, Rule, RuleKind, RulePrelude, Selector, SimpleSelector, SimpleSelectorKind,
+    StyleInfo, StyleSheet,
 };
+
+/// The attribute `__SetCSSId` writes; web-core's `CSS_ID_ATTRIBUTE`
+/// (`packages/web-platform/web-core/src/constants.rs:9`).
+const CSS_ID_ATTRIBUTE: &str = "l-css-id";
 
 /// Lowers every fragment of a decoded `StyleInfo` into one pre-parsed sheet.
 #[must_use]
 pub(crate) fn to_preparsed_style_sheet(style_info: &StyleInfo) -> PreparsedStyleSheet {
+    let mut importers = imported_by(style_info);
     let mut rules = Vec::new();
     for css_id in fragment_order(style_info) {
         let sheet = &style_info.css_id_to_style_sheet[&css_id];
-        rules.extend(sheet.rules.iter().filter_map(convert_rule));
+        let scopes = scopes(importers.remove(&css_id).unwrap_or_default());
+        rules.extend(
+            sheet
+                .rules
+                .iter()
+                .filter_map(|rule| convert_rule(rule, &scopes)),
+        );
     }
     PreparsedStyleSheet { rules }
 }
@@ -82,8 +119,60 @@ fn fragment_order(style_info: &StyleInfo) -> Vec<i32> {
     ordered
 }
 
+/// Every fragment's importers: the fragments that import it, directly or
+/// through other fragments, and the fragment itself — web-core's
+/// `imported_by` (`flattened_style_info.rs:66-78`). Ascending, so 0 first.
+///
+/// Built by walking down from each fragment rather than by web-core's
+/// topological pass, so a fragment in an import cycle is not lost: the
+/// members of a cycle each count the others as importers.
+fn imported_by(style_info: &StyleInfo) -> HashMap<i32, BTreeSet<i32>> {
+    let sheets = &style_info.css_id_to_style_sheet;
+    let mut importers: HashMap<i32, BTreeSet<i32>> = HashMap::new();
+    for &importer in sheets.keys() {
+        let mut reached = HashSet::new();
+        let mut pending = vec![importer];
+        while let Some(id) = pending.pop() {
+            if reached.insert(id) {
+                importers.entry(id).or_default().insert(importer);
+                pending.extend(live_imports(sheets, id));
+            }
+        }
+    }
+    importers
+}
+
+/// One fragment's importers as the components its selectors get: the
+/// `:where([l-css-id="N"])` guard for each importing fragment `N`, or — when
+/// fragment 0 is an importer — only `None`, the selector unchanged.
+///
+/// The unchanged selector matches every element, marked or not, so each
+/// guarded copy beside it would match a strict subset of the same elements
+/// with the same specificity (`:where()` adds none) in the same rule. Leaving
+/// them out changes no match and no cascade outcome. It is a deliberate
+/// string-level deviation from web-core, whose decoder emits those copies
+/// (`style_info_decoder.rs:193-221`): for fragment 0 that is one copy per
+/// scoped component, for every global selector.
+fn scopes(importers: BTreeSet<i32>) -> Vec<Option<SimpleSelector>> {
+    if importers.contains(&0) {
+        return vec![None];
+    }
+    importers
+        .into_iter()
+        .map(|css_id| {
+            Some(SimpleSelector {
+                kind: SimpleSelectorKind::PseudoClass,
+                value: format!("where([{CSS_ID_ATTRIBUTE}=\"{css_id}\"])"),
+            })
+        })
+        .collect()
+}
+
 /// A named fragment includes only its reachable imports, in the same cascade
 /// order as the ordinary bundle stylesheet. Other named sections stay separate.
+///
+/// Its rules stay unscoped: a named section is loaded as a stylesheet of its
+/// own, not mounted as the `css_id` fragment an element's `l-css-id` names.
 pub(crate) fn fragment_rules(style_info: &StyleInfo, root: i32) -> impl Iterator<Item = &Rule> {
     let mut reachable = HashSet::new();
     let mut pending = vec![root];
@@ -107,10 +196,11 @@ fn live_imports(sheets: &HashMap<i32, StyleSheet>, id: i32) -> impl Iterator<Ite
         .filter(move |import| *import != id && sheets.contains_key(import))
 }
 
-fn convert_rule(rule: &Rule) -> Option<PreparsedRule> {
+/// `scopes` are the rule's fragment's [`scopes`]; only a style rule uses them.
+fn convert_rule(rule: &Rule, scopes: &[Option<SimpleSelector>]) -> Option<PreparsedRule> {
     match rule.kind {
         RuleKind::Style => Some(PreparsedRule::Style {
-            selectors: selector_text(&rule.prelude)?,
+            selectors: scoped_selector_text(&rule.prelude, scopes)?,
             declarations: declarations(&rule.declaration_block),
         }),
         RuleKind::Keyframes => Some(PreparsedRule::Keyframes {
@@ -138,17 +228,75 @@ fn convert_rule(rule: &Rule) -> Option<PreparsedRule> {
 
 /// The rule's selector list as CSS text, or `None` when it has no selectors.
 fn selector_text(prelude: &RulePrelude) -> Option<String> {
+    scoped_selector_text(prelude, &[None])
+}
+
+/// The rule's selector list with every selector repeated once per scope, in
+/// web-core's order — each selector's copies together, in `scopes` order —
+/// or `None` when it has no selectors.
+fn scoped_selector_text(
+    prelude: &RulePrelude,
+    scopes: &[Option<SimpleSelector>],
+) -> Option<String> {
     if prelude.selectors.is_empty() {
         return None;
     }
     let mut text = String::new();
-    for (index, selector) in prelude.selectors.iter().enumerate() {
-        if index > 0 {
-            text.push(',');
+    let mut first = true;
+    for selector in &prelude.selectors {
+        let at = guard_index(selector);
+        for scope in scopes {
+            if !first {
+                text.push(',');
+            }
+            first = false;
+            match scope {
+                None => selector.write_css_string(&mut text),
+                Some(guard) => {
+                    let (before, after) = selector.components.split_at(at);
+                    for component in before {
+                        component.write_css_string(&mut text);
+                    }
+                    guard.write_css_string(&mut text);
+                    for component in after {
+                        component.write_css_string(&mut text);
+                    }
+                }
+            }
         }
-        selector.write_css_string(&mut text);
     }
     Some(text)
+}
+
+/// Where a scope guard goes: just after the last component that is compound
+/// content — class, id, attribute, type, universal or pseudo-class — which
+/// puts it at the end of the subject compound and before a trailing
+/// pseudo-element (`.a:hover:where(…)::after`). web-core's own index
+/// (`style_info_decoder.rs:157-167`), with its quirk: a subject compound that
+/// is nothing but a pseudo-element (`.a > ::placeholder`) has no content of
+/// its own, so the guard lands on the compound before it, as it does there.
+///
+/// `UnknownText` does not move the index, as in web-core. Neither encoder
+/// puts it in a style rule's selector — web-core's `encodeCSS.ts` pushes only
+/// csstree node types there, and the native decoder emits it only for a
+/// keyframes name or key (`native/style.rs`) — so what such text would hold is
+/// unknown; it is not known to be compound content.
+fn guard_index(selector: &Selector) -> usize {
+    selector
+        .components
+        .iter()
+        .rposition(|component| {
+            matches!(
+                component.kind,
+                SimpleSelectorKind::Class
+                    | SimpleSelectorKind::Id
+                    | SimpleSelectorKind::Attribute
+                    | SimpleSelectorKind::Type
+                    | SimpleSelectorKind::Universal
+                    | SimpleSelectorKind::PseudoClass
+            )
+        })
+        .map_or(0, |index| index + 1)
 }
 
 fn declarations(block: &DeclarationBlock) -> Vec<PreparsedDeclaration> {
@@ -658,6 +806,8 @@ mod tests {
                 _ => panic!("style rules only"),
             })
             .collect();
+        // Fragment 0 imports 1 imports 2, so 0 reaches every rule and each
+        // stays unguarded: a guarded copy would match a subset of it.
         assert_eq!(selectors, [".base", ".middle", ".importer"]);
     }
 
@@ -685,7 +835,14 @@ mod tests {
                 _ => panic!("style rules only"),
             })
             .collect();
-        assert_eq!(selectors, [".zero", ".three", ".seven"]);
+        assert_eq!(
+            selectors,
+            [
+                ".zero",
+                r#".three:where([l-css-id="3"])"#,
+                r#".seven:where([l-css-id="7"])"#,
+            ]
+        );
     }
 
     /// A fragment that only carries `@import` edges is normal in scoped
@@ -770,5 +927,260 @@ mod tests {
             })
             .collect();
         assert_eq!(selectors, [".base", ".importer"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // `css_id` scoping
+    // -----------------------------------------------------------------------
+
+    fn selector(components: &[(SimpleSelectorKind, &str)]) -> Selector {
+        Selector {
+            components: components
+                .iter()
+                .map(|(kind, value)| SimpleSelector {
+                    kind: *kind,
+                    value: (*value).to_owned(),
+                })
+                .collect(),
+        }
+    }
+
+    fn sheet(imports: Vec<i32>, rules: Vec<Rule>) -> StyleSheet {
+        StyleSheet { imports, rules }
+    }
+
+    fn red(selectors: Vec<Selector>) -> Rule {
+        style_rule(selectors, vec![declaration(CssPropertyId::Color, "red")])
+    }
+
+    /// Every lowered rule's selector text, keyframes and font-face included
+    /// under a marker so a test can see they carry no guard.
+    fn lowered(info: &StyleInfo) -> Vec<String> {
+        to_preparsed_style_sheet(info)
+            .rules
+            .into_iter()
+            .map(|rule| match rule {
+                PreparsedRule::Style { selectors, .. } => selectors,
+                PreparsedRule::Keyframes { name, keyframes } => format!(
+                    "@keyframes {name} {}",
+                    keyframes
+                        .iter()
+                        .map(|keyframe| keyframe.selector.as_str())
+                        .collect::<Vec<_>>()
+                        .join("|")
+                ),
+                PreparsedRule::FontFace { descriptors } => format!("@font-face {descriptors}"),
+                other => panic!("this lowering builds no {other:?}"),
+            })
+            .collect()
+    }
+
+    /// One selector in fragment 1, which nothing else imports.
+    fn scoped_once(components: &[(SimpleSelectorKind, &str)]) -> String {
+        let info = style_info(vec![(
+            1,
+            sheet(vec![], vec![red(vec![selector(components)])]),
+        )]);
+        lowered(&info).remove(0)
+    }
+
+    /// `imported_by` is transitive and includes the fragment itself: 1
+    /// imports 2 imports 3, so 3's rule is copied for 1, 2 and 3 — and for no
+    /// unscoped element, because fragment 0 does not reach it. Fragment 0,
+    /// imported by 1, stays unguarded alone: its importers include 0, and a
+    /// copy guarded for 1 would match a subset of the unguarded selector.
+    #[test]
+    fn importers_are_the_transitive_closure_plus_the_fragment_itself() {
+        use SimpleSelectorKind::Class;
+        let info = style_info(vec![
+            (0, sheet(vec![], vec![red(vec![selector(&[(Class, "g")])])])),
+            (1, sheet(vec![2, 0], vec![])),
+            (2, sheet(vec![3], vec![])),
+            (3, sheet(vec![], vec![red(vec![selector(&[(Class, "c")])])])),
+        ]);
+        assert_eq!(
+            lowered(&info),
+            [
+                ".g",
+                r#".c:where([l-css-id="1"]),.c:where([l-css-id="2"]),.c:where([l-css-id="3"])"#,
+            ]
+        );
+    }
+
+    /// Only the subject compound is guarded; the ancestors a combinator
+    /// reaches are left alone, whatever the combinator.
+    #[test]
+    fn the_guard_ends_the_subject_compound() {
+        use SimpleSelectorKind::{Class, Combinator, Type};
+        assert_eq!(
+            scoped_once(&[(Class, "card"), (Combinator, ">"), (Type, "view")]),
+            r#".card > view:where([l-css-id="1"])"#
+        );
+        assert_eq!(
+            scoped_once(&[(Class, "a"), (Combinator, " "), (Class, "b")]),
+            r#".a .b:where([l-css-id="1"])"#
+        );
+        assert_eq!(
+            scoped_once(&[
+                (Class, "a"),
+                (Combinator, " "),
+                (Class, "b"),
+                (Combinator, "~"),
+                (Type, "view"),
+                (Class, "c"),
+            ]),
+            r#".a .b ~ view.c:where([l-css-id="1"])"#
+        );
+    }
+
+    #[test]
+    fn a_pseudo_class_stays_before_the_guard_and_a_pseudo_element_after_it() {
+        use SimpleSelectorKind::{Class, PseudoClass, PseudoElement};
+        assert_eq!(
+            scoped_once(&[(Class, "a"), (PseudoClass, "hover")]),
+            r#".a:hover:where([l-css-id="1"])"#
+        );
+        assert_eq!(
+            scoped_once(&[
+                (Class, "a"),
+                (PseudoClass, "hover"),
+                (PseudoElement, "after")
+            ]),
+            r#".a:hover:where([l-css-id="1"])::after"#
+        );
+    }
+
+    /// web-core's index counts only compound content, so a subject that is a
+    /// bare pseudo-element puts the guard on the compound before it.
+    #[test]
+    fn a_bare_pseudo_element_subject_guards_the_compound_before_it() {
+        use SimpleSelectorKind::{Class, Combinator, PseudoElement};
+        assert_eq!(
+            scoped_once(&[
+                (Class, "a"),
+                (Combinator, ">"),
+                (PseudoElement, "placeholder")
+            ]),
+            r#".a:where([l-css-id="1"]) > ::placeholder"#
+        );
+    }
+
+    #[test]
+    fn universal_and_attribute_subjects_take_the_guard() {
+        use SimpleSelectorKind::{Attribute, Type, Universal};
+        // The native decoder's universal component carries no text.
+        assert_eq!(
+            scoped_once(&[(Universal, "")]),
+            r#"*:where([l-css-id="1"])"#
+        );
+        assert_eq!(
+            scoped_once(&[(Attribute, "[type=submit]")]),
+            r#"[type=submit]:where([l-css-id="1"])"#
+        );
+        assert_eq!(
+            scoped_once(&[(Type, "view"), (Attribute, "[type=submit]")]),
+            r#"view[type=submit]:where([l-css-id="1"])"#
+        );
+    }
+
+    /// Each selector of a list keeps its copies together, in importer order,
+    /// all in the one rule.
+    #[test]
+    fn a_selector_list_repeats_each_selector_per_importer() {
+        use SimpleSelectorKind::Class;
+        let info = style_info(vec![
+            (
+                1,
+                sheet(
+                    vec![],
+                    vec![red(vec![
+                        selector(&[(Class, "a")]),
+                        selector(&[(Class, "b")]),
+                    ])],
+                ),
+            ),
+            (2, sheet(vec![1], vec![])),
+        ]);
+        assert_eq!(
+            lowered(&info),
+            [concat!(
+                r#".a:where([l-css-id="1"]),.a:where([l-css-id="2"]),"#,
+                r#".b:where([l-css-id="1"]),.b:where([l-css-id="2"])"#
+            )]
+        );
+    }
+
+    /// The members of an import cycle count each other as importers; no
+    /// fragment is dropped.
+    #[test]
+    fn an_import_cycle_scopes_each_member_for_both() {
+        use SimpleSelectorKind::Class;
+        let info = style_info(vec![
+            (
+                1,
+                sheet(vec![2], vec![red(vec![selector(&[(Class, "a")])])]),
+            ),
+            (
+                2,
+                sheet(vec![1], vec![red(vec![selector(&[(Class, "b")])])]),
+            ),
+        ]);
+        assert_eq!(
+            lowered(&info),
+            [
+                r#".a:where([l-css-id="1"]),.a:where([l-css-id="2"])"#,
+                r#".b:where([l-css-id="1"]),.b:where([l-css-id="2"])"#,
+            ]
+        );
+    }
+
+    /// The compiler's usual shape: a component fragment whose only import is
+    /// the global fragment 0.
+    #[test]
+    fn a_fragment_importing_only_the_global_one() {
+        use SimpleSelectorKind::Class;
+        let info = style_info(vec![
+            (0, sheet(vec![], vec![red(vec![selector(&[(Class, "g")])])])),
+            (
+                5,
+                sheet(vec![0], vec![red(vec![selector(&[(Class, "x")])])]),
+            ),
+        ]);
+        assert_eq!(lowered(&info), [".g", r#".x:where([l-css-id="5"])"#]);
+    }
+
+    /// `@keyframes` and `@font-face` are emitted verbatim, as web-core emits
+    /// them, whatever fragment they are in.
+    #[test]
+    fn keyframes_and_font_faces_stay_global() {
+        let keyframes = Rule {
+            kind: RuleKind::Keyframes,
+            prelude: RulePrelude {
+                selectors: vec![text_selector("spin")],
+            },
+            declaration_block: DeclarationBlock {
+                declarations: vec![],
+            },
+            children: vec![style_rule(
+                vec![text_selector("to")],
+                vec![declaration(CssPropertyId::Opacity, "1")],
+            )],
+        };
+        let font_face = Rule {
+            kind: RuleKind::FontFace,
+            prelude: RulePrelude { selectors: vec![] },
+            declaration_block: DeclarationBlock {
+                declarations: vec![declaration(CssPropertyId::FontFamily, "Custom")],
+            },
+            children: vec![],
+        };
+        let info = style_info(vec![
+            (1, sheet(vec![], vec![keyframes, font_face])),
+            (2, sheet(vec![1], vec![])),
+        ]);
+        assert_eq!(
+            lowered(&info),
+            ["@keyframes spin to", "@font-face font-family:Custom;"]
+        );
     }
 }

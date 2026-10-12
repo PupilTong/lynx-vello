@@ -485,9 +485,6 @@ impl BobcatRenderer {
         self.ensure_running()?;
         let input = Url::parse(&url).map_err(js_error)?;
         let page = PageSource::from_bytes(&input, &bytes).map_err(js_error)?;
-        for warning in page.compatibility_warnings() {
-            console_warn(&JsValue::from(warning.to_string()));
-        }
         page.register_with(&self.resources);
         self.load_sources(page.view_sources(self.screen), global_props)
             .await
@@ -505,9 +502,6 @@ impl BobcatRenderer {
         let input = Url::parse(&entry_url).map_err(js_error)?;
         let archive = ZipSource::from_bytes(&bytes).map_err(js_error)?;
         let page = archive.page(&input).map_err(js_error)?;
-        for warning in page.compatibility_warnings() {
-            console_warn(&JsValue::from(warning.to_string()));
-        }
         archive
             .register_with(&self.resources, &input)
             .map_err(js_error)?;

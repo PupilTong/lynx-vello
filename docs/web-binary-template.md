@@ -128,7 +128,13 @@ level; `value_text()` stays wire-faithful.
 
 `css_id_to_style_sheet` keys are the per-entry CSS fragment ids (`cssId`);
 `imports` model `@import` between fragments (flattening uses Kahn topological
-sort in `flattened_style_info.rs`).
+sort in `flattened_style_info.rs`). Both drive scoping: each style rule of a
+fragment is repeated once per fragment that imports it, transitively and
+itself included, with `:where([l-css-id="N"])` on the subject compound for
+every importer `N` other than 0 (`style_info_decoder.rs:193-221`). This
+engine's `crates/bobcat-source/src/lower_style.rs` does the same, except that
+a rule whose importers include 0 keeps only its unchanged selector: the
+guarded copies web-core adds beside it match a subset of the same elements.
 
 At runtime the wasm `decode_style_info(buffer, entry_name, enable_css_selector,
 transform_vw, transform_vh, transform_rem)` deserializes `RawStyleInfo`, runs

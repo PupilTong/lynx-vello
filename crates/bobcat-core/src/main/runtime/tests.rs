@@ -939,9 +939,16 @@ fn imported_runtime_bindings_supply_bridges_without_globals() {
                 if (typeof globDynamicComponentEntry !== 'undefined') {
                   throw new Error('the dynamic-chunk entry must not leak into the card realm');
                 }
+                const scoped = __CreateView(0);
                 if (typeof __SetCSSId !== 'function' ||
-                    __SetCSSId([], 0, 'entry') !== undefined) {
-                  throw new Error('the scoped-style PAPI must accept its call and record nothing');
+                    __SetCSSId([scoped], 3, 'entry') !== undefined ||
+                    __GetAttributeByName(scoped, 'l-css-id') !== '3' ||
+                    __GetAttributeByName(scoped, 'l-e-name') !== null) {
+                  throw new Error('the scoped-style PAPI must write l-css-id and no entry name');
+                }
+                __SetCSSId([scoped], 0);
+                if (__GetAttributeByName(scoped, 'l-css-id') !== null) {
+                  throw new Error('css id 0 must remove l-css-id');
                 }
 
                 const core = lynx.getCoreContext();

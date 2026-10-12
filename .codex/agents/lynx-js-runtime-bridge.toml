@@ -109,7 +109,7 @@ and `bobcat-workers` (every Worker realm, including the BTS).
 - `packages/bobcat-element/src/` — `element-papi.ts` (`bobcat:element`; its
   header table is the authoritative PAPI list: `__AddEvent`, `__GetEvent`,
   `__GetEvents`, `__SetEvents`, `__AddEventListener`, `__QuerySelector`(`All`),
-  `__FlushElementTree`, and `__SetCSSId`, accepted and ignored),
+  `__FlushElementTree`, and `__SetCSSId`, which writes `l-css-id`),
   `main-thread-runtime.ts` (`bobcat:runtime`), `worker.ts` (the W3C `Worker`),
   `worker-runtime.ts`, `background-thread-runtime.ts` (`bobcat:bts-runtime`),
   `bts.ts` (`bobcat:bts` — the BTS bootstrap and a BTS realm's root module;
@@ -251,7 +251,8 @@ Landed and not to be regressed:
 - `__InvokeUIMethod` and `__GetComputedStyleByKey` read the last layout pass
   and **never flush**: the caller decides when to `__FlushElementTree`, so a
   job that mutates and then measures sees the pre-mutation geometry.
-- Not implemented on purpose: per-component css-id scoping, UI methods other
+- Not implemented on purpose: the `l-e-name` entry-name CSS guard (`__SetCSSId`
+  ignores `entryName`), UI methods other
   than the base set's `boundingClientRect`, `scrollIntoView` and
   `scrollTo`/`scrollBy` and the kinds' methods `AGENTS.md` lists (`focus`/`blur`
   have no focus model), import maps, import attributes, JSON *ESM*

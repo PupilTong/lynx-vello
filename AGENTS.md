@@ -592,9 +592,9 @@ Resource lifetime belongs to the fetcher, adopted rules to the document. No
 native stylesheet handles, load state or adoption queue live in
 `MainThreadRuntime`. See
 `docs/named-styles-runtime.md` for URL mapping and load timing. Per-component
-css-id scoping is **not** implemented: every fragment mounts globally, which is
-what web-core emits for an `enableRemoveCSSScope = true` bundle (see
-`__SetCSSId` below).
+css-id scoping follows web-core: `bobcat-source` guards each scoped
+fragment's rules with `:where([l-css-id="N"])` and `__SetCSSId` writes that
+attribute (see `__SetCSSId` below).
 
 Ordinary ECMAScript `import()` loads JavaScript ESM through
 `SourceRequest::Module` and the same `SourceCompletion` channel, during and
@@ -1472,7 +1472,7 @@ is the authoritative enumeration** — it names every member and what backs it, 
 every ReactLynx Snapshot constructor except `__CreateFrame`; all six tree
 mutations; the properties and queries a Snapshot's `create`/`update` functions
 write through and read back, among them `__SetInlineStyles` and the name-based
-`__AddInlineStyle`, with `__SetCSSId` accepted and ignored; the readback pair
+`__AddInlineStyle`, with `__SetCSSId` writing `l-css-id`; the readback pair
 `__InvokeUIMethod`, whose UI methods are `boundingClientRect`,
 `scrollIntoView` and CSSOM-View's `scrollTo`/`scrollBy` on every element, a pager's
 `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s
@@ -1638,14 +1638,19 @@ drops every observer and `resumeExposure` re-observes (native's semantics, with
 timer. The defaults where the references differ are in
 `docs/tracking/deviations.md`.
 
-`__SetCSSId` is a sink rather than an implementation: it names the author-CSS
-scope an element cascades in, and no layer lowers a decoded `StyleInfo` into
-**scoped** author rules yet (ingestion has landed but mounts every fragment
-globally; web-core writes `l-css-id`/`l-e-name` attributes, native Lynx keeps
-css_id on the element). A compiled card calls it while installing its snapshot
-runtime, so it accepts the call and drops the id. The scoping behavior lands
-with the ingestion side that reads it, together with the parent-component
-css-id inheritance that feeds it.
+`__SetCSSId` writes web-core's `l-css-id` attribute on each element (a
+non-zero id sets it, 0 or a nullish id removes it), and `bobcat-source`'s
+`lower_style` repeats every rule of a scoped `StyleInfo` fragment once per
+importing fragment with `:where([l-css-id="N"])` at the end of the subject
+compound, so stylo's own attribute matching does the scoping. A rule whose
+importers include fragment 0 keeps only its unguarded selector; web-core's
+extra guarded copies would match a subset of it. Nothing reads
+`enableRemoveCSSScope`: a bundle built with it carries only fragment 0 and
+never calls `__SetCSSId`. Deliberately absent: the `l-e-name` entry-name guard
+(`entryName` is ignored; it separates a lazy bundle's own `StyleInfo`, which
+is not mounted) and parent-component css-id inheritance (ReactLynx creates
+every element under the page, whose css id is 0). `docs/style-assumptions.md`
+§D.16 records the decision.
 
 `Document::drop_element` frees exactly the node the collected handle named: its
 **element** children are unlinked and go on as detached roots, each held by its
@@ -2128,11 +2133,10 @@ It must not duplicate runtime, DOM, layout, painting, or source-lowering
 policy: missing MTS/PAPI support remains a precise `bobcat-core` QuickJS error.
 `bobcat-source` lowers a decoded `StyleInfo` into
 `bobcat_core::PreparsedStyleSheet`, flattening every `css_id` fragment in
-reverse-topological order so imported fragments precede their importers, and
+reverse-topological order so imported fragments precede their importers and
+guarding each scoped fragment's selectors with `:where([l-css-id="N"])`, and
 each native embedder registers that sheet in `bobcat-resources` under the URL
-it names in `ViewSources::style_sheets`. A bundle carrying non-zero fragment
-ids warns that per-component scoping is not implemented rather than claiming
-compatibility. For XML, a present `<style>` body instead uses the fetcher's raw
+it names in `ViewSources::style_sheets`. For XML, a present `<style>` body instead uses the fetcher's raw
 CSS-text arm and the fixed page configuration is `false`/`false`/`true` for
 default linear display, visible overflow, and selector support; a present
 background section is registered under the native in-memory URL
@@ -2985,10 +2989,11 @@ not by per-platform baselines.
 What the runtime layer does not implement yet, each recorded with the code that
 would host it:
 
-- **Per-component css-id scoping.** `__SetCSSId` is a sink and every
-  `StyleInfo` fragment mounts globally; the encoding lands with the ingestion
-  side that reads it, together with the parent-component css-id inheritance
-  that feeds it.
+- **The entry-name CSS guard.** css-id scoping is implemented, but a lazy
+  bundle's own `StyleInfo` is not mounted, so web-core's `l-e-name` /
+  `:not([l-e-name])` guard that would separate it from the host card's rules
+  is not synthesized and `__SetCSSId` ignores `entryName`; both land with
+  lazy-bundle stylesheet mounting (`docs/tracking/deviations.md`).
 - **The list surface.** `crates/bobcat-core/src/main/tree/list.rs` carries
   what a UA sheet can say about `list` and `list-item`: the scroll axis, the
   `list-type` layout modes (`flow` = grid, `waterfall` = `grid-lanes`), cells
