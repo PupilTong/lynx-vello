@@ -21,9 +21,9 @@ scope decision, will not. Upstream's own `dist/` is built without an
 this engine has no intention of serving. Compiled here at `4.1.0`, the same
 sources exercise the path it does.
 
-The cards, their CSS and their assets are otherwise upstream's, with three
+The cards, their CSS and their assets are otherwise upstream's, with four
 rewrites applied to the vendored text by user ruling (the first two on
-2026-09-25, the third on 2026-10-08):
+2026-09-25, the third on 2026-10-08, the fourth on 2026-10-12):
 
 - **`direction: lynx-rtl` becomes `direction: rtl`** (24 files). `lynx-rtl` is
   a value the fork's grammar rejects, so upstream's own spelling left every
@@ -41,9 +41,16 @@ rewrites applied to the vendored text by user ruling (the first two on
   spellings beside them, commented out. The cards whose subject *is* the
   deprecated family — the `basic-linear-*-graverty-*`, `*-cross-gravity` and
   `*-layout-gravity` ones — keep it, and are judged as dropping it.
+- **`enable-exposure-ui-margin` is added to the exposed view of
+  `api-exposure-dynamic-ui-margin`** (1 file). The card sets
+  `exposure-ui-margin-top` and nothing else. web-core applies a ui margin
+  with no switch; this engine follows native, where it applies only under the
+  element's `enable-exposure-ui-margin` or the page's
+  `enableExposureUIMargin` (`crates/bobcat-core/src/main/exposure.rs`), so
+  upstream's own text left the margins doing nothing here.
 
-All three are recorded here rather than absorbed silently, because a re-sync
-from upstream will bring the original spellings back.
+All four are recorded here rather than absorbed silently, because a re-sync
+from upstream will bring the original text back.
 
 ## Building
 
