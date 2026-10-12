@@ -2866,6 +2866,130 @@ mod tests {
         );
     }
 
+    /// A whole-tree run: a change reached the root while an in-place root
+    /// parked under an unwritten `display: contents` wrapper. The root walk
+    /// descends through marked nodes alone and the wrapper carries no mark,
+    /// so the parked root's subtree must still be rounded and its top-layer
+    /// box placed.
+    #[test]
+    fn a_parked_in_place_root_under_a_wrapper_is_rounded_in_a_whole_tree_run() {
+        let mut doc: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
+        doc.add_stylesheet(
+            "page { display: flex; flex-direction: column; width: 300px; height: 300px; }
+             .wrapper { display: contents; }
+             .inner { display: flex; flex: none; overflow: hidden; width: 100px; height: 40px; }
+             .leaf { width: 10px; height: 10px; }
+             .top { position: fixed; top: 10px; left: 10px; width: 20px; height: 20px; }
+             .hidden { display: none; }",
+            StylesheetOrigin::Author,
+        );
+        let root = doc.document_element().id();
+        let wrapper = doc.create_element("view", ());
+        doc.add_class(wrapper, "wrapper");
+        doc.append_child(root, wrapper);
+        let inner = doc.create_element("view", ());
+        doc.add_class(inner, "inner");
+        doc.append_child(wrapper, inner);
+        let top = doc.create_element("view", ());
+        doc.set_classes(top, "top hidden");
+        doc.append_child(inner, top);
+        doc.add_to_top_layer(top, false);
+        let leaf = doc.create_element("view", ());
+        doc.add_class(leaf, "leaf");
+        doc.append_child(root, leaf);
+        doc.layout();
+        assert!(
+            doc.bounding_client_rect(top).is_none(),
+            "hidden until shown"
+        );
+
+        doc.set_classes(top, "top");
+        let added = doc.create_element("view", ());
+        doc.add_class(added, "leaf");
+        doc.append_child(root, added);
+        doc.flush_styles_with_damage_sink(&mut |_, _| {});
+        assert!(
+            doc.layout_requires_full_pass(Size::new(800.0, 600.0), 1.0),
+            "the appended child reached the root"
+        );
+        assert_eq!(doc.relayout_roots().len(), 1, "the in-place root parks");
+        doc.layout();
+
+        let placed = doc
+            .bounding_client_rect(top)
+            .expect("the top-layer box is placed against the viewport");
+        assert_eq!(
+            (
+                placed.origin.x,
+                placed.origin.y,
+                placed.size.width,
+                placed.size.height
+            ),
+            (10.0, 10.0, 20.0, 20.0)
+        );
+    }
+
+    /// A whole-tree run: a change reached the root while a containment
+    /// boundary parked under a box whose own cache stayed warm. The root
+    /// pass answers that box from its cache and never descends, so the
+    /// boundary's subtree must be relaid in place as in an incremental run.
+    #[test]
+    fn a_parked_boundary_under_a_warm_box_is_relaid_in_a_whole_tree_run() {
+        let mut doc: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
+        doc.add_stylesheet(
+            "page { display: flex; flex-direction: column; width: 300px; height: 300px; }
+             .box { display: flex; flex: none; width: 200px; height: 80px; }
+             .wrapper { display: contents; }
+             .inner { display: flex; flex: none; contain: strict; width: 100px; height: 40px; }
+             .leaf { width: 10px; height: 10px; }",
+            StylesheetOrigin::Author,
+        );
+        let root = doc.document_element().id();
+        let outer = doc.create_element("view", ());
+        doc.add_class(outer, "box");
+        doc.append_child(root, outer);
+        let wrapper = doc.create_element("view", ());
+        doc.add_class(wrapper, "wrapper");
+        doc.append_child(outer, wrapper);
+        let inner = doc.create_element("view", ());
+        doc.add_class(inner, "inner");
+        doc.append_child(wrapper, inner);
+        let child = doc.create_element("view", ());
+        doc.add_class(child, "leaf");
+        doc.append_child(inner, child);
+        let leaf = doc.create_element("view", ());
+        doc.add_class(leaf, "leaf");
+        doc.append_child(root, leaf);
+        doc.layout();
+
+        doc.set_inline_style(child, "height: 20px");
+        let added = doc.create_element("view", ());
+        doc.add_class(added, "leaf");
+        doc.append_child(root, added);
+        doc.flush_styles_with_damage_sink(&mut |_, _| {});
+        assert!(
+            doc.layout_requires_full_pass(Size::new(800.0, 600.0), 1.0),
+            "the appended child reached the root"
+        );
+        assert_eq!(doc.relayout_roots().len(), 1, "the boundary parks");
+        doc.layout();
+
+        let rect = doc
+            .bounding_client_rect(child)
+            .expect("the child has a box");
+        assert_eq!(
+            (
+                rect.origin.x,
+                rect.origin.y,
+                rect.size.width,
+                rect.size.height
+            ),
+            (0.0, 0.0, 10.0, 20.0)
+        );
+    }
+
     #[test]
     fn only_a_root_reaching_invalidation_forces_a_full_pass() {
         let mut doc: Document<()> =

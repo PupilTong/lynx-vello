@@ -1129,14 +1129,18 @@ the painting — layout's job is to never be the frame's bottleneck.
   parked containment boundaries it runs the fused traversal **over each parked
   boundary's subtree**, re-snapping from the parent's accumulated unrounded
   origin byte-identically to a full re-round and leaving clean subtrees
-  untouched. A parked boundary under another parked boundary is walked on its
-  own: the boxes between the two carry no rounding marks, since each
-  invalidation stopped at its own boundary, so the outer walk would not
-  descend to it; where the outer boundary's own box changed, its walk rounds
-  the inner subtree a second time, to the same values. Only a change that
-  reached the document root or a viewport/scale move falls back to a
-  whole-tree traversal. This keeps a single
-  contained mutation `O(boundary subtree)` end-to-end.
+  untouched. Every parked root is walked on its own, after the whole-tree
+  walk too: the boxes between a parked root and the nearest box above it the
+  pass wrote carry no rounding marks, since the root's invalidation stopped
+  at the root, so neither the whole-tree walk nor an outer parked root's walk
+  is sure to descend to it; a root a walk did reach answers at once, and
+  where a box above it changed, that walk rounded the root's subtree a second
+  time, to the same values. Only a change that reached the document root or
+  a viewport/scale move adds the whole-tree traversal. The parked re-runs
+  happen in every run for the same reason: the root pass answers a box whose
+  cache stayed warm from that cache and never descends, so a parked root
+  under such a box is laid out by nobody else. This keeps a single contained
+  mutation `O(boundary subtree)` end-to-end.
 - **Allocation strategy (current).** Algorithms use bounded transient `Vec`
   scratch. Relative deduplicates each item's at-most-eight dependencies in a
   fixed inline `u32` array, bypasses graph construction entirely when no

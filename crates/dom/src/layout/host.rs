@@ -591,36 +591,38 @@ pub(super) fn run_layout<T: Sync>(
         let (tree, state) = document.layout_parts();
         let root = tree.live_slot(root_id);
         state.begin_container_interleave(interleave);
-        if !full {
-            for &(_, pending) in &parked {
-                let Some(slot) = tree.slot(pending.node_id) else {
-                    continue;
-                };
-                if !tree.at(slot).is_element() {
-                    continue;
-                }
-                match pending.kind {
-                    RelayoutKind::Boundary => {
-                        if is_relayout_boundary(&StyleView::of(tree.at(slot))) {
-                            let output =
-                                compute_boundary_relayout(tree, state, slot, pending.input);
-                            tree.layout_mut(state, slot)
-                                .set_unrounded_content_size(output.content_size);
-                        }
+        // Every parked root is relaid in place before the root pass, in a
+        // whole-tree run too: the root pass answers a box whose cache stayed
+        // warm from that cache and never descends, so a parked root under
+        // such a box is reached by nobody else, and a dirty box above it
+        // takes the relay's result from the cache the relay just filled.
+        for &(_, pending) in &parked {
+            let Some(slot) = tree.slot(pending.node_id) else {
+                continue;
+            };
+            if !tree.at(slot).is_element() {
+                continue;
+            }
+            match pending.kind {
+                RelayoutKind::Boundary => {
+                    if is_relayout_boundary(&StyleView::of(tree.at(slot))) {
+                        let output = compute_boundary_relayout(tree, state, slot, pending.input);
+                        tree.layout_mut(state, slot)
+                            .set_unrounded_content_size(output.content_size);
                     }
-                    RelayoutKind::InPlace { previous } => {
-                        let output = tree.compute_layout(state, slot, pending.input);
-                        // A reproduced output proves nothing above this node
-                        // can observe the change; anything else falls back to
-                        // the whole-tree pass, which reuses the caches just
-                        // filled.
-                        if output != previous {
-                            escalated = true;
-                            let mut current = tree.at(slot).flat_parent_slot();
-                            while let Some(ancestor) = current {
-                                state.clear_layout_cache(ancestor);
-                                current = tree.at(ancestor).flat_parent_slot();
-                            }
+                }
+                RelayoutKind::InPlace { previous } => {
+                    let output = tree.compute_layout(state, slot, pending.input);
+                    // A reproduced output proves nothing above this node
+                    // can observe the change; anything else falls back to
+                    // the whole-tree pass, which reuses the caches just
+                    // filled.
+                    if output != previous {
+                        escalated = true;
+                        let mut current = tree.at(slot).flat_parent_slot();
+                        while let Some(ancestor) = current {
+                            state.clear_layout_cache(ancestor);
+                            current = tree.at(ancestor).flat_parent_slot();
                         }
                     }
                 }
@@ -637,11 +639,6 @@ pub(super) fn run_layout<T: Sync>(
         );
         state.take_container_deferrals(&mut deferred);
     }
-    // The parked subtrees this run relaid in place, before the root pass: a
-    // box under one of them that escapes to a containing block above it was
-    // laid out by nobody, and the tail places it (`hoisted::places_late`).
-    // A run that started whole relaid none of them first.
-    let relays_in_place = !full;
     let full = full || escalated;
     let settled = settle_deferred_containers(document, resized, &mut deferred);
     // A deferred container is a relayout boundary, so its own box did not move
@@ -656,11 +653,10 @@ pub(super) fn run_layout<T: Sync>(
             }
         }
     }
-    let relayed: FxHashSet<NodeId> = if relays_in_place {
-        parked.iter().map(|&(_, pending)| pending.node_id).collect()
-    } else {
-        FxHashSet::default()
-    };
+    // The parked subtrees this run relaid in place, before the root pass: a
+    // box under one of them that escapes to a containing block above it was
+    // laid out by nobody, and the tail places it (`hoisted::places_late`).
+    let relayed: FxHashSet<NodeId> = parked.iter().map(|&(_, pending)| pending.node_id).collect();
     {
         let (tree, state) = document.layout_parts();
         let root = tree.live_slot(root_id);
@@ -671,9 +667,12 @@ pub(super) fn run_layout<T: Sync>(
                 pre_position(tree, state, node, viewport, &relayed)
             };
             round_with(tree, state, root, scale, Point::ZERO, rescale, position);
-        } else {
-            position_and_round_parked_boundaries(tree, state, &parked, viewport, scale, &relayed);
         }
+        // After a whole-tree walk too: that walk descends through marked
+        // nodes alone, and the boxes between a parked root and the nearest
+        // box above it the pass wrote carry no mark, so it may stop short of
+        // the root. A root it did reach answers at once.
+        position_and_round_parked_boundaries(tree, state, &parked, viewport, scale, &relayed);
         state.in_rounding_tail = false;
         // Every text node this pass measured but did not commit still holds
         // the probe's line break; painting reads the committed one.
@@ -811,22 +810,25 @@ fn collect_parked_boundaries<T>(document: &Document<T>) -> Vec<(usize, PendingRe
     parked
 }
 
-/// The incremental rounding tail: every parked boundary's subtree is
+/// The parked roots' rounding tail: every parked root's subtree is
 /// positioned and rounded from its parent's accumulated unrounded origin,
 /// which is what the whole-tree walk would reach it with, since every
-/// unrounded box is final before the tail runs.
+/// unrounded box is final before the tail runs. It runs after every pass,
+/// the whole-tree walk included.
 ///
-/// A parked boundary under another parked boundary is walked on its own
-/// too. The outer one's walk descends only through nodes a layout write
-/// marked, and the boxes between the two — a `display: contents` wrapper, or
-/// any box neither relayout wrote — are marked by nobody: the inner
-/// boundary's invalidation stopped at the inner boundary and the outer's at
-/// the outer. Left to the outer walk, the inner subtree would keep its old
-/// rounded boxes, and a box the tail alone places (`pre_position`: one whose
-/// containing block is the initial one, a top-layer element among them) would
-/// never be placed. Where the outer boundary's own box did change, its walk
-/// forces its whole subtree and rounds the inner one a second time, to the
-/// same values: rounding is a function of the unrounded boxes alone.
+/// A parked root is walked on its own because no other walk is sure to
+/// reach it. A walk descends only through nodes a layout write marked, and
+/// the boxes between a parked root and the nearest box above it that the
+/// pass wrote — a `display: contents` wrapper, or any box no relayout wrote
+/// — are marked by nobody: the root's invalidation stopped at the root, and
+/// the walk above it started from another invalidation. Left to that walk,
+/// the subtree would keep its old rounded boxes, and a box the tail alone
+/// places (`pre_position`: one whose containing block is the initial one, a
+/// top-layer element among them) would never be placed. A root another walk
+/// did reach carries no mark any more and answers at once; where a box
+/// above it did change, that walk forced its whole subtree and rounded the
+/// root's a second time, to the same values: rounding is a function of the
+/// unrounded boxes alone.
 fn position_and_round_parked_boundaries<T: Sync>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
