@@ -997,7 +997,10 @@ and §D.16 with what the wire format actually permits.)*
       at its original position only, so an element the copy shows measures
       one period from where it is drawn; and the copy's offset is snapped
       to device pixels on its own, so with a non-integer period × device
-      pixel ratio the two copies may meet one device pixel apart.
+      pixel ratio the two copies may meet one device pixel apart (accepted
+      by the user 2026-10-13: a circular `flat-coverflow` swiper of 60% items
+      on a 393px viewport, period 943.2px, shows one column of its own
+      background at the seam).
       `x-swiper[circular]` is wired to it
       (`crates/bobcat-core/src/main/tree/swiper.rs`).
     - **Inertia** (user-directed 2026-09-22, the same change): a scrolling

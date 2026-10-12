@@ -2726,7 +2726,9 @@ consequential choice about whether to follow the spec or the quirk.
   is the element (two elements with one id+scene are two records), a
   teardown or an `exposure-id` change emits a `disexposure` record with the
   old id and no `uidisappear`, `exposure-area` is `parseFloat(value) / 100`,
-  zero-area and edge-adjacent targets count as intersecting, and
+  zero-area and edge-adjacent targets count as intersecting (confirmed by the
+  user 2026-10-13 for a pager's hidden page, which starts on the pager's edge
+  and is therefore exposed, where both references leave it unexposed), and
   `visibility: hidden`/`opacity: 0` do not hide (native checks alpha and
   hidden). Defaults taken from native: global records need a non-empty
   `exposure-id` (web-core emits records with a null id for listener-only
