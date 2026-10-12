@@ -315,7 +315,6 @@ impl PageSource {
             default_overflow_visible: template.config_flag("defaultOverflowVisible"),
             enable_css_selector: template.config_flag("enableCSSSelector"),
             enable_js_data_processor: template.config_flag("enableJSDataProcessor"),
-            enable_exposure_ui_margin: template.config_flag("enableExposureUIMargin"),
         };
         let background_sources = bundle_modules(input, &template, target);
         let background_script = if template.manifest.is_empty() {
@@ -778,7 +777,6 @@ const fn raw_lynx_xml_config() -> PageConfig {
         default_overflow_visible: false,
         enable_css_selector: true,
         enable_js_data_processor: false,
-        enable_exposure_ui_margin: false,
     }
 }
 
@@ -962,7 +960,6 @@ mod tests {
                 default_overflow_visible: false,
                 enable_css_selector: true,
                 enable_js_data_processor: false,
-                enable_exposure_ui_margin: false,
             }
         );
         let sources = page.view_sources(SCREEN);

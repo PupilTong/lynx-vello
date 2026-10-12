@@ -5,7 +5,7 @@
  */
 interface BobcatNative {
   /**
-   * Builds the realm's one document out of the five page switches, in
+   * Builds the realm's one document out of the four page switches, in
    * `PageConfig`'s order, and the view's own resources, which never reach
    * this realm: its metrics, its fonts and its style pool.
    *
@@ -19,7 +19,6 @@ interface BobcatNative {
     defaultOverflowVisible: boolean,
     enableCssSelector: boolean,
     enableJSDataProcessor: boolean,
-    enableExposureUIMargin: boolean,
   ): void;
   /** Marks the permanent page live and returns its `NodeId`. */
   createPage(): number;

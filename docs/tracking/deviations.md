@@ -2130,10 +2130,11 @@ consequential choice about whether to follow the spec or the quirk.
   every clipping ancestor with a ratio of at least `exposure-area`
   (web-core's browser observer uses the nearest scroll container *instead
   of* the viewport; native tests the screen, the root and each scroll
-  ancestor's whole rect separately); `exposure-ui-margin-*` apply only with
-  `enable-exposure-ui-margin` or the `enableExposureUIMargin` page config,
-  as documented and as native does (web-core applies them always, with a
-  TODO); `lynx.stopExposure` stops detection and `resumeExposure` restarts
+  ancestor's whole rect separately); `exposure-ui-margin-*` always apply, as
+  web-core's do: neither the per-element `enable-exposure-ui-margin`
+  attribute nor the `enableExposureUIMargin` page config is read
+  (user-directed 2026-10-12; native applies the margins only under the
+  attribute or, without it, the page config); `lynx.stopExposure` stops detection and `resumeExposure` restarts
   it (web-core's flag is read nowhere else); delivery is one batch per
   update with no timer (web-core coalesces the global lists on a 50 ms
   timer, native polls at 50 ms), and `setObserverFrameRate` is accepted and

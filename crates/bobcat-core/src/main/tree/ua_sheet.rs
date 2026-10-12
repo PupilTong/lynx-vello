@@ -75,14 +75,6 @@ pub struct PageConfig {
     pub enable_css_selector: bool,
     /// Pass data and its processor name to BTS without running the MTS processor.
     pub enable_js_data_processor: bool,
-    /// Whether an element's `exposure-ui-margin-*` attributes take part in
-    /// exposure detection when the element names no
-    /// `enable-exposure-ui-margin` of its own: native's page-level
-    /// `enableExposureUIMargin` (`LynxBaseUI.getEnableExposureUIMargin`,
-    /// which falls back to the context's switch), false unless the page says
-    /// otherwise. The UA cascade does not read it; the runtime's exposure
-    /// detection does (`crate::main::exposure`).
-    pub enable_exposure_ui_margin: bool,
 }
 
 impl Default for PageConfig {
@@ -92,7 +84,6 @@ impl Default for PageConfig {
             default_overflow_visible: true,
             enable_css_selector: true,
             enable_js_data_processor: false,
-            enable_exposure_ui_margin: false,
         }
     }
 }
@@ -611,7 +602,6 @@ mod tests {
             default_overflow_visible: false,
             enable_css_selector: true,
             enable_js_data_processor: false,
-            enable_exposure_ui_margin: false,
         });
         assert!(!sheet.contains("display: linear;"));
         assert!(!sheet.contains(OVERFLOW_RULE));
@@ -739,7 +729,6 @@ mod tests {
                 default_overflow_visible: false,
                 enable_css_selector: false,
                 enable_js_data_processor: false,
-                enable_exposure_ui_margin: false,
             },
         ] {
             let sheet = ua_stylesheet(config);
