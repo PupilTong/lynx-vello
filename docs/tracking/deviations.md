@@ -3942,6 +3942,13 @@ consequential choice about whether to follow the spec or the quirk.
   here (`lower_style`), the `l-e-name` guard is not, and `__SetCSSId`
   ignores its `entryName`. A container's `config` is ignored too: page policy
   is the page's.
+  **Consequence on the web target (found 2026-10-06, restated 2026-10-13):**
+  a `.web.bundle` lazy container compiled by rspeedy carries its CSS only in
+  that `StyleInfo`; no ReactLynx build writes it as a `CSS` custom section
+  (see the next entry), so `__LoadStyleSheet('CSS', …)` answers `null` and
+  none of a web lazy component's class rules apply. Twelve
+  `basic-lazy-component-css*` cards of the web-core-e2e corpus are pending on
+  it; inline-styled lazy components are unaffected.
 - **CSS custom sections are read from the `CustomSectionsStyleInfo` section
   *and* from the legacy JSON form** — since lynx-stack#4138 (75c770fe)
   web-core's encoder writes every `encoding: 'CSS'` custom section into

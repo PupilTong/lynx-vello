@@ -47,7 +47,6 @@ class LazyComponent extends Component {
         style='width: 400px;height: 400px'
         exposure-id={this.props.eid}
         exposure-scene={this.props.escene}
-        enable-exposure-ui-margin
         exposure-ui-margin-top={this.props.border}
       >
         {show && (
