@@ -2015,14 +2015,33 @@ and §D.16 with what the wire format actually permits.)*
       four. An element root's rect is its padding box when either axis
       clips (Chromium: both); the two differ only for an
       `overflow: clip visible` root with a border.
+    - **A target margin, which the spec does not have (2026-10-12).** Every
+      observer carries one beside its root margin. It dilates each target's
+      border box in the target's own space, before the target's transform
+      and before any clip, with percentages by the undilated box's height
+      (top/bottom) and width (left/right); an eaten size clamps at 0, as the
+      root's does. The entry's `boundingClientRect`, `intersectionRect` and
+      ratio are over the dilated rect, and the zero margin is the spec's
+      geometry. The reason is Lynx native's exposure
+      (`LynxUIExposure.m` `frameOfUIInWindow:`/`uiInWindow:`, Android
+      `UIExposure.java` `getUIRect`/`inWindow`): it grows the element's own
+      rect and tests that against each scroll container, the root and the
+      screen, so its margins reach an element a scrollport or a clipping
+      page has cut, with the ratio over the grown rect. A root margin moves
+      the root's edges after every clip below the root has cut, and cannot.
+      No script reaches it; the MTS binding, once it exists, passes the zero
+      target margin.
     - **Out, with the reason.** `clip-path`, masks and rounded corners (no
       clip shapes in the frame either), `overflow-clip-margin` (the frame
-      clips to the padding box), `scrollMargin`, `delay`/`trackVisibility`
-      and so `isVisible` (v2, no occlusion model here), a
-      compositor-exported transform curve mid-flight (the geometry is the
-      main thread's last cascade), and `position-visibility` (a hidden box
-      stays geometric, as for `bounding_client_rect`). `ResizeObserver`
-      stays out.
+      clips to the padding box), `scrollMargin` (it dilates scroll
+      containers' clip rects only, so a non-scrolling `overflow: clip`
+      ancestor such as the page still cuts, and it keeps the undilated ratio
+      basis; the target margin above is what Lynx's exposure needs),
+      `delay`/`trackVisibility` and so `isVisible` (v2, no occlusion model
+      here), a compositor-exported transform curve mid-flight (the geometry
+      is the main thread's last cascade), and `position-visibility` (a
+      hidden box stays geometric, as for `bounding_client_rect`).
+      `ResizeObserver` stays out.
 
 33. **`@scope` scoped styles (user-directed, 2026-10-12).** css-cascade-6
     §2.5 "Scoped Styles" (the 2024-09-06 Working Draft's numbering; §3.5 in

@@ -970,9 +970,11 @@ async fn build_watched_rows(
 
         let observer = document.create_intersection_observer(
             Box::new(dom::ElementHandler(watcher)),
-            Some(scroller),
-            dom::RootMargin::ZERO,
-            vec![0.0, 0.5, 1.0],
+            dom::IntersectionObserverInit {
+                root: Some(scroller),
+                thresholds: vec![0.0, 0.5, 1.0],
+                ..dom::IntersectionObserverInit::default()
+            },
         );
         for row in rows {
             document.observe_intersection(observer, row);

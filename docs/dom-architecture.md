@@ -732,9 +732,11 @@ consumers are the engine's own components and, later, a realm binding.
 ascending by id, so a lookup is a binary search — each with a handler
 (`Box<dyn IntersectionEventHandler<T>>`), the node that handler is bound to
 (cached at creation), a root (`IntersectionObserverRoot::Implicit`,
-`Element(node)`, or `Freed` once that element is gone), a `RootMargin`,
-sorted thresholds (`[0]` when empty) and its registrations: a target and the
-`(thresholdIndex, isIntersecting)` pair the last update stored, `None` until
+`Element(node)`, or `Freed` once that element is gone), a root margin and
+a target margin (an `IntersectionMargin` each, from the creation's
+`IntersectionObserverInit`), sorted thresholds (`[0]` when empty) and its
+registrations: a target and the `(thresholdIndex, isIntersecting)` pair the
+last update stored, `None` until
 the first one so that update always queues. Ids are monotone and never
 reissued; a dropped id is a caller bug (a panic), like a freed `NodeId`. A
 `Document` field, not a `TreeArenas` table: nothing in style, layout or
@@ -779,7 +781,8 @@ the queue, as `unobserve` does; `takeRecords` or the next delivery still
 hands those entries out.
 
 **Geometry** (`geometry.rs`, its module doc is the algorithm): the target's
-border box is carried up the containing-block chain — the
+border box, dilated by the observer's target margin in its own border-box
+space, is carried up the containing-block chain — the
 `ContainingBlockChain` iterator `bounding_client_rect` now folds too — as
 one composed matrix, each box contributing the painter's own `ContextMatrix`
 (transform list, `transform-origin`, `offset-path`, the parent's
@@ -790,7 +793,17 @@ is edge-inclusive (a touching edge is a zero-area intersection, so
 `isIntersecting` is true), and the root rect — the viewport, or an element
 root's padding or border box — is dilated by `rootMargin` with percentages
 against its height for top/bottom and its width for left/right (every
-engine and WPT `root-margin.html`; the spec sentence says width). A target
+engine and WPT `root-margin.html`; the spec sentence says width). The
+target margin is a Lynx-motivated extension: the dilation comes before the
+target's own matrix and every clip, its percentages resolve by the
+undilated border box's height and width, an eaten size clamps at 0 at the
+moved origin, and the entry's `boundingClientRect`, `intersectionRect` and
+ratio are all over the dilated rect. Native exposure grows the element's
+own rect before testing it against each scroll container, so its margins
+reach an element a scrollport or a clipping page cut, which a root margin,
+applied after every clip, cannot; the spec's `scrollMargin` dilates scroll
+containers' clips only, so a non-scrolling `overflow: clip` page would still
+cut. An element root's bounds are carried with the zero margin. A target
 that reaches an element root off its chain, never reaches it, or is the
 root is "not a descendant": rendered, zero rects, root bounds reported. Not
 rendered — `display: none`/`contents`, no layout, a hidden layout slot
@@ -798,7 +811,8 @@ rendered — `display: none`/`contents`, no layout, a hidden layout slot
 skipped contents are never intersecting), detached — reports zero rects
 throughout. Transforms are included by ruling while `bounding_client_rect`
 stays transform-free; out by design: `clip-path`, masks, rounded corners,
-`overflow-clip-margin`, `scrollMargin`, `delay`/`trackVisibility`
+`overflow-clip-margin`, `scrollMargin` (the target margin covers what Lynx
+needs of it), `delay`/`trackVisibility`
 (`isVisible`), a compositor-exported transform curve mid-flight, and
 `position-visibility` (a hidden box stays geometric).
 

@@ -9,11 +9,13 @@
 
 #![allow(clippy::float_cmp)] // Authored pixel sizes and ratios are exact.
 
-use dom::{MarginLength, NodeId, RootMargin, Vector2D};
+use dom::{IntersectionMargin, MarginLength, NodeId, Vector2D};
 
-use super::{Exposure, Length, Transition, fold_margins, parse_area, parse_length};
-use crate::main::tree::LynxDocument;
-use crate::main::tree::test_support::{child, document as fresh_document, element_under};
+use super::{Exposure, Length, Margins, Transition, fold_margins, parse_area, parse_length};
+use crate::main::tree::test_support::{
+    child, document as fresh_document, element_under, with_config,
+};
+use crate::main::tree::{LynxDocument, PageConfig};
 
 /// `test_support`'s viewport.
 const VIEWPORT_WIDTH: f32 = 393.0;
@@ -70,11 +72,26 @@ fn record(node: NodeId, appeared: bool, id: &str) -> Transition {
 }
 
 /// The root margin the registration of `node` made its observer with.
-fn root_margin(exposure: &Exposure, document: &LynxDocument, node: NodeId) -> RootMargin {
+fn root_margin(exposure: &Exposure, document: &LynxDocument, node: NodeId) -> IntersectionMargin {
     let observer = exposure
         .observer_of(node)
         .expect("the element is registered and detection runs");
     *document.intersection_observer(observer).root_margin()
+}
+
+/// The target margin the registration of `node` made its observer with.
+fn target_margin(exposure: &Exposure, document: &LynxDocument, node: NodeId) -> IntersectionMargin {
+    let observer = exposure
+        .observer_of(node)
+        .expect("the element is registered and detection runs");
+    *document.intersection_observer(observer).target_margin()
+}
+
+/// A margin with `0px` on every side but those `sides` writes.
+fn margin(sides: impl FnOnce(&mut IntersectionMargin)) -> IntersectionMargin {
+    let mut margin = IntersectionMargin::ZERO;
+    sides(&mut margin);
+    margin
 }
 
 /// `nodes` in `NodeId` order, the order a switch visits registrations in.
@@ -195,8 +212,9 @@ fn margin_lengths_read_px_rpx_percent_and_bare_numbers() {
     }
 }
 
-/// The screen margins, through an element: each side as its attribute
-/// names it, a percentage left for the primitive to resolve.
+/// The screen margins, through an element: a positive one on the target
+/// margin of the opposite side, a negative one on the root margin of its
+/// own side, and a percentage left for the primitive to resolve.
 #[test]
 fn screen_margins_reach_the_observer() {
     let mut document = fresh_document();
@@ -212,13 +230,17 @@ fn screen_margins_reach_the_observer() {
         set(&mut exposure, &mut document, node, name, value);
     }
     assert_eq!(
-        root_margin(&exposure, &document, node),
-        RootMargin {
-            top: MarginLength::Px(20.0 * VIEWPORT_WIDTH / 750.0),
-            right: MarginLength::Percent(10.0),
-            bottom: MarginLength::Px(15.0),
-            left: MarginLength::Px(-30.0),
+        target_margin(&exposure, &document, node),
+        IntersectionMargin {
+            top: MarginLength::Px(15.0),
+            right: MarginLength::Px(0.0),
+            bottom: MarginLength::Px(20.0 * VIEWPORT_WIDTH / 750.0),
+            left: MarginLength::Percent(10.0),
         }
+    );
+    assert_eq!(
+        root_margin(&exposure, &document, node),
+        margin(|margin| margin.left = MarginLength::Px(-30.0))
     );
 }
 
@@ -227,7 +249,23 @@ fn screen_margins_reach_the_observer() {
 /// bottom margin, and one at the top leaves when the top shrinks past it.
 #[test]
 fn screen_margins_grow_and_shrink_the_screen() {
-    let mut document = fresh_document();
+    grow_and_shrink_the_screen(fresh_document());
+}
+
+/// The same answers on a page that clips, as native's page does: the
+/// element below the viewport is cut off by the page before the root is
+/// seen, and the 20px bottom margin still exposes it, because it grows the
+/// element, whose grown rect the page's clip cuts.
+#[test]
+fn screen_margins_reach_past_a_clipping_page() {
+    grow_and_shrink_the_screen(with_config(PageConfig {
+        default_overflow_visible: false,
+        ..PageConfig::default()
+    }));
+}
+
+/// [`screen_margins_grow_and_shrink_the_screen`] over `document`.
+fn grow_and_shrink_the_screen(mut document: LynxDocument) {
     let mut exposure = Exposure::new(false);
     let below = boxed(&mut document, VIEWPORT_HEIGHT + 10.0, 20.0);
     let top = boxed(&mut document, 0.0, 20.0);
@@ -258,6 +296,50 @@ fn screen_margins_grow_and_shrink_the_screen() {
     );
 }
 
+/// A positive screen margin reaches an element a scrollport cuts off, the
+/// card `api-exposure-dynamic-screen-margin`'s case: an element scrolled
+/// 10px below a `scroll-view`'s scrollport, on screen but cut by it, is
+/// not exposed, and a 20px bottom margin grows the element's top back into
+/// the scrollport.
+#[test]
+fn screen_margins_reach_past_a_scrollport() {
+    let mut document = fresh_document();
+    let mut exposure = Exposure::new(false);
+    let scroller = child(
+        &mut document,
+        "scroll-view",
+        "position:absolute;left:0;top:0;width:100px;height:100px",
+    );
+    // At 140 in the scroller's scroll coordinates, past 140px of filler,
+    // and followed by enough content for an offset of 30.
+    let [_, node, _] = [140.0, 20.0, 100.0].map(|height| {
+        element_under(
+            &mut document,
+            scroller,
+            "view",
+            &format!("flex-shrink:0;width:100px;height:{height}px"),
+        )
+    });
+    set(&mut exposure, &mut document, node, "exposure-id", "a");
+    // 40px below the scrollport before the scroll, which needs a layout to
+    // have a range, and 10px after it.
+    assert_eq!(deliver(&exposure, &mut document), Vec::new());
+    document.scroll_to(scroller, Vector2D::new(0.0, 30.0));
+    assert_eq!(deliver(&exposure, &mut document), Vec::new());
+
+    set(
+        &mut exposure,
+        &mut document,
+        node,
+        "exposure-screen-margin-bottom",
+        "20px",
+    );
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![record(node, true, "a")]
+    );
+}
+
 /// The ui margins apply only when switched on: by the element's own
 /// `enable-exposure-ui-margin`, present and not `"false"`, or, where it
 /// names none, by the page's `enableExposureUIMargin`. An element 10px below
@@ -277,7 +359,7 @@ fn ui_margins_apply_only_when_switched_on() {
     set(&mut exposure, &mut document, node, "exposure-id", "a");
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
     assert_eq!(
-        root_margin(&exposure, &document, node).bottom,
+        target_margin(&exposure, &document, node).top,
         MarginLength::Px(0.0)
     );
 
@@ -289,7 +371,7 @@ fn ui_margins_apply_only_when_switched_on() {
         "true",
     );
     assert_eq!(
-        root_margin(&exposure, &document, node).bottom,
+        target_margin(&exposure, &document, node).top,
         MarginLength::Px(20.0)
     );
     assert_eq!(
@@ -337,61 +419,119 @@ fn ui_margins_apply_only_when_switched_on() {
     );
 }
 
-/// Growing an element's edge is growing the root's opposite edge: each ui
-/// margin lands on the root margin of the side across from it, added to
-/// that side's screen margin. A screen percentage survives only where no ui
-/// margin is added to it, and a ui percentage is 0.
+/// The fold: a ui margin lands on the target margin of its own side, a
+/// positive screen margin on the target margin of the opposite side, and a
+/// negative screen margin on the root margin of its own side. A
+/// percentage stays one, of the rect it lands on; a percentage and a
+/// length that land on one side keep the length.
 #[test]
-fn ui_margins_fold_onto_the_opposite_root_side() {
+fn margins_fold_onto_the_target_and_the_root() {
     let px = |px| MarginLength::Px(px);
+    let percent = |percent| MarginLength::Percent(percent);
+    let zero = [Length::Px(0.0); 4];
+
+    // ui margins, same side, either sign.
+    assert_eq!(
+        fold_margins(
+            zero,
+            [
+                Length::Px(10.0),
+                Length::Px(-20.0),
+                Length::Px(30.0),
+                Length::Percent(40.0)
+            ],
+        ),
+        Margins {
+            root: IntersectionMargin::ZERO,
+            target: IntersectionMargin {
+                top: px(10.0),
+                right: px(-20.0),
+                bottom: px(30.0),
+                left: percent(40.0),
+            },
+        }
+    );
+    // Positive screen margins, opposite side, a percentage included.
     assert_eq!(
         fold_margins(
             [
                 Length::Px(1.0),
                 Length::Px(2.0),
-                Length::Px(3.0),
+                Length::Percent(3.0),
                 Length::Px(4.0)
             ],
-            [10.0, 20.0, 30.0, 40.0],
+            zero,
         ),
-        RootMargin {
-            top: px(1.0 + 30.0),
-            right: px(2.0 + 40.0),
-            bottom: px(3.0 + 10.0),
-            left: px(4.0 + 20.0),
+        Margins {
+            root: IntersectionMargin::ZERO,
+            target: IntersectionMargin {
+                top: percent(3.0),
+                right: px(4.0),
+                bottom: px(1.0),
+                left: px(2.0),
+            },
         }
     );
+    // Negative screen margins, same side on the root, a percentage
+    // included; zero contributes nothing.
     assert_eq!(
         fold_margins(
             [
-                Length::Percent(10.0),
-                Length::Percent(20.0),
+                Length::Px(-1.0),
+                Length::Percent(-2.0),
                 Length::Px(0.0),
-                Length::Px(0.0)
+                Length::Percent(0.0)
             ],
-            [0.0, 0.0, 0.0, 5.0],
+            zero,
         ),
-        RootMargin {
-            top: MarginLength::Percent(10.0),
-            right: px(5.0),
-            bottom: px(0.0),
-            left: px(0.0),
+        Margins {
+            root: margin(|margin| {
+                margin.top = px(-1.0);
+                margin.right = percent(-2.0);
+            }),
+            target: IntersectionMargin::ZERO,
         }
     );
+    // Both kinds on one side add: ui top plus screen bottom in px, ui left
+    // plus screen right in percent. On the right a ui length and the
+    // screen-left percentage meet, and the length is kept. Screen top, which
+    // is negative, leaves the target's bottom to the ui margin alone.
+    assert_eq!(
+        fold_margins(
+            [
+                Length::Px(-5.0),
+                Length::Percent(6.0),
+                Length::Px(7.0),
+                Length::Percent(8.0)
+            ],
+            [
+                Length::Px(10.0),
+                Length::Px(20.0),
+                Length::Px(30.0),
+                Length::Percent(40.0)
+            ],
+        ),
+        Margins {
+            root: margin(|margin| margin.top = px(-5.0)),
+            target: IntersectionMargin {
+                top: px(10.0 + 7.0),
+                right: px(20.0),
+                bottom: px(30.0),
+                left: percent(40.0 + 6.0),
+            },
+        }
+    );
+}
 
-    // Through an element above the viewport, whose bottom edge a 20px ui
-    // margin moves down into it: the root's top grows instead. A percentage
-    // ui margin, which natively is of the element's own size, is 0.
+/// Through an element above the viewport, whose bottom edge a 20px ui
+/// margin moves down into it, with the page's switch on: the target margin
+/// of the same side, and no root margin.
+#[test]
+fn a_ui_margin_grows_the_element_on_its_own_side() {
+    let px = |px| MarginLength::Px(px);
     let mut document = fresh_document();
     let mut exposure = Exposure::new(true);
     let node = boxed(&mut document, -30.0, 20.0);
-    set(
-        &mut exposure,
-        &mut document,
-        node,
-        "exposure-ui-margin-left",
-        "50%",
-    );
     set(&mut exposure, &mut document, node, "exposure-id", "a");
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
     set(
@@ -402,17 +542,56 @@ fn ui_margins_fold_onto_the_opposite_root_side() {
         "20px",
     );
     assert_eq!(
+        target_margin(&exposure, &document, node),
+        margin(|margin| margin.bottom = px(20.0))
+    );
+    assert_eq!(
         root_margin(&exposure, &document, node),
-        RootMargin {
-            top: px(20.0),
-            right: px(0.0),
-            bottom: px(0.0),
-            left: px(0.0),
-        }
+        IntersectionMargin::ZERO
     );
     assert_eq!(
         deliver(&exposure, &mut document),
         vec![record(node, true, "a")]
+    );
+}
+
+/// A ui percentage is of the element's own size: an element 20px tall and
+/// 10px below the viewport, whose top a `100%` ui margin moves up by 20px.
+#[test]
+fn a_ui_percentage_is_of_the_element_s_own_size() {
+    let mut document = fresh_document();
+    let mut exposure = Exposure::new(true);
+    let node = boxed(&mut document, VIEWPORT_HEIGHT + 10.0, 20.0);
+    set(&mut exposure, &mut document, node, "exposure-id", "a");
+    assert_eq!(deliver(&exposure, &mut document), Vec::new());
+
+    set(
+        &mut exposure,
+        &mut document,
+        node,
+        "exposure-ui-margin-top",
+        "100%",
+    );
+    assert_eq!(
+        target_margin(&exposure, &document, node).top,
+        MarginLength::Percent(100.0)
+    );
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![record(node, true, "a")]
+    );
+
+    // `25%`, 5px of 20, leaves it 5px short.
+    set(
+        &mut exposure,
+        &mut document,
+        node,
+        "exposure-ui-margin-top",
+        "25%",
+    );
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![record(node, false, "a")]
     );
 }
 

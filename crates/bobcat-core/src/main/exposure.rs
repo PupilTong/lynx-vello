@@ -4,12 +4,13 @@
 //!
 //! Exposure is a Lynx-only extension (standards bucket 2): no W3C feature has
 //! its attributes, its events or its records. It lives here rather than in
-//! `dom`, and `dom` is not changed for it: each registered element is one
-//! W3C intersection observer of `dom`'s (`dom::IntersectionEventHandler`),
-//! and this module turns what those observers deliver into exposure
-//! transitions.
+//! `dom`: each registered element is one intersection observer of `dom`'s
+//! (`dom::IntersectionEventHandler`), the W3C primitive with the target
+//! margin `dom` adds beside the root margin, and this module turns what
+//! those observers deliver into exposure transitions.
 //!
-//! # The rulings it is built on (user, 2026-10-11)
+//! # The rulings it is built on (user, 2026-10-11; the margin fold is the
+//! architect's decision of 2026-10-12)
 //!
 //! **Geometry is the W3C primitive's, unchanged.** The root is the viewport,
 //! a target is clipped through every clipping ancestor on its chain, and an
@@ -21,18 +22,28 @@
 //! primitive already clips through every ancestor, `enable-exposure-ui-clip`
 //! has nothing left to choose and is ignored.
 //!
-//! **Margins have their documented, native meaning.**
-//! `exposure-screen-margin-*` always applies: a positive margin grows the
-//! screen rect on that side and a negative one shrinks it.
-//! `exposure-ui-margin-*` grows the element's own rect, and applies only when
-//! the element's `enable-exposure-ui-margin` is true or, where the element
-//! names none, when the page's `enableExposureUIMargin` is
-//! (`LynxBaseUI.java:1583-1591`; `LynxUIExposure.m:266-334`,
-//! `UIExposure.java:262-296`). Both are folded into the observer's one
-//! `rootMargin`: growing the element's bottom edge by `b` is growing the
-//! root's top edge by `b`, so the ui margin of each side lands on the root
-//! margin of the opposite side. web-core folds the same sides, with signs
-//! that cancel a ui margin rather than add it, and has no page switch
+//! **Margins have their native meaning: a positive margin grows the
+//! element's own rect, a negative screen margin shrinks the screen.**
+//! Each observer has two margins, the root margin that dilates the viewport
+//! and the target margin that dilates the element's border box before any
+//! clip, and the element's margins are folded into them by one rule:
+//! - `exposure-ui-margin-*` lands on the target margin of its own side, either sign, and applies
+//!   only when the element's `enable-exposure-ui-margin` is true or, where the element names none,
+//!   when the page's `enableExposureUIMargin` is (`LynxBaseUI.java:1583-1591`). Native grows the
+//!   element's rect by it the same way (`LynxUIExposure.m:266-334` `frameOfUIInWindow:`,
+//!   `UIExposure.java:262-296` `getUIRect`).
+//! - A positive `exposure-screen-margin-*` lands on the target margin of the opposite side: growing
+//!   the screen down by `b` is growing the element up by `b`. That is native's logic without the
+//!   switch, in the same two functions.
+//! - A negative `exposure-screen-margin-*` lands on the root margin of its own side, shrinking the
+//!   screen there (`LynxUIExposure.m:336-366` `borderOfExposureScreen:`).
+//!
+//! The target margin is what lets a positive margin reach an element that a
+//! scrollport or a clipping page cuts off, as native's per-rect tests do:
+//! the primitive clips the grown rect, while a root margin dilates only the
+//! viewport, after every clip has cut the element. web-core folds every margin into
+//! one `rootMargin` of the nearest scroll container, with signs that cancel
+//! a ui margin rather than add it, and has no page switch
 //! (`ExposureServices.ts:141-151`).
 //!
 //! **`stopExposure`/`resumeExposure` are native's** (`LynxUIExposure.m:538-569`,
@@ -77,11 +88,25 @@
 //!   hides nothing from it — where native reports a zero-sized element hidden
 //!   (`LynxUIExposure.m:373-375`), needs strict overlap and walks `isVisible`.
 //! - **Lengths**: `<n>px`, `<n>rpx` (1rpx is the viewport width over 750, stylo's rule), and a bare
-//!   number as px (`UnitUtils.java:59-86`). `<n>%` on a screen margin is the intersection
-//!   observer's root percentage: top and bottom of the viewport's height, left and right of its
-//!   width. `%` on a ui margin is of the element's own size natively, which a root margin cannot
-//!   express, so it is 0. Anything else is 0, as web-core's `convertLengthToPx` answers for what it
-//!   cannot read. A negative length is kept.
+//!   number as px (`UnitUtils.java:59-86`). `<n>%` is of the rect the margin lands on, resolved by
+//!   the primitive at every update, top and bottom of its height, left and right of its width: a ui
+//!   margin's of the element's own size, native's `viewSize`; a positive screen margin's of the
+//!   element's size too, and a negative one's of the viewport. Native has no screen `%`. A
+//!   percentage and a length that land on one side together, a ui margin and the opposite positive
+//!   screen margin, are not one margin length; the length is kept and the percentage counts as 0.
+//!   Anything else is 0, as web-core's `convertLengthToPx` answers for what it cannot read. A
+//!   negative length is kept.
+//! - **Positive screen margins stay on the element with the ui switch on.** Native then puts every
+//!   screen margin on the screen rect, a positive one included (`borderOfExposureScreen:`), and the
+//!   element keeps only its ui margins. Here a positive screen margin grows the element in both
+//!   switch states. At `exposure-area` 0 the answer is the same, intersecting or not; above it the
+//!   ratio is over the grown element rather than the element. A root margin cannot reach past the
+//!   page's clip or a scroller's clip, which native's independent per-rect tests do reach, and the
+//!   user's 2026-10-11 ruling keeps the clip-through geometry.
+//! - **A margin that shrinks the element past its size**, a negative ui margin, leaves a zero-size
+//!   rect at the shifted origin, and the primitive's zero-area rule stands: intersecting, it has
+//!   ratio 1. Native says such an element is not in the window (`LynxUIExposure.m:315-317`,
+//!   `UIExposure.java:282-284`). The root margin's clamp is the same rule.
 //! - **`exposure-area`** is `parseFloat(value) / 100`, web-core's (`ExposureServices.ts:107-108`):
 //!   `"50%"` and `"50"` are both one half. It is clamped to `[0, 1]`, and what does not parse is 0.
 //! - **`exposure-scene`** is `""` when absent.
@@ -92,9 +117,10 @@
 //! realm has filed a `uiappear`/`uidisappear` handler on it, which the
 //! realm reports through the `exposureEvents` host member. Each
 //! registration owns one observer — root the viewport, one threshold, the
-//! element's `exposure-area`, and its folded margins — whose handler,
-//! [`ExposureHandler`], compares what the primitive reports with what was
-//! last recorded and queues a [`Transition`] where they differ. One
+//! element's `exposure-area`, and the root and target margins its margins
+//! fold into — whose handler, [`ExposureHandler`], compares what the
+//! primitive reports with what was last recorded and queues a
+//! [`Transition`] where they differ. One
 //! threshold at the area is enough: the primitive queues an entry exactly
 //! when the pair (threshold index, intersecting) changes, which is exactly
 //! when "intersecting with a ratio of at least the area" can change.
@@ -116,8 +142,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use dom::{
-    IntersectionEventHandler, IntersectionObserverEntry, IntersectionObserverId, MarginLength,
-    NodeId, RootMargin,
+    IntersectionEventHandler, IntersectionMargin, IntersectionObserverEntry,
+    IntersectionObserverId, IntersectionObserverInit, MarginLength, NodeId,
 };
 use rustc_hash::FxHashMap;
 
@@ -348,40 +374,94 @@ fn parse_length(value: Option<&str>, viewport_width: f32) -> Length {
     length.unwrap_or(Length::Px(0.0))
 }
 
-/// A ui margin in px. A percentage is of the element's own size natively,
-/// which a root margin has no way to name, so it is 0.
-const fn ui_px(length: Length) -> f32 {
-    match length {
-        Length::Px(px) => px,
-        Length::Percent(_) => 0.0,
+impl Length {
+    /// Whether the length moves no edge, in either unit.
+    fn is_zero(self) -> bool {
+        match self {
+            Self::Px(number) | Self::Percent(number) => number == 0.0,
+        }
+    }
+
+    /// Whether the length moves an edge out: a positive number in either
+    /// unit.
+    fn is_positive(self) -> bool {
+        match self {
+            Self::Px(number) | Self::Percent(number) => number > 0.0,
+        }
+    }
+
+    /// Two lengths that land on one side of one margin.
+    ///
+    /// Two lengths of one unit add. A percentage and a length together are
+    /// not one [`MarginLength`], and the element's size they would meet in
+    /// is only known at each update, so then the length is kept and the
+    /// percentage counts as 0.
+    fn plus(self, other: Self) -> Self {
+        if self.is_zero() {
+            return other;
+        }
+        if other.is_zero() {
+            return self;
+        }
+        match (self, other) {
+            (Self::Px(a), Self::Px(b)) => Self::Px(a + b),
+            (Self::Percent(a), Self::Percent(b)) => Self::Percent(a + b),
+            (Self::Px(px), Self::Percent(_)) | (Self::Percent(_), Self::Px(px)) => Self::Px(px),
+        }
+    }
+
+    const fn margin(self) -> MarginLength {
+        match self {
+            Self::Px(px) => MarginLength::Px(px),
+            Self::Percent(percent) => MarginLength::Percent(percent),
+        }
     }
 }
 
-/// One side of the root margin: the screen margin of that side plus the ui
-/// margin of the opposite side.
+/// The two margins an element's exposure margins fold into: the observer's
+/// root margin, which dilates the viewport, and its target margin, which
+/// dilates the element's own border box before any clip.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Margins {
+    root: IntersectionMargin,
+    target: IntersectionMargin,
+}
+
+/// Folds an element's margins, each array top, right, bottom, left, into
+/// the observer's two. `ui` is all zero when ui margins do not apply.
 ///
-/// A screen percentage stays a percentage of the viewport, resolved by the
-/// primitive at every update, as long as no ui margin is added to it; a sum
-/// of a percentage and a length is not something a root margin can carry, so
-/// then the percentage counts as 0 and the ui margin is kept.
-fn fold_side(screen: Length, ui: f32) -> MarginLength {
-    match screen {
-        Length::Px(px) => MarginLength::Px(px + ui),
-        Length::Percent(percent) if ui == 0.0 => MarginLength::Percent(percent),
-        Length::Percent(_) => MarginLength::Px(ui),
+/// - A ui margin lands on the target margin of its own side, either sign.
+/// - A positive screen margin lands on the target margin of the opposite side: growing the screen
+///   down by `b` is growing the element up by `b`, native's `frameOfUIInWindow:` without the
+///   switch.
+/// - A negative screen margin lands on the root margin of its own side, native's
+///   `borderOfExposureScreen:`.
+///
+/// A percentage is of the rect it lands on, which the primitive resolves at
+/// every update: on the target, of the element's own height (top, bottom)
+/// or width (left, right); on the root, of the viewport's.
+fn fold_margins(screen: [Length; 4], ui: [Length; 4]) -> Margins {
+    let mut root = [Length::Px(0.0); 4];
+    let mut target = ui;
+    for (side, length) in screen.into_iter().enumerate() {
+        if length.is_positive() {
+            // Top (0) and bottom (2) face each other, as right (1) and left
+            // (3) do.
+            let opposite = (side + 2) % 4;
+            target[opposite] = target[opposite].plus(length);
+        } else if !length.is_zero() {
+            root[side] = length;
+        }
     }
-}
-
-/// The root margin an element's margins make: each side's screen margin,
-/// plus — when ui margins apply — the opposite side's ui margin.
-fn fold_margins(screen: [Length; 4], ui: [f32; 4]) -> RootMargin {
-    let [top, right, bottom, left] = screen;
-    let [ui_top, ui_right, ui_bottom, ui_left] = ui;
-    RootMargin {
-        top: fold_side(top, ui_bottom),
-        right: fold_side(right, ui_left),
-        bottom: fold_side(bottom, ui_top),
-        left: fold_side(left, ui_right),
+    let margin = |[top, right, bottom, left]: [Length; 4]| IntersectionMargin {
+        top: top.margin(),
+        right: right.margin(),
+        bottom: bottom.margin(),
+        left: left.margin(),
+    };
+    Margins {
+        root: margin(root),
+        target: margin(target),
     }
 }
 
@@ -449,7 +529,7 @@ struct Attributes {
     exposure_id: Option<String>,
     scene: String,
     area: f64,
-    margin: RootMargin,
+    margins: Margins,
 }
 
 impl Attributes {
@@ -468,9 +548,9 @@ impl Attributes {
             .attribute(ENABLE_UI_MARGIN)
             .map_or(ui_margin_default, |value| value != "false");
         let ui = if ui_margins {
-            UI_MARGINS.map(|name| ui_px(length(name)))
+            UI_MARGINS.map(length)
         } else {
-            [0.0; 4]
+            [Length::Px(0.0); 4]
         };
         Self {
             exposure_id: element
@@ -482,7 +562,7 @@ impl Attributes {
                 .unwrap_or_default()
                 .to_owned(),
             area: parse_area(element.attribute(EXPOSURE_AREA)),
-            margin: fold_margins(SCREEN_MARGINS.map(length), ui),
+            margins: fold_margins(SCREEN_MARGINS.map(length), ui),
         }
     }
 }
@@ -561,7 +641,7 @@ impl Exposure {
             exposure_id,
             scene,
             area,
-            margin,
+            margins,
         } = attributes;
         let previous = {
             let mut shared = self.shared.borrow_mut();
@@ -598,9 +678,12 @@ impl Exposure {
                 node,
                 shared: Rc::clone(&self.shared),
             }),
-            None,
-            margin,
-            vec![area],
+            IntersectionObserverInit {
+                root: None,
+                root_margin: margins.root,
+                target_margin: margins.target,
+                thresholds: vec![area],
+            },
         );
         document.observe_intersection(observer, node);
         self.shared

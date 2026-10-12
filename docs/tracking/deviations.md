@@ -2114,7 +2114,12 @@ consequential choice about whether to follow the spec or the quirk.
   differ under a transform. `isIntersecting` is Chromium's clipped,
   edge-inclusive answer and `rootMargin` percentages resolve by
   height/width as every engine does; both recorded in
-  `docs/style-assumptions.md` §32. No script surface exists yet.
+  `docs/style-assumptions.md` §32. Every observer also carries a target
+  margin the spec does not have, which dilates each target's border box
+  before its transform and every clip, with the entry's rects and ratio
+  over the dilated rect. The reason is native exposure, which grows the
+  element's own rect and so reaches an element a clipping ancestor cut,
+  where a root margin cannot (§32). No script surface exists yet.
 - **Lynx exposure is the primitive's geometry, native's switches and
   web-core's payload** (user-directed 2026-10-11;
   `crates/bobcat-core/src/main/exposure.rs`). The references disagree on
@@ -2148,9 +2153,26 @@ consequential choice about whether to follow the spec or the quirk.
   every form into the element's event set (web-core marks from
   `__AddEvent` alone). One more from web-core: `lynx.stopExposure({})`,
   an object naming no `sendEvent`, sends the records (`sendEvent ?? true`;
-  native sends nothing for it). Not modelled: `enable-exposure-ui-clip` (every clipping ancestor
-  clips), `%` on a ui margin (native resolves it against the target's own
-  size, which a root margin cannot express: 0), native's iOS flap filter
+  native sends nothing for it). Margins (2026-10-12) fold into the
+  observer's root and target margins: a ui margin on the target's same
+  side, a positive screen margin on the target's opposite side and a
+  negative one on the root's same side, native's logic without the
+  switch; a `%` is of the rect it lands on, so a ui margin's is of the
+  element's own size as native's is (a positive screen margin's of the
+  element's, a negative one's of the viewport's; native has no screen `%`),
+  and a `%` and a length that land on one side keep the length. Two
+  deviations from native follow: with the ui switch on native puts every
+  screen margin on the screen rect, and here a positive one stays on the
+  element, which gives the same intersect-or-not answer at
+  `exposure-area` 0 and a ratio over the grown element above it, because a
+  root margin cannot reach past the page's clip or a scroller's clip,
+  which native's independent per-rect tests do reach, and the 2026-10-11
+  ruling keeps the clip-through geometry; and an element a negative ui
+  margin shrinks past its size keeps the primitive's zero-area rule
+  (intersecting, ratio 1) where native says it is not in the window.
+  web-core folds every margin into one `rootMargin` of the nearest scroll
+  container. Not modelled: `enable-exposure-ui-clip` (every clipping ancestor
+  clips), native's iOS flap filter
   and `enableCheckExposureOptimize`, the other exposure page configs
   (`enableDisexposureWhenLynxHidden`, `enableExposureWhenLayout`,
   `enableExposureWhenReload`, `enableDisexposureWhenBackground`,

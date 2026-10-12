@@ -4,9 +4,10 @@
 //!
 //! The rulings these pin: transforms are included (unlike
 //! `bounding_client_rect`), intersection is edge-inclusive through every
-//! clip on the target's containing-block chain (Chromium's), and `rootMargin`
+//! clip on the target's containing-block chain (Chromium's), `rootMargin`
 //! percentages take the root rect's height for top/bottom and its width for
-//! left/right.
+//! left/right, and a target margin dilates the target's border box in its
+//! own space before any clip cuts it.
 
 #![allow(clippy::float_cmp)]
 
@@ -14,7 +15,8 @@ mod common;
 
 use common::{Doc, device};
 use dom::{
-    FontBlob, IntersectionGeometry, MarginLength, NodeId, Point2D, Rect, RootMargin, Vector2D,
+    FontBlob, IntersectionGeometry, IntersectionMargin, MarginLength, NodeId, Point2D, Rect,
+    Vector2D,
 };
 
 const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
@@ -47,14 +49,22 @@ fn tuple(rect: Rect<f32>) -> Rect4 {
 
 /// Against the viewport, with no margin.
 fn geo(doc: &Doc, target: NodeId) -> IntersectionGeometry {
-    doc.dom
-        .intersection_geometry(target, None, &RootMargin::ZERO)
+    doc.dom.intersection_geometry(
+        target,
+        None,
+        &IntersectionMargin::ZERO,
+        &IntersectionMargin::ZERO,
+    )
 }
 
 /// Against an element root, with no margin.
 fn geo_in(doc: &Doc, target: NodeId, root: NodeId) -> IntersectionGeometry {
-    doc.dom
-        .intersection_geometry(target, Some(root), &RootMargin::ZERO)
+    doc.dom.intersection_geometry(
+        target,
+        Some(root),
+        &IntersectionMargin::ZERO,
+        &IntersectionMargin::ZERO,
+    )
 }
 
 fn client_rect(doc: &Doc, id: NodeId) -> Rect4 {
@@ -389,7 +399,7 @@ fn an_element_root_is_its_padding_box_when_it_clips() {
     doc.flush();
     let bounds = doc
         .dom
-        .root_geometry(Some(root), &RootMargin::ZERO)
+        .root_geometry(Some(root), &IntersectionMargin::ZERO)
         .expect("a rendered root")
         .bounds;
     assert_eq!(tuple(bounds), (110.0, 10.0, 100.0, 100.0));
@@ -402,7 +412,7 @@ fn an_element_root_is_its_padding_box_when_it_clips() {
     doc.flush();
     let bounds = doc
         .dom
-        .root_geometry(Some(root), &RootMargin::ZERO)
+        .root_geometry(Some(root), &IntersectionMargin::ZERO)
         .expect("a rendered root")
         .bounds;
     assert_eq!(tuple(bounds), (100.0, 0.0, 120.0, 120.0));
@@ -471,7 +481,7 @@ fn a_scrolled_element_root_sees_its_content_move() {
 #[test]
 fn margin_percentages_take_the_roots_height_and_width() {
     let doc = page("");
-    let margin = RootMargin {
+    let margin = IntersectionMargin {
         top: MarginLength::Px(10.0),
         right: MarginLength::Percent(20.0),
         bottom: MarginLength::Percent(40.0),
@@ -494,7 +504,7 @@ fn negative_margins_shrink_the_root() {
     let corner = doc.el(doc.root, "view.corner");
     let straddle = doc.el(corner, "view.straddle");
     doc.flush();
-    let margin = RootMargin {
+    let margin = IntersectionMargin {
         top: MarginLength::Px(-100.0),
         right: MarginLength::Px(-100.0),
         bottom: MarginLength::Px(-100.0),
@@ -503,7 +513,9 @@ fn negative_margins_shrink_the_root() {
     let root = doc.dom.root_geometry(None, &margin).expect("implicit");
     assert_eq!(tuple(root.bounds), (100.0, 100.0, 600.0, 400.0));
 
-    let geometry = doc.dom.intersection_geometry_in(corner, &root);
+    let geometry = doc
+        .dom
+        .intersection_geometry_in(corner, &root, &IntersectionMargin::ZERO);
     assert!(
         geometry.is_intersecting,
         "touching the shrunk root's corner"
@@ -511,7 +523,9 @@ fn negative_margins_shrink_the_root() {
     assert_eq!(tuple(geometry.intersection_rect), (100.0, 100.0, 0.0, 0.0));
     assert_eq!(geometry.intersection_ratio(), 0.0);
 
-    let geometry = doc.dom.intersection_geometry_in(straddle, &root);
+    let geometry = doc
+        .dom
+        .intersection_geometry_in(straddle, &root, &IntersectionMargin::ZERO);
     assert_eq!(
         tuple(geometry.intersection_rect),
         (100.0, 100.0, 50.0, 50.0)
@@ -520,7 +534,7 @@ fn negative_margins_shrink_the_root() {
 
     // A margin that eats the rect leaves a zero-size root, not a negative
     // one.
-    let eaten = RootMargin {
+    let eaten = IntersectionMargin {
         top: MarginLength::Percent(-60.0),
         right: MarginLength::Px(0.0),
         bottom: MarginLength::Percent(-60.0),
@@ -539,7 +553,7 @@ fn element_root_margins_resolve_against_the_element() {
     let root = doc.el(doc.root, "view.root");
     let target = doc.el(root, "view.target");
     doc.flush();
-    let margin = RootMargin {
+    let margin = IntersectionMargin {
         top: MarginLength::Percent(10.0),
         right: MarginLength::Percent(50.0),
         bottom: MarginLength::Percent(10.0),
@@ -551,7 +565,9 @@ fn element_root_margins_resolve_against_the_element() {
         .expect("rendered");
     assert_eq!(resolved.root(), Some(root));
     assert_eq!(tuple(resolved.bounds), (0.0, 90.0, 400.0, 120.0));
-    let geometry = doc.dom.intersection_geometry_in(target, &resolved);
+    let geometry = doc
+        .dom
+        .intersection_geometry_in(target, &resolved, &IntersectionMargin::ZERO);
     assert_eq!(tuple(geometry.target_rect), (350.0, 100.0, 40.0, 40.0));
     assert!(
         geometry.is_intersecting,
@@ -582,6 +598,216 @@ fn a_zero_area_sentinel_on_the_edge_intersects() {
     doc.flush();
     let geometry = geo(&doc, sentinel);
     assert_eq!(tuple(geometry.target_rect), (0.0, 601.0, 100.0, 0.0));
+    assert!(!geometry.is_intersecting);
+    assert_eq!(geometry.intersection_ratio(), 0.0);
+}
+
+// --- Target margins ---------------------------------------------------------
+
+/// `px` on each side, in `top, right, bottom, left` order.
+fn px(top: f32, right: f32, bottom: f32, left: f32) -> IntersectionMargin {
+    IntersectionMargin {
+        top: MarginLength::Px(top),
+        right: MarginLength::Px(right),
+        bottom: MarginLength::Px(bottom),
+        left: MarginLength::Px(left),
+    }
+}
+
+/// Against the viewport, with no root margin and `target_margin` on the
+/// target.
+fn geo_dilated(
+    doc: &Doc,
+    target: NodeId,
+    target_margin: &IntersectionMargin,
+) -> IntersectionGeometry {
+    doc.dom
+        .intersection_geometry(target, None, &IntersectionMargin::ZERO, target_margin)
+}
+
+/// A target 10px below the viewport is reached by a 20px margin on the side
+/// that faces it, and not by one on the far side. The entry's rects and its
+/// ratio are over the dilated rect: 10px of its 50px height show.
+#[test]
+fn a_target_margin_reaches_a_target_outside_the_viewport() {
+    let mut doc = page(
+        "page { flex-direction: column; }
+         .spacer { width: 10px; height: 610px; }
+         .target { width: 100px; height: 30px; }",
+    );
+    doc.el(doc.root, "view.spacer");
+    let target = doc.el(doc.root, "view.target");
+    doc.flush();
+    assert!(
+        !geo(&doc, target).is_intersecting,
+        "10px below the viewport"
+    );
+
+    let geometry = geo_dilated(&doc, target, &px(20.0, 0.0, 0.0, 0.0));
+    assert!(geometry.rendered);
+    assert!(geometry.is_intersecting);
+    assert_eq!(tuple(geometry.target_rect), (0.0, 590.0, 100.0, 50.0));
+    assert_eq!(tuple(geometry.root_bounds), (0.0, 0.0, 800.0, 600.0));
+    assert_eq!(tuple(geometry.intersection_rect), (0.0, 590.0, 100.0, 10.0));
+    assert_eq!(geometry.intersection_ratio(), 0.2);
+
+    let geometry = geo_dilated(&doc, target, &px(0.0, 0.0, 20.0, 0.0));
+    assert!(!geometry.is_intersecting, "grown away from the viewport");
+    assert_eq!(tuple(geometry.target_rect), (0.0, 610.0, 100.0, 50.0));
+    assert_eq!(geometry.intersection_ratio(), 0.0);
+}
+
+/// A row scrolled 10px out of the top of an `overflow: scroll` scrollport is
+/// reached by a 20px margin on its bottom: the scroller's clip cuts the
+/// dilated rect, so 10px of it is left.
+#[test]
+fn a_target_margin_reaches_back_into_a_scrollport() {
+    let mut doc = page(
+        ".scroller { flex-direction: column; overflow: scroll; width: 100px; height: 100px; }
+         .row { width: 100px; height: 30px; }
+         .tail { width: 100px; height: 300px; }",
+    );
+    let scroller = doc.el(doc.root, "view.scroller");
+    let row = doc.el(scroller, "view.row");
+    doc.el(scroller, "view.tail");
+    doc.flush();
+    doc.dom.scroll_to(scroller, Vector2D::new(0.0, 40.0));
+    let geometry = geo(&doc, row);
+    assert_eq!(tuple(geometry.target_rect), (0.0, -40.0, 100.0, 30.0));
+    assert!(!geometry.is_intersecting, "10px above the scrollport");
+
+    let geometry = geo_dilated(&doc, row, &px(0.0, 0.0, 20.0, 0.0));
+    assert!(geometry.is_intersecting);
+    assert_eq!(tuple(geometry.target_rect), (0.0, -40.0, 100.0, 50.0));
+    assert_eq!(tuple(geometry.intersection_rect), (0.0, 0.0, 100.0, 10.0));
+    assert_eq!(geometry.intersection_ratio(), 0.2);
+}
+
+/// The same through an `overflow: clip` ancestor, which is no scroll
+/// container: a target 10px below it is reached by a 20px margin on its top.
+#[test]
+fn a_target_margin_reaches_past_an_overflow_clip_ancestors_edge() {
+    let mut doc = page(
+        ".clipper { overflow: clip; width: 100px; height: 100px; }
+         .target { position: relative; top: 110px; width: 100px; height: 30px; }",
+    );
+    let clipper = doc.el(doc.root, "view.clipper");
+    let target = doc.el(clipper, "view.target");
+    doc.flush();
+    assert!(!geo(&doc, target).is_intersecting, "10px below the clip");
+
+    let geometry = geo_dilated(&doc, target, &px(20.0, 0.0, 0.0, 0.0));
+    assert!(geometry.is_intersecting);
+    assert_eq!(tuple(geometry.target_rect), (0.0, 90.0, 100.0, 50.0));
+    assert_eq!(tuple(geometry.intersection_rect), (0.0, 90.0, 100.0, 10.0));
+    assert_eq!(geometry.intersection_ratio(), 0.2);
+}
+
+/// What motivates the target margin: a root margin moves the root's edges
+/// only after every clip below the root has cut, so no root margin reaches
+/// the targets the two cases above reach.
+#[test]
+fn a_root_margin_alone_does_not_reach_past_a_clip() {
+    let mut doc = page(
+        ".scroller { flex-direction: column; overflow: scroll; width: 100px; height: 100px; }
+         .row { width: 100px; height: 30px; }
+         .tail { width: 100px; height: 300px; }
+         .clipper { overflow: clip; width: 100px; height: 100px; }
+         .target { position: relative; top: 110px; width: 100px; height: 30px; }",
+    );
+    let scroller = doc.el(doc.root, "view.scroller");
+    let row = doc.el(scroller, "view.row");
+    doc.el(scroller, "view.tail");
+    let clipper = doc.el(doc.root, "view.clipper");
+    let target = doc.el(clipper, "view.target");
+    doc.flush();
+    doc.dom.scroll_to(scroller, Vector2D::new(0.0, 40.0));
+    let wide = px(1000.0, 1000.0, 1000.0, 1000.0);
+    for id in [row, target] {
+        let geometry = doc
+            .dom
+            .intersection_geometry(id, None, &wide, &IntersectionMargin::ZERO);
+        assert_eq!(
+            tuple(geometry.root_bounds),
+            (-1000.0, -1000.0, 2800.0, 2600.0)
+        );
+        assert!(!geometry.is_intersecting, "{id}: cut before the root");
+        assert_eq!(geometry.intersection_ratio(), 0.0);
+    }
+}
+
+/// The margin is in the target's own border-box space, so its transform
+/// moves it: a 20px right margin on a target rotated a quarter turn grows
+/// its bounding box downward, and under `scale(2)` it grows by 40px. The
+/// rotation is about the undilated box's centre, `transform-origin` being
+/// the border box's.
+#[test]
+fn a_transformed_target_dilates_in_its_own_space() {
+    let mut doc = page(
+        ".target { margin-left: 100px; margin-top: 100px; width: 100px; height: 40px;
+                   transform: rotate(90deg); }",
+    );
+    let target = doc.el(doc.root, "view.target");
+    doc.flush();
+    let right = px(0.0, 20.0, 0.0, 0.0);
+    assert_close(geo(&doc, target).target_rect, (130.0, 70.0, 40.0, 100.0));
+    let geometry = geo_dilated(&doc, target, &right);
+    assert_close(geometry.target_rect, (130.0, 70.0, 40.0, 120.0));
+    assert!(geometry.is_intersecting);
+    assert_eq!(geometry.intersection_ratio(), 1.0);
+
+    doc.set_inline(target, "transform: scale(2); transform-origin: 0 0");
+    doc.flush();
+    assert_close(
+        geo_dilated(&doc, target, &right).target_rect,
+        (100.0, 100.0, 240.0, 80.0),
+    );
+}
+
+/// Percentages resolve against the undilated border box, per axis: top and
+/// bottom by its 50px height, left and right by its 200px width.
+#[test]
+fn target_margin_percentages_take_the_targets_height_and_width() {
+    let mut doc =
+        page(".target { margin-left: 100px; margin-top: 100px; width: 200px; height: 50px; }");
+    let target = doc.el(doc.root, "view.target");
+    doc.flush();
+    let margin = IntersectionMargin {
+        top: MarginLength::Percent(10.0),
+        right: MarginLength::Percent(50.0),
+        bottom: MarginLength::Percent(100.0),
+        left: MarginLength::Percent(10.0),
+    };
+    let geometry = geo_dilated(&doc, target, &margin);
+    assert_eq!(tuple(geometry.target_rect), (80.0, 95.0, 320.0, 105.0));
+    assert_eq!(geometry.intersection_rect, geometry.target_rect);
+    assert_eq!(geometry.intersection_ratio(), 1.0);
+}
+
+/// A negative margin that eats the box clamps its size at 0 at the moved
+/// origin, as an eaten root does, and the zero-area rule then answers:
+/// intersecting with ratio 1 inside the viewport, ratio 0 outside it.
+#[test]
+fn an_eaten_target_clamps_to_zero_at_the_moved_origin() {
+    let mut doc =
+        page(".target { margin-left: 100px; margin-top: 100px; width: 100px; height: 40px; }");
+    let target = doc.el(doc.root, "view.target");
+    doc.flush();
+    let eaten = IntersectionMargin {
+        top: MarginLength::Percent(-60.0),
+        right: MarginLength::Px(-70.0),
+        bottom: MarginLength::Percent(-60.0),
+        left: MarginLength::Px(-70.0),
+    };
+    let geometry = geo_dilated(&doc, target, &eaten);
+    assert_eq!(tuple(geometry.target_rect), (170.0, 124.0, 0.0, 0.0));
+    assert!(geometry.is_intersecting);
+    assert_eq!(geometry.intersection_ratio(), 1.0);
+
+    doc.set_inline(target, "transform: translateY(1000px)");
+    doc.flush();
+    let geometry = geo_dilated(&doc, target, &eaten);
+    assert_eq!(tuple(geometry.target_rect), (170.0, 1124.0, 0.0, 0.0));
     assert!(!geometry.is_intersecting);
     assert_eq!(geometry.intersection_ratio(), 0.0);
 }
@@ -848,6 +1074,9 @@ fn an_unrendered_root_resolves_to_nothing() {
     let gone = doc.el(doc.root, "view.gone");
     let cell = doc.el(doc.root, "view.cell");
     doc.flush();
-    assert_eq!(doc.dom.root_geometry(Some(gone), &RootMargin::ZERO), None);
+    assert_eq!(
+        doc.dom.root_geometry(Some(gone), &IntersectionMargin::ZERO),
+        None
+    );
     assert_eq!(geo_in(&doc, cell, gone), IntersectionGeometry::UNRENDERED);
 }

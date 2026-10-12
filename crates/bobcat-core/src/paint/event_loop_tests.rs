@@ -1980,9 +1980,11 @@ fn a_windowed_scroll_delivers_intersections_to_an_engine_component() {
             document.set_id_attribute(second, Some("second"));
             let observer = document.create_intersection_observer(
                 Box::new(dom::ElementHandler(element)),
-                Some(scroller),
-                dom::RootMargin::ZERO,
-                vec![0.0, 0.1, 1.0],
+                dom::IntersectionObserverInit {
+                    root: Some(scroller),
+                    thresholds: vec![0.0, 0.1, 1.0],
+                    ..dom::IntersectionObserverInit::default()
+                },
             );
             document.observe_intersection(observer, first);
             document.observe_intersection(observer, second);
