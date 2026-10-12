@@ -186,7 +186,6 @@ impl MacApplication {
             .program
             .take()
             .expect("the program is consumed by the first window only");
-        program.warn_about_compatibility_limits();
 
         // Two constructions: the view, which is the page and its resources,
         // and the painter, which is this window's surface. The surface is

@@ -14,10 +14,10 @@
 //!
 //! * the wire, through `bobcat_source::web::decode`, read by [`lowerable_rules`] through exactly
 //!   the accessors `crates/bobcat-source/src/lower_style.rs` reads it through —
-//!   `Selector::write_css_string` for a prelude (`lower_style.rs:140-152`),
-//!   `ParsedDeclaration::value_and_importance` for a declaration (`lower_style.rs:154-172`),
+//!   `Selector::write_css_string` for a prelude (`lower_style.rs:237-269`),
+//!   `ParsedDeclaration::value_and_importance` for a declaration (`lower_style.rs:302-320`),
 //!   `ParsedDeclaration::write_value_text` for an `@font-face` descriptor
-//!   (`lower_style.rs:174-190`). No test in this file re-serializes CSS itself: every asserted
+//!   (`lower_style.rs:322-338`). No test in this file re-serializes CSS itself: every asserted
 //!   string is the return value of one production call on one decoded item.
 //! * the engine's stylesheet hand-off, through [`registered_style_sheet`] —
 //!   `PageSource::from_bytes` runs the whole lowering (`page.rs:262-270`) and
@@ -72,8 +72,12 @@
 //! `:not([l-e-name])` suffix web-core appends to every rule, its
 //! double-bracketed re-emission of an attribute selector
 //! (`style_info_decoder.rs:96`, `:205-215`), and the separate `fontFace`
-//! output channel. This DOM has no shared browser document to isolate one card
-//! inside, and its lowering keeps every rule kind in one sheet.
+//! output channel. The entry-name guard separates a lazy bundle's own
+//! `StyleInfo` from its host card's, and no lazy bundle's `StyleInfo` is
+//! mounted here; the lowering keeps every rule kind in one sheet. The
+//! `:where([l-css-id="N"])` guard web-core adds to a scoped fragment's rules
+//! *is* synthesized, by `lower_style`, and is asserted there: the lowered
+//! sheet is not readable from this crate (see above).
 //!
 //! # Halves that live in other crates
 //!
@@ -394,7 +398,7 @@ fn fragment(style_info: &StyleInfo, css_id: i32) -> &[Rule] {
 }
 
 /// A rule's declaration block, in source order, read the way
-/// `lower_style::declarations` reads it (`lower_style.rs:154-172`).
+/// `lower_style::declarations` reads it (`lower_style.rs:302-320`).
 ///
 /// `value_and_importance` rather than `value_text` on purpose: the wire leaves
 /// `is_important` false and appends the marker to the value tokens, and
@@ -412,7 +416,7 @@ fn declarations(rule: &Rule) -> Vec<Declaration> {
 }
 
 /// A font-face rule's descriptors, read the way `lower_style::descriptor_text`
-/// reads them (`lower_style.rs:174-190`).
+/// reads them (`lower_style.rs:322-338`).
 ///
 /// A descriptor keeps a trailing `!important` in its text — that is what makes
 /// stylo reject the descriptor, as a browser does — so this is
@@ -432,7 +436,7 @@ fn descriptors(rule: &Rule) -> Vec<(String, String)> {
 
 /// A prelude's selectors, each through `Selector::write_css_string` — the
 /// production call `lower_style::selector_text` makes once per selector
-/// (`lower_style.rs:140-152`).
+/// (`lower_style.rs:237-269`).
 fn selectors(prelude: &RulePrelude) -> Vec<String> {
     prelude
         .selectors
@@ -536,8 +540,9 @@ fn registered_style_sheet(style_info: &StyleInfo) -> Option<String> {
 /// registration the view is handed.
 ///
 /// The fixture's `cssId` is 1, not 0, which upstream is incidental and here is
-/// not: a non-zero fragment id is component-scoped CSS, which this engine
-/// mounts globally and reports as a compatibility warning.
+/// not: a non-zero fragment id is component-scoped CSS. A `@font-face` rule
+/// stays global in such a fragment, as web-core emits it verbatim, so it
+/// still reaches the engine.
 #[test]
 fn raw_style_info_carries_a_font_face_rule_kind() {
     let info = style_info_at(
@@ -552,13 +557,6 @@ fn raw_style_info_carries_a_font_face_rule_kind() {
     assert!(
         registered_style_sheet(&info).is_some(),
         "the rule reaches the engine as a registered sheet"
-    );
-
-    let warnings = page_source(&info).compatibility_warnings().to_vec();
-    assert_eq!(
-        warnings.len(),
-        1,
-        "fragment 1 is component-scoped and is mounted globally: {warnings:?}"
     );
 }
 
@@ -1002,10 +1000,9 @@ fn text_and_font_corpus() -> Vec<(&'static str, StyleInfo, Vec<Lowerable>)> {
 /// faithful port is the bundle path, with both group kinds side by side in one
 /// fragment. Taking the raw Lynx-XML path instead would test nothing: there a
 /// `<style>` body is stored unparsed as `PageStyleSheet::Text`
-/// (`crates/bobcat-source/src/page.rs:299`) and never becomes rules, and
-/// `from_lynx_xml` hard-codes an empty warning list (`page.rs:307`), so
-/// upstream's `expect(discarded).toStrictEqual([])` has nothing to bite on.
-/// On the bundle path that field is live (`page.rs:271-278`).
+/// (`crates/bobcat-source/src/page.rs`, `from_lynx_xml`) and never becomes
+/// rules. Upstream's `expect(discarded).toStrictEqual([])` has no counterpart
+/// on either path: `PageSource` reports no discarded rules.
 ///
 /// The web's two decoded channels — `css` and `fontFace` — collapse into one
 /// sheet here, so the "separate channel" half of the upstream assertion is
@@ -1046,12 +1043,6 @@ fn a_card_carries_keyframes_and_font_face() {
         ]
     );
     assert!(registered_style_sheet(&info).is_some());
-
-    assert!(
-        page_source(&info).compatibility_warnings().is_empty(),
-        "nothing is reported discarded: {:?}",
-        page_source(&info).compatibility_warnings()
-    );
 }
 
 /// A scroll-animations-1 range keyframe selector (`entry 0%`) as web-core's

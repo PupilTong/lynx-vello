@@ -38,7 +38,6 @@ impl EventRequester for ChannelWakeup {
 }
 
 pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> {
-    program.warn_about_compatibility_limits();
     let (sender, receiver) = flume::unbounded();
     let event_requester = std::sync::Arc::new(ChannelWakeup(sender.clone()));
     // The resource system completes image loads on its own runtime — a driver

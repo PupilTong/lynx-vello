@@ -85,45 +85,7 @@ impl Selector {
     /// temporary for each selector of a list.
     pub fn write_css_string(&self, buf: &mut String) {
         for component in &self.components {
-            match component.kind {
-                SimpleSelectorKind::Type | SimpleSelectorKind::UnknownText => {
-                    buf.push_str(&component.value);
-                }
-                SimpleSelectorKind::Class => {
-                    buf.push('.');
-                    buf.push_str(&component.value);
-                }
-                SimpleSelectorKind::Id => {
-                    buf.push('#');
-                    buf.push_str(&component.value);
-                }
-                SimpleSelectorKind::Attribute => {
-                    // The encoder stores the generated attribute-selector text
-                    // with its brackets already included (`[type=submit]`).
-                    buf.push_str(&component.value);
-                }
-                SimpleSelectorKind::PseudoClass => {
-                    buf.push(':');
-                    buf.push_str(&component.value);
-                }
-                SimpleSelectorKind::PseudoElement => {
-                    buf.push_str("::");
-                    buf.push_str(&component.value);
-                }
-                SimpleSelectorKind::Universal => {
-                    buf.push('*');
-                }
-                SimpleSelectorKind::Combinator => {
-                    // The descendant combinator is encoded as a single space.
-                    if component.value.trim().is_empty() {
-                        buf.push(' ');
-                    } else {
-                        buf.push(' ');
-                        buf.push_str(&component.value);
-                        buf.push(' ');
-                    }
-                }
-            }
+            component.write_css_string(buf);
         }
     }
 }
@@ -134,6 +96,54 @@ impl Selector {
 pub struct SimpleSelector {
     pub kind: SimpleSelectorKind,
     pub value: String,
+}
+
+impl SimpleSelector {
+    /// Appends this one component's CSS text to `buf`. A selector's text is
+    /// its components' texts in order, with nothing between them, so a
+    /// component can be spliced into a selector by writing it between two
+    /// runs of the selector's own components.
+    pub fn write_css_string(&self, buf: &mut String) {
+        match self.kind {
+            SimpleSelectorKind::Type | SimpleSelectorKind::UnknownText => {
+                buf.push_str(&self.value);
+            }
+            SimpleSelectorKind::Class => {
+                buf.push('.');
+                buf.push_str(&self.value);
+            }
+            SimpleSelectorKind::Id => {
+                buf.push('#');
+                buf.push_str(&self.value);
+            }
+            SimpleSelectorKind::Attribute => {
+                // The encoder stores the generated attribute-selector text
+                // with its brackets already included (`[type=submit]`).
+                buf.push_str(&self.value);
+            }
+            SimpleSelectorKind::PseudoClass => {
+                buf.push(':');
+                buf.push_str(&self.value);
+            }
+            SimpleSelectorKind::PseudoElement => {
+                buf.push_str("::");
+                buf.push_str(&self.value);
+            }
+            SimpleSelectorKind::Universal => {
+                buf.push('*');
+            }
+            SimpleSelectorKind::Combinator => {
+                // The descendant combinator is encoded as a single space.
+                if self.value.trim().is_empty() {
+                    buf.push(' ');
+                } else {
+                    buf.push(' ');
+                    buf.push_str(&self.value);
+                    buf.push(' ');
+                }
+            }
+        }
+    }
 }
 
 #[expect(missing_docs, reason = "self-describing selector kinds")]

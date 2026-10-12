@@ -53,7 +53,6 @@
 //! no card body: it is this crate's own module, and imports what it uses.
 
 use std::collections::BTreeMap;
-use std::fmt;
 use std::sync::Arc;
 
 use bobcat_core::{PageConfig, PreparsedStyleSheet, ScreenMetrics, ViewSources};
@@ -85,7 +84,6 @@ pub struct PageSource {
     named_style_sheets: Vec<(Url, Arc<PreparsedStyleSheet>)>,
     style_sheet: Option<(Url, PageStyleSheet)>,
     config: PageConfig,
-    compatibility_warnings: Vec<CompatibilityWarning>,
 }
 
 /// The view-facing result of registering one browser-loaded Lynx XML response.
@@ -123,36 +121,6 @@ impl LynxXmlResponseRegistration {
     #[must_use]
     pub fn compatibility_warnings(&self) -> &[String] {
         &self.compatibility_warnings
-    }
-}
-
-/// A page feature retained by the source loader but not fully supported by
-/// the current runtime.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum CompatibilityWarning {
-    /// Rules from these component CSS fragments currently mount globally.
-    ComponentScopedCss { css_ids: Vec<i32> },
-}
-
-impl fmt::Display for CompatibilityWarning {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ComponentScopedCss { css_ids } => {
-                let mut ids = css_ids.iter();
-                write!(formatter, "component-scoped CSS fragments (css ids ")?;
-                if let Some(id) = ids.next() {
-                    write!(formatter, "{id}")?;
-                    for id in ids {
-                        write!(formatter, ", {id}")?;
-                    }
-                }
-                write!(
-                    formatter,
-                    "); per-component scoping is not implemented, so their rules apply globally"
-                )
-            }
-        }
     }
 }
 
@@ -342,32 +310,12 @@ impl PageSource {
                     .expect("the built-in stylesheet URL must be valid");
                 (url, PageStyleSheet::Preparsed(sheet))
             });
-        let scoped_css_ids = template
-            .style_info
-            .as_ref()
-            .map_or_else(Vec::new, |style_info| {
-                let mut ids: Vec<i32> = style_info
-                    .css_id_to_style_sheet
-                    .keys()
-                    .copied()
-                    .filter(|id| *id != 0)
-                    .collect();
-                ids.sort_unstable();
-                ids
-            });
         let config = PageConfig {
             default_display_linear: template.config_flag("defaultDisplayLinear"),
             default_overflow_visible: template.config_flag("defaultOverflowVisible"),
             enable_css_selector: template.config_flag("enableCSSSelector"),
             enable_js_data_processor: template.config_flag("enableJSDataProcessor"),
             enable_exposure_ui_margin: template.config_flag("enableExposureUIMargin"),
-        };
-        let compatibility_warnings = if scoped_css_ids.is_empty() {
-            Vec::new()
-        } else {
-            vec![CompatibilityWarning::ComponentScopedCss {
-                css_ids: scoped_css_ids,
-            }]
         };
         let background_sources = bundle_modules(input, &template, target);
         let background_script = if template.manifest.is_empty() {
@@ -391,7 +339,6 @@ impl PageSource {
             named_style_sheets,
             style_sheet,
             config,
-            compatibility_warnings,
         })
     }
 
@@ -414,7 +361,6 @@ impl PageSource {
             named_style_sheets: Vec::new(),
             style_sheet,
             config: raw_lynx_xml_config(),
-            compatibility_warnings: Vec::new(),
         })
     }
 
@@ -506,13 +452,6 @@ impl PageSource {
                 screen,
             )
         }
-    }
-
-    /// Input features retained only approximately or not executed by the
-    /// current runtime.
-    #[must_use]
-    pub fn compatibility_warnings(&self) -> &[CompatibilityWarning] {
-        &self.compatibility_warnings
     }
 }
 
@@ -1032,7 +971,6 @@ mod tests {
         assert_eq!(sources.entry, "bobcat-memory://bundle/lepus-root.js");
         assert!(sources.background_entry.is_none());
         assert!(sources.style_sheets.is_empty());
-        assert!(page.compatibility_warnings().is_empty());
 
         let resources = resources();
         page.register_with(&resources);
@@ -1492,7 +1430,6 @@ mod tests {
             page.style_sheet.as_ref().map(|(url, _)| url.as_str()),
             Some("bobcat-memory://lynx-xml/style.css")
         );
-        assert!(page.compatibility_warnings().is_empty());
         assert!(matches!(
             page.style_sheet.as_ref(),
             Some((_, PageStyleSheet::Text(source))) if source.is_empty()
@@ -1577,7 +1514,6 @@ mod tests {
         assert!(page.style_sheet.is_none());
         assert!(page.background_script.is_none());
         assert!(page.view_sources(SCREEN).background_entry.is_none());
-        assert!(page.compatibility_warnings().is_empty());
         assert_eq!(
             page.view_sources(SCREEN).entry,
             "bobcat-memory://lynx-xml/main-thread.js"
@@ -1680,16 +1616,5 @@ mod tests {
                 ..
             }
         ));
-    }
-
-    #[test]
-    fn compatibility_warning_text_keeps_cli_wording_components() {
-        let warning = CompatibilityWarning::ComponentScopedCss {
-            css_ids: vec![4, 9],
-        };
-        assert_eq!(
-            warning.to_string(),
-            "component-scoped CSS fragments (css ids 4, 9); per-component scoping is not implemented, so their rules apply globally"
-        );
     }
 }

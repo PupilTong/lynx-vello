@@ -80,14 +80,6 @@ impl Program {
         }
         resources
     }
-
-    /// Preserves the CLI's warning wording while the source crate exposes
-    /// structured warnings that other embedders can handle differently.
-    pub(crate) fn warn_about_compatibility_limits(&self) {
-        for warning in self.source.compatibility_warnings() {
-            eprintln!("bobcat: warning: {} carries {warning}", self.input);
-        }
-    }
 }
 
 #[cfg(test)]

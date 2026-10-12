@@ -68,7 +68,7 @@ import { splitRecord } from "bobcat:record";
 // | `__SetInlineStyles(element, value)` | native `setAttribute` / `removeAttribute` / `setInlineStyles` exports |
 // | `__AddInlineStyle(element, property, value)` | native `setInlineStyleProperty`; CSS names, not numeric native IDs |
 // | `__SetDataset` / `__GetDataset` / `__AddDataset` | typed per-element values in this realm |
-// | `__SetCSSId(elements, cssId, entryName?)` | nothing — accepted and ignored |
+// | `__SetCSSId(elements, cssId, entryName?)` | native `setAttribute` / `removeAttribute` exports (`l-css-id`) |
 // | `__SetAttribute(element, name, value)` | native `setAttribute` / `removeAttribute` exports; `update-list-info` instead drives the list callbacks over `childElementIds` / `insertBefore` / `removeElement` |
 // | `__UpdateListCallbacks(list, ...)` | this runtime's own store |
 // | `__AddEvent(element, type, name, handler)` | this runtime's own store |
@@ -96,16 +96,11 @@ import { splitRecord } from "bobcat:record";
 // BTS SelectorQuery uses the internal `__BobcatQueryNodes` export below;
 // it resolves through the document's existing selector engine.
 //
-// `__SetCSSId` is the one member installed as a sink. It names the author-CSS
-// scope its elements cascade in, and no layer lowers a decoded `StyleInfo`
-// into scoped author rules yet — every fragment mounts globally, as web-core
-// itself emits for an `enableRemoveCSSScope = true` bundle. Recording the id
-// would mean choosing an encoding (web-core writes `l-css-id`/`l-e-name`
-// attributes; native Lynx keeps css_id on the element) with no consumer to
-// validate it against. A compiled card calls it while installing its snapshot
-// runtime, so it accepts the call and drops the id rather than failing at a
-// missing global; the scoping behavior lands with the ingestion side that
-// reads it.
+// `__SetCSSId` writes web-core's `l-css-id` attribute
+// (`packages/web-platform/web-core/src/main_thread/client/element_apis/style_apis.rs:16-52`).
+// bobcat-source lowers each scoped `StyleInfo` fragment's rules with a
+// `:where([l-css-id="N"])` guard, so the attribute is what selects which
+// fragment's rules an element matches; the cascade itself is stylo's.
 //
 // # Events
 //
@@ -279,7 +274,14 @@ import { splitRecord } from "bobcat:record";
 //   realm-local symbol — web-core's `uniqueIdSymbol` shape; every PAPI
 //   return of an element yields the same object it was created with.
 //   `parentComponentUniqueID` and `__CreatePage`'s arguments are accepted
-//   for PAPI shape and unused.
+//   for PAPI shape and unused. In web-core an element inherits the css id
+//   of the component it is created under (`create_element_common`,
+//   `web-core/src/main_thread/client/main_thread_context.rs:77-120`), but
+//   ReactLynx creates the page as `__CreatePage('0', 0)`
+//   (`react/runtime/src/snapshot/lynx/calledByNative.ts:101`) and every
+//   element under it, so what it would inherit is 0; its scoped elements
+//   are marked by `__SetCSSId` instead. `__CreateComponent`, the creator
+//   that names a css id of its own, is not implemented.
 // - **That number is Lynx's `unique_id`, and nothing here mints it.** The
 //   DOM issues it when the element is created and this runtime only carries
 //   it: there is no counter in this file, and `__GetElementUniqueID` reports
@@ -1394,30 +1396,33 @@ export function __BobcatComputedStyleMap(element: unknown): ComputedStyleMap {
 }
 
 /**
- * Accepted and ignored.
+ * Marks each element with the css id whose scoped rules it matches: a
+ * non-zero id becomes the `l-css-id` attribute, and 0 — or a nullish id,
+ * which web-core turns into 0 — removes it, leaving the element to the
+ * unscoped rules alone. web-core's `set_css_id`
+ * (`web-core/src/main_thread/client/element_apis/style_apis.rs:16-52`); the
+ * id is an `i32` there, so it goes through the same `ToInt32` here.
  *
- * The PAPI names the author-CSS scope a set of elements cascades in, and
- * nothing lowers a decoded `StyleInfo` into scoped author rules yet: every
- * fragment mounts globally, which is what web-core itself emits for an
- * `enableRemoveCSSScope = true` bundle. Recording the id would therefore
- * mean choosing an encoding — web-core writes `l-css-id`/`l-e-name`
- * attributes, native Lynx keeps `css_id` on the element — with no consumer
- * to validate the choice against, so the id is dropped rather than written
- * somewhere a later scoping pass would have to unlearn.
- *
- * It is a sink rather than an absence because a compiled card calls it
- * while installing its snapshot runtime, and a card whose styles are all
- * global has nothing to gain from failing at the missing global. The scoped
- * behavior lands with the ingestion side that reads it.
+ * `entryName` is ignored. web-core writes it to `l-e-name`, which only its
+ * entry-name guard reads; that guard separates a lazy bundle's own
+ * `StyleInfo` from its host card's, and a lazy bundle's `StyleInfo` is not
+ * mounted here.
  */
 export function __SetCSSId(
   elements: unknown,
   cssId: unknown,
   entryName?: unknown,
 ): undefined {
-  void elements;
-  void cssId;
   void entryName;
+  const id = Number(cssId ?? 0) | 0;
+  for (const element of elements as unknown[]) {
+    const nodeId = nodeIdOf(element);
+    if (id !== 0) {
+      setAttribute(nodeId, "l-css-id", String(id));
+    } else {
+      removeAttribute(nodeId, "l-css-id");
+    }
+  }
   return undefined;
 }
 

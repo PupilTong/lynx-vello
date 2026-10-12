@@ -336,9 +336,6 @@ fn prepare_source(
 
 async fn capture_page(request: &CaptureRequest) -> Result<Screenshot, CaptureFailure> {
     let (page, archive) = prepare_source(request)?;
-    for warning in page.compatibility_warnings() {
-        eprintln!("bobcat-server: warning: {warning}");
-    }
     let wakeup = Arc::new(CaptureWakeup::default());
     let resources = Resources::new(resources_config(&page, request.timeout), {
         let wakeup = Arc::clone(&wakeup);
