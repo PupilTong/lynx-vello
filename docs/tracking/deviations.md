@@ -2349,6 +2349,37 @@ consequential choice about whether to follow the spec or the quirk.
   here (`lower_style`), the `l-e-name` guard is not, and `__SetCSSId`
   ignores its `entryName`. A container's `config` is ignored too: page policy
   is the page's.
+- **CSS custom sections are read from the `CustomSectionsStyleInfo` section
+  *and* from the legacy JSON form** — since lynx-stack#4138 (75c770fe)
+  web-core's encoder writes every `encoding: 'CSS'` custom section into
+  `.web.bundle` label 7 (an rkyv `RawStyleInfoMap`) and no longer into the
+  JSON `CustomSections` section, while web-core's own decoders accept label 7
+  but do not consume it yet (`ts/server/decode.ts`,
+  `ts/client/decodeWorker/decode.worker.ts`), so on web-core
+  `getCustomSectionSync(name)` answers `undefined` for such a section. This
+  engine lowers label 7 into the named stylesheets `__LoadStyleSheet` loads,
+  and **keeps lowering the legacy JSON `{encoding:"CSS", content:{ruleList}}`
+  descriptor** for bundles an encoder before #4138 wrote
+  (`crates/bobcat-source/src/custom_style.rs`); a name label 7 carries wins
+  over a JSON descriptor of the same name. No bundle in this workspace — the
+  fixtures or the pinned `lynx-examples` tarballs of the catalog — carries a
+  JSON CSS section today, so the legacy path can be removed once no supported
+  bundle predates #4138. **Decision: read both**, so that neither encoder
+  generation loses its named CSS.
+- **`__LoadStyleSheet` for a section a container does not carry answers
+  `null`; native answers `undefined`** — native's `LoadStyleSheet` returns
+  `undefined` for a missing section
+  (`lynx/core/runtime/lepus/bindings/renderer_functions.cc:963-968`). Here the
+  realm asks the fetcher's `ResourceFetcher::style_sheet_probe` through the
+  `hasStyleSheet` host member — synchronous, registry-only in
+  `bobcat-resources`, never a request — and answers `null` when nothing is
+  registered at `<bundle>/custom_section/<key>.css`. **Resolved: `null`**,
+  because ReactLynx adopts only a handle that is `!== null`
+  (`rLynxPrepareLazyBundleMTS`, the sync lazy path): `null` makes it adopt
+  nothing, as native's `undefined` does there, where `undefined` would reach
+  `__AdoptStyleSheet` and throw. `react-lazy-nested`'s inner container, which
+  has no `CSS` section, runs with no report and no stylesheet request
+  (`crates/bobcat-source/tests/lazy_bundle.rs`).
 - **`NativeModules.<name>` for a module the host does not have** — native's
   `LynxJSIModuleBinding::get` answers `null`
   (`lynx_jsi_module_binding.cc:23`), while web-core builds a plain object out

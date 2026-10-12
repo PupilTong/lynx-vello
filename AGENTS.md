@@ -575,14 +575,24 @@ intersection module are absent. Exposure is not a module here:
 the `switchExposure` host member, and `lynx.setObserverFrameRate` is accepted
 and ignored (see the exposure paragraph under the intersection primitive).
 
-`PageSource` registers named CSS under entry-relative resource URLs. Boot
-supplies the entry response URL to the JS runtime before importing the entry,
-whose `__Card__` import reads that value; JS replaces the `"__Card__"` alias
-and maps the compiler's `CSS` section to `<entry-url>/index.css`.
-`__LoadStyleSheet` returns a plain `{url}` object and sends a
-`ResourceFetcher::preload_source` hint a fetcher may ignore; no realm state
-survives that call, and `__AdoptStyleSheet` reads the URL off the handle it is
-given.
+`PageSource` registers named CSS under entry-relative resource URLs. A named
+sheet is a `.web.bundle`'s `CustomSectionsStyleInfo` section (label 7,
+lynx-stack#4138: one rkyv `StyleInfo` per `encoding: 'CSS'` custom section),
+a legacy JSON `encoding: "CSS"` descriptor from an encoder before that change,
+or a `.lynx.bundle`'s CSS custom section (`bobcat-source`'s
+`custom_style.rs`). Boot supplies the entry response URL to the JS runtime
+before importing the entry, whose `__Card__` import reads that value; JS
+replaces the `"__Card__"` alias and maps section `<key>` to
+`<entry-url>/custom_section/<encoded key>.css`, the compiler's `CSS` section
+to `<entry-url>/custom_section/CSS.css`.
+`__LoadStyleSheet` first asks `hasStyleSheet(url)`, which is the fetcher's
+`ResourceFetcher::style_sheet_probe` — synchronous and registry-only in
+`bobcat-resources`, no request and no network — and answers `null` for a sheet
+not held, so `rLynxPrepareLazyBundleMTS` adopts nothing for a container without
+a `CSS` section, as native's `undefined` makes it. Otherwise it returns a plain
+`{url}` object and sends a `ResourceFetcher::preload_source` hint a fetcher may
+ignore; no realm state survives that call, and `__AdoptStyleSheet` reads the URL
+off the handle it is given.
 Every `__AdoptStyleSheet` requests the URL through `SourceRequest::StyleSheet`,
 synchronously obtains its response and mounts it before returning, repeated
 adoption included. The fetcher owns pending loads, cached responses and
@@ -725,7 +735,9 @@ from the evaluation an earlier one ran. An entry no `__BobcatRegisterBundle`
 named is a **lazy container's** `bundleName` instead, and its sections are
 named *under* that URL rather than beside it — `<bundleName path>/<encoded
 section>.js`, one rule shared with MTS's `chunkURL` and with
-`bobcat-source`'s `named_chunk_url`.
+`bobcat-source`'s `named_chunk_url`; its named stylesheets hang under
+`<bundleName path>/custom_section/<encoded key>.css` (`styleSheetURL` and
+`named_style_url`).
 
 **`lynx.fetchBundle(url, options?)` is a plain fetch**, in both realm kinds:
 apart from being waitable it does what `fetch(image_url)` does. Core's whole

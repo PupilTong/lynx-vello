@@ -168,11 +168,13 @@ serializes that result as a web bundle for tooling. JavaScript custom sections
 retain their original names and `{content: source}` descriptors in that model,
 alongside the existing manifest/MTS map adaptation. Conversion preserves these
 descriptors; named `loadScript` must not lose them to an empty CustomSections
-section. CSS also lowers to StyleInfo and keeps named descriptors in the
-compiler's `{encoding:"CSS",content:{ruleList}}` JSON shape. Named fragments
-include their reachable imports in cascade order. `PageSource` lowers these
-descriptors for [MTS loading and adoption](named-styles-runtime.md); conversion
-executes no script and mounts no stylesheet.
+section. CSS also lowers to StyleInfo, and each named CSS section becomes a
+`StyleInfo` of its own under css id 0 in `custom_sections_style_info`, which
+conversion writes as the web `CustomSectionsStyleInfo` section (label 7) rather
+than as JSON, as web-core's encoder does since lynx-stack#4138. Named fragments
+include their reachable imports in cascade order. `PageSource` lowers them for
+[MTS loading and adoption](named-styles-runtime.md); conversion executes no
+script and mounts no stylesheet.
 Real bytecode, legacy
 Lepus, card-style top-level CSS, and irreversible parsed CSS encodings return
 errors. The exact known inert external-root stubs are accepted only in the

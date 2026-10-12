@@ -54,11 +54,16 @@ Section labels (`TemplateSectionLabel`):
 | 4 | CustomSections | UTF-16LE JSON |
 | 5 | ElementTemplates | (reserved; current encoder never emits it, runtime ignores it) |
 | 6 | Configurations | UTF-16LE JSON |
+| 7 | CustomSectionsStyleInfo | rkyv-serialized `RawStyleInfoMap` (see below) |
 
 The current encoder writes sections in the order: Configurations, LepusCode,
-CustomSections, StyleInfo, Manifest. Decoders must not rely on order (the
-reference decoder loops on labels), except that `Configurations` is needed to
-interpret StyleInfo flags at runtime.
+CustomSections, StyleInfo, Manifest, then CustomSectionsStyleInfo. Label 7
+was added by lynx-stack#4138 (merged as 75c770fe) and is written **only when
+at least one custom section has `encoding: 'CSS'`**, so a bundle without one
+stays byte-for-byte what older runtimes load; a runtime that predates the
+label throws `Unknown section label` on a bundle that carries it. Decoders
+must not rely on order (the reference decoder loops on labels), except that
+`Configurations` is needed to interpret StyleInfo flags at runtime.
 
 ### Payload encodings
 
@@ -81,9 +86,15 @@ JS char (i.e. UTF-16LE without BOM). Used for `Configurations` and
   (`"true"` when appType != `"card"`), plus every `pageConfig` entry stringified
   (`enableCSSSelector`, `enableRemoveCSSScope`, `defaultDisplayLinear`,
   `defaultOverflowVisible`, `enableJSDataProcessor`, …).
-- CustomSections content: `Record<string, { type?: 'lazy', content: string | object }>`;
-  named CSS uses `{encoding:"CSS", content:{ruleList}}`. `PageSource` lowers
-  supported descriptors for [MTS loading and adoption](named-styles-runtime.md).
+- CustomSections content: `Record<string, { type?: 'lazy', encoding?:
+  'JsBytecode' | 'CSS', content: string | object }>`. Since lynx-stack#4138 a
+  section with `encoding: 'CSS'` (`{encoding:"CSS", content:{ruleList}}` in the
+  encoder's input) **no longer appears in this JSON**: `webEncoder.ts` takes it
+  out and writes it into label 7 instead. Bundles from older encoders still
+  carry it here; `bobcat-source` keeps reading that legacy form
+  (`crates/bobcat-source/src/custom_style.rs`, recorded in
+  [deviations](tracking/deviations.md)). Both forms are lowered for
+  [MTS loading and adoption](named-styles-runtime.md).
 
 ### StyleInfo: rkyv-serialized CSS
 
@@ -136,6 +147,28 @@ engine's `crates/bobcat-source/src/lower_style.rs` does the same, except that
 a rule whose importers include 0 keeps only its unchanged selector: the
 guarded copies web-core adds beside it match a subset of the same elements.
 
+### CustomSectionsStyleInfo: the CSS custom sections, rkyv-serialized
+
+`raw_style_info_map.rs` in the same directory, encoded by `encodeCSSMap`
+(`ts/encode/encodeCSS.ts`) with the same rkyv 0.7 settings:
+
+```rust
+RawStyleInfoMap { name_to_style_info: HashMap<String, RawStyleInfo> }  // FnvHashMap in source
+```
+
+One entry per `encoding: 'CSS'` custom section, keyed by the section name.
+Each value is an ordinary `RawStyleInfo` holding the section's rule list under
+css id `0` only (`createRawStyleInfo({ '0': ruleList })`), with its
+`style_content_str_size_hint` computed per entry before serialization. A
+section is one stylesheet, so no `l-css-id` guard applies to it. web-core's
+decoders accept the label and skip it for now
+(`ts/server/decode.ts`, `ts/client/decodeWorker/decode.worker.ts`).
+`bobcat-source` decodes it into `WebTemplate::custom_sections_style_info`
+(`crates/bobcat-source/src/web/style_info.rs` `StyleInfoMap`) under the
+StyleInfo bounds — the 1 MiB section cap, one validation level more for the
+map, and the 64-level rule depth per entry — and registers each entry at
+`<container>/custom_section/<encoded name>.css`.
+
 At runtime the wasm `decode_style_info(buffer, entry_name, enable_css_selector,
 transform_vw, transform_vh, transform_rem)` deserializes `RawStyleInfo`, runs
 `StyleInfoDecoder` (selector rewriting to HTML — e.g. type selectors become
@@ -153,7 +186,8 @@ Option<String>, css_og_… map }` back over the wasm boundary.
 4. LepusCode → binary string map → `lepusCode: Record<string, Uint8Array>`.
 5. CustomSections → UTF-16LE → `JSON.parse`.
 6. StyleInfo → wasm `decode_style_info(...)` (flags read from `config`).
-7. Manifest / ElementTemplates → ignored server-side; unknown labels → error.
+7. Manifest / ElementTemplates / CustomSectionsStyleInfo → ignored
+   server-side; unknown labels → error.
 
 An XML document compiled by `encodeLynxXML()` enters exactly this pipeline;
 downstream decoders cannot and need not know its source format. The proposed
@@ -168,7 +202,7 @@ documented in [lynx-xml-template.md](lynx-xml-template.md).
 | --- | --- |
 | `packages/web-platform/web-core/ts/constants.ts` | Magic + section labels |
 | `packages/web-platform/web-core/ts/encode/webEncoder.ts` | Binary encoder + `TasmJSONInfo` type |
-| `packages/web-platform/web-core/ts/encode/encodeCSS.ts` | styleInfo → Rust `RawStyleInfo` builder |
+| `packages/web-platform/web-core/ts/encode/encodeCSS.ts` | styleInfo → Rust `RawStyleInfo` builder; `encodeCSSMap` → `RawStyleInfoMap` |
 | `packages/web-platform/web-core/ts/server/decode.ts` | Reference decoder |
 | `packages/web-platform/web-core/ts/common/decodeUtils.ts` | Binary string map |
 | `packages/web-platform/web-core/src/template/template_sections/style_info/*.rs` | rkyv CSS data model |
