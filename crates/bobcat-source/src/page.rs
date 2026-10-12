@@ -682,19 +682,18 @@ pub(crate) fn named_chunk_url(entry: &Url, name: &str) -> Url {
     url
 }
 
-/// The resource URL used by the JS stylesheet wrapper: the compiler's `CSS`
-/// section is `index.css`; other named sections each have their own directory.
+/// The resource URL `__LoadStyleSheet` names one named stylesheet by: the
+/// container URL's path, then `custom_section/` and the encoded section name
+/// as a `.css` file, the `?#` suffix kept — so the compiler's `CSS` section
+/// is `<path>/custom_section/CSS.css`. The realm writes the same string in
+/// `packages/bobcat-element/src/section-url.ts`'s `styleSheetURL`.
 pub(crate) fn named_style_url(entry: &Url, key: &str) -> Url {
     let mut url = entry.clone();
-    let section = if key == "CSS" {
-        String::new()
-    } else {
-        let name: String = url::form_urlencoded::byte_serialize(key.as_bytes()).collect();
-        format!("{}/", name.replace('+', "%20"))
-    };
+    let encoded: String = url::form_urlencoded::byte_serialize(key.as_bytes()).collect();
     url.set_path(&format!(
-        "{}/{section}index.css",
-        entry.path().trim_end_matches('/')
+        "{}/custom_section/{}.css",
+        entry.path().trim_end_matches('/'),
+        encoded.replace('+', "%20")
     ));
     url
 }

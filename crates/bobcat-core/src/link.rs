@@ -57,7 +57,7 @@ use crate::clock::ClockInstant;
 use crate::main::tree::LynxDocument;
 use crate::native_module::ModuleReply;
 use crate::paint::RouterHost;
-use crate::resource::{FetchProbe, LoadedSource, SourceCompletion, SourceRequest};
+use crate::resource::{FetchProbe, LoadedSource, SourceCompletion, SourceRequest, StyleSheetProbe};
 use crate::view::{EngineEvent, EventRequester, LynxViewError, Viewport};
 
 /// The answer to one source request, as the side that awaits it sees it.
@@ -689,6 +689,10 @@ pub(crate) struct ViewOutbox {
     /// This view's fetcher's `fetch_probe`, taken on the embedder's thread at
     /// construction and handed to every realm of the view.
     probe: Option<FetchProbe>,
+    /// This view's fetcher's `style_sheet_probe`, taken with `probe` and read
+    /// by the MTS realm alone: a Worker has no `__LoadStyleSheet`, so it is
+    /// not part of a [`HostOutbox`].
+    style_sheet_probe: Option<StyleSheetProbe>,
     /// This view's base URL, parsed on the embedder's thread at construction
     /// and handed to every realm of the view.
     base: Arc<Url>,
@@ -701,6 +705,7 @@ impl ViewOutbox {
         requester: Arc<dyn EventRequester>,
         token: CancellationToken,
         probe: Option<FetchProbe>,
+        style_sheet_probe: Option<StyleSheetProbe>,
         base: Arc<Url>,
     ) -> Self {
         Self {
@@ -709,8 +714,15 @@ impl ViewOutbox {
             requester,
             token,
             probe,
+            style_sheet_probe,
             base,
         }
+    }
+
+    /// Whether this view's fetcher can say a stylesheet is held without
+    /// loading it, and how. `None` is a host that gave no probe.
+    pub(crate) const fn style_sheet_probe(&self) -> Option<&StyleSheetProbe> {
+        self.style_sheet_probe.as_ref()
     }
 
     /// This view's end signal. Workers have separate cancellation scopes.
@@ -903,18 +915,27 @@ pub(crate) fn detached_base() -> Arc<Url> {
 /// One view's publishing end and the far end that reads it, with no thread
 /// between them.
 pub(crate) fn detached_outbox(requester: Arc<dyn EventRequester>) -> (ViewOutbox, DetachedView) {
+    detached_outbox_probing_style_sheets(requester, None)
+}
+
+/// [`detached_outbox`], with a stylesheet probe standing in for a fetcher's.
+pub(crate) fn detached_outbox_probing_style_sheets(
+    requester: Arc<dyn EventRequester>,
+    style_sheet_probe: Option<StyleSheetProbe>,
+) -> (ViewOutbox, DetachedView) {
     let token = CancellationToken::new();
     let (notices, notice_receiver) = mpsc::unbounded_channel();
     let (frames, frame_receiver) = watch::channel(Published::default());
     (
-        // No probe: a detached view has no fetcher, so every fetch is a
-        // request and none settles synchronously.
+        // No fetch probe: a detached view has no fetcher, so every fetch is
+        // a request and none settles synchronously.
         ViewOutbox::new(
             notices,
             frames,
             requester,
             token.clone(),
             None,
+            style_sheet_probe,
             detached_base(),
         ),
         DetachedView {

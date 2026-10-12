@@ -98,7 +98,11 @@ ${entries.join('\n')}
           .map(file => relative(sourceRoot, file).split(sep).join('/')).sort();
         await writeFile(join(dirname(output), `${basename(output)}.provenance.json`), JSON.stringify({
           sources, target: native ? 'lynx' : 'web', mode, engineVersion,
-          description: native ? 'Page repacked from original compiler sources; lazy bundles unchanged.' : 'Unmodified web compiler output.',
+          description: native
+            ? 'Page repacked from original compiler sources; lazy bundles unchanged.'
+            : fixture === 'css-custom-sections'
+              ? 'Web compiler output with two CSS custom sections added by scripts/css-custom-sections.ts.'
+              : 'Unmodified web compiler output.',
           publicPath, nativePageSha256, scripts, bundles,
           encoder: `@lynx-js/tasm@${version('@lynx-js/tasm')}`,
           react: version('@lynx-js/react'), rsbuild: version('@rsbuild/core'),

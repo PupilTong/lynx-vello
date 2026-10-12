@@ -19,6 +19,22 @@ pub(super) fn install_styles(
     outbox: &ViewOutbox,
     thread: JsThreadHandle,
 ) -> Result<(), MainThreadError> {
+    // Asked before `__LoadStyleSheet` hands out a handle: a stylesheet the
+    // fetcher says it does not hold answers `null` there, which is what a
+    // container without that section answers natively. Synchronous and
+    // request-free — the fetcher's probe reads what is registered and starts
+    // nothing. Without a probe every URL may be held, so the adoption finds
+    // out, as it always did.
+    let probe = outbox.style_sheet_probe().cloned();
+    install(engine, js, "hasStyleSheet", 1, move |args| {
+        let Some(HostValue::String(url)) = args.first() else {
+            return Err("hasStyleSheet expects a URL".to_owned());
+        };
+        Ok(HostValue::Boolean(
+            probe.as_ref().is_none_or(|probe| probe(url)),
+        ))
+    })?;
+
     let sources = outbox.host_outbox(outbox.token().clone());
     install(engine, js, "preloadStyleSheet", 1, move |args| {
         let Some(HostValue::String(url)) = args.first() else {

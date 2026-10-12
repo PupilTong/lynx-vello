@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde_json::{Map, Value as JsonValue};
 
 use super::ConvertError;
-use crate::web::style_info::StyleInfo;
+use crate::web::style_info::{StyleInfo, StyleInfoMap};
 use crate::web::{MAGIC_0, MAGIC_1, SectionLabel, WebTemplate};
 
 const WEB_FORMAT_VERSION: u32 = 1;
@@ -19,6 +19,18 @@ pub(crate) fn encode(native: WebTemplate) -> Result<Vec<u8>, ConvertError> {
     )?;
     let style_info = encode_style_info(&native.style_info.unwrap_or_default())?;
     let manifest = encode_string_map(&native.manifest, "Manifest")?;
+    // Named CSS sections travel as the `CustomSectionsStyleInfo` section and
+    // never as JSON, and the section is left out when there is none, as
+    // web-core's `webEncoder.ts` does since lynx-stack#4138. Each entry's
+    // `style_text_size_hint` stays the 0 the native decoder gave it: it only
+    // presizes web-core's stylesheet string.
+    let custom_style_info = if native.custom_sections_style_info.is_empty() {
+        None
+    } else {
+        Some(encode_style_info_map(&StyleInfoMap {
+            name_to_style_info: native.custom_sections_style_info.into_iter().collect(),
+        })?)
+    };
 
     let mut output = Vec::new();
     output.extend_from_slice(&MAGIC_0.to_le_bytes());
@@ -49,11 +61,25 @@ pub(crate) fn encode(native: WebTemplate) -> Result<Vec<u8>, ConvertError> {
         "StyleInfo",
     )?;
     append_section(&mut output, SectionLabel::Manifest, &manifest, "Manifest")?;
+    if let Some(custom_style_info) = custom_style_info {
+        append_section(
+            &mut output,
+            SectionLabel::CustomSectionsStyleInfo,
+            &custom_style_info,
+            "CustomSectionsStyleInfo",
+        )?;
+    }
     Ok(output)
 }
 
 fn encode_style_info(style_info: &StyleInfo) -> Result<Vec<u8>, ConvertError> {
     rkyv::to_bytes::<_, 1024>(style_info)
+        .map(|bytes| bytes.to_vec())
+        .map_err(|error| ConvertError::StyleInfo(error.to_string()))
+}
+
+fn encode_style_info_map(map: &StyleInfoMap) -> Result<Vec<u8>, ConvertError> {
+    rkyv::to_bytes::<_, 1024>(map)
         .map(|bytes| bytes.to_vec())
         .map_err(|error| ConvertError::StyleInfo(error.to_string()))
 }

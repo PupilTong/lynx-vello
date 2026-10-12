@@ -3777,10 +3777,17 @@ fn list_cells(document: &mut LynxDocument) -> Vec<String> {
             assert_eq!(cell.tag_name(), Some("list-item"));
             let text = cell.children().next().expect("the cell's own text");
             assert_eq!(text.tag_name(), Some("text"));
+            // A `<text>`'s own `text` attribute replaces its children's
+            // content (`tree/raw_text.rs`); the `ReactLynx` 0.127 compiler
+            // writes a dynamic `<text>{value}</text>` that way, with
+            // `__SetAttribute(text, 'text', value)` on the `<text>` itself,
+            // where 0.126's output put the content in a child.
+            let content = text
+                .attribute("text")
+                .map_or_else(|| generated_text(text), str::to_owned);
             format!(
-                "{}={}",
+                "{}={content}",
                 cell.attribute("item-key").expect("every cell is keyed"),
-                generated_text(text),
             )
         })
         .collect()

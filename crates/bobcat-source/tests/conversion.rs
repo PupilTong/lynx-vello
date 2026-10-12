@@ -144,11 +144,31 @@ fn converts_source_scripts_and_css_to_a_decodable_web_bundle() {
         sections["library__main-thread"]["content"],
         "globalThis.mainThread = true;"
     );
-    assert_eq!(sections["library:CSS"]["encoding"], "CSS");
+    // A named CSS section travels as the `CustomSectionsStyleInfo` section
+    // (label 7), as web-core's encoder writes it since lynx-stack#4138, and
+    // not as JSON.
+    assert!(sections.get("library:CSS").is_none(), "{sections}");
     assert_eq!(
-        sections["library:CSS"]["content"]["ruleList"][0]["selectorText"]["value"],
-        ".box"
+        decoded
+            .custom_sections_style_info
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["library:CSS"]
     );
+    let named = &decoded.custom_sections_style_info["library:CSS"];
+    assert_eq!(
+        named
+            .css_id_to_style_sheet
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        [0],
+        "a section is one sheet, under css id 0"
+    );
+    let named_rules = &named.css_id_to_style_sheet[&0].rules;
+    assert_eq!(named_rules.len(), 1);
+    assert_eq!(named_rules[0].prelude.selectors[0].to_css_string(), ".box");
 
     let style_info = decoded.style_info.expect("StyleInfo section");
     let sheet = style_info
@@ -175,6 +195,44 @@ fn converts_source_scripts_and_css_to_a_decodable_web_bundle() {
     assert_eq!(variable.property.id, CssPropertyId::Unknown);
     assert_eq!(variable.property.name(), "--accent");
     assert_eq!(variable.value_text(), "#123456");
+}
+
+/// The section labels of a web bundle, in order.
+fn web_labels(bytes: &[u8]) -> Vec<u32> {
+    let mut labels = Vec::new();
+    let mut offset = 12;
+    while offset < bytes.len() {
+        labels.push(u32::from_le_bytes(
+            bytes[offset..offset + 4].try_into().unwrap(),
+        ));
+        let len = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        offset += 8 + len;
+    }
+    labels
+}
+
+/// Like web-core's encoder, the converter writes `CustomSectionsStyleInfo`
+/// after the manifest and only when a CSS custom section exists, so a bundle
+/// without one stays loadable by a runtime that does not know label 7.
+#[test]
+fn the_custom_sections_style_info_section_is_written_only_for_css_sections() {
+    use bobcat_source::web::SectionLabel;
+    let scripts = || CustomSection::source("library", "globalThis.background = true;");
+    let without = convert(&native_bundle(vec![custom_section(vec![scripts()])])).unwrap();
+    assert!(
+        !web_labels(&without).contains(&(SectionLabel::CustomSectionsStyleInfo as u32)),
+        "{:?}",
+        web_labels(&without)
+    );
+    let with = convert(&native_bundle(vec![custom_section(vec![
+        scripts(),
+        CustomSection::css("CSS", &css_fragment()),
+    ])]))
+    .unwrap();
+    assert_eq!(
+        web_labels(&with).last(),
+        Some(&(SectionLabel::CustomSectionsStyleInfo as u32))
+    );
 }
 
 #[test]
@@ -565,39 +623,37 @@ fn native_keyframes_and_font_faces_share_the_web_rule_model() {
         &fragment,
     )])]);
     let decoded = bobcat_source::web::decode(&convert(&bytes).unwrap()).unwrap();
-    let descriptors =
-        &decoded.custom_sections.as_ref().unwrap()["library:CSS"]["content"]["ruleList"];
-    assert_eq!(descriptors.as_array().unwrap().len(), 3);
-    assert_eq!(descriptors[1]["type"], "KeyframesRule");
-    assert_eq!(descriptors[1]["name"]["value"], "fade");
-    assert_eq!(descriptors[1]["styles"][0]["keyText"]["value"], "50%");
-    assert_eq!(descriptors[1]["styles"][0]["style"][0]["value"], "0.5");
-    assert_eq!(descriptors[2]["type"], "FontFaceRule");
-    assert_eq!(descriptors[2]["style"][1]["value"], "url(font.woff2)");
+    // The fragment in the bundle's `StyleInfo` under its native id, and the
+    // named section in `CustomSectionsStyleInfo` under css id 0: one model.
     let style = decoded.style_info.unwrap();
-    let rules = &style.css_id_to_style_sheet[&7].rules;
-    assert_eq!(rules.len(), 3);
-    assert_eq!(
-        rules[1].kind,
-        bobcat_source::web::style_info::RuleKind::Keyframes
-    );
-    assert_eq!(rules[1].prelude.selectors[0].to_css_string(), "fade");
-    assert_eq!(
-        rules[1].children[0].prelude.selectors[0].to_css_string(),
-        "50%"
-    );
-    assert_eq!(
-        rules[1].children[0].declaration_block.declarations[0].value_text(),
-        "0.5"
-    );
-    assert_eq!(
-        rules[2].kind,
-        bobcat_source::web::style_info::RuleKind::FontFace
-    );
-    assert_eq!(
-        rules[2].declaration_block.declarations[1].value_text(),
-        "url(font.woff2)"
-    );
+    let named = &decoded.custom_sections_style_info["library:CSS"];
+    for rules in [
+        &style.css_id_to_style_sheet[&7].rules,
+        &named.css_id_to_style_sheet[&0].rules,
+    ] {
+        assert_eq!(rules.len(), 3);
+        assert_eq!(
+            rules[1].kind,
+            bobcat_source::web::style_info::RuleKind::Keyframes
+        );
+        assert_eq!(rules[1].prelude.selectors[0].to_css_string(), "fade");
+        assert_eq!(
+            rules[1].children[0].prelude.selectors[0].to_css_string(),
+            "50%"
+        );
+        assert_eq!(
+            rules[1].children[0].declaration_block.declarations[0].value_text(),
+            "0.5"
+        );
+        assert_eq!(
+            rules[2].kind,
+            bobcat_source::web::style_info::RuleKind::FontFace
+        );
+        assert_eq!(
+            rules[2].declaration_block.declarations[1].value_text(),
+            "url(font.woff2)"
+        );
+    }
 }
 
 #[test]

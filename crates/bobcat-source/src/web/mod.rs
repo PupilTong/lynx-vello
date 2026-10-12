@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 pub use error::DecodeError;
 use reader::Reader;
-pub use style_info::StyleInfo;
+pub use style_info::{StyleInfo, StyleInfoMap};
 
 pub const MAGIC_0: u32 = 0x4152_4453;
 pub const MAGIC_1: u32 = 0x464F_5257;
@@ -24,6 +24,12 @@ pub enum SectionLabel {
     CustomSections = 4,
     ElementTemplates = 5,
     Configurations = 6,
+    /// The custom sections the compiler tagged `encoding: 'CSS'`, as an rkyv
+    /// [`StyleInfoMap`] keyed by section name (lynx-stack#4138,
+    /// `TemplateSectionLabel.CustomSectionsStyleInfo` in web-core's
+    /// `ts/constants.ts`). The encoder writes it only when such a section
+    /// exists, and those sections are then absent from `CustomSections`.
+    CustomSectionsStyleInfo = 7,
 }
 
 /// A decoded web binary template.
@@ -36,6 +42,10 @@ pub struct WebTemplate {
     pub manifest: BTreeMap<String, String>,
     pub custom_sections: Option<serde_json::Value>,
     pub style_info: Option<StyleInfo>,
+    /// The `CustomSectionsStyleInfo` section: one [`StyleInfo`] per named
+    /// CSS custom section, empty when the section is absent. The native
+    /// decoder fills it from a `.lynx.bundle`'s CSS custom sections.
+    pub custom_sections_style_info: BTreeMap<String, StyleInfo>,
     pub element_templates: Option<Vec<u8>>,
 }
 
@@ -70,6 +80,7 @@ pub fn decode(bytes: &[u8]) -> Result<WebTemplate, DecodeError> {
         ..WebTemplate::default()
     };
     let mut style_info_bytes: Option<&[u8]> = None;
+    let mut custom_style_info_bytes: Option<&[u8]> = None;
 
     while !reader.is_empty() {
         let label = reader.read_u32()?;
@@ -100,6 +111,9 @@ pub fn decode(bytes: &[u8]) -> Result<WebTemplate, DecodeError> {
             l if l == SectionLabel::StyleInfo as u32 => {
                 style_info_bytes = Some(content);
             }
+            l if l == SectionLabel::CustomSectionsStyleInfo as u32 => {
+                custom_style_info_bytes = Some(content);
+            }
             l if l == SectionLabel::ElementTemplates as u32 => {
                 template.element_templates = Some(content.to_vec());
             }
@@ -109,6 +123,12 @@ pub fn decode(bytes: &[u8]) -> Result<WebTemplate, DecodeError> {
 
     if let Some(bytes) = style_info_bytes {
         template.style_info = Some(style_info::decode_style_info(bytes)?);
+    }
+    if let Some(bytes) = custom_style_info_bytes {
+        template.custom_sections_style_info = style_info::decode_style_info_map(bytes)?
+            .name_to_style_info
+            .into_iter()
+            .collect();
     }
 
     Ok(template)

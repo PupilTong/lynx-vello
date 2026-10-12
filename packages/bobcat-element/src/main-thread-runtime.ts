@@ -58,7 +58,7 @@ import type { NodeQueryRequest } from "bobcat:selector-query";
 import "bobcat:timers";
 import { cancelAnimationFrame, clearAnimationFrames, requestAnimationFrame } from "bobcat:animation-frame";
 import { createSystemInfo } from "bobcat:system-info";
-import { initialProcessor as getInitialProcessor, globalProps, initData, loadModuleSync, nativeModuleTable, preloadStyleSheet, adoptStyleSheet, switchExposure } from "bobcat-internal:host";
+import { initialProcessor as getInitialProcessor, globalProps, initData, loadModuleSync, nativeModuleTable, hasStyleSheet, preloadStyleSheet, adoptStyleSheet, switchExposure } from "bobcat-internal:host";
 import { reportError as _ReportError, console } from "bobcat:diagnostics";
 import { sectionURL, styleSheetURL as sectionStyleSheetURL } from "bobcat:section-url";
 import { type BundleHandle, createBundleFetches } from "bobcat:bundle-fetch";
@@ -641,11 +641,16 @@ export const NativeModules = undefined;
  * and nothing else. No realm state survives the call, so a handle is only
  * ever as good as the URL it names.
  */
-export function __LoadStyleSheet(key: string, bundleName: string): {url: string} {
+export function __LoadStyleSheet(key: string, bundleName: string): {url: string} | null {
   if (arguments.length < 2 || typeof key !== "string" || typeof bundleName !== "string") {
     throw new TypeError("__LoadStyleSheet requires a section key and bundle name");
   }
   const url = styleSheetURL(key, bundleName);
+  // A section the container does not carry is `null`, so a card that adopts
+  // only a non-null handle — `rLynxPrepareLazyBundleMTS` — adopts nothing, as
+  // native's `undefined` makes it. The host answers from what its fetcher
+  // holds, synchronously, and requests nothing.
+  if (!hasStyleSheet(url)) return null;
   preloadStyleSheet(url);
   return {url};
 }

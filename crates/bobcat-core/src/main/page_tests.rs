@@ -3567,6 +3567,7 @@ fn a_frame_post_pending_across_boot_is_acknowledged_after_the_boot_report_and_it
             }),
             token.clone(),
             None,
+            None,
             detached_base(),
         );
         // Bound from the start, and no listed sheets: boot's own flush parks
@@ -4111,7 +4112,7 @@ fn card_url_uses_the_entry_response_url_before_requesting_styles() {
             .await;
         let request = harness.preloads.pop().unwrap();
         assert!(matches!(request, SourceRequest::StyleSheet(ref url)
-            if url == "https://cdn.test/redirected/main.js/index.css?version=2#entry"));
+            if url == "https://cdn.test/redirected/main.js/custom_section/CSS.css?version=2#entry"));
     });
 }
 

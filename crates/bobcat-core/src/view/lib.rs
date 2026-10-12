@@ -1006,6 +1006,7 @@ impl LynxGroup {
                 frames,
                 cancel: cancel.clone(),
                 fetch_probe: fetcher.fetch_probe(),
+                style_sheet_probe: fetcher.style_sheet_probe(),
                 base_url,
             })))
             .map_err(|_| EngineError::Thread {
@@ -1525,6 +1526,10 @@ pub(crate) struct ViewAttachment {
     /// of this view asks before making a fetch. `None` for a host that gave
     /// none.
     pub(crate) fetch_probe: Option<crate::resource::FetchProbe>,
+    /// The fetcher's answer to "is a stylesheet held here?", which only the
+    /// view's MTS realm asks, from `__LoadStyleSheet`. `None` for a host that
+    /// gave none.
+    pub(crate) style_sheet_probe: Option<crate::resource::StyleSheetProbe>,
     /// [`ViewSources::base_url`], parsed by `create_lynx_view`: what every
     /// realm of this view resolves a synchronous load's URL against.
     pub(crate) base_url: Arc<url::Url>,

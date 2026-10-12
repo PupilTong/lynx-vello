@@ -49,6 +49,7 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   requestScriptFrame: rstest.fn(),
   reportScriptError: rstest.fn(),
   logScriptMessage: rstest.fn(),
+  hasStyleSheet: rstest.fn(() => true),
   preloadStyleSheet: rstest.fn(),
   adoptStyleSheet: rstest.fn(),
   initialProcessor: () => "",

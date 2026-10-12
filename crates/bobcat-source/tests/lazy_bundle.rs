@@ -54,13 +54,16 @@ fn registered(name: &str) -> (bobcat_core::ViewSources, Resources) {
     (page.view_sources(SCREEN), resources)
 }
 
-/// Boots one fixture and runs it until `expected` has been logged, painting
-/// as it goes so that the lazy component's own CSS reaches a frame.
-///
-/// The `.lazy-box` assertion is the point of the paint: a blue box is the
-/// lazy container's `CSS` section having been adopted through
-/// `__LoadStyleSheet`, which only happens if the container installed.
-async fn boots(name: &str, expected: &str) {
+/// The 80px `.lazy-box` of `react-lazy-child.css`, sampled 40×40 into the
+/// page: blue only once the lazy container's `CSS` section was adopted
+/// through `__LoadStyleSheet`, which only happens if the container installed.
+const LAZY_BOX: &[((usize, usize), [u8; 4])] = &[((40, 40), [0, 0, 255, 255])];
+
+/// Boots one fixture and runs it until `expected` has been logged and every
+/// `probes` pixel shows its colour, painting as it goes so that the lazy
+/// components' own CSS reaches a frame. Any other runtime event fails the
+/// test.
+async fn boots(name: &str, expected: &str, probes: &[((usize, usize), [u8; 4])]) {
     let (sources, resources) = registered(name);
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto)
         .await
@@ -89,10 +92,11 @@ async fn boots(name: &str, expected: &str) {
         }
         painter.pump().expect("the frame draws");
         if logged {
-            // 40×40 into the page, which is inside the 80px `.lazy-box`.
             let shot = painter.capture().expect("a capture");
-            let offset = (40 * 393 + 40) * 4;
-            drawn = shot.pixels[offset..offset + 4] == [0, 0, 255, 255];
+            drawn = probes.iter().all(|&((x, y), colour)| {
+                let offset = (y * 393 + x) * 4;
+                shot.pixels[offset..offset + 4] == colour
+            });
         }
         assert!(
             Instant::now() < deadline,
@@ -116,7 +120,7 @@ async fn boots(name: &str, expected: &str) {
 /// registered yet — `Snapshot not found`. See `docs/tracking/deviations.md`.
 #[tokio::test]
 async fn a_compiled_lazy_card_fetches_its_container_and_renders_it() {
-    boots("react-lazy", "react-lazy-ready").await;
+    boots("react-lazy", "react-lazy-ready", LAZY_BOX).await;
 }
 
 /// The synchronous shape: `lynx.fetchBundle(url, {}).wait(5)` parks the BTS
@@ -124,7 +128,34 @@ async fn a_compiled_lazy_card_fetches_its_container_and_renders_it() {
 /// call returns.
 #[tokio::test]
 async fn a_sync_lazy_card_waits_out_its_container_on_the_background_thread() {
-    boots("react-lazy-sync", "react-lazy-sync-listening").await;
+    boots("react-lazy-sync", "react-lazy-sync-listening", LAZY_BOX).await;
+}
+
+/// The nested shape: an async lazy `Outer` whose container carries the
+/// `CSS` section of `react-lazy-nested-outer.css`, a sync lazy `Inner` inside
+/// it, and a JS module both of `Inner`'s imports share. The 100px orange
+/// `.nested-outer` is painted only once `Outer`'s `CSS` section was adopted;
+/// the 80px `Inner` in its corner turns purple once the shared module ran.
+///
+/// `Inner`'s container has no `CSS` section, yet `rLynxPrepareLazyBundleMTS`
+/// still runs `__LoadStyleSheet('CSS', url)` and adopts what it answers
+/// unless that is `null`. Native's `LoadStyleSheet` answers `undefined` for a
+/// missing section (`renderer_functions.cc:963-968`); here the fetcher's
+/// registry has nothing at `<inner>/custom_section/CSS.css`, so it answers
+/// `null`, and nothing is adopted, requested or reported.
+#[tokio::test]
+async fn a_nested_lazy_card_adopts_the_outer_containers_css() {
+    boots(
+        "react-lazy-nested",
+        "react-lazy-nested-ready",
+        &[
+            // Inside `.nested-outer`, outside the 80px `Inner`.
+            ((90, 90), [255, 165, 0, 255]),
+            // Inside `Inner`, after the shared module recoloured it.
+            ((40, 40), [128, 0, 128, 255]),
+        ],
+    )
+    .await;
 }
 
 /// What the real `react-lazy` chunk decodes to, URL by URL: the one rule both
@@ -159,7 +190,7 @@ fn the_real_lazy_chunk_installs_the_sections_both_realms_ask_for() {
             .map(|(url, _)| url.as_str())
             .collect::<Vec<_>>(),
         // `__LoadStyleSheet('CSS', bundleName)` on MTS.
-        [format!("{ORIGIN}/{name}/index.css")]
+        [format!("{ORIGIN}/{name}/custom_section/CSS.css")]
     );
 
     let (_, main_thread) = sources

@@ -3,8 +3,8 @@
 // A container — the page's own, or a lazy one `lynx.fetchBundle` installed —
 // answers its bodies and its stylesheets at URLs derived from its own: the
 // section name as a `.js` file under the container URL's path, and the named
-// stylesheet as `index.css` under it. `bobcat-source` registers exactly these
-// strings (`named_chunk_url` and `named_style_url` in
+// stylesheet as `custom_section/<encoded name>.css` under it. `bobcat-source`
+// registers exactly these strings (`named_chunk_url` and `named_style_url` in
 // `crates/bobcat-source/src/page.rs`), so the rule lives in one module rather
 // than once per realm — MTS builds them for `__LoadLepusChunk`,
 // `lynx.loadScript` and `__LoadStyleSheet`, BTS for a lazy `bundleName`.
@@ -41,12 +41,11 @@ export function sectionURL(name: string, bundleURL: string): string {
 }
 
 /**
- * The resource URL one named stylesheet lives at: the compiler's `CSS`
- * section is `index.css` under the container URL's path; every other named
- * section has a directory of its own.
+ * The resource URL one named stylesheet lives at: the container URL's path,
+ * then `custom_section/` and the encoded section name as a `.css` file, the
+ * `?#` suffix kept — the compiler's `CSS` section is `custom_section/CSS.css`.
  */
 export function styleSheetURL(key: string, bundleURL: string): string {
   const [path, suffix] = parts(bundleURL);
-  const section = key === "CSS" ? "" : `${encodedSection(key)}/`;
-  return `${path.replace(/\/$/, "")}/${section}index.css${suffix}`;
+  return `${path.replace(/\/$/, "")}/custom_section/${encodedSection(key)}.css${suffix}`;
 }
