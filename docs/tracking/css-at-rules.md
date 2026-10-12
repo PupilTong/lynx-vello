@@ -105,6 +105,20 @@ whole module in [style-assumptions.md](../style-assumptions.md) §28.
 
 ---
 
+### @scope (css-cascade-6 §2.5)
+
+Neither native Lynx nor web-core parses `@scope` (the Lynx CSS compiler
+drops it; the `.web.bundle` wire has no rule kind for it). lynx-vello parses
+it under the fork's `lynx` feature from CSS-text sheets; the cascade side is
+tracked in [css-selectors-cascade.md](css-selectors-cascade.md) and the
+scope in [style-assumptions.md](../style-assumptions.md) §33.
+
+| Item | Description | Tier | W3C-compliant? | Deviation & what we should do instead | Source refs |
+|---|---|---|---|---|---|
+| `@scope [(<scope-start>)]? [to (<scope-end>)]? { … }` | Scoped style rules: explicit and implicit (prelude-less) scoping roots, scoping limits, nested declarations as `:where(:scope)`, relative inner selectors, `@scope` nested in style rules and group rules; implicit root = the document element for a document sheet, the shadow host for a shadow sheet | Extended (user-directed 2026-10-12) | Yes | Not in Lynx native or web-core. No CSSOM; `:has()`/`:nth-child(… of S)` preludes stay gated with the fork's prefs; more than 74 nested `@scope` rules lose their innermost rules to cssparser's 75-block limit (Firefox's behaviour). See [style-assumptions.md §33](../style-assumptions.md) | `vendor/stylo/style/stylesheets/rule_parser.rs`, `vendor/stylo/style/stylesheets/scope_rule.rs`, `vendor/stylo/style/stylist.rs`; `crates/dom/src/style/engine.rs` (`ShadowStyleSheet`); tests `vendor/stylo/style/tests/lynx_scope.rs`, `crates/dom/tests/scope.rs` |
+
+---
+
 ## Also see
 
 Scope note: this is a spec for `.claude/agents/lynx-css-engine.md`. Added as a gap found by the completeness-critique pass.

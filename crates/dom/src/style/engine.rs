@@ -21,12 +21,13 @@ use stylo::properties::{
 };
 use stylo::selector_parser::SelectorParser;
 use stylo::servo_arc::Arc;
-use stylo::shared_lock::{Locked, SharedRwLock, StylesheetGuards};
+use stylo::shared_lock::{Locked, SharedRwLock, SharedRwLockReadGuard, StylesheetGuards};
 pub use stylo::stylesheets::Origin as StylesheetOrigin;
 use stylo::stylesheets::keyframes_rule::{Keyframe, KeyframeSelectors, KeyframesRule};
+use stylo::stylesheets::scope_rule::ImplicitScopeRoot;
 use stylo::stylesheets::{
     AllowImportRules, CssRule as StyloCssRule, CssRuleType, CssRules, DocumentStyleSheet, Origin,
-    StyleRule, Stylesheet, StylesheetContents, UrlExtraData,
+    StyleRule, Stylesheet, StylesheetContents, StylesheetInDocument, UrlExtraData,
 };
 use stylo::stylist::Stylist;
 use stylo::values::{KeyframesName, SourceLocation};
@@ -36,6 +37,45 @@ use stylo_traits::ParsingMode;
 use crate::Document;
 use crate::tree::document::NodeId;
 use crate::tree::shadow::ShadowRootData;
+
+/// An author stylesheet scoped to one shadow tree.
+///
+/// The document-level sheets are stylo's [`DocumentStyleSheet`], which
+/// reports no implicit `@scope` root (css-cascade-6 §2.5: the root of an
+/// `@scope` rule without a `<scope-start>`), so stylo falls back to the
+/// document element, Gecko's root for a sheet with no owner node. A shadow
+/// tree's sheet has no owner node either, but its containing node tree is
+/// the shadow tree, so its implicit root is the shadow host — the root a
+/// constructed sheet adopted by a shadow root resolves to in a browser.
+/// [`ImplicitScopeRoot::Constructed`] is that root: stylo resolves it to the
+/// host of the tree whose rules are being matched, and it may match the host
+/// itself.
+#[derive(Clone, Debug)]
+pub(crate) struct ShadowStyleSheet(pub(crate) Arc<Stylesheet>);
+
+impl PartialEq for ShadowStyleSheet {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl StylesheetInDocument for ShadowStyleSheet {
+    fn enabled(&self) -> bool {
+        self.0.enabled()
+    }
+
+    fn media<'a>(&'a self, guard: &'a SharedRwLockReadGuard) -> Option<&'a MediaList> {
+        self.0.media(guard)
+    }
+
+    fn contents<'a>(&'a self, guard: &'a SharedRwLockReadGuard) -> &'a StylesheetContents {
+        self.0.contents(guard)
+    }
+
+    fn implicit_scope_root(&self) -> Option<ImplicitScopeRoot> {
+        Some(ImplicitScopeRoot::Constructed)
+    }
+}
 
 /// One declaration of a directly constructed rule: a property name plus the
 /// value text a decoded wire format already carries.
@@ -423,9 +463,9 @@ impl StyleEngine {
         })
     }
 
-    fn parse_stylesheet(&self, css: &str, origin: Origin) -> DocumentStyleSheet {
+    fn parse_stylesheet(&self, css: &str, origin: Origin) -> Stylesheet {
         let media = Arc::new(self.lock.wrap(MediaList::empty()));
-        let sheet = Stylesheet::from_str(
+        Stylesheet::from_str(
             css,
             self.url_data.clone(),
             origin,
@@ -435,12 +475,11 @@ impl StyleEngine {
             None,
             QuirksMode::NoQuirks,
             AllowImportRules::Yes,
-        );
-        DocumentStyleSheet(Arc::new(sheet))
+        )
     }
 
     pub(crate) fn add_stylesheet(&mut self, css: &str, origin: Origin) {
-        let sheet = self.parse_stylesheet(css, origin);
+        let sheet = DocumentStyleSheet(Arc::new(self.parse_stylesheet(css, origin)));
         let guard = self.lock.read();
         self.stylist.append_stylesheet(sheet, &guard);
         let invalidations = self.stylist.flush(&StylesheetGuards::same(&guard));
@@ -451,10 +490,10 @@ impl StyleEngine {
 
     pub(crate) fn add_scoped_stylesheet(
         &mut self,
-        styles: &mut AuthorStyles<DocumentStyleSheet>,
+        styles: &mut AuthorStyles<ShadowStyleSheet>,
         css: &str,
     ) {
-        let sheet = self.parse_stylesheet(css, Origin::Author);
+        let sheet = ShadowStyleSheet(Arc::new(self.parse_stylesheet(css, Origin::Author)));
         let guard = self.lock.read();
         styles.stylesheets.append_stylesheet(sheet, &guard);
         let invalidations = styles.flush(&mut self.stylist, &guard);

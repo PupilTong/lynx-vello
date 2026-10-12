@@ -2024,6 +2024,74 @@ and §D.16 with what the wire format actually permits.)*
       stays geometric, as for `bounding_client_rect`). `ResizeObserver`
       stays out.
 
+33. **`@scope` scoped styles (user-directed, 2026-10-12).** css-cascade-6
+    §2.5 "Scoped Styles" (the 2024-09-06 Working Draft's numbering; §3.5 in
+    the current Editor's Draft, whose §3.1 Cascade Sorting Order holds the
+    proximity criterion) and css-nesting "Nesting @scope", in the "Extended,
+    user-directed" bucket with `if()` (§27) and css-anchor-position-1 (§28).
+    Neither Lynx nor web-core has it: the Lynx CSS compiler does not
+    recognise `@scope` and drops the rule with everything inside it
+    (`lynx-stack/packages/web-platform/web-core/CHANGELOG.md`, the markup-card
+    entry listing `@container`, `@property`, `@scope`, …;
+    [lynx-xml-template.md](lynx-xml-template.md) "Build-time path"), and the
+    `.web.bundle` `StyleInfo` wire has exactly three rule kinds
+    (`crates/bobcat-source/src/lower_style.rs` `convert_rule`).
+    - **Implemented.** Stylo's own implementation (Gecko's), enabled by the
+      fork's `lynx` feature at the at-rule name
+      (`vendor/stylo/style/stylesheets/rule_parser.rs`; the
+      `layout.css.at-scope.enabled` pref stays false, so a stock Servo build
+      does not parse it): `<scope-start>` and `<scope-end>` selector lists,
+      the prelude-less implicit form, scoping limits (a limit and its
+      descendants are out of scope), proximity as the cascade criterion after
+      specificity and before order of appearance, `:scope` as the scoping
+      root, `&` as `:where(:scope)` (in `<scope-end>`, the scoping root),
+      inner selectors relative to `:scope` without added specificity,
+      declarations directly in `@scope` as nested declarations matching
+      `:where(:scope)`, `@scope` nested in style rules (its `<scope-start>`
+      relative to the parent rule) and in `@media`/`@supports`/`@layer`
+      and other `@scope` rules, name-defining rules inside it unscoped
+      (`@keyframes`, `@property`), restyle invalidation on class, id,
+      attribute, state and child-list changes that move a root or a limit,
+      and the style sharing cache's per-element scope revalidation.
+    - **Implicit roots.** A document stylesheet has no owner node; its
+      implicit root is the document element (stylo's
+      `ImplicitScopeRoot::DocumentElement`, Gecko's resolution). A shadow
+      tree's stylesheet resolves to the shadow host, as a constructed sheet
+      adopted by a shadow root does in a browser, and the host can match
+      `:scope` (`ShadowStyleSheet` in `crates/dom/src/style/engine.rs`
+      reports `ImplicitScopeRoot::Constructed`). WPT
+      `scope-implicit-constructed-document.html` expects a document-adopted
+      sheet's root to be the document *node* (`:scope` matches nothing, the
+      root element is in scope); no engine ships that yet — Chrome 155 and
+      Safari 27 match nothing there, Gecko uses the document element — and
+      this engine follows Gecko.
+    - **Reach.** Any CSS-text sheet: `Document::add_stylesheet` (author or
+      user-agent origin, so the UA sheet in
+      `crates/bobcat-core/src/main/tree/ua_sheet.rs` can use it) and
+      `Document::add_shadow_stylesheet`. A ReactLynx `.web.bundle` cannot
+      carry it, and neither can the XML `<style>` path; neither is extended.
+    - **Out, with the reason.** CSSOM (`CSSScopeRule`, `insertRule`,
+      `selectorText` mutation): this engine has no CSSOM. `::part()` and
+      pseudo-element subjects under `@scope` (`::before`/`::after` boxes are
+      deferred). `@container` (not supported) and `@starting-style` (behind
+      a false pref). `:has()` and `:nth-child(… of S)` in a prelude or an
+      inner rule while their prefs stay false in the fork. Owner-node
+      implicit roots (`<style>`/`<link>` elements, `@import`) do not exist
+      here. Nesting depth: cssparser stops at 75 nested blocks, so a sheet
+      nesting more than 74 `@scope` rules around a style rule loses the
+      innermost rules at parse time — Firefox's result on WPT
+      `scope-deep.html`, where Chrome and Safari pass.
+    - **Coverage.** `crates/dom/tests/scope.rs` ports `css/css-cascade/`
+      `scope-evaluation`, `-proximity`, `-specificity`, `-declarations`,
+      `-nesting`, `-implicit`, `-shadow`, `-shadow-sharing`,
+      `-ua-shadow-host`, `-invalidation`, `-style-sharing-001`/`-002`,
+      `-layer`, `-media`, `-supports`, `-deep`, `-featureless`,
+      `-name-defining-rules`, `-hover`, `-focus` and three crash tests (its
+      header lists every case left out and why);
+      `vendor/stylo/style/tests/lynx_scope.rs` ports `at-scope-parsing`,
+      `at-scope-relative-syntax` and the `CSSNestedDeclarations` half of
+      `scope-declarations`.
+
 ## Deliberately still open (known non-decisions)
 
 - The v1 media-feature set `Device` exposes (viewport geometry, orientation,

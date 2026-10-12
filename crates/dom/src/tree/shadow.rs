@@ -38,8 +38,8 @@ use std::sync::LazyLock;
 
 use stylo::LocalName;
 use stylo::author_styles::AuthorStyles;
-use stylo::stylesheets::DocumentStyleSheet;
 
+use crate::style::engine::ShadowStyleSheet;
 use crate::tree::document::{Document, NodeId, NodeSlot, PayloadSlot};
 use crate::tree::node::Node;
 
@@ -62,7 +62,7 @@ pub enum ShadowRootMode {
 pub(crate) struct ShadowRootData {
     pub(crate) host: NodeSlot,
     pub(crate) mode: ShadowRootMode,
-    pub(crate) styles: AuthorStyles<DocumentStyleSheet>,
+    pub(crate) styles: AuthorStyles<ShadowStyleSheet>,
     slots: Option<Vec<NodeId>>,
 }
 
