@@ -639,6 +639,12 @@ pub struct ViewSources {
     pub config: PageConfig,
     pub fonts: Vec<FontBlob>,
     pub default_font_family: Option<String>,
+    /// Font containers whose families are appended to every script's fallback
+    /// list, in order: what shapes text no family of its own `font-family`
+    /// covers. For an embedder without a system-font backend, which has no
+    /// fallback otherwise; a script listed here stops asking the platform for
+    /// its own.
+    pub fallback_fonts: Vec<FontBlob>,
     pub style_sheets: Vec<String>,
     /// The MTS entry's URL, which may be relative: `create_lynx_view`
     /// resolves it against [`Self::base_url`], and both the fetcher's request
@@ -703,6 +709,7 @@ impl ViewSources {
             config: PageConfig::default(),
             fonts: Vec::new(),
             default_font_family: None,
+            fallback_fonts: Vec::new(),
             style_sheets: Vec::new(),
             entry: entry.into(),
             background_entry: None,
@@ -926,6 +933,7 @@ impl LynxGroup {
         let text_context = stage_text_context(
             std::mem::take(&mut sources.fonts),
             default_font_family.as_deref(),
+            std::mem::take(&mut sources.fallback_fonts),
         )?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         // One view, one set of channels and one end signal: nothing here is
@@ -1615,13 +1623,17 @@ pub(crate) fn resolve_startup_urls(sources: &mut ViewSources) -> Result<url::Url
 fn stage_text_context(
     fonts: Vec<FontBlob>,
     default_font_family: Option<&str>,
+    fallback_fonts: Vec<FontBlob>,
 ) -> Result<Option<dom::TextContext>, LynxViewError> {
-    if fonts.is_empty() && default_font_family.is_none() {
+    if fonts.is_empty() && default_font_family.is_none() && fallback_fonts.is_empty() {
         return Ok(None);
     }
     let mut text = dom::TextContext::new();
     for font in fonts {
         text.register_fonts(font);
+    }
+    for font in fallback_fonts {
+        text.register_fallback_fonts(font);
     }
     if let Some(family) = default_font_family
         && !text.set_default_font_family(family)

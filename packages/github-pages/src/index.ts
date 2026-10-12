@@ -505,6 +505,109 @@ async function loadDemoFont(): Promise<Uint8Array> {
   return new Uint8Array(await response.arrayBuffer());
 }
 
+// The Local Font Access API, which TypeScript's DOM library does not declare.
+interface LocalFontData {
+  readonly family: string;
+  blob(): Promise<Blob>;
+}
+
+type LocalFontWindow = Window & {
+  queryLocalFonts?(): Promise<LocalFontData[]>;
+};
+
+// The families read from the system for Chinese, the first one installed
+// winning: macOS, Windows, then the usual Linux and Android ones.
+const SYSTEM_FALLBACK_FAMILIES = [
+  'PingFang SC',
+  'Hiragino Sans GB',
+  'Microsoft YaHei',
+  'Noto Sans CJK SC',
+  'Noto Sans SC',
+  'Source Han Sans SC',
+  'WenQuanYi Micro Hei',
+  'Heiti SC',
+  'SimSun',
+  'Droid Sans Fallback',
+];
+
+async function localFontPermission(): Promise<PermissionState> {
+  try {
+    const status = await navigator.permissions.query({
+      name: 'local-fonts' as PermissionName,
+    });
+    return status.state;
+  } catch {
+    // A browser that does not know the permission still prompts on a query.
+    return 'prompt';
+  }
+}
+
+// Asks before the first read: a query made outside a click cannot prompt.
+function systemFontConsent(shell: Shell): Promise<void> {
+  return new Promise((resolve) => {
+    const panel = document.createElement('div');
+    panel.className = 'font-consent';
+    const note = document.createElement('p');
+    note.className = 'field-help';
+    note.textContent =
+      'The browser gives the engine no system fonts. Allow access to local fonts to render Chinese text; without it only Roboto is available.';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'primary-button';
+    button.textContent = 'Use system fonts';
+    button.addEventListener('click', () => resolve(), { once: true });
+    panel.append(note, button);
+    shell.canvasHost.replaceChildren(panel);
+  });
+}
+
+// The files of the first installed fallback family. A collection file holds
+// every face of its family, so faces that are the same file are read once.
+async function readSystemFallbackFonts(
+  query: () => Promise<LocalFontData[]>,
+): Promise<Uint8Array[]> {
+  const installed = await query();
+  const family = SYSTEM_FALLBACK_FAMILIES.find((name) =>
+    installed.some((font) => font.family === name),
+  );
+  const files = new Map<number, Blob>();
+  for (const font of installed) {
+    if (font.family === family) {
+      const blob = await font.blob();
+      files.set(blob.size, blob);
+    }
+  }
+  return Promise.all(
+    Array.from(files.values(), async (blob) => new Uint8Array(await blob.arrayBuffer())),
+  );
+}
+
+/**
+ * The system fonts every script falls back to, read once the user has agreed.
+ * Empty where the browser has no Local Font Access API or the user refused,
+ * which leaves the page with Roboto alone.
+ */
+async function loadSystemFallbackFonts(shell: Shell): Promise<Uint8Array[]> {
+  const query = (window as LocalFontWindow).queryLocalFonts;
+  if (typeof query !== 'function') {
+    return [];
+  }
+  const permission = await localFontPermission();
+  if (permission === 'denied') {
+    return [];
+  }
+  if (permission === 'prompt') {
+    shell.message.textContent = 'Waiting for access to system fonts…';
+    await systemFontConsent(shell);
+  }
+  try {
+    return await readSystemFallbackFonts(() => query.call(window));
+  } catch (error) {
+    console.warn('Could not read system fonts', error);
+    return [];
+  }
+}
+
 function canvasMetrics(canvas: HTMLCanvasElement): CanvasSize {
   const bounds = canvas.getBoundingClientRect();
   return {
@@ -670,6 +773,7 @@ function createExplorerModule(
 class PreviewRenderer {
   readonly #config: PageConfig;
   readonly #factory: BobcatCanvasFactory;
+  readonly #fallbackFonts: readonly Uint8Array[];
   readonly #fontBytes: Uint8Array;
   readonly #nativeModules: NativeModules;
   readonly #reportFatal: (error: Error) => void;
@@ -687,6 +791,7 @@ class PreviewRenderer {
     factory: BobcatCanvasFactory,
     config: PageConfig,
     fontBytes: Uint8Array,
+    fallbackFonts: readonly Uint8Array[],
     nativeModules: NativeModules,
     reportFatal: (error: Error) => void,
   ) {
@@ -694,6 +799,7 @@ class PreviewRenderer {
     this.#factory = factory;
     this.#config = config;
     this.#fontBytes = fontBytes;
+    this.#fallbackFonts = fallbackFonts;
     this.#nativeModules = nativeModules;
     this.#reportFatal = reportFatal;
     this.#resizeObserver = new ResizeObserver(() => this.scheduleResize());
@@ -797,6 +903,9 @@ class PreviewRenderer {
         // container without the Roboto family makes the first load reject.
         await view.registerFonts(this.#fontBytes);
         await view.setDefaultFontFamily('Roboto');
+        for (const font of this.#fallbackFonts) {
+          await view.registerFallbackFonts(font);
+        }
       } catch (error) {
         if (this.#view === view) {
           this.#view = undefined;
@@ -1068,6 +1177,14 @@ async function start(shell: Shell, router: TabRouter): Promise<void> {
 
   await init();
 
+  // The module is loaded and instantiated by now; only the Rust renderer,
+  // which takes its fonts at construction, waits for the user's answer.
+  const fallbackFonts = await loadSystemFallbackFonts(shell);
+  shell.message.textContent =
+    fallbackFonts.length === 0
+      ? 'No system fonts: text Roboto does not cover is not rendered.'
+      : 'System fonts loaded.';
+
   // The Explorer homepage opens templates through its own native module; the
   // loader it uses is the page's, and exists only once `installSources` has
   // built it below.
@@ -1077,6 +1194,7 @@ async function start(shell: Shell, router: TabRouter): Promise<void> {
     BobcatCanvas,
     LYNX_XML_PAGE_CONFIG,
     fontBytes,
+    fallbackFonts,
     createExplorerModule(shell, loader),
     (error) => {
       setIndicator(shell.renderer, 'Failed', 'error');

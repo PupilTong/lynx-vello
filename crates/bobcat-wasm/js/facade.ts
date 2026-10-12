@@ -1080,6 +1080,15 @@ export class BobcatCanvas {
     })
   }
 
+  /**
+   * Retain font faces every script falls back to, for every page this canvas
+   * loads: they shape the text no family of its own font-family covers. Call
+   * before a load.
+   */
+  async registerFallbackFonts(data: ArrayBuffer | Uint8Array): Promise<void> {
+    await this.#request('registerFallbackFonts', { bytes: fontBytes(data) })
+  }
+
   async resize(
     width: number,
     height: number,

@@ -1089,6 +1089,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         // whose answers `startup` carries, beside the URL each was named by.
         fonts: _,
         default_font_family: _,
+        fallback_fonts: _,
         style_sheets: _,
         entry: _,
         background_entry,
