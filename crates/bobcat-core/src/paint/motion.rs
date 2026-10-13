@@ -672,6 +672,8 @@ mod tests {
             min: at,
             max: at,
             stop: false,
+            area: dom::NodeId::from_bits(1).expect("a well-formed handle"),
+            order: 0,
         });
         let snap = SnapAxis {
             strictness: dom::scroll::SnapStrictness::Mandatory,

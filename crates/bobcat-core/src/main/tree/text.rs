@@ -27,14 +27,17 @@
 /// `text`'s own defaults, from `web-elements`' `x-text.css`.
 ///
 /// `color: initial` is why Lynx text does not wear an ancestor's color. Native
-/// Lynx runs with inheritance off; web-core runs on the browser's always-on
-/// inheritance and buys the same result by resetting `color` at every text
-/// root, which is the parity this engine committed to
-/// (`docs/tracking/deviations.md`). A nested run opts back in with `inherit`,
-/// and that carries a Lynx text gradient exactly as it carries a solid color —
-/// the fork's `color` holds either, and the glyph painter reads whichever it
-/// finds. The reset therefore also stops an ancestor's gradient at the text
-/// root, where web-core stops it with the same declaration.
+/// Lynx runs with inheritance off unless the page turns it on; web-core runs
+/// on the browser's always-on inheritance and buys the same result by
+/// resetting `color` at every text root, which is the parity this engine
+/// committed to (`docs/tracking/deviations.md`). A nested run opts back in
+/// with `inherit`, and that carries a Lynx text gradient exactly as it carries
+/// a solid color — the fork's `color` holds either, and the glyph painter
+/// reads whichever it finds. The reset therefore also stops an ancestor's
+/// gradient at the text root, where web-core stops it with the same
+/// declaration. A page whose config says `enableCSSInheritance: true` gets
+/// [`CSS_INHERITANCE_RULES`] after these rules, which overrides the reset for
+/// a `text` inside a `view`.
 ///
 /// A `text` renders text: anything else written directly inside one generates
 /// no box, and the tags that are content opt back in. `wrapper` dissolves,
@@ -127,6 +130,60 @@ text > inline-truncation { display: -lynx-text !important; --lynx-inline-truncat
 text > text, text > wrapper > text { color: inherit; }
 text > image, text > wrapper > image, inline-text > image, inline-text > wrapper > image, text > inline-truncation > image, text > inline-truncation > wrapper > image { padding: 0 !important; }
 "#;
+
+/// What `enableCSSInheritance: true` adds to the sheet, after [`UA_RULES`];
+/// [`super::ua_sheet`] writes it when the page config has the switch on and
+/// leaves it out otherwise.
+///
+/// It is web-core's rule for the same switch (lynx-stack #3907, `8d0b358bf`,
+/// `web-core/css/in_shadow.css`):
+/// `[lynx-enable-css-inheritance="true"] :where(x-view > x-text, x-view >
+/// lynx-wrapper, x-view > lynx-wrapper > x-text)` over fourteen `inherit`
+/// declarations. The scope is that rule's and no wider: a `text` directly
+/// inside a `view`, a `wrapper` directly inside a `view`, and a `text`
+/// directly inside such a wrapper. A `text` under `page`, `scroll-view`,
+/// `list-item` or any other container keeps the reset, as it does there.
+/// Native Lynx's switch of the same name does something else — a list of
+/// properties that inherit through every element, where nothing inherits
+/// with it off — and this rule does not build that
+/// (`docs/tracking/deviations.md`).
+///
+/// # Which declarations are written
+///
+/// Two of the fourteen change a computed value in this engine:
+///
+/// - `color: inherit` replaces the `color: initial` [`UA_RULES`] gives every `text`. The fork's
+///   `color` holds a Lynx text gradient as its own value, so this one declaration inherits a view's
+///   gradient as well as its solid color.
+/// - `text-decoration: inherit`. The shorthand's longhands are not inherited properties, so under
+///   an underlined view a `text` computes `none` without it. `view > wrapper` is in the selector
+///   for this declaration: the wrapper has to hold the view's value for the `text` inside it to
+///   inherit it.
+///
+/// The other twelve are left out because none of them can change one:
+///
+/// - `--lynx-text-bg-color`, `background-clip` and `-webkit-background-clip` belong to web-core's
+///   lowering of a gradient `color` for a browser — transparent glyphs over a background image
+///   clipped to them, which `x-text.css` resets at the text root. This engine lowers no gradient
+///   that way, so there is no reset here for them to override.
+/// - `direction`, `font-family`, `font-size`, `font-style`, `font-weight`, `letter-spacing`,
+///   `line-height`, `text-align` and `text-shadow` are inherited properties, and no rule of this
+///   sheet sets one of them on a `text` or a `wrapper`. Each already reaches the `text` from the
+///   view with the switch off, as it does under web-core, where `x-text.css` resets none of them.
+///
+/// # Precedence
+///
+/// web-core's selector has the specificity of one attribute selector, since
+/// `:where()` adds none: above every web-elements default for `x-text`, and
+/// above no authored rule, each of whose selectors web-core extends with
+/// `:not([l-e-name])`. Here the rule is user-agent origin, so every authored
+/// declaration and every inline style outranks it whatever its selector, and
+/// its tag selectors outrank `text`'s `color: initial` on specificity. The
+/// selector list is not wrapped in `:where()` for that reason: at no
+/// specificity it would lose to the reset it exists to replace.
+pub(super) const CSS_INHERITANCE_RULES: &str = "\
+view > text, view > wrapper, view > wrapper > text { color: inherit; text-decoration: inherit; }
+";
 
 use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId};
 use serde_json::{Map, Value};

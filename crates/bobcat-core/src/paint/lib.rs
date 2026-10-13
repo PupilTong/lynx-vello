@@ -166,6 +166,15 @@ pub(crate) struct FarEnd {
     notices: mpsc::UnboundedReceiver<crate::link::ViewNotice>,
 }
 
+/// The canvas colour: what a painter's target holds before a frame composes
+/// over it, and so what shows wherever the page painted nothing.
+///
+/// Named once because two renders read it. The composite render clears to
+/// it, and the bake of a `backdrop-filter` element at the document's root
+/// renders over it, since filter-effects-2's Backdrop Root Image of the root
+/// holds the canvas (see [`dom::render::blur`]).
+const CANVAS: Color = Color::WHITE;
+
 /// Where a painter's pixels go: a window's presentation stack, or a texture
 /// it owns and nothing displays. It is built with the painter and is the one
 /// it has for its whole life, whatever views come and go past it.
@@ -294,6 +303,7 @@ impl Output {
                     offset_of,
                     scroll_generation,
                     animation_now,
+                    CANVAS,
                 )
                 .map_err(|error| EngineError::Gpu(error.to_string()))?,
             Self::Window(graphics) => graphics.prepare_filters(
@@ -332,7 +342,7 @@ impl Output {
             #[cfg(test)]
             Self::None => Ok(()),
             Self::Offscreen(gpu) => gpu
-                .render_frame(scene, images, size.width, size.height, Color::WHITE)
+                .render_frame(scene, images, size.width, size.height, CANVAS)
                 .map_err(|error| EngineError::Gpu(error.to_string())),
             Self::Window(graphics) => graphics.render_to_target(scene, images, size),
         }
@@ -454,6 +464,15 @@ pub(super) struct ScrollIntents {
     /// and glide targets that refer to it by the same amount.
     pub(super) offsets: FxHashMap<NodeId, Vector2D<f32>>,
     rebased_commit: Option<u64>,
+    /// The snap area each container stood on, in the frame the offsets were
+    /// last rebased onto: read off that frame's positions as a newer commit
+    /// replaces it ([`Self::leave`]), and spent by the rebase onto that
+    /// commit, which moves each such container at rest onto its area's new
+    /// position (css-scroll-snap-1 §4.1.3). Empty outside that interval.
+    /// What a container is snapped to follows from its offset and the frame
+    /// it stands on, so nothing tracks it while that frame is at hand; this
+    /// holds it for the one step that no longer has the frame.
+    snapped: FxHashMap<NodeId, Snapped>,
     generation: u64,
     /// Where each drag found each container it moved: the offset before the
     /// drag's first step on it, keyed by the pointer and the container. The
@@ -485,12 +504,49 @@ pub(super) struct ScrollIntents {
     posting: SmallVec<[(NodeId, ScrollEntry); 2]>,
 }
 
+/// The snap area a container stood on, per axis; `None` on an axis where it
+/// stood on no position.
+#[derive(Debug, Clone, Copy)]
+struct Snapped {
+    x: Option<NodeId>,
+    y: Option<NodeId>,
+}
+
 impl ScrollIntents {
+    /// Reads, as a newer commit replaces `frame`, the snap area each
+    /// container stands on in it ([`dom::scroll::SnapAxis::snapped_area`],
+    /// from the live offset), for the rebase onto that commit to follow.
+    /// Every container is read, moving or not: whether one is at rest is
+    /// decided by that rebase.
+    ///
+    /// Offsets that never stood on `frame` — it was adopted and replaced
+    /// with no rebase between — are not read against its positions; what
+    /// the frame they do stand on left behind still holds.
+    fn leave(&mut self, frame: &CommittedFrame) {
+        if self.rebased_commit != Some(frame.commit_id()) {
+            return;
+        }
+        self.snapped.clear();
+        for slot in frame.scroll_slots() {
+            let (snap_x, snap_y) = frame.snap_axes(slot);
+            if snap_x.is_none() && snap_y.is_none() {
+                continue;
+            }
+            let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
+            let x = snap_x.and_then(|snap| snap.snapped_area(offset.x));
+            let y = snap_y.and_then(|snap| snap.snapped_area(offset.y));
+            if x.is_some() || y.is_some() {
+                self.snapped.insert(slot.node, Snapped { x, y });
+            }
+        }
+    }
+
     /// Brings the intents onto a newly adopted `frame`, at `now`: re-clamps
     /// every live offset to the frame's ranges — or, on a circular axis,
     /// normalizes it into the period — drops what moves a container the
     /// frame no longer has, carries out the requests the frame brings for
-    /// the first time, and settles the snapping containers at rest.
+    /// the first time, and settles the snapping containers at rest, each
+    /// onto the area it stood on where it stood on one.
     ///
     /// A normalization moves the live offset by whole periods, so the
     /// drag origins and glide targets of that container move with it
@@ -615,6 +671,9 @@ impl ScrollIntents {
     ) {
         let node = slot.node;
         self.stop_motion_on(frame, node, now);
+        // The request decides where the container goes, not the area it
+        // stood on before.
+        self.snapped.remove(&node);
         let live = self.offsets.get(&node).copied().unwrap_or(slot.offset);
         match request.behavior {
             ScrollBehavior::Instant => {
@@ -653,13 +712,53 @@ impl ScrollIntents {
     /// applied — so each snapping container no drag is holding, no fling is
     /// driving and no bounce back or glide is moving settles from where it
     /// stands, at once, as an intent like any other scroll.
+    ///
+    /// §4.1.3 comes first: a container that stood on an area's position in
+    /// the frame this one replaces ([`Self::leave`]) moves onto that area's
+    /// position here, and the at-rest rule then finds it on a position and
+    /// leaves it. A container something is moving follows nothing — where
+    /// it rests is decided when the drag, fling, bounce back or glide ends —
+    /// so what was read for it is dropped with the rest.
     fn settle_at_rest(&mut self, frame: &CommittedFrame) {
+        let mut snapped = std::mem::take(&mut self.snapped);
         for slot in frame.scroll_slots() {
             if self.is_held(slot.node) || self.is_bouncing(slot.node) || self.is_gliding(slot.node)
             {
                 continue;
             }
+            if let Some(snapped) = snapped.get(&slot.node) {
+                self.follow_snapped(frame, slot, *snapped);
+            }
             self.settle_node_at_rest(frame, slot);
+        }
+        snapped.clear();
+        self.snapped = snapped;
+    }
+
+    /// css-scroll-snap-1 §4.1.3 for one container at rest: on each axis it
+    /// stood on an area's position, it moves to the position `frame` gives
+    /// that area ([`dom::scroll::SnapAxis::position_of`]), however far that
+    /// is and whatever the strictness. An axis whose area contributes no
+    /// position any more keeps its offset, for the at-rest rule. On a
+    /// circular axis the position is taken into the period, where the
+    /// rebase has just brought the offset: the old offset says nothing
+    /// about which copy is near under the new period, and nothing refers to
+    /// the offset of a container at rest.
+    fn follow_snapped(&mut self, frame: &CommittedFrame, slot: &dom::ScrollSlot, snapped: Snapped) {
+        let (snap_x, snap_y) = frame.snap_axes(slot);
+        let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
+        let axis = |area: Option<NodeId>, snap: Option<dom::scroll::SnapAxis<'_>>, offset: f32| {
+            area.zip(snap)
+                .and_then(|(area, snap)| snap.position_of(area, offset))
+                .unwrap_or(offset)
+        };
+        let followed = slot.wrap(Vector2D::new(
+            axis(snapped.x, snap_x, offset.x),
+            axis(snapped.y, snap_y, offset.y),
+        ));
+        if followed != offset {
+            self.write(slot.node, followed);
+            self.generation += 1;
         }
     }
 
@@ -1428,6 +1527,10 @@ impl Painter {
                     return;
                 };
                 self.images.resolve(frame, seat.images.as_ref());
+            }
+            // While the outgoing frame's snap positions can still be read.
+            if let Some(outgoing) = self.published.frame.as_deref() {
+                self.scroll_intents.leave(outgoing);
             }
             self.redraw_pending.set(true);
         }

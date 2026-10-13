@@ -616,7 +616,7 @@ fn render_filtered(gpu: &mut dom::render::gpu::Headless, doc: &mut Doc, size: u3
         .committed_frame()
         .expect("render leaves a committed frame retained");
     let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-        .prepare_filters(&frame, &[], &[], &|_| None, 0, None)
+        .prepare_filters(&frame, &[], &[], &|_| None, 0, None, Color::WHITE)
         .expect("the filter bakes render")
         .to_vec();
     let mut scene = Scene::new();
@@ -864,6 +864,7 @@ fn a_blurred_box_in_a_scroller_moves_with_the_offset() {
                 &|_| Some(Vector2D::new(0.0, offset)),
                 0,
                 None,
+                Color::WHITE,
             )
             .expect("the filter bakes render")
             .to_vec();
@@ -949,7 +950,7 @@ fn a_sliding_blurred_card_stays_inside_its_ancestors_clip() {
     // frame's clip ends at x = 100.
     let now = Some(0.6);
     let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-        .prepare_filters(&frame, &[], &[], &|_| None, 0, now)
+        .prepare_filters(&frame, &[], &[], &|_| None, 0, now, Color::WHITE)
         .expect("the filter bakes render")
         .to_vec();
     let mut scene = Scene::new();
@@ -978,7 +979,7 @@ fn compose_at(
     (width, height): (u32, u32),
 ) -> Vec<u8> {
     let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-        .prepare_filters(frame, &[], &[], &|_| None, 0, now)
+        .prepare_filters(frame, &[], &[], &|_| None, 0, now, Color::WHITE)
         .expect("the filter bakes render")
         .to_vec();
     let mut scene = Scene::new();
@@ -1258,7 +1259,7 @@ fn a_blurred_backdrop_over_a_scroller_re_bakes_with_it() {
     let draw = |gpu: &mut dom::render::gpu::Headless, generation: u64, offset: f32| {
         let offset_of = |_: &dom::ScrollSlot| Some(Vector2D::new(0.0, offset));
         let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-            .prepare_filters(&frame, &[], &[], &offset_of, generation, None)
+            .prepare_filters(&frame, &[], &[], &offset_of, generation, None, Color::WHITE)
             .expect("the entries bake")
             .to_vec();
         assert!(filtered.iter().all(Option::is_some), "both entries baked");
@@ -1284,8 +1285,9 @@ fn a_blurred_backdrop_over_a_scroller_re_bakes_with_it() {
 
 /// A page of 4 px black stripes on 8 px centres over white, which any blur
 /// visibly greys: a pixel reading pure black or pure white is one no filter
-/// reached. The page paints its own white, because a backdrop is made of what
-/// the scene drew, not of the render's base colour.
+/// reached. The page paints its own white ground, so a test over it reads
+/// nothing of the canvas; the canvas tests further down cover a page that
+/// paints none.
 fn striped_page(css: &str, width: f32, height: f32) -> Doc {
     let mut doc = Doc::with_css_sized(
         &format!(
@@ -1673,7 +1675,7 @@ fn a_group_over_the_budget_renders_unblurred() {
         "and it is past the budget ({width}x{height})",
     );
     let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-        .prepare_filters(&frame, &[], &[], &|_| None, 0, None)
+        .prepare_filters(&frame, &[], &[], &|_| None, 0, None, Color::WHITE)
         .expect("a refused group is not an error")
         .to_vec();
     assert_eq!(filtered.len(), 1);
@@ -1710,17 +1712,42 @@ fn a_group_over_the_budget_renders_unblurred() {
 ///
 /// The seam is the subject: a blur turns the step into a gradient, and every
 /// pixel of that gradient is inside the box while every pixel outside it
-/// stays a hard edge. The page paints its own opaque white, because a
-/// backdrop is made of what the *scene* drew — the render's base colour is
-/// behind the scene, not in it, so a transparent page would leave the
-/// backdrop's light half empty.
+/// stays a hard edge. The page paints its own opaque white ground;
+/// [`seam_page`] is the same page with the ground left to the canvas.
 fn backdrop_page(size: f32, box_rect: (f32, f32, f32, f32), extra: &str) -> Doc {
+    seam_page(Ground::Painted, size, box_rect, "", extra)
+}
+
+/// What lies under a [`seam_page`]'s black half and its box.
+#[derive(Clone, Copy)]
+enum Ground {
+    /// An opaque white background the page paints itself.
+    Painted,
+    /// Nothing: the canvas, which is the render's base colour.
+    Canvas,
+}
+
+/// [`backdrop_page`] over `ground`, with the box inside a viewport-sized
+/// wrapper carrying `wrapper`.
+fn seam_page(
+    ground: Ground,
+    size: f32,
+    box_rect: (f32, f32, f32, f32),
+    wrapper: &str,
+    extra: &str,
+) -> Doc {
     let (left, top, width, height) = box_rect;
+    let ground = match ground {
+        Ground::Painted => "background-color: #ffffff;",
+        Ground::Canvas => "",
+    };
     let css = format!(
         "page {{ display: flex; position: relative; width: {size}px; height: {size}px;
-                 background-color: #ffffff; }}
+                 {ground} }}
          .half {{ display: flex; position: absolute; left: 0px; top: 0px;
                   width: {half}px; height: {size}px; background-color: #000000; }}
+         .wrap {{ display: flex; position: absolute; left: 0px; top: 0px;
+                  width: {size}px; height: {size}px; {wrapper} }}
          .box {{ display: flex; position: absolute; left: {left}px; top: {top}px;
                  width: {width}px; height: {height}px; {extra} }}",
         half = size / 2.0,
@@ -1728,7 +1755,8 @@ fn backdrop_page(size: f32, box_rect: (f32, f32, f32, f32), extra: &str) -> Doc 
     let mut doc = Doc::with_css_sized(&css, size, size);
     let root = doc.root;
     doc.el(root, "half");
-    doc.el(root, "box");
+    let wrap = doc.el(root, "wrap");
+    doc.el(wrap, "box");
     doc
 }
 
@@ -1743,6 +1771,17 @@ fn render_baked(
     size: u32,
     entries: usize,
 ) -> Vec<u8> {
+    render_baked_over(gpu, doc, size, entries, Color::WHITE)
+}
+
+/// [`render_baked`] over a canvas of `canvas`.
+fn render_baked_over(
+    gpu: &mut dom::render::gpu::Headless,
+    doc: &mut Doc,
+    size: u32,
+    entries: usize,
+    canvas: Color,
+) -> Vec<u8> {
     doc.dom.render();
     gpu.forget_filters();
     let frame = doc
@@ -1755,7 +1794,7 @@ fn render_baked(
         "the frame's filter entries",
     );
     let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-        .prepare_filters(&frame, &[], &[], &|_| None, 0, None)
+        .prepare_filters(&frame, &[], &[], &|_| None, 0, None, canvas)
         .expect("the bakes render")
         .to_vec();
     assert!(
@@ -1764,7 +1803,7 @@ fn render_baked(
     );
     let mut scene = Scene::new();
     frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
-    gpu.render(&scene, &[], size, size, Color::WHITE)
+    gpu.render(&scene, &[], size, size, canvas)
         .expect("headless render")
 }
 
@@ -1966,6 +2005,7 @@ fn a_fixed_backdrop_over_a_scroller_rebakes_per_offset() {
                 &|_| Some(Vector2D::new(0.0, offset)),
                 generation,
                 None,
+                Color::WHITE,
             )
             .expect("the backdrop bakes")
             .to_vec();
@@ -2123,7 +2163,7 @@ fn a_backdrop_over_the_budget_stays_unfiltered() {
         "and it is past the budget ({width}x{height})",
     );
     let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-        .prepare_filters(&frame, &[], &[], &|_| None, 0, None)
+        .prepare_filters(&frame, &[], &[], &|_| None, 0, None, Color::WHITE)
         .expect("a refused entry is not an error")
         .to_vec();
     assert_eq!(filtered.len(), 1);
@@ -2167,7 +2207,7 @@ fn a_colour_only_backdrop_darkens_only_inside_the_box() {
         "a colour-only list has no blur",
     );
     let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-        .prepare_filters(&frame, &[], &[], &|_| None, 0, None)
+        .prepare_filters(&frame, &[], &[], &|_| None, 0, None, Color::WHITE)
         .expect("the backdrop bakes")
         .to_vec();
     assert!(
@@ -2194,6 +2234,309 @@ fn a_colour_only_backdrop_darkens_only_inside_the_box() {
         luma(&pixels, 128, 48, 64) < 8,
         "the black half stays black ({})",
         luma(&pixels, 128, 48, 64),
+    );
+}
+
+// The canvas. filter-effects-2's Backdrop Root Image of the document's root
+// element holds the canvas under whatever the page painted, and here the
+// canvas is the render's base colour, which no op of the frame draws. Most of
+// these render one page twice — over the bare canvas, and over an opaque
+// ground of the canvas's colour that the page paints itself — and hold the
+// two to the same pixels, so they need no opinion on what a filter looks
+// like.
+
+/// A box over nothing but the canvas filters the canvas: `brightness(0.5)`
+/// halves the canvas colour inside the border box and leaves it beside it,
+/// and a `blur()` of that one colour is that colour.
+///
+/// Nothing is painted before the box, so its range is empty and the canvas is
+/// its whole backdrop.
+#[test]
+fn a_backdrop_over_the_bare_canvas_filters_the_canvas_colour() {
+    let mut gpu = headless("a_backdrop_over_the_bare_canvas_filters_the_canvas_colour");
+    let page = |extra: &str| {
+        let css = format!(
+            "page {{ display: flex; position: relative; width: 128px; height: 128px; }}
+             .box {{ display: flex; position: absolute; left: 32px; top: 32px;
+                     width: 64px; height: 64px; {extra} }}"
+        );
+        let mut doc = Doc::with_css_sized(&css, 128.0, 128.0);
+        let root = doc.root;
+        doc.el(root, "box");
+        doc
+    };
+    for (canvas, colour) in [
+        (Color::WHITE, [255_u8, 255, 255, 255]),
+        (Color::from_rgb8(40, 120, 200), [40, 120, 200, 255]),
+    ] {
+        let mut doc = page("backdrop-filter: brightness(0.5);");
+        let pixels = render_baked_over(&mut gpu, &mut doc, 128, 1, canvas);
+        let frame = doc.dom.committed_frame().expect("a committed frame");
+        assert!(
+            frame.filter_groups()[0].reads_canvas(),
+            "the box's Backdrop Root is the document's",
+        );
+        let inside = pixel(&pixels, 128, 64, 64);
+        for channel in 0..3 {
+            assert!(
+                inside[channel].abs_diff(colour[channel] / 2) <= 3,
+                "the canvas {colour:?} is halved inside the box ({inside:?})",
+            );
+        }
+        assert_eq!(
+            pixel(&pixels, 128, 16, 64),
+            colour,
+            "and untouched beside it"
+        );
+
+        let mut doc = page("backdrop-filter: blur(6px);");
+        let pixels = render_baked_over(&mut gpu, &mut doc, 128, 1, canvas);
+        for (x, y) in [(64, 64), (33, 33), (94, 94), (16, 64)] {
+            let read = pixel(&pixels, 128, x, y);
+            for channel in 0..4 {
+                assert!(
+                    read[channel].abs_diff(colour[channel]) <= 1,
+                    "a blur of the canvas {colour:?} alone is the canvas at ({x}, {y}): {read:?}",
+                );
+            }
+        }
+    }
+}
+
+/// One committed frame drawn over two canvas colours through one renderer:
+/// the second draw filters the second canvas, not the bake the first left in
+/// the cache.
+#[test]
+fn a_canvas_change_re_bakes_a_backdrop_over_it() {
+    let mut gpu = headless("a_canvas_change_re_bakes_a_backdrop_over_it");
+    let mut doc = Doc::with_css_sized(
+        "page { display: flex; position: relative; width: 64px; height: 64px; }
+         .box { display: flex; position: absolute; left: 16px; top: 16px;
+                width: 32px; height: 32px; backdrop-filter: brightness(0.5); }",
+        64.0,
+        64.0,
+    );
+    let root = doc.root;
+    doc.el(root, "box");
+    doc.dom.render();
+    gpu.forget_filters();
+    let frame = doc
+        .dom
+        .committed_frame()
+        .expect("render leaves a committed frame retained");
+    for (canvas, colour) in [
+        (Color::WHITE, [255_u8, 255, 255]),
+        (Color::from_rgb8(40, 120, 200), [40, 120, 200]),
+    ] {
+        let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
+            .prepare_filters(&frame, &[], &[], &|_| None, 0, None, canvas)
+            .expect("the backdrop bakes")
+            .to_vec();
+        let mut scene = Scene::new();
+        frame.compose_into(&mut scene, &[], &filtered, &[], &|_| None, None);
+        let pixels = gpu
+            .render(&scene, &[], 64, 64, canvas)
+            .expect("headless render");
+        let inside = pixel(&pixels, 64, 32, 32);
+        for channel in 0..3 {
+            assert!(
+                inside[channel].abs_diff(colour[channel] / 2) <= 3,
+                "the canvas {colour:?} is halved inside the box ({inside:?})",
+            );
+        }
+    }
+}
+
+/// A box straddling the edge of a black half over the bare canvas blurs that
+/// edge on both sides: the profile is symmetric about it, where a bake
+/// without the canvas leaves the black side of the edge unfiltered — the
+/// blurred copy fades to transparency there and the sharp half shows through.
+#[test]
+fn a_backdrop_blur_over_the_canvas_softens_an_edge_on_both_sides() {
+    let mut gpu = headless("a_backdrop_blur_over_the_canvas_softens_an_edge_on_both_sides");
+    let subject = "backdrop-filter: blur(6px);";
+    let rect = (32.0, 32.0, 64.0, 64.0);
+    let mut bare = seam_page(Ground::Canvas, 128.0, rect, "", subject);
+    let bare = render_baked(&mut gpu, &mut bare, 128, 1);
+
+    // The seam is at x = 64.0, so 63 and 64 are the symmetric pair.
+    for distance in 0..=12_u32 {
+        let dark = luma(&bare, 128, 63 - distance, 64);
+        let light = luma(&bare, 128, 64 + distance, 64);
+        assert!(
+            (dark + light - 255).abs() <= 6,
+            "the blurred edge is symmetric at {distance} px ({dark} dark, {light} light)",
+        );
+    }
+    assert!(
+        luma(&bare, 128, 60, 64) > 40,
+        "the black side of the edge is lightened, not left sharp ({})",
+        luma(&bare, 128, 60, 64),
+    );
+
+    let mut painted = seam_page(Ground::Painted, 128.0, rect, "", subject);
+    let painted = render_baked(&mut gpu, &mut painted, 128, 1);
+    assert_pixels_match(&bare, &painted, 1, "the canvas against a painted ground");
+}
+
+/// The same holds under a transform on the box, on an ancestor of it, and on
+/// both, and for a colour pass on either side of the blur: over the bare
+/// canvas each draws what it draws over a ground the page painted.
+#[test]
+fn a_transformed_backdrop_over_the_canvas_draws_as_over_a_painted_ground() {
+    let mut gpu = headless("a_transformed_backdrop_over_the_canvas_draws_as_over_a_painted_ground");
+    let rect = (32.0, 32.0, 64.0, 64.0);
+    for (wrapper, subject) in [
+        ("", "backdrop-filter: blur(6px); transform: rotate(20deg);"),
+        (
+            "",
+            "backdrop-filter: blur(6px); transform: translate(9.5px, -7px) scale(1.25, 0.8);",
+        ),
+        (
+            "transform: translate(6px, -4px) rotate(-12deg) scale(1.1);",
+            "backdrop-filter: blur(6px);",
+        ),
+        (
+            "transform: rotate(8deg);",
+            "backdrop-filter: blur(6px); transform: skewX(15deg) scale(0.9);",
+        ),
+        (
+            "transform: rotate(8deg);",
+            "backdrop-filter: brightness(0.6) blur(4px); border-radius: 16px;",
+        ),
+        ("", "backdrop-filter: blur(4px) brightness(0.6);"),
+    ] {
+        let label = format!("wrapper `{wrapper}`, box `{subject}`");
+        let mut bare = seam_page(Ground::Canvas, 128.0, rect, wrapper, subject);
+        let bare = render_baked(&mut gpu, &mut bare, 128, 1);
+        let mut painted = seam_page(Ground::Painted, 128.0, rect, wrapper, subject);
+        let painted = render_baked(&mut gpu, &mut painted, 128, 1);
+        assert_pixels_match(&bare, &painted, 1, &label);
+
+        // And the comparison is of a filtered edge: just on the black side
+        // of the seam, at the box's centre row, the blur has let light in.
+        assert!(
+            luma(&bare, 128, 61, 64) > 20,
+            "{label}: the black side of the edge is filtered ({})",
+            luma(&bare, 128, 61, 64),
+        );
+    }
+}
+
+/// A box sliding by an exported `transform` curve, composed later than its
+/// commit: over the bare canvas each instant draws what it draws over a
+/// ground the page painted. The bake of a moving box is taken per instant, in
+/// the box's own space, and the canvas is under all of it.
+#[test]
+fn a_sliding_backdrop_over_the_canvas_composes_as_over_a_painted_ground() {
+    let mut gpu = headless("a_sliding_backdrop_over_the_canvas_composes_as_over_a_painted_ground");
+    let draw = |gpu: &mut dom::render::gpu::Headless, ground: Ground, wrapper: &str| {
+        let mut doc = seam_page(
+            ground,
+            128.0,
+            (16.0, 32.0, 48.0, 64.0),
+            wrapper,
+            "backdrop-filter: blur(5px); animation: slide 1s linear infinite;",
+        );
+        doc.dom.add_stylesheet(
+            "@keyframes slide { from { transform: translateX(0px) rotate(0deg); }
+                                to { transform: translateX(60px) rotate(40deg); } }",
+            dom::StylesheetOrigin::Author,
+        );
+        doc.dom.render();
+        doc.dom.advance_animations(0.0);
+        doc.dom.advance_animations(0.1);
+        doc.dom.render();
+        gpu.forget_filters();
+        let frame = doc
+            .dom
+            .committed_frame()
+            .expect("render leaves a committed frame retained");
+        assert!(frame.has_live_curves(), "the slide exports");
+        let [entry] = frame.filter_groups() else {
+            panic!("one backdrop, got {:?}", frame.filter_groups());
+        };
+        assert!(
+            entry.reads_canvas() && entry.samples_animations(),
+            "the box moves over the document root's image",
+        );
+        [0.3, 0.7].map(|now| compose_at(gpu, &frame, Some(now), (128, 128)))
+    };
+    for wrapper in ["", "transform: rotate(-10deg);"] {
+        let bare = draw(&mut gpu, Ground::Canvas, wrapper);
+        let painted = draw(&mut gpu, Ground::Painted, wrapper);
+        for ((bare, painted), now) in bare.iter().zip(&painted).zip([0.3, 0.7]) {
+            assert_pixels_match(bare, painted, 1, &format!("wrapper `{wrapper}` at {now} s"));
+        }
+        assert!(
+            (0..128 * 128).any(|index| bare[0][index * 4].abs_diff(bare[1][index * 4]) > 40),
+            "wrapper `{wrapper}`: the two instants draw the box in two places",
+        );
+    }
+}
+
+/// A box inside an `opacity` group does not read the canvas: the group is its
+/// Backdrop Root, and the group's own pixels start empty.
+///
+/// Where the group painted nothing a colour pass has nothing to change, so
+/// the canvas shows as it does beside the box; and the bar the group did
+/// paint keeps its full ink under the box, because the blurred copy fades to
+/// transparency over it rather than to the canvas colour.
+#[test]
+fn a_backdrop_inside_an_opacity_group_does_not_read_the_canvas() {
+    let mut gpu = headless("a_backdrop_inside_an_opacity_group_does_not_read_the_canvas");
+    let page = |extra: &str| {
+        let css = format!(
+            "page {{ display: flex; position: relative; width: 128px; height: 128px; }}
+             .root {{ display: flex; position: absolute; left: 0px; top: 0px;
+                      width: 128px; height: 128px; opacity: 0.5; }}
+             .bar {{ display: flex; position: absolute; left: 0px; top: 0px;
+                     width: 24px; height: 128px; background-color: #000000; }}
+             .box {{ display: flex; position: absolute; left: 4px; top: 40px;
+                     width: 120px; height: 48px; {extra} }}"
+        );
+        let mut doc = Doc::with_css_sized(&css, 128.0, 128.0);
+        let root = doc.root;
+        let wrap = doc.el(root, "root");
+        doc.el(wrap, "bar");
+        doc.el(wrap, "box");
+        doc
+    };
+
+    let mut doc = page("backdrop-filter: brightness(0.5);");
+    let pixels = render_baked(&mut gpu, &mut doc, 128, 1);
+    let frame = doc.dom.committed_frame().expect("a committed frame");
+    assert!(
+        !frame.filter_groups()[0].reads_canvas(),
+        "the box's Backdrop Root is the group",
+    );
+    assert_eq!(
+        pixel(&pixels, 128, 80, 64),
+        WHITE,
+        "the group painted nothing here, so nothing is dimmed",
+    );
+
+    let mut doc = page("backdrop-filter: blur(5px);");
+    let pixels = render_baked(&mut gpu, &mut doc, 128, 1);
+    // The bar's edge is at x = 24. Above the box (y = 20) the half-faded bar
+    // is a step; under it the blur spreads the bar outward, and inside the
+    // bar the ink is what it is above the box.
+    assert_eq!(
+        pixel(&pixels, 128, 80, 64),
+        WHITE,
+        "nothing far from the bar"
+    );
+    assert!(
+        (luma(&pixels, 128, 20, 64) - luma(&pixels, 128, 20, 20)).abs() <= 2,
+        "the bar keeps its ink under the box ({} against {})",
+        luma(&pixels, 128, 20, 64),
+        luma(&pixels, 128, 20, 20),
+    );
+    assert!(
+        luma(&pixels, 128, 27, 64) < luma(&pixels, 128, 27, 20) - 10,
+        "and its edge is spread past it ({} against {})",
+        luma(&pixels, 128, 27, 64),
+        luma(&pixels, 128, 27, 20),
     );
 }
 
@@ -2243,7 +2586,15 @@ fn an_anchored_box_follows_its_scrolled_anchor_and_hides_with_it() {
     {
         let offset_of = move |_: &dom::ScrollSlot| Some(Vector2D::new(0.0, offset));
         let filtered: Vec<Option<dom::vello::peniko::ImageData>> = gpu
-            .prepare_filters(&frame, &[], &[], &offset_of, generation as u64, None)
+            .prepare_filters(
+                &frame,
+                &[],
+                &[],
+                &offset_of,
+                generation as u64,
+                None,
+                Color::WHITE,
+            )
             .expect("the filter bakes render")
             .to_vec();
         let mut scene = Scene::new();

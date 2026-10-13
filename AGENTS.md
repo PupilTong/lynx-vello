@@ -784,14 +784,14 @@ document. `LynxDocument`, `Viewport`, `DocumentIngredients`, `DocumentSlot`,
 public, and `LynxDocument` is what an embedder cannot name.
 
 **The realm creates its own document, out of a configuration it holds.** The
-Rust-generated boot module is written with the view's four page switches as
+Rust-generated boot module is written with the view's five page switches as
 boolean literals (`const config = { defaultDisplayLinear: true, … };` — facts
 Rust owns, passed as primitives, with no JSON round trip), and its first
 statement is `export const document = new Document(config);`;
 `bobcat:element`'s `Document` constructor calls
 `createDocument(defaultDisplayLinear, defaultOverflowVisible,
-enableCssSelector, enableJSDataProcessor)`, which
-reads four `HostValue::Boolean` arguments and builds the document from them plus the
+enableCssSelector, enableJSDataProcessor, enableCssInheritance)`, which
+reads five `HostValue::Boolean` arguments and builds the document from them plus the
 `DocumentIngredients` that never reach the realm: the create-time viewport, the
 validated text context and the group's style pool. It never waits: **the view's
 author sheets are not mounted here** but by the first `__FlushElementTree`
@@ -1844,7 +1844,14 @@ paragraph whatever `defaultDisplayLinear` says, `wrapper` is
 inside (`display: none` anywhere else) with
 `white-space-collapse: preserve-breaks`, the one place Lynx keeps a literal
 newline. Sibling runs and nested text share the establishing element's
-paragraph. UA `attr(... number)` declarations supply `--lynx-text-maxline` and
+paragraph. `text { color: initial; }` stops an ancestor's color at the text
+root and `text > text` inherits it again, as in web-elements; a page whose
+config says `enableCSSInheritance: true` gets one more UA rule,
+`view > text, view > wrapper, view > wrapper > text { color: inherit;
+text-decoration: inherit; }`, which is web-core's rule for that switch
+(lynx-stack #3907) reduced to the two declarations that change a value here
+(`tree::text::CSS_INHERITANCE_RULES`, `docs/tracking/deviations.md`). UA
+`attr(... number)` declarations supply `--lynx-text-maxline` and
 `--lynx-text-maxlength`; `<integer>`, non-inherited registrations reject
 fractional counts and default to `-1` (unlimited). No numeric-prefix parsing or
 CSS expressions in attributes are supported. `text[tail-color-convert="true"]`
@@ -2479,7 +2486,11 @@ owns the value coercions web-core gets from the HTML DOM for free:
 truthiness-not-null clearing for classes, ids, and inline styles,
 `String(value)` for DOM attributes, and camelCase-to-kebab hyphenation of a
 record-shaped inline style. Lynx attribute readback retains a separate typed
-container copy, and datasets merge typed keys in the MTS handle. BTS
+container copy, and datasets merge typed keys in the MTS handle, each entry
+also written to the node as its `data-<key>` attribute (web-core's
+`__AddDataset` text: no attribute for a falsy value, JSON for an object), so
+`[data-<key>]` selectors match it in queries and stylesheets while readback
+answers the typed value. BTS
 `lynx.createSelectorQuery()` builds `NodesRef` tasks carrying selection tokens
 over the existing Worker messages; MTS resolves those through the document's
 selector engine, including the query root, and returns fields/path data, while
@@ -2567,8 +2578,8 @@ whatever is due — before that entry's commit, so a callback's mutation rides
 the same frame. No deadline crosses the link and no host turn is owed for one.
 
 `src/element-papi.ts` also exports `class Document` and the `PageConfig` its
-constructor takes: the four page switches the boot module is written with,
-which the constructor passes to the native `createDocument` as four booleans,
+constructor takes: the five page switches the boot module is written with,
+which the constructor passes to the native `createDocument` as five booleans,
 in `PageConfig`'s order. It is on no collection schedule at all, which is the opposite
 of the element path in the same file.
 
@@ -2634,7 +2645,14 @@ Subsystems:
   for the named delta sign). `scroll/snap.rs` is css-scroll-snap-1 — positions from
   `scroll-snap-type`/`-align`/`-stop`, `scroll-padding` and `scroll-margin`,
   published per scroll slot, settled on at a drag's end, stepped to by a
-  wheel tick, and re-snapped at rest on every commit; no snap events.
+  wheel tick, and re-snapped at rest on every commit; no snap events. Each
+  position names its snap area, so a container that stood on an area's
+  position follows that area through a layout change (§4.1.3) instead of
+  taking the position nearest its old offset: the document moves its own
+  offset inside the render (`Document::resnap`, the committed frame's
+  positions against the newly built ones), and `bobcat-core`'s painter the
+  offset it holds when it adopts the commit, unless a drag, fling, bounce
+  back or glide has the container.
   `scroll/request.rs` is CSSOM-View's `scrollTo({behavior})`: a script-facing
   scroll is a request the committed frame carries to the painter, which
   animates a smooth one and names the request in the offsets it posts back.
@@ -2657,7 +2675,10 @@ Subsystems:
   (2026-08-04): `FrameImages` and the `render::gpu` wgpu backend. `render::blur`
   is the one exception: a `filter: blur()` bake is a partial replay of a
   committed frame's compose program, so it reads `CommittedFrame`'s filter side
-  table, while still naming no node, style, layout or paint-order type.
+  table, while still naming no node, style, layout or paint-order type. A
+  `backdrop-filter` bake at the document's root renders over the canvas
+  colour its caller composites over, which `FilterTextures::prepare` and
+  `Headless::prepare_filters` therefore take.
 
 **Vector images** (`docs/svg-lynx-component-design.md`): an SVG document used
 as an image — `<image src>`, `background-image`, `mask-image`, the Lynx

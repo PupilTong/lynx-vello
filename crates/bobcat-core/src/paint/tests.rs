@@ -1423,3 +1423,229 @@ fn a_smooth_request_posts_its_serial_and_lands_at_rest() {
     }
     panic!("the glide never came to rest");
 }
+
+/// A 200px column scroller of five pages in a document of its own, each
+/// page as tall as the scrollport and snapping at its start, the scroller
+/// carrying `css`: positions 0, 200, 400, 600 and 800, and one scrollport
+/// apart at any other height.
+fn paged(css: &str) -> (LynxDocument, dom::NodeId) {
+    let mut document = document();
+    let root = document.document_element().id();
+    let scroller = document.create_element("view", ());
+    document.set_inline_style(scroller, &paged_style(css, 200));
+    document.append_child(root, scroller);
+    for _ in 0..5 {
+        let page = document.create_element("view", ());
+        document.set_inline_style(
+            page,
+            "flex-shrink:0;width:200px;height:100%;scroll-snap-align:start",
+        );
+        document.append_child(scroller, page);
+    }
+    (document, scroller)
+}
+
+/// [`paged`]'s scroller style at `height` px.
+fn paged_style(css: &str, height: u32) -> String {
+    format!(
+        "display:flex;flex-direction:column;overflow:scroll;width:200px;height:{height}px;\
+         scroll-snap-type:y mandatory;{css}"
+    )
+}
+
+/// Publishes the document's newest commit and brings the painter onto it,
+/// as a display frame does.
+fn adopt(painter: &mut Painter, main: &FarEnd, document: &mut LynxDocument) {
+    main.outbox.publish_frame(document.commit());
+    painter.poll_link();
+    let frame = painter.frame().cloned().expect("the frame is adopted");
+    painter.scroll_intents.rebase(&frame, 0.0);
+}
+
+/// Where the painter shows `node`: its live offset, else the committed one.
+fn shown(painter: &Painter, node: dom::NodeId) -> dom::Vector2D<f32> {
+    painter.scroll_intents.offset_for(node).unwrap_or_else(|| {
+        let frame = painter.frame().expect("a frame is adopted");
+        frame.scroll_slots()[frame.slot_of(node).expect("a scroll container") as usize].offset
+    })
+}
+
+fn wheel(painter: &mut Painter, dy: f32) {
+    painter.dispatch_input(dom::input::InputEvent::wheel(
+        dom::Point2D::new(100.0, 100.0),
+        dom::Vector2D::new(0.0, dy),
+    ));
+}
+
+/// css-scroll-snap-1 §4.1.3 on the painter's own offset. Two wheel ticks
+/// put the scroller on its third page, 400, which main never adopts here:
+/// the document still stands at 0, so nothing in the commit says where the
+/// painter is. At 300px the third page is at 600, and the painter moves
+/// there at once — the position nearest 400 would have been the second
+/// page's 300 — and posts it at rest. Two more commits adopted with no
+/// rebase between them are followed from the frame the offset stands on:
+/// the third page at 250px is 500.
+#[test]
+fn a_resized_scroller_stays_on_the_page_the_painter_showed() {
+    let (mut document, scroller) = paged("");
+    let (mut painter, main) = detached();
+    painter.clock.pin(0.0);
+    adopt(&mut painter, &main, &mut document);
+    wheel(&mut painter, 30.0);
+    wheel(&mut painter, 30.0);
+    assert_eq!(shown(&painter, scroller), dom::Vector2D::new(0.0, 400.0));
+    let _ = take(&main);
+
+    document.set_inline_style(scroller, &paged_style("", 300));
+    adopt(&mut painter, &main, &mut document);
+    assert_eq!(shown(&painter, scroller), dom::Vector2D::new(0.0, 600.0));
+    assert!(
+        !painter.scroll_intents.is_animating(),
+        "a jump, not a glide"
+    );
+    painter.publish_scroll(0.0, None);
+    let (entries, _) = take(&main);
+    assert_eq!(
+        entries,
+        [(
+            scroller,
+            ScrollEntry {
+                offset: dom::Vector2D::new(0.0, 600.0),
+                at: 0.0,
+                rest: Some(dom::Vector2D::new(0.0, 600.0)),
+                request: None,
+            }
+        )],
+    );
+
+    document.set_inline_style(scroller, &paged_style("", 1000));
+    main.outbox.publish_frame(document.commit());
+    painter.poll_link();
+    document.set_inline_style(scroller, &paged_style("", 250));
+    adopt(&mut painter, &main, &mut document);
+    assert_eq!(shown(&painter, scroller), dom::Vector2D::new(0.0, 500.0));
+}
+
+/// The same when main had adopted the painter's offset: the document
+/// re-snaps its own in the commit, and the painter, following its own
+/// reading of the frame it stood on, arrives at the offset the slot
+/// carries.
+#[test]
+fn a_resized_scroller_agrees_with_the_document_that_followed_it() {
+    let (mut document, scroller) = paged("");
+    let (mut painter, main) = detached();
+    painter.clock.pin(0.0);
+    adopt(&mut painter, &main, &mut document);
+    wheel(&mut painter, 30.0);
+    wheel(&mut painter, 30.0);
+    let (entries, _) = take(&main);
+    document.scroll_to(scroller, entries[0].1.offset);
+
+    document.set_inline_style(scroller, &paged_style("", 300));
+    adopt(&mut painter, &main, &mut document);
+    let frame = painter.frame().cloned().expect("a frame is adopted");
+    let slot = &frame.scroll_slots()[frame.slot_of(scroller).expect("a slot") as usize];
+    assert_eq!(slot.offset, dom::Vector2D::new(0.0, 600.0));
+    assert_eq!(shown(&painter, scroller), slot.offset);
+}
+
+/// A circular axis: six ticks from the first of five pages stand on the
+/// second page's next copy, 1200 on a period of 1000. At 300px the period
+/// is 1500 and the second page is at 300; the offset left where it was
+/// would read 1200 there, the fifth page.
+#[test]
+fn a_resized_circular_scroller_stays_on_the_page_the_painter_showed() {
+    let circular = "overscroll-behavior:circular";
+    let (mut document, scroller) = paged(circular);
+    let (mut painter, main) = detached();
+    painter.clock.pin(0.0);
+    adopt(&mut painter, &main, &mut document);
+    for _ in 0..6 {
+        wheel(&mut painter, 30.0);
+    }
+    assert_eq!(shown(&painter, scroller), dom::Vector2D::new(0.0, 1200.0));
+
+    document.set_inline_style(scroller, &paged_style(circular, 300));
+    adopt(&mut painter, &main, &mut document);
+    assert_eq!(shown(&painter, scroller), dom::Vector2D::new(0.0, 300.0));
+}
+
+/// `proximity`, where the two rules differ. A container at rest on the
+/// third page's position, 400, follows the page to 600 at 300px, though
+/// 600 is two proximity ranges from where it stood: the range decides
+/// whether a container snaps, not whether a snapped one stays snapped. One
+/// at rest on no position — 750, more than a range from 600 and from 900 —
+/// follows nothing, and at 320px, more than a range from 640 and from 960,
+/// it keeps its offset, where `mandatory` would have taken it to 640.
+#[test]
+fn a_proximity_scroller_follows_its_area_only_when_it_stood_on_one() {
+    let proximity = "scroll-snap-type:y proximity";
+    let (mut document, scroller) = paged(proximity);
+    let (mut painter, main) = detached();
+    painter.clock.pin(0.0);
+    adopt(&mut painter, &main, &mut document);
+    painter
+        .scroll_intents
+        .write(scroller, dom::Vector2D::new(0.0, 400.0));
+    document.set_inline_style(scroller, &paged_style(proximity, 300));
+    adopt(&mut painter, &main, &mut document);
+    assert_eq!(shown(&painter, scroller), dom::Vector2D::new(0.0, 600.0));
+
+    let between = dom::Vector2D::new(0.0, 750.0);
+    painter.scroll_intents.write(scroller, between);
+    document.set_inline_style(scroller, &paged_style(proximity, 320));
+    adopt(&mut painter, &main, &mut document);
+    assert_eq!(shown(&painter, scroller), between);
+}
+
+/// A commit moves no container a drag holds or a glide is moving, whatever
+/// it stands on. The drag brings the scroller back onto the third page's
+/// position, 400, and holds it there: the resize, which would carry a
+/// scroller at rest to 600, leaves it under the finger. Let go, it glides
+/// from there toward a position of the new frame, and a second resize
+/// landing mid-glide leaves the glide its offset too. It comes to rest on a
+/// position of the last frame.
+#[test]
+fn a_commit_moves_no_scroller_a_drag_or_a_glide_has() {
+    use dom::input::PointerPhase::{Down, Move, Up};
+
+    let (mut document, scroller) = paged("");
+    let (mut painter, main) = detached();
+    painter.clock.pin(0.0);
+    adopt(&mut painter, &main, &mut document);
+    wheel(&mut painter, 30.0);
+    wheel(&mut painter, 30.0);
+
+    touch(&mut painter, Down, 150.0);
+    touch(&mut painter, Move, 120.0);
+    assert_eq!(shown(&painter, scroller), dom::Vector2D::new(0.0, 422.0));
+    touch(&mut painter, Move, 142.0);
+    let held = dom::Vector2D::new(0.0, 400.0);
+    assert_eq!(shown(&painter, scroller), held);
+    document.set_inline_style(scroller, &paged_style("", 300));
+    adopt(&mut painter, &main, &mut document);
+    assert_eq!(shown(&painter, scroller), held, "under the finger");
+
+    painter.clock.pin(1.0);
+    touch(&mut painter, Up, 142.0);
+    assert!(painter.scroll_intents.is_gliding(scroller));
+    painter.service_gesture_clock(1.05);
+    let gliding = shown(&painter, scroller);
+    assert!(gliding.y > 300.0 && gliding.y < 400.0, "got {gliding:?}");
+    document.set_inline_style(scroller, &paged_style("", 250));
+    adopt(&mut painter, &main, &mut document);
+    assert_eq!(shown(&painter, scroller), gliding, "under the glide");
+    assert!(painter.scroll_intents.is_gliding(scroller));
+
+    let mut now = 1.05;
+    while painter.scroll_intents.is_animating() {
+        now += 1.0 / 60.0;
+        assert!(now < 4.0, "the glide never landed");
+        painter.service_gesture_clock(now);
+    }
+    let rest = shown(&painter, scroller).y;
+    assert!(
+        rest % 250.0 == 0.0,
+        "on a page of the last frame, got {rest}"
+    );
+}

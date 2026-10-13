@@ -136,7 +136,11 @@ pub struct SnapSlot {
 impl SnapSlotAxis {
     /// This axis over the frame's points, repeating every `period` on a
     /// circular axis.
-    fn axis<'frame>(&self, points: &'frame [SnapPoint], period: Option<f32>) -> SnapAxis<'frame> {
+    pub(super) fn axis<'frame>(
+        &self,
+        points: &'frame [SnapPoint],
+        period: Option<f32>,
+    ) -> SnapAxis<'frame> {
         SnapAxis {
             strictness: self.strictness,
             points: &points[self.start as usize..self.end as usize],
@@ -532,6 +536,12 @@ impl CommittedFrame {
     /// backdrop pops the layers the range left open and draws its pre-blur
     /// passes over the whole bake rect, so neither lands inside a clip.
     ///
+    /// `scene` holds the range's ops and nothing under them. What they
+    /// compose over is the base colour `scene` is rendered with, which is
+    /// the caller's: the canvas colour for an entry that
+    /// [reads the canvas](FilterGroup::reads_canvas), transparent black for
+    /// every other.
+    ///
     /// Offsets on a circular axis are normalized as [`Self::compose_into`]
     /// normalizes them, and the seam copy of a straddling container the
     /// entry does not ride is baked into the texture with the rest.
@@ -771,12 +781,7 @@ impl CommittedFrame {
     /// so the painter snaps across the seam.
     #[must_use]
     pub fn snap_axes(&self, slot: &ScrollSlot) -> (Option<SnapAxis<'_>>, Option<SnapAxis<'_>>) {
-        let points = self.snap_points();
-        let (period_x, period_y) = slot.wrap_period();
-        (
-            slot.snap.x.as_ref().map(|axis| axis.axis(points, period_x)),
-            slot.snap.y.as_ref().map(|axis| axis.axis(points, period_y)),
-        )
+        self.order.snap_axes(slot)
     }
 
     /// The frame's scroll containers, chain-linked; see [`ScrollSlot`].

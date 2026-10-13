@@ -250,7 +250,14 @@ consequential choice about whether to follow the spec or the quirk.
 
   It is **painted** as of 2026-09-19, as a prefix bake on the flat render
   path (`crates/dom/src/paint/compose.rs`'s `PushBackdrop`,
-  `crates/dom/src/render/blur.rs`), with these recorded narrowings:
+  `crates/dom/src/render/blur.rs`). The Backdrop Root Image of the document's
+  root element holds the canvas: an element whose Backdrop Root is the
+  document's bakes over the colour the painter clears its target to (white),
+  and an element inside a group Backdrop Root over transparent black, since
+  that group's own pixels start empty. The filtered image is composited
+  source-over in both cases (filter-effects-2's last step), so inside a group
+  the group's unfiltered pixels show through wherever its filtered copy is
+  translucent, as they do in Chromium. These are the recorded narrowings:
 
   - **`will-change` Backdrop Roots are not honored**, and this one *is* observable. `will-change`
     is in the fork's author grammar, and filter-effects-2 makes an element naming a rooting
@@ -284,9 +291,10 @@ consequential choice about whether to follow the spec or the quirk.
     carries.
   - **Items culled at commit are absent from a straddling crop.** The walker discards items that
     can put no ink in the viewport, so an element whose border box extends past the viewport bakes
-    a crop in which the off-screen part holds only what survived culling. Those pixels are outside
-    the viewport, so nothing visible reads them directly — but a σ large enough to reach back in
-    can, and that part of the crop will be emptier than the spec's Backdrop Root Image.
+    a crop in which the off-screen part holds only what survived culling, over the canvas colour
+    at the document's root. Those pixels are outside the viewport, so nothing visible reads them
+    directly — but a σ large enough to reach back in can, and that part of the crop will be
+    emptier than the spec's Backdrop Root Image.
   - **No composite curve**, like `filter`: an animated `backdrop-filter` recommits and re-bakes
     every tick.
   - **The area budget is shared with `filter: blur()`** (`MAX_FILTER_DIMENSION`,
@@ -654,12 +662,14 @@ consequential choice about whether to follow the spec or the quirk.
   against deprecated APIs will lose those declarations here. Intentional.
 - **CSS inheritance** — native Lynx gates *all* property inheritance behind
   `enableCSSInheritance` (default **off**, allowlist when on;
-  [css-text.md](css-text.md) recommends replicating that gate). But the
-  compat target `web-core` **ignores that flag entirely** (zero references
-  in `lynx-stack/packages/web-platform/`): it runs on the browser's
-  always-on W3C inheritance and reproduces the visible Lynx behavior with
-  targeted UA-sheet resets (`x-text { color: initial }` +
-  `x-text > x-text { color: inherit }` in `web-elements`).
+  [css-text.md](css-text.md) describes that gate). The compat target
+  `web-core` runs on the browser's always-on W3C inheritance and reproduces
+  the visible default with targeted UA-sheet resets
+  (`x-text { color: initial }` + `x-text > x-text { color: inherit }` in
+  `web-elements`). When the decision below was taken it also **ignored the
+  flag entirely** (zero references in `lynx-stack/packages/web-platform/`);
+  since lynx-stack #3907 it reads it — see *The switch* at the end of this
+  entry.
   **Decision (user-confirmed, 2026-07): web-core parity** — lynx-vello uses
   stylo's standard always-on inheritance plus the replicated UA resets. The
   native-Lynx gate is documented as a config-gated fallback design
@@ -680,6 +690,71 @@ consequential choice about whether to follow the spec or the quirk.
   A tag this engine has no rule for (anything but `wrapper`, `view`, `image`,
   `text`, `raw-text`) generates no box inside a `text`, which is the literal
   `x-text > * { display: none }` behavior and not a narrowing of it.
+  **The switch (2026-10-13): `enableCSSInheritance: true` is honored the way
+  web-core honors it.** lynx-stack #3907 (`8d0b358bf`, "support
+  enableCSSInheritance for text in views") removed the premise that web-core
+  never reads the flag: `config['enableCSSInheritance'] === 'true'` now sets
+  `lynx-enable-css-inheritance="true"` on the page element
+  (`web-core/ts/client/mainthread/elementAPIs/createElementAPI.ts`), and
+  `web-core/css/in_shadow.css` adds
+  `[lynx-enable-css-inheritance="true"] :where(x-view > x-text, x-view >
+  lynx-wrapper, x-view > lynx-wrapper > x-text)` over fourteen `inherit`
+  declarations. The decision is unchanged and its consequence is new:
+  web-core parity now includes the switch. `PageConfig::enable_css_inheritance`
+  is read from the page config string as `defaultDisplayLinear` is, and adds
+  one UA rule after the text block,
+  `view > text, view > wrapper, view > wrapper > text { color: inherit;
+  text-decoration: inherit; }`
+  (`bobcat_core::tree::text::CSS_INHERITANCE_RULES`). Off or absent — an
+  absent key is off, as under web-core — the sheet is unchanged. Three things
+  differ from web-core's text of the rule, none of them in what a page
+  renders except where noted:
+  - *Two declarations, not fourteen.* `--lynx-text-bg-color`,
+    `background-clip` and `-webkit-background-clip` belong to web-core's
+    lowering of a gradient `color` for a browser (transparent glyphs over a
+    background image clipped to them, which `x-text.css` resets at the text
+    root); the fork's `color` holds the gradient as its value, so
+    `color: inherit` inherits it. `direction`, `font-family`, `font-size`,
+    `font-style`, `font-weight`, `letter-spacing`, `line-height`,
+    `text-align` and `text-shadow` are inherited properties that neither
+    sheet resets at a text root: they reach the text with the switch off in
+    both engines, so a declaration for them changes no value. The visible
+    remainder: under web-core with the switch on, a `background-clip` an
+    author writes on a view is also inherited by the text inside it; here it
+    is not.
+  - *Tag selectors at user-agent origin, not `:where()`.* web-core's selector
+    has the specificity of one attribute selector, and web-core extends every
+    authored selector with `:not([l-e-name])`, so no authored rule loses to
+    it. Here every authored declaration and inline style outranks a UA rule
+    whatever its selector, and the rule needs its tag specificity to outrank
+    `text { color: initial }` inside the UA origin.
+  - *No page attribute.* The switch selects UA-sheet text
+    (`docs/style-assumptions.md` §D.14), so there is no
+    `lynx-enable-css-inheritance` attribute for an author selector to match.
+  The scope is web-core's selector list and no wider: a `text` under `page`,
+  `scroll-view`, `list-item`, a blur view, or two wrappers deep keeps the
+  reset.
+  **Native's switch does more, and that part is not built (unruled).** With it
+  on, native inherits a list of properties — `font-size`, `font-family`,
+  `text-align`, `line-spacing`, `letter-spacing`, `line-height`, `font-style`,
+  `font-weight`, `color`, `text-decoration`, `text-shadow`, `direction`,
+  `cursor` (`lynx/core/renderer/css/dynamic_css_styles_manager.cc:30-38`),
+  or the page's `customCSSInheritanceList` in its place
+  (`lynx/core/renderer/dom/element.cc:2815-2826`) — through *every* element,
+  so a `text` under a `scroll-view`, a `list-item` or the page inherits
+  `color` there and keeps the reset here and under web-core, which reads no
+  `customCSSInheritanceList`. With it off, native
+  inherits nothing at all, where both web targets still inherit every W3C
+  inherited property (`font-size` from a view to its text, for one; `cursor`
+  as well, which is on native's list). `line-spacing` is in neither
+  web-core's rule nor this engine's grammar. The same native switch also
+  turns on its direction handling in fiber mode
+  (`Element::IsDirectionChangedEnabled`, `element.cc:2828-2834`; without it
+  `FiberElement::TryResolveLogicStyleAndSaveDirectionRelatedStyle`,
+  `fiber/fiber_element.cc:4949-4953`, resolves no logical style against
+  `direction`), which stylo does whatever the page config says. web-core is
+  this project's default resolution of such conflicts (AGENTS.md); none of
+  these has been put to a ruling.
 
 - **`:is()`, `:where()`, `:has()`, `:nth-child()` family, `:first-child`/`:last-child`/`:only-child`/`:empty`**
   — all are *parsed* by Lynx's selector grammar but have **no matcher case at
@@ -2188,6 +2263,38 @@ consequential choice about whether to follow the spec or the quirk.
   **Decision: follow native** and include the typed `dataset` copy, which is
   what a card that measures a list row then reads its keys off the same answer
   expects. This is one of the places where the web default is not taken.
+- **A dataset entry is matched by `[data-<key>]`, and the three reference
+  rules for it disagree** — native has no `data-*` attribute at all: its
+  `SelectorQuery` matcher reads the typed dataset for a `data-` name
+  (`core/renderer/dom/selector/matching/attribute_selector_matching.cc:24-28`),
+  so `[data-k]` matches whenever the key exists, a null value included, the
+  key is compared case-sensitively, and a value is compared as text only when
+  it is a string (`Value::ToString`, `base/src/value/base_value.cc:1181-1193`,
+  is `""` for every other type); its stylesheet matcher has no attribute
+  selectors (`core/renderer/css/ng/matcher/selector_matcher.cc`). web-core
+  reflects the dataset as DOM attributes, by two rules. `__AddDataset`
+  (`web-core/ts/client/mainthread/elementAPIs/createElementAPI.ts:434-446`)
+  removes the attribute for any falsy value and otherwise writes an object's
+  JSON text or the value's `toString()`. `__SetDataset`
+  (`web-core/src/main_thread/client/element_apis/dataset_apis.rs:12-55`)
+  replaces the dataset, removes the attribute of every key the new object
+  lacks and of a null or undefined value, writes a string as it is and writes
+  `""` for every other type, and skips a key whose value is unchanged. Both
+  spell the name `data-${key}` through `setAttribute`, which lowercases it.
+  **Implemented, not ruled:** the typed store keeps native's merge
+  (`AttributeHolder::SetDataSet`, `core/renderer/dom/attribute_holder.cc:229-234`),
+  the attributes follow the typed
+  store — so `__SetDataset` removes no attribute for a key it does not name —
+  and one text rule serves both members, web-core's `__AddDataset`, because
+  that is the member a compiled `data-*` JSX attribute reaches (`__SetDataset`
+  is the spread path) and the only one of the three that lets `[data-n="7"]`
+  match a number. Visible differences: from native, `[data-k]` does not match
+  a key whose value is falsy, `[data-k="7"]` matches the number 7, and
+  `[data-testid]` matches the key `testId`; from web-core's `__SetDataset`, a
+  key dropped from a spread keeps its attribute, a non-string value is its
+  string instead of `""`, and `false`, `0` and `""` have no attribute. A value
+  JSON cannot carry (a cycle) is `""` here, where web-core's `__AddDataset`
+  throws.
 - **An unknown UI method answers 3, not 1** — the code table is shared
   (`lynx_get_ui_result.h`, web-core's `constants.ts`), but native reports the
   generic `UNKNOWN = 1` for a method its per-class registry has no entry for,

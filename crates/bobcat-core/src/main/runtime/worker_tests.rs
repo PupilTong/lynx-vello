@@ -2450,6 +2450,65 @@ fn bts_node_queries_read_real_nodes_and_retain_native_tokens_and_statuses() {
     )));
 }
 
+/// A background-thread `SelectorQuery` finds an element by a dataset entry:
+/// the entry is the node's `data-<key>` attribute, which the document's
+/// selector engine matches, and the `dataset` field still answers the typed
+/// values.
+#[test]
+fn bts_selector_queries_match_dataset_entries_as_data_attributes() {
+    let mut pair = Pair::with_background(
+        r"
+        const page = __CreatePage();
+        const first = __CreateView(); __SetID(first, 'first');
+        __AddDataset(first, 'test', 'x');
+        __AddDataset(first, 'index', 0);
+        const second = __CreateView(); __SetID(second, 'second');
+        __SetDataset(second, {test: 'y', count: 7, item: {id: 3}});
+        const third = __CreateView(); __SetID(third, 'third');
+        __AddDataset(third, 'test', 'gone'); __AddDataset(third, 'test', null);
+        __AppendElement(page, first); __AppendElement(page, second); __AppendElement(page, third);
+        globalThis.results = null;
+        lynx.getJSContext().addEventListener('queryDone', event => { results = event.data; });
+    ",
+        Some(
+            r#"
+        import { lynx } from 'bobcat:bts-runtime';
+        void (async () => {
+        const read = (nodes, fields) => new Promise(resolve => nodes.fields(fields, (data, status) => resolve({data,status})).exec());
+        const query = lynx.createSelectorQuery();
+        const present = await read(query.selectAll('[data-test]'), {id:true, dataset:true});
+        const exact = await read(query.select('[data-test="y"]'), {id:true, dataset:true});
+        const number = await read(query.select('[data-count="7"]'), {id:true});
+        const missing = await read(query.select('[data-test="gone"]'), {id:true});
+        lynx.getCoreContext().dispatchEvent({type:'queryDone', data:{present, exact, number, missing}});
+        })();
+    "#,
+        ),
+    );
+    // Four requests and then the application result.
+    for _ in 0..5 {
+        pair.deliver();
+    }
+    pair.check(r"
+        const r = results;
+        if (!r || r.present.status.code !== 0) throw Error(JSON.stringify(r));
+        if (r.present.data.map(node => node.id).join(',') !== 'first,second') throw Error(JSON.stringify(r.present));
+        // A falsy value has no attribute, and is still the typed value.
+        if (r.present.data[0].dataset.test !== 'x' || r.present.data[0].dataset.index !== 0) throw Error(JSON.stringify(r.present));
+        if (r.exact.status.code !== 0 || r.exact.data.id !== 'second') throw Error(JSON.stringify(r.exact));
+        const dataset = r.exact.data.dataset;
+        if (dataset.test !== 'y' || dataset.count !== 7 || dataset.item.id !== 3) throw Error(JSON.stringify(dataset));
+        if (r.number.status.code !== 0 || r.number.data.id !== 'second') throw Error(JSON.stringify(r.number));
+        if (r.missing.status.code !== 2 || r.missing.data !== null) throw Error(JSON.stringify(r.missing));
+    ");
+    assert!(!pair.notices().iter().any(|notice| matches!(
+        notice,
+        ViewNotice::Engine(
+            crate::EngineEvent::WorkerThrew { .. } | crate::EngineEvent::WorkerEnded { .. }
+        )
+    )));
+}
+
 #[test]
 fn bts_native_props_mutate_the_document_before_the_next_query() {
     let mut pair = Pair::with_background(

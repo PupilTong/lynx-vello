@@ -18,7 +18,16 @@ function App() {
           if (updateStatus.code !== 0 || updated.attribute.role !== 'updated') {
             throw new Error('query ran ahead of setNativeProps');
           }
-          console.log('react-bts-query verified');
+          // `data-count={7}` is `__AddDataset(element, 'count', 7)`, which the
+          // element carries as the attribute `data-count="7"`.
+          lynx.createSelectorQuery().selectAll('[data-count="7"]')
+            .fields({id: true, dataset: true}, (tagged, taggedStatus) => {
+              if (taggedStatus.code !== 0 || tagged.length !== 1 || tagged[0].id !== 'target'
+                || tagged[0].dataset.count !== 7) {
+                throw new Error(`dataset selector failed: ${JSON.stringify({tagged, taggedStatus})}`);
+              }
+              console.log('react-bts-query verified');
+            }).exec();
         }).exec();
       }).exec();
     }).exec();

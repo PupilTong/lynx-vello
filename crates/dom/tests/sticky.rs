@@ -465,7 +465,7 @@ fn sticky_pixels_survive_enclosing_effects_and_far_refills() {
             let frame = doc.dom.commit();
             let offsets = |slot: &dom::ScrollSlot| Some(doc.dom.scroll_offset(slot.node));
             let filtered = gpu
-                .prepare_filters(&frame, &[], &[], &offsets, generation, None)
+                .prepare_filters(&frame, &[], &[], &offsets, generation, None, Color::WHITE)
                 .expect("prepare sticky effects")
                 .to_vec();
             let mut scene = Scene::new();
@@ -507,7 +507,7 @@ fn nested_sticky_motion_refreshes_a_filter_with_the_same_scroll_chain() {
         let offsets =
             |slot: &dom::ScrollSlot| (slot.node == scroller).then_some(Vector2D::new(0.0, offset));
         let filtered = gpu
-            .prepare_filters(&frame, &[], &[], &offsets, generation, None)
+            .prepare_filters(&frame, &[], &[], &offsets, generation, None, Color::WHITE)
             .expect("prepare nested sticky filter")
             .to_vec();
         let mut scene = Scene::new();

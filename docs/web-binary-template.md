@@ -85,7 +85,8 @@ JS char (i.e. UTF-16LE without BOM). Used for `Configurations` and
 - Configurations content: flat string map — `cardType`, `isLazy`
   (`"true"` when appType != `"card"`), plus every `pageConfig` entry stringified
   (`enableCSSSelector`, `enableRemoveCSSScope`, `defaultDisplayLinear`,
-  `defaultOverflowVisible`, `enableJSDataProcessor`, …).
+  `defaultOverflowVisible`, `enableJSDataProcessor`, `enableCSSInheritance`,
+  …).
 - CustomSections content: `Record<string, { type?: 'lazy', encoding?:
   'JsBytecode' | 'CSS', content: string | object }>`. Since lynx-stack#4138 a
   section with `encoding: 'CSS'` (`{encoding:"CSS", content:{ruleList}}` in the

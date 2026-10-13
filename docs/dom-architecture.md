@@ -532,7 +532,13 @@ box — the crop filter-effects-2 applies before filtering, with no margin
 because the property enlarges no ink overflow — and its range points
 *backwards*: every op from its nearest Backdrop Root ancestor's content start
 up to the element's own scope open, which is exactly "everything painted before
-the element inside that root". Its one op, `PushBackdrop`, is recorded
+the element inside that root". The entry also records which root that is
+(`compose::BackdropRoot`), because it decides what the range was painted over:
+nothing inside a group, whose own pixels start empty, and the canvas under the
+document root's image. The canvas is the composite render's base colour rather
+than a program op, so `FilterGroup::reads_canvas` tells the bake to render
+over it, and such an entry is recorded even over an empty range. Its one op,
+`PushBackdrop`, is recorded
 innermost inside the element's own layers and before any of its items, so the
 element's `opacity`, `clip-path`, `mask-image` and `filter` apply to the
 backdrop and to the element together.
@@ -613,8 +619,9 @@ reads a `CommittedFrame`'s filter side table and calls the frame's own
 `bake_filter`, because a bake *is* a partial replay of that frame's compose
 program. It binds one of two samplers per entry — clamp-to-edge for a
 `filter: blur()` group's transparent margin, `MirrorRepeat` for a backdrop's
-marginless crop — and skips the whole gaussian at σ = 0, which only a
-colour-only `backdrop-filter` reaches. It still knows nothing about nodes, computed styles, layout or paint
+marginless crop — renders an entry that `reads_canvas` over the canvas colour
+`prepare` is given and every other over transparent black, and skips the
+whole gaussian at σ = 0, which only a colour-only `backdrop-filter` reaches. It still knows nothing about nodes, computed styles, layout or paint
 order — the frame hands it device-pixel geometry and an opaque op range — and
 nothing else in `render` names a frame at all. A render names the bitmaps its scene
 draws: vello frees its persistent image atlas whenever a scene with no patch at
@@ -855,7 +862,14 @@ differ. `scroll/snap.rs` is css-scroll-snap-1 without its
 events: a container's snap positions are computed from layout and published
 beside its slot, a drag settles onto the nearest one at release, a wheel tick
 steps to the next one in its direction, and a snapping container is re-snapped
-at rest whenever a commit lands. Only
+at rest whenever a commit lands. Each position names the element whose snap
+area it aligns, so a container that stood on an area's position before a
+layout change stands on that area's position after it (§4.1.3), read from the
+committed frame's positions and the offset with no record kept: the document
+moves its own offset in the render that builds the new positions
+(`Document::resnap`, before the initial scroll targets, with one more
+paint-order build when an offset moved), and the painter the offset it holds.
+Only
 `overflow: scroll` is user-scrollable; `hidden` is a scroll container that
 moves only programmatically (load-bearing here, because the Lynx UA cascade
 puts `hidden` on every element) and `clip` is not a scroll container at all —

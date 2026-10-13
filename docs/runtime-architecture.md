@@ -193,10 +193,10 @@ QuickJS ESM graph — an MTS realm, on bobcat-main's runtime
   bobcat:boot
     ├──▶ bobcat:element (Document class + flush binding)
     ├──▶ bobcat:timers (timer-global installation)
-    ├──  const config = { defaultDisplayLinear: …, … }  four boolean literals
+    ├──  const config = { defaultDisplayLinear: …, … }  five boolean literals
     ├──  export const document = new Document(config)  the realm's first
     │      └──▶ bobcat-internal:host.createDocument      statement
-    │            └──▶ four booleans + DocumentIngredients ──▶ private dom::Document<()>
+    │            └──▶ five booleans + DocumentIngredients ──▶ private dom::Document<()>
     │   (the author sheets are mounted on this document, in listed order, by
     │    the first __FlushElementTree below, never by a statement here)
     └──▶ await import("<entry URL>")    completed by the view's `load_entry`
@@ -1575,6 +1575,7 @@ const config = {
   defaultOverflowVisible: true,
   enableCssSelector: true,
   enableJSDataProcessor: false,
+  enableCssInheritance: false,
 };
 export const document = new Document(config);
 __BobcatInitializeMTS({
@@ -1592,7 +1593,7 @@ __BobcatRenderPage(data);
 await Promise.resolve().then(() => __FlushElementTree());
 ```
 
-The screen's three numbers, the page configuration's four switches and the
+The screen's three numbers, the page configuration's five switches and the
 entry's URL are written into it as literals — facts Rust owns, passed as
 primitives, with no JSON the realm parses and hands back. `new Document(config)` builds the
 document and mounts nothing: the first `__FlushElementTree` mounts the author
@@ -1648,11 +1649,11 @@ and tests.
 
 The document belongs to a *realm*, and the realm creates it, out of a
 configuration it holds. `bobcat:element` exports `class Document`; the boot
-module is written with the view's four page switches as boolean literals and
+module is written with the view's five page switches as boolean literals and
 constructs one over that record; and that constructor calls
 `createDocument(defaultDisplayLinear, defaultOverflowVisible,
-enableCssSelector, enableJSDataProcessor)`, which reads the four
-`HostValue::Boolean` arguments — Rust genuinely needs these fields — and builds
+enableCssSelector, enableJSDataProcessor, enableCssInheritance)`, which reads
+the five `HostValue::Boolean` arguments — Rust genuinely needs these fields — and builds
 a `LynxDocument` out of them plus the `DocumentIngredients` that never reached
 the realm: the create-time viewport, the validated `dom::TextContext` and the
 group's `StylePool`. It never waits and mounts no author stylesheet; the first
@@ -2041,7 +2042,17 @@ positions: a wheel tick steps to the next position, a drag is raw until its
 release, when a `ScrollEnd` decision settles every container the drag moved
 from where it found it. A frame's adoption also re-snaps every snapping
 container no drag is holding, which is how the initial layout and a
-relayout come to rest on a position.
+relayout come to rest on a position. A container that stood on a snap
+area's position in the frame being replaced goes to that same area's
+position in the new one (css-scroll-snap-1 §4.1.3), not to the position
+nearest its old offset: `poll_link` reads which area each container stands
+on while the outgoing frame is still at hand (`ScrollIntents::leave`), and
+the rebase moves the ones at rest (`follow_snapped`) before the at-rest
+rule. A container a drag, a fling, a bounce back or a glide has is not
+moved, and a request the frame brings for the first time replaces what was
+read for its container. The document does the same for its own offset in
+the commit, so the frame is baked around the position the painter arrives
+at.
 
 Inertia is the same walk on the painter's clock (`paint/inertia.rs`): the
 intents measure a drag's release velocity from the drag's own steps, and
@@ -2288,7 +2299,17 @@ border. The range points **backwards**: from the content start of the
 element's nearest Backdrop Root ancestor (`filter`, `opacity < 1`, `mask`,
 `clip-path`, `mix-blend-mode`, `backdrop-filter`, a current `opacity` animation
 at any reading, exported or not, or the root) to the element's own scope open —
-exactly what was painted before it inside that root. A `will-change` naming one
+exactly what was painted before it inside that root. What that prefix was
+painted *over* belongs to the image as well. A group's own pixels start empty,
+so a backdrop inside one bakes over transparent black. Under the document
+root's image lies the canvas, which is the colour the painter clears its
+target to (`paint::CANVAS`) and no op of the program, so an entry whose
+Backdrop Root is the document's (`FilterGroup::reads_canvas`) bakes over that
+colour, and is recorded even when nothing was painted before the element.
+Baked without it the texture is transparent where the page painted nothing
+and translucent wherever the blur spreads painted content toward such a
+place, and the op's source-over fill leaves the unfiltered pixels showing
+there. A `will-change` naming one
 of those properties is a Backdrop Root per the spec and is deliberately not one
 here, since no group layer is opened per `will-change` element (recorded in
 `docs/tracking/deviations.md`); the current `opacity` animation, which Web
@@ -2325,8 +2346,9 @@ group's ancestors' clips.
 
 The device side is `dom::render::blur::FilterTextures`, one per
 `vello::Renderer`, owned beside that renderer's `AtlasResidency` by `Headless`
-and by the painter's `WindowGraphics`. Its cache holds one commit's bakes, and
-each entry re-bakes on its own two conditional readings. The painter's scroll
+and by the painter's `WindowGraphics`. Its cache holds one commit's bakes,
+taken over one canvas colour, and each entry re-bakes on its own two
+conditional readings. The painter's scroll
 generation counts when some op in the entry's range and the entry's own space
 differ in their innermost scroll or sticky node, a node on one path and not
 the other. A blurred scroller's content slides under the blur, and a backdrop

@@ -422,9 +422,9 @@ fn checker(width: u32, height: u32) -> (u32, u32, Vec<u8>) {
 /// crimson left half and an amber bar across it, so every subject sits over
 /// one vertical seam, one horizontal seam and two hues.
 ///
-/// A backdrop is made of what the *scene* drew, not of the render's base
-/// colour, so the card paints its own opaque white. The two hues are what
-/// makes a colour pass in a chain legible beside a blur.
+/// The card paints its own opaque white, so every cell filters the same
+/// ground whatever the capture is cleared to. The two hues are what makes a
+/// colour pass in a chain legible beside a blur.
 fn board(row: usize, col: usize, inner: &str) -> String {
     format!(
         r#"<div style="display: flex; position: absolute; left: {left}px; top: {top}px; width: 115px; height: 128px; background-color: #ffffff">
