@@ -46,6 +46,9 @@ crates/bobcat-core/src/
                        the token that ends them, and the owner's wait
   realm/mod.rs         open_realm, the one constructor every realm is opened
                        with, and the core every realm gets from it
+  realm/child.rs       a realm's ShadowRealm children: the hook that
+                       furnishes each, the list they live in, and what the
+                       owner's epilogue does with them
   realm/owner.rs       the one driver a view's page and a worker share: the
                        entry boundary, the epilogue, module loads, future
                        settles, the end and the release
@@ -834,7 +837,12 @@ an MTS realm and, for a worker realm, `Worker { id, url }`: the id of its
 key and its script URL, whatever that URL is. Since
 both runtimes register
 every built-in module, these host modules are also what decides which
-built-ins a realm can link.
+built-ins a realm can link. The core ends with the TC39 `ShadowRealm`
+constructor, so every realm kind has it as a global; each `new ShadowRealm()`
+is a child realm that `realm/child.rs` furnishes with the same core over
+tables of its own and none of its parent's kind's host modules, keeps in the
+realm core's `ChildRealms` and leaves to the owner's epilogue to service (see
+below).
 
 ### Realm construction and driving
 
@@ -856,7 +864,7 @@ difference.
 | Opened by | `Page::open_realm`, the view's first job | `Worker::boot`, the worker's first job, queued as its `Start` is served |
 | Root module | `bobcat:boot`, which Rust generates: the page configuration, the screen and the BTS entry's URL as literals, the `Document`, `try { await import(<entry URL>) } catch`, then the BTS, the render and the first flush | the module at its URL itself, loaded the way `import(<URL>)` loads one, with nothing written around it and no global scope installed first. The BTS's URL is `bobcat:bts`, which imports `bobcat:worker` and `bobcat:timers` first; a script at any other URL imports them itself when it uses them |
 | Entry completed by | `load_entry`, from the answer `create_lynx_view` asked for | the driver's `load_module`, as every import is: the load of the root module in `Worker::boot` raises the request, and that job's epilogue asks the host through the worker's `HostOutbox`. A URL under the engine prefixes never becomes a request: the realm's own loader loads it or refuses it. `bobcat:bts` is such a URL, and it imports the BTS entry the `initialize` message names once that message has arrived, as an ordinary import |
-| Core members on `bobcat-internal:host` | `requestScriptFrame`, `setTimer`/`clearTimer`, `waitFuture`/`takeFuture`/`settleFuture`, `fetchResource`, `resolveModuleUrl`/`loadModuleSync`, `reportScriptError`/`logScriptMessage` | the same |
+| Core members on `bobcat-internal:host` | `requestScriptFrame`, `setTimer`/`clearTimer`, `waitFuture`/`takeFuture`/`settleFuture`, `fetchResource`, `resolveModuleUrl`/`loadModuleSync`, `reportScriptError`/`logScriptMessage`, and the global `ShadowRealm`, whose children get the same members (`requestScriptFrame` a no-op) | the same |
 | Host members of its kind | on `bobcat-internal:host`: the document, tree, attribute, readback, stylesheet (`hasStyleSheet`, `preloadStyleSheet`, `adoptStyleSheet`), event-name, startup-string and `Worker` members | `bobcat-internal:worker`: `postWorkerMessage`, `closeWorker`, `workerName`, the same members at every URL |
 | Startup strings | `initData`, `globalProps`, `initialProcessor` and `nativeModuleTable`, one-shot members `bobcat:runtime` reads as it is evaluated | none. The `initialize` message the MTS realm's `__BobcatConnectBackground` posts to the BTS carries `initData`, `updateData`, `processorName`, `cacheData` and `globalProps` as the MTS realm processed them, the BTS entry's URL, the MTS realm's `SystemInfo` and the view's native module table. A worker at any other URL is posted no `initialize` |
 | `SystemInfo` | `ViewSources::screen`, written into the boot module as three number literals: a `bobcat:runtime` export and `lynx.SystemInfo` | the BTS's is the MTS realm's own, from `initialize`: `bobcat:bts-runtime` builds its export, `lynx.SystemInfo` and a global `SystemInfo` out of it before the BTS entry is imported, so both realms report the numbers boot's literals read as. A worker at any other URL is posted no `initialize`, and a `bobcat:bts-runtime` it imports reports the runtime constants alone |
@@ -958,13 +966,44 @@ The epilogue's steps and their order are the contract, for both owners:
    load of its root module (a worker whose URL is an engine name raises none,
    because its realm's loader loads that root module);
 10. the futures a `.then` asked the realm to settle, each spawned as a
-    `settle_future`;
-11. `after_settles`: on a page one `load_font_face` per `@font-face` rule the
+    `settle_future`, then each `ShadowRealm` child's, as a
+    `settle_child_future`;
+11. what the realm's `ShadowRealm` children left unhandled, one rejection per
+    child, and then what the realm itself left beside them, each reported
+    under ShadowRealm; skipped for a realm with no children;
+12. `after_settles`: on a page one `load_font_face` per `@font-face` rule the
     sheets mounted by the operation declared;
-12. the next timer deadline, republished only when it moved;
-13. the checkpoint generation, last, so it names the generation this entry ran
+13. the release of every child nothing needs any more, outside every
+    JavaScript call;
+14. the next timer deadline, the earliest of the realm's own and every
+    child's, republished only when it moved;
+15. the checkpoint generation, last, so it names the generation this entry ran
     the shared job queue up to, which is what `serve_clock` compares a bump
     against to tell this owner's entries from a sibling's.
+
+**`ShadowRealm` children.** A child has no entries of its own: its code runs
+inside the owner's entries, so the owner's epilogue services it at the steps
+above. Its timers run in step 2 beside the realm's own, through the owner's
+`run_due_timers` — a page settles the removals a child's callback made in the
+same batch, and a worker that called `close()` runs a child's no more than its
+own. Its module requests (step 9, after the realm's) are asked of the host
+through the owner's `HostOutbox` and completed in the child by a
+`load_child_module`, and its future settles (step 10) delivered into it by a
+`settle_child_future`; each task finds the child by its key when it enters,
+and drops what it carries for a child released meanwhile. Step 11 reads the
+children's rejections because an entry's checkpoint reports for the owner's
+realm alone and leaves a child's queued for the child, and the owner's beside
+them because a child's operation can leave one in the parent — an
+`importValue` that rejects when the child's module load completes. Step 13
+frees a child once no `ShadowRealm`, wrapped function or pending
+`importValue` of another realm refers to it, no timer of its is armed and no
+load or settle of its is in flight; it is the only place a child is freed
+while its owner lives, because freeing a realm collects the whole runtime and
+no JavaScript call may be under it. A child the hook could not furnish is kept
+retired until that step. Otherwise the children go with the realm core, after
+the owner's realm. Each operation on a child takes it out of the list and puts
+it back, so a `new ShadowRealm()` in the child's own code adds a grandchild to
+the same flat list without meeting a borrow of it.
 
 Each "nothing more" skips every later step, not only the reports: an owner
 that has ended asks the host for nothing, spawns nothing and re-arms no timer
@@ -977,7 +1016,9 @@ collection step of its own. On the MTS realm, a batch of document operations
 that crossed `REMOVALS_PER_COLLECTION` removals ends with one, in the call that
 ran the batch — the timer batch of step 2 is one such call, and an event
 dispatch or a page update is another. And freeing any realm's QuickJS context,
-which releasing an MTS realm or any worker realm does, is followed by a
+which releasing an MTS realm or any worker realm does — and so does the
+epilogue's release of a `ShadowRealm` child, the one collection an epilogue
+can cause — is followed by a
 collection of the whole runtime that realm was on: the bridge's
 `qjs_context_free` runs it, because a realm's global object is cyclic and only
 a collection reaches its finalizers. That collection covers every realm on the
@@ -1041,6 +1082,7 @@ The MTS table, whose events go to the view's host:
 | Listener | `ListenerFailed` | no | none | an input event (`ToMain::DispatchEvent`), a batch of component events, what a worker said (`consume_worker_events`) |
 | Frame | `ScriptRunError` | no | none | `ToMain::Vsync` |
 | HostCall | `ScriptRunError` | no | none | `ToMain::PageUpdate`, `ToMain::ModuleCallback` |
+| ShadowRealm | `ScriptRunError` | no | `in a ShadowRealm` | the epilogue: a rejection a `ShadowRealm` child left unhandled, or the realm itself beside its children |
 | Disposal | `ListenerFailed` | no: the view has already ended | none | the page's `before_release`, the JavaScript disposal |
 | Panic | `Panicked`, through `EngineEvent::from_panic` | yes, through the panic latch | `the Lynx main thread panicked` | `trapped`, `finish_view`, the Wasm panic hook |
 
@@ -1062,6 +1104,7 @@ The worker table, whose events go to the realm that created the worker:
 | Listener | `Errored` | no | `delivering a message to a worker` | a posted message |
 | Frame | `Errored` | no | `running animation callbacks` | a vsync, through `bobcat:animation-frame` |
 | HostCall | `Errored` | no | `running a native module callback` | a native module's answer |
+| ShadowRealm | `Errored` | no | `running a ShadowRealm job` | the epilogue, as on the MTS table |
 | Panic | `Failed` | yes, through the panic latch | `the worker thread panicked` | `trapped`, `finish_worker_task`, `report_thread_trap`, the Wasm panic hook |
 
 The MTS realm that created the worker reports an `Errored` to the host as

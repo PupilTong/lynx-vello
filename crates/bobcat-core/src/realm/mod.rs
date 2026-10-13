@@ -5,7 +5,10 @@
 //! Each gets the same core under `bobcat-internal:host` — `requestScriptFrame`,
 //! the timer pair, the `Future` members, `fetchResource`, the two members
 //! `bobcat:module` is written over, and the two `bobcat:diagnostics` is written
-//! over — installed here and nowhere else.
+//! over — installed here and nowhere else, and the TC39 `ShadowRealm` global,
+//! every `new ShadowRealm()` of which is a child realm furnished with that
+//! same core over tables of its own ([`child`]) and kept in the
+//! [`RealmCore`]'s list for the owner's epilogue to service.
 //!
 //! What differs between realm kinds is the host modules installed after the
 //! core, and those are the caller's: [`open_realm`] takes them as a closure.
@@ -24,13 +27,15 @@
 //! written there once for both threads. What a failure in either kind of
 //! realm is reported as is [`policy`]'s: one table per realm kind.
 
+pub(crate) mod child;
 pub(crate) mod owner;
 pub(crate) mod policy;
 
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use quickjs_rust_bridge::HostValue;
 
+use self::child::{ChildRealms, ShadowRealmHook};
 use self::policy::context_of;
 use crate::background::WorkerKey;
 use crate::esm::HOST_MODULE_SPECIFIER;
@@ -47,9 +52,15 @@ use crate::view::{EngineEvent, ScriptSource};
 ///
 /// `engine` is declared first, so an owner that holds this as its first field
 /// frees the realm, and with it every host function that holds a clone of
-/// either table, before anything declared after it.
+/// either table, before anything declared after it. `children` comes next:
+/// the realm's `ShadowRealm` objects and wrapped functions are freed with it,
+/// and then the children they named.
 pub(crate) struct RealmCore {
     pub(crate) engine: ScriptEngine,
+    /// The realm's `ShadowRealm` children, grandchildren included, which the
+    /// owner's epilogue services. Only this field holds the list strongly:
+    /// the hook that fills it holds it weakly, so it goes with the core.
+    pub(crate) children: Rc<ChildRealms>,
     /// What `setTimer` arms and the owner's epilogue fires.
     pub(crate) timers: Rc<TimerState>,
     /// Every host-backed operation this realm holds a `Future` for, every
@@ -73,7 +84,7 @@ pub(crate) fn open_realm<T>(
     thread: JsThreadHandle,
     frame_target: Option<WorkerKey>,
     source: ScriptSource,
-    host_modules: impl FnOnce(&mut ScriptEngine, &mut ScriptRuntime) -> Result<T, ScriptError>,
+    host_modules: impl FnOnce(&mut ScriptEngine) -> Result<T, ScriptError>,
 ) -> Result<(RealmCore, T), ScriptError> {
     let mut engine = js
         .create_realm()
@@ -82,12 +93,21 @@ pub(crate) fn open_realm<T>(
     // order is not observable, and it leaves no stretch in which the realm
     // exists without module loading.
     engine.enable_module_loading();
-    let (timers, futures) =
-        install_realm_core(&mut engine, js, host, thread, frame_target, source)?;
-    let installed = host_modules(&mut engine, js)?;
+    let children = Rc::new(ChildRealms::new());
+    engine.set_children(Rc::downgrade(&children));
+    let (timers, futures) = install_realm_core(
+        &mut engine,
+        host,
+        thread,
+        FrameDemand::Report(frame_target),
+        source,
+        &Rc::downgrade(&children),
+    )?;
+    let installed = host_modules(&mut engine)?;
     Ok((
         RealmCore {
             engine,
+            children,
             timers,
             futures,
         },
@@ -95,38 +115,64 @@ pub(crate) fn open_realm<T>(
     ))
 }
 
-/// Installs the members every realm has, and answers with the two tables they
-/// write to.
+/// What a realm's `requestScriptFrame` does with what it is told.
+#[derive(Clone, Copy)]
+pub(crate) enum FrameDemand {
+    /// Reports it to the view under this key: `None` for a view's MTS realm,
+    /// the worker's own key for a worker realm.
+    Report(Option<WorkerKey>),
+    /// Nothing, in a `ShadowRealm` child. The demand is one flag per realm
+    /// key and a child has no key of its own, so a child that reported under
+    /// its parent's would cancel the parent's demand with its own `false`.
+    Ignored,
+}
+
+/// Installs the members every realm has, the `ShadowRealm` constructor last,
+/// and answers with the two tables they write to.
+///
+/// One function for an owner's realm and for each `ShadowRealm` child, which
+/// differ only in `frames`. A child is furnished from inside its parent's
+/// JavaScript, which is why nothing here takes the runtime. `children` is the
+/// list every `new ShadowRealm()` of this realm, and of its children, joins.
 fn install_realm_core(
     engine: &mut ScriptEngine,
-    js: &mut ScriptRuntime,
     host: &HostOutbox,
     thread: JsThreadHandle,
-    frame_target: Option<WorkerKey>,
+    frames: FrameDemand,
     source: ScriptSource,
+    children: &Weak<ChildRealms>,
 ) -> Result<(Rc<TimerState>, Rc<FutureTable>), ScriptError> {
-    let frames = host.clone();
-    crate::script_frames::install(engine, js, move |pending| {
-        frames.notify(ViewNotice::ScriptFrameDemand {
-            worker: frame_target,
-            pending,
-        });
+    let notices = host.clone();
+    crate::script_frames::install(engine, move |pending| {
+        if let FrameDemand::Report(worker) = frames {
+            notices.notify(ViewNotice::ScriptFrameDemand { worker, pending });
+        }
     })
     .map_err(|error| context_of("installing animation frames", error))?;
     let timers = Rc::new(TimerState::new());
-    install_timer_members(engine, js, &timers)
+    install_timer_members(engine, &timers)
         .map_err(|error| context_of("installing the timer members", error))?;
     let futures = Rc::new(FutureTable::new());
-    crate::future::install(engine, js, &futures, host.token().clone(), thread.clone())
+    crate::future::install(engine, &futures, host.token().clone(), thread.clone())
         .map_err(|error| context_of("installing Future", error))?;
     // Over the table above rather than a wait of its own: what a fetch hands
     // JavaScript is a future of this realm's.
-    crate::fetch::install(engine, js, host, &futures)
+    crate::fetch::install(engine, host, &futures)
         .map_err(|error| context_of("installing fetchResource", error))?;
-    crate::require::install(engine, js, host.clone(), thread)
+    crate::require::install(engine, host.clone(), thread.clone())
         .map_err(|error| context_of("installing require", error))?;
-    install_diagnostics(engine, js, host, source)
+    install_diagnostics(engine, host, source.clone())
         .map_err(|error| context_of("installing the diagnostics members", error))?;
+    child::install(
+        engine,
+        ShadowRealmHook {
+            children: Weak::clone(children),
+            host: host.clone(),
+            thread,
+            source,
+        },
+    )
+    .map_err(|error| context_of("installing ShadowRealm", error))?;
     Ok((timers, futures))
 }
 
@@ -141,7 +187,6 @@ fn install_realm_core(
 /// realm.
 fn install_diagnostics(
     engine: &mut ScriptEngine,
-    js: &mut ScriptRuntime,
     host: &HostOutbox,
     source: ScriptSource,
 ) -> Result<(), ScriptError> {
@@ -151,7 +196,6 @@ fn install_diagnostics(
     ] {
         let reporting = host.clone();
         engine.register_host_module_function(
-            js,
             HOST_MODULE_SPECIFIER,
             name,
             2,

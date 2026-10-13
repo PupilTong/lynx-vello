@@ -318,11 +318,10 @@ pub(crate) fn run_due_timers(
 /// thread's, through [`run_due_timers`].
 pub(crate) fn install_timer_members(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     timers: &Rc<TimerState>,
 ) -> Result<(), ScriptError> {
     let state = Rc::clone(timers);
-    install(engine, js_runtime, "setTimer", 2, move |arguments| {
+    install(engine, "setTimer", 2, move |arguments| {
         const NAME: &str = "bobcat-internal:host.setTimer";
         let delay = number_argument(NAME, arguments, 0)?;
         let repeats = boolean_argument(NAME, arguments, 1)?;
@@ -336,7 +335,7 @@ pub(crate) fn install_timer_members(
     })?;
 
     let state = Rc::clone(timers);
-    install(engine, js_runtime, "clearTimer", 1, move |arguments| {
+    install(engine, "clearTimer", 1, move |arguments| {
         const NAME: &str = "bobcat-internal:host.clearTimer";
         let id = timer_id_argument(NAME, arguments, 0)?;
         state.schedule.borrow_mut().clear(id);
@@ -346,18 +345,11 @@ pub(crate) fn install_timer_members(
 
 fn install(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     name: &str,
     arity: u8,
     callback: impl FnMut(&[HostValue]) -> Result<HostValue, String> + 'static,
 ) -> Result<(), ScriptError> {
-    engine.register_host_module_function(
-        js_runtime,
-        HOST_MODULE_SPECIFIER,
-        name,
-        arity,
-        Box::new(callback),
-    )
+    engine.register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, Box::new(callback))
 }
 
 fn argument(arguments: &[HostValue], index: usize) -> &HostValue {

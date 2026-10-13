@@ -168,13 +168,12 @@ enum Waited {
 /// asynchronous path instead.
 pub(crate) fn install(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     table: &Rc<FutureTable>,
     token: CancellationToken,
     thread: JsThreadHandle,
 ) -> Result<(), ScriptError> {
     let futures = Rc::clone(table);
-    install_member(engine, js_runtime, "waitFuture", 2, move |arguments| {
+    install_member(engine, "waitFuture", 2, move |arguments| {
         const NAME: &str = "bobcat-internal:host.waitFuture";
         let id = future_id_argument(NAME, arguments, 0)?;
         let deadline = deadline_from(number_argument(NAME, arguments, 1)?);
@@ -210,14 +209,14 @@ pub(crate) fn install(
     })?;
 
     let futures = Rc::clone(table);
-    install_member(engine, js_runtime, "takeFuture", 1, move |arguments| {
+    install_member(engine, "takeFuture", 1, move |arguments| {
         const NAME: &str = "bobcat-internal:host.takeFuture";
         let id = future_id_argument(NAME, arguments, 0)?;
         futures.take(id)
     })?;
 
     let futures = Rc::clone(table);
-    install_member(engine, js_runtime, "settleFuture", 1, move |arguments| {
+    install_member(engine, "settleFuture", 1, move |arguments| {
         const NAME: &str = "bobcat-internal:host.settleFuture";
         let id = future_id_argument(NAME, arguments, 0)?;
         let Some(future) = futures.pending.borrow_mut().remove(&id) else {
@@ -237,7 +236,7 @@ pub(crate) fn install(
     #[cfg(test)]
     {
         let futures = Rc::clone(table);
-        install_member(engine, js_runtime, "testFuture", 3, move |arguments| {
+        install_member(engine, "testFuture", 3, move |arguments| {
             const NAME: &str = "bobcat-internal:host.testFuture";
             let delay = Duration::from_secs_f64(
                 number_argument(NAME, arguments, 0)?.clamp(0.0, MAX_TIMEOUT_MILLISECONDS) / 1_000.0,
@@ -301,18 +300,11 @@ fn deadline_from(milliseconds: f64) -> Option<ClockInstant> {
 
 fn install_member(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     name: &str,
     arity: u8,
     callback: impl FnMut(&[HostValue]) -> Result<HostValue, String> + 'static,
 ) -> Result<(), ScriptError> {
-    engine.register_host_module_function(
-        js_runtime,
-        HOST_MODULE_SPECIFIER,
-        name,
-        arity,
-        Box::new(callback),
-    )
+    engine.register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, Box::new(callback))
 }
 
 fn number_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<f64, String> {

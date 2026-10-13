@@ -4900,3 +4900,211 @@ fn a_passed_deadline_queues_one_settle_while_a_sibling_holds_the_thread() {
         );
     });
 }
+
+/// Every `ConsoleMessage` text among `events`.
+fn console_messages(events: &[EngineEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::ConsoleMessage { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// How many `ShadowRealm` children the page's realm holds.
+async fn child_realms(page: &Rc<Page>) -> Option<usize> {
+    owner::enter(page, |runtime, _| runtime.child_realms()).await
+}
+
+/// A `ShadowRealm` child's timer is the owner's to fire: armed in the child's
+/// own table, it wakes the page's clock and runs in a later epilogue of the
+/// page, where its callback calls a function of the parent's it was handed.
+#[test]
+fn a_shadow_realm_timer_fires_in_a_later_epilogue_of_its_owner() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned
+            .boot(&format!(
+                "{ONE_BOX}
+globalThis.realm = new ShadowRealm();
+await realm.importValue('bobcat:timers', '__BobcatRunTimer');
+realm.evaluate('report => {{ setTimeout(() => report(\"fired\"), 30); }}')(
+  message => console.log(message),
+);
+console.log('armed');
+"
+            ))
+            .await;
+        let mut events = owned.events();
+        assert_eq!(console_messages(&events), ["armed"], "{events:?}");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !console_messages(&events)
+            .iter()
+            .any(|message| message == "fired")
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child's timer never fired: {events:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            task::yield_now().await;
+            events.extend(owned.events());
+        }
+        assert!(
+            !events.iter().any(EngineEvent::is_fatal),
+            "the child's timer ended nothing: {events:?}"
+        );
+        assert_eq!(child_realms(&owned.page).await, Some(1));
+    });
+}
+
+/// What a child leaves unhandled is reported once, after the entry that ran
+/// its code, as a `ScriptRunError` named for the `ShadowRealm`; the view goes
+/// on. The child, which nothing refers to any more, is released by the same
+/// epilogue, after the report.
+#[test]
+fn a_shadow_realm_rejection_is_reported_once_and_ends_nothing() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        let booted = owned
+            .boot(&format!(
+                "{ONE_BOX_WITH_UPDATE}
+new ShadowRealm().evaluate('Promise.reject(new Error(\"the child failed\")); undefined');
+"
+            ))
+            .await;
+        for _ in 0..8 {
+            task::yield_now().await;
+        }
+        let failures: Vec<String> = owned
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                EngineEvent::ScriptRunError(error) => Some(error.message.to_string()),
+                _ if event.is_fatal() => panic!("the rejection ended the view: {event:?}"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(
+            failures[0].starts_with("in a ShadowRealm: ")
+                && failures[0].contains("the child failed"),
+            "{}",
+            failures[0]
+        );
+        assert!(!owned.page.ended(), "the rejection did not end the view");
+        assert_eq!(child_realms(&owned.page).await, Some(0));
+        owned.page.apply(vec![update_command(1)]).await;
+        assert_eq!(owned.view.published.commit(), Some(booted + 1));
+    });
+}
+
+/// A child goes once nothing needs it: no `ShadowRealm` or wrapped function
+/// of the parent's refers to it and it has no timer armed. The epilogue that
+/// first sees that releases it; one with a timer still armed stays, as a
+/// browser's realm stays while its timer list holds a callback of its.
+#[test]
+fn a_shadow_realm_nothing_needs_is_released_by_its_owners_epilogue() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned
+            .boot(&format!(
+                "{ONE_BOX}
+globalThis.idle = new ShadowRealm();
+idle.evaluate('1');
+globalThis.waiting = new ShadowRealm();
+await waiting.importValue('bobcat:timers', '__BobcatRunTimer');
+waiting.evaluate('setTimeout(() => {{}}, 3600000); undefined');
+globalThis.updatePage = () => {{
+  globalThis.idle = undefined;
+  globalThis.waiting = undefined;
+}};
+"
+            ))
+            .await;
+        assert_eq!(child_realms(&owned.page).await, Some(2));
+
+        owned.page.apply(vec![update_command(1)]).await;
+        // A collection, for a `ShadowRealm` object that is only cyclic
+        // garbage: the epilogue after it is what releases the child.
+        owner::enter(&owned.page, |runtime, js| {
+            runtime.core().engine.collect_garbage(js)
+        })
+        .await
+        .expect("the page is live")
+        .expect("the collection runs");
+        assert_eq!(
+            child_realms(&owned.page).await,
+            Some(1),
+            "the idle child is released and the one with a timer armed stays"
+        );
+        let events = owned.events();
+        assert!(
+            !events.iter().any(EngineEvent::is_fatal),
+            "the release ended nothing: {events:?}"
+        );
+    });
+}
+
+/// A child's module request goes to the view's host like the owner's own and
+/// is completed in the child, and a future a `.then` in the child asked to
+/// settle is delivered into the child: both by tasks the owner's epilogue
+/// spawned, which enter the owner's realm to reach the child.
+#[test]
+fn a_shadow_realms_module_loads_and_future_settles_land_in_the_child() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::new(context, workers);
+        harness
+            .boot(&format!(
+                "{ONE_BOX}
+globalThis.realm = new ShadowRealm();
+realm.importValue('app:///child.js', 'value').then(value => console.log('loaded ' + value));
+await realm.importValue('bobcat:future', 'Future');
+realm.evaluate(`report => {{
+  import('bobcat-internal:host').then(({{ testFuture }}) => import('bobcat:future').then(({{ Future }}) =>
+    new Future(testFuture(5, 'settled', false)).then(report)));
+}}`)(value => console.log('future ' + value));
+"
+            ))
+            .await;
+        harness
+            .until("the child never asked for its module", |harness| {
+                harness.sources.iter().any(|(request, _)| {
+                    matches!(request, SourceRequest::Module(url) if url == "app:///child.js")
+                })
+            })
+            .await;
+        harness.answer("app:///child.js", "export const value = 7;");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let messages = console_messages(&harness.events);
+            if ["loaded 7", "future settled"]
+                .iter()
+                .all(|wanted| messages.iter().any(|message| message == wanted))
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child's load or settle never landed: {:?}",
+                harness.events
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            harness.turn().await;
+        }
+        assert!(
+            !harness
+                .events
+                .iter()
+                .any(|event| event.is_fatal() || matches!(event, EngineEvent::ScriptRunError(_))),
+            "{:?}",
+            harness.events
+        );
+    });
+}

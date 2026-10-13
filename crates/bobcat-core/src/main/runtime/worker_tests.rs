@@ -3609,7 +3609,6 @@ fn bts_animation_frames_continue_while_an_mts_callback_is_blocked() {
         .core
         .engine
         .register_host_module_function(
-            &mut pair.js,
             "test:gate",
             "block",
             0,
@@ -4145,5 +4144,40 @@ fn a_callback_for_a_worker_that_has_ended_says_so_and_invoking_it_does_nothing()
             WorkerPayload::Message(ref value) if posted(value, "unreachable")
         )),
         "the released realm ran nothing"
+    );
+}
+
+/// A Worker realm has `ShadowRealm` too, and its children are serviced by
+/// the worker's own epilogue: a child evaluates, and its timer fires on the
+/// worker thread and calls the worker's own function it was handed.
+#[test]
+fn a_worker_realm_has_shadow_realms_its_epilogue_services() {
+    let mut pair = Pair::new(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.results = [];
+        globalThis.worker = new Worker('./worker.js');
+        worker.onmessage = event => results.push(event.data);
+    ",
+    );
+    pair.answer(
+        r"import 'bobcat:worker'; import 'bobcat:timers';
+        const realm = new ShadowRealm();
+        postMessage(realm.evaluate('1 + 1'));
+        await realm.importValue('bobcat:timers', '__BobcatRunTimer');
+        realm.evaluate('report => { setTimeout(() => report(\'fired\'), 5); }')(
+            message => postMessage(message),
+        );
+    ",
+    );
+    pair.deliver();
+    pair.deliver();
+    pair.check(
+        r#"if (JSON.stringify(results) !== '[2,"fired"]') throw Error(JSON.stringify(results));
+        worker.terminate();"#,
+    );
+    assert!(
+        worker_failures(pair.notices()).is_empty(),
+        "the child's timer failed nothing"
     );
 }

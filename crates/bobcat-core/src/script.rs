@@ -61,6 +61,12 @@ pub enum ScriptErrorPhase {
     /// Calling an ESM export the realm published back to the host.
     CallModuleExport,
     CollectGarbage,
+    /// Installing the `ShadowRealm` constructor on a realm.
+    InstallShadowRealm,
+    /// Reporting what a realm left unhandled outside a checkpoint of its own
+    /// entry: a `ShadowRealm` child's rejections, and the parent's beside
+    /// them.
+    ShadowRealmCheckpoint,
 }
 
 /// Sanitized source location for a [`ScriptError`].

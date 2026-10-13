@@ -303,14 +303,12 @@ impl ModuleReply {
 /// [`LynxView::pump`]: crate::LynxView::pump
 pub(crate) fn install(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     host: &HostOutbox,
     caller: Option<WorkerKey>,
 ) -> Result<(), ScriptError> {
     const NAME: &str = "bobcat-internal:native-modules.invokeNativeModule";
     let host = host.clone();
     engine.register_host_module_function(
-        js_runtime,
         NATIVE_MODULES_HOST_SPECIFIER,
         "invokeNativeModule",
         5,

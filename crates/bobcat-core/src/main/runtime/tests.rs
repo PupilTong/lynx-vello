@@ -7192,3 +7192,63 @@ fn one_mts_future_times_out_then_settles_as_a_promise_and_refuses_a_later_wait()
         ]
     );
 }
+
+/// `ShadowRealm` is a global of the MTS realm, like the W3C `Worker` a
+/// bucket-1 capability: a child evaluates in a global of its own, answers
+/// primitives, refuses objects with a `TypeError`, and wraps functions both
+/// ways.
+#[test]
+fn the_main_thread_realm_has_shadow_realms() {
+    let (mut js, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        if (typeof ShadowRealm !== 'function') throw Error('no ShadowRealm: ' + typeof ShadowRealm);
+        const realm = new ShadowRealm();
+        if (realm.evaluate('1 + 1') !== 2) throw Error('evaluate');
+        globalThis.marker = 'parent';
+        realm.evaluate('globalThis.marker = \'child\'');
+        if (globalThis.marker !== 'parent') throw Error('the child shares the parent global');
+        let refused;
+        try { realm.evaluate('({})'); } catch (error) { refused = error; }
+        if (!(refused instanceof TypeError)) throw Error('an object crossed: ' + refused);
+        if (realm.evaluate('f => f(21)')(x => x * 2) !== 42) throw Error('wrapped callback');
+        if (typeof realm.evaluate('typeof ShadowRealm') !== 'string'
+            || realm.evaluate('typeof ShadowRealm') !== 'function') throw Error('no nested ShadowRealm');
+    ",
+            "app:///shadow-realm.js",
+        )
+        .unwrap();
+    assert_eq!(runtime.child_realms(), 1);
+}
+
+/// A child has the realm core members under `bobcat-internal:host` and
+/// nothing of the MTS realm's kind: `bobcat:timers` links in it, and
+/// `bobcat:element`, which needs the document members, does not — a failure
+/// the parent's `importValue` rejects with a `TypeError` of its own.
+#[test]
+fn a_shadow_realm_links_the_core_built_ins_and_not_the_document_ones() {
+    let (mut js, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        const realm = new ShadowRealm();
+        const run = await realm.importValue('bobcat:timers', '__BobcatRunTimer');
+        if (typeof run !== 'function') throw Error('bobcat:timers did not link: ' + typeof run);
+        if (realm.evaluate('typeof setTimeout') !== 'function') throw Error('no child setTimeout');
+        let failed;
+        try {
+            await realm.importValue('bobcat:element', 'Document');
+        } catch (error) {
+            failed = error;
+        }
+        if (!(failed instanceof TypeError)) throw Error('bobcat:element linked: ' + failed);
+        // The link names a member of the MTS realm's own host module.
+        if (!failed.message.includes('bobcat-internal:host')) throw Error(failed.message);
+    ",
+            "app:///shadow-realm-imports.js",
+        )
+        .unwrap();
+}
