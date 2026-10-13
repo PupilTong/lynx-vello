@@ -79,7 +79,7 @@ const DOCUMENT_REFUSAL = new Error("the realm already created its document");
 
 /**
  * The page configuration a boot module is written with and hands to the
- * constructor. Its four switches are the host's; nothing in this file reads
+ * constructor. Its five switches are the host's; nothing in this file reads
  * them, and the constructor's only job is to pass them on, in order.
  */
 const PAGE_CONFIG: elementPapi.PageConfig = {
@@ -87,6 +87,7 @@ const PAGE_CONFIG: elementPapi.PageConfig = {
   defaultOverflowVisible: false,
   enableCssSelector: false,
   enableJSDataProcessor: true,
+  enableCssInheritance: true,
 };
 
 /**
@@ -201,7 +202,7 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
   const host: MockBobcat = {
     calls,
     named,
-    // Arguments are recorded rather than ignored: a test asserts the four
+    // Arguments are recorded rather than ignored: a test asserts the five
     // switches arrive as booleans, in `PageConfig`'s order.
     createDocument: (...args: unknown[]) => {
       calls.push(["createDocument", ...args]);
@@ -557,8 +558,8 @@ describe("installation", () => {
     void new elementModule.Document(PAGE_CONFIG);
     expect(mock.named("createDocument")).toEqual([
       // `PageConfig`'s order: display, overflow, selectors, processor,
-      // exposure ui margin.
-      ["createDocument", true, false, false, true],
+      // inheritance.
+      ["createDocument", true, false, false, true, true],
     ]);
   });
 

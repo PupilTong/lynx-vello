@@ -49,10 +49,11 @@
 
 use dom::NodeId;
 use dom::stylo::color::AbsoluteColor;
+use dom::stylo::properties::PropertyId;
 use dom::stylo::values::computed::{ColorPropertyValue, Display};
 
-use super::LynxDocument;
-use super::test_support::{child, display, document, element_under, style_of};
+use super::test_support::{child, display, element_under, style_of, with_config};
+use super::{LynxDocument, PageConfig};
 
 /// Solid em squares, so a run's advance is its glyph count times its font size.
 const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
@@ -67,10 +68,28 @@ const IMAGE_SRC: &str = "/tests/fixtures/resources/inline-image.png";
 /// A phone-shaped document shaping every generic family with Ahem, so a
 /// fixture's unstyled `font-family` measures as exactly as a named one.
 fn ahem_document() -> LynxDocument {
-    let mut document = document();
+    ahem_document_with(PageConfig::default())
+}
+
+/// The same document, built with the page configuration a card's bundle
+/// holds.
+fn ahem_document_with(config: PageConfig) -> LynxDocument {
+    let mut document = with_config(config);
     assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
     assert!(document.set_default_font_family("Ahem"));
     document
+}
+
+/// One computed longhand, as CSSOM serializes it — what a fixture's
+/// `toHaveCSS(property, value)` reads.
+fn computed(document: &LynxDocument, element: NodeId, property: &str) -> String {
+    let id = PropertyId::parse_enabled_for_all_content(property)
+        .unwrap_or_else(|()| panic!("unknown property `{property}`"));
+    let declaration = id
+        .as_shorthand()
+        .err()
+        .unwrap_or_else(|| panic!("`{property}` is a shorthand"));
+    style_of(document, element).computed_value_to_string(declaration)
 }
 
 /// A literal text node, the way a fixture's markup writes one between tags.
@@ -2070,15 +2089,21 @@ fn the_later_of_two_equal_specificity_class_rules_wins_on_a_text() {
 
 /// Replicates `reactlynx/basic-color-not-inherit`
 /// (`web-core-e2e/tests/reactlynx/basic-color-not-inherit/index.jsx`,
-/// `web-core-e2e/tests/reactlynx.spec.ts:1275`): a `view` with `color: red`
+/// `web-core-e2e/tests/reactlynx.spec.ts:1401`): a `view` with `color: red`
 /// does not pass that colour into a `text` child, which resolves to the black
 /// initial value.
 ///
 /// The original asserts `toHaveCSS('color', 'rgb(0, 0, 0)')` on the text. The
-/// mechanism differs from web-core's: that target reaches the result through
-/// the card's `enableCSSInheritance: false` page config, while this engine
-/// always cascades and buys the same value with the UA `text { color: initial }`
-/// reset (`crates/bobcat-core/src/main/tree/text.rs:125`).
+/// mechanism is web-core's own: web-elements' `x-text { color: initial }`
+/// (`x-text.css:12`) stops the browser's inheritance at the text root, and the
+/// UA `text { color: initial }` here ([`super::text::UA_RULES`]) is that
+/// declaration. The card is built without `enableCSSInheritance`, and since
+/// lynx-stack #3907 (`8d0b358bf`) that is a condition of the result under
+/// web-core too: with the switch on, web-core's
+/// `[lynx-enable-css-inheritance="true"]` rule overrides the reset for a `text`
+/// inside a `view`, and so does this engine's
+/// ([`super::text::CSS_INHERITANCE_RULES`]; the `config-css-inheritance`
+/// replicas below).
 ///
 /// The card writes the string as a `text` attribute on the `text`; the replica
 /// writes it as the `raw-text` the dynamic path
@@ -2107,4 +2132,503 @@ fn a_text_child_does_not_inherit_its_view_parent_s_colour() {
         AbsoluteColor::BLACK,
         "and the ancestor really did declare a colour to inherit"
     );
+}
+
+/// `web-core-e2e/tests/reactlynx/config-css-inheritance-true/index.css`, as
+/// the card writes it.
+const INHERITANCE_CARD_CSS: &str = "
+.typography {
+  color: red;
+  direction: rtl;
+  font-family: monospace;
+  font-size: 24px;
+  font-style: italic;
+  font-weight: 700;
+  letter-spacing: 2px;
+  line-height: 32px;
+  text-align: right;
+  text-decoration: underline;
+  text-shadow: 1px 2px 3px blue;
+}
+
+.gradient {
+  color: linear-gradient(red, blue);
+}
+
+.override {
+  color: green;
+  font-size: 18px;
+  text-decoration: none;
+}
+
+.updated {
+  color: linear-gradient(green, blue);
+  font-size: 30px;
+}
+";
+
+/// The card's two gradients, as this engine's `color` serializes them.
+/// web-core lowers a gradient `color` to transparent glyphs over a clipped
+/// `background-image`, so its spec reads these out of `background-image`
+/// beside `color: rgba(0, 0, 0, 0)` and `background-clip: text`; here the
+/// gradient is the computed `color` itself, and those three assertions are
+/// this one.
+const RED_TO_BLUE: &str = "linear-gradient(rgb(255, 0, 0), rgb(0, 0, 255))";
+const GREEN_TO_BLUE: &str = "linear-gradient(rgb(0, 128, 0), rgb(0, 0, 255))";
+
+/// The three page configurations the fixture is built with: its
+/// `config-css-inheritance-true`, `-false` and `-default` cards, which share
+/// one `index.jsx`. Each is the card's name, the switch as the card's
+/// `rspeedy.config.ts` sets it, and whether the spec expects inheritance. The
+/// last sets none, which here is [`PageConfig::default`]; how a bundle's
+/// config string becomes the switch is `bobcat-source`'s to test
+/// (`web_bundle_css_inheritance_follows_the_page_config_string`).
+const INHERITANCE_CONFIGS: [(&str, Option<bool>, bool); 3] = [
+    ("true", Some(true), true),
+    ("false", Some(false), false),
+    ("default", None, false),
+];
+
+/// The elements of `config-css-inheritance-true/index.jsx` its spec reads,
+/// under the names the card's `id` attributes give them.
+struct InheritanceCard {
+    document: LynxDocument,
+    solid_parent: NodeId,
+    solid_text: NodeId,
+    wrapped_text: NodeId,
+    nested_text: NodeId,
+    gradient_text: NodeId,
+    wrapped_gradient: NodeId,
+    override_text: NodeId,
+    own_gradient: NodeId,
+}
+
+/// A `text` holding one run, with `class` when the card gives it one.
+fn card_text(document: &mut LynxDocument, parent: NodeId, class: &str, content: &str) -> NodeId {
+    let text = element_under(document, parent, "text", "");
+    if !class.is_empty() {
+        document.add_class(text, class);
+    }
+    raw_text(document, text, content);
+    text
+}
+
+/// A `view` with the card's class on it.
+fn card_view(document: &mut LynxDocument, parent: NodeId, class: &str) -> NodeId {
+    let view = element_under(document, parent, "view", "");
+    if !class.is_empty() {
+        document.add_class(view, class);
+    }
+    view
+}
+
+/// Builds `config-css-inheritance-true/index.jsx`'s tree, less the `#update`
+/// button — the replica adds the `updated` class the button's handler sets —
+/// over a page config whose `enableCSSInheritance` is `switch`, or the default
+/// config for a card that sets none, and lays it out.
+fn inheritance_card(switch: Option<bool>) -> InheritanceCard {
+    let mut config = PageConfig::default();
+    if let Some(enabled) = switch {
+        config.enable_css_inheritance = enabled;
+    }
+    let mut document = ahem_document_with(config);
+    document.add_stylesheet(INHERITANCE_CARD_CSS, dom::StylesheetOrigin::Author);
+    let root = child(&mut document, "view", "");
+
+    let solid_parent = card_view(&mut document, root, "typography");
+    let solid_text = card_text(&mut document, solid_parent, "", "Inherited text");
+    let wrapper = element_under(&mut document, solid_parent, "wrapper", "");
+    let wrapped_text = card_text(&mut document, wrapper, "", "Wrapped text");
+    let nested_parent = element_under(&mut document, solid_parent, "text", "");
+    let nested_text = card_text(&mut document, nested_parent, "", "Nested text");
+
+    let gradient_parent = card_view(&mut document, root, "gradient");
+    let gradient_text = card_text(&mut document, gradient_parent, "", "Gradient text");
+    let wrapper = element_under(&mut document, gradient_parent, "wrapper", "");
+    let wrapped_gradient = card_text(&mut document, wrapper, "", "Wrapped gradient");
+    let override_text = card_text(
+        &mut document,
+        gradient_parent,
+        "override",
+        "Explicit solid color",
+    );
+
+    let own_parent = card_view(&mut document, root, "typography");
+    let own_gradient = card_text(
+        &mut document,
+        own_parent,
+        "gradient",
+        "Explicit gradient color",
+    );
+
+    document.layout();
+    InheritanceCard {
+        document,
+        solid_parent,
+        solid_text,
+        wrapped_text,
+        nested_text,
+        gradient_text,
+        wrapped_gradient,
+        override_text,
+        own_gradient,
+    }
+}
+
+/// Replicates `reactlynx/config-css-inheritance-{true,false,default}`
+/// (`web-core-e2e/tests/reactlynx/config-css-inheritance-true/index.jsx`,
+/// `web-core-e2e/tests/reactlynx.spec.ts:98-223`, lynx-stack #3907), the
+/// solid case: `#solid-text`, a `text` directly inside a `view` whose class
+/// sets every property web-core's inheritance rule lists.
+///
+/// With the switch on, the original asserts the eleven values below on the
+/// text, one `toHaveCSS` each. With it off or omitted it asserts the colour
+/// alone, `rgb(0, 0, 0)`.
+///
+/// The second half is this engine's own claim, and the reason
+/// [`super::text::CSS_INHERITANCE_RULES`] writes two declarations where
+/// web-core writes fourteen: with the switch off, nine of the eleven already
+/// reach the text, because they are inherited properties and nothing resets
+/// them at a text root — in this sheet or in web-elements'. Only `color`,
+/// which the text block resets, and `text-decoration-line`, which is not
+/// inherited, change with the switch.
+#[test]
+fn css_inheritance_gives_the_text_inside_a_view_the_view_s_typography() {
+    const INHERITED_EITHER_WAY: [(&str, &str); 9] = [
+        ("direction", "rtl"),
+        ("font-family", "monospace"),
+        ("font-size", "24px"),
+        ("font-style", "italic"),
+        ("font-weight", "700"),
+        ("letter-spacing", "2px"),
+        ("line-height", "32px"),
+        ("text-align", "right"),
+        ("text-shadow", "rgb(0, 0, 255) 1px 2px 3px"),
+    ];
+
+    for (setting, switch, enabled) in INHERITANCE_CONFIGS {
+        let card = inheritance_card(switch);
+        let read = |property| computed(&card.document, card.solid_text, property);
+
+        assert_eq!(
+            read("color"),
+            if enabled {
+                "rgb(255, 0, 0)"
+            } else {
+                "rgb(0, 0, 0)"
+            },
+            "{setting}"
+        );
+        assert_eq!(
+            read("text-decoration-line"),
+            if enabled { "underline" } else { "none" },
+            "{setting}"
+        );
+        for (property, value) in INHERITED_EITHER_WAY {
+            assert_eq!(read(property), value, "{property}: {setting}");
+        }
+    }
+}
+
+/// The same fixture's wrapper case: `#wrapped-text` and `#wrapped-gradient`,
+/// each a `text` inside a `wrapper` inside a `view`.
+///
+/// With the switch on the original asserts the red and the underline on the
+/// first and the gradient on the second; off or omitted, black and no
+/// gradient. The underline is what the rule's `view > wrapper` selector is
+/// for: `text-decoration` is not inherited, so the wrapper has to hold the
+/// view's value for the text to inherit it from.
+#[test]
+fn css_inheritance_reaches_a_text_through_a_wrapper() {
+    for (setting, switch, enabled) in INHERITANCE_CONFIGS {
+        let card = inheritance_card(switch);
+        let read = |element, property| computed(&card.document, element, property);
+
+        assert_eq!(
+            read(card.wrapped_text, "color"),
+            if enabled {
+                "rgb(255, 0, 0)"
+            } else {
+                "rgb(0, 0, 0)"
+            },
+            "{setting}"
+        );
+        assert_eq!(
+            read(card.wrapped_text, "text-decoration-line"),
+            if enabled { "underline" } else { "none" },
+            "{setting}"
+        );
+        assert_eq!(
+            read(card.wrapped_gradient, "color"),
+            if enabled { RED_TO_BLUE } else { "rgb(0, 0, 0)" },
+            "{setting}"
+        );
+    }
+}
+
+/// The same fixture's nested case: `#nested-text`, a `text` inside the `text`
+/// that is inside the view.
+///
+/// The original asserts red with the switch on and black otherwise. The inner
+/// text is outside the switch's rule; it inherits from the outer one by the
+/// text block's own `text > text { color: inherit }`, which holds under every
+/// configuration, so its colour is whatever the outer text's is.
+#[test]
+fn css_inheritance_reaches_a_nested_text_through_its_parent_text() {
+    for (setting, switch, enabled) in INHERITANCE_CONFIGS {
+        let card = inheritance_card(switch);
+
+        assert_eq!(
+            computed(&card.document, card.nested_text, "color"),
+            if enabled {
+                "rgb(255, 0, 0)"
+            } else {
+                "rgb(0, 0, 0)"
+            },
+            "{setting}"
+        );
+    }
+}
+
+/// The same fixture's gradient case: `#gradient-text`, a `text` directly
+/// inside a `view` whose `color` is a gradient.
+///
+/// With the switch on the original asserts `color: rgba(0, 0, 0, 0)`,
+/// `background-image: linear-gradient(rgb(255, 0, 0), rgb(0, 0, 255))` and
+/// `background-clip: text` on the text and on its `inner-box` part — web-core's
+/// lowering of a gradient colour, which is why its rule also inherits
+/// `--lynx-text-bg-color` and both `background-clip` spellings. Here the
+/// gradient is the `color` value, so `color: inherit` alone inherits it, and
+/// the paragraph's run is painted with it. Off or omitted, the original
+/// asserts black and `background-image: none`.
+#[test]
+fn css_inheritance_inherits_a_view_s_gradient_colour() {
+    for (setting, switch, enabled) in INHERITANCE_CONFIGS {
+        let card = inheritance_card(switch);
+
+        assert_eq!(
+            computed(&card.document, card.gradient_text, "color"),
+            if enabled { RED_TO_BLUE } else { "rgb(0, 0, 0)" },
+            "{setting}"
+        );
+        assert_eq!(
+            matches!(
+                style_of(&card.document, card.gradient_text).get_color(),
+                ColorPropertyValue::Gradient(_)
+            ),
+            enabled,
+            "the value the glyph painter reads is the gradient itself: {setting}"
+        );
+    }
+}
+
+/// The same fixture's override case: `#override-text`, a `text` inside the
+/// gradient view with a class of its own setting `color`, `font-size` and
+/// `text-decoration`.
+///
+/// The original asserts the text's own values under all three configurations
+/// — green, `background-image: none`, `background-clip: border-box`, `18px`,
+/// no decoration line. web-core gets there by keeping its rule's specificity
+/// under every authored selector; here the rule is user-agent origin, which
+/// every authored declaration outranks.
+#[test]
+fn an_authored_text_style_outranks_css_inheritance() {
+    for (setting, switch, _) in INHERITANCE_CONFIGS {
+        let card = inheritance_card(switch);
+        let read = |property| computed(&card.document, card.override_text, property);
+
+        assert_eq!(read("color"), "rgb(0, 128, 0)", "{setting}");
+        assert_eq!(read("font-size"), "18px", "{setting}");
+        assert_eq!(read("text-decoration-line"), "none", "{setting}");
+    }
+}
+
+/// The same fixture's last static case: `#own-gradient`, a `text` with a
+/// gradient class of its own inside a view with a solid colour.
+///
+/// The original asserts the text's own gradient under all three
+/// configurations. With the switch on, the rule's value for it would be the
+/// view's red, so the gradient is the authored declaration outranking the
+/// rule.
+#[test]
+fn a_text_s_own_gradient_outranks_css_inheritance() {
+    for (setting, switch, _) in INHERITANCE_CONFIGS {
+        let card = inheritance_card(switch);
+
+        assert_eq!(
+            computed(&card.document, card.own_gradient, "color"),
+            RED_TO_BLUE,
+            "{setting}"
+        );
+    }
+}
+
+/// The same fixture's update case: tapping `#update` adds the `updated` class
+/// to `#solid-parent`, which changes the view's `color` to a gradient and its
+/// `font-size` to `30px`.
+///
+/// With the switch on the original asserts both on `#solid-text` afterwards —
+/// `font-size: 30px`, and the gradient through web-core's lowering. Off or
+/// omitted it asserts the text is still black with no background image. The
+/// text's own style has not changed in either case: what is asserted is that
+/// the parent's class change restyles the child whose values inherit from it.
+#[test]
+fn css_inheritance_follows_a_change_of_the_view_s_style() {
+    for (setting, switch, enabled) in INHERITANCE_CONFIGS {
+        let mut card = inheritance_card(switch);
+        assert_eq!(
+            computed(&card.document, card.solid_text, "font-size"),
+            "24px",
+            "{setting}"
+        );
+
+        card.document.add_class(card.solid_parent, "updated");
+        card.document.layout();
+
+        let read = |element, property| computed(&card.document, element, property);
+        assert_eq!(read(card.solid_parent, "color"), GREEN_TO_BLUE, "{setting}");
+        assert_eq!(
+            read(card.solid_text, "color"),
+            if enabled {
+                GREEN_TO_BLUE
+            } else {
+                "rgb(0, 0, 0)"
+            },
+            "{setting}"
+        );
+        assert_eq!(
+            read(card.wrapped_text, "color"),
+            if enabled {
+                GREEN_TO_BLUE
+            } else {
+                "rgb(0, 0, 0)"
+            },
+            "the change reaches the text inside the wrapper as the first value did: {setting}"
+        );
+        assert_eq!(
+            read(card.solid_text, "font-size"),
+            "30px",
+            "an inherited property follows the view under every configuration: {setting}"
+        );
+    }
+}
+
+/// `text-decoration` is the one property of the rule that is not inherited
+/// by default, so a change of the view's value restyles the text only
+/// because the text's declaration is an explicit `inherit`. The fixture's
+/// update changes `color` and `font-size` alone; this is the same update for
+/// the remaining declaration, directly and through a wrapper.
+#[test]
+fn css_inheritance_follows_a_change_of_the_view_s_text_decoration() {
+    let mut document = ahem_document_with(PageConfig {
+        enable_css_inheritance: true,
+        ..PageConfig::default()
+    });
+    document.add_stylesheet(
+        ".struck { text-decoration: line-through; }",
+        dom::StylesheetOrigin::Author,
+    );
+    let view = child(&mut document, "view", "");
+    let direct = card_text(&mut document, view, "", "direct");
+    let wrapper = element_under(&mut document, view, "wrapper", "");
+    let wrapped = card_text(&mut document, wrapper, "", "wrapped");
+    document.layout();
+    for text in [direct, wrapped] {
+        assert_eq!(computed(&document, text, "text-decoration-line"), "none");
+    }
+
+    document.add_class(view, "struck");
+    document.layout();
+    for text in [direct, wrapped] {
+        assert_eq!(
+            computed(&document, text, "text-decoration-line"),
+            "line-through"
+        );
+    }
+
+    document.remove_class(view, "struck");
+    document.layout();
+    for text in [direct, wrapped] {
+        assert_eq!(computed(&document, text, "text-decoration-line"), "none");
+    }
+}
+
+/// The scope of the switch is web-core's selector list and nothing wider:
+/// `x-view > x-text`, `x-view > lynx-wrapper`, `x-view > lynx-wrapper >
+/// x-text` (`web-core/css/in_shadow.css`). A `text` whose parent is any other
+/// container keeps the text block's reset with the switch on, and so does one
+/// behind two wrappers, whose own wrapper is not a view's child.
+///
+/// The fixture has no case for this; the claim is the rule's selector, read
+/// against the tags web-core maps to something other than `x-view` — `page`
+/// is its `div[part="page"]`, and a blur view is `x-blur-view`.
+#[test]
+fn css_inheritance_is_scoped_to_a_view_s_own_text_and_wrapper() {
+    let mut document = ahem_document_with(PageConfig {
+        enable_css_inheritance: true,
+        ..PageConfig::default()
+    });
+    document.add_stylesheet(
+        "page, .coloured { color: rgb(1, 2, 3); }",
+        dom::StylesheetOrigin::Author,
+    );
+    let page = document.document_element().id();
+    let mut texts = vec![("page", card_text(&mut document, page, "", "page"))];
+    for tag in ["scroll-view", "list-item", "blur-view", "x-blur-view"] {
+        let container = element_under(&mut document, page, tag, "");
+        document.add_class(container, "coloured");
+        texts.push((tag, card_text(&mut document, container, "", tag)));
+    }
+    let view = card_view(&mut document, page, "coloured");
+    let outer = element_under(&mut document, view, "wrapper", "");
+    let inner = element_under(&mut document, outer, "wrapper", "");
+    texts.push((
+        "two wrappers",
+        card_text(&mut document, inner, "", "wrapped twice"),
+    ));
+    let inside = card_text(&mut document, view, "", "inside the view");
+    document.layout();
+
+    assert_eq!(computed(&document, inside, "color"), "rgb(1, 2, 3)");
+    for (parent, text) in texts {
+        assert_eq!(
+            computed(&document, text, "color"),
+            "rgb(0, 0, 0)",
+            "a text under {parent} keeps the reset"
+        );
+    }
+}
+
+/// The rule is user-agent origin, so an authored declaration outranks it
+/// whatever its selector's specificity — a bare type selector included, which
+/// is lower than the rule's own `view > text` — and so does an inline style.
+/// web-core reaches the same order by specificity: it extends every authored
+/// selector with `:not([l-e-name])`, which alone equals its rule's one
+/// attribute selector.
+#[test]
+fn every_authored_declaration_outranks_css_inheritance() {
+    let mut document = ahem_document_with(PageConfig {
+        enable_css_inheritance: true,
+        ..PageConfig::default()
+    });
+    document.add_stylesheet(
+        "text { color: rgb(4, 5, 6); text-decoration: line-through; }",
+        dom::StylesheetOrigin::Author,
+    );
+    let view = child(
+        &mut document,
+        "view",
+        "color: rgb(1, 2, 3); text-decoration: underline",
+    );
+    let by_type = card_text(&mut document, view, "", "type selector");
+    let inline = element_under(&mut document, view, "text", "color: rgb(7, 8, 9)");
+    raw_text(&mut document, inline, "inline style");
+    document.layout();
+
+    assert_eq!(computed(&document, by_type, "color"), "rgb(4, 5, 6)");
+    assert_eq!(
+        computed(&document, by_type, "text-decoration-line"),
+        "line-through"
+    );
+    assert_eq!(computed(&document, inline, "color"), "rgb(7, 8, 9)");
 }

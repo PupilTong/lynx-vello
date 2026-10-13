@@ -232,8 +232,8 @@ pub(crate) struct DocumentIngredients {
     /// [`ViewSources::screen`](crate::ViewSources::screen).
     pub(crate) viewport: Viewport,
     /// The page configuration the view was built with. The boot module is
-    /// written with its four switches as literals, and hands them back to the
-    /// `createDocument` that builds the document as four boolean arguments.
+    /// written with its five switches as literals, and hands them back to the
+    /// `createDocument` that builds the document as five boolean arguments.
     /// What the document is actually built with is therefore the realm's
     /// copy, not this one.
     pub(crate) config: PageConfig,
@@ -1762,7 +1762,7 @@ impl MainThreadRuntime {
     /// connecting the BTS, and the flush, the listed sheets included.
     ///
     /// The only literals written into it are the screen's three numbers, the
-    /// page configuration's four switches, the entry's URL and the BTS
+    /// page configuration's five switches, the entry's URL and the BTS
     /// entry's — facts Rust owns, written as primitives rather than as JSON
     /// the realm would parse and hand back. Each URL is written as a JSON
     /// string literal, which is the one quoting that is also a JavaScript
@@ -1788,6 +1788,7 @@ impl MainThreadRuntime {
             default_overflow_visible,
             enable_css_selector,
             enable_js_data_processor,
+            enable_css_inheritance,
         } = self.config;
         let entry = serde_json::to_string(&self.entry).expect("a string serializes");
         let background_entry = self.background_entry.as_ref().map_or_else(
@@ -1806,6 +1807,7 @@ const config = {{
   defaultOverflowVisible: {default_overflow_visible},
   enableCssSelector: {enable_css_selector},
   enableJSDataProcessor: {enable_js_data_processor},
+  enableCssInheritance: {enable_css_inheritance},
 }};
 
 // The realm's document, created out of that configuration and held by this
@@ -2308,8 +2310,8 @@ fn install_document_members(
 ) -> Result<(), MainThreadError> {
     const NAME: &str = "bobcat-internal:host.createDocument";
     let tree = Rc::clone(handle);
-    install(engine, js_runtime, "createDocument", 4, move |arguments| {
-        // The four switches, in `PageConfig`'s order, as the boot module
+    install(engine, js_runtime, "createDocument", 5, move |arguments| {
+        // The five switches, in `PageConfig`'s order, as the boot module
         // wrote them. Read rather than passed through because Rust itself
         // needs the fields: the UA cascade and the document's own switches are
         // built out of them. A missing or non-boolean one fails the
@@ -2319,6 +2321,7 @@ fn install_document_members(
             default_overflow_visible: boolean_argument(NAME, arguments, 1)?,
             enable_css_selector: boolean_argument(NAME, arguments, 2)?,
             enable_js_data_processor: boolean_argument(NAME, arguments, 3)?,
+            enable_css_inheritance: boolean_argument(NAME, arguments, 4)?,
         };
         // The page id is not this member's answer: `createPage` is still what
         // hands the realm the permanent root, and it now has a document to
@@ -2956,7 +2959,7 @@ fn flag_argument(function: &str, arguments: &[HostValue], index: usize) -> Resul
 }
 
 /// A JavaScript boolean, which is what the boot module hands `createDocument`
-/// its four switches as.
+/// its five switches as.
 fn boolean_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
     match *argument(arguments, index) {
         HostValue::Boolean(value) => Ok(value),

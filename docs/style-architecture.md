@@ -185,7 +185,10 @@ What that covers, and what it does not:
   `position: relative`, a zero-width solid border, zero `min-width` /
   `min-height`) are installed as a UA stylesheet, under the `defaultDisplayLinear` and
   `defaultOverflowVisible` page-config switches; `page` supplies the inherited
-  `font-family: sans-serif` default at UA origin;
+  `font-family: sans-serif` default at UA origin; `enableCSSInheritance` adds
+  web-core's rule for it to the same sheet, so a `text` inside a `view` takes
+  the view's `color` and `text-decoration` (`docs/tracking/deviations.md`,
+  "CSS inheritance");
 - view metrics and touch-first device construction (`Viewport::device`);
 - Lynx element identity as the DOM `NodeId`, with no separate id space; the
   native host boundary validates live IDs and mutation preconditions so

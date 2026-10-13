@@ -124,7 +124,26 @@ the semantics are stylo's.** Everything below refines that sentence.
 9. **Inheritance: full W3C, always on.** Reconfirms the earlier decision in
    [deviations.md](tracking/deviations.md): stylo's standard inheritance
    plus web-elements-parity UA resets (`x-text { color: initial }`, …).
-   Native Lynx's `enableCSSInheritance` gate is never emulated.
+   Native Lynx's `enableCSSInheritance` gate — nothing inherits with it off,
+   an allowlist inherits through every element with it on — is never
+   emulated.
+
+   *Revised 2026-10-13: the page switch is read, the way web-core reads it.*
+   When this was decided web-core had no reference to `enableCSSInheritance`,
+   so reading it could only have meant emulating native. lynx-stack #3907
+   (`8d0b358bf`, 2026-09-11) gave web-core one: `enableCSSInheritance: true`
+   sets `lynx-enable-css-inheritance="true"` on the page element, and a rule
+   in `web-core/css/in_shadow.css` overrides the `x-text` resets for
+   `x-view > x-text`, `x-view > lynx-wrapper` and
+   `x-view > lynx-wrapper > x-text`. Web-core parity therefore now includes
+   the switch, and it is honored under §D.14: `PageConfig::enable_css_inheritance`
+   adds one UA rule, `view > text, view > wrapper, view > wrapper > text
+   { color: inherit; text-decoration: inherit; }`, and no engine branch. Off
+   or absent, the sheet is what it was. Inheritance itself is still stylo's
+   and always on; the switch decides only whether the text block's reset
+   holds inside a view. Native's gate is still not emulated — its differences
+   from web-core's switch are listed in
+   [deviations.md](tracking/deviations.md), unruled.
 
 10. **`@media`: wire stylo's evaluation now, ahead of the wire format.**
     The `.web.bundle` format cannot express `@media` today (`RuleType` has

@@ -664,7 +664,7 @@ const registry = new FinalizationRegistry(
 );
 
 /**
- * The four Lynx page switches a document is built with, as the boot module
+ * The five Lynx page switches a document is built with, as the boot module
  * is written with them.
  *
  * The host writes them into the boot module as boolean literals; the boot
@@ -680,6 +680,11 @@ export interface PageConfig {
   readonly enableCssSelector: boolean;
   /** Whether page data reaches BTS without the MTS processor running. */
   readonly enableJSDataProcessor: boolean;
+  /**
+   * Whether a `text` inside a `view` takes the view's `color` and
+   * `text-decoration`: the page's `enableCSSInheritance`.
+   */
+  readonly enableCssInheritance: boolean;
 }
 
 /**
@@ -704,6 +709,7 @@ export class Document {
       config.defaultOverflowVisible,
       config.enableCssSelector,
       config.enableJSDataProcessor,
+      config.enableCssInheritance,
     );
   }
 

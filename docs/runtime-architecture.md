@@ -193,10 +193,10 @@ QuickJS ESM graph — an MTS realm, on bobcat-main's runtime
   bobcat:boot
     ├──▶ bobcat:element (Document class + flush binding)
     ├──▶ bobcat:timers (timer-global installation)
-    ├──  const config = { defaultDisplayLinear: …, … }  four boolean literals
+    ├──  const config = { defaultDisplayLinear: …, … }  five boolean literals
     ├──  export const document = new Document(config)  the realm's first
     │      └──▶ bobcat-internal:host.createDocument      statement
-    │            └──▶ four booleans + DocumentIngredients ──▶ private dom::Document<()>
+    │            └──▶ five booleans + DocumentIngredients ──▶ private dom::Document<()>
     │   (the author sheets are mounted on this document, in listed order, by
     │    the first __FlushElementTree below, never by a statement here)
     └──▶ await import("<entry URL>")    completed by the view's `load_entry`
@@ -1575,6 +1575,7 @@ const config = {
   defaultOverflowVisible: true,
   enableCssSelector: true,
   enableJSDataProcessor: false,
+  enableCssInheritance: false,
 };
 export const document = new Document(config);
 __BobcatInitializeMTS({
@@ -1592,7 +1593,7 @@ __BobcatRenderPage(data);
 await Promise.resolve().then(() => __FlushElementTree());
 ```
 
-The screen's three numbers, the page configuration's four switches and the
+The screen's three numbers, the page configuration's five switches and the
 entry's URL are written into it as literals — facts Rust owns, passed as
 primitives, with no JSON the realm parses and hands back. `new Document(config)` builds the
 document and mounts nothing: the first `__FlushElementTree` mounts the author
@@ -1648,11 +1649,11 @@ and tests.
 
 The document belongs to a *realm*, and the realm creates it, out of a
 configuration it holds. `bobcat:element` exports `class Document`; the boot
-module is written with the view's four page switches as boolean literals and
+module is written with the view's five page switches as boolean literals and
 constructs one over that record; and that constructor calls
 `createDocument(defaultDisplayLinear, defaultOverflowVisible,
-enableCssSelector, enableJSDataProcessor)`, which reads the four
-`HostValue::Boolean` arguments — Rust genuinely needs these fields — and builds
+enableCssSelector, enableJSDataProcessor, enableCssInheritance)`, which reads
+the five `HostValue::Boolean` arguments — Rust genuinely needs these fields — and builds
 a `LynxDocument` out of them plus the `DocumentIngredients` that never reached
 the realm: the create-time viewport, the validated `dom::TextContext` and the
 group's `StylePool`. It never waits and mounts no author stylesheet; the first

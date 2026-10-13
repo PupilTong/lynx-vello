@@ -784,14 +784,14 @@ document. `LynxDocument`, `Viewport`, `DocumentIngredients`, `DocumentSlot`,
 public, and `LynxDocument` is what an embedder cannot name.
 
 **The realm creates its own document, out of a configuration it holds.** The
-Rust-generated boot module is written with the view's four page switches as
+Rust-generated boot module is written with the view's five page switches as
 boolean literals (`const config = { defaultDisplayLinear: true, … };` — facts
 Rust owns, passed as primitives, with no JSON round trip), and its first
 statement is `export const document = new Document(config);`;
 `bobcat:element`'s `Document` constructor calls
 `createDocument(defaultDisplayLinear, defaultOverflowVisible,
-enableCssSelector, enableJSDataProcessor)`, which
-reads four `HostValue::Boolean` arguments and builds the document from them plus the
+enableCssSelector, enableJSDataProcessor, enableCssInheritance)`, which
+reads five `HostValue::Boolean` arguments and builds the document from them plus the
 `DocumentIngredients` that never reach the realm: the create-time viewport, the
 validated text context and the group's style pool. It never waits: **the view's
 author sheets are not mounted here** but by the first `__FlushElementTree`
@@ -1844,7 +1844,14 @@ paragraph whatever `defaultDisplayLinear` says, `wrapper` is
 inside (`display: none` anywhere else) with
 `white-space-collapse: preserve-breaks`, the one place Lynx keeps a literal
 newline. Sibling runs and nested text share the establishing element's
-paragraph. UA `attr(... number)` declarations supply `--lynx-text-maxline` and
+paragraph. `text { color: initial; }` stops an ancestor's color at the text
+root and `text > text` inherits it again, as in web-elements; a page whose
+config says `enableCSSInheritance: true` gets one more UA rule,
+`view > text, view > wrapper, view > wrapper > text { color: inherit;
+text-decoration: inherit; }`, which is web-core's rule for that switch
+(lynx-stack #3907) reduced to the two declarations that change a value here
+(`tree::text::CSS_INHERITANCE_RULES`, `docs/tracking/deviations.md`). UA
+`attr(... number)` declarations supply `--lynx-text-maxline` and
 `--lynx-text-maxlength`; `<integer>`, non-inherited registrations reject
 fractional counts and default to `-1` (unlimited). No numeric-prefix parsing or
 CSS expressions in attributes are supported. `text[tail-color-convert="true"]`
@@ -2571,8 +2578,8 @@ whatever is due — before that entry's commit, so a callback's mutation rides
 the same frame. No deadline crosses the link and no host turn is owed for one.
 
 `src/element-papi.ts` also exports `class Document` and the `PageConfig` its
-constructor takes: the four page switches the boot module is written with,
-which the constructor passes to the native `createDocument` as four booleans,
+constructor takes: the five page switches the boot module is written with,
+which the constructor passes to the native `createDocument` as five booleans,
 in `PageConfig`'s order. It is on no collection schedule at all, which is the opposite
 of the element path in the same file.
 

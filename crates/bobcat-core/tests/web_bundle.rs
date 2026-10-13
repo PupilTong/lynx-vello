@@ -29,6 +29,7 @@ fn page_config(template: &bobcat_source::web::WebTemplate) -> PageConfig {
         default_overflow_visible: template.config_flag("defaultOverflowVisible"),
         enable_css_selector: template.config_flag("enableCSSSelector"),
         enable_js_data_processor: template.config_flag("enableJSDataProcessor"),
+        enable_css_inheritance: template.config_flag("enableCSSInheritance"),
     }
 }
 
@@ -80,6 +81,15 @@ fn decoded_bundle_page_config_is_supplied_at_view_construction() {
         assert!(config.default_display_linear, "{name}");
         assert!(config.default_overflow_visible, "{name}");
         assert!(config.enable_css_selector, "{name}");
+        // The key and the value type a real rspeedy build writes for this
+        // switch: these fixtures are built without it, which the web encoder
+        // spells as the string `"false"`.
+        assert_eq!(
+            template.config_str("enableCSSInheritance"),
+            Some("false"),
+            "{name}"
+        );
+        assert!(!config.enable_css_inheritance, "{name}");
     }
 }
 

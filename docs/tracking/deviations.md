@@ -654,12 +654,14 @@ consequential choice about whether to follow the spec or the quirk.
   against deprecated APIs will lose those declarations here. Intentional.
 - **CSS inheritance** — native Lynx gates *all* property inheritance behind
   `enableCSSInheritance` (default **off**, allowlist when on;
-  [css-text.md](css-text.md) recommends replicating that gate). But the
-  compat target `web-core` **ignores that flag entirely** (zero references
-  in `lynx-stack/packages/web-platform/`): it runs on the browser's
-  always-on W3C inheritance and reproduces the visible Lynx behavior with
-  targeted UA-sheet resets (`x-text { color: initial }` +
-  `x-text > x-text { color: inherit }` in `web-elements`).
+  [css-text.md](css-text.md) describes that gate). The compat target
+  `web-core` runs on the browser's always-on W3C inheritance and reproduces
+  the visible default with targeted UA-sheet resets
+  (`x-text { color: initial }` + `x-text > x-text { color: inherit }` in
+  `web-elements`). When the decision below was taken it also **ignored the
+  flag entirely** (zero references in `lynx-stack/packages/web-platform/`);
+  since lynx-stack #3907 it reads it — see *The switch* at the end of this
+  entry.
   **Decision (user-confirmed, 2026-07): web-core parity** — lynx-vello uses
   stylo's standard always-on inheritance plus the replicated UA resets. The
   native-Lynx gate is documented as a config-gated fallback design
@@ -680,6 +682,71 @@ consequential choice about whether to follow the spec or the quirk.
   A tag this engine has no rule for (anything but `wrapper`, `view`, `image`,
   `text`, `raw-text`) generates no box inside a `text`, which is the literal
   `x-text > * { display: none }` behavior and not a narrowing of it.
+  **The switch (2026-10-13): `enableCSSInheritance: true` is honored the way
+  web-core honors it.** lynx-stack #3907 (`8d0b358bf`, "support
+  enableCSSInheritance for text in views") removed the premise that web-core
+  never reads the flag: `config['enableCSSInheritance'] === 'true'` now sets
+  `lynx-enable-css-inheritance="true"` on the page element
+  (`web-core/ts/client/mainthread/elementAPIs/createElementAPI.ts`), and
+  `web-core/css/in_shadow.css` adds
+  `[lynx-enable-css-inheritance="true"] :where(x-view > x-text, x-view >
+  lynx-wrapper, x-view > lynx-wrapper > x-text)` over fourteen `inherit`
+  declarations. The decision is unchanged and its consequence is new:
+  web-core parity now includes the switch. `PageConfig::enable_css_inheritance`
+  is read from the page config string as `defaultDisplayLinear` is, and adds
+  one UA rule after the text block,
+  `view > text, view > wrapper, view > wrapper > text { color: inherit;
+  text-decoration: inherit; }`
+  (`bobcat_core::tree::text::CSS_INHERITANCE_RULES`). Off or absent — an
+  absent key is off, as under web-core — the sheet is unchanged. Three things
+  differ from web-core's text of the rule, none of them in what a page
+  renders except where noted:
+  - *Two declarations, not fourteen.* `--lynx-text-bg-color`,
+    `background-clip` and `-webkit-background-clip` belong to web-core's
+    lowering of a gradient `color` for a browser (transparent glyphs over a
+    background image clipped to them, which `x-text.css` resets at the text
+    root); the fork's `color` holds the gradient as its value, so
+    `color: inherit` inherits it. `direction`, `font-family`, `font-size`,
+    `font-style`, `font-weight`, `letter-spacing`, `line-height`,
+    `text-align` and `text-shadow` are inherited properties that neither
+    sheet resets at a text root: they reach the text with the switch off in
+    both engines, so a declaration for them changes no value. The visible
+    remainder: under web-core with the switch on, a `background-clip` an
+    author writes on a view is also inherited by the text inside it; here it
+    is not.
+  - *Tag selectors at user-agent origin, not `:where()`.* web-core's selector
+    has the specificity of one attribute selector, and web-core extends every
+    authored selector with `:not([l-e-name])`, so no authored rule loses to
+    it. Here every authored declaration and inline style outranks a UA rule
+    whatever its selector, and the rule needs its tag specificity to outrank
+    `text { color: initial }` inside the UA origin.
+  - *No page attribute.* The switch selects UA-sheet text
+    (`docs/style-assumptions.md` §D.14), so there is no
+    `lynx-enable-css-inheritance` attribute for an author selector to match.
+  The scope is web-core's selector list and no wider: a `text` under `page`,
+  `scroll-view`, `list-item`, a blur view, or two wrappers deep keeps the
+  reset.
+  **Native's switch does more, and that part is not built (unruled).** With it
+  on, native inherits a list of properties — `font-size`, `font-family`,
+  `text-align`, `line-spacing`, `letter-spacing`, `line-height`, `font-style`,
+  `font-weight`, `color`, `text-decoration`, `text-shadow`, `direction`,
+  `cursor` (`lynx/core/renderer/css/dynamic_css_styles_manager.cc:30-38`),
+  or the page's `customCSSInheritanceList` in its place
+  (`lynx/core/renderer/dom/element.cc:2815-2826`) — through *every* element,
+  so a `text` under a `scroll-view`, a `list-item` or the page inherits
+  `color` there and keeps the reset here and under web-core, which reads no
+  `customCSSInheritanceList`. With it off, native
+  inherits nothing at all, where both web targets still inherit every W3C
+  inherited property (`font-size` from a view to its text, for one; `cursor`
+  as well, which is on native's list). `line-spacing` is in neither
+  web-core's rule nor this engine's grammar. The same native switch also
+  turns on its direction handling in fiber mode
+  (`Element::IsDirectionChangedEnabled`, `element.cc:2828-2834`; without it
+  `FiberElement::TryResolveLogicStyleAndSaveDirectionRelatedStyle`,
+  `fiber/fiber_element.cc:4949-4953`, resolves no logical style against
+  `direction`), which stylo does whatever the page config says. web-core is
+  this project's default resolution of such conflicts (AGENTS.md); none of
+  these has been put to a ruling.
 
 - **`:is()`, `:where()`, `:has()`, `:nth-child()` family, `:first-child`/`:last-child`/`:only-child`/`:empty`**
   — all are *parsed* by Lynx's selector grammar but have **no matcher case at

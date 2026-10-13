@@ -1245,9 +1245,9 @@ fn clearing_a_class_id_or_attribute_removes_it_from_the_private_document() {
 
 /// The page configuration reaches the document through the realm.
 ///
-/// The boot module is written with the four switches as boolean literals and
+/// The boot module is written with the five switches as boolean literals and
 /// hands them to `new Document(config)`, whose `createDocument` call passes
-/// them back as four booleans, and the UA cascade is built from *those* — so
+/// them back as five booleans, and the UA cascade is built from *those* — so
 /// what these switches do to a `view`'s computed style is the boot module's
 /// literals working. The document is built from what JavaScript handed back.
 #[test]
@@ -1295,10 +1295,69 @@ fn the_page_config_written_into_the_boot_module_builds_the_ua_cascade() {
     }
 }
 
+/// `enableCSSInheritance` takes the same path as the two switches above: the
+/// boot module's literal, `new Document(config)`, the fifth boolean of
+/// `createDocument`, and the UA rule that boolean adds. With it on, a `text`
+/// inside a `view` takes the view's color; with it off the text block's reset
+/// keeps the initial black, as before the switch existed.
+#[test]
+fn the_css_inheritance_switch_written_into_the_boot_module_reaches_the_ua_cascade() {
+    use dom::stylo::color::AbsoluteColor;
+
+    for inheritance in [true, false] {
+        let (mut js_runtime, mut runtime, elements, _names) =
+            runtime_over_watching_names(DocumentIngredients::for_test(
+                Viewport::new(393.0, 727.0),
+                PageConfig {
+                    enable_css_inheritance: inheritance,
+                    ..PageConfig::default()
+                },
+            ));
+        runtime
+            .run_main_thread_script(
+                &mut js_runtime,
+                r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const view = __CreateView(0);
+                  __SetInlineStyles(view, 'color: rgb(1, 2, 3)');
+                  __AppendElement(page, view);
+                  __AppendElement(view, __CreateText(0));
+                };
+                ",
+                "app:///css-inheritance.js",
+            )
+            .expect("main-thread script");
+        let tree = elements.tree();
+        // The page is node 2, so the view and the text created after it are
+        // 3 and 4; the tag is asserted so a different numbering fails here.
+        let color = |id, tag| {
+            let element = tree.get(node_id(id)).expect("a live element");
+            assert_eq!(element.tag_name(), Some(tag));
+            element
+                .computed_style()
+                .expect("a flushed element has style")
+                .get_color()
+                .solid_color()
+        };
+        let view = color(3, "view");
+        let text = color(4, "text");
+        assert_ne!(view, AbsoluteColor::BLACK, "the view declared a color");
+        assert_eq!(
+            text == view,
+            inheritance,
+            "`enableCSSInheritance` reached the cascade: inheritance={inheritance}"
+        );
+        if !inheritance {
+            assert_eq!(text, AbsoluteColor::BLACK);
+        }
+    }
+}
+
 /// A page configuration switch that is not a boolean refuses the
 /// construction, and the boot that asked for it fails.
 ///
-/// Rust needs these four fields, so it reads each rather than forwarding
+/// Rust needs these five fields, so it reads each rather than forwarding
 /// them; a card that reaches `createDocument` and hands it anything else gets
 /// the message rather than a document built on defaults. The argument is read
 /// before the second-document refusal, so this is the message the card sees.
@@ -1311,7 +1370,7 @@ fn a_non_boolean_page_config_switch_refuses_the_document() {
             &mut js_runtime,
             r#"
             import { createDocument } from "bobcat-internal:host";
-            createDocument(true, "yes", true, false);
+            createDocument(true, "yes", true, false, false);
             "#,
             "app:///bad-config.js",
         )

@@ -75,6 +75,11 @@ pub struct PageConfig {
     pub enable_css_selector: bool,
     /// Pass data and its processor name to BTS without running the MTS processor.
     pub enable_js_data_processor: bool,
+    /// Whether a `text` directly inside a `view`, or inside a `wrapper`
+    /// directly inside one, takes the view's `color` and `text-decoration`
+    /// ([`super::text::CSS_INHERITANCE_RULES`]). Off unless the page says
+    /// `enableCSSInheritance: true`, as under web-core.
+    pub enable_css_inheritance: bool,
 }
 
 impl Default for PageConfig {
@@ -84,6 +89,7 @@ impl Default for PageConfig {
             default_overflow_visible: true,
             enable_css_selector: true,
             enable_js_data_processor: false,
+            enable_css_inheritance: false,
         }
     }
 }
@@ -129,6 +135,16 @@ impl Default for PageConfig {
 /// clipped — by this `clip`, and the
 /// first two also by the paint containment [`super::list`] and
 /// [`super::viewpager`] give them.
+///
+/// `enableCSSInheritance` adds one rule and removes none: with it on,
+/// [`super::text::CSS_INHERITANCE_RULES`] follows the text block, so a `text`
+/// directly inside a `view` — or inside a `wrapper` directly inside one —
+/// takes the view's `color` and `text-decoration` in place of the text
+/// block's reset. It is web-core's
+/// `[lynx-enable-css-inheritance="true"] :where(x-view > x-text, …)` rule
+/// (lynx-stack #3907), which is keyed on a page attribute there and on the
+/// sheet's own text here, like the two switches above. Off or absent, the
+/// sheet is identical to the one built before the switch existed.
 ///
 /// The blur-view tags are here because native's `LynxUIBlurView` extends
 /// `LynxUIView`: a blur view is a view in everything layout can see, and its
@@ -208,6 +224,11 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     } else {
         String::new()
     };
+    let inheritance = if config.enable_css_inheritance {
+        text::CSS_INHERITANCE_RULES
+    } else {
+        ""
+    };
     format!(
         "page, view, scroll-view, list, list-item, {component_tags}, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG}, \
          text, image, svg {{ box-sizing: border-box; border-width: 0; border-style: solid; \
@@ -228,6 +249,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          :where({DIALOG_TAG}:popover-open) {{ display: {block}; }}\n\
          {overlays}\
          {text}\
+         {inheritance}\
          {carriers}\
          {images}\
          {svgs}",
@@ -583,16 +605,22 @@ mod tests {
     /// The whole rule `defaultOverflowVisible` gates, spelled out once.
     const OVERFLOW_RULE: &str = "page, view, blur-view, x-blur-view { overflow: visible; }";
 
+    /// The whole rule `enableCSSInheritance` gates, spelled out once.
+    const INHERITANCE_RULE: &str = "view > text, view > wrapper, view > wrapper > text \
+                                    { color: inherit; text-decoration: inherit; }";
+
     #[test]
     fn default_config_is_linear_and_overflow_visible() {
         let config = PageConfig::default();
         assert!(config.default_display_linear);
         assert!(config.default_overflow_visible);
+        assert!(!config.enable_css_inheritance);
 
         let sheet = ua_stylesheet(config);
         assert!(sheet.contains("display: linear;"));
         assert!(sheet.contains(OVERFLOW_RULE));
         assert!(sheet.contains("box-sizing: border-box;"));
+        assert!(!sheet.contains(INHERITANCE_RULE));
     }
 
     #[test]
@@ -602,9 +630,30 @@ mod tests {
             default_overflow_visible: false,
             enable_css_selector: true,
             enable_js_data_processor: false,
+            enable_css_inheritance: false,
         });
         assert!(!sheet.contains("display: linear;"));
         assert!(!sheet.contains(OVERFLOW_RULE));
+        assert!(!sheet.contains(INHERITANCE_RULE));
+    }
+
+    /// `enableCSSInheritance` adds its one rule and changes nothing else:
+    /// taking that line back out leaves the sheet the switch-off config
+    /// builds. The rule follows the text block, whose `color: initial` it
+    /// outranks on specificity, not on that position.
+    #[test]
+    fn the_css_inheritance_switch_adds_one_rule_and_nothing_else() {
+        let off = ua_stylesheet(PageConfig::default());
+        let on = ua_stylesheet(PageConfig {
+            enable_css_inheritance: true,
+            ..PageConfig::default()
+        });
+
+        assert_eq!(
+            on.lines().filter(|line| *line == INHERITANCE_RULE).count(),
+            1
+        );
+        assert_eq!(on.replacen(&format!("{INHERITANCE_RULE}\n"), "", 1), off);
     }
 
     /// The sheet's important declarations are exactly the text-block ones.
@@ -729,6 +778,11 @@ mod tests {
                 default_overflow_visible: false,
                 enable_css_selector: false,
                 enable_js_data_processor: false,
+                enable_css_inheritance: false,
+            },
+            PageConfig {
+                enable_css_inheritance: true,
+                ..PageConfig::default()
             },
         ] {
             let sheet = ua_stylesheet(config);

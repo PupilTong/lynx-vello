@@ -315,6 +315,7 @@ impl PageSource {
             default_overflow_visible: template.config_flag("defaultOverflowVisible"),
             enable_css_selector: template.config_flag("enableCSSSelector"),
             enable_js_data_processor: template.config_flag("enableJSDataProcessor"),
+            enable_css_inheritance: template.config_flag("enableCSSInheritance"),
         };
         let background_sources = bundle_modules(input, &template, target);
         let background_script = if template.manifest.is_empty() {
@@ -776,6 +777,7 @@ const fn raw_lynx_xml_config() -> PageConfig {
         default_overflow_visible: false,
         enable_css_selector: true,
         enable_js_data_processor: false,
+        enable_css_inheritance: false,
     }
 }
 
@@ -905,16 +907,22 @@ mod tests {
     }
 
     fn web_bundle(root: Option<&str>) -> Vec<u8> {
+        web_bundle_with_config(
+            r#"{
+            "defaultDisplayLinear": "true",
+            "defaultOverflowVisible": "false",
+            "enableCSSSelector": "true"
+        }"#,
+            root,
+        )
+    }
+
+    fn web_bundle_with_config(config: &str, root: Option<&str>) -> Vec<u8> {
         let mut bytes = Vec::new();
         push_u32(&mut bytes, crate::web::MAGIC_0);
         push_u32(&mut bytes, crate::web::MAGIC_1);
         push_u32(&mut bytes, 1);
 
-        let config = r#"{
-            "defaultDisplayLinear": "true",
-            "defaultOverflowVisible": "false",
-            "enableCSSSelector": "true"
-        }"#;
         let config: Vec<u8> = config.encode_utf16().flat_map(u16::to_le_bytes).collect();
         push_section(
             &mut bytes,
@@ -959,6 +967,7 @@ mod tests {
                 default_overflow_visible: false,
                 enable_css_selector: true,
                 enable_js_data_processor: false,
+                enable_css_inheritance: false,
             }
         );
         let sources = page.view_sources(SCREEN);
@@ -1402,6 +1411,37 @@ mod tests {
         }
     }
 
+    /// `enableCSSInheritance` is read the way web-core reads it
+    /// (`config['enableCSSInheritance'] === 'true'`, lynx-stack #3907): the
+    /// string `"true"` turns it on, and `"false"`, an absent key and any other
+    /// value leave it off. The web encoder writes every page config value
+    /// through `String(value)`, so `"true"` is the only spelling a
+    /// `.web.bundle` has for an enabled switch.
+    #[test]
+    fn web_bundle_css_inheritance_follows_the_page_config_string() {
+        for (config, expected) in [
+            (r#"{"enableCSSInheritance": "true"}"#, true),
+            (r#"{"enableCSSInheritance": "false"}"#, false),
+            (r#"{"enableCSSInheritance": "TRUE"}"#, false),
+            (r#"{"enableCSSInheritance": true}"#, false),
+            (r#"{"enableCssInheritance": "true"}"#, false),
+            ("{}", false),
+        ] {
+            let page = PageSource::from_bytes(
+                &input_url(),
+                &web_bundle_with_config(config, Some("export {};")),
+            )
+            .expect("valid web bundle");
+
+            assert_eq!(page.config().enable_css_inheritance, expected, "{config}");
+            assert_eq!(
+                page.view_sources(SCREEN).config.enable_css_inheritance,
+                expected,
+                "the view is built with the page's switch: {config}"
+            );
+        }
+    }
+
     #[test]
     fn web_bundle_requires_a_root_script() {
         let error = PageSource::from_bytes(&input_url(), &web_bundle(None))
@@ -1421,6 +1461,7 @@ mod tests {
         assert!(!page.config().default_display_linear);
         assert!(!page.config().default_overflow_visible);
         assert!(page.config().enable_css_selector);
+        assert!(!page.config().enable_css_inheritance);
         assert_eq!(page.input_url(), &input_url());
         assert_eq!(
             page.style_sheet.as_ref().map(|(url, _)| url.as_str()),
