@@ -1497,6 +1497,15 @@ consequential choice about whether to follow the spec or the quirk.
   `direction`), which stylo does whatever the page config says. web-core is
   this project's default resolution of such conflicts (AGENTS.md); none of
   these has been put to a ruling.
+  **A decoration under a gradient `color` is black (accepted by the user,
+  2026-10-13).** A text decoration takes the `color` of its decorating box,
+  and where that `color` is a gradient the line is painted black: the
+  underline of a text that has a gradient `color` of its own or inherits one
+  with the switch on, and the underline a view with a gradient `color`
+  propagates to its texts with the switch off. web-core lowers a gradient
+  `color` to transparent glyphs over a background clipped to the text. The
+  three `config-css-inheritance-*` cards of the web-core-e2e corpus are
+  pinned on the black line.
 
 - **`:is()`, `:where()`, `:has()`, `:nth-child()` family, `:first-child`/`:last-child`/`:only-child`/`:empty`**
   — all are *parsed* by Lynx's selector grammar but have **no matcher case at
