@@ -507,4 +507,15 @@ driven! {
         "background-removed": [Tap(50.0, 50.0)],
         "background-restored": [Tap(50.0, 50.0)],
     ],
+    // `#update`, the last row (the text `Update`, y 177..193): upstream clicks it and
+    // asserts what `#solid-text` computes afterwards.
+    "config-css-inheritance-default" => [
+        "updated": [Tap(20.0, 185.0)],
+    ],
+    "config-css-inheritance-false" => [
+        "updated": [Tap(20.0, 185.0)],
+    ],
+    "config-css-inheritance-true" => [
+        "updated": [Tap(20.0, 185.0)],
+    ],
 }
