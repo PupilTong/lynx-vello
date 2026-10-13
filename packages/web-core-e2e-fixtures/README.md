@@ -83,7 +83,7 @@ Upstream expresses per-case compiler configuration as 21 rspeedy config files:
 six that glob a family, fifteen that sit beside a single case. This repository
 builds ReactLynx with Rsbuild directly, so that information lives in
 `groups.js` as one entry per distinct configuration, matched by case name —
-`enableCSSSelector: false`, `enableRemoveCSSScope: false`,
+`enableRemoveCSSScope: false`,
 `experimental_isLazyBundle: true`, the two `enableCSSInheritance` variants, the
 split-chunk presets, and the development-mode card whose asset prefix points at
 a host that does not resolve.
@@ -91,6 +91,25 @@ a host that does not resolve.
 **When re-syncing `src/` from upstream, re-read those config files.** A case
 whose family moved would otherwise compile with the wrong switches, and the
 suite would blame the engine for it.
+
+## What is not vendored
+
+Every case that involves `enableCSSSelector: false` (user, 2026-10-13: the
+flag is no longer supported, so its cases are deleted rather than kept
+pending). That is 29 directories of upstream's `tests/reactlynx`:
+
+- the ten `config-css-selector-false-*` cards and `config-mixed-01`, which are
+  compiled with the flag;
+- the nine `basic-lazy-component-css-selector-false-*` cards, compiled with it
+  too;
+- the nine `config-lazy-component-css-selector-false-*` lazy containers, which
+  only those nine cards load.
+
+Their three rspeedy config files (`config-css-selector-false.config.ts`,
+`basic-lazy-component-css-selector-false.config.ts`,
+`config-mixed-01.config.ts`) have no entry in `groups.js`. **A re-sync from
+upstream will bring the directories back; delete them again.** With them gone
+the corpus is 324 cards.
 
 ## What is not built
 

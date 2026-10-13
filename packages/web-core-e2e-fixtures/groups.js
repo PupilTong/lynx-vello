@@ -6,6 +6,11 @@
 // ReactLynx with Rsbuild directly, so the same information lives here as data
 // — one group per distinct compiler configuration, matched by case name.
 //
+// Three of those config files have no group: `config-css-selector-false`,
+// `basic-lazy-component-css-selector-false` and `config-mixed-01` set
+// `enableCSSSelector: false`, and their cases are not vendored (README, "What
+// is not vendored").
+//
 // Keep this table in step with upstream when re-syncing `src/`: a case whose
 // family moved would otherwise be compiled with the wrong switches and fail
 // the suite for a reason that is not the engine's.
@@ -16,18 +21,7 @@ export const groups = [
   // is what the overwhelming majority of the corpus wants.
   {
     name: "default",
-    matches: (name) =>
-      (name.startsWith("basic-") || name.startsWith("api-"))
-      && !name.startsWith("basic-lazy-component-css-selector-false"),
-  },
-  // `config-css-selector-false.config.ts` and
-  // `basic-lazy-component-css-selector-false.config.ts`.
-  {
-    name: "css-selector-false",
-    options: { enableCSSSelector: false },
-    matches: (name) =>
-      name.startsWith("config-css-selector-false-")
-      || name.startsWith("basic-lazy-component-css-selector-false-"),
+    matches: (name) => name.startsWith("basic-") || name.startsWith("api-"),
   },
   // `config-lazy-component.config.ts`. These are lazy-bundle containers, not
   // cards: they carry no `lepusCode.root` and no page opens them — upstream's
@@ -75,11 +69,6 @@ export const groups = [
   {
     name: "default-overflow-visible-unset",
     matches: (name) => name === "config-css-default-overflow-visible-unset",
-  },
-  {
-    name: "mixed-01",
-    options: { enableRemoveCSSScope: false, enableCSSSelector: false },
-    matches: (name) => name === "config-mixed-01",
   },
   // The three split-chunk cases each own a directory under `dist/`, because
   // their vendor chunks are separate files the card fetches by relative path.

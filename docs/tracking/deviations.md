@@ -3954,10 +3954,11 @@ consequential choice about whether to follow the spec or the quirk.
   is also written into `CustomSectionsStyleInfo` (label 7) under its name,
   which is where this engine reads it (see the next entry). A container built
   by an older encoder still has the rules in `StyleInfo` alone and is not
-  answered from there. What adoption leaves open is the entry-name guard: two
-  bundles compiled unscoped collide on equal selectors, the later adoption
-  winning (`basic-lazy-component-css`, `-css-blank` of the web-core-e2e
-  corpus).
+  answered from there. An adopted sheet is page-wide: two bundles compiled
+  unscoped collide on equal selectors, the later adoption winning. The user
+  ruled that the expected result (2026-10-13: the isolation between a card's
+  sheet and a lazy bundle's has been removed), and `basic-lazy-component-css`
+  and `-css-blank` of the web-core-e2e corpus are pinned on it.
 - **CSS custom sections are read from the `CustomSectionsStyleInfo` section
   *and* from the legacy JSON form** — since lynx-stack#4138 (75c770fe)
   web-core's encoder writes every `encoding: 'CSS'` custom section into

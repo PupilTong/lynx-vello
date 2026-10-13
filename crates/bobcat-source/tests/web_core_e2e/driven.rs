@@ -416,42 +416,6 @@ driven! {
         "tapped": [Tap(150.0, 50.0)],
         "tapped-again": [Tap(150.0, 50.0)],
     ],
-    // `#target`, clicked twice.
-    "basic-lazy-component-css-selector-false-exchange-class" => [
-        "class-exchanged": [Tap(50.0, 50.0)],
-        "class-removed": [Tap(50.0, 50.0)],
-    ],
-    // `#target`, clicked twice.
-    "basic-lazy-component-css-selector-false-inline-css-change-same-time" => [
-        "inline-and-class-added": [Tap(50.0, 50.0)],
-        "inline-and-class-removed": [Tap(50.0, 50.0)],
-    ],
-    // `#target`, clicked four times.
-    "basic-lazy-component-css-selector-false-inline-remove-css-remove-inline" => [
-        "inline-red": [Tap(50.0, 50.0)],
-        "green-class-removed": [Tap(50.0, 50.0)],
-        "inline-removed": [Tap(50.0, 50.0)],
-        "all-removed": [Tap(50.0, 50.0)],
-    ],
-    // `#target`, clicked once.
-    "basic-lazy-component-css-selector-false-remove-all" => [
-        "classes-removed": [Tap(50.0, 50.0)],
-    ],
-    // `#target`, clicked twice.
-    "basic-lazy-component-css-selector-false-remove-css-and-reuse-css" => [
-        "green-class-added": [Tap(50.0, 50.0)],
-        "green-class-removed": [Tap(50.0, 50.0)],
-    ],
-    // `#target`, clicked twice.
-    "basic-lazy-component-css-selector-false-remove-css-and-style-collapsed" => [
-        "inline-yellow": [Tap(50.0, 50.0)],
-        "inline-green": [Tap(50.0, 50.0)],
-    ],
-    // `#target`, clicked twice.
-    "basic-lazy-component-css-selector-false-remove-inline-style-and-reuse-css" => [
-        "inline-red": [Tap(50.0, 50.0)],
-        "inline-removed": [Tap(50.0, 50.0)],
-    ],
     // `#target`, clicked once.
     "basic-lazy-component-mts-bindtap" => [
         "tapped": [Tap(50.0, 50.0)],
@@ -542,41 +506,5 @@ driven! {
     "basic-style-remove-one-property" => [
         "background-removed": [Tap(50.0, 50.0)],
         "background-restored": [Tap(50.0, 50.0)],
-    ],
-    // `#target`, clicked twice.
-    "config-css-selector-false-exchange-class" => [
-        "class-exchanged": [Tap(50.0, 50.0)],
-        "class-removed": [Tap(50.0, 50.0)],
-    ],
-    // `#target`, clicked twice.
-    "config-css-selector-false-inline-css-change-same-time" => [
-        "inline-and-class-added": [Tap(50.0, 50.0)],
-        "inline-and-class-removed": [Tap(50.0, 50.0)],
-    ],
-    // `#target`, clicked four times.
-    "config-css-selector-false-inline-remove-css-remove-inline" => [
-        "inline-added": [Tap(50.0, 50.0)],
-        "class-removed": [Tap(50.0, 50.0)],
-        "inline-removed": [Tap(50.0, 50.0)],
-        "all-removed": [Tap(50.0, 50.0)],
-    ],
-    // `#target`, clicked once.
-    "config-css-selector-false-remove-all" => [
-        "classes-removed": [Tap(50.0, 50.0)],
-    ],
-    // `#target`, clicked twice.
-    "config-css-selector-false-remove-css-and-reuse-css" => [
-        "class-added": [Tap(50.0, 50.0)],
-        "class-removed": [Tap(50.0, 50.0)],
-    ],
-    // `#target`, clicked twice.
-    "config-css-selector-false-remove-css-and-style-collapsed" => [
-        "inline-yellow-class-green": [Tap(50.0, 50.0)],
-        "inline-green-class-removed": [Tap(50.0, 50.0)],
-    ],
-    // `#target`, clicked twice.
-    "config-css-selector-false-remove-inline-style-and-reuse-css" => [
-        "inline-added": [Tap(50.0, 50.0)],
-        "inline-removed": [Tap(50.0, 50.0)],
     ],
 }
