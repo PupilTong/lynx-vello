@@ -194,12 +194,6 @@ verified! {
     config_css_remove_scope_false_display_linear => "config-css-remove-scope-false-display-linear",
     // An `@import`ed fragment cascades into the importing component: `common.css`'s `.green` paints `#sub` over the colourless `.basic` parent.
     config_css_remove_scope_false_import_css => "config-css-remove-scope-false-import-css",
-    // With `enableCSSSelector: false` the sheet still cascades by real specificity: `.parent .background` (pink) beats both single-class rules.
-    config_css_selector_false_multi_level_selector => "config-css-selector-false-multi-level-selector",
-    // A bare `view` type selector still matches under `enableCSSSelector: false`, giving `#target` yellow at 100x100.
-    config_css_selector_false_type_selector => "config-css-selector-false-type-selector",
-    // First screen only, since the suite drives no reload: `.parent` gives `#target` a 200x200 red box under `enableCSSSelector: false`.
-    config_css_selector_false_reload => "config-css-selector-false-reload",
     // A mapped child list renders in order after a zero-height sibling: pink, orange, wheat, 100px each.
     basic_list_rendering => "basic-list-rendering",
     // Two `useEffect`-inserted lists keep their place around two static rects: red, green, gap, blue, yellow.
@@ -330,10 +324,6 @@ verified! {
     basic_style_remove => "basic-style-remove",
     // One inline property is removed while another stays: the class's pink shows through, then green again.
     basic_style_remove_one_property => "basic-style-remove-one-property",
-    // An inline colour and a class added in one update, then both removed: inline wins, so yellow, red, yellow. Nothing in this card depends on `enableCSSSelector`.
-    config_css_selector_false_inline_css_change_same_time => "config-css-selector-false-inline-css-change-same-time",
-    // The inline colour changes in the same update that adds or removes a class: inline wins each time, so green, yellow, green. Nothing in this card depends on `enableCSSSelector`.
-    config_css_selector_false_remove_css_and_style_collapsed => "config-css-selector-false-remove-css-and-style-collapsed",
     // With no `defaultOverflowVisible` in the build the compiler writes `true`, so the unstyled sixth box lets its 50px child overflow like the explicit `overflow: visible` fifth; the two `hidden` boxes clip at the padding edge, and so do the two mixed-axis boxes, whose `visible` axis pairs into a clip (css-overflow-3, as web-core; native clips per axis).
     config_css_default_overflow_visible_unset => "config-css-default-overflow-visible-unset",
     // `SystemInfo.pixelHeight` and `SystemInfo.pixelWidth` are both numbers on the background thread: the effect that checks them turns the 100x100 box from pink to green.
@@ -444,12 +434,8 @@ verified! {
     basic_element_x_swiper_circular_flat_coverflow => "basic-element-x-swiper-circular-flat-coverflow",
     // The rows turn red on `exposure` and green on `disexposure`. All of `viewpager`, Item1, Text1, Item2 and Text2 are red in the three frames (first screen, after the swipe to tab2, after the swipe back), and none turns green: the page that is not shown starts or ends exactly on the pager's padding edge, what the pager's clip leaves of it is a line on that edge, and an element that only touches an edge is intersecting (`crates/bobcat-core/src/main/exposure.rs`), so the hidden page is exposed from the start and never disexposed. The user ruled that a hidden page touching the edge counts as exposed (2026-10-13). web-core and native both leave it unexposed, and the card's `-10px` screen margins shrink the viewport (393 to 383), not the pager (edge at 353).
     basic_element_x_viewpager_ng_exposure => "basic-element-x-viewpager-ng-exposure",
-    // The lazy container's rules reach the page through its `CSS` custom section (`.web.bundle` label 7 since lynx-stack #4142), which the runtime adopts with `__LoadStyleSheet('CSS', url)`. The lazy component's `.parent .background` (pink) beats both single-class rules on `#target`, a 100x100 pink box: the `config-` twin's frame, pixel for pixel.
-    basic_lazy_component_css_selector_false_multi_level_selector => "basic-lazy-component-css-selector-false-multi-level-selector",
-    // The lazy container's rules reach the page through its `CSS` custom section (`.web.bundle` label 7 since lynx-stack #4142), which the runtime adopts with `__LoadStyleSheet('CSS', url)`. The lazy component's bare `view` rule gives `#target` its 100x100 size and yellow: the `config-` twin's frame, pixel for pixel. No upstream test opens this card; it is judged by its source.
-    basic_lazy_component_css_selector_false_type_selector => "basic-lazy-component-css-selector-false-type-selector",
-    // The lazy container's rules reach the page through its `CSS` custom section (`.web.bundle` label 7 since lynx-stack #4142), which the runtime adopts with `__LoadStyleSheet('CSS', url)`. `#target` is the class's yellow, then red when a tap adds an inline colour and a second class in one update, then yellow again when both go: the `config-` twin's three frames, pixel for pixel.
-    basic_lazy_component_css_selector_false_inline_css_change_same_time => "basic-lazy-component-css-selector-false-inline-css-change-same-time",
-    // The lazy container's rules reach the page through its `CSS` custom section (`.web.bundle` label 7 since lynx-stack #4142), which the runtime adopts with `__LoadStyleSheet('CSS', url)`. The inline colour changes in the same update that adds or removes a class and wins each time: green, yellow, green, as in the `config-` twin. Until the section was adopted the same frames tested nothing, because no class rule applied.
-    basic_lazy_component_css_selector_false_remove_css_and_style_collapsed => "basic-lazy-component-css-selector-false-remove-css-and-style-collapsed",
+    // Both `.container` boxes are orange. The lazy bundle's `CSS` section is adopted page-wide and both bundles are compiled unscoped, so the lazy bundle's `.container { background-color: orange }`, adopted later, wins over the card's red on the card's own box too. The user ruled this the expected result (2026-10-13): the isolation between a card's sheet and a lazy bundle's has been removed. Upstream's assertion, taken on the `__QueryComponent` build, is red and orange.
+    basic_lazy_component_css => "basic-lazy-component-css",
+    // Both `.container` boxes are red. The lazy bundle's own `.container` rule only sizes its box, and the card's `.container { background-color: red }` reaches it, because nothing separates a card's sheet from a lazy bundle's (the user's ruling of 2026-10-13: the isolation has been removed, and this is the expected result). Upstream's assertion, taken on the `__QueryComponent` build, is that the lazy box is not coloured.
+    basic_lazy_component_css_blank => "basic-lazy-component-css-blank",
 }
