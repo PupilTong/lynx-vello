@@ -30,6 +30,18 @@
 //! - §6.1's "must rest on a snap position": the runtime settles a container from its own offset
 //!   whenever a commit publishes one — initial layout, a relayout that moved areas, a programmatic
 //!   scroll — as long as no drag is holding it.
+//! - §4.1.3 re-snapping after a layout change: a container that stood on an area's snap position
+//!   before the change stands on that same area's position after it, whatever the strictness and
+//!   however far the position moved, as long as the area still contributes one. Every position
+//!   names its area ([`SnapPoint::area`]), so "snapped to" is read off the positions the last
+//!   commit published and the offset the container stands at ([`SnapAxis::snapped_area`]) and needs
+//!   no record of its own; the area's new position is [`SnapAxis::position_of`]. The document does
+//!   this for its own offset inside the render that publishes the new positions
+//!   (`Document::resnap`), and the runtime's painter for the offset it holds when it adopts that
+//!   commit, at rest only. Where several areas are aligned at the offset, §6.2.1 picks the first in
+//!   tree order ([`SnapPoint::order`]). The move is a jump, which §4.1.3 leaves to the user agent
+//!   for a re-snap to the same box. A container snapped to nothing, or whose area is gone, falls to
+//!   the at-rest rule above.
 //!
 //! An axis with `overscroll-behavior: circular` has no boundary on the
 //! painter's side, so its snap positions repeat: a [`SnapAxis`] with a
@@ -52,7 +64,10 @@
 //! *animation* in this crate (every snap the document applies is
 //! instantaneous; the runtime's painter animates the snap after a drag's
 //! release), and §7's preference for the same element on both axes (axes
-//! are chosen independently).
+//! are chosen independently). §6.2.1's other two steps are absent with it:
+//! there is no focused or targeted box to prefer (this crate has no focus
+//! model), and an area is not set aside for a descendant of it aligned at
+//! the same position.
 //!
 //! Snap areas are the elements in the container's DOM subtree whose nearest
 //! scroll container on the containing-block chain is this one. The walk
@@ -72,9 +87,17 @@ use super::{ScrollAxes, clamp_to, is_scroll_container, wrap_axis};
 use crate::NodeId;
 use crate::layout::{DisplayMode, StyleView, box_parent, display_mode};
 use crate::tree::document::Document;
+use crate::visual::PaintOrder;
 
 /// The share of the scrollport, per axis, within which `proximity` snaps.
 pub const PROXIMITY_RATIO: f32 = 1.0 / 3.0;
+
+/// How far from a snap position, in CSS px, an offset still stands on it
+/// ([`SnapAxis::snapped_area`]). An offset at rest on a position is that
+/// position's own number, except on a circular axis, where normalizing it
+/// into the period rounds; no container comes to rest this near a position
+/// without being on it.
+pub const SNAPPED_TOLERANCE: f32 = 0.5;
 
 /// How strictly a container snaps on an axis (`scroll-snap-type`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +117,13 @@ pub struct SnapPoint {
     pub max: f32,
     /// `scroll-snap-stop: always` on the area.
     pub stop: bool,
+    /// The element whose snap area this position aligns: what a container
+    /// standing here is snapped to, and what it follows through a layout
+    /// change (§4.1.3).
+    pub area: NodeId,
+    /// The area's place among its container's areas in flat-tree order,
+    /// which chooses between areas aligned at one offset (§6.2.1).
+    pub order: u32,
 }
 
 impl SnapPoint {
@@ -179,7 +209,7 @@ impl SnapAxis<'_> {
                     SnapPoint {
                         min: point.min + shift,
                         max: point.max + shift,
-                        stop: point.stop,
+                        ..*point
                     }
                 }
                 None => *point,
@@ -286,6 +316,47 @@ impl SnapAxis<'_> {
             SnapStrictness::Mandatory => Some(next.unwrap_or(current)),
             SnapStrictness::Proximity => next.filter(|next| (next - natural).abs() <= threshold),
         }
+    }
+
+    /// The area a container standing at `offset` is snapped to on this axis
+    /// (§4.1.3), or `None` when it stands on no position: of the areas whose
+    /// position holds `offset`, within [`SNAPPED_TOLERANCE`], the first in
+    /// tree order (§6.2.1). The strictness does not enter: a `proximity`
+    /// container that came to rest on a position is snapped to it. A
+    /// non-finite offset stands nowhere.
+    #[must_use]
+    pub fn snapped_area(&self, offset: f32) -> Option<NodeId> {
+        if !offset.is_finite() {
+            return None;
+        }
+        self.copies_around(offset)
+            .filter(|point| point.distance(offset) <= SNAPPED_TOLERANCE)
+            .min_by_key(|point| point.order)
+            .map(|point| point.area)
+    }
+
+    /// Where a container at `offset` rests on `area`'s position, or `None`
+    /// when `area` contributes none to this axis: the position itself, or
+    /// for an area larger than the snapport the offset in its range nearest
+    /// `offset`. On a circular axis it is the copy nearest `offset`, in the
+    /// caller's own frame as every other result here is.
+    #[must_use]
+    pub fn position_of(&self, area: NodeId, offset: f32) -> Option<f32> {
+        self.copies_around(offset)
+            .filter(|point| point.area == area)
+            .min_by(|a, b| a.distance(offset).total_cmp(&b.distance(offset)))
+            .map(|point| point.nearest(offset))
+    }
+
+    /// Where a container that stood at `stood` over `before` — this axis as
+    /// the previous commit published it — stands now, when it was snapped
+    /// to an area that still contributes a position (§4.1.3); `None` leaves
+    /// it to the caller's own rule. `offset` is where it stands against the
+    /// new geometry, which picks the copy on a circular axis and the offset
+    /// inside a range.
+    #[must_use]
+    pub fn resnap(&self, before: &SnapAxis<'_>, stood: f32, offset: f32) -> Option<f32> {
+        self.position_of(before.snapped_area(stood)?, offset)
     }
 }
 
@@ -428,22 +499,22 @@ pub fn settle_offset(
     )
 }
 
-/// The snap position one area contributes on one axis, given the area's
-/// and the snapport's extents in the container's scrolling coordinates.
+/// The snap position one area contributes on one axis, as the `min` and
+/// `max` of its [`SnapPoint`], given the area's and the snapport's extents
+/// in the container's scrolling coordinates.
 ///
 /// On a bounded axis the position is clamped into the scrollable range
 /// `0..=max`. On an axis that wraps with `period` nothing is clamped: a
 /// single position is normalized into `[0, period)`, and a range moves its
 /// `min` into `[0, period)` and its `max` by the same shift, so the range
 /// keeps its length and starts inside one period.
-fn snap_point(
+fn snap_range(
     align: ScrollSnapAlignKeyword,
     area: (f32, f32),
     snapport: (f32, f32),
     max: f32,
     period: Option<f32>,
-    stop: bool,
-) -> SnapPoint {
+) -> (f32, f32) {
     let clamp = |offset: f32| offset.clamp(0.0, max.max(0.0));
     let (area_start, area_end) = area;
     let (port_start, port_end) = snapport;
@@ -453,15 +524,11 @@ fn snap_point(
         let (min, max) = (area_start - port_start, area_end - port_end);
         if let Some(period) = period {
             let start = wrap_axis(min, period);
-            return SnapPoint {
-                min: start,
-                max: max + (start - min),
-                stop,
-            };
+            return (start, max + (start - min));
         }
         let (min, max) = (clamp(min), clamp(max));
         if min <= max {
-            return SnapPoint { min, max, stop };
+            return (min, max);
         }
     }
     let offset = match align {
@@ -474,11 +541,7 @@ fn snap_point(
         Some(period) => wrap_axis(offset, period),
         None => clamp(offset),
     };
-    SnapPoint {
-        min: offset,
-        max: offset,
-        stop,
-    }
+    (offset, offset)
 }
 
 pub(crate) fn scroll_padding(value: &NonNegativeLengthPercentageOrAuto, basis: f32) -> f32 {
@@ -527,6 +590,8 @@ impl<T> Document<T> {
 
         let mut x = Vec::new();
         let mut y = Vec::new();
+        // Counts the areas as the walk meets them, which is tree order.
+        let mut order = 0_u32;
         // The flat tree: a snap area is a box, and a scroll container in a
         // shadow tree holds its slotted descendants' boxes.
         let mut pending: Vec<NodeId> = node.flat_children().iter().rev().copied().collect();
@@ -559,26 +624,23 @@ impl<T> Document<T> {
                         rect.min_y() - values.get_scroll_margin_top().px(),
                         rect.max_y() + values.get_scroll_margin_bottom().px(),
                     );
+                    let point = |(min, max): (f32, f32)| SnapPoint {
+                        min,
+                        max,
+                        stop,
+                        area: child_id,
+                        order,
+                    };
+                    let (inline, block) = (align.inline(), align.block());
                     if wants_x {
-                        x.push(snap_point(
-                            align.inline(),
-                            area_x,
-                            snapport_x,
-                            max.x,
-                            period_x,
-                            stop,
-                        ));
+                        let range = snap_range(inline, area_x, snapport_x, max.x, period_x);
+                        x.push(point(range));
                     }
                     if wants_y {
-                        y.push(snap_point(
-                            align.block(),
-                            area_y,
-                            snapport_y,
-                            max.y,
-                            period_y,
-                            stop,
-                        ));
+                        let range = snap_range(block, area_y, snapport_y, max.y, period_y);
+                        y.push(point(range));
                     }
+                    order += 1;
                 }
             }
             if is_scroll_container(values) {
@@ -624,6 +686,72 @@ impl<T> Document<T> {
             positions.y(),
         );
         self.scroll_to(id, settled)
+    }
+
+    /// css-scroll-snap-1 §4.1.3 for the document's own offsets: each
+    /// container of `frame` — the paint order just built — that stood on an
+    /// area's snap position in the committed frame it replaces moves to
+    /// that area's position in `frame`. Answers whether any offset moved, in
+    /// which case `frame` no longer carries the offsets the document holds
+    /// and the render builds it again.
+    ///
+    /// Both sets of positions are tables a build has already filled, so a
+    /// render that moves nothing pays one scan of each snapping container's
+    /// points and no walk of the tree.
+    ///
+    /// Only an offset that stood on a position moves. The at-rest rule for
+    /// the others — a `mandatory` container whose area is gone, say — needs
+    /// to know the container is at rest, which the runtime's painter does
+    /// and the document does not: its offset under a drag is whatever that
+    /// drag last posted. The write is a plain [`Self::scroll_to`] and no
+    /// request, because a painter holding an offset of its own applies the
+    /// same rule to it when it adopts the commit, and must not be moved
+    /// while a drag or a glide has the container. A container with a
+    /// pending request ([`Self::pending_scroll_request`]) is left to it: its
+    /// position is the request's until the painter has carried it out.
+    pub(crate) fn resnap(&mut self, frame: &PaintOrder) -> bool {
+        if frame.snap_points().is_empty() {
+            return false;
+        }
+        let Some(committed) = self.committed_frame() else {
+            return false;
+        };
+        let mut moved = false;
+        for slot in frame.slots() {
+            let (after_x, after_y) = frame.snap_axes(slot);
+            if after_x.is_none() && after_y.is_none() {
+                continue;
+            }
+            let Some(before) = committed.slot_of(slot.node) else {
+                continue;
+            };
+            if self.pending_scroll_request(slot.node).is_some() {
+                continue;
+            }
+            let (before_x, before_y) =
+                committed.snap_axes(&committed.scroll_slots()[before as usize]);
+            // As it was written, against the geometry it was written for;
+            // `slot.offset` is the same offset admitted against the new one.
+            let stood = self.stored_scroll_offset(slot.node);
+            let axis = |after: Option<SnapAxis<'_>>,
+                        before: Option<SnapAxis<'_>>,
+                        stood: f32,
+                        offset: f32| {
+                after
+                    .zip(before)
+                    .and_then(|(after, before)| after.resnap(&before, stood, offset))
+                    .unwrap_or(offset)
+            };
+            let target = Vector2D::new(
+                axis(after_x, before_x, stood.x, slot.offset.x),
+                axis(after_y, before_y, stood.y, slot.offset.y),
+            );
+            if target != slot.offset {
+                self.scroll_to(slot.node, target);
+                moved = true;
+            }
+        }
+        moved
     }
 
     /// The first scroll container above `id` on its containing-block chain.
@@ -675,19 +803,30 @@ mod tests {
     use crate::StylesheetOrigin;
     use crate::tree::document::tests::device;
 
-    fn point(offset: f32) -> SnapPoint {
+    /// The area named `key` in the axis tests, which read no tree.
+    fn area(key: u64) -> NodeId {
+        NodeId::from_bits(key).expect("a well-formed handle")
+    }
+
+    /// The position `min..=max` of area `key`, the `key`th in tree order.
+    fn range(min: f32, max: f32, key: u32) -> SnapPoint {
         SnapPoint {
-            min: offset,
-            max: offset,
+            min,
+            max,
             stop: false,
+            area: area(u64::from(key)),
+            order: key,
         }
+    }
+
+    fn point(offset: f32) -> SnapPoint {
+        range(offset, offset, 1)
     }
 
     fn stop(offset: f32) -> SnapPoint {
         SnapPoint {
-            min: offset,
-            max: offset,
             stop: true,
+            ..point(offset)
         }
     }
 
@@ -718,14 +857,7 @@ mod tests {
 
     #[test]
     fn a_range_position_is_valid_anywhere_inside_it() {
-        let points = [
-            point(0.0),
-            SnapPoint {
-                min: 100.0,
-                max: 300.0,
-                stop: false,
-            },
-        ];
+        let points = [point(0.0), range(100.0, 300.0, 2)];
         let mandatory = axis(SnapStrictness::Mandatory, &points);
         assert_eq!(mandatory.settle(0.0, 180.0, 0.0), 180.0);
         assert_eq!(mandatory.settle(0.0, 320.0, 0.0), 300.0);
@@ -1247,6 +1379,315 @@ mod tests {
             document.scroll_offset(scroller),
             Vector2D::new(0.0, 175.0),
             "and back across it"
+        );
+    }
+
+    /// §6.2.1: of the areas whose position holds the offset, the first in
+    /// tree order — not the first in the table, which is sorted by position.
+    #[test]
+    fn a_container_is_snapped_to_the_first_area_in_tree_order_at_its_offset() {
+        let points = [
+            range(0.0, 0.0, 1),
+            range(50.0, 250.0, 5),
+            range(100.0, 100.0, 4),
+            range(100.0, 100.0, 3),
+        ];
+        for strictness in [SnapStrictness::Mandatory, SnapStrictness::Proximity] {
+            let axis = axis(strictness, &points);
+            assert_eq!(axis.snapped_area(0.0), Some(area(1)));
+            assert_eq!(
+                axis.snapped_area(100.0),
+                Some(area(3)),
+                "three areas hold 100; the first in tree order is the table's last",
+            );
+            assert_eq!(axis.snapped_area(100.4), Some(area(3)), "within tolerance");
+            assert_eq!(axis.snapped_area(180.0), Some(area(5)), "inside the range");
+            assert_eq!(axis.snapped_area(30.0), None, "on no position");
+            assert_eq!(axis.snapped_area(f32::NAN), None);
+        }
+    }
+
+    /// §4.1.3 over two commits' positions: the area the container stood on
+    /// decides, not the position nearest the offset it was left with.
+    #[test]
+    fn a_resnap_follows_the_area_to_its_new_position() {
+        let before = [
+            range(0.0, 0.0, 1),
+            range(100.0, 100.0, 2),
+            range(200.0, 200.0, 3),
+        ];
+        let before = axis(SnapStrictness::Mandatory, &before);
+        let after = [
+            range(0.0, 0.0, 1),
+            range(150.0, 150.0, 2),
+            range(300.0, 300.0, 3),
+        ];
+        let after = axis(SnapStrictness::Proximity, &after);
+        assert_eq!(
+            after.resnap(&before, 200.0, 200.0),
+            Some(300.0),
+            "the third area, though the second's 150 is nearer 200",
+        );
+        assert_eq!(after.resnap(&before, 100.0, 100.0), Some(150.0));
+        assert_eq!(
+            after.resnap(&before, 120.0, 120.0),
+            None,
+            "stood on nothing"
+        );
+
+        let gone = [range(0.0, 0.0, 1), range(150.0, 150.0, 2)];
+        let gone = axis(SnapStrictness::Mandatory, &gone);
+        assert_eq!(gone.resnap(&before, 200.0, 150.0), None, "its area is gone");
+
+        // Grown past the snapport, the area is a range: the offset in it
+        // nearest where the container stands.
+        let grown = [range(0.0, 0.0, 1), range(150.0, 400.0, 3)];
+        let grown = axis(SnapStrictness::Mandatory, &grown);
+        assert_eq!(grown.resnap(&before, 200.0, 200.0), Some(200.0));
+        assert_eq!(grown.resnap(&before, 200.0, 100.0), Some(150.0));
+    }
+
+    /// On a circular axis the offset may stand any number of periods away,
+    /// and the area's new position is the copy nearest it.
+    #[test]
+    fn a_periodic_resnap_reads_the_offset_modulo_the_old_period() {
+        let before = [
+            range(0.0, 0.0, 1),
+            range(200.0, 200.0, 2),
+            range(400.0, 400.0, 3),
+        ];
+        let before = periodic(SnapStrictness::Mandatory, &before);
+        assert_eq!(
+            before.snapped_area(1400.0),
+            Some(area(2)),
+            "200, two periods on"
+        );
+        assert_eq!(
+            before.snapped_area(-200.0),
+            Some(area(3)),
+            "400, one period back"
+        );
+
+        let after = [
+            range(0.0, 0.0, 1),
+            range(300.0, 300.0, 2),
+            range(850.0, 850.0, 3),
+        ];
+        let after = SnapAxis {
+            strictness: SnapStrictness::Mandatory,
+            points: &after,
+            period: Some(900.0),
+        };
+        assert_eq!(after.resnap(&before, 1400.0, 500.0), Some(300.0));
+        assert_eq!(
+            after.resnap(&before, -200.0, 10.0),
+            Some(-50.0),
+            "850's copy across the seam is the one nearest 10",
+        );
+    }
+
+    /// The pages of a snapping scroller: its element children.
+    fn pages(document: &Document<()>, scroller: NodeId) -> Vec<NodeId> {
+        document
+            .get(scroller)
+            .expect("the scroller")
+            .child_ids()
+            .to_vec()
+    }
+
+    /// Where the newest commit publishes `scroller`.
+    fn committed_offset(document: &mut Document<()>, scroller: NodeId) -> Vector2D<f32> {
+        let frame = document.commit();
+        let slot = frame.slot_of(scroller).expect("the scroller has a slot");
+        frame.scroll_slots()[slot as usize].offset
+    }
+
+    /// §4.1.3 when the container itself is resized. Four pages, each as tall
+    /// as the scrollport, so every position moves with it: 0, 100, 200, 300
+    /// at 100px. Standing on the third page (200), a scrollport of 150px
+    /// puts that page at 300 — where the position nearest the old offset is
+    /// the second page's 150 — and one of 60px puts it at 120.
+    #[test]
+    fn a_resized_container_stays_on_the_area_it_was_snapped_to() {
+        for strictness in ["mandatory", "proximity"] {
+            let (mut document, scroller) = snapping_page(
+                &format!("scroll-snap-type: y {strictness};"),
+                "height: 100%;",
+                &[],
+            );
+            for _ in 0..4 {
+                let page = document.create_element("view", ());
+                document.add_class(page, "page");
+                document.append_child(scroller, page);
+            }
+            document.commit();
+            // As the runtime adopts a painter's post: no request.
+            document.scroll_to(scroller, Vector2D::new(0.0, 200.0));
+
+            document.set_inline_style(scroller, "height: 150px");
+            assert_eq!(
+                committed_offset(&mut document, scroller),
+                Vector2D::new(0.0, 300.0),
+                "{strictness}: the commit publishes the third page's new position",
+            );
+            assert_eq!(document.scroll_offset(scroller), Vector2D::new(0.0, 300.0));
+
+            document.set_inline_style(scroller, "height: 60px");
+            assert_eq!(
+                committed_offset(&mut document, scroller),
+                Vector2D::new(0.0, 120.0),
+                "{strictness}: and again, from the offset the last one left",
+            );
+        }
+    }
+
+    /// §4.1.3 when an area ahead of the snapped one is resized, and the two
+    /// strictnesses' difference: none while the container is snapped. Four
+    /// 100px pages in a 100px scrollport, positions 0, 100, 200, 300; the
+    /// first page grows to 300px, which moves the second to 300. A container
+    /// standing on the second page follows it under `proximity` too, though
+    /// 300 is six proximity ranges from 100 (the specification's own
+    /// example: a log that stays at its end as lines are added).
+    #[test]
+    fn a_resized_area_carries_the_container_snapped_past_it() {
+        for strictness in ["mandatory", "proximity"] {
+            let (mut document, scroller) = snapping_page(
+                &format!("scroll-snap-type: y {strictness};"),
+                "",
+                &[100.0; 4],
+            );
+            document.commit();
+            document.scroll_to(scroller, Vector2D::new(0.0, 100.0));
+            let first = pages(&document, scroller)[0];
+            document.set_inline_style(first, "height: 300px");
+            assert_eq!(
+                committed_offset(&mut document, scroller),
+                Vector2D::new(0.0, 300.0),
+                "{strictness}",
+            );
+        }
+    }
+
+    /// A container that stood on no position is not the document's to move:
+    /// whether it is at rest, and so owes the at-rest rule, is the painter's
+    /// knowledge. 150 is half-way between two pages, where a `proximity`
+    /// container may rest and a `mandatory` one is only ever passing.
+    #[test]
+    fn an_offset_on_no_position_is_left_to_the_at_rest_rule() {
+        for strictness in ["mandatory", "proximity"] {
+            let (mut document, scroller) = snapping_page(
+                &format!("scroll-snap-type: y {strictness};"),
+                "",
+                &[100.0; 4],
+            );
+            document.commit();
+            document.scroll_to(scroller, Vector2D::new(0.0, 150.0));
+            let first = pages(&document, scroller)[0];
+            document.set_inline_style(first, "height: 300px");
+            assert_eq!(
+                committed_offset(&mut document, scroller),
+                Vector2D::new(0.0, 150.0),
+                "{strictness}",
+            );
+        }
+    }
+
+    /// The snapped area removed: nothing to follow, so the offset stays —
+    /// clamped as any offset is — for the at-rest rule.
+    #[test]
+    fn a_container_whose_area_is_gone_keeps_its_offset() {
+        let (mut document, scroller) =
+            snapping_page("scroll-snap-type: y mandatory;", "", &[100.0; 4]);
+        document.commit();
+        document.scroll_to(scroller, Vector2D::new(0.0, 300.0));
+        let last = pages(&document, scroller)[3];
+        document.remove_element(last);
+        assert_eq!(
+            committed_offset(&mut document, scroller),
+            Vector2D::new(0.0, 200.0),
+            "clamped to the range three pages leave",
+        );
+    }
+
+    /// §6.2.1 through a commit. Four 50px pages in a 100px scrollport: the
+    /// last page's start is clamped to the end of the range, 100, which is
+    /// the third page's position too. Standing there the container is
+    /// snapped to the third page, first in tree order, and stays on it when
+    /// a 50px scrollport separates the two (100 and 150).
+    #[test]
+    fn two_areas_at_one_position_resnap_to_the_first_in_tree_order() {
+        let (mut document, scroller) =
+            snapping_page("scroll-snap-type: y mandatory;", "", &[50.0; 4]);
+        document.commit();
+        document.scroll_to(scroller, Vector2D::new(0.0, 100.0));
+        document.set_inline_style(scroller, "height: 50px");
+        assert_eq!(
+            committed_offset(&mut document, scroller),
+            Vector2D::new(0.0, 100.0)
+        );
+    }
+
+    /// A circular axis: the period changes with the scrollport, and the
+    /// area's position is found in the new one. Four full-height pages,
+    /// period 400 at 100px and 600 at 150px: the last page moves from 300
+    /// to 450, which a clamp to the old range's end would never reach.
+    /// Then an area across the seam: four 50px pages centred in the 100px
+    /// scrollport put the first at −25, 175 on a period of 200; grown to
+    /// 80px it centres at −10, 220 on a period of 230.
+    #[test]
+    fn a_circular_container_follows_its_area_into_the_new_period() {
+        let circular = "scroll-snap-type: y mandatory; overscroll-behavior-y: circular;";
+        let (mut document, scroller) = snapping_page(circular, "height: 100%;", &[]);
+        for _ in 0..4 {
+            let page = document.create_element("view", ());
+            document.add_class(page, "page");
+            document.append_child(scroller, page);
+        }
+        document.commit();
+        document.scroll_to(scroller, Vector2D::new(0.0, 300.0));
+        document.set_inline_style(scroller, "height: 150px");
+        assert_eq!(
+            committed_offset(&mut document, scroller),
+            Vector2D::new(0.0, 450.0)
+        );
+
+        let (mut document, scroller) =
+            snapping_page(circular, "scroll-snap-align: center;", &[50.0; 4]);
+        document.commit();
+        assert_eq!(
+            document.scroll_to(scroller, Vector2D::new(0.0, 175.0)),
+            Vector2D::new(0.0, 175.0),
+            "the first page, across the seam",
+        );
+        let first = pages(&document, scroller)[0];
+        document.set_inline_style(first, "height: 80px");
+        assert_eq!(
+            committed_offset(&mut document, scroller),
+            Vector2D::new(0.0, 220.0)
+        );
+    }
+
+    /// A pending request owns the container's position until the painter
+    /// has carried it out, so the commit moves neither the offset nor the
+    /// target the slot carries.
+    #[test]
+    fn a_container_with_a_pending_request_is_left_to_it() {
+        let (mut document, scroller) =
+            snapping_page("scroll-snap-type: y mandatory;", "", &[100.0; 4]);
+        document.commit();
+        document.scroll_to_with(
+            scroller,
+            Vector2D::new(0.0, 100.0),
+            crate::scroll::ScrollBehavior::Instant,
+        );
+        let first = pages(&document, scroller)[0];
+        document.set_inline_style(first, "height: 300px");
+        let frame = document.commit();
+        let slot = &frame.scroll_slots()[frame.slot_of(scroller).expect("a slot") as usize];
+        assert_eq!(slot.offset, Vector2D::new(0.0, 100.0));
+        assert_eq!(
+            slot.request.map(|request| request.target),
+            Some(Vector2D::new(0.0, 100.0))
         );
     }
 

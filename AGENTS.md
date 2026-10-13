@@ -2645,7 +2645,14 @@ Subsystems:
   for the named delta sign). `scroll/snap.rs` is css-scroll-snap-1 — positions from
   `scroll-snap-type`/`-align`/`-stop`, `scroll-padding` and `scroll-margin`,
   published per scroll slot, settled on at a drag's end, stepped to by a
-  wheel tick, and re-snapped at rest on every commit; no snap events.
+  wheel tick, and re-snapped at rest on every commit; no snap events. Each
+  position names its snap area, so a container that stood on an area's
+  position follows that area through a layout change (§4.1.3) instead of
+  taking the position nearest its old offset: the document moves its own
+  offset inside the render (`Document::resnap`, the committed frame's
+  positions against the newly built ones), and `bobcat-core`'s painter the
+  offset it holds when it adopts the commit, unless a drag, fling, bounce
+  back or glide has the container.
   `scroll/request.rs` is CSSOM-View's `scrollTo({behavior})`: a script-facing
   scroll is a request the committed frame carries to the painter, which
   animates a smooth one and names the request in the offsets it posts back.

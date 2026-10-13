@@ -138,8 +138,8 @@ pub(crate) use self::space::{Space, SpaceKind, SpaceSamples};
 pub(crate) use self::sticky_frame::StickySample;
 pub(crate) use self::sticky_frame::{StickySamples, StickySlot};
 use crate::render::image::{DocumentRequest, ImageEvent, ImageOutcome, ImageRole};
-use crate::scroll::SnapPoint;
 use crate::scroll::initial_target::InitialTarget;
+use crate::scroll::{SnapAxis, SnapPoint};
 use crate::tree::document::Document;
 use crate::{FrameImages, NodeId};
 
@@ -441,6 +441,26 @@ impl PaintOrder {
     #[must_use]
     pub(crate) fn snap_points(&self) -> &[SnapPoint] {
         &self.snap_points
+    }
+
+    /// A slot's snapping on each axis, over this frame's points; see
+    /// [`CommittedFrame::snap_axes`].
+    #[must_use]
+    pub(crate) fn snap_axes(
+        &self,
+        slot: &ScrollSlot,
+    ) -> (Option<SnapAxis<'_>>, Option<SnapAxis<'_>>) {
+        let (period_x, period_y) = slot.wrap_period();
+        (
+            slot.snap
+                .x
+                .as_ref()
+                .map(|axis| axis.axis(&self.snap_points, period_x)),
+            slot.snap
+                .y
+                .as_ref()
+                .map(|axis| axis.axis(&self.snap_points, period_y)),
+        )
     }
 
     /// Every `scroll-initial-target: nearest` element this build reached.
@@ -846,13 +866,20 @@ impl<T: Sync> Document<T> {
     fn build_frame_with_relevance(&mut self) -> PaintOrder {
         let mut scratch = self.painter.get_mut().take_relevance_scratch();
         let mut frame = self.build_frame();
-        if self.scroll_to_initial_targets(&frame) {
+        // css-scroll-snap-1 §4.1.3 before the initial targets: it reads each
+        // offset against the positions the last commit published, and a
+        // target scrolled to below is placed in this layout — on its
+        // `nearest` axis from the offset the container holds by then.
+        let resnapped = self.resnap(&frame);
+        if self.scroll_to_initial_targets(&frame) || resnapped {
             // css-scroll-snap-2's initial scroll position is set from the
             // built frame and must be in the frame this commit publishes,
             // with the scroll request that carries it to the painter, so the
             // frame it was decided on is void — same commit, as below. The
             // request dirtied the document; the rebuild is the answer to
-            // that too.
+            // that too. A re-snapped offset voids the frame the same way,
+            // and the rebuild's layout re-samples the scroll timelines that
+            // read it.
             let stale = std::mem::replace(&mut frame, PaintOrder::empty());
             self.painter.get_mut().restore_spare_buffers(stale);
             frame = self.build_frame();

@@ -82,7 +82,8 @@
 //! order and then y in its own.
 //!
 //! Where each step lands is [`snap`]'s: css-scroll-snap-1 positions per
-//! container, applied as a wheel tick lands and when a drag ends. Where a
+//! container, applied as a wheel tick lands and when a drag ends, and
+//! followed by area through a layout change (`Document::resnap`). Where a
 //! container *starts* is `initial_target`'s: css-scroll-snap-2's
 //! `scroll-initial-target`, honoured after the paint build finds the element,
 //! at the position `into_view`'s CSSOM-View `scrollIntoView` computes
@@ -139,8 +140,8 @@ mod sticky_geometry_tests;
 pub use into_view::{ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition};
 pub use request::{ScrollBehavior, ScrollRequest};
 pub use snap::{
-    PROXIMITY_RATIO, ScrollKind, SnapAxis, SnapAxisPositions, SnapPoint, SnapPositions,
-    SnapStrictness, resolve_step, settle_offset,
+    PROXIMITY_RATIO, SNAPPED_TOLERANCE, ScrollKind, SnapAxis, SnapAxisPositions, SnapPoint,
+    SnapPositions, SnapStrictness, resolve_step, settle_offset,
 };
 
 impl ScrollAxes {

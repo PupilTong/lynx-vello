@@ -1704,6 +1704,124 @@ fn a_vertical_scroller_inside_a_page_scrolls_and_hands_horizontal_drags_to_the_p
     );
 }
 
+// --- `<x-swiper>` through a resize --------------------------------------------
+
+/// A 200px `x-swiper` (node 3) of three `x-swiper-item`s, styled by the UA
+/// sheet alone apart from the swiper's size, with `setup` run before the
+/// first flush.
+fn swiper_page(setup: &str) -> String {
+    format!(
+        r"
+        globalThis.renderPage = function () {{
+          const page = __CreatePage('card', 0);
+          const swiper = __CreateElement('x-swiper', 0);
+          __AppendElement(page, swiper);
+          globalThis.held = [page, swiper];
+          __SetInlineStyles(swiper, 'width:200px;height:200px');
+          for (let i = 0; i < 3; i++) {{
+            const item = __CreateElement('x-swiper-item', 0);
+            __AppendElement(swiper, item);
+            held.push(item);
+          }}
+          {setup}
+          __FlushElementTree();
+        }};
+        "
+    )
+}
+
+/// The swiper's scroll container, its shadow `#content`: the one scroll
+/// slot of the published frame that snaps.
+fn swiper_scroller(engine: &mut TestEngine) -> u64 {
+    let frame = engine
+        .painter
+        .published_frame()
+        .expect("a frame is adopted");
+    frame
+        .scroll_slots()
+        .iter()
+        .find(|slot| slot.snap.x.is_some())
+        .expect("the swiper's scroller snaps on x")
+        .node
+        .to_bits()
+}
+
+/// A swiper at rest on an item stays on it when its width changes
+/// (css-scroll-snap-1 §4.1.3), end to end: the user swipes, main adopts
+/// where the swiper came to rest, and the card resizes the swiper from
+/// 200px to 300px. The commit that lays the new width out carries the
+/// document's offset on the same item's new position, and the painter,
+/// which holds an offset of its own from the swipe, moves there on
+/// adoption at once.
+///
+/// Bounded, a forward swipe rests on the second item: 200, then 300.
+/// `circular`, a backward swipe from the first item rests on the last one
+/// across the seam — one period back for the painter, 400 for main — and
+/// the period grows from 600 to 900 with the width: the last item is at
+/// 600.
+#[test]
+fn a_swiper_resized_at_rest_stays_on_its_item() {
+    for (circular, to, rested, adopted, resized) in [
+        (false, 30.0, 200.0, 200.0, 300.0),
+        (true, 270.0, -200.0, 400.0, 600.0),
+    ] {
+        let mut engine = booted(&swiper_page(if circular {
+            "__SetAttribute(swiper, 'circular', '');"
+        } else {
+            ""
+        }));
+        let content = swiper_scroller(&mut engine);
+        touch_x_at(&mut engine, 0.0, PointerPhase::Down, 150.0);
+        touch_x_at(&mut engine, 0.05, PointerPhase::Move, to);
+        touch_x_at(&mut engine, 0.4, PointerPhase::Up, to);
+        let mut at = 0.4;
+        while engine.painter.scroll_intents.is_animating() {
+            at += 1.0 / 60.0;
+            assert!(at < 3.0, "never came to rest (circular={circular})");
+            frame_at(&mut engine, at);
+        }
+        let live = live_offset(&mut engine, content).x;
+        assert!(
+            (live - rested).abs() < f32::EPSILON,
+            "the swipe rests on the item, got {live} (circular={circular})"
+        );
+        engine.painter.publish_scroll(at, None);
+        assert_eq!(
+            scroll_offset_of(&mut engine, content),
+            dom::Vector2D::new(adopted, 0.0),
+            "main adopted the swipe (circular={circular})"
+        );
+
+        engine
+            .probe_document(|document| {
+                document.set_inline_style(node_id(3), "width:300px;height:200px");
+            })
+            .expect("the view's task answers probes");
+        // A later entry, so the resize's own commit has been published too.
+        assert_eq!(
+            scroll_offset_of(&mut engine, content),
+            dom::Vector2D::new(resized, 0.0),
+            "the document follows the item (circular={circular})"
+        );
+        adopt_at(&mut engine, at + 0.1);
+        let live = live_offset(&mut engine, content).x;
+        assert!(
+            (live - resized).abs() < f32::EPSILON,
+            "the painter shows the item, got {live} (circular={circular})"
+        );
+        assert!(
+            !engine.painter.scroll_intents.is_animating(),
+            "a jump, not a glide (circular={circular})"
+        );
+        engine.painter.publish_scroll(at + 0.1, None);
+        assert_eq!(
+            scroll_offset_of(&mut engine, content),
+            dom::Vector2D::new(resized, 0.0),
+            "and main keeps it (circular={circular})"
+        );
+    }
+}
+
 /// A wheel over scrollable content scrolls it (the router's decision,
 /// landing in the intents) and dispatches `wheel` with its delta in
 /// the detail — in that order.

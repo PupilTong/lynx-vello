@@ -855,7 +855,14 @@ differ. `scroll/snap.rs` is css-scroll-snap-1 without its
 events: a container's snap positions are computed from layout and published
 beside its slot, a drag settles onto the nearest one at release, a wheel tick
 steps to the next one in its direction, and a snapping container is re-snapped
-at rest whenever a commit lands. Only
+at rest whenever a commit lands. Each position names the element whose snap
+area it aligns, so a container that stood on an area's position before a
+layout change stands on that area's position after it (§4.1.3), read from the
+committed frame's positions and the offset with no record kept: the document
+moves its own offset in the render that builds the new positions
+(`Document::resnap`, before the initial scroll targets, with one more
+paint-order build when an offset moved), and the painter the offset it holds.
+Only
 `overflow: scroll` is user-scrollable; `hidden` is a scroll container that
 moves only programmatically (load-bearing here, because the Lynx UA cascade
 puts `hidden` on every element) and `clip` is not a scroll container at all —

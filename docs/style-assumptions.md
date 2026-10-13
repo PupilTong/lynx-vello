@@ -1041,10 +1041,22 @@ and §D.16 with what the wire format actually permits.)*
       re-snapped at rest on every commit, which is also the initial snap;
       `block`/`inline` are `y`/`x`; axes are chosen independently. A drag's
       release glides to its snap position (the inertia bullet above); a wheel
-      tick and the at-rest snap after a commit are instantaneous. **Out by request**: the
+      tick and the at-rest snap after a commit are instantaneous. After a
+      layout change a container that stood on an area's position stands on
+      that same area's position (§4.1.3), under either strictness and
+      however far the position moved; the choices there: "snapped to" is an
+      offset within half a CSS px of a position the last commit published,
+      with no record kept; of several areas aligned there the first in tree
+      order is the one (§6.2.1); the move is a jump; the document moves only
+      an offset that stood on a position and leaves the rest, and a
+      container with a pending scroll request, to the painter; a container a
+      drag, fling, bounce back or glide has is not moved, and a glide's
+      target is not re-aimed at its area. **Out by request**: the
       `scrollsnapchange`/`scrollsnapchanging` events of css-scroll-snap-2.
-      **Not implemented**: §7's same-element preference across axes, and
-      snap areas escaping from inside a nested scroll container.
+      **Not implemented**: §7's same-element preference across axes,
+      §6.2.1's focused or targeted box and its preference for a descendant
+      over an ancestor aligned at the same position, and snap areas escaping
+      from inside a nested scroll container.
     - **`scroll-initial-target: none | nearest`** (css-scroll-snap-2 §3.1),
       declared under the `lynx` feature only since gecko has no
       declaration. The build records the `nearest` elements per scroll slot;

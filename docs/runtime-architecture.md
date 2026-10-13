@@ -2042,7 +2042,17 @@ positions: a wheel tick steps to the next position, a drag is raw until its
 release, when a `ScrollEnd` decision settles every container the drag moved
 from where it found it. A frame's adoption also re-snaps every snapping
 container no drag is holding, which is how the initial layout and a
-relayout come to rest on a position.
+relayout come to rest on a position. A container that stood on a snap
+area's position in the frame being replaced goes to that same area's
+position in the new one (css-scroll-snap-1 §4.1.3), not to the position
+nearest its old offset: `poll_link` reads which area each container stands
+on while the outgoing frame is still at hand (`ScrollIntents::leave`), and
+the rebase moves the ones at rest (`follow_snapped`) before the at-rest
+rule. A container a drag, a fling, a bounce back or a glide has is not
+moved, and a request the frame brings for the first time replaces what was
+read for its container. The document does the same for its own offset in
+the commit, so the frame is baked around the position the painter arrives
+at.
 
 Inertia is the same walk on the painter's clock (`paint/inertia.rs`): the
 intents measure a drag's release velocity from the drag's own steps, and

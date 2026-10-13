@@ -1807,6 +1807,83 @@ mod tests {
         }
     }
 
+    /// `item`'s own snap position on the swiper's main axis. Under
+    /// `circular` it may lie across the seam, past `max_offset`.
+    fn snap_position(document: &LynxDocument, swiper: NodeId, item: NodeId, vertical: bool) -> f32 {
+        let positions = document
+            .snap_positions(scroller(document, swiper))
+            .expect("a snapping swiper");
+        let axis = if vertical {
+            positions.y().expect("snaps on y")
+        } else {
+            positions.x().expect("snaps on x")
+        };
+        axis.points
+            .iter()
+            .find(|point| point.area == item)
+            .expect("every item is a snap area")
+            .min
+    }
+
+    /// A swiper whose main-axis size changes stays on the item it showed
+    /// (css-scroll-snap-1 §4.1.3): every item's snap position moves with
+    /// the size, and the commit that lays the new size out puts `#content`
+    /// on the same item's new position, in every mode, both ways, bounded
+    /// and `circular` — where the period changes with the size too, and an
+    /// end item's position lies across the seam. The active dot stays on
+    /// that item's dot: the strip's timeline is sampled again from the
+    /// offset the commit settled on.
+    #[test]
+    fn a_resized_swiper_stays_on_the_item_it_showed() {
+        const PITCH: f32 = 13.44;
+        for case in &GEOMETRY {
+            for circular in [false, true] {
+                for (index, moves) in [(0, false), (1, true), (2, true)] {
+                    let (mut document, swiper, items) = mode_swiper(case.mode, case.vertical, 3);
+                    if circular {
+                        document.set_attribute(swiper, "circular", "");
+                    }
+                    document.commit();
+                    let content = scroller(&document, swiper);
+                    let label = format!(
+                        "{} vertical={} circular={circular} item {index}",
+                        case.mode, case.vertical
+                    );
+                    // As main adopts the painter's post once the swiper has
+                    // come to rest on the item: no request.
+                    let before = snap_position(&document, swiper, items[index], case.vertical);
+                    document.scroll_to(content, main_axis(case.vertical, before));
+                    document.advance_scroll_timelines(&[content]);
+
+                    document.set_inline_style(
+                        swiper,
+                        if case.vertical {
+                            "width: 100px; height: 300px"
+                        } else {
+                            "width: 300px; height: 100px"
+                        },
+                    );
+                    document.commit();
+                    let after = snap_position(&document, swiper, items[index], case.vertical);
+                    if moves && !circular {
+                        assert!(after > before, "the position moved: {label}");
+                    }
+                    assert_eq!(
+                        document.scroll_offset(content),
+                        main_axis(case.vertical, after),
+                        "{label}"
+                    );
+                    if matches!(case.mode, "normal" | "carousel" | "flat-coverflow") {
+                        #[expect(clippy::cast_precision_loss, reason = "index < 3")]
+                        let dot = index as f32 * PITCH;
+                        let at = active_offset(&document, swiper, case.vertical);
+                        assert!((at - dot).abs() < 0.01, "the active dot, {at}: {label}");
+                    }
+                }
+            }
+        }
+    }
+
     /// The strip's animation is sampled on the main thread — it animates a
     /// background, which no curve exports — and nothing ticks a clock. A
     /// hidden strip runs no animation at all: `display: none` alone would not

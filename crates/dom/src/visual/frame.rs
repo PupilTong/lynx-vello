@@ -136,7 +136,11 @@ pub struct SnapSlot {
 impl SnapSlotAxis {
     /// This axis over the frame's points, repeating every `period` on a
     /// circular axis.
-    fn axis<'frame>(&self, points: &'frame [SnapPoint], period: Option<f32>) -> SnapAxis<'frame> {
+    pub(super) fn axis<'frame>(
+        &self,
+        points: &'frame [SnapPoint],
+        period: Option<f32>,
+    ) -> SnapAxis<'frame> {
         SnapAxis {
             strictness: self.strictness,
             points: &points[self.start as usize..self.end as usize],
@@ -771,12 +775,7 @@ impl CommittedFrame {
     /// so the painter snaps across the seam.
     #[must_use]
     pub fn snap_axes(&self, slot: &ScrollSlot) -> (Option<SnapAxis<'_>>, Option<SnapAxis<'_>>) {
-        let points = self.snap_points();
-        let (period_x, period_y) = slot.wrap_period();
-        (
-            slot.snap.x.as_ref().map(|axis| axis.axis(points, period_x)),
-            slot.snap.y.as_ref().map(|axis| axis.axis(points, period_y)),
-        )
+        self.order.snap_axes(slot)
     }
 
     /// The frame's scroll containers, chain-linked; see [`ScrollSlot`].
