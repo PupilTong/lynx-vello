@@ -588,8 +588,11 @@ impl Page {
                 target,
                 name,
                 payload,
+                release,
             } => {
-                if let Err(error) = runtime.dispatch_input_event(js, target, name, &payload) {
+                if let Err(error) =
+                    runtime.dispatch_input_event(js, target, name, &payload, release)
+                {
                     policy::report(self, Scene::Listener, error.into_script_error());
                 }
             }

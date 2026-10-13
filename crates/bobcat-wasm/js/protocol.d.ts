@@ -21,6 +21,10 @@ export type PointerPhase = 0 | 1 | 2 | 3
 
 /** One pointer event, in viewport CSS px. */
 export interface PointerFields {
+  /** W3C `MouseEvent.button`: `-1` when no button changed. */
+  button: number
+  /** W3C `MouseEvent.buttons`: the held buttons as a bitmask. */
+  buttons: number
   defaultPrevented: boolean
   device: PointerDevice
   phase: PointerPhase

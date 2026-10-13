@@ -132,17 +132,25 @@ import { splitRecord } from "bobcat:record";
 // Everything else is numbers, and the objects they describe are built here,
 // because their shape is JavaScript's. `timestamp` is the event's own, in
 // milliseconds on the view's timeline. `detailKind` says which shape the
-// numbers behind it make, and is the only thing that branches: one kind per
-// `detail` *shape*, never per event name, so one export carries every
-// producer the host has.
+// numbers behind it make, and is the only thing the `detail` branches on:
+// one kind per `detail` *shape*, never per event name, so one export carries
+// every producer the host has. The one rule keyed by name is which pointer
+// events also get `MouseEvent` members on the event object (the
+// compatibility mouse events and the two clicks, as web-core gives them).
 //
-// - `DETAIL_POSITION` — every routed input event. `x`/`y` are the device
-//   position the `detail` reports; `deltaX`/`deltaY` are the wheel delta,
-//   `undefined` for every event that has none, which is what keeps those two
-//   keys out of the `detail` rather than `NaN` in it; then four numbers per
-//   touch point — `identifier`, `x`, `y`, and a flag bitmask over
-//   `touches`/`targetTouches`/`changedTouches` — which the four touch events
-//   alone carry.
+// - `DETAIL_POSITION` — every routed pointer, wheel and touch event. `x`/`y`
+//   are the device position the `detail` reports; `deltaX`/`deltaY` are the
+//   wheel delta, `undefined` for every event that has none, which is what
+//   keeps those two keys out of the `detail` rather than `NaN` in it;
+//   `button`/`buttons` are W3C `MouseEvent`'s, `undefined` for a wheel or
+//   touch event, and never in the `detail`: a `mousedown`/`mousemove`/
+//   `mouseup` gets them on the event object with `x`, `y`, `clientX`,
+//   `clientY`, `pageX` and `pageY`, a `click`/`dblclick` with the four client
+//   and page coordinates (web-core's shapes, `createCrossThreadEvent.ts`),
+//   and every other pointer event (`pointer*`, `tap`, `longpress`) not at
+//   all; then four numbers per touch point — `identifier`, `x`, `y`, and a
+//   flag bitmask over `touches`/`targetTouches`/`changedTouches` — which the
+//   four touch events alone carry.
 // - `DETAIL_SIZE` — an `<image>`'s `load`: the bitmap's intrinsic `width` and
 //   `height`, in px.
 // - `DETAIL_EMPTY` — an `<image>`'s `error`: no numbers, and a `detail` of
@@ -2656,6 +2664,16 @@ interface DispatchedEvent {
   touches?: TouchPointValues[];
   targetTouches?: TouchPointValues[];
   changedTouches?: TouchPointValues[];
+  // The W3C `MouseEvent` members a mouse or click event carries on itself
+  // ([`mouseMembers`]). Absent on every other event.
+  button?: number;
+  buttons?: number;
+  clientX?: number;
+  clientY?: number;
+  pageX?: number;
+  pageY?: number;
+  x?: number;
+  y?: number;
   // The W3C `KeyboardEvent` members only a key event carries, on the event
   // itself as `KeyboardEvent` and web-core (`createCrossThreadEvent.ts`) put
   // them. Absent on every other event, like the touch lists.
@@ -2741,6 +2759,52 @@ const MODIFIER_CTRL = 2;
 const MODIFIER_META = 4;
 const MODIFIER_SHIFT = 8;
 
+/** The compatibility mouse events (Pointer Events Level 3 §11). */
+const MOUSE_EVENTS: ReadonlySet<string> = new Set([
+  "mousedown",
+  "mousemove",
+  "mouseup",
+]);
+
+/** UI Events' two click events. */
+const CLICK_EVENTS: ReadonlySet<string> = new Set(["click", "dblclick"]);
+
+/**
+ * The `MouseEvent` members a mouse or click event carries on the event object
+ * itself, never in its `detail`, which keeps the `{x, y}` every pointer event
+ * has. web-core's shape (`createCrossThreadEvent.ts`): a `mouse*` event gets
+ * `button`, `buttons`, `x`, `y`, `clientX`, `clientY`, `pageX` and `pageY`; a
+ * `click` gets the four client and page coordinates, and here `button` and
+ * `buttons` as well, which `MouseEvent` has. Every coordinate is the one
+ * viewport CSS px the `detail` reports: this runtime has no separate client
+ * or page space. Nothing for any other name, and nothing when the host sent
+ * no buttons.
+ */
+function mouseMembers(
+  name: string,
+  values: unknown[],
+): Record<string, number> | undefined {
+  const mouse = MOUSE_EVENTS.has(name);
+  if ((!mouse && !CLICK_EVENTS.has(name)) || values[4] === undefined) {
+    return undefined;
+  }
+  const x = Number(values[0]);
+  const y = Number(values[1]);
+  const members: Record<string, number> = {
+    button: Number(values[4]),
+    buttons: Number(values[5]),
+    clientX: x,
+    clientY: y,
+    pageX: x,
+    pageY: y,
+  };
+  if (mouse) {
+    members["x"] = x;
+    members["y"] = y;
+  }
+  return members;
+}
+
 /**
  * The `KeyboardEvent` members one `DETAIL_KEY` dispatch puts on its event:
  * the host's `key` and `code` strings, `repeat`, and the modifier bitmask
@@ -2779,8 +2843,9 @@ function keyMembers(values: unknown[]): {
  * reads the target at all.
  * `DETAIL_SIZE` spends two, an image `load`'s `naturalWidth`/`naturalHeight`.
  * `DETAIL_POSITION` spends two, then two more for a wheel delta that may be
- * absent; whatever follows those four is the touch numbers, which
- * [`touchLists`] reads.
+ * absent, then two for a pointer's `button` and `buttons`, which never enter
+ * the `detail` ([`mouseMembers`] puts them on the event); whatever follows
+ * those six is the touch numbers, which [`touchLists`] reads.
  */
 function detailOf(kind: number, numbers: unknown[], target: number): EventDetail {
   if (kind === DETAIL_EMPTY || kind === DETAIL_KEY) {
@@ -3182,13 +3247,19 @@ function dispatchEvent(
   // Assigned rather than declared above, so an event that carries no touches
   // has no such keys at all — the transport would carry three
   // `undefined`-valued ones to a background handler otherwise. Only a
-  // position detail can have any: its first four numbers are the position and
-  // the wheel delta, and the points follow them.
+  // position detail can have any: its first six numbers are the position, the
+  // wheel delta and the pointer buttons, and the points follow them.
   const lists = kind === DETAIL_POSITION
-    ? touchLists(detailNumbers.slice(4))
+    ? touchLists(detailNumbers.slice(6))
     : undefined;
   if (lists !== undefined) {
     Object.assign(event, lists);
+  }
+  if (kind === DETAIL_POSITION) {
+    const members = mouseMembers(name, detailNumbers);
+    if (members !== undefined) {
+      Object.assign(event, members);
+    }
   }
   if (kind === DETAIL_KEY) {
     Object.assign(event, keyMembers(detailNumbers));

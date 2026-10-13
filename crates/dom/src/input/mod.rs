@@ -142,6 +142,15 @@ pub enum InputKind {
         id: PointerId,
         device: PointerKind,
         phase: PointerPhase,
+        /// W3C `MouseEvent.button`: the button whose state this event
+        /// changed (`0` primary, `1` auxiliary, `2` secondary), or `-1` when
+        /// no button changed, as for a move. A touch or pen contact is the
+        /// primary button.
+        button: i16,
+        /// W3C `MouseEvent.buttons`: every button held once this event has
+        /// been applied, as a bitmask (`1` primary, `2` secondary,
+        /// `4` auxiliary).
+        buttons: u16,
     },
     Wheel {
         /// Scroll delta in viewport CSS pixels. Embedders must normalize any
@@ -183,7 +192,13 @@ pub struct InputEvent {
 }
 
 impl InputEvent {
-    /// A pointer event at `position` (viewport CSS px).
+    /// A pointer event at `position` (viewport CSS px), with the button
+    /// state a primary contact has in `phase`: a down presses the primary
+    /// button (`button` 0, `buttons` 1), a move keeps it held (-1, 1), an up
+    /// releases it (0, 0) and a cancel holds nothing (-1, 0). That is a touch
+    /// or pen contact, and a primary-button mouse drag; a mouse embedder that
+    /// knows better (a hover move, another button) says so with
+    /// [`Self::with_buttons`].
     #[must_use]
     pub fn pointer(
         position: impl Into<Point2D<f32>>,
@@ -191,11 +206,39 @@ impl InputEvent {
         device: PointerKind,
         phase: PointerPhase,
     ) -> Self {
+        let (button, buttons) = match phase {
+            PointerPhase::Down => (0, 1),
+            PointerPhase::Move => (-1, 1),
+            PointerPhase::Up => (0, 0),
+            PointerPhase::Cancel => (-1, 0),
+        };
         Self {
             position: position.into(),
-            kind: InputKind::Pointer { id, device, phase },
+            kind: InputKind::Pointer {
+                id,
+                device,
+                phase,
+                button,
+                buttons,
+            },
             default_prevented: false,
         }
+    }
+
+    /// This pointer event with W3C `MouseEvent.button` and `buttons` as
+    /// given; any other event is returned unchanged.
+    #[must_use]
+    pub fn with_buttons(mut self, button: i16, buttons: u16) -> Self {
+        if let InputKind::Pointer {
+            button: held_button,
+            buttons: held_buttons,
+            ..
+        } = &mut self.kind
+        {
+            *held_button = button;
+            *held_buttons = buttons;
+        }
+        self
     }
 
     /// A wheel event at `position` with `delta` in viewport CSS pixels.

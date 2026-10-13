@@ -1621,8 +1621,12 @@ its host (routed input events are composed, the components' events are not,
 as HTML and web-core fire them) — plus the name and then numbers alone: the
 `timestamp` (milliseconds on the view's timeline), the position the `detail`
 reports, the wheel delta (`undefined` for every event without one, which keeps
-the two keys out of the `detail`), and four numbers per touch point
-(`identifier`, `x`, `y`, flags) for the four touch events. The realm builds
+the two keys out of the `detail`), a pointer's W3C `button` and `buttons`
+(never in the `detail`: the realm puts them on the event object of a
+compatibility mouse event, a `click` and a `dblclick`, web-core's shape), and
+four numbers per touch point (`identifier`, `x`, `y`, flags) for the four
+touch events; a key event crosses its `key` and `code` strings, `repeat` and a
+modifier bitmask instead. The realm builds
 the `detail` object and the three touch lists out of them; no JSON is
 formatted on the host side and none is parsed in the realm. One call
 is one dispatch, so one event object serves it, and the host keeps no listener
@@ -3162,7 +3166,9 @@ would host it:
   (`docs/tracking/deviations.md`).
 - **Gesture detectors and the arena.** `crates/bobcat-core/src/paint/gesture.rs`
   has no fling or velocity, no `:active` driving, no `consume-slide-event`, no
-  per-element `GestureDetector`/arena relations and no `click`; `tapSlop` is
+  per-element `GestureDetector`/arena relations and no `pointerover`/`out`/
+  `enter`/`leave`, mouse boundary events, `auxclick` or `contextmenu`
+  (`click`, `dblclick` and the compatibility mouse events are built); `tapSlop` is
   the default 50 px rather than the page config's.
 - **The rest of the `<image>` element surface.** `src`, `placeholder`,
   `mode`, `auto-size` and `blur-radius` work, and `load` (with the bitmap's

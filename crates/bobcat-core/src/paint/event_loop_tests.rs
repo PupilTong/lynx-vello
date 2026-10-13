@@ -240,6 +240,61 @@ fn a_quick_release_delivers_tap_to_the_realm() {
     wait_for_log(&mut engine, "tap:12");
 }
 
+/// Two 100x100 views side by side in a row (node 3 the row, 4 and 5 the
+/// views); the page's listeners append `type@uid` to the row's `log`.
+const CLICK_PAGE: &str = r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const row = __CreateView(0);
+          const left = __CreateView(0);
+          const right = __CreateView(0);
+          __AppendElement(page, row);
+          __AppendElement(row, left);
+          __AppendElement(row, right);
+          globalThis.held = [page, row, left, right];
+          globalThis.entries = [];
+          __SetInlineStyles(row, 'display:flex;flex-direction:row;width:200px;height:100px');
+          __SetInlineStyles(left, 'width:100px;height:100px');
+          __SetInlineStyles(right, 'width:100px;height:100px');
+          const note = (event) => {
+            entries.push(event.type + '@' + event.target.uid);
+            __SetAttribute(row, 'log', entries.join());
+          };
+          for (const name of ['click', 'dblclick', 'tap']) {
+            __AddEventListener(page, name, note, {});
+          }
+          __FlushElementTree();
+        };
+        ";
+
+fn touch_xy(id: u32, phase: PointerPhase, x: f32, y: f32) -> InputEvent {
+    InputEvent::pointer(Point2D::new(x, y), id, PointerKind::Touch, phase)
+}
+
+/// `click` end to end: a press that leaves one view for its sibling clicks
+/// their common parent (and is no `tap`, at 100px of travel); two quick
+/// presses on one view click it twice and add a `dblclick` after the
+/// second, each before that release's `tap`.
+#[test]
+fn a_click_reaches_the_common_ancestor_and_two_quick_ones_a_dblclick() {
+    let mut engine = booted(CLICK_PAGE);
+    engine.painter.clock.pin(0.0);
+    engine.dispatch_input(touch_xy(1, PointerPhase::Down, 50.0, 50.0));
+    engine.dispatch_input(touch_xy(1, PointerPhase::Up, 150.0, 50.0));
+    wait_for_log(&mut engine, "click@3");
+
+    engine.painter.clock.pin(1.0);
+    engine.dispatch_input(touch_xy(1, PointerPhase::Down, 50.0, 50.0));
+    engine.dispatch_input(touch_xy(1, PointerPhase::Up, 50.0, 50.0));
+    engine.painter.clock.pin(1.2);
+    engine.dispatch_input(touch_xy(1, PointerPhase::Down, 50.0, 50.0));
+    engine.dispatch_input(touch_xy(1, PointerPhase::Up, 50.0, 50.0));
+    wait_for_log(
+        &mut engine,
+        "click@3,click@4,tap@4,click@4,dblclick@4,tap@4",
+    );
+}
+
 /// The page a `timestamp`/`params` test reads: one `tap` listener that
 /// logs what every dispatched event carries beside its detail.
 const STAMPED_GESTURE_PAGE: &str = r"

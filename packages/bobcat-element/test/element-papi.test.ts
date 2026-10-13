@@ -1341,6 +1341,9 @@ interface DispatchPayload {
   y?: number;
   deltaX?: number;
   deltaY?: number;
+  /** A pointer event's W3C `button` and `buttons`. */
+  button?: number;
+  buttons?: number;
   touchNumbers?: number[];
   timestamp?: number;
   /** An image `load`'s intrinsic size: the `DETAIL_SIZE` kind. */
@@ -1381,6 +1384,8 @@ function detailArguments(payload: DispatchPayload): [number, ...unknown[]] {
     payload.y ?? 0,
     payload.deltaX,
     payload.deltaY,
+    payload.button,
+    payload.buttons,
     ...(payload.touchNumbers ?? []),
   ];
 }
@@ -2642,6 +2647,78 @@ describe("the event detail", () => {
       "exposure-id": "card-7",
       "exposure-scene": "",
     });
+  });
+});
+
+describe("mouse and click events", () => {
+  /** The `MouseEvent` members a mouse or click event carries on itself. */
+  type MouseEventValues = Record<string, unknown> & {
+    detail: Record<string, unknown>;
+  };
+
+  function delivered(name: string, payload: DispatchPayload): MouseEventValues {
+    const { inner } = tree();
+    let seen: MouseEventValues | undefined;
+    __AddEventListener(inner, name, (event: MouseEventValues) => {
+      seen = event;
+    }, {});
+    dispatch([inner], name, payload);
+    expect(seen, "the listener ran").toBeDefined();
+    return seen!;
+  }
+
+  it("puts web-core's mouse members on a compatibility mouse event", () => {
+    const event = delivered("mousedown", { x: 12, y: 30, button: 0, buttons: 1 });
+
+    // The `detail` keeps the `{x, y}` every pointer event has; the buttons
+    // never enter it.
+    expect(event.detail).toEqual({ x: 12, y: 30 });
+    expect(event["button"]).toBe(0);
+    expect(event["buttons"]).toBe(1);
+    expect(event["x"]).toBe(12);
+    expect(event["y"]).toBe(30);
+    expect(event["clientX"]).toBe(12);
+    expect(event["clientY"]).toBe(30);
+    expect(event["pageX"]).toBe(12);
+    expect(event["pageY"]).toBe(30);
+  });
+
+  it("puts the buttons and the client and page coordinates on a click", () => {
+    for (const name of ["click", "dblclick"]) {
+      const event = delivered(name, { x: 4, y: 5, button: 0, buttons: 0 });
+
+      expect(event.detail).toEqual({ x: 4, y: 5 });
+      expect(event["button"]).toBe(0);
+      expect(event["buttons"]).toBe(0);
+      expect(event["clientX"]).toBe(4);
+      expect(event["pageY"]).toBe(5);
+      expect("x" in event, "web-core gives a click no top-level x").toBe(false);
+    }
+  });
+
+  it("gives a pointer event and a tap no mouse members", () => {
+    for (const name of ["pointerdown", "tap"]) {
+      const event = delivered(name, { x: 1, y: 2, button: 0, buttons: 1 });
+
+      expect(event.detail).toEqual({ x: 1, y: 2 });
+      for (const member of ["button", "buttons", "clientX", "pageX"]) {
+        expect(member in event, `${name}.${member}`).toBe(false);
+      }
+    }
+  });
+
+  it("publishes a click's mouse members to a background handler", () => {
+    const { inner } = tree();
+    __AddEvent(inner, "bindEvent", "click", "3:0:bindclick");
+
+    dispatch([inner], "click", { x: 7, y: 8, button: 0, buttons: 0 });
+
+    const published = mock.named("publishEvent");
+    expect(published).toHaveLength(1);
+    const event = published[0]![3] as Record<string, unknown>;
+    expect(event["detail"]).toEqual({ x: 7, y: 8 });
+    expect(event["button"]).toBe(0);
+    expect(event["clientX"]).toBe(7);
   });
 });
 

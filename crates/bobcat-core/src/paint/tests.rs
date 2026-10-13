@@ -236,6 +236,8 @@ fn tap_detail() -> EventDetail {
         position: dom::Point2D::new(1.0, 1.0),
         id: 1,
         device: dom::input::PointerKind::Touch,
+        button: 0,
+        buttons: 0,
     }
 }
 
@@ -256,6 +258,7 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
             name: TAP_EVENT,
             target,
             detail: tap_detail(),
+            release: None,
         }));
         painter.execute_decisions(&mut decisions, None, 0.25);
         assert!(decisions.is_empty(), "the queue is always drained");
@@ -295,6 +298,7 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
         name,
         target: sent,
         payload,
+        ..
     } = command
     else {
         panic!("an emit decision becomes a dispatch command");
@@ -352,6 +356,7 @@ fn a_wheel_delta_and_touch_points_cross_as_values() {
             position: dom::Point2D::new(5.0, 6.0),
             delta: dom::Vector2D::new(0.0, 30.0),
         },
+        release: None,
     }));
     decisions.push(InputDecision::Emit(EmitEvent {
         name: "touchmove",
@@ -360,6 +365,7 @@ fn a_wheel_delta_and_touch_points_cross_as_values() {
             position: dom::Point2D::new(30.5, 40.0),
             points: touches.clone(),
         },
+        release: None,
     }));
     painter.execute_decisions(&mut decisions, None, 0.5);
 
@@ -1227,6 +1233,7 @@ fn a_dispatch_in_a_scrolling_pass_follows_the_marker() {
         name: TAP_EVENT,
         target: scroller,
         detail: tap_detail(),
+        release: None,
     }));
     painter.execute_decisions(&mut decisions, Some(&frame), 0.5);
     assert!(matches!(main.commands.try_recv(), Ok(ToMain::Posted)));
@@ -1283,6 +1290,7 @@ fn a_frame_post_is_fenced_behind_every_command_sent_before_it() {
         name: TAP_EVENT,
         target: scroller,
         detail: tap_detail(),
+        release: None,
     }));
     painter.execute_decisions(&mut decisions, Some(&frame), 0.5);
     let sent = main.seat.commands.sent();

@@ -798,6 +798,8 @@ impl BobcatRenderer {
         pointer_id: u32,
         device: u8,
         phase: u8,
+        button: i16,
+        buttons: u16,
         default_prevented: bool,
     ) -> Result<(), JsValue> {
         self.ensure_running()?;
@@ -821,7 +823,9 @@ impl BobcatRenderer {
             POINTER_PHASE_CANCEL => PointerPhase::Cancel,
             _ => return Err(js_error(format!("unknown browser pointer phase {phase}"))),
         };
+        // The browser's own `button` and `buttons`, passed through.
         let event = InputEvent::pointer(Point2D::new(x, y), pointer_id, device, phase)
+            .with_buttons(button, buttons)
             .with_default_prevented(default_prevented);
         // A pointer that arrives before any page is loaded has nothing to
         // reach; the painter is attached to no view, so it routes nothing and

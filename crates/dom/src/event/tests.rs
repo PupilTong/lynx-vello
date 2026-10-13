@@ -572,6 +572,8 @@ mod rust_walk {
             position: Point2D::new(x, 0.0),
             id: 1,
             device: PointerKind::Touch,
+            button: 0,
+            buttons: 1,
         }
     }
 
@@ -661,4 +663,45 @@ mod rust_walk {
         document.dispatch_element_event_over(&steps, "pointerdown", &pointer(0.0), 0.0);
         assert_eq!(take(&log), ["outer:pointerdown:capture:0:0"]);
     }
+}
+
+#[test]
+fn the_nearest_common_event_ancestor_is_inclusive_and_crosses_shadow_boundaries() {
+    let (mut document, page, outer, inner) = nested();
+    let sibling = document.create_element("view", ());
+    document.append_child(outer, sibling);
+    assert_eq!(
+        document.nearest_common_event_ancestor(inner, inner),
+        Some(inner)
+    );
+    assert_eq!(
+        document.nearest_common_event_ancestor(inner, outer),
+        Some(outer),
+        "an ancestor of the other is the answer itself"
+    );
+    assert_eq!(
+        document.nearest_common_event_ancestor(inner, sibling),
+        Some(outer)
+    );
+    assert_eq!(
+        document.nearest_common_event_ancestor(sibling, page),
+        Some(page)
+    );
+
+    // A node inside a shadow tree meets a light node at the host or above.
+    let shadow = document.attach_shadow(inner, ShadowRootMode::Open);
+    let chrome = document.create_element("view", ());
+    document.append_child(shadow, chrome);
+    assert_eq!(
+        document.nearest_common_event_ancestor(chrome, inner),
+        Some(inner)
+    );
+    assert_eq!(
+        document.nearest_common_event_ancestor(chrome, sibling),
+        Some(outer)
+    );
+
+    // Two detached trees share nothing.
+    let loose = document.create_element("view", ());
+    assert_eq!(document.nearest_common_event_ancestor(loose, inner), None);
 }

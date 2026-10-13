@@ -287,6 +287,35 @@ impl<T> Document<T> {
         (path, target_root)
     }
 
+    /// The nearest node that is an inclusive ancestor of both `a` and `b`
+    /// along the parents a composed event path takes (DOM's *get the
+    /// parent*: a slotted node's assigned slot, a shadow root's host), or
+    /// `None` when either is not live or the two share no root.
+    ///
+    /// UI Events' `click` target: the nearest common inclusive ancestor of
+    /// the `pointerdown` and `pointerup` targets. Allocation-free for a tree
+    /// no deeper than the inline step capacity.
+    #[must_use]
+    pub fn nearest_common_event_ancestor(&self, a: NodeId, b: NodeId) -> Option<NodeId> {
+        if !self.contains_node(a) || !self.contains_node(b) {
+            return None;
+        }
+        let mut ancestors: SmallVec<[NodeId; INLINE_STEPS]> = SmallVec::new();
+        let mut node = Some(a);
+        while let Some(current) = node {
+            ancestors.push(current);
+            node = self.event_parent(current, true, current);
+        }
+        let mut node = Some(b);
+        while let Some(current) = node {
+            if ancestors.contains(&current) {
+                return Some(current);
+            }
+            node = self.event_parent(current, true, current);
+        }
+        None
+    }
+
     fn is_shadow_root(&self, node: NodeId) -> bool {
         self.get(node).is_some_and(Node::is_shadow_root)
     }

@@ -593,8 +593,32 @@ consequential choice about whether to follow the spec or the quirk.
     no `longpress` at all, no gesture API — `web-core` limitations, not Lynx
     semantics). This engine implements the native semantics; matching
     web-core's degradations was rejected.
-  - **`click` is not synthesized** (Android and the fragment path emit it
-    beside `tap` with re-targeting at release); no consumer yet.
+  - **`click` and `dblclick` are dispatched beside `tap` (2026-10-13,
+    architect ruling)**, a superset of both references: Lynx has no event of
+    either name in script (Android and the fragment path emit a native
+    `click` beside `tap`, re-targeted at release), and web-core renames the
+    browser's `click` to `tap` (`W3cEventNameToLynx`). Here `click` is UI
+    Events': every pointer kind, the primary button of the primary pointer,
+    no movement slop, at the nearest common inclusive ancestor of the down
+    and release targets, suppressed by a consumed scroll or a cancel, and not
+    by a delivered `longpress`; `dblclick` follows a second `click` at the
+    same target within 500 ms. The order after a release is `pointerup`,
+    `touchend`, `mouseup`, `click`, `dblclick`, `tap`. The event object of a
+    `click`/`dblclick` carries `button`, `buttons`, `clientX`, `clientY`,
+    `pageX` and `pageY` (web-core gives a `click` the last four; `button` and
+    `buttons` are `MouseEvent`'s), and its `detail` is `{x, y}`.
+  - **Compatibility mouse events for a mouse only (2026-10-13, architect
+    ruling).** `mousedown`/`mousemove`/`mouseup` follow a mouse pointer's
+    `pointerdown`/`pointermove`/`pointerup` at the same target (Pointer
+    Events Level 3 §11); touch and pen produce none, where browsers emit them
+    for touch after the touch events. Their event object carries web-core's
+    `button`, `buttons`, `x`, `y`, `clientX`, `clientY`, `pageX` and `pageY`
+    (all in the one viewport CSS px space); their `detail` is the `{x, y}`
+    every pointer event has, where web-core leaves the DOM `UIEvent.detail`
+    number. Both shipped embedders feed a mouse as a pen so that its drags
+    scroll, so neither produces these events today. Deferred:
+    `pointerover`/`out`/`enter`/`leave`, `mouseover`/`out`/`enter`/`leave`,
+    `auxclick`, `contextmenu`.
   - **`timestamp` is milliseconds on the view's timeline epoch**, which is
     this engine's time origin — web-core's time-origin semantics, and DOM's
     for `Event.timeStamp`. Native Lynx reports epoch milliseconds instead.

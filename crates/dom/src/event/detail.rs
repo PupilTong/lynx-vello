@@ -63,13 +63,18 @@ pub enum EventDetail {
     /// Nothing at all: an `error`, a dialog's `close`, a `slotchange`.
     #[default]
     None,
-    /// A pointer at a position: the pointer events, and every event the
-    /// runtime synthesizes from a pointer sequence.
+    /// A pointer at a position: the pointer events, the compatibility mouse
+    /// events, `click` and `dblclick`, and the Lynx events the runtime
+    /// synthesizes from a pointer sequence (`tap`, `longpress`).
     Pointer {
         /// Viewport CSS px.
         position: Point2D<f32>,
         id: PointerId,
         device: PointerKind,
+        /// W3C `MouseEvent.button` ([`InputKind::Pointer`](crate::input::InputKind::Pointer)).
+        button: i16,
+        /// W3C `MouseEvent.buttons`.
+        buttons: u16,
     },
     /// A wheel turned at a position, by a delta in viewport CSS px.
     Wheel {

@@ -70,6 +70,14 @@ const EXPOSURE_EXPORT: &str = "__BobcatSendExposure";
 const APPEAR_EVENT: &str = "uiappear";
 const DISAPPEAR_EVENT: &str = "uidisappear";
 
+/// UI Events' two click names; see [`MainThreadRuntime::dispatch_click`].
+const CLICK_EVENT: &str = "click";
+const DOUBLE_CLICK_EVENT: &str = "dblclick";
+
+/// How soon a second `click` at the same target makes a `dblclick`, in
+/// milliseconds on the view's timeline.
+const DOUBLE_CLICK_MILLISECONDS: f64 = 500.0;
+
 /// What an element's own image source settling is called. Both are web-core's
 /// names, which are the browser's (`XImage/ImageEvents.ts`), and both are
 /// non-bubbling.
@@ -112,11 +120,16 @@ const MODIFIER_SHIFT: u8 = 8;
 ///   detail, `repeat` as a boolean and the modifiers as one bitmask. The realm puts them on the
 ///   event object itself, as `KeyboardEvent` and web-core do, and the `detail` is `{}`.
 /// - [`DETAIL_EMPTY`] for everything else: the realm's `{}`, and no numbers.
-fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut SmallVec<[HostArgument<'a>; 10]>) {
-    let (position, delta, points): (_, _, &[dom::event::TouchPoint]) = match detail {
-        EventDetail::Pointer { position, .. } => (*position, None, &[]),
-        EventDetail::Wheel { position, delta } => (*position, Some(*delta), &[]),
-        EventDetail::Touch { position, points } => (*position, None, points),
+fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut SmallVec<[HostArgument<'a>; 12]>) {
+    let (position, delta, buttons, points): (_, _, _, &[dom::event::TouchPoint]) = match detail {
+        EventDetail::Pointer {
+            position,
+            button,
+            buttons,
+            ..
+        } => (*position, None, Some((*button, *buttons)), &[]),
+        EventDetail::Wheel { position, delta } => (*position, Some(*delta), None, &[]),
+        EventDetail::Touch { position, points } => (*position, None, None, points),
         EventDetail::Size { width, height } => {
             arguments.push(HostArgument::Number(DETAIL_SIZE));
             arguments.push(HostArgument::Number(*width));
@@ -165,6 +178,12 @@ fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut SmallVec<[HostArgu
         arguments.push(delta.map_or(HostArgument::Undefined, |value| {
             HostArgument::Number(f64::from(value))
         }));
+    }
+    for value in [
+        buttons.map(|(button, _)| f64::from(button)),
+        buttons.map(|(_, buttons)| f64::from(buttons)),
+    ] {
+        arguments.push(value.map_or(HostArgument::Undefined, HostArgument::Number));
     }
     for point in points {
         arguments.push(HostArgument::Number(f64::from(point.identifier)));
@@ -581,6 +600,16 @@ impl DocumentSlot {
         Ok(())
     }
 
+    /// Whether anything hears `name`: a realm registration anywhere, or a
+    /// component that observes it. Two set lookups.
+    fn listens(&self, name: &str) -> bool {
+        self.listened.contains(name)
+            || self
+                .document
+                .as_ref()
+                .is_some_and(|document| document.observes_event(name))
+    }
+
     /// One global edge of the realm's listener-name count: `available` for a
     /// name's first registration anywhere, not for the removal of its last.
     ///
@@ -914,6 +943,10 @@ pub(crate) struct MainThreadRuntime {
     /// to the BTS in the `initialize` message. Held for the same reason as
     /// [`Self::screen`]; `None` is a view that named none.
     background_entry: Option<String>,
+    /// The last `click` that did not complete a `dblclick`: its resolved
+    /// target and its timestamp. A second `click` at the same target within
+    /// [`DOUBLE_CLICK_MILLISECONDS`] is a `dblclick`, and clears it.
+    last_click: Option<(dom::NodeId, f64)>,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -1004,6 +1037,7 @@ impl MainThreadRuntime {
                 workers,
                 slot,
                 timeline_milliseconds: 0.0,
+                last_click: None,
                 screen: startup.screen,
                 config,
                 entry: startup.entry,
@@ -1419,17 +1453,24 @@ impl MainThreadRuntime {
     /// Every routed input event bubbles — the painting side routes what a
     /// gesture produced, and Lynx has no non-bubbling input event — and is
     /// composed, as every UI event is, so this is [`Self::dispatch`] with
-    /// both flags set and the payload's numbers for a detail. The events that
-    /// do neither are the components' — an `<image>`'s `load` and `error`, a
+    /// both flags set and the payload's detail. The events that do neither
+    /// are the components' — an `<image>`'s `load` and `error`, a
     /// `<dialog>`'s `cancel` and `close` — which
     /// [`Self::dispatch_component_events`] delivers.
+    ///
+    /// A `click` names the node its release routed to as well (`release`),
+    /// and is [`Self::dispatch_click`].
     pub(crate) fn dispatch_input_event(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         target: dom::NodeId,
         name: &str,
         payload: &InputEventPayload,
+        release: Option<dom::NodeId>,
     ) -> Result<bool, MainThreadError> {
+        if let Some(release) = release {
+            return self.dispatch_click(js_runtime, target, release, payload);
+        }
         self.dispatch(
             js_runtime,
             target,
@@ -1439,6 +1480,81 @@ impl MainThreadRuntime {
             payload.timestamp,
             &payload.detail,
         )
+    }
+
+    /// One `click` and, when it completes one, a `dblclick` (UI Events).
+    ///
+    /// The target is the nearest common inclusive ancestor of the down's
+    /// target and the release's, along the parents a composed event path
+    /// takes ([`dom::Document::nearest_common_event_ancestor`]); the painting
+    /// side has no tree to find it in. A second `click` at the same target
+    /// within [`DOUBLE_CLICK_MILLISECONDS`] of the last one is then followed
+    /// by a `dblclick` there, and a third starts over. The painting side sends
+    /// a `click` when either name is listened for, so each is dispatched only
+    /// when a realm listener or a component observes it.
+    fn dispatch_click(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+        down: dom::NodeId,
+        release: dom::NodeId,
+        payload: &InputEventPayload,
+    ) -> Result<bool, MainThreadError> {
+        let (target, click, double) = {
+            let slot = self.slot.borrow();
+            let Some(document) = slot.document.as_ref() else {
+                return Ok(false);
+            };
+            (
+                document.nearest_common_event_ancestor(down, release),
+                slot.listens(CLICK_EVENT),
+                slot.listens(DOUBLE_CLICK_EVENT),
+            )
+        };
+        let Some(target) = target else {
+            self.last_click = None;
+            return Ok(false);
+        };
+        let at = payload.timestamp;
+        let clicked = if click {
+            self.dispatch(
+                js_runtime,
+                target,
+                CLICK_EVENT,
+                true,
+                true,
+                at,
+                &payload.detail,
+            )
+        } else {
+            Ok(false)
+        };
+        let completes = self
+            .last_click
+            .take_if(|(last, then)| *last == target && at - *then <= DOUBLE_CLICK_MILLISECONDS)
+            .is_some();
+        if !completes {
+            self.last_click = Some((target, at));
+            return clicked;
+        }
+        let doubled = if double {
+            self.dispatch(
+                js_runtime,
+                target,
+                DOUBLE_CLICK_EVENT,
+                true,
+                true,
+                at,
+                &payload.detail,
+            )
+        } else {
+            Ok(false)
+        };
+        // A `click` listener that threw is the failure reported; the
+        // `dblclick` still ran.
+        match (clicked, doubled) {
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+            (Ok(clicked), Ok(doubled)) => Ok(clicked || doubled),
+        }
     }
 
     /// One whole dispatch, whatever produced it: the one place an event is
@@ -1539,10 +1655,10 @@ impl MainThreadRuntime {
             document.dispatch_element_event_over(&steps, name, detail, timestamp);
         }
 
-        // Inline for the ten an input event without touch points spends: six
-        // of header, then its four detail numbers. A touch event spills once,
-        // and its points are the only thing that ever grows this.
-        let mut arguments: SmallVec<[HostArgument<'_>; 10]> = SmallVec::new();
+        // Inline for the twelve an input event without touch points spends:
+        // six of header, then its six detail numbers. A touch event spills
+        // once, and its points are the only thing that ever grows this.
+        let mut arguments: SmallVec<[HostArgument<'_>; 12]> = SmallVec::new();
         arguments.push(HostArgument::String(&nodes));
         arguments.push(HostArgument::String(&targets));
         arguments.push(HostArgument::String(name));
@@ -1586,9 +1702,12 @@ impl MainThreadRuntime {
                     position,
                     id: 1,
                     device: dom::input::PointerKind::Touch,
+                    button: 0,
+                    buttons: 0,
                 },
                 ..InputEventPayload::default()
             },
+            None,
         )
     }
 

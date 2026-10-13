@@ -1485,6 +1485,7 @@ fn tap(target: dom::NodeId) -> ToMain {
         target,
         name: "tap",
         payload: InputEventPayload::default(),
+        release: None,
     }
 }
 
@@ -3150,6 +3151,7 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
             target,
             name: "tap",
             payload: InputEventPayload::default(),
+            release: None,
         }])
         .await;
         for _ in 0..64 {

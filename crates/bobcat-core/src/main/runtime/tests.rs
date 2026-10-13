@@ -1891,6 +1891,7 @@ fn a_key_event_reaches_the_page_with_its_keyboard_members() {
             dom::NodeId::DOCUMENT_ELEMENT,
             "keydown",
             &payload,
+            None,
         )
         .expect("dispatch");
     runtime
@@ -1898,6 +1899,82 @@ fn a_key_event_reaches_the_page_with_its_keyboard_members() {
             &mut js_runtime,
             r"
                 if (seen.join('|') !== 'keydown,ArrowLeft,ArrowLeft,true,true,false,false,false,{}') {
+                  throw new Error('unexpected deliveries: ' + seen.join('|'));
+                }
+                ",
+            "app:///verify.js",
+            "verifying",
+        )
+        .expect("verification");
+}
+
+/// A `click` is dispatched at the nearest common ancestor of its two targets,
+/// and a second one at the same target within 500 ms adds a `dblclick` after
+/// it; a third starts over.
+#[test]
+fn a_click_targets_the_common_ancestor_and_two_make_a_dblclick() {
+    let (mut js_runtime, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const outer = __CreateView(0);
+                  const a = __CreateView(0);
+                  const b = __CreateView(0);
+                  __AppendElement(page, outer);
+                  __AppendElement(outer, a);
+                  __AppendElement(outer, b);
+                  globalThis.held = [page, outer, a, b];
+                  const note = (event) => seen.push(event.type + '@' + event.target.uid +
+                    ':' + event.button + ':' + event.detail.x);
+                  __AddEventListener(page, 'click', note, {});
+                  __AddEventListener(page, 'dblclick', note, {});
+                };
+                ",
+            "app:///clicks.js",
+        )
+        .expect("main-thread script");
+
+    // `page` is 2, `outer` 3, `a` 4, `b` 5.
+    let mut click = |down: u64, release: u64, at: f64| {
+        let payload = InputEventPayload {
+            detail: dom::event::EventDetail::Pointer {
+                position: dom::Point2D::new(7.0, 8.0),
+                id: 1,
+                device: dom::input::PointerKind::Mouse,
+                button: 0,
+                buttons: 0,
+            },
+            timestamp: at,
+        };
+        runtime
+            .dispatch_input_event(
+                &mut js_runtime,
+                node_id(down),
+                "click",
+                &payload,
+                Some(node_id(release)),
+            )
+            .expect("dispatch");
+    };
+    click(4, 5, 0.0);
+    click(5, 4, 300.0);
+    click(4, 5, 400.0);
+    click(4, 5, 1000.0);
+    click(4, 4, 2000.0);
+    click(5, 5, 2100.0);
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                const expected = [
+                  'click@3:0:7', 'click@3:0:7', 'dblclick@3:0:7', 'click@3:0:7',
+                  'click@3:0:7', 'click@4:0:7', 'click@5:0:7',
+                ].join('|');
+                if (seen.join('|') !== expected) {
                   throw new Error('unexpected deliveries: ' + seen.join('|'));
                 }
                 ",

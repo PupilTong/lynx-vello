@@ -174,11 +174,13 @@ impl ScriptHarness {
                 position: dom::Point2D::new(123.5, 456.25),
                 id: 1,
                 device: dom::input::PointerKind::Touch,
+                button: 0,
+                buttons: 0,
             },
             ..InputEventPayload::default()
         };
         self.runtime
-            .dispatch_input_event(&mut self.js_runtime, target, name, &payload)
+            .dispatch_input_event(&mut self.js_runtime, target, name, &payload, None)
             .expect("the benchmark dispatch completes")
     }
 

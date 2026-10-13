@@ -462,6 +462,8 @@ self.addEventListener('message', (event) => {
           message.pointerId,
           message.device,
           message.phase,
+          message.button,
+          message.buttons,
           message.defaultPrevented,
         )
       } catch (error) {

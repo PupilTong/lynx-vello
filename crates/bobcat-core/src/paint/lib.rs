@@ -1763,7 +1763,7 @@ impl Painter {
         }
         let timestamp = at_seconds * 1000.0;
         for event in dispatches {
-            if !self.published.listeners.contains(event.name) {
+            if !event.wanted(|name| self.published.listeners.contains(name)) {
                 continue;
             }
             self.send(
@@ -1775,6 +1775,7 @@ impl Painter {
                         detail: event.detail,
                         timestamp,
                     },
+                    release: event.release,
                 },
             );
         }

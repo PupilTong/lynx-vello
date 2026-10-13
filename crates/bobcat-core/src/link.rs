@@ -159,6 +159,10 @@ pub(crate) enum ToMain {
         target: NodeId,
         name: &'static str,
         payload: InputEventPayload,
+        /// For a `click` alone: the node the release routed to. The event
+        /// is dispatched at the nearest common inclusive ancestor of
+        /// `target` and this one, which only this side's tree can answer.
+        release: Option<NodeId>,
     },
     Vsync(f64),
     /// The view's [`ScrollMailbox`] holds something to take: scroll offsets,

@@ -371,6 +371,8 @@ class CanvasPointerInput {
       this.#releaseCapture(pointerId)
       if (!this.#disposed) {
         this.#send({
+          button: -1,
+          buttons: 0,
           defaultPrevented: false,
           device: active.device,
           phase: POINTER_PHASE_CANCEL,
@@ -575,6 +577,8 @@ class CanvasPointerInput {
       return undefined
     }
     return {
+      button: event.button,
+      buttons: event.buttons,
       defaultPrevented: event.defaultPrevented === true,
       device,
       phase,
