@@ -2479,10 +2479,10 @@ Everything else is forwarded and unconditionally `preventDefault()`ed, because
 the Worker answers nothing and the facade cannot learn synchronously whether
 the engine consumed the scroll — the canvas owns wheel scrolling outright, the
 way `touch-action: none` makes it own touch panning. A browser mouse is
-reported truthfully by the facade and then fed to the engine as
-`PointerKind::Pen` by `dispatchPointer`, exactly as the macOS host does, so a
-primary-button drag scrolls: the engine's drag recognizer latches touch and pen
-only. Hover moves and secondary mouse buttons do not cross the boundary.
+reported truthfully by the facade and fed to the engine as
+`PointerKind::Mouse` by `dispatchPointer`, as the macOS host does, and a
+primary-button drag still scrolls: the engine's drag recognizer latches every
+pointer kind, a mouse included (user ruling 2026-10-13). Hover moves and secondary mouse buttons do not cross the boundary.
 
 **Host `NativeModules` and `globalProps` are the page's, not the Worker's.**
 `BobcatCanvas.create` takes an optional

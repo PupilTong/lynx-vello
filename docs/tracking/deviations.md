@@ -618,8 +618,12 @@ consequential choice about whether to follow the spec or the quirk.
     `button`, `buttons`, `x`, `y`, `clientX`, `clientY`, `pageX` and `pageY`
     (all in the one viewport CSS px space); their `detail` is the `{x, y}`
     every pointer event has, where web-core leaves the DOM `UIEvent.detail`
-    number. Both shipped embedders feed a mouse as a pen so that its drags
-    scroll, so neither produces these events today. Deferred:
+    number. Both shipped embedders report a mouse honestly as
+    `PointerKind::Mouse`, so they produce these events. **A mouse drag
+    scrolls** a scroll container here (user ruling 2026-10-13, an engine
+    policy in `PointerKind::drags_to_scroll`), unlike every browser; a drag
+    that scrolls suppresses `click` and `tap` as a touch drag does, and
+    `mousemove` keeps flowing while it scrolls. Deferred:
     `pointerover`/`out`/`enter`/`leave`, `mouseover`/`out`/`enter`/`leave`,
     `auxclick`, `contextmenu`.
   - **`timestamp` is milliseconds on the view's timeline epoch**, which is

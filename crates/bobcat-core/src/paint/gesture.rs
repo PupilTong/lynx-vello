@@ -40,16 +40,16 @@
 //!   its down routed to is that finger's target for the finger's whole life — the standard's
 //!   implicit capture, so a move that leaves the node still dispatches at it. Multi-touch is always
 //!   on.
-//! - **User-agent scrolling.** The drag recognizer (touch/pen, latched at the down on the nearest
-//!   user-scrollable, 8px slop with the slop subtracted from the first movement, per-pointer
-//!   independent) and wheel scrolling (per-event nearest scrollable filtered by the CSS-pixel
-//!   delta's axes). Both were `dom`'s default action; the engine now routes with
-//!   `default_prevented` set so `dom` performs none, and this router is the one decision point. The
-//!   scroll *primitives* (`drive_chain`'s remainder chaining, the step rule, the published chain
-//!   links) stay in `dom`. A drag that scrolled ends with a [`InputDecision::ScrollEnd`] at its
-//!   release or cancel, ahead of the release's own events, so the containers it moved settle onto
-//!   their css-scroll-snap-1 positions (the executor's intents own that; the router only marks the
-//!   end).
+//! - **User-agent scrolling.** The drag recognizer (every pointer kind, a mouse included by ruling,
+//!   latched at the down on the nearest user-scrollable, 8px slop with the slop subtracted from the
+//!   first movement, per-pointer independent) and wheel scrolling (per-event nearest scrollable
+//!   filtered by the CSS-pixel delta's axes). Both were `dom`'s default action; the engine now
+//!   routes with `default_prevented` set so `dom` performs none, and this router is the one
+//!   decision point. The scroll *primitives* (`drive_chain`'s remainder chaining, the step rule,
+//!   the published chain links) stay in `dom`. A drag that scrolled ends with a
+//!   [`InputDecision::ScrollEnd`] at its release or cancel, ahead of the release's own events, so
+//!   the containers it moved settle onto their css-scroll-snap-1 positions (the executor's intents
+//!   own that; the router only marks the end).
 //! - **Gesture synthesis** per the 2026-08-21 ruling (recorded in `docs/tracking/deviations.md`):
 //!   `tap` fires at release, targeted at the down-routed node, unless the sequence travelled past
 //!   the 50px radial [`TAP_SLOP`], the drag recognizer's scroll consumed (reported back by the
@@ -98,7 +98,7 @@ pub(crate) const TAP_SLOP: f32 = 50.0;
 /// the same travel.
 pub(crate) const LONG_PRESS_MOVE_SLOP: f32 = 8.0;
 
-/// How far a touch/pen drag travels before it starts scrolling, in viewport
+/// How far a pointer drag travels before it starts scrolling, in viewport
 /// CSS px. The first movement subtracts the slop instead of jumping.
 pub(crate) const DRAG_SLOP: f32 = 8.0;
 
@@ -122,12 +122,11 @@ pub(crate) const CLICK_EVENT: &str = "click";
 /// Whether a pointer of this kind produces touch events.
 ///
 /// Touch and pen do; a mouse produces none, which is what both a browser and
-/// web-core do — a mouse gesture is reported through the pointer events and
-/// `tap` alone. The policy is the drag-to-scroll one because it asks the same
-/// question (is this device a finger on the content?), and naming it here
-/// keeps the two call sites from drifting apart.
+/// web-core do — a mouse gesture is reported through the pointer events, the
+/// compatibility mouse events and `tap`. Not the drag-to-scroll policy, which
+/// a mouse drag shares here by ruling.
 pub(crate) fn produces_touch_events(device: PointerKind) -> bool {
-    device.drags_to_scroll()
+    matches!(device, PointerKind::Touch | PointerKind::Pen)
 }
 
 /// The published-frame facts the router may ask for while deciding. Borrowed
@@ -1537,32 +1536,59 @@ mod tests {
         );
     }
 
+    /// A mouse drag scrolls (user ruling 2026-10-13): it latches the drag
+    /// recognizer like a finger, the compatibility `mousemove` goes on
+    /// flowing while it scrolls, and the consumed scroll claims the sequence
+    /// from `click` and `tap` alike.
     #[test]
-    fn a_mouse_drag_does_not_scroll_but_still_taps() {
+    fn a_mouse_drag_scrolls_and_its_consumed_scroll_suppresses_click_and_tap() {
         let mut harness = Harness::new();
         harness.host.scroller = Some(scroller());
         harness.feed(mouse(1, PointerPhase::Down, 10.0, 10.0), 0.0);
-        harness.feed(mouse(1, PointerPhase::Move, 10.0, 30.0), 0.05);
-        harness.feed(mouse(1, PointerPhase::Up, 10.0, 30.0), 0.1);
+        harness.feed(mouse(1, PointerPhase::Move, 10.0, 70.0), 0.05);
+        harness.router.note_scroll_consumed(1);
+        harness.feed(mouse(1, PointerPhase::Up, 10.0, 70.0), 0.1);
         assert_eq!(
-            harness.emitted(),
+            harness.trace(),
             [
-                "pointerdown",
-                "mousedown",
-                "pointermove",
-                "mousemove",
-                "pointerup",
-                "mouseup",
-                "click",
-                "tap"
+                format!("pointerdown@{TARGET}"),
+                format!("mousedown@{TARGET}"),
+                // 60px of travel less the 8px slop.
+                format!("scroll@{SCROLLER}:-0,-52"),
+                format!("pointermove@{TARGET}"),
+                format!("mousemove@{TARGET}"),
+                "scrollend#1".to_owned(),
+                format!("pointerup@{TARGET}"),
+                format!("mouseup@{TARGET}"),
             ],
-            "matching every browser, a mouse drag scrolls nothing"
+            "a scroll decision, the mouse events beside it, and no click or tap"
         );
-        assert!(
-            !harness
-                .out
-                .iter()
-                .any(|decision| matches!(decision, InputDecision::Scroll { .. }))
+    }
+
+    /// The wheel is no pointer sequence: a mouse wheel during a press scrolls
+    /// as any wheel does and claims nothing from the press's `click`/`tap`.
+    #[test]
+    fn a_mouse_wheel_is_unaffected_by_the_mouse_drag_policy() {
+        let mut harness = Harness::new();
+        harness.host.scroller = Some(scroller());
+        harness.feed(mouse(1, PointerPhase::Down, 10.0, 10.0), 0.0);
+        harness.feed(
+            InputEvent::wheel(Point2D::new(10.0, 10.0), Vector2D::new(0.0, 30.0)),
+            0.05,
+        );
+        harness.feed(mouse(1, PointerPhase::Up, 10.0, 10.0), 0.1);
+        assert_eq!(
+            harness.trace(),
+            [
+                format!("pointerdown@{TARGET}"),
+                format!("mousedown@{TARGET}"),
+                format!("scroll@{SCROLLER}:0,30"),
+                format!("wheel@{TARGET}"),
+                format!("pointerup@{TARGET}"),
+                format!("mouseup@{TARGET}"),
+                format!("click@{TARGET}"),
+                format!("tap@{TARGET}"),
+            ]
         );
     }
 

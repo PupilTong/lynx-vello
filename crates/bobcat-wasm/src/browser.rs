@@ -808,12 +808,11 @@ impl BobcatRenderer {
         }
         let device = match device {
             POINTER_DEVICE_TOUCH => PointerKind::Touch,
-            // The mouse arrives as a pen. The engine's drag recognizer latches
-            // touch and pen only, and this embedder — like `bobcat-cli`'s
-            // macOS host — wants a primary-button mouse drag to scroll. The
-            // facade keeps reporting the true device, so its `event.button`
-            // filter and this protocol stay truthful.
-            POINTER_DEVICE_MOUSE | POINTER_DEVICE_PEN => PointerKind::Pen,
+            // The device the browser reported. A primary-button mouse drag
+            // still scrolls: the engine's drag recognizer latches a mouse
+            // too (user ruling 2026-10-13).
+            POINTER_DEVICE_MOUSE => PointerKind::Mouse,
+            POINTER_DEVICE_PEN => PointerKind::Pen,
             _ => return Err(js_error(format!("unknown browser pointer device {device}"))),
         };
         let phase = match phase {

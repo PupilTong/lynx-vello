@@ -349,7 +349,7 @@ impl MacApplication {
         self.dispatch(InputEvent::pointer(
             point,
             MOUSE_POINTER_ID,
-            PointerKind::Pen,
+            PointerKind::Mouse,
             phase,
         ));
     }

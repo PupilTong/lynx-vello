@@ -383,10 +383,10 @@ core's `InputEvent` and calls the canvas painter's `dispatch_input`, which
 stamps the event's arrival from the engine's own clock — the same clock its
 frames read — so a press after a long idle period cannot derive its `longpress`
 deadline from the last rendered frame, and nothing has to agree on a time
-origin. A mouse is reported to the Worker as the mouse it is and then handed to
-the engine as `PointerKind::Pen`, the way `bobcat-cli`'s macOS host does it,
-because the engine's drag recognizer latches touch and pen only and a
-primary-button drag is expected to scroll here too. Each load releases active
+origin. A mouse is reported to the Worker and to the engine as the mouse it
+is, `PointerKind::Mouse`, as `bobcat-cli`'s macOS host reports it; a
+primary-button drag still scrolls, because the engine's drag recognizer
+latches a mouse too (user ruling 2026-10-13). Each load releases active
 captures before replacing the view; disposal stops input before terminating the
 Worker.
 
