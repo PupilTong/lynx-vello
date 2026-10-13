@@ -667,7 +667,7 @@ async fn a_blur_view_over_the_bare_canvas_blurs_an_edge_on_both_sides() {
         .expect("an offscreen painter is built");
     painter.attach(&view).expect("the page takes a painter");
     wait_for_script(&mut view).expect("the entry module boots");
-    painter.tick(true).expect("the filtered frame renders");
+    tick(&mut painter, true).expect("the filtered frame renders");
 
     let shot = painter.capture().expect("the committed frame");
     let luma = |x: usize, y: usize| i32::from(shot.pixels[(y * 128 + x) * 4]);
