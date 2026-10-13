@@ -3090,6 +3090,197 @@ describe("exposure", () => {
   });
 });
 
+describe("the dataset's data-* attributes", () => {
+  /** The attribute writes the host received since the calls were cleared. */
+  function attributeWrites() {
+    return mock.calls.filter(
+      (call) => call[0] === "setAttribute" || call[0] === "removeAttribute",
+    );
+  }
+
+  it("reflects an __AddDataset entry as data-<key>", () => {
+    const view = __CreateView(0);
+    const id = __GetElementUniqueID(view);
+    mock.calls.length = 0;
+
+    __AddDataset(view, "test", "x");
+
+    expect(attributeWrites()).toEqual([["setAttribute", id, "data-test", "x"]]);
+    expect(__GetAttributeByName(view, "data-test")).toBe("x");
+  });
+
+  it("reflects every key of a __SetDataset and keeps the keys it does not name", () => {
+    const view = __CreateView(0);
+    const id = __GetElementUniqueID(view);
+    mock.calls.length = 0;
+
+    __SetDataset(view, { test: "x", kind: "row" });
+    // Native's merge: `test` stays in the typed store, so its attribute
+    // stays too. web-core replaces the dataset and would remove it.
+    __SetDataset(view, { kind: "cell" });
+
+    expect(attributeWrites()).toEqual([
+      ["setAttribute", id, "data-test", "x"],
+      ["setAttribute", id, "data-kind", "row"],
+      ["setAttribute", id, "data-kind", "cell"],
+    ]);
+    expect(__GetDataset(view)).toEqual({ test: "x", kind: "cell" });
+  });
+
+  it("writes a non-string value as its string and an object as its JSON text", () => {
+    const view = __CreateView(0);
+    const id = __GetElementUniqueID(view);
+    mock.calls.length = 0;
+
+    __AddDataset(view, "count", 7);
+    __AddDataset(view, "on", true);
+    __SetDataset(view, { item: { id: 3, tags: ["a"] }, list: [1, 2] });
+
+    expect(attributeWrites()).toEqual([
+      ["setAttribute", id, "data-count", "7"],
+      ["setAttribute", id, "data-on", "true"],
+      ["setAttribute", id, "data-item", '{"id":3,"tags":["a"]}'],
+      ["setAttribute", id, "data-list", "[1,2]"],
+    ]);
+    // The typed store is untouched by the reflection.
+    expect(__GetDataset(view)).toEqual({
+      count: 7,
+      on: true,
+      item: { id: 3, tags: ["a"] },
+      list: [1, 2],
+    });
+  });
+
+  it("removes the attribute of a null, undefined or otherwise falsy value", () => {
+    for (const value of [null, undefined, false, 0, Number.NaN, ""]) {
+      const added = __CreateView(0);
+      const set = __CreateView(0);
+      __AddDataset(added, "test", "x");
+      __SetDataset(set, { test: "x" });
+      mock.calls.length = 0;
+
+      __AddDataset(added, "test", value);
+      __SetDataset(set, { test: value });
+
+      expect(attributeWrites()).toEqual([
+        ["removeAttribute", __GetElementUniqueID(added), "data-test"],
+        ["removeAttribute", __GetElementUniqueID(set), "data-test"],
+      ]);
+      expect(__GetAttributeByName(added, "data-test")).toBeNull();
+      // The key itself stays, with the value it was given.
+      expect(__GetDataset(added)).toEqual({ test: value });
+      expect(Object.hasOwn(__GetDataset(set), "test")).toBe(true);
+    }
+  });
+
+  it("crosses to the host only when the reflected text changed", () => {
+    const view = __CreateView(0);
+    const id = __GetElementUniqueID(view);
+    __SetDataset(view, { test: "x", count: 1, item: { id: 3 }, off: null });
+    mock.calls.length = 0;
+
+    // ReactLynx's spread update hands over the whole dataset every time.
+    __SetDataset(view, { test: "x", count: 1, item: { id: 3 }, off: undefined });
+    __AddDataset(view, "test", "x");
+    expect(attributeWrites()).toEqual([]);
+
+    __SetDataset(view, { test: "y", count: 1, item: { id: 4 }, off: null });
+    expect(attributeWrites()).toEqual([
+      ["setAttribute", id, "data-test", "y"],
+      ["setAttribute", id, "data-item", '{"id":4}'],
+    ]);
+  });
+
+  it("always crosses for a key's first write, so a data-* attribute of that name is replaced", () => {
+    const view = __CreateView(0);
+    const id = __GetElementUniqueID(view);
+    __SetAttribute(view, "data-test", "attribute");
+    mock.calls.length = 0;
+
+    __AddDataset(view, "test", undefined);
+
+    expect(attributeWrites()).toEqual([["removeAttribute", id, "data-test"]]);
+  });
+
+  it("lowers ASCII uppercase in the attribute name and converts nothing else", () => {
+    const view = __CreateView(0);
+    const id = __GetElementUniqueID(view);
+    mock.calls.length = 0;
+
+    __SetDataset(view, { fooBar: "a", "foo-bar": "b", "É": "c" });
+
+    expect(attributeWrites()).toEqual([
+      ["setAttribute", id, "data-foobar", "a"],
+      ["setAttribute", id, "data-foo-bar", "b"],
+      ["setAttribute", id, "data-É", "c"],
+    ]);
+  });
+
+  it("keeps a value JSON cannot carry, as an attribute with no text", () => {
+    const view = __CreateView(0);
+    const id = __GetElementUniqueID(view);
+    const cycle: Record<string, unknown> = {};
+    cycle["self"] = cycle;
+    mock.calls.length = 0;
+
+    expect(() => __AddDataset(view, "cycle", cycle)).not.toThrow();
+
+    expect(attributeWrites()).toEqual([["setAttribute", id, "data-cycle", ""]]);
+    const stored = __GetDataset(view)["cycle"] as Record<string, unknown>;
+    expect(stored["self"]).toBe(stored);
+  });
+
+  it("answers an event's dataset with the typed values alone, under the keys they were filed with", () => {
+    const { inner } = tree();
+    __SetAttribute(inner, "data-item-name", "row");
+    __SetDataset(inner, { fooBar: 1, "foo-bar": { nested: true }, plain: "text", off: false });
+    const seen: unknown[] = [];
+    __AddEventListener(inner, "tap", (event: ListenerEvent) => {
+      seen.push(event.target.dataset);
+    }, {});
+
+    dispatch([inner], "tap");
+
+    // Neither `foobar: "1"` (the attribute `data-foobar`) nor a string
+    // `fooBar` (the attribute `data-foo-bar`, camelCased) is in it.
+    expect(seen).toEqual([{
+      itemName: "row",
+      fooBar: 1,
+      "foo-bar": { nested: true },
+      plain: "text",
+      off: false,
+    }]);
+  });
+
+  it("keeps data-* attributes out of the attribute field of a node query", () => {
+    const page = __CreatePage("card", 0);
+    const view = __CreateView(0);
+    __AppendElement(page, view);
+    __SetAttribute(view, "role", "row");
+    __SetDataset(view, { test: "x", count: 7 });
+    const uid = __GetElementUniqueID(view);
+
+    const answer = elementModule.__BobcatQueryNodes({
+      bobcat: "runtime",
+      method: "nodeQuery",
+      operation: "fields",
+      token: {
+        type: 2,
+        identifier: String(uid),
+        component_id: "",
+        first_only: true,
+        root_unique_id: undefined,
+      },
+      params: ["attribute", "dataset"],
+    });
+
+    expect(answer).toEqual({
+      status: { code: 0, data: "success" },
+      data: { attribute: { role: "row" }, dataset: { test: "x", count: 7 } },
+    });
+  });
+});
+
 describe("__GetPageElement", () => {
   it("is undefined before __CreatePage and the page handle after it", () => {
     expect(__GetPageElement()).toBeUndefined();

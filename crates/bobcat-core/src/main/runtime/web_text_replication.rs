@@ -54,10 +54,11 @@
 //! exists, so the replica runs the whole card, states the reference, and fails
 //! on the missing behaviour rather than on a missing identifier. The
 //! `set-native-props` four became writable with `__SetDataset`/`__GetDataset`/
-//! `__AddDataset` (`element-papi.ts:973-988`) and the background-thread
-//! `SelectorQuery`, whose `setNativeProps` operation
-//! (`element-papi.ts:1226-1235`) routes each prop to `__AddInlineStyle` or
-//! `__SetAttribute` and flushes.
+//! `__AddDataset` (`element-papi.ts`, which files each entry as a typed value
+//! in the realm and reflects it as the node's `data-<key>` attribute) and the
+//! background-thread `SelectorQuery`, whose `setNativeProps` operation
+//! (`__BobcatQueryNodes` in `element-papi.ts`) routes each prop to
+//! `__AddInlineStyle` or `__SetAttribute` and flushes.
 
 use std::time::Duration;
 
@@ -646,20 +647,12 @@ fn raw_text_content_round_trips_with_its_case_intact() {
 /// out precisely because content lives on the attribute.
 ///
 /// The source tags the element with `__AddDataset(text0, 'testid', ...)` and
-/// then finds it with a `[data-testid=…]` selector. `__AddDataset` exists here
-/// (`packages/bobcat-element/src/element-papi.ts:985-988`), but it files a
-/// typed value in this realm's own per-element store, not a `data-*`
-/// attribute on the node — so nothing in the document carries what that
-/// selector matches, and the lookup half of the source case stays
-/// unreplicable. The replica therefore tags with `__SetID`; what is under test
-/// is the content read, not the tagging member.
-///
-/// Be honest about what that substitution costs. Once the tag becomes an id
-/// this replica is structurally the multiple-levels case below
-/// (`a_carrier_is_reachable_as_a_descendant_of_the_id_d_text`) with a different
-/// content string; the two pin the same property. The dataset lookup itself is
-/// unreplicated, and a `[data-*]` selector over a dataset entry would be a new
-/// case rather than this one — it would state nothing about text.
+/// then finds it with a `[data-testid=…]` selector, and so does the replica:
+/// `__AddDataset` files the typed value in the realm and reflects it as the
+/// node's `data-testid` attribute (`setDatasetValue` in
+/// `packages/bobcat-element/src/element-papi.ts`), which is what the
+/// document's selector engine matches. `Document::query_selector` from the
+/// page root is the stand-in for the source's `rootDom.querySelector`.
 #[test]
 fn a_tagged_text_is_found_and_reads_its_content_back() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
@@ -673,7 +666,7 @@ fn a_tagged_text_is_found_and_reads_its_content_back() {
                   const rawText0 = __CreateRawText('2');
                   __AppendElement(text0, rawText0);
                   __AppendElement(page, text0);
-                  __SetID(text0, 'count-value');
+                  __AddDataset(text0, 'testid', 'count-value');
                 };
                 ",
             "app:///text-content-positive.js",
@@ -681,7 +674,12 @@ fn a_tagged_text_is_found_and_reads_its_content_back() {
         .expect("main-thread script");
 
     let tree = elements.tree();
-    let text = element_with_id(&tree, "count-value");
+    let page = tree.document_element().id();
+    let text = tree
+        .query_selector(page, r#"[data-testid="count-value"]"#)
+        .expect("the selector parses")
+        .expect("the tagged text is found by its dataset entry");
+    assert_eq!(tree.get(text).and_then(dom::Node::tag_name), Some("text"));
     assert_eq!(carrier_contents(&tree, text), vec!["2".to_owned()]);
 }
 

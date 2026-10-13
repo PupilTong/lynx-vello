@@ -67,7 +67,7 @@ import { splitRecord } from "bobcat:record";
 // | `__GetElementUniqueID(element)` | the handle's own node id |  // (= its Lynx unique id)
 // | `__SetInlineStyles(element, value)` | native `setAttribute` / `removeAttribute` / `setInlineStyles` exports |
 // | `__AddInlineStyle(element, property, value)` | native `setInlineStyleProperty`; CSS names, not numeric native IDs |
-// | `__SetDataset` / `__GetDataset` / `__AddDataset` | typed per-element values in this realm |
+// | `__SetDataset` / `__GetDataset` / `__AddDataset` | typed per-element values in this realm, each reflected as a `data-<key>` attribute through native `setAttribute` / `removeAttribute` |
 // | `__SetCSSId(elements, cssId, entryName?)` | native `setAttribute` / `removeAttribute` exports (`l-css-id`) |
 // | `__SetAttribute(element, name, value)` | native `setAttribute` / `removeAttribute` exports; `update-list-info` instead drives the list callbacks over `childElementIds` / `insertBefore` / `removeElement` |
 // | `__UpdateListCallbacks(list, ...)` | this runtime's own store |
@@ -526,6 +526,8 @@ function valuesOf(element: unknown, key: typeof datasetSymbol | typeof attribute
 }
 
 // Native keeps typed attribute/dataset values separately from DOM strings.
+// The typed value is what readback answers (`__GetDataset`, `fields`, an
+// event's `dataset`); the string on the node is what a selector matches.
 // Copy containers at assignment, retaining local functions as local values;
 // fields() filters function attributes and the BTS transport structure-clones
 // the remaining result. Assigning an attribute is not a cross-realm operation.
@@ -1173,11 +1175,98 @@ export function __GetElementUniqueID(element: unknown): number {
   return nodeIdOf(element) ?? -1;
 }
 
+/**
+ * The attribute a dataset key is reflected under: `data-<key>`, the key
+ * spelled as it was given except that ASCII uppercase is lowered.
+ *
+ * web-core writes `data-${key}` through `Element.setAttribute`
+ * (`createElementAPI.ts:437-443`, `dataset_apis.rs:44-49`), which lowercases
+ * the name of an HTML element's attribute, and a selector's attribute name is
+ * lowercased the same way before it is compared — by a browser and by this
+ * document's selector engine alike. So `fooBar` is `data-foobar`, and both
+ * `[data-fooBar]` and `[data-foobar]` match it. No camelCase-to-kebab
+ * conversion happens: a dataset key is not a `DOMStringMap` name.
+ */
+function datasetAttributeName(key: string): string {
+  return `data-${key.replace(/[A-Z]/g, (letter) => letter.toLowerCase())}`;
+}
+
+/**
+ * The text a dataset value is reflected as, or null for a value that is
+ * reflected as no attribute.
+ *
+ * web-core's `__AddDataset` rule (`createElementAPI.ts:438-445`), which is
+ * the member a compiled `data-*` JSX attribute reaches: a falsy value — null,
+ * undefined, `false`, `0`, `NaN`, `""` — has no attribute, an object is its
+ * JSON text, and anything else is its string. A value JSON cannot carry (a
+ * cycle, a BigInt inside it) is the empty string, so the attribute is still
+ * present: the typed store accepts such a value, so reflecting it does not
+ * throw either.
+ */
+function datasetAttributeText(value: unknown): string | null {
+  if (!value) return null;
+  if (typeof value !== "object") return String(value);
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Files one dataset value and reflects it as the element's `data-<key>`
+ * attribute, which is what a `[data-<key>]` selector matches — in a
+ * `SelectorQuery`, in `__QuerySelector` and in a stylesheet.
+ *
+ * One host call per key whose reflected text changed, and none otherwise:
+ * ReactLynx's spread update hands `__SetDataset` the whole dataset on every
+ * update, and an attribute write records a style invalidation whether or not
+ * the value moved. The comparison is against the value this store held, not
+ * against the node, so a first write of a key always crosses. A `data-*`
+ * attribute `__SetAttribute` wrote under the same name in between is
+ * therefore left as it is by an equal dataset write, as web-core's
+ * `set_dataset` leaves it (`dataset_apis.rs:40-42`).
+ */
+function setDatasetValue(
+  nodeId: number,
+  values: Map<string, unknown>,
+  key: string,
+  value: unknown,
+): void {
+  const known = values.has(key);
+  const previous = values.get(key);
+  values.set(key, value);
+  if (known && previous === value && (value === null || typeof value !== "object")) {
+    return;
+  }
+  const text = datasetAttributeText(value);
+  if (known && text === datasetAttributeText(previous)) {
+    return;
+  }
+  if (text === null) {
+    removeAttribute(nodeId, datasetAttributeName(key));
+  } else {
+    setAttribute(nodeId, datasetAttributeName(key), text);
+  }
+}
+
+/**
+ * Merges `dataset`'s keys into the element's typed dataset and reflects each
+ * as a `data-<key>` attribute ([`setDatasetValue`]).
+ *
+ * Native `SetDataSet` merges keys; it does not replace or clear prior keys
+ * (`attribute_holder.cc:229-234`). web-core replaces the dataset and removes
+ * the attribute of every key the new object lacks (`dataset_apis.rs:27-34`).
+ * The typed store follows native, and the attributes follow the typed store:
+ * a key absent from `dataset` keeps its value and its attribute.
+ */
 export function __SetDataset(element: unknown, dataset: unknown) {
-  // Native SetDataSet merges keys; it does not replace or clear prior keys.
   const values = valuesOf(element, datasetSymbol);
   if (dataset !== null && typeof dataset === "object") {
-    for (const [key, value] of Object.entries(copyElementValue(dataset))) values.set(key, value);
+    const nodeId = nodeIdOf(element);
+    for (const [key, value] of Object.entries(copyElementValue(dataset))) {
+      setDatasetValue(nodeId, values, key, value);
+    }
   }
 }
 
@@ -1187,7 +1276,8 @@ export function __GetDataset(element: unknown) {
 
 export function __AddDataset(element: unknown, key: string, value: unknown) {
   if (typeof key !== "string") throw new TypeError("dataset key must be a string");
-  valuesOf(element, datasetSymbol).set(key, copyElementValue(value));
+  const values = valuesOf(element, datasetSymbol);
+  setDatasetValue(nodeIdOf(element), values, key, copyElementValue(value));
 }
 
 /**
@@ -2478,27 +2568,45 @@ function targetInfo(
 
 /**
  * One element's dataset as an event descriptor reports it: every `data-*`
- * attribute under DOMStringMap's camelCased name, with the typed values
- * `__SetDataset`/`__AddDataset` filed merged over them — native keeps those
- * apart from the DOM strings, and the typed value wins where both name the
- * same key.
+ * attribute `__SetAttribute` wrote, under DOMStringMap's camelCased name,
+ * with the typed values `__SetDataset`/`__AddDataset` filed merged over them
+ * — native keeps those apart from the DOM strings, and the typed value wins
+ * where both name the same key.
+ *
+ * A typed key is on the node as well, as the `data-<key>` attribute
+ * [`setDatasetValue`] reflects it under. That attribute is the typed value's
+ * own text and is left out here: the key answers once, typed, under the
+ * spelling it was filed with, and never a second time as a string under the
+ * camelCased spelling of its attribute (`fooBar` is not also `foobar`, and
+ * `foo-bar` is not also `fooBar`).
  *
  * Read fresh at each use rather than kept, because web-core rebuilds the
  * whole descriptor per listener invocation and a listener that writes a
  * `data-*` attribute is expected to be seen by the steps after it. A node
  * whose handle is gone has no typed values left to merge; its attributes
- * still answer.
+ * still answer, the reflected ones among them, as strings.
  */
 function datasetOf(nodeId: number): Record<string, unknown> {
+  const handle = handleOf(nodeId);
+  const typed = handle?.[datasetSymbol];
+  // Most elements have no typed dataset, and then nothing is reflected.
+  let reflected: Set<string> | undefined;
+  if (typed !== undefined && typed.size !== 0) {
+    reflected = new Set();
+    for (const key of typed.keys()) {
+      reflected.add(datasetAttributeName(key));
+    }
+  }
   const attributeDataset = Object.fromEntries(
     splitRecord(attributeNames(nodeId))
-      .filter((name) => name.startsWith("data-") && !/[A-Z]/.test(name))
+      .filter((name) =>
+        name.startsWith("data-") && !/[A-Z]/.test(name) && reflected?.has(name) !== true
+      )
       .map((name): [string, string | null] => [
         name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()),
         getAttribute(nodeId, name),
       ]),
   );
-  const handle = handleOf(nodeId);
   return {
     ...attributeDataset,
     ...(handle === undefined ? {} : __GetDataset(handle)),
@@ -2795,7 +2903,8 @@ interface GlobalExposureEvent extends ExposureDetail {
  * so a read that throws while the handle is live is something else, and is
  * thrown on. An element whose handle is gone and which the collection has not
  * freed yet still answers its attributes; its typed dataset went with the
- * handle, as [`datasetOf`] says.
+ * handle, and what is left of it is the strings it was reflected as, as
+ * [`datasetOf`] says.
  */
 function exposureTarget(nodeId: number): ExposureTarget {
   try {

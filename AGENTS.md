@@ -2479,7 +2479,11 @@ owns the value coercions web-core gets from the HTML DOM for free:
 truthiness-not-null clearing for classes, ids, and inline styles,
 `String(value)` for DOM attributes, and camelCase-to-kebab hyphenation of a
 record-shaped inline style. Lynx attribute readback retains a separate typed
-container copy, and datasets merge typed keys in the MTS handle. BTS
+container copy, and datasets merge typed keys in the MTS handle, each entry
+also written to the node as its `data-<key>` attribute (web-core's
+`__AddDataset` text: no attribute for a falsy value, JSON for an object), so
+`[data-<key>]` selectors match it in queries and stylesheets while readback
+answers the typed value. BTS
 `lynx.createSelectorQuery()` builds `NodesRef` tasks carrying selection tokens
 over the existing Worker messages; MTS resolves those through the document's
 selector engine, including the query root, and returns fields/path data, while

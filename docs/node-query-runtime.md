@@ -184,8 +184,23 @@ constructs a rooted query in the response callback. `path()` returns field
 records from the selected node through its page ancestors.
 
 `__SetDataset` merges typed keys; `__AddDataset` replaces one key. Assignment
-and `__GetDataset` copy containers. Datasets stay separate from DOM `data-*`
-strings. Background event descriptors include those typed dataset values.
+and `__GetDataset` copy containers. Each entry is also reflected as the node's
+`data-<key>` attribute, which is what a `[data-<key>]` selector matches in a
+`SelectorQuery`, in `__QuerySelector` and in a stylesheet: the key keeps its
+spelling except that ASCII uppercase is lowered (`testId` is `data-testid`,
+matched by `[data-testId]` and `[data-testid]` alike), and the value follows
+web-core's `__AddDataset` — a falsy value (null, undefined, `false`, `0`,
+`NaN`, `""`) has no attribute, an object is its JSON text, anything else its
+string. The attribute is written only when that text changed. The typed value
+is what readback answers: `__GetDataset`, the `dataset` field and an event's
+`dataset` report the values as they were filed, under the keys they were filed
+with, and the `attribute` field leaves every `data-*` name out. A `data-*`
+attribute `__SetAttribute` wrote is a string beside them, and reaches an
+event's `dataset` under its camelCased name. Background event descriptors
+include those typed dataset values. Native and web-core disagree with each
+other, and web-core's two members with each other, on which values are
+present and what a non-string value's text is; see
+[deviations](tracking/deviations.md).
 Lynx attributes similarly retain typed copies for readback while ordinary DOM
 attributes remain strings. Attribute fields exclude function/null/undefined
 values and the separate id/class/style/dataset stores. Assigning a local
@@ -202,8 +217,8 @@ native numeric-length conversion remain unsupported.
 
 Legacy component-scoped roots, direct MTS selector PAPI, UI invoke methods
 other than the base set's four (`boundingClientRect`, `scrollIntoView`,
-`scrollTo`, `scrollBy`), `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s three, a `list`'s four, an `x-refresh-view`'s three, a scroll coordinator's `setFoldExpanded`, a `text`'s `getTextBoundingRect` and a dialog's four (a `list`'s `autoScroll` and a coordinator's `getScrollInfo` among them), animation methods,
-dataset-to-DOM reflection and cross-realm host objects remain pending.
+`scrollTo`, `scrollBy`), `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s three, a `list`'s four, an `x-refresh-view`'s three, a scroll coordinator's `setFoldExpanded`, a `text`'s `getTextBoundingRect` and a dialog's four (a `list`'s `autoScroll` and a coordinator's `getScrollInfo` among them), animation methods
+and cross-realm host objects remain pending.
 An `image`'s `startAnimate`/`pauseAnimation`/`resumeAnimation`/`stopAnimation`
 and a `text`'s `getSelectedText`/`setTextSelection` are code 3 for want of a
 primitive: the engine plays no image frames, and has no text selection

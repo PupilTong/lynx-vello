@@ -2188,6 +2188,38 @@ consequential choice about whether to follow the spec or the quirk.
   **Decision: follow native** and include the typed `dataset` copy, which is
   what a card that measures a list row then reads its keys off the same answer
   expects. This is one of the places where the web default is not taken.
+- **A dataset entry is matched by `[data-<key>]`, and the three reference
+  rules for it disagree** — native has no `data-*` attribute at all: its
+  `SelectorQuery` matcher reads the typed dataset for a `data-` name
+  (`core/renderer/dom/selector/matching/attribute_selector_matching.cc:24-28`),
+  so `[data-k]` matches whenever the key exists, a null value included, the
+  key is compared case-sensitively, and a value is compared as text only when
+  it is a string (`Value::ToString`, `base/src/value/base_value.cc:1181-1193`,
+  is `""` for every other type); its stylesheet matcher has no attribute
+  selectors (`core/renderer/css/ng/matcher/selector_matcher.cc`). web-core
+  reflects the dataset as DOM attributes, by two rules. `__AddDataset`
+  (`web-core/ts/client/mainthread/elementAPIs/createElementAPI.ts:434-446`)
+  removes the attribute for any falsy value and otherwise writes an object's
+  JSON text or the value's `toString()`. `__SetDataset`
+  (`web-core/src/main_thread/client/element_apis/dataset_apis.rs:12-55`)
+  replaces the dataset, removes the attribute of every key the new object
+  lacks and of a null or undefined value, writes a string as it is and writes
+  `""` for every other type, and skips a key whose value is unchanged. Both
+  spell the name `data-${key}` through `setAttribute`, which lowercases it.
+  **Implemented, not ruled:** the typed store keeps native's merge
+  (`AttributeHolder::SetDataSet`, `core/renderer/dom/attribute_holder.cc:229-234`),
+  the attributes follow the typed
+  store — so `__SetDataset` removes no attribute for a key it does not name —
+  and one text rule serves both members, web-core's `__AddDataset`, because
+  that is the member a compiled `data-*` JSX attribute reaches (`__SetDataset`
+  is the spread path) and the only one of the three that lets `[data-n="7"]`
+  match a number. Visible differences: from native, `[data-k]` does not match
+  a key whose value is falsy, `[data-k="7"]` matches the number 7, and
+  `[data-testid]` matches the key `testId`; from web-core's `__SetDataset`, a
+  key dropped from a spread keeps its attribute, a non-string value is its
+  string instead of `""`, and `false`, `0` and `""` have no attribute. A value
+  JSON cannot carry (a cycle) is `""` here, where web-core's `__AddDataset`
+  throws.
 - **An unknown UI method answers 3, not 1** — the code table is shared
   (`lynx_get_ui_result.h`, web-core's `constants.ts`), but native reports the
   generic `UNKNOWN = 1` for a method its per-class registry has no entry for,

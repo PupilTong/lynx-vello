@@ -2057,6 +2057,173 @@ fn the_query_selector_papi_never_answers_the_element_it_was_asked_on() {
         .expect("verification");
 }
 
+/// A dataset entry is on the node as its `data-<key>` attribute, so the
+/// document's selector engine matches `[data-<key>]` and `[data-<key>="…"]`
+/// for an entry either member wrote, as web-core's DOM does
+/// (`web-core/ts/client/mainthread/elementAPIs/createElementAPI.ts:434-446`,
+/// `web-core/src/main_thread/client/element_apis/dataset_apis.rs:12-55`).
+/// The typed values `__GetDataset` answers are not changed by it.
+#[test]
+fn a_dataset_entry_is_matched_by_a_data_attribute_selector() {
+    let (mut js_runtime, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const added = __CreateView(0);
+                  const set = __CreateView(0);
+                  const plain = __CreateView(0);
+                  __AddDataset(added, 'test', 'x');
+                  __SetDataset(set, {test: 'y', count: 7, item: {id: 3}});
+                  __AppendElement(page, added);
+                  __AppendElement(page, set);
+                  __AppendElement(page, plain);
+                  globalThis.held = [page, added, set, plain];
+                };
+                ",
+            "app:///dataset-selector.js",
+        )
+        .expect("main-thread script");
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r#"
+                import {
+                  __AddDataset,
+                  __GetDataset,
+                  __QuerySelector,
+                  __QuerySelectorAll,
+                  __SetDataset,
+                } from 'bobcat:element';
+                const [page, added, set, plain] = held;
+                const names = new Map([[added, 'added'], [set, 'set'], [plain, 'plain']]);
+                const expectAll = (selector, ...expected) => {
+                  const found = __QuerySelectorAll(page, selector, {});
+                  const got = found.map(element => names.get(element)).join(',');
+                  if (got !== expected.map(element => names.get(element)).join(',')) {
+                    throw new Error(selector + ' matched [' + got + ']');
+                  }
+                };
+                expectAll('[data-test]', added, set);
+                expectAll('[data-test="x"]', added);
+                expectAll('[data-test="y"]', set);
+                if (__QuerySelector(page, '[data-test="y"]', {}) !== set) {
+                  throw new Error('the first match of [data-test="y"]');
+                }
+                // A non-string value is matched by its string, an object by
+                // its JSON text.
+                expectAll('[data-count="7"]', set);
+                expectAll('[data-item=\'{"id":3}\']', set);
+
+                // An update is what the selector sees next.
+                __AddDataset(added, 'test', 'z');
+                __SetDataset(set, {test: 'x'});
+                expectAll('[data-test="z"]', added);
+                expectAll('[data-test="x"]', set);
+                // `__SetDataset` merges: the keys it did not name are still
+                // in the dataset, and so still on the node.
+                expectAll('[data-count="7"]', set);
+
+                // A null or undefined value has no attribute; the key stays
+                // in the typed dataset.
+                __AddDataset(added, 'test', undefined);
+                __SetDataset(set, {test: null});
+                expectAll('[data-test]');
+                if (!('test' in __GetDataset(added)) || __GetDataset(set).test !== null) {
+                  throw new Error('a removed attribute dropped its dataset key');
+                }
+                __AddDataset(added, 'test', 'again');
+                expectAll('[data-test]', added);
+
+                // An uppercase key is matched under either spelling, as an
+                // HTML element's attribute is.
+                __AddDataset(plain, 'testId', 'row');
+                expectAll('[data-testId="row"]', plain);
+                expectAll('[data-testid="row"]', plain);
+
+                const typed = __GetDataset(set);
+                if (typed.count !== 7 || typed.item.id !== 3 || typed.test !== null) {
+                  throw new Error('typed dataset: ' + JSON.stringify(typed));
+                }
+                if (__GetDataset(plain).testId !== 'row' || 'testid' in __GetDataset(plain)) {
+                  throw new Error('typed dataset key: ' + JSON.stringify(__GetDataset(plain)));
+                }
+                "#,
+            "app:///verify.js",
+            "verifying",
+        )
+        .expect("verification");
+}
+
+/// A stylesheet's attribute selector over a dataset entry applies, and a
+/// dataset write restyles the element at the next flush: the attribute write
+/// behind it records the invalidation any attribute write does.
+#[test]
+fn a_dataset_write_restyles_an_attribute_selector_rule() {
+    use crate::resource::{LoadedSource, StyleSheetSource};
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script_over_sheets(
+            &mut js_runtime,
+            vec![(
+                "app:///index.css",
+                LoadedSource::StyleSheet(StyleSheetSource::Text(
+                    ".box{width:20px;height:10px} \
+                     .box[data-state=\"on\"]{width:90px} \
+                     .box[data-wide]{height:40px}"
+                        .into(),
+                )),
+            )],
+            r"
+                const page = __CreatePage('card', 0);
+                const first = __CreateView(0);
+                const second = __CreateView(0);
+                __SetClasses(first, 'box');
+                __SetClasses(second, 'box');
+                __AddDataset(first, 'state', 'on');
+                __AppendElement(page, first);
+                __AppendElement(page, second);
+                globalThis.held = [first, second];
+            ",
+            "app:///main.js",
+        )
+        .expect("main-thread script");
+    let sizes = || {
+        let tree = elements.tree();
+        [3, 4].map(|id| {
+            let size = tree.rounded_layout(node_id(id)).unwrap().size;
+            (size.width, size.height)
+        })
+    };
+    assert_eq!(sizes(), [(90.0, 10.0), (20.0, 10.0)]);
+
+    let mut step = |script: &str, name: &str| {
+        let source = format!(
+            "import {{__AddDataset, __SetDataset, __FlushElementTree}} from 'bobcat:element';
+             const [first, second] = held;
+             {script}
+             __FlushElementTree();"
+        );
+        runtime
+            .evaluate_module(&mut js_runtime, &source, name, "writing a dataset")
+            .expect("the dataset write");
+    };
+    step(
+        "__AddDataset(first, 'state', 'off'); __SetDataset(second, {state: 'on', wide: true});",
+        "app:///swap.js",
+    );
+    assert_eq!(sizes(), [(20.0, 10.0), (90.0, 40.0)]);
+    // `wide` is not named by this write and stays; `state` loses its
+    // attribute with its value.
+    step("__SetDataset(second, {state: null});", "app:///clear.js");
+    assert_eq!(sizes(), [(20.0, 10.0), (20.0, 40.0)]);
+    step("__AddDataset(second, 'wide', false);", "app:///narrow.js");
+    assert_eq!(sizes(), [(20.0, 10.0), (20.0, 10.0)]);
+}
+
 /// The one UI method the engine dispatches: `boundingClientRect` answers the
 /// border box of the last layout pass, and — as native does, where web-core
 /// reports the id alone — the element's `id` attribute and `dataset` ride
