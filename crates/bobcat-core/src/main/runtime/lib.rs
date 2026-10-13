@@ -70,6 +70,14 @@ const EXPOSURE_EXPORT: &str = "__BobcatSendExposure";
 const APPEAR_EVENT: &str = "uiappear";
 const DISAPPEAR_EVENT: &str = "uidisappear";
 
+/// CSSOM-View's two scroll events, fired at a scroll container on this
+/// thread: `scroll` when an adopted or script-requested offset moved it,
+/// `scrollend` when the scroll finished. Non-bubbling, not composed, `{}`
+/// detail, delivered as component events; see
+/// [`MainThreadRuntime::adopt_scroll_offsets`].
+const SCROLL_EVENT: &str = "scroll";
+const SCROLL_END_EVENT: &str = "scrollend";
+
 /// UI Events' two click names; see [`MainThreadRuntime::dispatch_click`].
 const CLICK_EVENT: &str = "click";
 const DOUBLE_CLICK_EVENT: &str = "dblclick";
@@ -481,6 +489,11 @@ struct DocumentSlot {
     /// against, less the names the document's components observe, which are
     /// published once and never closed.
     listened: FxHashSet<Arc<str>>,
+    /// The scroll containers that fired a `scroll` and owe a `scrollend`
+    /// when the painter posts them at rest. Filled only while something
+    /// hears `scrollend`, so a page that does not keeps it empty; a
+    /// container's own `scrollend` takes it back out.
+    scrolling: SmallVec<[dom::NodeId; 4]>,
     /// Where committed frames leave for the painting side.
     outbox: ViewOutbox,
 }
@@ -512,6 +525,7 @@ impl DocumentSlot {
             exposure: Exposure::new(),
             removals: 0,
             listened: FxHashSet::default(),
+            scrolling: SmallVec::new(),
             outbox,
         }))
     }
@@ -598,6 +612,25 @@ impl DocumentSlot {
             .publish_observed_names(document.observed_event_names());
         self.document = Some(document);
         Ok(())
+    }
+
+    /// Queues `scroll` then `scrollend` at every container a script-facing
+    /// instant scroll moved ([`dom::Document::take_instant_scrolls`]), for
+    /// whichever of the two something hears. Such a container's scroll is
+    /// over, so it owes no later `scrollend`.
+    fn instant_scrolls(&mut self) {
+        let hears_scroll = self.listens(SCROLL_EVENT);
+        let hears_end = self.listens(SCROLL_END_EVENT);
+        let moved = self.document_mut().take_instant_scrolls();
+        for node in moved {
+            if hears_scroll {
+                self.component_events.queue(node, SCROLL_EVENT);
+            }
+            if hears_end {
+                self.component_events.queue(node, SCROLL_END_EVENT);
+            }
+            self.scrolling.retain(|held| *held != node);
+        }
     }
 
     /// Whether anything hears `name`: a realm registration anywhere, or a
@@ -1278,12 +1311,30 @@ impl MainThreadRuntime {
     /// one, is adopted and acknowledges it. A pending auto-scroll change
     /// ([`dom::Document::auto_scroll`]) moved no offset, so no post is
     /// dropped on its account: whichever names its serial acknowledges it.
+    ///
+    /// CSSOM-View's `scroll` and `scrollend` are decided here, never on the
+    /// painter: an adopted post that moved its container queues one
+    /// `scroll` there, and a post naming the container at rest queues a
+    /// `scrollend` after it, when a `scroll` was fired for the container
+    /// since its last `scrollend`. Each is queued only while a realm
+    /// listener or a component hears its name, so a page that hears
+    /// neither pays two set lookups per take and allocates nothing.
     pub(crate) fn adopt_scroll_offsets(
         &mut self,
         entries: impl Iterator<Item = (dom::NodeId, crate::link::ScrollEntry)>,
     ) {
         let mut slot = self.slot.borrow_mut();
-        let document = slot.document_mut();
+        // Asked once per take: two set lookups each, and while neither name
+        // is heard the loop below reads nothing more and queues nothing.
+        let hears_scroll = slot.listens(SCROLL_EVENT);
+        let hears_end = slot.listens(SCROLL_END_EVENT);
+        let DocumentSlot {
+            document,
+            component_events,
+            scrolling,
+            ..
+        } = &mut *slot;
+        let document = document.as_mut().expect(DOCUMENT_EXISTS);
         let frame = document.committed_frame();
         let mut recenter = false;
         let mut moved: SmallVec<[dom::NodeId; 4]> = SmallVec::new();
@@ -1297,13 +1348,39 @@ impl MainThreadRuntime {
                 };
                 document.acknowledge_scroll_request(node, handled);
             }
+            let before = (hears_scroll || hears_end).then(|| document.scroll_offset(node));
             document.scroll_to(node, entry.offset);
+            // CSSOM-View: a container whose offset this post moved fires one
+            // `scroll` (the mailbox holds one entry per container, so one per
+            // take), and owes a `scrollend` once it comes to rest — in this
+            // post or a later one.
+            if before.is_some_and(|before| document.scroll_offset(node) != before) {
+                if hears_scroll {
+                    component_events.queue(node, SCROLL_EVENT);
+                }
+                if hears_end && !scrolling.contains(&node) {
+                    scrolling.push(node);
+                }
+            }
+            // A rest ends a scroll only where one was fired: the painter also
+            // posts a container at rest after carrying out an instant request,
+            // whose `scrollend` was fired when the document scrolled it.
+            if entry.rest.is_some()
+                && let Some(index) = scrolling.iter().position(|&held| held == node)
+            {
+                scrolling.swap_remove(index);
+                component_events.queue(node, SCROLL_END_EVENT);
+            }
             moved.push(node);
             recenter |= frame.as_ref().is_some_and(|frame| {
                 frame.slot_of(node).is_some_and(|index| {
                     frame.scroll_slots()[index as usize].recenter_due(entry.offset)
                 })
             });
+        }
+        if !scrolling.is_empty() {
+            // A container freed mid-scroll never rests.
+            scrolling.retain(|node| document.get(*node).is_some());
         }
         if recenter {
             document.note_scroll_windows_stale();
@@ -1351,6 +1428,22 @@ impl MainThreadRuntime {
             .is_some_and(LynxDocument::needs_render)
     }
 
+    /// Queues the `scroll` and `scrollend` every script-facing instant
+    /// scroll of this entry owes: a UI method's `scrollTo`, `scrollBy` or
+    /// `scrollIntoView`, or a component's own instant scroll. Asked by the
+    /// page's epilogue, so they join the component events this entry
+    /// produced; one length check when nothing scrolled.
+    pub(crate) fn queue_instant_scroll_events(&mut self) {
+        let mut slot = self.slot.borrow_mut();
+        if slot
+            .document
+            .as_ref()
+            .is_some_and(LynxDocument::has_instant_scrolls)
+        {
+            slot.instant_scrolls();
+        }
+    }
+
     /// Whether any producer has left a component event owing — the queue
     /// [`Self::dispatch_component_events`] drains, asked once per entry.
     ///
@@ -1365,8 +1458,10 @@ impl MainThreadRuntime {
     }
 
     /// Dispatches everything [`Self::apply_image_events`], the `image`,
-    /// `svg` and `overlay` components and the dialog's UI methods have
-    /// queued, in the order they formed.
+    /// `svg` and `overlay` components, the dialog's UI methods and the
+    /// scroll events ([`Self::adopt_scroll_offsets`],
+    /// [`Self::queue_instant_scroll_events`]) have queued, in the order they
+    /// formed.
     ///
     /// Called by the entry the page posts for the batch and by nothing else:
     /// the events are tasks, not part of the entry that produced them. Each

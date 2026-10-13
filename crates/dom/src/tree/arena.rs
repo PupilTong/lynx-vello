@@ -551,6 +551,12 @@ pub(crate) struct DocumentLayoutState {
     /// `autoScroll`: one that never does keeps it empty and pays nothing per
     /// node or per container. An entry dies as a scroll request's does.
     pub(crate) auto_scroll_requests: Vec<(NodeId, AutoScrollRequest)>,
+    /// The containers a script-facing instant scroll moved since the host
+    /// last took them, each once, in the order they moved: CSSOM-View's
+    /// pending scroll event targets for the scrolls the document itself
+    /// performs. Bounded by the scroll containers, and empty unless a script
+    /// scrolled one; see `scroll::request`.
+    pub(crate) instant_scrolls: SmallVec<[NodeId; 2]>,
     /// The grid items whose `position: sticky` insets resolve against their
     /// grid area rather than the grid container: the area's edges in the
     /// container's border-box coordinates, unrounded as the layout run
@@ -643,6 +649,7 @@ impl DocumentLayoutState {
             scroll_requests: FxHashMap::default(),
             next_scroll_request: NonZeroU64::MIN,
             auto_scroll_requests: Vec::new(),
+            instant_scrolls: SmallVec::new(),
             sticky_containing_blocks: Vec::new(),
             anchored: FxHashMap::default(),
             anchor_pending: PendingReads::default(),
@@ -775,6 +782,7 @@ impl DocumentLayoutState {
             scroll_requests: _,
             next_scroll_request: _,
             auto_scroll_requests: _,
+            instant_scrolls: _,
             sticky_containing_blocks: _,
             anchored: _,
             anchor_pending: _,
@@ -828,6 +836,7 @@ impl DocumentLayoutState {
             scroll_requests: _,
             next_scroll_request: _,
             auto_scroll_requests: _,
+            instant_scrolls: _,
             sticky_containing_blocks: _,
             anchored: _,
             anchor_pending: _,

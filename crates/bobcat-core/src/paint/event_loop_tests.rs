@@ -506,6 +506,71 @@ fn a_scroll_consuming_drag_suppresses_the_tap() {
     );
 }
 
+/// A 200px column scroller (node 3, max offset 800) whose `scroll` and
+/// `scrollend` listeners log their type into its `log`; its first `tap`
+/// scrolls it instantly to 100 through the `scrollTo` UI method.
+const SCROLL_EVENTS_PAGE: &str = r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const scroller = __CreateView(0);
+          __AppendElement(page, scroller);
+          globalThis.held = [page, scroller];
+          globalThis.entries = [];
+          __SetInlineStyles(scroller, 'display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px');
+          for (let i = 0; i < 5; i++) {
+            const card = __CreateView(0);
+            __AppendElement(scroller, card);
+            held.push(card);
+            __SetInlineStyles(card, 'flex-shrink:0;width:200px;height:200px');
+          }
+          const note = (event) => {
+            entries.push(event.type);
+            __SetAttribute(scroller, 'log', entries.join());
+          };
+          __AddEventListener(scroller, 'scroll', note, {});
+          __AddEventListener(scroller, 'scrollend', note, {});
+          __AddEventListener(scroller, 'tap', () => {
+            if (globalThis.scrolled) return;
+            globalThis.scrolled = true;
+            __InvokeUIMethod(scroller, 'scrollTo', { top: 100 }, () => {});
+          }, {});
+          __FlushElementTree();
+        };
+        ";
+
+/// CSSOM-View's `scroll` and `scrollend`, end to end. An instant
+/// `scrollTo` fires both in the task that scrolled, and the painter's later
+/// post of the container at rest (it carries the request out too) fires no
+/// second `scrollend`. A drag that comes to rest fires one `scroll` for the
+/// offset its move posted and a `scrollend` for the rest its quiet release
+/// posted.
+#[test]
+fn an_instant_scroll_and_a_drag_that_comes_to_rest_fire_scroll_then_scrollend() {
+    let mut engine = booted(SCROLL_EVENTS_PAGE);
+    touch_at(&mut engine, 0.0, PointerPhase::Down, 100.0);
+    touch_at(&mut engine, 0.05, PointerPhase::Up, 100.0);
+    wait_for_log(&mut engine, "scroll,scrollend");
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(0.0, 100.0)
+    );
+
+    // Slow: 30px over half a second, then held still before the release,
+    // so the release has no speed to fling with.
+    touch_at(&mut engine, 1.0, PointerPhase::Down, 150.0);
+    touch_at(&mut engine, 1.5, PointerPhase::Move, 120.0);
+    touch_at(&mut engine, 2.0, PointerPhase::Move, 120.0);
+    touch_at(&mut engine, 2.0, PointerPhase::Up, 120.0);
+    for at in [2.1, 2.2, 2.5] {
+        frame_at(&mut engine, at);
+    }
+    wait_for_log(&mut engine, "scroll,scrollend,scroll,scrollend");
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(0.0, 122.0)
+    );
+}
+
 /// An outer column scroller (node 3, max offset 800) whose first child is
 /// an inner scroller (node 4, 200×100, max offset 900) carrying
 /// `inner_css`; the outer's own filler sits below the inner.

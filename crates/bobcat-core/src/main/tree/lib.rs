@@ -181,9 +181,10 @@ pub(crate) enum ComponentEvent {
     /// an `<image>`'s intrinsic size and an `<svg>`'s layout size, or `error`,
     /// which an `<svg>` does not fire.
     Image(ImageOutcome),
-    /// An event whose detail is `{}`, named by the component that queued it:
-    /// a `<dialog>`'s `close` and `cancel` ([`dialog`]), an `<overlay>`'s
-    /// `showoverlay` and `dismissoverlay` ([`overlay`]).
+    /// An event whose detail is `{}`, named by whatever queued it: a
+    /// `<dialog>`'s `close` and `cancel` ([`dialog`]), an `<overlay>`'s
+    /// `showoverlay` and `dismissoverlay` ([`overlay`]), and a scroll
+    /// container's `scroll` and `scrollend`, which the runtime queues.
     Plain { node: NodeId, name: &'static str },
 }
 

@@ -658,6 +658,24 @@ consequential choice about whether to follow the spec or the quirk.
       flowing while the drag recognizer scrolls (native; browsers likewise
       keep sending `touchmove` to a scrolling page). Only
       `PointerPhase::Cancel` produces `touchcancel`.
+- **W3C `scroll`/`scrollend` under Lynx's `scroll` name (2026-10-13,
+  architect ruling, accepted collision).** CSSOM-View's two events fire at
+  every scroll container, non-bubbling, with a `{}` detail. Lynx's own
+  `scroll` (`bindscroll` on `scroll-view` and `list`; web-core's
+  `lynxscroll`, renamed to `scroll` by `W3cEventNameToLynx`) fires only on
+  those components and carries `scrollTop`, `scrollLeft`, `scrollHeight`,
+  `scrollWidth`, `deltaX` and `deltaY` in its `detail`; a card that reads
+  them gets `undefined` here until the follow-up fills the Lynx detail.
+  Recorded choices inside the step:
+  - **A `scrollend` follows a fired `scroll` only.** The painter posts a
+    container at rest after it carries out an instant request too, whose
+    `scrollend` fired with the request; a rest with no `scroll` fired since
+    the container's last `scrollend` fires nothing.
+  - **No debounce.** A wheel tick rests at once, so each tick that moves a
+    container is one `scroll` and one `scrollend`; browsers end a wheel
+    scroll after a quiet interval.
+  - **The render's own positioning fires nothing**: `scroll-initial-target`
+    and the re-snap after a layout change move a container without an event.
 - **Keyboard: `keydown`/`keyup` only, targeted at the document element
   (2026-10-13, architect ruling).** W3C UI Events' two key events reach the
   page with `key`, `code`, `repeat`, `altKey`, `ctrlKey`, `metaKey` and

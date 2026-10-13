@@ -1984,6 +1984,78 @@ fn a_click_targets_the_common_ancestor_and_two_make_a_dblclick() {
         .expect("verification");
 }
 
+/// `scroll` and `scrollend` are queued only for a name something hears: an
+/// adopted offset on a page with neither listener queues nothing, and one
+/// with a `scroll` listener queues the `scroll` alone, once per adopt.
+#[test]
+fn adopted_offsets_queue_scroll_events_only_for_a_name_something_hears() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const scroller = __CreateView(0);
+                  __AppendElement(page, scroller);
+                  const card = __CreateView(0);
+                  __AppendElement(scroller, card);
+                  globalThis.held = [page, scroller, card];
+                  __SetInlineStyles(scroller, 'display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px');
+                  __SetInlineStyles(card, 'flex-shrink:0;width:200px;height:1000px');
+                  globalThis.listen = () =>
+                    __AddEventListener(scroller, 'scroll', () => {}, {});
+                  __FlushElementTree();
+                };
+                ",
+            "app:///scroll-gate.js",
+        )
+        .expect("main-thread script");
+    let scroller = node_id(3);
+    let entry = |y: f32| {
+        (
+            scroller,
+            crate::link::ScrollEntry {
+                offset: dom::Vector2D::new(0.0, y),
+                at: 0.0,
+                rest: Some(dom::Vector2D::new(0.0, y)),
+                request: None,
+            },
+        )
+    };
+
+    runtime.adopt_scroll_offsets([entry(40.0)].into_iter());
+    assert_eq!(
+        elements.tree().scroll_offset(scroller),
+        dom::Vector2D::new(0.0, 40.0)
+    );
+    assert!(!runtime.has_component_events(), "nothing hears either name");
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            "globalThis.listen();",
+            "app:///listen.js",
+            "listening",
+        )
+        .expect("listening");
+    runtime.adopt_scroll_offsets([entry(40.0)].into_iter());
+    assert!(
+        !runtime.has_component_events(),
+        "an offset that did not move fires nothing"
+    );
+    runtime.adopt_scroll_offsets([entry(60.0)].into_iter());
+    let queued = runtime.slot.borrow().component_events.take();
+    assert_eq!(
+        queued,
+        [ComponentEvent::Plain {
+            node: scroller,
+            name: "scroll"
+        }],
+        "one `scroll`, and no `scrollend` with nothing to hear it"
+    );
+}
+
 /// An engine component on the path that observes the event's name.
 /// Records its delivery, marks the target so script can tell it ran first,
 /// and stops propagation — which must end only its own walk.

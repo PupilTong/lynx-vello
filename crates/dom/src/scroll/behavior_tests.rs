@@ -497,3 +497,45 @@ fn a_child_ending_at_the_padding_edge_adds_no_scroll_range() {
         Vector2D::new(0.0, 3.0),
     );
 }
+
+/// A script-facing instant scroll that moves its container is recorded for
+/// the host's `scroll`/`scrollend`, once per container however often it
+/// moves before the host takes them; one that moves nothing, and a smooth
+/// one (the painter's to move), record nothing.
+#[test]
+fn an_instant_scroll_that_moves_its_container_is_recorded_once_for_the_host() {
+    let mut h = Harness::new(BORDERED_SCROLLER);
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    for _ in 0..3 {
+        h.el(scroller, "view.row.over");
+    }
+    h.doc.dom.layout();
+    assert!(!h.doc.dom.has_instant_scrolls());
+
+    h.doc
+        .dom
+        .scroll_to_with(scroller, Vector2D::new(0.0, 20.0), ScrollBehavior::Smooth);
+    assert!(
+        !h.doc.dom.has_instant_scrolls(),
+        "a smooth scroll is the painter's"
+    );
+    h.doc
+        .dom
+        .scroll_to_with(scroller, Vector2D::new(0.0, 0.0), ScrollBehavior::Instant);
+    assert!(!h.doc.dom.has_instant_scrolls(), "nothing moved");
+
+    h.doc
+        .dom
+        .scroll_to_with(scroller, Vector2D::new(0.0, 20.0), ScrollBehavior::Instant);
+    h.doc
+        .dom
+        .scroll_to_with(scroller, Vector2D::new(0.0, 30.0), ScrollBehavior::Instant);
+    assert!(h.doc.dom.has_instant_scrolls());
+    assert_eq!(h.doc.dom.take_instant_scrolls().as_slice(), [scroller]);
+    assert!(h.doc.dom.take_instant_scrolls().is_empty(), "taken once");
+
+    // The document's own write, as an adopted painter offset, is not one.
+    h.doc.dom.scroll_to(scroller, Vector2D::new(0.0, 5.0));
+    assert!(!h.doc.dom.has_instant_scrolls());
+}

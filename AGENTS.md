@@ -1644,6 +1644,13 @@ is `dom::event::EventDetail` (one variant per payload shape), which the router
 fills in, `ToMain::DispatchEvent` carries, the Rust walk lends out and
 `encode_detail` turns into the realm's numbers. The names components observe
 are published to the painter's name set once per document and never closed.
+CSSOM-View's `scroll` and `scrollend` are decided on this thread, never on
+the painter: `adopt_scroll_offsets` queues a `scroll` per container a post
+moved and a `scrollend` when a post names it at rest after a `scroll`, and a
+script-facing instant scroll (`dom::Document::take_instant_scrolls`) queues
+both from its entry's epilogue; all are component events, non-bubbling with a
+`{}` detail, and queued only for a name a realm listener or a component
+hears.
 
 One event deliberately does **not** take that path, because it is the
 engine's own rather than script's: css-contain-2 §4.4's

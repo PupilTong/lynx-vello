@@ -52,6 +52,7 @@
 use std::num::NonZeroU64;
 
 use euclid::default::Vector2D;
+use smallvec::SmallVec;
 
 use crate::NodeId;
 use crate::tree::document::Document;
@@ -173,13 +174,17 @@ impl<T> Document<T> {
     /// replaces the first, which is CSSOM-View §3.1's abort of the ongoing
     /// smooth scroll. Either way the document needs a commit, because the
     /// request travels in the frame.
+    ///
+    /// An instant request that moves the container records it for
+    /// [`Self::take_instant_scrolls`], so the host can fire CSSOM-View's
+    /// `scroll` and `scrollend` for a scroll the document performed itself.
     pub fn scroll_to_with(
         &mut self,
         id: NodeId,
         offset: Vector2D<f32>,
         behavior: ScrollBehavior,
     ) -> Vector2D<f32> {
-        self.request_scroll(id, offset, behavior, false)
+        self.request_scroll(id, offset, behavior, false, true)
             .unwrap_or_default()
     }
 
@@ -201,15 +206,23 @@ impl<T> Document<T> {
         offset: Vector2D<f32>,
         behavior: ScrollBehavior,
     ) -> bool {
-        self.request_scroll(id, offset, behavior, true).is_some()
+        self.request_scroll(id, offset, behavior, true, false)
+            .is_some()
     }
 
-    fn request_scroll(
+    /// The one request path behind [`Self::scroll_to_with`],
+    /// [`Self::scroll_to_yielding`] and the render's own positioning.
+    /// `yields_to_pointer` is the yielding request's rule; `script_facing`
+    /// records an instant move for the host's scroll events, which the
+    /// render's own positioning (`scroll-initial-target`) is not, and a
+    /// yielding request never performs here.
+    pub(crate) fn request_scroll(
         &mut self,
         id: NodeId,
         offset: Vector2D<f32>,
         behavior: ScrollBehavior,
         yields_to_pointer: bool,
+        script_facing: bool,
     ) -> Option<Vector2D<f32>> {
         debug_assert!(
             offset.x.is_finite() && offset.y.is_finite(),
@@ -223,7 +236,11 @@ impl<T> Document<T> {
                 return None;
             }
         } else if behavior == ScrollBehavior::Instant {
-            self.scroll_to(id, target);
+            let moved = self.scroll_to(id, target) != scroll_box.offset;
+            let recorded = &mut self.layout_state_mut().instant_scrolls;
+            if moved && script_facing && !recorded.contains(&id) {
+                recorded.push(id);
+            }
         }
         let state = self.layout_state_mut();
         let serial = state.next_scroll_request;
@@ -241,6 +258,26 @@ impl<T> Document<T> {
         );
         self.note_visual_mutation();
         Some(target)
+    }
+
+    /// The containers a script-facing instant [`Self::scroll_to_with`] moved
+    /// since the last call, each once, in the order they first moved, and
+    /// forgets them. The host fires `scroll` then `scrollend` at each, in the
+    /// task that scrolled: an instant scroll has finished by the time it
+    /// returns. A smooth one is the painter's to move, and the host learns
+    /// its offsets, and its end, from the painter's posts instead.
+    ///
+    /// No allocation while a container or two moved, and none at all when
+    /// nothing did.
+    pub fn take_instant_scrolls(&mut self) -> SmallVec<[NodeId; 2]> {
+        std::mem::take(&mut self.layout_state_mut().instant_scrolls)
+    }
+
+    /// Whether [`Self::take_instant_scrolls`] has anything to answer: one
+    /// length check.
+    #[must_use]
+    pub fn has_instant_scrolls(&self) -> bool {
+        !self.layout_state().instant_scrolls.is_empty()
     }
 
     /// The serial of `id`'s pending request, if it has one: the least serial
