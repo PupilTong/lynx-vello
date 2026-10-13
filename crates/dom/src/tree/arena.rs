@@ -23,7 +23,7 @@ use crate::layout::anchors::{AnchorBuckets, AnchorRegistry, AnchoredBox, Pending
 use crate::layout::committed_box::{CommittedBox, CommittedBoxTable};
 use crate::layout::relevance::{Relevance, RelevanceTable};
 use crate::layout::text_block::TextBlockStore;
-use crate::scroll::ScrollRequest;
+use crate::scroll::{AutoScrollRequest, ScrollRequest};
 use crate::tree::node::Node;
 use crate::tree::top_layer::TopLayer;
 
@@ -538,6 +538,12 @@ pub(crate) struct DocumentLayoutState {
     /// The serial the next scroll request takes: one counter per document,
     /// so serials order every request against every post that names one.
     pub(crate) next_scroll_request: NonZeroU64,
+    /// Each scroll container's pending auto-scroll change, the newest only;
+    /// see `scroll::request`. A list rather than a per-node field or a field
+    /// of the scroll request because almost no document ever calls
+    /// `autoScroll`: one that never does keeps it empty and pays nothing per
+    /// node or per container. An entry dies as a scroll request's does.
+    pub(crate) auto_scroll_requests: Vec<(NodeId, AutoScrollRequest)>,
     /// The grid items whose `position: sticky` insets resolve against their
     /// grid area rather than the grid container: the area's edges in the
     /// container's border-box coordinates, unrounded as the layout run
@@ -629,6 +635,7 @@ impl DocumentLayoutState {
             initial_targets: Vec::new(),
             scroll_requests: FxHashMap::default(),
             next_scroll_request: NonZeroU64::MIN,
+            auto_scroll_requests: Vec::new(),
             sticky_containing_blocks: Vec::new(),
             anchored: FxHashMap::default(),
             anchor_pending: PendingReads::default(),
@@ -678,6 +685,9 @@ impl DocumentLayoutState {
         }
         if !self.scroll_requests.is_empty() {
             self.scroll_requests.remove(&slot);
+        }
+        if !self.auto_scroll_requests.is_empty() {
+            self.auto_scroll_requests.retain(|(node, _)| *node != slot);
         }
         if !self.anchored.is_empty() {
             self.anchored.remove(&slot);
@@ -757,6 +767,7 @@ impl DocumentLayoutState {
             initial_targets: _,
             scroll_requests: _,
             next_scroll_request: _,
+            auto_scroll_requests: _,
             sticky_containing_blocks: _,
             anchored: _,
             anchor_pending: _,
@@ -809,6 +820,7 @@ impl DocumentLayoutState {
             initial_targets: _,
             scroll_requests: _,
             next_scroll_request: _,
+            auto_scroll_requests: _,
             sticky_containing_blocks: _,
             anchored: _,
             anchor_pending: _,

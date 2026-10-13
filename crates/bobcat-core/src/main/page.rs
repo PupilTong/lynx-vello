@@ -168,7 +168,6 @@ use super::quickjs::{ScriptRuntime, SharedRuntime};
 use super::runtime::{DocumentIngredients, MainThreadRuntime, RealmStartup};
 use super::{AttachedView, GroupContext};
 use crate::background::WorkerEvent;
-#[cfg(test)]
 use crate::clock::ClockInstant;
 use crate::lifetime::{Lifetime, Settles, run_job, serve_clock};
 use crate::link::{FramePost, HostOutbox, ScrollEntry, ScrollMailbox, ToMain, ViewOutbox};
@@ -931,6 +930,13 @@ impl RealmOwner for Page {
     /// fires inside boot's own epilogue and adds no commit of its own.
     fn run_due_timers(runtime: &mut MainThreadRuntime, js: &mut ScriptRuntime) -> Vec<ScriptError> {
         runtime.run_due_timers(js)
+    }
+
+    /// The realm's next timer or an `x-swiper`'s next autoplay turn,
+    /// whichever is sooner: the clock task waits for one deadline, and the
+    /// epilogue it wakes runs both kinds.
+    fn next_deadline(runtime: &mut MainThreadRuntime) -> Option<ClockInstant> {
+        runtime.next_deadline()
     }
 
     /// First the documents an `<svg content>` handed over in this entry,

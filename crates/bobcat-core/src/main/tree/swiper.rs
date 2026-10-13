@@ -1,7 +1,7 @@
 //! The `x-swiper` and `x-swiper-item` tags: a row (or, with `vertical`, a
 //! column) of items the user swipes through one item at a time, in one of
-//! five layouts, with a strip of dots, and the `scrollTo` UI method that turns
-//! to an item from script.
+//! five layouts, with a strip of dots, the autoplay that turns it on a timer,
+//! and the `scrollTo` UI method that turns to an item from script.
 //!
 //! Translated from web-elements'
 //! `lynx-stack/packages/web-platform/web-elements/src/elements/XSwiper/x-swiper.css`
@@ -248,11 +248,36 @@
 //! after mandatory snapping, in every mode. A bad or out-of-range `index` is code 4, Android's
 //! answer, where web-core does nothing and answers 0; Android's `direction` is not read.
 //!
+//! # Autoplay is a timer of the component's
+//!
+//! `autoplay`, `interval` and `smooth-scroll` are web-core's `XSwiperAutoScroll.ts`, run by the
+//! component rather than by script. A connected swiper that has `autoplay` keeps one timer in the
+//! document's [`Autoplays`], which the page waits out with its realm's own timers and runs in its
+//! epilogue ([`Autoplays::run_due`]); every `interval` milliseconds (5000 when it is missing or
+//! not a number) it turns to the next item ([`turn`]). Nothing is armed, read or waited for on a
+//! page with no such swiper.
+//!
+//! When the timer starts and stops is web-core's, to the letter (user ruling 2026-10-13):
+//!
+//! - It starts when the swiper is connected with `autoplay`, and starts over whenever `autoplay` or
+//!   `interval` changes on a connected swiper that has `autoplay` (`XSwiperAutoScroll.ts:60-70`,
+//!   after web-core's connect pass, `component.ts:226-258`). The first turn is one whole interval
+//!   later.
+//! - **Removing `autoplay` does not stop it.** web-core's handler has no branch for the attribute
+//!   going away and its tick never rechecks it. Android cancels (`XSwiperUI.java:684-691`).
+//!   `autoplay="false"` is the attribute removed, as web-core's false-filtering makes it.
+//! - Only disconnection ends it (`:72-74`); reconnecting with `autoplay` starts a new one.
+//!
+//! A turn that comes due while a finger holds the swiper is not carried out, and the timer goes
+//! on unchanged (user ruling 2026-10-13): the turn is a scroll request the painter declines while
+//! a pointer has the container ([`dom::Document::scroll_to_yielding`]). web-core scrolls under
+//! the finger; Android stops its timer for the drag and waits a whole interval after it
+//! (`XSwiperUI.java:208-220`).
+//!
 //! # What is not implemented
 //!
-//! - `autoplay`, `interval` and `smooth-scroll`: not implemented for now, the user deferred them;
-//!   `smooth-scroll` only matters to autoplay (web-core's `XSwiperAutoScroll.ts`) and to Android's
-//!   default for `scrollTo`'s `smooth`.
+//! - Android's `finish-reset`, which rewinds a swiper that is not `circular` from its last item
+//!   (`XSwiperUI.java:693-696`): web-core has none.
 //! - The perspective of `coverflow`: its turn is drawn in a parallel projection, above.
 //! - `page-margin`, `previous-margin`, `next-margin` and `duration` have no rule, following
 //!   web-core, where they change nothing on screen: the three margins become custom properties on
@@ -266,15 +291,23 @@
 //!   (`x-swiper.css:77-80`), `scrollbar-width` and the per-item `view-timeline-name` rules: a
 //!   browser shortcut, a scrollbar this engine does not draw, and web-core's per-dot timelines.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::Duration;
+
 use dom::event::{ElementEvent, ElementEventKind, EventPhase};
 use dom::scroll::{
     ScrollBehavior, ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition,
 };
 use dom::stylo::values::specified::box_::ScrollSnapAlignKeyword;
-use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, Node, NodeId, ShadowRootMode};
+use dom::{
+    CustomElement, MethodCall, MethodError, MethodOutcome, Node, NodeId, ShadowRootMode, Vector2D,
+};
 use serde_json::Value;
+use smallvec::SmallVec;
 
 use super::{InvalidParams, LynxDocument, element_child, is_truthy};
+use crate::clock::ClockInstant;
 
 /// The swiper tag, web-core's only spelling of it.
 pub(super) const SWIPER_TAG: &str = "x-swiper";
@@ -420,21 +453,181 @@ const COUNT_PROPERTY: &str = "--swiper-count";
 /// Installs the `x-swiper` component. Must run before any element could
 /// carry the tag, which is [`Document::define`](dom::Document::define)'s own
 /// precondition.
-pub(super) fn define(document: &mut LynxDocument) {
-    document.define(SWIPER_TAG, Box::new(Swiper));
+pub(super) fn define(document: &mut LynxDocument, autoplays: Autoplays) {
+    document.define(SWIPER_TAG, Box::new(Swiper { autoplays }));
+}
+
+/// The period of an autoplay with no usable `interval`, web-core's
+/// (`XSwiperAutoScroll.ts:65-68`) and Android's (`XSwiperUI.java:90`).
+const DEFAULT_AUTOPLAY_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The least period an autoplay runs at, in milliseconds: the delay HTML
+/// clamps a nested timer to, which is what a browser's `setInterval(…, 0)`
+/// settles at.
+const LEAST_AUTOPLAY_MILLISECONDS: f64 = 4.0;
+
+/// The longest period, in milliseconds: HTML's `long` timeout, about 24
+/// days.
+const LONGEST_AUTOPLAY_MILLISECONDS: f64 = 2_147_483_647.0;
+
+/// The autoplay timers of one document's swipers: for each connected
+/// `x-swiper` that was given `autoplay`, when its next turn is due and how
+/// long after that the following one is.
+///
+/// Shared, as [`super::ComponentEvents`] is, between the component, which
+/// starts and stops the timers from its reactions, and the runtime, which
+/// waits for the earliest ([`Self::next_deadline`]) and runs what came due
+/// ([`Self::run_due`]). Empty on a page with no autoplaying swiper, where
+/// each of the two is one test.
+#[derive(Clone, Default)]
+pub(crate) struct Autoplays(Rc<RefCell<Vec<Autoplay>>>);
+
+struct Autoplay {
+    swiper: NodeId,
+    period: Duration,
+    due: ClockInstant,
+}
+
+impl Autoplays {
+    /// Starts `swiper`'s timer over: its first turn is `period` after `now`.
+    fn start(&self, swiper: NodeId, period: Duration, now: ClockInstant) {
+        let mut timers = self.0.borrow_mut();
+        let timer = Autoplay {
+            swiper,
+            period,
+            due: now + period,
+        };
+        match timers.iter_mut().find(|armed| armed.swiper == swiper) {
+            Some(armed) => *armed = timer,
+            None => timers.push(timer),
+        }
+    }
+
+    fn stop(&self, swiper: NodeId) {
+        self.0.borrow_mut().retain(|armed| armed.swiper != swiper);
+    }
+
+    /// When the earliest turn is due, if any swiper autoplays.
+    pub(crate) fn next_deadline(&self) -> Option<ClockInstant> {
+        self.0.borrow().iter().map(|armed| armed.due).min()
+    }
+
+    /// Turns every swiper whose timer has come due at `now` ([`turn`]) and
+    /// arms each one's next turn a period after `now`, as `setInterval`
+    /// re-arms from the moment it fires.
+    pub(crate) fn run_due(&self, document: &mut LynxDocument, now: ClockInstant) {
+        let due: SmallVec<[NodeId; 1]> = self
+            .0
+            .borrow_mut()
+            .iter_mut()
+            .filter(|armed| armed.due <= now)
+            .map(|armed| {
+                armed.due = now + armed.period;
+                armed.swiper
+            })
+            .collect();
+        // With the list released: a turn mutates the document.
+        for swiper in due {
+            turn(document, swiper);
+        }
+    }
+}
+
+/// The period `interval` names: web-core's `parseFloat` of the attribute in
+/// milliseconds, 5000 when it is missing or no number
+/// (`XSwiperAutoScroll.ts:64-68`), within what a timer admits: no shorter
+/// than a nested timer's 4 ms, which is where a browser's `setInterval` of 0
+/// or of a negative delay settles, and no longer than HTML's longest
+/// timeout.
+fn autoplay_period(interval: Option<&str>) -> Duration {
+    let Some(milliseconds) = interval.and_then(parse_float) else {
+        return DEFAULT_AUTOPLAY_INTERVAL;
+    };
+    let milliseconds =
+        milliseconds.clamp(LEAST_AUTOPLAY_MILLISECONDS, LONGEST_AUTOPLAY_MILLISECONDS);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped just above to a positive range far inside u64"
+    )]
+    let microseconds = (milliseconds * 1000.0).round() as u64;
+    Duration::from_micros(microseconds)
+}
+
+/// JavaScript's `parseFloat` of a decimal literal: the longest prefix of
+/// `text`, past leading white space, that reads as a number. `None` where
+/// `parseFloat` answers `NaN`, and for `Infinity`, which no interval is.
+fn parse_float(text: &str) -> Option<f64> {
+    let text = text.trim_start();
+    let numeric = text
+        .find(|character: char| !matches!(character, '0'..='9' | '+' | '-' | '.' | 'e' | 'E'))
+        .map_or(text, |end| &text[..end]);
+    (1..=numeric.len())
+        .rev()
+        .find_map(|end| numeric[..end].parse::<f64>().ok())
+        .filter(|value| value.is_finite())
 }
 
 /// The `x-swiper` component: builds the shadow tree when the element is
 /// constructed, keeps `--swiper-count` equal to the number of its element
-/// children, and answers the `scrollTo` UI method ([`scroll_to`]).
+/// children, runs the autoplay timer, and answers the `scrollTo` UI method
+/// ([`scroll_to`]).
 ///
 /// The shadow tree is built in `constructed`, not on connection: the element
 /// is new and detached then, and `__CreateElement` mints a swiper before
 /// anything is appended to it, so every child arrives as a `slotchange` at
 /// the slot.
-struct Swiper;
+struct Swiper {
+    autoplays: Autoplays,
+}
+
+impl Swiper {
+    /// web-core's `_handleAutoplay` (`XSwiperAutoScroll.ts:62-70`) for a
+    /// connected swiper: with `autoplay`, its timer starts over at the
+    /// period `interval` names; without, nothing changes, a running timer
+    /// included.
+    fn handle_autoplay(&self, document: &LynxDocument, swiper: NodeId) {
+        let Some(element) = document.get(swiper) else {
+            return;
+        };
+        if flag(element, "autoplay") {
+            self.autoplays.start(
+                swiper,
+                autoplay_period(element.attribute("interval")),
+                ClockInstant::now(),
+            );
+        }
+    }
+}
 
 impl CustomElement<()> for Swiper {
+    fn observed_attributes(&self) -> Vec<String> {
+        vec!["autoplay".to_owned(), "interval".to_owned()]
+    }
+
+    fn connected_callback(&self, document: &mut LynxDocument, element: NodeId) {
+        self.handle_autoplay(document, element);
+    }
+
+    fn disconnected_callback(&self, _document: &LynxDocument, element: NodeId) {
+        self.autoplays.stop(element);
+    }
+
+    /// `autoplay` or `interval` changed. A swiper that is not connected
+    /// reads both when it connects, as web-core's handlers run only then.
+    fn attribute_changed_callback(
+        &self,
+        document: &mut LynxDocument,
+        element: NodeId,
+        _name: &str,
+        _old: Option<&str>,
+        _new: Option<&str>,
+    ) {
+        if document.is_connected(element) {
+            self.handle_autoplay(document, element);
+        }
+    }
+
     fn constructed(&self, document: &mut LynxDocument, element: NodeId) {
         let shadow = document.attach_shadow(element, ShadowRootMode::Open);
         document.add_shadow_stylesheet(shadow, SHADOW_RULES);
@@ -503,7 +696,7 @@ impl CustomElement<()> for Swiper {
 /// - `smooth` is read with JavaScript truthiness, as web-core's `smooth ? 'smooth' : 'instant'`
 ///   reads it, and a missing one is `true`, web-core's default. Android's default is the
 ///   `smooth-scroll` attribute (`mSmoothScroll`, `XSwiperUI.java:89`, itself `true` by default),
-///   which this engine does not read.
+///   which only an autoplay turn reads here ([`turn`]).
 /// - Android's `direction` (`"begin"` or `"end"`: which way a circular swiper turns,
 ///   `XSwiperUI.java:767-772`) is not read: web-core has no such param.
 ///
@@ -593,8 +786,105 @@ pub(super) fn scroll_to(
 fn is_vertical(document: &LynxDocument, swiper: NodeId) -> bool {
     document
         .get(swiper)
-        .and_then(|node| node.attribute("vertical"))
+        .is_some_and(|node| flag(node, "vertical"))
+}
+
+/// Whether `element` carries the boolean attribute `name`: present and not
+/// `"false"`, the attribute web-core's false-filtering leaves.
+fn flag(element: &Node<()>, name: &str) -> bool {
+    element
+        .attribute(name)
         .is_some_and(|value| value != "false")
+}
+
+/// One autoplay turn of `swiper`: to the item after the current one, or
+/// from the last item to the first when it is `circular`
+/// (`XSwiperAutoScroll.ts:22-33`).
+///
+/// The positions are the swiper's snap positions on its main axis
+/// ([`dom::Document::snap_positions`]), one per item, in order. The current
+/// item is the one whose position is nearest the offset, the first on a tie.
+/// That is web-core's "item whose centre is nearest the scrollport's mid"
+/// (`XSwiper.ts:37-91`, the mid at 40% of the scrollport in `carousel`)
+/// restated: items are equal on the main axis, and each one's position is
+/// its centre less the same distance — half the scrollport for a centred
+/// item, half the item for a start-aligned one, which in `carousel` is the
+/// 40% web-core uses. The target is the next item's snap position, which is
+/// where web-core's `#scrollToIndex` ends after its mandatory snap
+/// (`:104-129`); on the last item without `circular` nothing moves, and the
+/// timer goes on.
+///
+/// The turn is smooth unless `smooth-scroll` is present with any value,
+/// `"false"` included, which is web-core's reading
+/// (`getAttribute('smooth-scroll') === null`, `XSwiper.ts:101`, with
+/// `smooth-scroll` exempt from its false-filtering, `:28-31`). Android reads
+/// the attribute as a boolean that defaults to `true`
+/// (`XSwiperUI.java:877-885`), and turns over `duration` milliseconds, which
+/// web-core never reads. A `circular` swiper's turn from the last item runs
+/// along the shorter arc of its circle, the painter's rule for a smooth
+/// request, where web-core re-slots its first item to travel forward and
+/// travels backward with two items (`XSwiperCircular.ts:44-118`).
+///
+/// It is a request the painter declines while a pointer holds the swiper
+/// ([`dom::Document::scroll_to_yielding`]), so the document's offset stays
+/// where it is until the painter posts it back, for a `smooth-scroll` turn
+/// too. A turn that comes before then counts from the old item and asks for
+/// the same one again. A pending `scrollTo` a script made is not replaced.
+///
+/// The offset, the positions and the turn are `#content`'s ([`content`]),
+/// the scroll container. Reads the last completed layout and never flushes.
+/// A swiper with no box, no snap positions or no items moves nothing.
+fn turn(document: &mut LynxDocument, swiper: NodeId) {
+    let Some(element) = document.get(swiper) else {
+        return;
+    };
+    let vertical = flag(element, "vertical");
+    let circular = flag(element, "circular");
+    let behavior = if element.attribute("smooth-scroll").is_some() {
+        ScrollBehavior::Instant
+    } else {
+        ScrollBehavior::Smooth
+    };
+    let Some(content) = content(document, swiper) else {
+        return;
+    };
+    let (Some(scroll_box), Some(positions)) = (
+        document.scroll_box(content),
+        document.snap_positions(content),
+    ) else {
+        return;
+    };
+    let offset = scroll_box.offset;
+    let (axis, at) = if vertical {
+        (positions.y(), offset.y)
+    } else {
+        (positions.x(), offset.x)
+    };
+    let Some(points) = axis.map(|axis| axis.points) else {
+        return;
+    };
+    let distance = |index: usize| {
+        let point = points[index];
+        (point.min - at).max(at - point.max).max(0.0)
+    };
+    let Some(current) = (0..points.len()).min_by(|a, b| distance(*a).total_cmp(&distance(*b)))
+    else {
+        return;
+    };
+    let next = if current + 1 < points.len() {
+        current + 1
+    } else if circular {
+        0
+    } else {
+        return;
+    };
+    let target = points[next].min;
+    let to = if vertical {
+        Vector2D::new(offset.x, target)
+    } else {
+        Vector2D::new(target, offset.y)
+    };
+    document.scroll_to_yielding(content, to, behavior);
 }
 
 /// Writes the number of elements assigned to `swiper`'s slot into its
@@ -636,6 +926,8 @@ pub(crate) fn content(document: &LynxDocument, swiper: NodeId) -> Option<NodeId>
 mod tests {
     #![allow(clippy::float_cmp)] // Explicit pixel sizes lay out exactly.
 
+    use std::time::Duration;
+
     use dom::scroll::ScrollBehavior;
     use dom::stylo::properties::PropertyId;
     use dom::stylo::values::computed::{CSSPixelLength, Display, Overflow};
@@ -644,9 +936,12 @@ mod tests {
         Vector2D,
     };
 
-    use super::super::test_support::{child, display, document, element_under, overflow, style_of};
+    use super::super::test_support::{
+        child, display, document, element_under, overflow, style_of, with_autoplays,
+    };
     use super::super::{InvalidParams, LynxDocument};
-    use super::{SWIPER_ITEM_TAG, SWIPER_TAG, scroll_to};
+    use super::{Autoplays, SWIPER_ITEM_TAG, SWIPER_TAG, autoplay_period, scroll_to};
+    use crate::clock::ClockInstant;
 
     /// One computed longhand, as CSSOM serializes it.
     fn value(document: &LynxDocument, element: NodeId, property: &str) -> String {
@@ -2220,6 +2515,311 @@ mod tests {
         assert_eq!(
             document.scroll_offset(scroller(&document, swiper)),
             Vector2D::new(200.0, 0.0)
+        );
+    }
+
+    // --- autoplay -----------------------------------------------------------
+
+    /// One autoplay turn of `swiper`, as far as the painter: the request the
+    /// next commit carries for it — target, behavior, and whether it yields
+    /// to a pointer — then carried out and acknowledged as the painter's
+    /// post would, so the next turn counts from the new item. `None` when
+    /// the turn asked for nothing.
+    fn turned(
+        document: &mut LynxDocument,
+        swiper: NodeId,
+    ) -> Option<(Vector2D<f32>, ScrollBehavior, bool)> {
+        super::turn(document, swiper);
+        let content = scroller(document, swiper);
+        // Asked first: a frame goes on carrying an acknowledged request
+        // until something else commits.
+        document.pending_scroll_request(content)?;
+        let frame = document.commit();
+        let index = frame
+            .slot_of(content)
+            .expect("the swiper's scroller has a slot");
+        let request = frame.scroll_slots()[index as usize].request?;
+        document.scroll_to(content, request.target);
+        document.acknowledge_scroll_request(content, request.serial);
+        Some((request.target, request.behavior, request.yields_to_pointer))
+    }
+
+    /// Each turn asks for the next item's snap position, smoothly and as a
+    /// request that yields to a pointer, in every mode and both
+    /// orientations; on the last item it asks for nothing.
+    #[test]
+    fn a_turn_goes_to_the_next_items_snap_position_and_stays_on_the_last() {
+        for case in &GEOMETRY {
+            let (mut document, swiper, _) = mode_swiper(case.mode, case.vertical, 3);
+            document.commit();
+            let [_, second, third] = case.snaps;
+            let label = format!("{} vertical={}", case.mode, case.vertical);
+            assert_eq!(
+                turned(&mut document, swiper),
+                Some((
+                    main_axis(case.vertical, second),
+                    ScrollBehavior::Smooth,
+                    true
+                )),
+                "{label}"
+            );
+            assert_eq!(
+                turned(&mut document, swiper),
+                Some((
+                    main_axis(case.vertical, third),
+                    ScrollBehavior::Smooth,
+                    true
+                )),
+                "{label}"
+            );
+            assert_eq!(turned(&mut document, swiper), None, "{label}: the last");
+        }
+    }
+
+    #[test]
+    fn a_turn_wraps_from_the_last_item_only_when_circular() {
+        for (circular, expected) in [("", Some(0.0)), ("true", Some(0.0)), ("false", None)] {
+            let mut document = document();
+            let (swiper, _) = build(
+                &mut document,
+                "width: 200px; height: 100px",
+                &[("circular", circular)],
+                3,
+            );
+            document.commit();
+            document.scroll_to(scroller(&document, swiper), Vector2D::new(400.0, 0.0));
+            assert_eq!(
+                turned(&mut document, swiper).map(|(target, ..)| target.x),
+                expected,
+                "circular={circular:?}"
+            );
+        }
+    }
+
+    /// The current item is the one whose snap position is nearest the
+    /// offset, the first on a tie: a swiper left between two items counts
+    /// from the nearer.
+    #[test]
+    fn a_turn_counts_from_the_nearest_item() {
+        for (from, to) in [(90.0, 200.0), (110.0, 400.0), (100.0, 200.0)] {
+            let (mut document, swiper, _) = row(3);
+            document.scroll_to(scroller(&document, swiper), Vector2D::new(from, 0.0));
+            assert_eq!(
+                turned(&mut document, swiper).map(|(target, ..)| target.x),
+                Some(to),
+                "from {from}"
+            );
+        }
+    }
+
+    /// `smooth-scroll` present with any value makes the turn instant,
+    /// web-core's reading. The document's own offset waits for the painter
+    /// either way: only the painter knows whether a finger had the swiper.
+    #[test]
+    fn smooth_scroll_makes_the_turn_instant_and_the_document_still_waits() {
+        for value in ["", "true", "false"] {
+            let (mut document, swiper, _) = row(3);
+            document.set_attribute(swiper, "smooth-scroll", value);
+            document.commit();
+            super::turn(&mut document, swiper);
+            assert_eq!(
+                document.scroll_offset(scroller(&document, swiper)),
+                Vector2D::zero(),
+                "{value:?}: not moved by the document"
+            );
+            assert_eq!(
+                pending(&mut document, swiper),
+                Some((Vector2D::new(200.0, 0.0), ScrollBehavior::Instant)),
+                "{value:?}"
+            );
+        }
+    }
+
+    /// A `scrollTo` a script made and the painter has not handled yet is not
+    /// replaced by a turn.
+    #[test]
+    fn a_turn_does_not_replace_a_scroll_a_script_asked_for() {
+        let (mut document, swiper, _) = row(3);
+        scroll_to(&mut document, swiper, r#"{"index":2}"#).expect("valid params");
+        super::turn(&mut document, swiper);
+        assert_eq!(
+            pending(&mut document, swiper),
+            Some((Vector2D::new(400.0, 0.0), ScrollBehavior::Smooth)),
+            "the script's turn to the last item stands"
+        );
+    }
+
+    #[test]
+    fn a_swiper_with_no_box_or_no_items_turns_nothing() {
+        let (mut document, swiper, _) = row(3);
+        document.set_inline_style(swiper, "display: none");
+        document.commit();
+        super::turn(&mut document, swiper);
+        let content = scroller(&document, swiper);
+        assert_eq!(document.pending_scroll_request(content), None);
+
+        let (mut document, swiper, _) = row(0);
+        super::turn(&mut document, swiper);
+        let content = scroller(&document, swiper);
+        assert_eq!(document.pending_scroll_request(content), None);
+    }
+
+    /// `interval` is `parseFloat`'s reading in milliseconds, 5000 when it is
+    /// missing or no number, and no shorter than a nested timer's 4 ms.
+    #[test]
+    fn the_period_is_the_interval_in_milliseconds() {
+        for (interval, milliseconds) in [
+            (None, 5000),
+            (Some(""), 5000),
+            (Some("fast"), 5000),
+            (Some("Infinity"), 5000),
+            (Some("1000"), 1000),
+            (Some("  250.5"), 250),
+            (Some("2500ms"), 2500),
+            (Some("1e3"), 1000),
+            (Some("12e"), 12),
+            (Some("0"), 4),
+            (Some("-300"), 4),
+            (Some("1e300"), 2_147_483_647),
+        ] {
+            assert_eq!(
+                autoplay_period(interval).as_millis(),
+                milliseconds,
+                "{interval:?}"
+            );
+        }
+    }
+
+    /// How long from now `autoplays`' earliest turn is due, in milliseconds.
+    fn due_in(autoplays: &Autoplays) -> Option<u128> {
+        autoplays
+            .next_deadline()
+            .map(|deadline| deadline.duration_since(ClockInstant::now()).as_millis())
+    }
+
+    /// A detached `x-swiper` with `attributes`, in a document whose autoplay
+    /// timers the test holds.
+    fn detached_swiper(attributes: &[(&str, &str)]) -> (LynxDocument, Autoplays, NodeId) {
+        let (mut document, autoplays) = with_autoplays();
+        let swiper = document.create_element(SWIPER_TAG, ());
+        for (name, value) in attributes {
+            document.set_attribute(swiper, name, value);
+        }
+        (document, autoplays, swiper)
+    }
+
+    /// The timer is a connected swiper's: it starts on connection, ends on
+    /// disconnection, and a new one starts on the next connection.
+    #[test]
+    fn autoplay_runs_from_connection_to_disconnection() {
+        let (mut document, autoplays, swiper) = detached_swiper(&[("autoplay", "")]);
+        assert_eq!(due_in(&autoplays), None, "not connected yet");
+        let page = document.document_element().id();
+        document.append_child(page, swiper);
+        let due = due_in(&autoplays).expect("started on connection");
+        assert!((4900..=5000).contains(&due), "one interval away, got {due}");
+
+        document.remove_element(swiper);
+        assert_eq!(due_in(&autoplays), None, "ended on disconnection");
+        document.append_child(page, swiper);
+        assert!(due_in(&autoplays).is_some(), "and started again");
+
+        document.drop_subtree(swiper);
+        assert_eq!(due_in(&autoplays), None, "a freed swiper keeps none");
+    }
+
+    #[test]
+    fn a_swiper_without_autoplay_keeps_no_timer() {
+        for attributes in [&[][..], &[("autoplay", "false")], &[("interval", "100")]] {
+            let (mut document, autoplays, swiper) = detached_swiper(attributes);
+            let page = document.document_element().id();
+            document.append_child(page, swiper);
+            assert_eq!(due_in(&autoplays), None, "{attributes:?}");
+        }
+    }
+
+    /// `autoplay` or `interval` written on a connected swiper that has
+    /// `autoplay` starts the timer over at the period `interval` names.
+    #[test]
+    fn a_change_of_autoplay_or_interval_starts_the_timer_over() {
+        let (mut document, autoplays, swiper) = detached_swiper(&[]);
+        let page = document.document_element().id();
+        document.append_child(page, swiper);
+        document.set_attribute(swiper, "interval", "60000");
+        assert_eq!(due_in(&autoplays), None, "no autoplay yet");
+
+        document.set_attribute(swiper, "autoplay", "true");
+        let due = due_in(&autoplays).expect("started");
+        assert!((59_900..=60_000).contains(&due), "got {due}");
+
+        document.set_attribute(swiper, "interval", "1000");
+        let due = due_in(&autoplays).expect("started over");
+        assert!((900..=1000).contains(&due), "the new period, got {due}");
+
+        document.remove_attribute(swiper, "interval");
+        let due = due_in(&autoplays).expect("started over");
+        assert!((4900..=5000).contains(&due), "the default, got {due}");
+    }
+
+    /// web-core's handler has no branch for `autoplay` going away, so the
+    /// timer it started keeps running at the period it has, whatever
+    /// `interval` is written afterwards.
+    #[test]
+    fn removing_autoplay_leaves_the_timer_running() {
+        for stop in [None, Some("false")] {
+            let (mut document, autoplays, swiper) =
+                detached_swiper(&[("autoplay", ""), ("interval", "60000")]);
+            let page = document.document_element().id();
+            document.append_child(page, swiper);
+            let armed = autoplays.next_deadline().expect("started");
+
+            match stop {
+                None => document.remove_attribute(swiper, "autoplay"),
+                Some(value) => document.set_attribute(swiper, "autoplay", value),
+            }
+            assert_eq!(autoplays.next_deadline(), Some(armed), "{stop:?}: running");
+            document.set_attribute(swiper, "interval", "100");
+            assert_eq!(
+                autoplays.next_deadline(),
+                Some(armed),
+                "{stop:?}: and at its old period"
+            );
+        }
+    }
+
+    /// What came due is turned and armed again one period after the run;
+    /// what has not is left alone.
+    #[test]
+    fn a_run_turns_what_is_due_and_arms_the_next_turn() {
+        let (mut document, autoplays) = with_autoplays();
+        let (swiper, _) = build(
+            &mut document,
+            "width: 200px; height: 100px",
+            &[("autoplay", ""), ("interval", "1000")],
+            3,
+        );
+        document.commit();
+        let content = scroller(&document, swiper);
+        let armed = autoplays.next_deadline().expect("started");
+
+        let early = armed
+            .checked_sub(Duration::from_millis(1))
+            .expect("a deadline a second away has a millisecond before it");
+        autoplays.run_due(&mut document, early);
+        assert_eq!(document.pending_scroll_request(content), None, "not due");
+        assert_eq!(autoplays.next_deadline(), Some(armed));
+
+        let late = armed + Duration::from_millis(30);
+        autoplays.run_due(&mut document, late);
+        assert_eq!(
+            pending(&mut document, swiper),
+            Some((Vector2D::new(200.0, 0.0), ScrollBehavior::Smooth)),
+            "turned to the second item"
+        );
+        assert_eq!(
+            autoplays.next_deadline(),
+            Some(late + Duration::from_secs(1)),
+            "one period after the run"
         );
     }
 }

@@ -69,6 +69,7 @@ use dom::{Document, ImageOutcome, NodeId, StylesheetOrigin};
 
 pub(crate) use self::base_methods::invoke_base_method;
 pub(crate) use self::svg::is_svg;
+pub(crate) use self::swiper::Autoplays;
 pub use self::ua_sheet::PageConfig;
 pub(crate) use crate::view::Viewport;
 
@@ -84,18 +85,20 @@ pub(crate) const PAGE_TAG: &str = "page";
 /// settled at its bind in, the `dialog` component the `close` and `cancel` its
 /// methods queue, and the `overlay` component its `showoverlay` and
 /// `dismissoverlay`, for the runtime to dispatch once it is out of the
-/// JavaScript call that caused them.
+/// JavaScript call that caused them. `autoplays` is where the `x-swiper`
+/// component keeps its autoplay timers, for the runtime to wait out and run.
 #[must_use]
 pub(crate) fn new_document(
     viewport: Viewport,
     config: PageConfig,
     events: ComponentEvents,
+    autoplays: Autoplays,
 ) -> LynxDocument {
     let mut document = Document::new(viewport.device(), PAGE_TAG, ());
     blur_view::define(&mut document);
     image::define(&mut document, events.clone());
     svg::define(&mut document, events.clone());
-    swiper::define(&mut document);
+    swiper::define(&mut document, autoplays);
     refresh_view::define(&mut document);
     viewpager::define(&mut document);
     scroll_container::define(&mut document);

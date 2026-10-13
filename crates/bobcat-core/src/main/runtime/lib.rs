@@ -37,7 +37,6 @@ use smallvec::SmallVec;
 use tokio::sync::watch;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
-#[cfg(test)]
 use crate::clock::ClockInstant;
 use crate::esm::{
     ANIMATION_FRAME_MODULE_SPECIFIER, BTS_MODULE_SPECIFIER, ELEMENT_MODULE_SPECIFIER,
@@ -48,8 +47,8 @@ use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::exposure::{Exposure, is_exposure_attribute};
 use crate::main::record::write_record_field;
 use crate::main::tree::{
-    ComponentEvent, ComponentEvents, LynxDocument, PageConfig, invoke_base_method, is_svg,
-    new_document,
+    Autoplays, ComponentEvent, ComponentEvents, LynxDocument, PageConfig, invoke_base_method,
+    is_svg, new_document,
 };
 use crate::realm::policy::context_of;
 use crate::realm::{RealmCore, open_realm, string_argument};
@@ -416,6 +415,13 @@ struct DocumentSlot {
     /// document because the `image` component is the far end of it and
     /// reaches nothing else; the runtime drains it once per entry.
     component_events: ComponentEvents,
+    /// The autoplay timers of the document's `x-swiper`s, which the
+    /// component starts and stops from its reactions. Held here for what
+    /// `component_events` is: the runtime waits for the earliest
+    /// ([`MainThreadRuntime::next_deadline`]) and runs what came due
+    /// ([`MainThreadRuntime::run_due_timers`]). Empty on a page with no
+    /// autoplaying swiper.
+    autoplays: Autoplays,
     /// The document's exposure registrations and the transitions they owe
     /// script.
     ///
@@ -454,6 +460,7 @@ impl DocumentSlot {
             bound: false,
             held: None,
             component_events: ComponentEvents::default(),
+            autoplays: Autoplays::default(),
             exposure: Exposure::new(),
             removals: 0,
             outbox,
@@ -468,6 +475,21 @@ impl DocumentSlot {
     /// and nothing empties the slot until the realm itself is freed.
     fn document_mut(&mut self) -> &mut LynxDocument {
         self.document.as_mut().expect(DOCUMENT_EXISTS)
+    }
+
+    /// Turns every `x-swiper` whose autoplay timer has come due. One test on
+    /// a page where none autoplays, which is also every page whose document
+    /// does not exist yet: a timer is a connected swiper's.
+    fn run_due_autoplays(&mut self) {
+        let Some(deadline) = self.autoplays.next_deadline() else {
+            return;
+        };
+        let now = ClockInstant::now();
+        if deadline > now {
+            return;
+        }
+        let autoplays = self.autoplays.clone();
+        autoplays.run_due(self.document_mut(), now);
     }
 
     /// Builds the realm's one document out of the configuration the boot
@@ -510,8 +532,9 @@ impl DocumentSlot {
             None => viewport,
         };
         let events = self.component_events.clone();
+        let autoplays = self.autoplays.clone();
         let document = construction_phase("building the page", || {
-            let mut document = new_document(viewport, config, events);
+            let mut document = new_document(viewport, config, events, autoplays);
             if let Some(pool) = style_pool {
                 document.set_style_pool(pool);
             }
@@ -1159,7 +1182,9 @@ impl MainThreadRuntime {
     /// ([`dom::Document::pending_scroll_request`]) is dropped: the painter
     /// made it before it saw the request, so it would write back the offset
     /// the request replaced. One that names the pending request, or a newer
-    /// one, is adopted and acknowledges it.
+    /// one, is adopted and acknowledges it. A pending auto-scroll change
+    /// ([`dom::Document::auto_scroll`]) moved no offset, so no post is
+    /// dropped on its account: whichever names its serial acknowledges it.
     pub(crate) fn adopt_scroll_offsets(
         &mut self,
         entries: impl Iterator<Item = (dom::NodeId, crate::link::ScrollEntry)>,
@@ -1170,6 +1195,9 @@ impl MainThreadRuntime {
         let mut recenter = false;
         let mut moved: SmallVec<[dom::NodeId; 4]> = SmallVec::new();
         for (node, entry) in entries {
+            if let Some(handled) = entry.request {
+                document.acknowledge_auto_scroll(node, handled);
+            }
             if let Some(pending) = document.pending_scroll_request(node) {
                 let Some(handled) = entry.request.filter(|handled| *handled >= pending) else {
                     continue;
@@ -1726,7 +1754,13 @@ impl MainThreadRuntime {
     /// the same standing an event listener that throws already has. A
     /// child's callbacks are in the same batch, because what they call of
     /// this realm's can remove elements too.
+    ///
+    /// The `x-swiper` autoplay turns that came due run first. They are the
+    /// component's, not script's: each asks the painter for one scroll and
+    /// calls into no realm, so they throw nothing, and what they ask for
+    /// rides this entry's commit like a timer callback's mutation.
     pub(crate) fn run_due_timers(&mut self, js_runtime: &mut ScriptRuntime) -> Vec<ScriptError> {
+        self.slot.borrow_mut().run_due_autoplays();
         let own = run_due_timers(&mut self.core.engine, js_runtime, &self.core.timers);
         let children = self.core.children.run_due_timers(js_runtime);
         if own.is_none() && children.is_none() {
@@ -1739,6 +1773,17 @@ impl MainThreadRuntime {
             failures.push(error.into_script_error());
         }
         failures
+    }
+
+    /// The earliest deadline this page waits for: its realm's next timer, or
+    /// an `x-swiper`'s next autoplay turn, whichever comes first.
+    pub(crate) fn next_deadline(&self) -> Option<ClockInstant> {
+        let timers = self.core.timers.next_deadline();
+        let autoplays = self.slot.borrow().autoplays.next_deadline();
+        match (timers, autoplays) {
+            (Some(timers), Some(autoplays)) => Some(timers.min(autoplays)),
+            (timers, autoplays) => timers.or(autoplays),
+        }
     }
 
     /// Evaluates `bobcat:boot`, which is this realm's whole startup: it

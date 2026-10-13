@@ -118,6 +118,17 @@ interface BobcatNative {
    * `offset` at once and answers what it consumed; `getScrollInfo` answers
    * the offset and the axis's maximum offset.
    *
+   * `autoScroll({rate, start = false, autoStop = true})` exists on
+   * `scroll-view` and `list`, on the axis the tag scrolls. With a truthy
+   * `start` it moves that axis at `rate` CSS px per second (a number, or a
+   * `px`/`rpx`/`ppx` string; negative toward the start edge) until the edge
+   * it moves toward, where it ends unless `autoStop` is `false`, in which
+   * case it goes on when the content grows; a zero, missing or unreadable
+   * `rate` is code 4 and changes nothing. Without `start` it ends the
+   * auto-scroll where it stands. It yields to a finger and to every other
+   * scroll and goes on afterwards; `scrollTo` and `scrollBy` do not end it.
+   * Always `0` and no data otherwise.
+   *
    * `scrollToPosition({position, index?, itemKey?, offset = 0, alignTo =
    * "top", smooth = false})`, `scrollBy({offset})`,
    * `getScrollContainerInfo()` and `getVisibleCells()` exist on `list`
@@ -131,8 +142,9 @@ interface BobcatNative {
    * out-of-range number is code 4. `scrollBy` is `scroll-view`'s.
    * `getVisibleCells` reports the `list-item` children whose border box
    * overlaps the scrollport, `index` counting `list-item` children, the
-   * rect relative to the scrollport. `autoScroll` and `getScrollInfo` are
-   * code 3. A `list` has no `scrollTo` of its own: the base set's answers.
+   * rect relative to the scrollport. `autoScroll` is `scroll-view`'s and
+   * `getScrollInfo` is code 3. A `list` has no `scrollTo` of its own: the
+   * base set's answers.
    *
    * `finishRefresh()`, `finishLoadMore()` and `autoStartRefresh()` exist on
    * `x-refresh-view` only, `params` unread, and always answer `0` and no

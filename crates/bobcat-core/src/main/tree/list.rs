@@ -11,12 +11,13 @@
 //! recycling, no threshold events, no `update-list-info` consumer —
 //! `docs/tracking/components.md` rows 23-24 carry what is still missing.
 //!
-//! The component ([`List`]) adds four of the methods Lynx documents for the
+//! The component ([`List`]) adds five of the methods Lynx documents for the
 //! tag (lynxjs.org/api/elements/built-in/list), which the runtime's
 //! `callElementMethod` reaches through
 //! [`dom::Document::invoke_element_method`]: `scrollToPosition`
-//! ([`scroll_to_position`]), `scrollBy` (`scroll-view`'s own,
-//! [`super::scroll_container::scroll_by`], on the list's axis),
+//! ([`scroll_to_position`]), `scrollBy` and `autoScroll` (`scroll-view`'s
+//! own, [`super::scroll_container::scroll_by`] and
+//! [`super::scroll_container::auto_scroll`], on the list's axis),
 //! `getScrollContainerInfo` ([`scroll_container_info`]) and
 //! `getVisibleCells` ([`visible_cells`]). The list has no `scrollTo` of its
 //! own, as web-core's `XList` has none, so the base set's CSSOM-View
@@ -38,12 +39,11 @@
 //!   `getVisibleCells` (`:966-1002`).
 //!
 //! Each method reads the last completed layout and never flushes, as every
-//! UI method does here. Not built, and so code 3: `autoScroll({rate, start,
-//! autoStop})`, for the reason `scroll-view`'s is not
-//! ([`super::scroll_container`]'s "Not built": a constant-rate scroll the
-//! painter drives with a way to stop it does not exist), and `getScrollInfo`,
-//! which only the natives answer on a list and the docs do not list, left
-//! out as `setDragGesture` is (user ruling 2026-10-11).
+//! UI method does here. `autoScroll({rate, start, autoStop})` is
+//! `scroll-view`'s own ([`super::scroll_container::auto_scroll`]) on the
+//! list's axis. Not built, and so code 3: `getScrollInfo`, which only the
+//! natives answer on a list and the docs do not list, left out as
+//! `setDragGesture` is (user ruling 2026-10-11).
 //!
 //! Everything here is translated from web-elements'
 //! `lynx-stack/packages/web-platform/web-elements/src/elements/XList/x-list.css`,
@@ -118,7 +118,7 @@ use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Rect, S
 use serde_json::{Map, Value};
 
 use super::scroll_container::{
-    along, clamp_to_range, object, offset_px, rect_in_scroller, scroll_by, with_axis,
+    along, auto_scroll, clamp_to_range, object, offset_px, rect_in_scroller, scroll_by, with_axis,
 };
 use super::{InvalidParams, LynxDocument, element_child, element_children, is_truthy};
 use crate::main::record::write_record_field;
@@ -244,6 +244,10 @@ impl CustomElement<()> for List {
             "scrollBy" => {
                 let horizontal = is_horizontal(document, element);
                 scroll_by(document, element, call.params, horizontal).map(|by| Some(by.record()))
+            }
+            "autoScroll" => {
+                let horizontal = is_horizontal(document, element);
+                auto_scroll(document, element, call.params, horizontal).map(|()| None)
             }
             "getScrollContainerInfo" => Ok(Some(scroll_container_info(document, element).record())),
             "getVisibleCells" => Ok(Some(cells_record(&visible_cells(document, element)))),
@@ -1844,13 +1848,43 @@ mod tests {
         );
     }
 
-    /// `autoScroll` is not built, `getScrollInfo` is left to the natives,
-    /// `scrollTo` and the rest are the base set's or no one's.
+    /// `autoScroll` is `scroll-view`'s, on the list's own axis.
+    #[test]
+    fn auto_scroll_runs_on_the_lists_axis() {
+        for (attribute, horizontal) in [
+            (None, false),
+            (Some(("scroll-orientation", "horizontal")), true),
+        ] {
+            let (mut document, list, _) = methods_list(attribute);
+            assert_eq!(
+                invoke(
+                    &mut document,
+                    list,
+                    "autoScroll",
+                    r#"{"rate":"30px","start":true,"autoStop":false}"#
+                ),
+                MethodOutcome::Done
+            );
+            let pending = document.pending_auto_scroll(list).expect("recorded");
+            assert_eq!(
+                (pending.rate, pending.horizontal, pending.stop_at_edge),
+                (30.0, horizontal, false)
+            );
+            assert_eq!(
+                invoke(&mut document, list, "autoScroll", r#"{"start":true}"#),
+                MethodOutcome::Failed(MethodError::InvalidParams),
+                "no rate"
+            );
+            assert_eq!(document.pending_auto_scroll(list), Some(pending));
+        }
+    }
+
+    /// `getScrollInfo` is left to the natives, `scrollTo` and the rest are
+    /// the base set's or no one's.
     #[test]
     fn methods_not_built_are_not_found() {
         let (mut document, list, _) = methods_list(None);
         for name in [
-            "autoScroll",
             "getScrollInfo",
             "selectTab",
             "scrollTo",
