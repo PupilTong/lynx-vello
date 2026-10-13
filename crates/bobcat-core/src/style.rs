@@ -17,7 +17,7 @@
 //! parsing, and property-name resolution for the shorthand-expanding
 //! properties — is skipped.
 
-use dom::{CssDeclaration, CssKeyframe, CssRule, StylesheetOrigin};
+use dom::{CssDeclaration, CssKeyframe, CssRule, NodeId, StylesheetOrigin};
 
 use crate::main::tree::LynxDocument;
 
@@ -142,6 +142,54 @@ pub(crate) fn add_preparsed_style_sheet(document: &mut LynxDocument, sheet: &Pre
 pub(crate) fn add_style_sheet_text(document: &mut LynxDocument, css: &str) {
     let css = css.strip_prefix('\u{feff}').unwrap_or(css);
     document.add_stylesheet(css, StylesheetOrigin::Author);
+}
+
+/// Mounts a pre-parsed author stylesheet on one shadow tree.
+///
+/// The shadow-root counterpart of [`add_preparsed_style_sheet`]: the rules
+/// match only inside `shadow_root`'s tree (the host through `:host`), and the
+/// sheet's implicit `@scope` root is the host. An `@font-face` rule in the
+/// sheet is not loaded ([`dom::Document::append_shadow_rules`]).
+///
+/// # Panics
+///
+/// Panics if `shadow_root` is not a live shadow root of `document`.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the <frame> element mounts its card's sheets here"
+    )
+)]
+pub(crate) fn add_preparsed_style_sheet_to_shadow(
+    document: &mut LynxDocument,
+    shadow_root: NodeId,
+    sheet: &PreparsedStyleSheet,
+) {
+    let rules = lower(document, sheet);
+    document.append_shadow_rules(shadow_root, rules);
+}
+
+/// Mounts an author stylesheet supplied as CSS text on one shadow tree,
+/// stripping a leading BOM as [`add_style_sheet_text`] does.
+///
+/// # Panics
+///
+/// Panics if `shadow_root` is not a live shadow root of `document`.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the <frame> element mounts its card's sheets here"
+    )
+)]
+pub(crate) fn add_style_sheet_text_to_shadow(
+    document: &mut LynxDocument,
+    shadow_root: NodeId,
+    css: &str,
+) {
+    let css = css.strip_prefix('\u{feff}').unwrap_or(css);
+    document.add_shadow_stylesheet(shadow_root, css);
 }
 
 #[cfg(test)]
@@ -361,6 +409,53 @@ mod tests {
         document.set_id_attribute(view, Some("tall"));
         document.layout();
         assert!((document.rounded_layout(view).unwrap().size.height - 77.0).abs() < f32::EPSILON);
+    }
+
+    /// A sheet mounted on a shadow root styles that tree and its host only.
+    #[test]
+    fn a_preparsed_sheet_mounted_on_a_shadow_root_stays_inside_it() {
+        let mut document = document();
+        let page = document.document_element().id();
+        let host = document.create_element("view", ());
+        document.insert_before(page, host, None);
+        document.set_classes(host, "card");
+        let shadow = document.attach_shadow(host, dom::ShadowRootMode::Open);
+        let inside = document.create_element("view", ());
+        document.insert_before(shadow, inside, None);
+        document.set_classes(inside, "box");
+        let outside = document.create_element("view", ());
+        document.insert_before(page, outside, None);
+        document.set_classes(outside, "box");
+
+        add_preparsed_style_sheet_to_shadow(
+            &mut document,
+            shadow,
+            &PreparsedStyleSheet {
+                rules: vec![
+                    style(".box", vec![declaration("width", "30px")]),
+                    style(":host(.card)", vec![declaration("height", "50px")]),
+                ],
+            },
+        );
+        add_style_sheet_text_to_shadow(&mut document, shadow, "\u{feff}.box { height: 12px; }");
+        document.layout();
+
+        let layout = document.rounded_layout(inside).expect("laid out");
+        assert!((layout.size.width - 30.0).abs() < f32::EPSILON);
+        assert!(
+            (layout.size.height - 12.0).abs() < f32::EPSILON,
+            "the text variant strips the BOM, so its first rule survives"
+        );
+        let host_layout = document.rounded_layout(host).expect("laid out");
+        assert!(
+            (host_layout.size.height - 50.0).abs() < f32::EPSILON,
+            ":host reaches the host from the shadow sheet"
+        );
+        let outside_layout = document.rounded_layout(outside).expect("laid out");
+        assert!(
+            (outside_layout.size.width - 30.0).abs() > f32::EPSILON,
+            "the shadow sheet does not match in the light tree"
+        );
     }
 
     /// A BOM is decoding metadata, not the first character of a selector.

@@ -7,7 +7,7 @@
 mod common;
 
 use common::Doc;
-use dom::{NodeId, ShadowRootMode, StylesheetOrigin};
+use dom::{CssDeclaration, CssRule, NodeId, ShadowRootMode, StylesheetOrigin};
 
 /// A host with a shadow tree, plus the ids of interest.
 struct Harness {
@@ -611,6 +611,114 @@ fn a_class_change_on_the_host_restyles_the_shadow_tree_through_host() {
         "19px",
         "a host state change invalidates the shadow tree that :host() selects on"
     );
+}
+
+/// One pre-built style rule with a single declaration.
+fn rule(doc: &Doc, selectors: &str, property: &str, value: &str) -> CssRule {
+    doc.dom
+        .build_style_rule(
+            selectors,
+            [CssDeclaration {
+                property,
+                value: value.into(),
+                important: false,
+            }],
+        )
+        .expect("the selector parses")
+}
+
+#[test]
+fn pre_built_rules_on_a_shadow_root_style_that_tree_only() {
+    let mut harness = Harness::new();
+    let inside = harness.shadow_el(harness.shadow, "view.box");
+    let light = harness.doc.el(harness.doc.root, "view.box");
+    let other_host = harness.doc.el(harness.doc.root, "host");
+    let other_shadow = harness
+        .doc
+        .dom
+        .attach_shadow(other_host, ShadowRootMode::Open);
+    let other = harness.doc.el(other_shadow, "view.box");
+
+    let rules = vec![rule(&harness.doc, ".box", "width", "21px")];
+    harness.doc.dom.append_shadow_rules(harness.shadow, rules);
+    harness.doc.flush();
+
+    assert_eq!(harness.doc.value(inside, "width"), "21px");
+    assert_eq!(
+        harness.doc.value(light, "width"),
+        "auto",
+        "the rules do not leak into the light tree"
+    );
+    assert_eq!(
+        harness.doc.value(other, "width"),
+        "auto",
+        "nor into a sibling shadow tree"
+    );
+}
+
+#[test]
+fn pre_built_rules_on_a_shadow_root_reach_the_host_through_host() {
+    let mut harness = Harness::new();
+    harness.doc.add_class(harness.host, "themed");
+    let inside = harness.shadow_el(harness.shadow, "target");
+    let rules = vec![
+        rule(&harness.doc, ":host", "width", "11px"),
+        rule(&harness.doc, ":host(.themed) target", "width", "13px"),
+        rule(&harness.doc, ":host(.other) target", "height", "99px"),
+    ];
+    harness.doc.dom.append_shadow_rules(harness.shadow, rules);
+    harness.doc.flush();
+
+    assert_eq!(harness.doc.value(harness.host, "width"), "11px");
+    assert_eq!(harness.doc.value(inside, "width"), "13px");
+    assert_eq!(
+        harness.doc.value(inside, "height"),
+        "auto",
+        "a :host() condition that the host fails must not match"
+    );
+}
+
+#[test]
+fn pre_built_and_text_shadow_sheets_cascade_in_mount_order() {
+    let mut harness = Harness::new();
+    let inside = harness.shadow_el(harness.shadow, "target");
+    harness
+        .doc
+        .dom
+        .add_shadow_stylesheet(harness.shadow, "target { width: 5px; height: 5px; }");
+    let rules = vec![rule(&harness.doc, "target", "width", "7px")];
+    harness.doc.dom.append_shadow_rules(harness.shadow, rules);
+    harness.doc.flush();
+    assert_eq!(harness.doc.value(inside, "width"), "7px");
+    assert_eq!(harness.doc.value(inside, "height"), "5px");
+
+    harness
+        .doc
+        .dom
+        .add_shadow_stylesheet(harness.shadow, "target { width: 9px; }");
+    harness.doc.flush();
+    assert_eq!(
+        harness.doc.value(inside, "width"),
+        "9px",
+        "a sheet mounted after the pre-built rules restyles over them"
+    );
+}
+
+#[test]
+#[should_panic(expected = "not a live shadow root")]
+fn appending_pre_built_rules_to_an_element_panics() {
+    let mut harness = Harness::new();
+    let rules = vec![rule(&harness.doc, "target", "width", "7px")];
+    harness.doc.dom.append_shadow_rules(harness.host, rules);
+}
+
+#[test]
+#[should_panic(expected = "CSS rule belongs to another Document")]
+fn appending_another_documents_rules_to_a_shadow_root_panics() {
+    let mut harness = Harness::new();
+    let foreign = Doc::new();
+    let rules = vec![rule(&foreign, "target", "width", "7px")];
+    harness.doc.dom.append_shadow_rules(harness.shadow, rules);
 }
 
 #[test]
