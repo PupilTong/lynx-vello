@@ -33,14 +33,10 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::Entry;
-use std::future::Future;
 use std::num::NonZeroU64;
-use std::pin::pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::task::{Context, Poll, Wake, Waker};
-use std::thread;
 
 use dom::input::PointerId;
 use dom::scroll::ScrollAxes;
@@ -52,7 +48,6 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::background::{WorkerKey, WorkerMessage};
-use crate::clock::ClockInstant;
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
 use crate::native_module::ModuleReply;
@@ -949,37 +944,58 @@ pub(crate) fn detached_outbox_probing_style_sheets(
     )
 }
 
-/// Polls `future` on this thread until it is ready or `deadline` passes.
+#[cfg(test)]
+pub(crate) use deadline::block_on_deadline;
+
+/// A blocking wait with a deadline, for the crate's tests alone.
 ///
-/// The one place a host's own thread blocks on `bobcat-main`, reached from
-/// `tick` and from the crate's tests. It parks rather than spins, and it
-/// takes the clock explicitly because `std::time` is not available on every
-/// target this engine runs on.
-///
-/// The future is polled *unconstrained*: tokio's cooperative budget would
-/// otherwise stop yielding to it after a few hundred ready polls, and there
-/// is no runtime here to hand the budget back.
-pub(crate) fn block_on_deadline<F: Future>(future: F, deadline: ClockInstant) -> Option<F::Output> {
-    let waker = Waker::from(Arc::new(Unpark(thread::current())));
-    let mut context = Context::from_waker(&waker);
-    let mut future = pin!(tokio::task::coop::unconstrained(future));
-    loop {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
-            return Some(output);
+/// No host entry point blocks its thread on `bobcat-main`: an offscreen
+/// host's wait for a frame is its own loop over
+/// [`crate::Painter::frame_serviced`], in which it also takes the view's
+/// turn. A test that plays one end of a channel by hand has no such loop.
+#[cfg(test)]
+mod deadline {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+    use std::thread;
+
+    use crate::clock::ClockInstant;
+
+    /// Polls `future` on this thread until it is ready or `deadline` passes.
+    ///
+    /// It parks rather than spins, and it takes the clock explicitly because
+    /// `std::time` is not available on every target this engine runs on.
+    ///
+    /// The future is polled *unconstrained*: tokio's cooperative budget would
+    /// otherwise stop yielding to it after a few hundred ready polls, and
+    /// there is no runtime here to hand the budget back.
+    pub(crate) fn block_on_deadline<F: Future>(
+        future: F,
+        deadline: ClockInstant,
+    ) -> Option<F::Output> {
+        let waker = Waker::from(Arc::new(Unpark(thread::current())));
+        let mut context = Context::from_waker(&waker);
+        let mut future = pin!(tokio::task::coop::unconstrained(future));
+        loop {
+            if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+                return Some(output);
+            }
+            let remaining = deadline.checked_duration_since(ClockInstant::now())?;
+            thread::park_timeout(remaining);
         }
-        let remaining = deadline.checked_duration_since(ClockInstant::now())?;
-        thread::park_timeout(remaining);
-    }
-}
-
-struct Unpark(thread::Thread);
-
-impl Wake for Unpark {
-    fn wake(self: Arc<Self>) {
-        self.0.unpark();
     }
 
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.unpark();
+    struct Unpark(thread::Thread);
+
+    impl Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
     }
 }

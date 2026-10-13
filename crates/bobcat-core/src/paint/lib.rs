@@ -33,6 +33,7 @@ use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
+#[cfg(test)]
 use std::time::Duration;
 
 use dom::input::{InputEvent, InputKind, PointerId};
@@ -56,16 +57,26 @@ use self::graphics::{FrameAcquisition, WindowGraphics};
 use self::inertia::{Axis, BounceBack, ChainOutcome, DragTrack, Fling, Glide};
 use self::motion::{ElasticStep, Motion, resolve_elastic_step, stretch_of, unwind_stretch};
 use crate::clock::ClockInstant;
-use crate::link::{
-    FramePost, InputEventPayload, Published, ScrollEntry, ToMain, ViewSeat, block_on_deadline,
-};
+use crate::link::{FramePost, InputEventPayload, Published, ScrollEntry, ToMain, ViewSeat};
 use crate::main::tree::Viewport;
 use crate::resource::ResourceFetcher;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::view::Screenshot;
 use crate::view::{ComposeKey, DrawTarget, EngineError, FrameSize, LynxView};
 
-const BEGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+/// One frame an offscreen painter has posted to its view and not yet drawn:
+/// what [`Painter::post_frame`] answers, [`Painter::frame_serviced`] asks
+/// about and [`Painter::draw_posted`] draws.
+#[derive(Debug)]
+#[must_use = "a posted frame is drawn by `Painter::draw_posted`"]
+pub struct PostedFrame {
+    /// The instant the post was made at, which is the instant the frame is
+    /// drawn at: one reading of the clock for both halves.
+    now: f64,
+    /// The post's sequence number, which the view acknowledges. `None` when
+    /// nothing was posted: no view is attached, or its task has gone.
+    seq: Option<u64>,
+}
 
 /// The painter's monotonic animation timeline. Its epoch is the construction
 /// of whichever view it is attached to, and one reading is shared by every
@@ -316,8 +327,8 @@ impl Output {
     /// swap-chain image, which is what lets re-exposure present the same frame
     /// again with a blit alone. Neither kind waits for the submitted work here:
     /// a window presents, and an offscreen target's readback polls the device
-    /// itself — only [`Painter::tick`], which renders offscreen and reads
-    /// nothing back, waits.
+    /// itself — only [`Painter::draw_posted`], which renders offscreen and
+    /// reads nothing back, waits.
     ///
     /// The scene's bitmaps are named because a target tracks what its
     /// renderer's image atlas still holds; see
@@ -1490,7 +1501,7 @@ impl Painter {
     }
 
     /// Whether the engine owes the timeline another frame, as of the last
-    /// pass that polled the view — a `pump`, a `tick`, or an input. That is
+    /// pass that polled the view — a `pump`, an offscreen frame, or an input. That is
     /// when a host asks: after answering the wakeup that carried the frame.
     ///
     /// A detached painter owes nothing: there is no timeline to be behind.
@@ -1739,9 +1750,9 @@ impl Painter {
 
     /// Posts a frame request for main when one is due — something animates
     /// on main, a curve passed its end, or `always` — beside this pass's
-    /// scroll state, and answers its sequence number: the number
-    /// [`Self::wait_begin_frame`] waits on, whether or not this post had to
-    /// send a marker. `None` when nothing was posted or the view's task is
+    /// scroll state, and answers its sequence number: the number the view
+    /// acknowledges ([`Self::frame_serviced`]), whether or not this post had
+    /// to send a marker. `None` when nothing was posted or the view's task is
     /// gone.
     pub(super) fn begin_frame(&mut self, now: f64, always: bool) -> Option<u64> {
         let main_ticks_due = self
@@ -1959,22 +1970,40 @@ impl Painter {
         self.frame().cloned()
     }
 
-    /// Advances an offscreen painter by one frame, answering whether it drew.
-    /// Supplies one synthetic vsync to outstanding script-frame requests first.
+    /// Starts one offscreen frame: delivers a synthetic vsync to outstanding
+    /// script-frame requests, then posts the frame to the view, and answers
+    /// what was posted.
     ///
-    /// The one call that blocks this thread on `bobcat-main`, which is why
-    /// only an offscreen painter has it — and why a browser painter, which
-    /// cannot have an offscreen target at all, can never reach it. It asks
-    /// the view's host for nothing either: the view's own `pump` is what
-    /// services its resource protocol, so a host settling an image drives
-    /// both turns.
+    /// An offscreen painter has no display to pace against, so a host that
+    /// wants a frame carrying everything it sent before asks for one: this
+    /// posts it, [`Self::frame_serviced`] reads whether the view has serviced
+    /// it, and [`Self::draw_posted`] draws. None of the three waits. The wait
+    /// between the post and the draw is the host's own, in its own loop,
+    /// because the view may need the host during it: a script that adopts a
+    /// stylesheet, requires a module or waits a `Future` parks its job on an
+    /// answer [`crate::LynxView::pump`] gives, and the frame post is queued
+    /// behind that job. A host therefore takes the view's turn while it
+    /// waits:
+    ///
+    /// ```text
+    /// let posted = painter.post_frame()?;
+    /// while !painter.frame_serviced(&posted) && before the host's own deadline {
+    ///     for event in view.pump() { … }
+    ///     wait for the host's wakeup
+    /// }
+    /// painter.draw_posted(posted, false)?;
+    /// ```
+    ///
+    /// The view wakes the host through its `EventRequester` both when it asks
+    /// the host for something and when it services a post, so that wakeup is
+    /// what the loop waits on.
     ///
     /// # Errors
     ///
     /// [`EngineError::NotOffscreen`] if this painter presents into a window —
-    /// its frames come from [`Self::pump`], on the host's own clock — and
-    /// [`EngineError::Gpu`] if the render fails.
-    pub fn tick(&mut self, force: bool) -> Result<bool, EngineError> {
+    /// its frames come from [`Self::pump`], on the host's own clock, and it
+    /// never waits for the view at all.
+    pub fn post_frame(&mut self) -> Result<PostedFrame, EngineError> {
         if !matches!(self.output, Output::Offscreen(_)) {
             return Err(EngineError::NotOffscreen);
         }
@@ -1984,16 +2013,57 @@ impl Painter {
             self.scroll_intents.rebase(&frame, now);
         }
         self.deliver_vsync(now);
-        if let Some(seq) = self.begin_frame(now, true) {
-            let _ = self.wait_begin_frame(seq, BEGIN_FRAME_TIMEOUT);
+        let seq = self.begin_frame(now, true);
+        Ok(PostedFrame { now, seq })
+    }
+
+    /// Whether the view has serviced `posted`, adopting everything the view
+    /// has published on the way. Never blocks.
+    ///
+    /// `true` as well when nothing will ever service it: nothing was posted,
+    /// or the view was released, or its tasks have ended — a boot that failed
+    /// ends them — so a host waiting on this is not left waiting on a view
+    /// that has gone.
+    pub fn frame_serviced(&mut self, posted: &PostedFrame) -> bool {
+        self.poll_link();
+        let Some(seq) = posted.seq else {
+            return true;
+        };
+        self.published.begin_frame_serviced >= seq
+            || self
+                .seat
+                .upgrade()
+                .is_none_or(|seat| seat.commands.is_closed())
+    }
+
+    /// Draws the frame [`Self::post_frame`] started, answering whether it
+    /// drew: whatever the view has published by now, at the instant the post
+    /// was made.
+    ///
+    /// A host calls it once [`Self::frame_serviced`] answers `true`, and may
+    /// call it without that — its own deadline passed — in which case this
+    /// draws what was already published and the post is serviced later.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::NotOffscreen`] if this painter presents into a window,
+    /// and [`EngineError::Gpu`] if the render fails.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "a posted frame is drawn once, and taking it is what says so"
+    )]
+    pub fn draw_posted(&mut self, posted: PostedFrame, force: bool) -> Result<bool, EngineError> {
+        if !matches!(self.output, Output::Offscreen(_)) {
+            return Err(EngineError::NotOffscreen);
         }
+        let PostedFrame { now, .. } = posted;
         self.poll_link();
         let Some(frame) = self.frame().cloned() else {
             self.publish_scroll(now, None);
             return Ok(false);
         };
-        // The wait may have adopted a newer commit. What this rebase changes
-        // is the pass's last publish; no send of the pass follows it.
+        // The host's wait may have adopted a newer commit. What this rebase
+        // changes is the pass's last publish; no send of the pass follows it.
         self.scroll_intents.rebase(&frame, now);
         self.publish_scroll(now, None);
         let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
@@ -2012,16 +2082,29 @@ impl Painter {
         Ok(rendered)
     }
 
+    /// One whole offscreen frame with the wait in the middle blocked on, for
+    /// the crate's tests: post, [`Self::wait_begin_frame`], draw. A host has
+    /// no such call, because the wait is where it takes its view's turn.
+    #[cfg(test)]
+    pub(crate) fn tick(&mut self, force: bool) -> Result<bool, EngineError> {
+        let posted = self.post_frame()?;
+        if let Some(seq) = posted.seq {
+            let _ = self.wait_begin_frame(seq, Duration::from_secs(10));
+        }
+        self.draw_posted(posted, force)
+    }
+
     /// Waits for the attached view to acknowledge a particular frame post,
     /// adopting everything it publishes on the way.
     ///
-    /// The one blocking wait a host's own thread makes on `bobcat-main`, and
-    /// [`Self::tick`] — offscreen only — is the one call that reaches it. It
-    /// ends early on a view whose tasks have gone, because nothing will
-    /// service that sequence number then; a boot that failed ends those
-    /// tasks, so a failure ends this wait rather than letting it run out its
-    /// whole deadline.
-    pub(super) fn wait_begin_frame(&mut self, seq: u64, timeout: Duration) -> bool {
+    /// A test's wait and nobody else's: it blocks the calling thread on
+    /// `bobcat-main`, which no entry point a host has does. The tests that
+    /// play a view by hand, or boot one whose scripts ask their host for
+    /// nothing while a frame is outstanding, have no turn to take meanwhile.
+    /// It ends early on a view whose tasks have gone, because nothing will
+    /// service that sequence number then.
+    #[cfg(test)]
+    pub(crate) fn wait_begin_frame(&mut self, seq: u64, timeout: Duration) -> bool {
         let deadline = ClockInstant::now() + timeout;
         self.poll_link();
         while self.published.begin_frame_serviced < seq && ClockInstant::now() < deadline {
@@ -2038,7 +2121,7 @@ impl Painter {
             let Some(frames) = self.frames.as_mut() else {
                 break;
             };
-            match block_on_deadline(frames.changed(), deadline) {
+            match crate::link::block_on_deadline(frames.changed(), deadline) {
                 // The deadline passed, or the view's publisher is gone.
                 None | Some(Err(_)) => break,
                 Some(Ok(())) => {}

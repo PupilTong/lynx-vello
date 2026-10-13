@@ -1027,8 +1027,8 @@ impl RealmOwner for Page {
         }
     }
 
-    /// A painter blocked in `wait_begin_frame` is released rather than timed
-    /// out: the frame it was waiting for will never come. What is acknowledged
+    /// A host waiting for a frame post to be serviced is released rather than
+    /// left to its own deadline: the frame it was waiting for will never come. What is acknowledged
     /// is the newest frame post taken and not yet acknowledged, whether a
     /// burst has applied it or it is still waiting for its fence. The deadline
     /// the realm had armed is withdrawn by the lifetime's own end.

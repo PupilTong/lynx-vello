@@ -297,7 +297,7 @@ samples *after* the acquire that waits on it (below). A browser's
 taken on the page's main thread, before the Render Worker is woken, and on a
 different time origin than the Worker's own `performance.now()`.
 
-**The frame's one reading.** `draw` and `tick` each call
+**The frame's one reading.** `draw` and an offscreen `post_frame` each call
 `FrameClock::now_seconds` exactly once and pass that `f64` to everything the
 frame resolves — `service_gesture_clock` for armed `longpress` deadlines on
 the painting side, and the frame post that carries the same reading to the
@@ -315,8 +315,9 @@ refresh between that wait and scan-out. Sampling the clock after it puts the
 whole frame on the near side of the pipeline — what is sampled is the frame
 being produced for the next refresh, not one produced a pipeline-depth earlier.
 The wait is the embedder's own turn spent waiting for its display, and it
-touches no document and takes no lock. An offscreen `tick` has no swap chain
-and samples immediately.
+touches no document and takes no lock. An offscreen painter has no swap chain
+and samples immediately; the reading its `post_frame` took rides in the
+`PostedFrame` it answers, and `draw_posted` draws at that same instant.
 
 `dom` itself reads no clock: `now` is a parameter to
 `Document::advance_animations`. That is what lets the painting side decide
@@ -326,17 +327,18 @@ Advancing an animation runs where the document is — the Lynx main thread,
 its only home. A window painter's draw posts one frame request,
 `FramePost { now, seq }`, into the view's `ScrollMailbox` per frame while the
 latest committed frame reports an animation it cannot compose alone (see
-"Composite animations compose; the rest tick"); an offscreen `tick` posts one
-on every call. Posts coalesce — the latest `now`, the greatest `seq` — and one
+"Composite animations compose; the rest tick"); an offscreen `post_frame`
+posts one on every call. Posts coalesce — the latest `now`, the greatest `seq` — and one
 payload-free `ToMain::Posted` marker in the command FIFO stands for all of
 them until main takes them, so a main thread inside a long job accumulates
 nothing. At the marker the page takes the post, and after the last command of
 that burst it advances the timeline once — a Stylo animation-only traversal
 of just the animating elements, no JavaScript involved — and commits what
-changed. The `seq` is what an offscreen `tick` waits on: the epilogue
-publishes the newest serviced sequence number on the view's watch after the
-commit it implies, so a host blocked on that number is woken by the frame
-rather than by the acknowledgement. The published frame's `animations_active`
+changed. The `seq` is what an offscreen host waits on, in its own loop
+(`Painter::frame_serviced`): the epilogue publishes the newest serviced
+sequence number on the view's watch after the commit it implies, and wakes
+the host through its `EventRequester`, so a host waiting on that number finds
+the frame already published when it reads the acknowledgement. The published frame's `animations_active`
 flag is what keeps the loop sustained: `owes_frame` keeps answering yes, the
 embedder keeps taking a turn per display frame, and each one that owes the
 main thread a tick posts a frame, until a commit reports the timeline idle.
@@ -408,9 +410,10 @@ through a bounded FIFO to one dedicated capture thread. For each job that
 thread is the embedder owner: it creates a fresh `LynxGroup` for that job,
 constructs its non-`Send` `LynxView`, builds an 800×600 DPR-1
 `DrawTarget::Offscreen` `Painter` beside it and attaches the two, owns all GPU
-work, settles the page on a plain frame interval — `view.pump()` and then
-`painter.tick(false)` per step — captures tightly packed RGBA8, and destroys
-both.
+work, settles the page on a plain frame interval — one frame per step:
+`painter.post_frame()`, `view.pump()` on every wakeup until
+`painter.frame_serviced(…)`, then `painter.draw_posted(…)` — captures tightly
+packed RGBA8, and destroys both.
 The group owns the Lynx main thread, QuickJS runtime, and Stylo pool, all
 released with that job's view; no runtime is shared across capture jobs and
 the server adds no separate rendering owner. The HTTP side then encodes the
@@ -2004,13 +2007,24 @@ JavaScript turn is still unobservable, because the epilogue runs after the
 operation rather than inside it. A windowed painter
 never waits on the main thread and never skips a frame: it always has the
 latest adopted frame to compose and hit-test, however busy that thread is.
-`Painter::tick` is the one call that does wait on it, and only an offscreen
-painter has one — a host with no display to pace against posts a frame and
-waits out that post's acknowledgement, with a deadline, and ends early if the
-view's task has gone. A post that sends no marker, because one is already
+No call a host can make on a painter waits on it either. An offscreen host,
+with no display to pace against, still wants a frame that carries everything
+it sent before, and gets one in three calls that each return at once:
+`Painter::post_frame` delivers a synthetic vsync and posts a frame,
+`Painter::frame_serviced` reads whether the view has acknowledged that post
+(or never will: the view's task has gone), and `Painter::draw_posted` draws.
+The wait between the post and the draw is the host's own, in its own loop,
+and that loop also calls `LynxView::pump`. That is the reason the wait is not
+inside the painter: a main-thread job that adopts a stylesheet, requires a
+module or waits a `Future` is parked on an answer `pump` gives, the frame post
+is queued behind that job, and `pump` runs on the thread a blocking wait
+would hold — each side would wait for the other. The view wakes the host
+through its `EventRequester` both when it asks for something and when it
+services a post, so that wakeup is what the loop sleeps on, and the host
+chooses its own deadline. A post that sends no marker, because one is already
 queued, still answers its own sequence number, and its fence holds it back
 until main has applied every command the seat's `CommandSender` sent before
-it, so the acknowledgement the wait takes implies them and the wait is
+it, so the acknowledgement the host waits for implies them and the frame is
 deterministic. A native module's answer to the MTS realm
 (`ToMain::ModuleCallback`) is not sent through that sender, and the
 acknowledgement does not imply one sent before the post ("Ordering
@@ -2106,7 +2120,7 @@ re-clamp — goes through one write that
 records the container among the pass's changed ones (and a drag's release
 records every container it let go). `publish_scroll` posts them: at the top of
 every send of the pass, of the frame post and of the `Vsync` delivery, and at
-the end of `dispatch_input`, `draw` and `tick`. An entry carries the clamped
+the end of `dispatch_input`, `draw` and `draw_posted`. An entry carries the clamped
 offset, the pass's clock, the newest request serial the painter has handled
 for the container, and a `rest` when nothing holds, flings, bounces or
 glides the container any more — a drag let go without a fling, a spent
@@ -2204,15 +2218,16 @@ without the marker.
   count of applied commands. So an answer applied before a post does not make
   main apply that post's frame one command early, and a frame post never
   waits for an answer.
-- The offscreen `tick` stays deterministic: post, mark, wait for
-  `begin_frame_serviced(seq)`, which the fence makes imply every command the
-  seat's `CommandSender` sent before the tick. A native module's answer to
-  the MTS realm sent before the tick is not one of them. When the post sends
+- An offscreen frame stays deterministic: `post_frame` posts and marks, the
+  host waits for `begin_frame_serviced(seq)` (`frame_serviced`), which the
+  fence makes imply every command the seat's `CommandSender` sent before the
+  post, and `draw_posted` draws. A native module's answer to the MTS realm
+  sent before the post is not one of them. When the post sends
   no marker, because one is queued, the burst that takes the post and
   reaches its fence can be one main collected before the answer was sent;
   main then acknowledges the post at the end of that burst and applies the
-  answer in a later one. `tick` delivers its `Vsync` before its frame post,
-  as it always has, so its rAF callbacks run before that post's frame work.
+  answer in a later one. `post_frame` delivers its `Vsync` before its frame
+  post, so its rAF callbacks run before that post's frame work.
 - Reattaching a painter (unchanged): a new painter shows the committed
   `slot.offset`, which can be behind the document when an adoption inside the
   window never committed.
@@ -2411,9 +2426,9 @@ A window painter's frame post narrows accordingly: it is made per frame only
 while the committed frame reports `needs_main_ticks` — something animating
 that could not export — and, once a finite curve runs past its end, per frame
 until the commit of its finish restyle is adopted. There an infinite exported
-animation involves the main thread zero times per frame. An offscreen `tick`
-does not narrow: it posts a frame and waits on it every call, so a
-headless host ticks the main thread each frame. An animation **frozen** by
+animation involves the main thread zero times per frame. An offscreen
+`post_frame` does not narrow: it posts a frame on every call, so a headless
+host ticks the main thread each frame. An animation **frozen** by
 css-contain-2 §4 narrows it all the way to nothing: an element in a skipped
 subtree (`content-visibility: hidden`, or a non-relevant
 `content-visibility: auto` box) does not advance its timeline, so the commit
@@ -2610,7 +2625,7 @@ create/append/drop/flush DOM API is exposed to JavaScript.
 6. The successful boot notification remains queued behind the same wakeup;
    the awakened host observes it through `LynxView::pump`, which hands it back
    with whatever else the turn produced. A draw that fails is the return value
-   of `Painter::pump`, `tick` or `capture`, reported once and never again. No
+   of `Painter::pump`, `draw_posted` or `capture`, reported once and never again. No
    realm or tree object crosses the boundary.
 
 ## Validation matrix

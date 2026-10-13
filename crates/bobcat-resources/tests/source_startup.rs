@@ -238,7 +238,19 @@ async fn missing_source_fails_without_blocking_sibling_startup() {
     )
     .await;
     boot(&mut sibling, &receiver).unwrap();
-    sibling_painter.tick(true).unwrap();
+    // One frame of the sibling's: post, take its turns until it is serviced,
+    // draw. The failed view is not what holds it up.
+    let posted = sibling_painter.post_frame().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !sibling_painter.frame_serviced(&posted) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the sibling's frame was never serviced"
+        );
+        let _ = sibling.pump();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    sibling_painter.draw_posted(posted, true).unwrap();
     assert!(failed.pump().is_empty());
 }
 

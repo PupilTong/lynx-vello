@@ -14,7 +14,7 @@ use bobcat_core::{
     PreparsedStyleSheet, ViewSources,
 };
 use flashbulb::{Image, Screenshots};
-use support::{FetcherDouble, solo_view, wait_for_script};
+use support::{FetcherDouble, solo_view, tick, wait_for_script};
 
 /// The screen these tests' views report, as a host with no screen to measure
 /// names it. None of them reads `SystemInfo`.
@@ -221,7 +221,7 @@ fn settle(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let _ = view.pump();
-        let _ = painter.tick(true);
+        let _ = tick(painter, true);
         if ready() {
             return;
         }

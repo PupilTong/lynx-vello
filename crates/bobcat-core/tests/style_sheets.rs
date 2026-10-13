@@ -10,6 +10,7 @@ mod support;
 
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bobcat_core::{
     DrawTarget, LynxView, LynxViewError, NoWakeup, PreparsedDeclaration, PreparsedRule,
@@ -212,5 +213,91 @@ async fn every_listed_sheet_issues_its_own_stylesheet_request() {
         1,
         "a stylesheet the host answers pre-parsed costs no payload; the one payload served \
          is the entry module"
+    );
+}
+
+/// Creates one classed `view`, and asks for one frame callback that adopts a
+/// sheet and flushes.
+const ADOPTING_FRAME_SCRIPT: &str = r"
+    Object.assign(globalThis, {
+      processData: function (data) { return data; },
+      renderPage: function () {
+        const page = __CreatePage('card', 0);
+        const view = __CreateView(0);
+        __SetClasses(view, 'basic');
+        __AppendElement(page, view);
+        lynx.requestAnimationFrame(function () {
+          __AdoptStyleSheet({ url: 'app:///late.css' });
+          __FlushElementTree();
+        });
+      },
+      updatePage: function () {},
+    });
+";
+
+/// A frame whose callback adopts a stylesheet is serviced once the host has
+/// taken the view's turn, and the frame drawn then carries the sheet.
+///
+/// The callback runs as a job of the frame that delivers it, and the adoption
+/// parks that job on a request only `LynxView::pump` answers. The frame post
+/// is queued behind the parked job. So the frame stays outstanding for as
+/// long as the host does not pump, and no call the host makes meanwhile
+/// blocks: the wait is the host's, in a loop where it also pumps. When the
+/// post is serviced the adoption and the flush behind it have already run,
+/// which is what the capture reads.
+#[tokio::test]
+async fn a_frame_whose_callback_adopts_a_sheet_is_serviced_once_the_host_pumps() {
+    let fetcher = Rc::new(
+        FetcherDouble::card(ADOPTING_FRAME_SCRIPT)
+            .with_preparsed_style_sheet(basic_sheet())
+            .resolving_to(SCRIPT_URL),
+    );
+    let (mut view, mut painter) = view_with(|_sink| fetcher.clone(), sources(&[]))
+        .await
+        .expect("loading view");
+    wait_for_script(&mut view).expect("script execution");
+
+    let started = Instant::now();
+    let posted = painter.post_frame().expect("an offscreen painter posts");
+    // The host's turn is withheld: the callback's job parks on the adoption,
+    // and nothing services the post behind it.
+    let withheld = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < withheld {
+        assert!(
+            !painter.frame_serviced(&posted),
+            "the frame was serviced before the host answered the adoption it waits behind"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        fetcher.style_sheet_fetch_count(),
+        0,
+        "the request reaches the fetcher only in the view's own turn"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !painter.frame_serviced(&posted) {
+        for _event in view.pump() {}
+        assert!(Instant::now() < deadline, "the frame was never serviced");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(fetcher.style_sheet_fetch_count(), 1);
+    // Ten seconds is what one such frame cost while the wait was a blocking
+    // one inside the painter, where no turn could be taken.
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the frame took {:?}",
+        started.elapsed()
+    );
+
+    painter
+        .draw_posted(posted, true)
+        .expect("the serviced frame draws");
+    let shot = painter.capture().expect("capture the adopted page");
+    let offset = (50 * shot.size.width as usize + 50) * 4;
+    assert_eq!(
+        &shot.pixels[offset..offset + 4],
+        &[0, 0, 255, 255],
+        "the serviced frame carries the sheet its own callback adopted"
     );
 }

@@ -94,7 +94,7 @@ concretely, so the tables above are read as "the target" and this section as
   itself, and the main thread hears about the animation again only when a
   finite curve runs out (a frame post per frame from its end until the finish
   restyle's commit is adopted) or something else commits. An offscreen
-  `Painter::tick` posts a frame on every call whatever the frame reports, so
+  `Painter::post_frame` posts a frame on every call whatever the frame reports, so
   a headless host still ticks the main thread each frame. Every job on the
   main thread first runs `Document::sync_animation_clock` at the painter's
   latest clock: the timeline and the states move (promotion at an anchored

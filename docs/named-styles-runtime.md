@@ -88,9 +88,14 @@ returns. The thread's *tasks* keep running throughout — the command consumers,
 the boot futures, the clock tasks, and the notice traffic that carries this very
 request to the host. What a task receives meanwhile waits as a job behind the
 adoption: a sibling view's command burst, and with it the acknowledgement of
-the frame post an offscreen host is blocked on, runs only once this adoption
+a frame post an offscreen host is waiting for, runs only once this adoption
 returns.
 The resource host continues servicing requests through `LynxView::pump`.
+That is why an offscreen host's wait for a frame is a loop of its own that
+pumps (`Painter::post_frame`, `frame_serviced`, `draw_posted`) rather than a
+call that blocks inside the painter: the answer this adoption is parked on
+comes from that same thread's `pump`, and a frame post is queued behind the
+adoption.
 
 The reference fetcher, `bobcat-resources`, owns a stylesheet response cache keyed
 by resolved URL. Preload and ordinary requests share pending work and reuse its

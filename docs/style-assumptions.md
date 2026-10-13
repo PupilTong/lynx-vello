@@ -166,8 +166,8 @@ the semantics are stylo's.** Everything below refines that sentence.
     sampling code, as Firefox runs stylo on its compositor — the values the
     next cascade produces whenever both sides iterate from the same animation
     state — and composes the retained frame, and a window painter does not
-    tick the main thread for it until the curve ends (an offscreen `tick`
-    ticks it every call). Everything else — a property the export does not
+    tick the main thread for it until the curve ends (an offscreen
+    `post_frame` ticks it every call). Everything else — a property the export does not
     carry, an `!important` override, a start the driver has not anchored, a
     transition — still restyles through the animation-only traversal and
     rebuilds the retained scene every frame; what that frame saves is the

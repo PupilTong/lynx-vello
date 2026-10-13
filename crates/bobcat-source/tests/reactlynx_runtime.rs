@@ -560,12 +560,20 @@ async fn compiled_refresh_view_holds_a_pulled_header() {
         std::thread::sleep(Duration::from_millis(10));
     }
     pull(&mut painter, 75.0, PointerPhase::Up, 250.0);
-    // An offscreen painter's glide advances one display frame per tick.
+    // An offscreen painter's glide advances one display frame per frame it
+    // is asked for: post, take the view's turns until it is serviced, draw.
     let deadline = Instant::now() + Duration::from_secs(10);
     while painter.is_animating() {
-        assert!(Instant::now() < deadline, "the release never came to rest");
-        let _ = view.pump();
-        painter.tick(false).unwrap();
+        let posted = painter.post_frame().unwrap();
+        loop {
+            assert!(Instant::now() < deadline, "the release never came to rest");
+            let _ = view.pump();
+            if painter.frame_serviced(&posted) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        painter.draw_posted(posted, false).unwrap();
         std::thread::sleep(Duration::from_millis(5));
     }
     settle(

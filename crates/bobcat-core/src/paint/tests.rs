@@ -449,7 +449,7 @@ impl EventRequester for WakeSignal {
 ///
 /// The rule that keeps a host from waiting on a frame clock for a view that
 /// has no display to keep up with: an offscreen painter's frames are asked
-/// for through `tick`, and one with no target at all has none to give.
+/// for through `post_frame`, and one with no target at all has none to give.
 #[test]
 fn a_painter_that_presents_to_no_window_owes_no_frame() {
     let (painter, _main) = detached();
@@ -645,6 +645,60 @@ fn a_views_published_state_is_independent_of_a_siblings() {
     assert!(
         second.published_frame().is_none(),
         "and no frame reached it, because none was published to it"
+    );
+}
+
+/// What a host's own wait reads between posting a frame and drawing it:
+/// whether the view has serviced the post, answered at once either way. It is
+/// `true` as well when nothing will ever service it — nothing was posted, or
+/// the view has gone — so that wait is never one on a view that is not there.
+#[test]
+fn a_posted_frame_reads_as_serviced_once_acknowledged_or_once_nothing_will() {
+    let (mut painter, end) = detached();
+    let seq = painter
+        .begin_frame(0.0, true)
+        .expect("the view's task is listening");
+    let posted = super::PostedFrame {
+        now: 0.0,
+        seq: Some(seq),
+    };
+
+    let started = Instant::now();
+    assert!(
+        !painter.frame_serviced(&posted),
+        "nothing has serviced the post yet"
+    );
+    end.outbox.begin_frame_serviced(seq - 1);
+    assert!(
+        !painter.frame_serviced(&posted),
+        "an earlier post's acknowledgement is not this one's"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "asking is not waiting"
+    );
+
+    end.outbox.begin_frame_serviced(seq);
+    assert!(painter.frame_serviced(&posted));
+
+    let nothing_posted = super::PostedFrame {
+        now: 0.0,
+        seq: None,
+    };
+    assert!(
+        painter.frame_serviced(&nothing_posted),
+        "a frame that posted nothing has nothing to wait for"
+    );
+
+    let unserviced = super::PostedFrame {
+        now: 0.1,
+        seq: Some(seq + 1),
+    };
+    assert!(!painter.frame_serviced(&unserviced));
+    drop(end);
+    assert!(
+        painter.frame_serviced(&unserviced),
+        "nothing will service a post once its view has gone"
     );
 }
 
@@ -1166,7 +1220,7 @@ fn a_dispatch_in_a_scrolling_pass_follows_the_marker() {
 }
 
 /// The animation frame callbacks run after the scroll state of their pass:
-/// HTML's scroll steps before `requestAnimationFrame`. In `tick`'s order —
+/// HTML's scroll steps before `requestAnimationFrame`. In `post_frame`'s order —
 /// an offset moves, then the vsync is delivered — the vsync's own send
 /// publishes the move ahead of it.
 #[test]
