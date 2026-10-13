@@ -1688,7 +1688,9 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
             "app:///edges.js",
         )
         .expect("main-thread script");
-    assert_eq!(names.names(), ["swipe", "tap"]);
+    // `slotchange` is the swiper's and the refresh view's, published once
+    // when the document was built and never closed.
+    assert_eq!(names.names(), ["slotchange", "swipe", "tap"]);
 
     runtime
         .evaluate_module(
@@ -1705,7 +1707,7 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
             "unregistering",
         )
         .expect("unregistration");
-    assert_eq!(names.names(), ["tap"]);
+    assert_eq!(names.names(), ["slotchange", "tap"]);
 
     runtime
         .evaluate_module(
@@ -1720,7 +1722,28 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
             "unregistering",
         )
         .expect("unregistration");
-    assert!(names.names().is_empty(), "the last registration closes it");
+    assert_eq!(
+        names.names(),
+        ["slotchange"],
+        "the last registration closes it; a component's name stays open"
+    );
+
+    // The realm's own edges for a component's name are not forwarded: its
+    // last removal does not close what the component still observes.
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __AddEventListener, __RemoveEventListener } from 'bobcat:element';
+                const [, outer] = globalThis.held;
+                __AddEventListener(outer, 'slotchange', globalThis.listener, {});
+                __RemoveEventListener(outer, 'slotchange', globalThis.listener, {});
+                ",
+            "app:///component-name.mjs",
+            "registering a component's name",
+        )
+        .expect("registration");
+    assert_eq!(names.names(), ["slotchange"]);
 }
 
 /// The replica is what the painting side filters against, so a
@@ -1816,6 +1839,107 @@ fn a_dispatch_runs_the_path_listeners_and_skips_the_steps_with_none() {
                 // The position the host decided reaches every listener as the
                 // event's own `detail`, built in the realm from two numbers.
                 if (seen.join('|') !== 'page-capture:2:1:12|inner:4:2:12') {
+                  throw new Error('unexpected deliveries: ' + seen.join('|'));
+                }
+                ",
+            "app:///verify.js",
+            "verifying",
+        )
+        .expect("verification");
+}
+
+/// An engine component on the path that observes the event's name.
+/// Records its delivery, marks the target so script can tell it ran first,
+/// and stops propagation — which must end only its own walk.
+struct StoppingComponent {
+    log: Rc<RefCell<Vec<String>>>,
+}
+
+impl dom::CustomElement<()> for StoppingComponent {
+    fn observed_events(&self) -> &'static [&'static str] {
+        &["tap"]
+    }
+
+    fn handle_event(
+        &self,
+        document: &mut LynxDocument,
+        _element: dom::NodeId,
+        event: &mut dom::event::ElementEvent<'_>,
+    ) {
+        let x = event.detail().position().map_or(-1.0, |point| point.x);
+        self.log
+            .borrow_mut()
+            .push(format!("{}:{:?}:{x}", event.type_name(), event.phase()));
+        document.set_attribute(event.target(), "data-rust", "seen");
+        event.stop_propagation();
+    }
+}
+
+/// The one dispatch runs the Rust walk over the path first and the realm's
+/// walk over the same path after it, and a component's `stop_propagation`
+/// ends the Rust walk alone.
+#[test]
+fn the_rust_walk_runs_before_the_realm_and_its_stop_does_not_reach_script() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  // Built later, once the test has defined the tag: a
+                  // definition never reaches an element created before it.
+                  globalThis.build = function () {
+                    const outer = __CreateElement('x-probe', 0);
+                    const inner = __CreateView(0);
+                    __AppendElement(page, outer);
+                    __AppendElement(outer, inner);
+                    globalThis.held = [page, outer, inner];
+                    const note = (label) => () =>
+                      seen.push(label + ':' + __GetAttributeByName(inner, 'data-rust'));
+                    __AddEventListener(inner, 'tap', note('inner'), {});
+                    __AddEventListener(outer, 'tap', note('outer'), {});
+                  };
+                };
+                ",
+            "app:///rust-walk.js",
+        )
+        .expect("main-thread script");
+    let log = Rc::new(RefCell::new(Vec::new()));
+    elements.tree().define(
+        "x-probe",
+        Box::new(StoppingComponent {
+            log: Rc::clone(&log),
+        }),
+    );
+    assert!(elements.tree().observes_event("tap"));
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            "globalThis.build();",
+            "app:///rust-walk-tree.js",
+            "building",
+        )
+        .expect("the tree");
+
+    // `page` is 2, the probe 3, the view 4.
+    runtime
+        .dispatch_for_test(&mut js_runtime, node_id(4), &tap(), event_point())
+        .expect("dispatch");
+    assert_eq!(
+        *log.borrow(),
+        ["tap:Capturing:12"],
+        "the component hears the capture step with the dispatch's detail, and its stop ends \
+         its own walk before the bubble step"
+    );
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                // Both script listeners ran, after the component marked the
+                // target: its stop never reached the realm.
+                if (seen.join('|') !== 'inner:seen|outer:seen') {
                   throw new Error('unexpected deliveries: ' + seen.join('|'));
                 }
                 ",

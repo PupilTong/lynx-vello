@@ -1763,9 +1763,7 @@ impl Painter {
                     target: event.target,
                     name: event.name,
                     payload: InputEventPayload {
-                        position: event.position,
-                        wheel: event.wheel,
-                        touches: event.touches,
+                        detail: event.detail,
                         timestamp,
                     },
                 },

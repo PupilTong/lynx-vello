@@ -78,6 +78,11 @@ pub(crate) type LynxDocument = Document<()>;
 
 pub(crate) const PAGE_TAG: &str = "page";
 
+/// DOM's `slotchange`, which a component with a UA shadow tree observes
+/// ([`dom::CustomElement::observed_events`]) to learn that its assigned
+/// children changed.
+pub(super) const SLOT_CHANGE: &str = "slotchange";
+
 /// Creates the document with its permanent `page` element, the components the
 /// engine defines, and the UA cascade.
 ///

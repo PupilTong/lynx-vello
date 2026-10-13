@@ -108,14 +108,20 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use stylo::LocalName;
 
-use crate::event::{ElementEvent, ElementEventKind};
+use crate::event::{ElementEvent, EventDetail};
 use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeId, NodeSlot};
 
 const MAX_REACTION_DEPTH: usize = 64;
+
+/// [DOM §4.2.2.5](https://dom.spec.whatwg.org/#signal-a-slot-change)'s
+/// event: fired by the document itself at a slot whose assigned nodes
+/// changed, with `bubbles: true` and `composed: false`, so it ends at the
+/// slot's shadow root, where the host's own handler hears it.
+pub(crate) const SLOT_CHANGE: &str = "slotchange";
 
 const MAX_REACTIONS_PER_SCOPE: usize = 1 << 20;
 
@@ -130,6 +136,24 @@ const MAX_REACTIONS_PER_SCOPE: usize = 1 << 20;
 pub trait CustomElement<T> {
     fn observed_attributes(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    /// The event types [`Self::handle_event`] is called for, by their W3C
+    /// names (`"slotchange"`, `"pointerdown"`): the analogue of
+    /// [`Self::observed_attributes`] for events.
+    ///
+    /// Read once, by [`Document::define`], which unions every definition's
+    /// list into one set for the document. A dispatch whose type is in no
+    /// definition's list is one set lookup and walks nothing, which is what
+    /// keeps the Rust walk free for an event no component handles. There is
+    /// no per-element registration: every element of a kind hears what its
+    /// definition names, and a handler that cares about one element filters
+    /// by `element`.
+    ///
+    /// The host publishes the union as listened-for names, so its input
+    /// router routes them whether or not a realm listens too.
+    fn observed_events(&self) -> &'static [&'static str] {
+        &[]
     }
 
     fn constructed(&self, document: &mut Document<T>, element: NodeId) {
@@ -155,22 +179,29 @@ pub trait CustomElement<T> {
         let _ = (document, element, name, old, new);
     }
 
-    /// One engine event reaching this element, on the standard's path.
+    /// One event reaching this element, on the standard's path, for a type
+    /// this definition names in [`Self::observed_events`].
     ///
-    /// Not a lifecycle callback: it is called by
-    /// [`Document::dispatch_element_event`], which walks the capture and
-    /// bubble passes of [`Document::event_steps`] and delivers to every
-    /// defined element on them — so `element` is the event's
-    /// `currentTarget`, and [`ElementEvent::target`] is what the event was
-    /// fired at. A component hears events aimed at its descendants exactly
-    /// as a bubble-phase listener would.
+    /// Not a lifecycle callback: it is called by the Rust walk
+    /// ([`Document::dispatch_element_event_over`], or
+    /// [`Document::dispatch_element_event`] for an event only the engine
+    /// hears), which walks the capture and bubble passes of
+    /// [`Document::event_steps`] and delivers to every defined element on
+    /// them — so `element` is the event's `currentTarget`, and
+    /// [`ElementEvent::target`] is what the event was fired at. A component
+    /// hears events aimed at its descendants exactly as a listener on it
+    /// would. [`ElementEvent::type_name`] says which event this is and
+    /// [`ElementEvent::detail`] what it carries.
     ///
-    /// **This path never reaches script.** It is how the engine's own
-    /// components — `<image>` today, `<list>` when it exists — observe
-    /// something the engine decided, such as a `content-visibility: auto`
-    /// element starting or stopping to skip its contents. An
-    /// `addEventListener` registration in a realm is unrelated state, in
-    /// another layer, and is not consulted here.
+    /// Two kinds of event arrive here. One is the engine's own, which never
+    /// reaches script: a `slotchange`, a `content-visibility: auto` element
+    /// starting or stopping to skip its contents. The other is every event
+    /// script hears too (routed input, a component's `load`, `scroll`): the
+    /// host's one dispatch runs this walk first, over the path it then hands
+    /// to the realm. [`ElementEvent::stop_propagation`] ends this walk only;
+    /// the script dispatch runs regardless. An `addEventListener`
+    /// registration in a realm is unrelated state, in another layer, and is
+    /// not consulted here.
     ///
     /// Called *inline*, unlike a reaction: the walk has no queue of its own,
     /// because it is not inside a tree mutation that a callback could
@@ -188,6 +219,14 @@ pub trait CustomElement<T> {
     /// call that is the host's, so [`ElementEvent::current_target`] is the
     /// host there too; [`ElementEvent::target`] is the node inside the shadow
     /// tree the event was fired at.
+    ///
+    /// For such an event that also does not bubble (the W3C `scroll` of a
+    /// scroll container inside the component's shadow tree), that boundary
+    /// step exists in the capture pass only, so the host's one delivery
+    /// reports [`EventPhase::Capturing`](crate::event::EventPhase::Capturing).
+    /// A handler that keeps only [`EventPhase::Bubbling`](crate::event::EventPhase::Bubbling)
+    /// deliveries, which is right for `slotchange` because it bubbles, never
+    /// sees one: filter on the phase only for an event that bubbles.
     fn handle_event(&self, document: &mut Document<T>, element: NodeId, event: &mut ElementEvent) {
         let _ = (document, element, event);
     }
@@ -324,6 +363,9 @@ struct Definition<T> {
 pub(crate) struct CustomElementRegistry<T> {
     definitions: Vec<Definition<T>>,
     by_name: FxHashMap<LocalName, DefinitionId>,
+    /// The union of every definition's [`CustomElement::observed_events`]:
+    /// the one lookup a dispatch of a type nothing observes costs.
+    observed_events: FxHashSet<&'static str>,
     element_queue: Vec<NodeId>,
     reactions: FxHashMap<NodeId, VecDeque<Reaction>>,
     pinned: SmallVec<[NodeId; 4]>,
@@ -342,6 +384,7 @@ impl<T> Default for CustomElementRegistry<T> {
         Self {
             definitions: Vec::new(),
             by_name: FxHashMap::default(),
+            observed_events: FxHashSet::default(),
             element_queue: Vec::new(),
             reactions: FxHashMap::default(),
             pinned: SmallVec::new(),
@@ -468,6 +511,9 @@ impl<T> Document<T> {
             .into_iter()
             .map(|attribute| LocalName::from(attribute.as_str()))
             .collect();
+        self.custom_elements
+            .observed_events
+            .extend(element.observed_events().iter().copied());
         let definition = DefinitionId(
             u32::try_from(self.custom_elements.definitions.len() + 1)
                 .ok()
@@ -581,7 +627,7 @@ impl<T> Document<T> {
     /// longer what they were. Nothing can hear it in a document that defines
     /// no component, so nothing is recorded there.
     pub(crate) fn signal_slot_change(&mut self, slot: NodeId) {
-        if self.custom_elements.is_empty() {
+        if !self.observes_event(SLOT_CHANGE) {
             return;
         }
         let signalled = &mut self.custom_elements.signal_slots;
@@ -617,7 +663,14 @@ impl<T> Document<T> {
                     "slotchange did not reach a fixpoint: a handler keeps changing slot \
                      assignments",
                 );
-                self.dispatch_element_event(slot, ElementEventKind::SlotChange, true, false);
+                self.dispatch_element_event(
+                    slot,
+                    SLOT_CHANGE,
+                    &EventDetail::None,
+                    true,
+                    false,
+                    0.0,
+                );
             }
         }
     }
@@ -663,12 +716,26 @@ impl<T> Document<T> {
         }
     }
 
-    /// Whether this document defines any component at all.
+    /// Whether any definition names `type_name` in its
+    /// [`CustomElement::observed_events`]: whether the Rust walk has anyone
+    /// to deliver an event of that type to.
     ///
-    /// The one check an event dispatch costs a document that cannot listen:
-    /// see [`Document::dispatch_element_event`].
-    pub(crate) fn has_custom_definitions(&self) -> bool {
-        !self.custom_elements.is_empty()
+    /// One set lookup, the whole cost of a dispatch nothing observes.
+    #[must_use]
+    pub fn observes_event(&self, type_name: &str) -> bool {
+        self.custom_elements.observed_events.contains(type_name)
+    }
+
+    /// Every event type some definition observes, in no particular order.
+    /// The host publishes these once, as names its router must route.
+    pub fn observed_event_names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.custom_elements.observed_events.iter().copied()
+    }
+
+    /// The set's own `'static` spelling of `type_name`, which is how the
+    /// walk names an event whose caller only had a borrowed name.
+    pub(crate) fn custom_elements_observed_event(&self, type_name: &str) -> Option<&&'static str> {
+        self.custom_elements.observed_events.get(type_name)
     }
 
     /// The handler of a node that is a *constructed* custom element, for a

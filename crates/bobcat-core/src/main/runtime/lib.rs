@@ -31,8 +31,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use dom::event::EventDetail;
 use dom::{MethodCall, MethodError, MethodOutcome, StylePool};
 use quickjs_rust_bridge::{HostArgument, HostValue};
+use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use tokio::sync::watch;
 
@@ -74,79 +76,66 @@ const DISAPPEAR_EVENT: &str = "uidisappear";
 const LOAD_EVENT: &str = "load";
 const ERROR_EVENT: &str = "error";
 
-/// What one dispatch's `detail` is made of, as it crosses the boundary: a
-/// discriminator and the numbers that kind spends. The object itself is built
-/// in the realm, because its shape is JavaScript's.
-///
-/// One kind per detail *shape* rather than per event name. The realm reads the
-/// discriminator alone — nothing there branches on which event is being
-/// delivered — which is what keeps the one dispatch export general.
-enum EventDetail<'a> {
-    /// Every routed input event: the device position, the wheel delta an event
-    /// may not have, and the four numbers per point the touch events carry.
-    Input(&'a InputEventPayload),
-    /// A `load`: an `<image>`'s bitmap's intrinsic size, or an `<svg>`'s
-    /// border-box layout size, in px.
-    Size { width: f64, height: f64 },
-    /// An `<image>`'s `error`: the realm's `{}`, and no numbers at all.
-    Empty,
-    /// An element's `uiappear` or `uidisappear`: no numbers either. The
-    /// realm builds web-core's detail (`ExposureServices.ts:202-208`) from
-    /// the target's own unique id and its `exposure-id` and `exposure-scene`
-    /// attributes, which are the live element's because [`MainThreadRuntime::dispatch`]
-    /// resolves the target before it calls the realm.
-    Exposure,
-}
-
-/// The discriminators [`EventDetail`] crosses as. Mirrored by the realm's own
-/// `DETAIL_*` constants in `element-papi.ts`.
+/// The discriminators a detail crosses as: one per [`EventDetail`] *shape*
+/// the realm builds a different object out of, never per event name, so the
+/// realm reads the discriminator alone and the one dispatch export stays
+/// general. Mirrored by the realm's own `DETAIL_*` constants in
+/// `element-papi.ts`.
 const DETAIL_INPUT: f64 = 0.0;
 const DETAIL_SIZE: f64 = 1.0;
 const DETAIL_EMPTY: f64 = 2.0;
 const DETAIL_EXPOSURE: f64 = 3.0;
 
-impl EventDetail<'_> {
-    const fn kind(&self) -> f64 {
-        match self {
-            Self::Input(_) => DETAIL_INPUT,
-            Self::Size { .. } => DETAIL_SIZE,
-            Self::Empty => DETAIL_EMPTY,
-            Self::Exposure => DETAIL_EXPOSURE,
+/// The script boundary's encoding of `dom`'s [`EventDetail`]: the
+/// discriminator, then the numbers that kind spends, in the order the realm
+/// reads them. `dom`'s detail is the one description of what an event
+/// carries; this is only how it crosses, and the object is built in the
+/// realm, because its shape is JavaScript's.
+///
+/// - [`DETAIL_INPUT`] for a pointer, wheel or touch event: the device position, the wheel delta
+///   (`undefined` for every event without one, which is what keeps the two `detail` keys absent
+///   there rather than `NaN`), then four numbers per touch point.
+/// - [`DETAIL_SIZE`] for a `load`: the size, in px.
+/// - [`DETAIL_EXPOSURE`] for a `uiappear`/`uidisappear`: no numbers. The realm builds web-core's
+///   detail (`ExposureServices.ts:202-208`) from the target's own unique id and its `exposure-id`
+///   and `exposure-scene` attributes, which are the live element's because
+///   [`MainThreadRuntime::dispatch`] resolves the target before it calls the realm.
+/// - [`DETAIL_EMPTY`] for everything else: the realm's `{}`, and no numbers.
+fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut SmallVec<[HostArgument<'a>; 10]>) {
+    let (position, delta, points): (_, _, &[dom::event::TouchPoint]) = match detail {
+        EventDetail::Pointer { position, .. } => (*position, None, &[]),
+        EventDetail::Wheel { position, delta } => (*position, Some(*delta), &[]),
+        EventDetail::Touch { position, points } => (*position, None, points),
+        EventDetail::Size { width, height } => {
+            arguments.push(HostArgument::Number(DETAIL_SIZE));
+            arguments.push(HostArgument::Number(*width));
+            arguments.push(HostArgument::Number(*height));
+            return;
         }
+        EventDetail::Exposure => {
+            arguments.push(HostArgument::Number(DETAIL_EXPOSURE));
+            return;
+        }
+        // `None`, and the engine's own `ContentVisibility`, which never
+        // reaches a realm: `{}`.
+        _ => {
+            arguments.push(HostArgument::Number(DETAIL_EMPTY));
+            return;
+        }
+    };
+    arguments.push(HostArgument::Number(DETAIL_INPUT));
+    arguments.push(HostArgument::Number(f64::from(position.x)));
+    arguments.push(HostArgument::Number(f64::from(position.y)));
+    for delta in [delta.map(|delta| delta.x), delta.map(|delta| delta.y)] {
+        arguments.push(delta.map_or(HostArgument::Undefined, |value| {
+            HostArgument::Number(f64::from(value))
+        }));
     }
-
-    /// Appends the numbers this kind spends, in the order the realm reads
-    /// them.
-    fn push_numbers<'a>(&'a self, arguments: &mut SmallVec<[HostArgument<'a>; 10]>) {
-        match *self {
-            Self::Input(payload) => {
-                arguments.push(HostArgument::Number(f64::from(payload.position.x)));
-                arguments.push(HostArgument::Number(f64::from(payload.position.y)));
-                // `undefined` rather than a number for every event without a
-                // wheel delta, which is what makes the two `detail` keys
-                // absent there rather than `NaN`.
-                for delta in [
-                    payload.wheel.map(|delta| delta.x),
-                    payload.wheel.map(|delta| delta.y),
-                ] {
-                    arguments.push(match delta {
-                        Some(value) => HostArgument::Number(f64::from(value)),
-                        None => HostArgument::Undefined,
-                    });
-                }
-                for point in &payload.touches {
-                    arguments.push(HostArgument::Number(f64::from(point.identifier)));
-                    arguments.push(HostArgument::Number(f64::from(point.position.x)));
-                    arguments.push(HostArgument::Number(f64::from(point.position.y)));
-                    arguments.push(HostArgument::Number(f64::from(point.flags)));
-                }
-            }
-            Self::Size { width, height } => {
-                arguments.push(HostArgument::Number(width));
-                arguments.push(HostArgument::Number(height));
-            }
-            Self::Empty | Self::Exposure => {}
-        }
+    for point in points {
+        arguments.push(HostArgument::Number(f64::from(point.identifier)));
+        arguments.push(HostArgument::Number(f64::from(point.position.x)));
+        arguments.push(HostArgument::Number(f64::from(point.position.y)));
+        arguments.push(HostArgument::Number(f64::from(point.flags)));
     }
 }
 
@@ -433,6 +422,11 @@ struct DocumentSlot {
     exposure: Exposure,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
+    /// The event names the realm has a registration for anywhere, as its
+    /// global edges said: this thread's copy of the set the painter routes
+    /// against, less the names the document's components observe, which are
+    /// published once and never closed.
+    listened: FxHashSet<Arc<str>>,
     /// Where committed frames leave for the painting side.
     outbox: ViewOutbox,
 }
@@ -463,6 +457,7 @@ impl DocumentSlot {
             autoplays: Autoplays::default(),
             exposure: Exposure::new(),
             removals: 0,
+            listened: FxHashSet::default(),
             outbox,
         }))
     }
@@ -543,8 +538,37 @@ impl DocumentSlot {
             }
             document
         })?;
+        // The components' own names are routed for the document's whole
+        // life, whether or not the realm listens too.
+        self.outbox
+            .publish_observed_names(document.observed_event_names());
         self.document = Some(document);
         Ok(())
+    }
+
+    /// One global edge of the realm's listener-name count: `available` for a
+    /// name's first registration anywhere, not for the removal of its last.
+    ///
+    /// Recorded here and forwarded to the painter, except for a name a
+    /// component observes: that one was published when the document was
+    /// built and stays open, so neither edge is forwarded.
+    fn listener_edge(&mut self, name: &str, available: bool) {
+        let observed = self
+            .document
+            .as_ref()
+            .is_some_and(|document| document.observes_event(name));
+        if available {
+            let name: Arc<str> = Arc::from(name);
+            self.listened.insert(Arc::clone(&name));
+            if !observed {
+                self.outbox.listener_edge(name, true);
+            }
+        } else {
+            self.listened.remove(name);
+            if !observed {
+                self.outbox.listener_edge(Arc::from(name), false);
+            }
+        }
     }
 
     /// An exposure attribute of the live element `node` was written or
@@ -922,7 +946,7 @@ impl MainThreadRuntime {
             None,
             ScriptSource::Main,
             |engine| {
-                install_bobcat(engine, &slot, &outbox, thread.clone())
+                install_bobcat(engine, &slot, thread.clone())
                     .map_err(MainThreadError::into_script_error)?;
                 style_sheets::install_styles(engine, &slot, &outbox, thread)
                     .map_err(MainThreadError::into_script_error)?;
@@ -1294,7 +1318,7 @@ impl MainThreadRuntime {
         let timestamp = self.timeline_milliseconds;
         let mut failures = Vec::new();
         for event in events {
-            // [`EventDetail::Empty`] is the realm's `{}`, which is web-core's
+            // [`EventDetail::None`] is the realm's `{}`, which is web-core's
             // `error` detail exactly, and the `Event` a dialog fires carries
             // nothing either; an `<image>`'s `load` carries the bitmap's
             // *intrinsic* size, web-core's `naturalWidth`/`naturalHeight`,
@@ -1330,9 +1354,9 @@ impl MainThreadRuntime {
                     if is_svg(self.slot.borrow_mut().document_mut(), node) {
                         continue;
                     }
-                    (node, ERROR_EVENT, EventDetail::Empty)
+                    (node, ERROR_EVENT, EventDetail::None)
                 }
-                ComponentEvent::Plain { node, name } => (node, name, EventDetail::Empty),
+                ComponentEvent::Plain { node, name } => (node, name, EventDetail::None),
             };
             // Not composed either, as HTML and web-core fire every one of
             // them: one queued at a UA shadow tree's node stays inside that
@@ -1378,22 +1402,32 @@ impl MainThreadRuntime {
             true,
             true,
             payload.timestamp,
-            &EventDetail::Input(payload),
+            &payload.detail,
         )
     }
 
-    /// One whole dispatch, whatever produced it: one call into the realm,
-    /// carrying the path, the flag that shapes the walk, the timestamp and
-    /// the numbers the `detail` is made of.
+    /// One whole dispatch, whatever produced it: the one place an event is
+    /// delivered. The path is computed once; the engine components' Rust walk
+    /// runs over it first, then one call into the realm carries the same
+    /// path, the flag that shapes the walk, the timestamp and the numbers the
+    /// `detail` is made of.
     ///
     /// A target freed since the event formed resolves to nothing rather than
     /// a path — a `NodeId` names one node for the life of the document, so
     /// the check is one lookup and can never hit a stranger.
     ///
-    /// The path crosses as the standard's event path — every step, in
-    /// target-first, root-last order, each with its shadow-retargeted target
-    /// — encoded as two comma-joined decimal id strings, which is how
-    /// `childElementIds` carries a list already: the boundary takes
+    /// **The Rust walk** is [`dom::Document::dispatch_element_event_over`]
+    /// over the steps: one set lookup when no
+    /// [`dom::CustomElement::observed_events`] names the event, and
+    /// otherwise the `handle_event` of every defined element on the path. A
+    /// handler's `stop_propagation` ends that walk and nothing else; the
+    /// realm's dispatch below runs whatever happened there.
+    ///
+    /// **The realm's dispatch** is handed the path as the standard's event
+    /// path — every step, in target-first, root-last order, each with its
+    /// shadow-retargeted target, which is the capture pass of the steps read
+    /// backwards — encoded as two comma-joined decimal id strings, which is
+    /// how `childElementIds` carries a list already: the boundary takes
     /// primitives and structured clones only, a clone can be minted by the
     /// realm alone, and a decimal id cannot contain the separator. One call
     /// carries the whole dispatch, and what the realm then runs over it —
@@ -1411,21 +1445,21 @@ impl MainThreadRuntime {
     ///
     /// `composed` is the event's own flag too, and it shapes the path here,
     /// where the tree is: a non-composed event's path ends at the root of the
-    /// tree its target is in (DOM's *get the parent*). The path then loses
-    /// every step at a UA shadow tree's content, because script names no
-    /// node of one — no handle, no listener — and a browser reports exactly
-    /// that to every listener outside the tree: the host, retargeted, as the
-    /// first step that remains says. An event at shadow content therefore
-    /// starts at its host, and a non-composed one there reaches no step at
-    /// all.
+    /// tree its target is in (DOM's *get the parent*). The realm's path then
+    /// loses every step at a UA shadow tree's content, because script names
+    /// no node of one — no handle, no listener — and a browser reports
+    /// exactly that to every listener outside the tree: the host, retargeted,
+    /// as the first step that remains says. An event at shadow content
+    /// therefore starts at its host there, and a non-composed one there
+    /// reaches no step at all. The Rust walk keeps those steps: a component's
+    /// shadow tree is its own.
     ///
     /// Everything else crosses as numbers, and the realm builds the objects:
-    /// the `timestamp`, then [`EventDetail`]'s discriminator and whatever
-    /// numbers that kind spends. No JSON is formatted here and none is parsed
-    /// there.
+    /// the `timestamp`, then the detail as [`encode_detail`] writes it. No
+    /// JSON is formatted here and none is parsed there.
     ///
-    /// The document is released before the call, which is what lets a
-    /// listener mutate the tree.
+    /// The document is released before the realm's call, which is what lets
+    /// a listener mutate the tree.
     ///
     /// Returns whether the realm published the export, which is all the host
     /// can know: nothing here says whether anything ran.
@@ -1441,31 +1475,33 @@ impl MainThreadRuntime {
         bubbles: bool,
         composed: bool,
         timestamp: f64,
-        detail: &EventDetail<'_>,
+        detail: &EventDetail,
     ) -> Result<bool, MainThreadError> {
-        let steps: SmallVec<[dom::event::EventStep; 16]> = {
+        let mut nodes = String::new();
+        let mut targets = String::new();
+        {
             let mut slot = self.slot.borrow_mut();
             let document = slot.document_mut();
             if document.get(target).is_none() {
                 return Ok(false);
             }
-            let steps = document.event_steps(target, true, composed);
-            steps
+            let steps = document.event_steps(target, bubbles, composed);
+            // The capture pass read backwards is the whole path, target
+            // first, whatever `bubbles` cut from the bubble pass.
+            for step in steps
                 .steps()
                 .iter()
-                .filter(|step| !step.capture && document.shadow_root_of(step.node).is_none())
-                .copied()
-                .collect()
-        };
-        let mut nodes = String::new();
-        let mut targets = String::new();
-        for step in &steps {
-            if !nodes.is_empty() {
-                nodes.push(',');
-                targets.push(',');
+                .rev()
+                .filter(|step| step.capture && document.shadow_root_of(step.node).is_none())
+            {
+                if !nodes.is_empty() {
+                    nodes.push(',');
+                    targets.push(',');
+                }
+                write!(nodes, "{}", packed_node_id(step.node)).expect("writing to a String");
+                write!(targets, "{}", packed_node_id(step.target)).expect("writing to a String");
             }
-            write!(nodes, "{}", packed_node_id(step.node)).expect("writing to a String");
-            write!(targets, "{}", packed_node_id(step.target)).expect("writing to a String");
+            document.dispatch_element_event_over(&steps, name, detail, timestamp);
         }
 
         // Inline for the ten an input event without touch points spends: six
@@ -1477,8 +1513,7 @@ impl MainThreadRuntime {
         arguments.push(HostArgument::String(name));
         arguments.push(HostArgument::Boolean(bubbles));
         arguments.push(HostArgument::Number(timestamp));
-        arguments.push(HostArgument::Number(detail.kind()));
-        detail.push_numbers(&mut arguments);
+        encode_detail(detail, &mut arguments);
 
         let called = self
             .core
@@ -1512,7 +1547,11 @@ impl MainThreadRuntime {
             target,
             name,
             &InputEventPayload {
-                position,
+                detail: dom::event::EventDetail::Pointer {
+                    position,
+                    id: 1,
+                    device: dom::input::PointerKind::Touch,
+                },
                 ..InputEventPayload::default()
             },
         )
@@ -1551,10 +1590,11 @@ impl MainThreadRuntime {
     /// starts, each step re-checks its node, and whatever a handler wrote is
     /// committed by this entry's own epilogue.
     pub(crate) fn dispatch_content_visibility_changes(&mut self) {
+        let timestamp = self.timeline_milliseconds;
         self.slot
             .borrow_mut()
             .document_mut()
-            .dispatch_content_visibility_changes();
+            .dispatch_content_visibility_changes(timestamp);
     }
 
     /// Runs the W3C "update intersection observations" steps
@@ -2180,11 +2220,10 @@ await Promise.resolve().then(() => __FlushElementTree());
 fn install_bobcat(
     engine: &mut ScriptEngine,
     handle: &Rc<RefCell<DocumentSlot>>,
-    outbox: &ViewOutbox,
     thread: crate::jobs::JsThreadHandle,
 ) -> Result<(), MainThreadError> {
     install_host_module(engine, handle, thread)?;
-    install_event_members(engine, outbox)
+    install_event_members(engine, handle)
 }
 
 fn install(
@@ -2421,16 +2460,17 @@ fn startup_strings(startup: &mut RealmStartup) -> [(&'static str, Option<String>
 /// global edges, the first registration for a name anywhere and the removal
 /// of its last. A name already open hears nothing, so the traffic is edges,
 /// never registrations, and the `Arc` each one allocates is rare enough to
-/// be free.
+/// be free. [`DocumentSlot::listener_edge`] keeps this thread's copy and
+/// forwards the edge.
 fn install_event_members(
     engine: &mut ScriptEngine,
-    outbox: &ViewOutbox,
+    handle: &Rc<RefCell<DocumentSlot>>,
 ) -> Result<(), MainThreadError> {
     for (member, available) in [("listenerNameOpened", true), ("listenerNameClosed", false)] {
-        let outbox = outbox.clone();
+        let tree = Rc::clone(handle);
         install(engine, member, 1, move |arguments| {
             let name = string_argument(member, arguments, 0)?;
-            outbox.listener_edge(Arc::from(name), available);
+            borrow_slot(member, &tree)?.listener_edge(name, available);
             Ok(HostValue::Undefined)
         })?;
     }

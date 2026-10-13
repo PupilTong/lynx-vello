@@ -56,15 +56,15 @@
 //! follow-ups. Scroll *events* (`scroll`/`scrolltolower`…) are component
 //! events above this layer.
 
+use dom::event::EventDetail;
+// The touch vocabulary is `dom`'s, because every layer that names an event
+// names it: the router fills the points in, the Rust walk reads them, and the
+// main thread encodes them into the realm's argument list.
+pub(crate) use dom::event::{TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET, TouchPoint, TouchPoints};
 use dom::input::{InputEvent, InputKind, PointerId, PointerKind, PointerPhase};
 use dom::scroll::ScrollAxes;
 use dom::{HitTarget, NodeId, Point2D, Vector2D};
 use smallvec::SmallVec;
-
-// The touch vocabulary is the link's, because both sides of the link name it:
-// the router fills the points in, and the main thread reads them out into the
-// realm's argument list.
-pub(crate) use crate::link::{TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET, TouchPoint, TouchPoints};
 
 /// How far a sequence may travel, in viewport CSS px, and still deliver `tap`.
 ///
@@ -131,21 +131,18 @@ pub(crate) trait RouterHost {
     fn has_listener(&self, name: &str) -> bool;
 }
 
-/// One event this layer decided to dispatch: the type and the target. The
-/// propagation chain is the event module's to compute from the target.
+/// One event this layer decided to dispatch: the type, the target and what
+/// it carries. The propagation chain is the event module's to compute from
+/// the target.
 #[derive(Clone, Debug)]
 pub(crate) struct EmitEvent {
     pub(crate) name: &'static str,
     /// The node the event targets. It may have been freed since the decision
     /// was formed — the executor checks liveness before building a path.
     pub(crate) target: NodeId,
-    /// The device position the event's `detail` reports.
-    pub(crate) position: Point2D<f32>,
-    /// The wheel delta, for the one event whose `detail` carries one.
-    pub(crate) wheel: Option<Vector2D<f32>>,
-    /// The three touch lists, for the four events that carry them. Empty
-    /// otherwise.
-    pub(crate) touches: TouchPoints,
+    /// What the event carries, in `dom`'s one description of it: a pointer
+    /// event's position and device, a wheel's delta, a touch event's lists.
+    pub(crate) detail: EventDetail,
 }
 
 /// One decision the engine executes, in order.
@@ -169,14 +166,22 @@ pub(crate) enum InputDecision {
 /// An inline-first batch of ordered decisions produced by the input router.
 pub(crate) type InputDecisions = SmallVec<[InputDecision; 4]>;
 
-fn emit(name: &'static str, target: NodeId, position: Point2D<f32>) -> InputDecision {
+fn emit(name: &'static str, target: NodeId, detail: EventDetail) -> InputDecision {
     InputDecision::Emit(EmitEvent {
         name,
         target,
-        position,
-        wheel: None,
-        touches: TouchPoints::new(),
+        detail,
     })
+}
+
+/// The detail every event a pointer produces carries, the synthesized ones
+/// included.
+fn pointer_detail(position: Point2D<f32>, id: PointerId, device: PointerKind) -> EventDetail {
+    EventDetail::Pointer {
+        position,
+        id,
+        device,
+    }
 }
 
 /// The W3C name a routed pointer phase dispatches under. Lynx's
@@ -232,6 +237,7 @@ struct ActiveTouch {
 #[derive(Debug)]
 struct Sequence {
     pointer: PointerId,
+    device: PointerKind,
     target: NodeId,
     down_position: Point2D<f32>,
     latest_position: Point2D<f32>,
@@ -313,10 +319,14 @@ impl GestureRouter {
                 if let Some(target) = target
                     && let Some(name) = pointer_event_name(phase)
                 {
-                    out.push(emit(name, target.node, event.position));
+                    out.push(emit(
+                        name,
+                        target.node,
+                        pointer_detail(event.position, id, device),
+                    ));
                 }
                 self.touch_step(event, target, id, device, phase, out);
-                self.synthesize(event, target, id, phase, at, out);
+                self.synthesize(event, target, id, device, phase, at, out);
             }
             InputKind::Wheel { delta } => {
                 let Some(target) = target else {
@@ -325,13 +335,14 @@ impl GestureRouter {
                 if !event.default_prevented {
                     Self::wheel_scroll(target, delta, host, out);
                 }
-                out.push(InputDecision::Emit(EmitEvent {
-                    name: "wheel",
-                    target: target.node,
-                    position: event.position,
-                    wheel: Some(delta),
-                    touches: TouchPoints::new(),
-                }));
+                out.push(emit(
+                    "wheel",
+                    target.node,
+                    EventDetail::Wheel {
+                        position: event.position,
+                        delta,
+                    },
+                ));
             }
             // `InputKind` is `#[non_exhaustive]`; an unknown kind decides
             // nothing rather than guessing.
@@ -535,13 +546,14 @@ impl GestureRouter {
             .iter()
             .find(|point| point.flags & TOUCH_ACTIVE != 0)
             .map_or(changed, |point| point.position);
-        out.push(InputDecision::Emit(EmitEvent {
+        out.push(emit(
             name,
             target,
-            position,
-            wheel: None,
-            touches,
-        }));
+            EventDetail::Touch {
+                position,
+                points: touches,
+            },
+        ));
     }
 
     /// The three lists for one touch event, flagged per point: every finger
@@ -605,11 +617,13 @@ impl GestureRouter {
     }
 
     /// The synthesis half: sequence lifecycle and the `tap` decision.
+    #[allow(clippy::too_many_arguments, reason = "one private dispatch site")]
     fn synthesize(
         &mut self,
         event: &InputEvent,
         target: Option<HitTarget>,
         id: PointerId,
+        device: PointerKind,
         phase: PointerPhase,
         at: f64,
         out: &mut InputDecisions,
@@ -629,6 +643,7 @@ impl GestureRouter {
                     // it starts no sequence.
                     self.sequence = target.map(|target| Sequence {
                         pointer: id,
+                        device,
                         target: target.node,
                         down_position: event.position,
                         latest_position: event.position,
@@ -660,7 +675,11 @@ impl GestureRouter {
                     && !sequence.longpress_fired
                     && !sequence.travelled_beyond(event.position, TAP_SLOP)
                 {
-                    out.push(emit(TAP_EVENT, sequence.target, event.position));
+                    out.push(emit(
+                        TAP_EVENT,
+                        sequence.target,
+                        pointer_detail(event.position, id, device),
+                    ));
                 }
             }
             PointerPhase::Cancel => {
@@ -696,7 +715,7 @@ impl GestureRouter {
             out.push(emit(
                 LONG_PRESS_EVENT,
                 sequence.target,
-                sequence.latest_position,
+                pointer_detail(sequence.latest_position, sequence.pointer, sequence.device),
             ));
         }
     }
@@ -827,9 +846,10 @@ mod tests {
             self.out
                 .iter()
                 .filter_map(|decision| match decision {
-                    InputDecision::Emit(event) if !event.touches.is_empty() => {
+                    InputDecision::Emit(event) if !event.detail.touch_points().is_empty() => {
                         let points: Vec<String> = event
-                            .touches
+                            .detail
+                            .touch_points()
                             .iter()
                             .map(|point| {
                                 let mut lists = String::new();
@@ -848,12 +868,13 @@ mod tests {
                                 )
                             })
                             .collect();
+                        let position = event.detail.position().expect("a touch event has one");
                         Some(format!(
                             "{}@{} detail={},{} [{}]",
                             event.name,
                             event.target.to_bits(),
-                            event.position.x,
-                            event.position.y,
+                            position.x,
+                            position.y,
                             points.join(" ")
                         ))
                     }
@@ -877,7 +898,8 @@ mod tests {
             panic!("the last decision is the tap");
         };
         assert_eq!(tap.target, target());
-        assert!((tap.position.x - 12.0).abs() < f32::EPSILON);
+        let position = tap.detail.position().expect("a tap carries a position");
+        assert!((position.x - 12.0).abs() < f32::EPSILON);
     }
 
     #[test]

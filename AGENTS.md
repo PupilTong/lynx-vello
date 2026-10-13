@@ -1630,6 +1630,17 @@ index at all. The realm runs the capture, bubble and `global-bindEvent` passes,
 derives `eventPhase` per step, and ends the dispatch itself; neither
 `stopPropagation` nor `stopImmediatePropagation` crosses the boundary.
 
+That host side is one function, `MainThreadRuntime::dispatch`, the only place
+an event script hears is delivered. It computes the steps once and, before the
+realm's call, runs `dom`'s Rust walk over them
+(`Document::dispatch_element_event_over`), so an engine component whose
+definition lists the type in `CustomElement::observed_events` hears it first;
+a component's `stop_propagation` ends that walk only. What the event carries
+is `dom::event::EventDetail` (one variant per payload shape), which the router
+fills in, `ToMain::DispatchEvent` carries, the Rust walk lends out and
+`encode_detail` turns into the realm's numbers. The names components observe
+are published to the painter's name set once per document and never closed.
+
 One event deliberately does **not** take that path, because it is the
 engine's own rather than script's: css-contain-2 §4.4's
 `contentvisibilityautostatechange`. The commit that determines
@@ -2761,10 +2772,12 @@ Subsystems:
   `block: start`, `inline: nearest` — as an instant scroll request and
   rebuilds the frame in the same commit.
 - `input/` and `event/` — the `InputEvent` host seam, `Document::event_steps`,
-  which computes a path for a *script* dispatch above, and
-  `Document::dispatch_element_event`, which walks that path here for an event
-  the engine decides, delivering it to defined `CustomElement`s through
-  `handle_event` and to nothing else.
+  which computes a path for a *script* dispatch above,
+  `Document::dispatch_element_event_over`, which walks those same steps here
+  first, delivering to defined `CustomElement`s through `handle_event`, and
+  `Document::dispatch_element_event`, the same walk for an event only the
+  engine hears. `event::EventDetail` is the one description of an event's
+  payload; `CustomElement::observed_events` gates the walk.
 - `render/` — the DOM-free floor absorbed from the former `pulsar` crate
   (2026-08-04): `FrameImages` and the `render::gpu` wgpu backend. `render::blur`
   is the one exception: a `filter: blur()` bake is a partial replay of a

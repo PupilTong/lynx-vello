@@ -726,16 +726,21 @@ struct Recorder {
 }
 
 impl dom::CustomElement<()> for Recorder {
+    fn observed_events(&self) -> &'static [&'static str] {
+        &["contentvisibilityautostatechange"]
+    }
+
     fn handle_event(
         &self,
         document: &mut dom::Document<()>,
         element: dom::NodeId,
-        event: &mut dom::event::ElementEvent,
+        event: &mut dom::event::ElementEvent<'_>,
     ) {
-        let dom::event::ElementEventKind::ContentVisibilityAutoStateChange { skipped } =
-            event.kind()
-        else {
-            panic!("an engine event this page never fires: {:?}", event.kind())
+        let dom::event::EventDetail::ContentVisibility { skipped } = *event.detail() else {
+            panic!(
+                "an engine event this page never fires: {:?}",
+                event.detail()
+            )
         };
         let target = document
             .get(event.target())

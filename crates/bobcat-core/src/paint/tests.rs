@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use dom::event::EventDetail;
+
 use super::{FarEnd, Painter, ToMain};
 use crate::link::{FramePost, ScrollEntry, ScrollMailbox};
 use crate::main::tree::{
@@ -228,13 +230,22 @@ fn a_commit_whose_pixels_can_no_longer_be_read_is_not_adopted() {
     );
 }
 
+/// A tap's detail, as the router decides one: a touch pointer's position.
+fn tap_detail() -> EventDetail {
+    EventDetail::Pointer {
+        position: dom::Point2D::new(1.0, 1.0),
+        id: 1,
+        device: dom::input::PointerKind::Touch,
+    }
+}
+
 /// An emit decision costs one name-table lookup and stops there unless a
 /// listener exists; when it crosses, it crosses as plain data — the
 /// target id, not a path. Liveness is the main thread's to check at
 /// delivery.
 #[test]
 fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
-    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT, TouchPoints};
+    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
 
     let (mut painter, mut main) = detached();
     // The permanent page element's packed handle, as script would name it.
@@ -244,9 +255,7 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
         decisions.push(InputDecision::Emit(EmitEvent {
             name: TAP_EVENT,
             target,
-            position: dom::Point2D::new(1.0, 1.0),
-            wheel: None,
-            touches: TouchPoints::new(),
+            detail: tap_detail(),
         }));
         painter.execute_decisions(&mut decisions, None, 0.25);
         assert!(decisions.is_empty(), "the queue is always drained");
@@ -293,9 +302,7 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     assert_eq!(name, TAP_EVENT);
     assert_eq!(sent, target);
     // The decision's own facts, as values: nothing is encoded on this side.
-    assert_eq!(payload.position, dom::Point2D::new(1.0, 1.0));
-    assert_eq!(payload.wheel, None, "a tap carries no wheel delta");
-    assert!(payload.touches.is_empty(), "a tap carries no touch points");
+    assert_eq!(payload.detail, tap_detail());
     // The pass's clock reading, in milliseconds.
     assert!((payload.timestamp - 250.0).abs() < f64::EPSILON);
 
@@ -341,16 +348,18 @@ fn a_wheel_delta_and_touch_points_cross_as_values() {
     decisions.push(InputDecision::Emit(EmitEvent {
         name: "wheel",
         target,
-        position: dom::Point2D::new(5.0, 6.0),
-        wheel: Some(dom::Vector2D::new(0.0, 30.0)),
-        touches: TouchPoints::new(),
+        detail: EventDetail::Wheel {
+            position: dom::Point2D::new(5.0, 6.0),
+            delta: dom::Vector2D::new(0.0, 30.0),
+        },
     }));
     decisions.push(InputDecision::Emit(EmitEvent {
         name: "touchmove",
         target,
-        position: dom::Point2D::new(30.5, 40.0),
-        wheel: None,
-        touches: touches.clone(),
+        detail: EventDetail::Touch {
+            position: dom::Point2D::new(30.5, 40.0),
+            points: touches.clone(),
+        },
     }));
     painter.execute_decisions(&mut decisions, None, 0.5);
 
@@ -361,16 +370,24 @@ fn a_wheel_delta_and_touch_points_cross_as_values() {
     else {
         panic!("an emit decision becomes a dispatch command");
     };
-    assert_eq!(payload.wheel, Some(dom::Vector2D::new(0.0, 30.0)));
-    assert_eq!(payload.position, dom::Point2D::new(5.0, 6.0));
+    assert_eq!(
+        payload.detail,
+        EventDetail::Wheel {
+            position: dom::Point2D::new(5.0, 6.0),
+            delta: dom::Vector2D::new(0.0, 30.0),
+        }
+    );
 
     let ToMain::DispatchEvent { payload, .. } =
         main.commands.try_recv().expect("then the touch event")
     else {
         panic!("an emit decision becomes a dispatch command");
     };
-    assert_eq!(payload.touches.as_slice(), touches.as_slice());
-    assert_eq!(payload.wheel, None);
+    assert_eq!(payload.detail.touch_points(), touches.as_slice());
+    assert_eq!(
+        payload.detail.position(),
+        Some(dom::Point2D::new(30.5, 40.0))
+    );
     assert!((payload.timestamp - 500.0).abs() < f64::EPSILON);
 }
 
@@ -1194,7 +1211,7 @@ fn frame_posts_coalesce_to_the_latest_clock_and_greatest_sequence() {
 /// marker, so its listener never sees a document older than its pass.
 #[test]
 fn a_dispatch_in_a_scrolling_pass_follows_the_marker() {
-    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT, TouchPoints};
+    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
 
     let (mut painter, mut main, scroller) = scrolling("");
     main.outbox.listener_edge(Arc::from(TAP_EVENT), true);
@@ -1209,9 +1226,7 @@ fn a_dispatch_in_a_scrolling_pass_follows_the_marker() {
     decisions.push(InputDecision::Emit(EmitEvent {
         name: TAP_EVENT,
         target: scroller,
-        position: dom::Point2D::new(1.0, 1.0),
-        wheel: None,
-        touches: TouchPoints::new(),
+        detail: tap_detail(),
     }));
     painter.execute_decisions(&mut decisions, Some(&frame), 0.5);
     assert!(matches!(main.commands.try_recv(), Ok(ToMain::Posted)));
@@ -1252,7 +1267,7 @@ fn a_vsync_follows_the_marker_of_its_pass() {
 /// applied them, so the acknowledgement implies the tap below.
 #[test]
 fn a_frame_post_is_fenced_behind_every_command_sent_before_it() {
-    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT, TouchPoints};
+    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
 
     let (mut painter, mut main, scroller) = scrolling("");
     main.outbox.listener_edge(Arc::from(TAP_EVENT), true);
@@ -1267,9 +1282,7 @@ fn a_frame_post_is_fenced_behind_every_command_sent_before_it() {
     decisions.push(InputDecision::Emit(EmitEvent {
         name: TAP_EVENT,
         target: scroller,
-        position: dom::Point2D::new(1.0, 1.0),
-        wheel: None,
-        touches: TouchPoints::new(),
+        detail: tap_detail(),
     }));
     painter.execute_decisions(&mut decisions, Some(&frame), 0.5);
     let sent = main.seat.commands.sent();

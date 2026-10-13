@@ -30,12 +30,21 @@
 //!
 //! An engine component is the other case: a
 //! [`CustomElement`](crate::CustomElement) handler is Rust owned by this
-//! document, so for an event *the engine itself decides* there is nothing to
-//! hand up. [`Document::dispatch_element_event`] walks the same path and
-//! calls [`CustomElement::handle_event`](crate::CustomElement::handle_event)
-//! on every defined element along it; [`ElementEvent`] is what such a handler
-//! is given, and nothing on that path reaches a realm — an `addEventListener`
-//! registration is in another layer and is not consulted for it.
+//! document, so this crate walks the path for it.
+//! [`Document::dispatch_element_event_over`] walks steps the caller already
+//! computed and calls
+//! [`CustomElement::handle_event`](crate::CustomElement::handle_event) on
+//! every defined element along them; the host's one dispatch entry computes
+//! the steps once, runs that walk, and hands the same steps to the realm.
+//! [`Document::dispatch_element_event`] computes the steps itself, for the
+//! two events only the engine hears (`slotchange`,
+//! `contentvisibilityautostatechange`). [`ElementEvent`] is what a handler is
+//! given: the W3C type name, an [`EventDetail`] (one variant per payload
+//! shape, owned by this crate and carried unchanged by every layer above),
+//! the timestamp, and the stop methods, which end this walk and nothing else.
+//! A type no definition lists in
+//! [`CustomElement::observed_events`](crate::CustomElement::observed_events)
+//! is one set lookup and walks nothing.
 //!
 //! A shadow root is not an element and has no handler, yet it is where a
 //! component listens for its own shadow tree's non-composed events
@@ -45,6 +54,15 @@
 //! `currentTarget` is not representable in a call that is the host's. A
 //! shadow root the path crosses delivers nothing, because the host that
 //! follows it on the path is called as itself.
+//!
+//! **A trap for component authors.** For a non-composed event fired inside a
+//! component's own shadow tree, that boundary step is the *only* step at
+//! which the host hears it. When the event also does not bubble — the W3C
+//! `scroll` of a scroll container inside a swiper's shadow tree, say — the
+//! bubble pass has no step at the shadow root at all, so the host's one
+//! delivery is the **capture**-phase one ([`EventPhase::Capturing`]). A
+//! handler that filters on [`EventPhase::Bubbling`], as one written for
+//! `slotchange` (which bubbles) may, never sees such an event.
 //!
 //! # Shadow trees
 //!
@@ -81,11 +99,15 @@
 //!   the topmost ancestor for a detached one. A detached target still produces a path, exactly as
 //!   the standard specifies.
 
+mod detail;
 mod element;
 
 use smallvec::SmallVec;
 
-pub use self::element::{ElementEvent, ElementEventKind, EventPhase};
+pub use self::detail::{
+    EventDetail, TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET, TouchPoint, TouchPoints,
+};
+pub use self::element::{ElementEvent, EventPhase};
 use crate::tree::document::{Document, NodeId};
 use crate::tree::node::Node;
 
@@ -128,12 +150,25 @@ pub struct EventStep {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventSteps {
     steps: SmallVec<[EventStep; INLINE_STEPS]>,
+    /// The node the event was dispatched at.
+    target: NodeId,
+    /// The shadow root a non-composed path ends at, whose host's engine
+    /// handler hears the event in its place; `None` for a composed event or a
+    /// target outside every shadow tree. Recorded while the path is built, so
+    /// a walk over these steps never asks a document that may have changed.
+    boundary: Option<NodeId>,
 }
 
 impl EventSteps {
     #[must_use]
     pub fn steps(&self) -> &[EventStep] {
         &self.steps
+    }
+
+    /// The node the event was dispatched at.
+    #[must_use]
+    pub fn target(&self) -> NodeId {
+        self.target
     }
 }
 
@@ -171,7 +206,8 @@ impl<T> Document<T> {
             self.contains_node(target),
             "Document::event_steps: stale target NodeId"
         );
-        let path = self.event_path(target, composed);
+        let (path, target_root) = self.event_path(target, composed);
+        let boundary = (!composed && self.is_shadow_root(target_root)).then_some(target_root);
         let mut steps = SmallVec::new();
 
         for entry in path.iter().rev() {
@@ -192,7 +228,11 @@ impl<T> Document<T> {
             });
         }
 
-        EventSteps { steps }
+        EventSteps {
+            steps,
+            target,
+            boundary,
+        }
     }
 
     /// The standard's event path, target first and root last.
@@ -212,7 +252,13 @@ impl<T> Document<T> {
     /// is never retargeted while a node inside the shadow tree always is.
     ///
     /// <https://dom.spec.whatwg.org/#event-path>
-    fn event_path(&self, target: NodeId, composed: bool) -> SmallVec<[PathEntry; INLINE_STEPS]> {
+    /// Answers the root of the target's own tree beside the path, which is
+    /// where a non-composed path ends.
+    fn event_path(
+        &self,
+        target: NodeId,
+        composed: bool,
+    ) -> (SmallVec<[PathEntry; INLINE_STEPS]>, NodeId) {
         let mut path = SmallVec::new();
         path.push(PathEntry {
             node: target,
@@ -238,7 +284,7 @@ impl<T> Document<T> {
             });
             node = parent;
         }
-        path
+        (path, target_root)
     }
 
     fn is_shadow_root(&self, node: NodeId) -> bool {

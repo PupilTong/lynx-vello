@@ -154,13 +154,13 @@
 //!   (`docs/tracking/deviations.md`).
 //! - Every event (`startrefresh`, `headeroffset`, `startloadmore`, …).
 
-use dom::event::{ElementEvent, ElementEventKind, EventPhase};
+use dom::event::{ElementEvent, EventPhase};
 use dom::scroll::{
     ScrollBehavior, ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition,
 };
 use dom::{CustomElement, MethodCall, MethodOutcome, Node, NodeId, ShadowRootMode};
 
-use super::LynxDocument;
+use super::{LynxDocument, SLOT_CHANGE};
 
 /// The container tag, web-core's registered spelling.
 pub(super) const REFRESH_VIEW_TAG: &str = "x-refresh-view";
@@ -238,6 +238,12 @@ pub(super) fn define(document: &mut LynxDocument) {
 struct RefreshView;
 
 impl CustomElement<()> for RefreshView {
+    /// Its own shadow tree's `slotchange`, which is how it learns that its
+    /// assigned children changed.
+    fn observed_events(&self) -> &'static [&'static str] {
+        &[SLOT_CHANGE]
+    }
+
     fn constructed(&self, document: &mut LynxDocument, element: NodeId) {
         let shadow = document.attach_shadow(element, ShadowRootMode::Open);
         document.add_shadow_stylesheet(shadow, SHADOW_RULES);
@@ -258,8 +264,8 @@ impl CustomElement<()> for RefreshView {
     /// `slotchange` at the default slot — the one slot with no `name` —
     /// delivered at the shadow root once per pass: the capture delivery is
     /// skipped, the bubble one acts. The named slots' own are ignored.
-    fn handle_event(&self, document: &mut LynxDocument, _: NodeId, event: &mut ElementEvent) {
-        if event.kind() != ElementEventKind::SlotChange || event.phase() != EventPhase::Bubbling {
+    fn handle_event(&self, document: &mut LynxDocument, _: NodeId, event: &mut ElementEvent<'_>) {
+        if event.type_name() != SLOT_CHANGE || event.phase() != EventPhase::Bubbling {
             return;
         }
         let slot = event.target();
