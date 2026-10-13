@@ -15,6 +15,7 @@ declare global {
   var __CreateScrollView: typeof elementPapi.__CreateScrollView;
   var __CreateRawText: typeof elementPapi.__CreateRawText;
   var __CreateList: typeof elementPapi.__CreateList;
+  var __CreateFrame: typeof elementPapi.__CreateFrame;
   var __AppendElement: typeof elementPapi.__AppendElement;
   var __InsertElementBefore: typeof elementPapi.__InsertElementBefore;
   var __RemoveElement: typeof elementPapi.__RemoveElement;

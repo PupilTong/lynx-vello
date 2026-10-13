@@ -200,7 +200,7 @@ What that covers, and what it does not:
   script layer's own graph — each holds a strong set of its children's
   handles, rooted at the permanent page handle — so an element cannot be
   freed while it is connected;
-- every ReactLynx Snapshot constructor except `__CreateFrame`, all six tree
+- every ReactLynx Snapshot constructor (`__CreateFrame` included), all six tree
   mutation calls (`__AppendElement`, `__InsertElementBefore`, `__RemoveElement`,
   `__ReplaceElement`, `__ReplaceElements`, `__SwapElement`),
   `__FlushElementTree`, and web-core's ESM boot sequence. `__CreateList`

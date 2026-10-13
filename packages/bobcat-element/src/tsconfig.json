@@ -18,6 +18,8 @@
       "bobcat:selector-query": ["./selector-query.ts"],
       "bobcat:element": ["./element-papi.ts"],
       "bobcat:runtime": ["./main-thread-runtime.ts"],
+      "bobcat:frame": ["./frame.ts"],
+      "bobcat:frame-boot": ["./frame-boot.ts"],
       "bobcat:timers": ["./timers.ts"],
       "bobcat:future": ["./future.ts"],
       "bobcat:module": ["./module.ts"],

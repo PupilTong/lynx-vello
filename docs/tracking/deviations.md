@@ -2373,7 +2373,41 @@ consequential choice about whether to follow the spec or the quirk.
     (`Document::append_shadow_rules`).
   - *No `load` event, no `data`/`global-props`, no `auto-width`/`auto-height`
     or `preset-*`*: none is built yet, and a frame with no author height is
-    0 tall (strict containment).
+    0 tall (strict containment). `bobcat:frame` hands the child `"{}"` for
+    both page data strings, so the seam exists; native's
+    `FrameElement::SetAttributeInternal` and web-core's `LynxView` pass the
+    attributes on.
+  - *The nested card has no BTS and gets no events.* Its boot
+    (`packages/bobcat-element/src/frame-boot.ts`) runs the card's `root` and
+    nothing for the background thread: `__BobcatDetachBackground` drops
+    every message the realm would post to one, so a ReactLynx card's
+    `useState`/effects and event handlers never run, and its first screen is
+    the MTS render alone. Native and web-core both start a full nested
+    runtime. Input dispatch does not enter a frame either.
+  - *A relative `src` resolves against the view's base*, not the host card's
+    URL: `src` is handed to `fetchResource` as written, which the fetcher
+    resolves against `ViewSources::base_url`, and the child's `__Card__` is
+    that same string, so a relative `src` inside a nested card also resolves
+    against the view's base rather than against the nested card's URL.
+    web-core fetches its `url` against the embedding document's base
+    (`templateManager.fetchBundle` in `LynxView.ts`), which nests no base per
+    card either; native hands `src` as written to its resource loader
+    (`LazyBundleLoader::LoadFrameBundle`), whose resolution is the
+    platform's.
+  - *Only a `.web.bundle` (or another container `ContainerSources`
+    registers a `root` for) boots in a frame*: the boot loads
+    `<U>/root.js`. A source-built `.lynx.bundle` names its main-thread
+    entry `<name>__main-thread` and has no `root`, so its load fails with one
+    diagnostic and the frame stays empty.
+  - *Removing `src`, or writing `""`, releases the frame's card*: the nested
+    page is freed and its realm retired. Native ignores a non-string `src`
+    (`FrameElement::OnSetSrc`) and web-core's `LynxView` renders nothing for
+    an empty `url` but disposes nothing, so both keep the old card. A write
+    of the frame's current `src` does nothing, as in both.
+  - *The nested card's first flush is queued a microtask after its
+    `renderPage`*, as the page boot queues its own; until the page's first
+    flush has settled the listed sheets and the painter binding, a child's
+    flush commits nothing and the epilogue's commit catches up.
 
 - **`markdown` / `x-markdown` (2026-10-14)** — Lynx-only (bucket 2): native
   registers `markdown`, web-core `x-markdown`; both are defined, on one
@@ -2798,7 +2832,9 @@ consequential choice about whether to follow the spec or the quirk.
   registration path a page and a fetched container share,
   `crates/bobcat-source/src/container.rs` — *registers* the StyleInfo at
   `<bundle>/style-info.css` either way, and only a page's view lists it, so a
-  lazy container's is held and never adopted.) **Decision: native**, because the compiled card
+  lazy container's is held and never adopted; a `<frame src>` fetches a full
+  card through the same path and adopts its StyleInfo into the frame's shadow
+  root, which `rLynxPrepareLazyBundleMTS` never asks for.) **Decision: native**, because the compiled card
   already makes that call and web-core's extra push would mount the same rules
   twice — and without that entry-name guard: css-id guards are synthesized
   here (`lower_style`), the `l-e-name` guard is not, and `__SetCSSId`

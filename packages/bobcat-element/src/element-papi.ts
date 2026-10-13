@@ -28,6 +28,10 @@ import {
 import type { NodeQueryRequest, QueryNode } from "bobcat:selector-query";
 import { __BobcatPublishEvent } from "bobcat:runtime";
 import { splitRecord } from "bobcat:record";
+// Read only when a frame's `src` is written, never as this module evaluates:
+// `bobcat:frame` imports `bobcat:runtime`, which imports this module, so the
+// cycle is safe exactly because nothing crosses it at evaluation.
+import { frameSourceChanged } from "bobcat:frame";
 
 // The Lynx Element PAPI runtime.
 //
@@ -51,6 +55,7 @@ import { splitRecord } from "bobcat:record";
 // | `__CreateScrollView(parentComponentUniqueID)` | native `createElement` export |
 // | `__CreateRawText(text)` | native `createElement` + `setAttribute` exports |
 // | `__CreateList(parentComponentUniqueID, ...)` | native `createElement` export + this runtime's own store |
+// | `__CreateFrame(parentComponentUniqueID)` | native `createElement` export; its `src` drives `bobcat:frame` |
 // | `__AppendElement(parent, child)` | native `insertBefore` export |
 // | `__InsertElementBefore(parent, child, reference?)` | native `insertBefore` export |
 // | `__RemoveElement(parent, child)` | native `removeElement` export |
@@ -86,8 +91,8 @@ import { splitRecord } from "bobcat:record";
 // | `__GetComputedStyleByKey(element, key)` | native `getComputedStyleMap` export |
 // | `__FlushElementTree()` | native `flushElementTree` export |
 //
-// Everything else — `__CreateFrame`, `__DropElement` (absent from every
-// web-core generation), `__AddClass`,
+// Everything else — `__DropElement` (absent from every web-core
+// generation), `__AddClass`,
 // component-info, config, template-part and animation members, the rest of
 // tree querying (`__GetParent`, `__FirstElement`, `__LastElement`,
 // `__NextElement`, `__ElementIsEqual`, `__GetAttributes`), and list cell
@@ -101,6 +106,14 @@ import { splitRecord } from "bobcat:record";
 // bobcat-source lowers each scoped `StyleInfo` fragment's rules with a
 // `:where([l-css-id="N"])` guard, so the attribute is what selects which
 // fragment's rules an element matches; the cascade itself is stylo's.
+//
+// A `frame` handle — from `__CreateFrame`, or `__CreateElement("frame")` — is
+// marked under a realm-local symbol, and an `src` written to it is handed,
+// after the native write, to `bobcat:frame`, which loads that card into a
+// `ShadowRealm` bound to the frame. Native's `FiberCreateFrame`
+// (`lynx/core/runtime/lepus/bindings/renderer_functions.cc`) and web-core's
+// `__CreateFrame` (`CreateFramePAPI = CreateViewPAPI`) both take the parent
+// component id alone.
 //
 // # Events
 //
@@ -541,6 +554,18 @@ interface ListCallbacks {
 const datasetSymbol = Symbol("dataset");
 const attributeValuesSymbol = Symbol("attributeValues");
 
+/**
+ * Set on a `frame` element's handle, which is what makes its `src` a load:
+ * on the handle rather than in a `WeakSet`, like every other per-handle
+ * fact here.
+ */
+const frameSymbol = Symbol("frame");
+
+function markFrame(handle: object): object {
+  (handle as Handle)[frameSymbol] = true;
+  return handle;
+}
+
 function valuesOf(element: unknown, key: typeof datasetSymbol | typeof attributeValuesSymbol): Map<string, unknown> {
   nodeIdOf(element);
   const handle = element as Handle;
@@ -625,6 +650,7 @@ interface Handle {
   [attributeValuesSymbol]?: Map<string, unknown>;
   [ownedChildrenSymbol]?: OwnedChildren;
   [ownerSymbol]?: number | undefined;
+  [frameSymbol]?: true;
 }
 
 function listenersOf(handle: Handle): ListenerLists | undefined {
@@ -875,12 +901,22 @@ export function __CreateElement(
   parentComponentUniqueID: unknown,
 ): object {
   void parentComponentUniqueID;
-  return createHandle(createElement(tag as string));
+  const handle = createHandle(createElement(tag as string));
+  return tag === "frame" ? markFrame(handle) : handle;
 }
 
 function createTag(tag: string, parentComponentUniqueID: unknown): object {
   void parentComponentUniqueID;
   return createHandle(createElement(tag));
+}
+
+/**
+ * A `frame` element: an element with a shadow root, into which `bobcat:frame`
+ * renders the card its `src` names. Arity 1, as web-core's
+ * `CreateFramePAPI = CreateViewPAPI` declares it.
+ */
+export function __CreateFrame(parentComponentUniqueID: unknown): object {
+  return markFrame(createTag("frame", parentComponentUniqueID));
 }
 
 export function __CreateWrapperElement(parentComponentUniqueID: unknown) {
@@ -1750,6 +1786,10 @@ const STRUCTURED_PROPERTY_NAMES: ReadonlySet<string> = new Set(
  * `update-list-info` is the one name that is not an attribute at all: it is
  * the list data protocol's one command, and it goes to [`updateListInfo`]
  * instead of being stringified onto the element.
+ *
+ * `src` on a `frame` is an attribute like any other, and then also a load:
+ * once the attribute is written, `bobcat:frame` is told the new value (`null`
+ * for a removal) and replaces whatever card the frame showed.
  */
 export function __SetAttribute(
   element: unknown,
@@ -1765,21 +1805,24 @@ export function __SetAttribute(
   if (value === null || value === undefined) {
     removeAttribute(nodeId, key);
     values.delete(key);
-    return undefined;
-  }
-  let text: string | undefined;
-  if (
-    typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean"
-    && STRUCTURED_PROPERTY_NAMES.has(key)
-  ) {
-    const attribute = STRUCTURED_PROPERTIES.get(tagName(nodeId))?.get(key);
-    if (attribute !== undefined) {
-      key = attribute;
-      text = String(JSON.stringify(value));
+  } else {
+    let text: string | undefined;
+    if (
+      typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean"
+      && STRUCTURED_PROPERTY_NAMES.has(key)
+    ) {
+      const attribute = STRUCTURED_PROPERTIES.get(tagName(nodeId))?.get(key);
+      if (attribute !== undefined) {
+        key = attribute;
+        text = String(JSON.stringify(value));
+      }
     }
+    setAttribute(nodeId, key, text ?? String(value));
+    values.set(key, copyElementValue(value));
   }
-  setAttribute(nodeId, key, text ?? String(value));
-  values.set(key, copyElementValue(value));
+  if (key === "src" && (element as Handle)[frameSymbol] === true) {
+    frameSourceChanged(element as object, nodeId, value == null ? null : String(value));
+  }
   return undefined;
 }
 

@@ -3720,6 +3720,9 @@ fn boolean_argument(function: &str, arguments: &[HostValue], index: usize) -> Re
 }
 
 #[cfg(test)]
+mod frame_tests;
+
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]

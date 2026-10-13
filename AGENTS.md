@@ -228,7 +228,8 @@ without one (a lazy bundle) has no entry and no boot, and nothing guesses a
 sole `*__main-thread` as one. A page's view names `<U>/root.js` as its entry,
 `U#background-thread` as its BTS entry, `style-info.css` as its only listed
 sheet and `U` as its `ViewSources::card_url`; a fetched container's StyleInfo
-is registered and never asked for. Scripts are collected per URL: one text at
+is registered, never asked for by a lazy component, and adopted only by a
+`<frame src>` boot into the frame's shadow root. Scripts are collected per URL: one text at
 one URL deduplicates, two texts — or a sheet URL a script also reaches — is
 `SourceError::ConflictingSection`, and a URL that cannot be a base is
 `SourceError::OpaqueContainerUrl`. The native decoder files each custom
@@ -814,7 +815,8 @@ names is the **fetcher's**, through `bobcat_resources::ContainerInstaller` and
 `bobcat_source::BundleInstaller`, which sniffs the two container magics,
 leaves every other fetch alone, and registers a container exactly as a page's
 own is registered (`ContainerSources`; its `root`, if any, at `root.js` as the
-entry's module, its StyleInfo at `style-info.css`). Nothing is evaluated by any of it. The
+entry's module, its StyleInfo at `style-info.css`) — which is what a
+`<frame src>` loads and adopts. Nothing is evaluated by any of it. The
 handle is native's `{wait, then}` host object rather than a Promise, built in
 `bundle-fetch.ts` over the **`bobcat:future`** `Future` the member answers
 with: `wait(seconds)` is `Future.wait` in milliseconds, so it parks the job
@@ -1586,6 +1588,39 @@ name, `RealmListenerNames` deduplicates one realm's): a child closing `tap`
 leaves the page's open, and what a freed child held open is closed when its
 members drop.
 
+**What a frame's `src` does** is JavaScript, in the realm that wrote it
+(`packages/bobcat-element/src/frame.ts`, `bobcat:frame`). `__CreateFrame`
+and `__CreateElement("frame")` mark the handle, and `__SetAttribute(frame,
+"src", value)` hands the new value (`null` for a removal) to
+`frameSourceChanged` after the native write. A value equal to the frame's
+current one does nothing, as native's `FrameElement::OnSetSrc` and web-core's
+`LynxView` `url` setter skip it; any other bumps the frame's generation,
+calls `releaseFrame`, and stops for `null` or `""`. Otherwise it calls
+`fetchResource(src)` with `src` as written — the fetcher resolves it against
+`ViewSources::base_url`, and `bobcat-source`'s `BundleInstaller` registers
+the card through `ContainerSources`, its `root` at `<U>/root.js` and its
+StyleInfo at `<U>/style-info.css` (`U` the resolved `src`), before the fetch
+settles — and when it settles
+(a probe hit's `true` in a microtask, a `Future` id through its `then`)
+creates a `ShadowRealm`, holds it on the handle, and calls
+`bobcat:frame-boot`'s `boot(frameId, src, "{}", "{}", JSON.stringify(SystemInfo))`
+in it. Every step checks the generation, so a fetch or an import for an
+earlier `src` starts nothing; a failure here (the fetch, the realm, the
+import) is one `ScriptReported` naming `src`. The child's boot
+(`frame-boot.ts`) imports `bobcat:runtime` before `bobcat:element` and is the
+page boot minus the `Document`, the BTS and the entry import: `bindFrame`,
+`__BobcatDetachBackground` (everything the realm would send a BTS is
+dropped), `__BobcatInitializeMTS` with the parent's page data and
+`SystemInfo`, `__BobcatInitEntry(src)` (so `__Card__` is `src` as written,
+ReactLynx's `bundleName`, and `chunkURL`/`styleSheetURL` name what the
+installer registered), `adoptStyleSheet(bundleStyleSheetURL(src))` when
+`hasStyleSheet` holds it, `loadModuleSync(sectionURL("root", src))` in a
+`try` of its own (a throwing root is reported and boot still renders),
+`__BobcatProcessInitData`, `__BobcatRenderPage`, and a flush queued one
+microtask later, as the page boot queues its own. It answers `false` for a
+failure it already reported. No `load` event, no `data`/`global-props`, no
+events into the frame and no nested BTS (`docs/tracking/deviations.md`).
+
 The members that answer with a list encode it in the return string, since
 the boundary's value type carries no array: `attributeNames` and
 `getComputedStyleMap` as the length-prefixed record `setInlineStyles` accepts,
@@ -1649,7 +1684,7 @@ which a card's entry receives through the import `bobcat-source` prepends to
 its body, and **the header table of `packages/bobcat-element/src/element-papi.ts`
 is the authoritative enumeration** — it names every member and what backs it, and
 `MTS_CHUNK_PREAMBLE` in `esm.rs` imports exactly that set. By kind:
-every ReactLynx Snapshot constructor except `__CreateFrame`; all six tree
+every ReactLynx Snapshot constructor, `__CreateFrame` included; all six tree
 mutations; the properties and queries a Snapshot's `create`/`update` functions
 write through and read back, among them `__SetInlineStyles` and the name-based
 `__AddInlineStyle`, with `__SetCSSId` writing `l-css-id`; the readback pair
@@ -1666,8 +1701,8 @@ dialog's `show`/`showModal`/`close`/`requestClose`, and
 caller; the event
 registration and propagation members, `__AddEvent` and `__AddEventListener`
 included; `__CreateList` with `__UpdateListCallbacks`; and
-`__FlushElementTree`. Everything else is not implemented, `__CreateFrame` and
-`__DropElement` (which no web-core generation has) included; a bundle reaching
+`__FlushElementTree`. Everything else is not implemented, `__DropElement`
+(which no web-core generation has) included; a bundle reaching
 for another member fails at the missing name with a precise `ReferenceError`,
 not silently.
 
@@ -1999,7 +2034,8 @@ sheet and no slot, so light children never render — `display: flex;
 contain: strict` whatever `defaultDisplayLinear` says, the shared box block,
 and `is_frame`; the nested page the frame binding puts in the shadow root is a
 `page`, which the UA sheet sizes 100% of the frame; `src` is an ordinary
-attribute, observed by nothing), and
+attribute to Rust, which observes nothing — `bobcat:frame` reacts to it in
+the realm that wrote it), and
 `tree::blur_view` (`blur-radius` reflected into a
 `backdrop-filter: blur()` presentational hint, under both the native tag
 `blur-view` and web-core's `x-blur-view`, as a CSS length rather than
@@ -2129,7 +2165,12 @@ file is evaluated, which is the first point author code can run and so the
 first point another load can replace the buffers the host lent. A module is
 linked during that compile, so the imports it pulls in are loaded — each
 through the same borrowed-until-the-next-load host callback — before its own
-evaluation starts.
+evaluation starts. A module whose evaluation throws fails the load with that
+throw and leaves no rejection behind: QuickJS runs every module body as an
+async function, so the throw rejects that body's promise, each failing
+module's on the path and the evaluation promise, and the shim forgets every
+rejection the evaluation recorded with the thrown value
+(`qjs_rejections_forget_since`), so a caller that catches it has handled it.
 
 A runtime can also reserve module-name prefixes
 (`Runtime::reserve_module_prefix`), which checks a name at two places. The
@@ -2682,12 +2723,15 @@ browser WebGPU completion is Promise-driven.
 
 The dependency-free TypeScript sources of the ESMs `bobcat-core` preloads into
 its QuickJS realms, one file per module. Both of a group's runtimes register
-all twenty-one, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
+all twenty-three, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
 `src/tsconfig.json`'s `paths` (a unit test holds the two equal):
 `src/lynx-modules.ts` as `bobcat:lynx-modules`, `src/global-event-emitter.ts`
 as `bobcat:global-event-emitter`, `src/selector-query.ts` as
 `bobcat:selector-query`, `src/element-papi.ts` as `bobcat:element`,
-`src/main-thread-runtime.ts` as `bobcat:runtime`, `src/timers.ts` as
+`src/main-thread-runtime.ts` as `bobcat:runtime`, `src/frame.ts` as
+`bobcat:frame` (what a `frame`'s `src` does in the realm that wrote it: the
+fetch, the `ShadowRealm`, the call into the child), `src/frame-boot.ts` as
+`bobcat:frame-boot` (a nested card's boot inside that child), `src/timers.ts` as
 `bobcat:timers`, `src/future.ts` as `bobcat:future`, `src/module.ts` as
 `bobcat:module`, `src/section-url.ts` as `bobcat:section-url`,
 `src/bundle-fetch.ts` as `bobcat:bundle-fetch`, `src/diagnostics.ts` as

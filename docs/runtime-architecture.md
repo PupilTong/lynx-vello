@@ -262,7 +262,7 @@ QuickJS ESM graph — a worker realm, on bobcat-workers' runtime
                 completion
   A realm in which bobcat:worker never ran has no global scope: a message
   posted to it is dropped, with nothing reported.
-  Both runtimes register the same twenty-one built-ins (esm.rs BUILTIN_MODULES),
+  Both runtimes register the same twenty-three built-ins (esm.rs BUILTIN_MODULES),
   and a realm's host modules decide which of them link. Here bobcat:element,
   bobcat:runtime and bobcat-internal fail at link with a SyntaxError: they
   import bobcat-internal:host members only an MTS realm has. In an MTS realm
@@ -852,7 +852,11 @@ over the same document — every one but the `Worker` members, with its startup
 strings answering `undefined` and no `bobcat-internal:native-modules` — rooted
 at no frame until its `bindFrame` binds it to a `frame` element, whose nested
 page its `createPage` then answers and whose shadow root its
-`adoptStyleSheet` mounts on (`main/runtime/frames.rs`). A worker realm's child
+`adoptStyleSheet` mounts on (`main/runtime/frames.rs`). What makes one is
+`bobcat:frame` (`packages/bobcat-element/src/frame.ts`), when a `frame`'s
+`src` is written: it fetches `src` as written, creates the child, and calls
+`bobcat:frame-boot`'s `boot` in it, which binds the frame and runs the card's
+`root` (see AGENTS.md, "What a frame's `src` does"). A worker realm's child
 has the core alone.
 
 ### Realm construction and driving
@@ -896,7 +900,7 @@ in any other worker or in the MTS realm that imports the internal module
 `bobcat:native-modules` directly can still call a module the view has.
 
 **One built-in table.** Both runtimes are built by `esm.rs`'s `build_runtime`,
-which registers the same twenty-one built-ins, `BUILTIN_MODULES`, and reserves
+which registers the same twenty-three built-ins, `BUILTIN_MODULES`, and reserves
 the two engine prefixes `bobcat:` and `bobcat-internal:` on the runtime. The
 host modules a realm declares decide which built-ins it can link: importing a
 host module the realm does not declare fails with a `ReferenceError`, and

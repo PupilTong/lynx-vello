@@ -298,6 +298,17 @@ export function __BobcatConnectBackground(worker: Worker, data: unknown, entry?:
   }
 }
 
+/**
+ * Called instead of `__BobcatConnectBackground` by a realm that has no BTS —
+ * a `frame`'s nested card, booted by `bobcat:frame-boot`: what it has queued
+ * for one is dropped, and so is everything it sends from now on, as if its
+ * BTS were already disposed. A Worker connected later is terminated.
+ */
+export function __BobcatDetachBackground(): void {
+  pendingBackgroundMessages = [];
+  backgroundDisposal ??= Promise.resolve();
+}
+
 export function __BobcatPublishEvent(
   componentId: unknown,
   handlerName: string,

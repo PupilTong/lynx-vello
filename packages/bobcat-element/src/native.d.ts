@@ -551,6 +551,24 @@ declare module "bobcat-internal:host" {
   export function settleFuture(id: number): void;
 }
 
+/**
+ * The TC39 `ShadowRealm`, a global of every realm this engine builds,
+ * installed by the host rather than by ES2023: `bobcat:frame` creates one per
+ * card a `frame` loads. Only primitives and callables cross: an object
+ * crossing either way is a `TypeError`, and a callable crosses as a wrapped
+ * function of the other realm.
+ */
+declare class ShadowRealm {
+  constructor();
+  /** Evaluates `sourceText` as a script in the child and answers its value. */
+  evaluate(sourceText: string): unknown;
+  /**
+   * Imports `specifier` in the child and answers its export `bindingName`,
+   * which must be a primitive or a callable.
+   */
+  importValue(specifier: string, bindingName: string): Promise<unknown>;
+}
+
 /** What one synchronous load answers with. */
 interface LoadedModuleSource {
   /**

@@ -14,12 +14,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::paint::Painter;
 use crate::resource::{
     LoadedSource, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
-    RetryAdvice, SourceCompletion, SourceRequest, StyleSheetSource,
+    RetryAdvice, SourceCompletion, SourceRequest, StyleSheetProbe, StyleSheetSource,
 };
 use crate::style::PreparsedStyleSheet;
 use crate::view::{
@@ -43,6 +43,10 @@ const PATIENCE: Duration = Duration::from_secs(30);
 /// The URL every [`TestViewSpec`] view names its entry by, and the one
 /// module URL an [`InlineFetcher`] answers with its entry script.
 const ENTRY: &str = "app:///main.js";
+
+/// The base URL every [`TestViewSpec`] view is built with, which its
+/// [`InlineFetcher`] resolves a stylesheet or a plain fetch against.
+const BASE: &str = "app:///";
 
 /// The URL a [`TestViewSpec`] view given a BTS entry names it by, which its
 /// [`InlineFetcher`] answers with that script.
@@ -74,6 +78,21 @@ pub(crate) struct InlineFetcher {
     /// that is not in here fails, which is how a test drives the fall-through
     /// to a rule's next source.
     fonts: FxHashMap<String, dom::FontBlob>,
+    /// The absolute URLs a [`SourceRequest::Fetch`] succeeds for; every
+    /// other plain fetch fails.
+    fetchable: FxHashSet<String>,
+    /// Whether this host answers [`ResourceFetcher::style_sheet_probe`]: from
+    /// the sheets it holds, by absolute URL. Without one, every
+    /// `hasStyleSheet` is `true`.
+    probes_style_sheets: bool,
+}
+
+/// `url` resolved against [`BASE`], as a fetcher resolves the stylesheets
+/// and plain fetches it is handed; one that does not resolve stays as it is.
+fn resolved(url: &str) -> String {
+    url::Url::parse(BASE)
+        .and_then(|base| base.join(url))
+        .map_or_else(|_| url.to_owned(), String::from)
 }
 
 impl dom::FrameImages for InlineFetcher {
@@ -109,7 +128,10 @@ impl ResourceFetcher for InlineFetcher {
                     url,
                 })
             }
-            SourceRequest::StyleSheet(url) => match self.sheets.get(&url) {
+            SourceRequest::Fetch { url } if self.fetchable.contains(&resolved(&url)) => {
+                Ok(LoadedSource::Fetched)
+            }
+            SourceRequest::StyleSheet(url) => match self.sheets.get(&resolved(&url)) {
                 Some(TestSheet::Text(css)) => Ok(LoadedSource::StyleSheet(StyleSheetSource::Text(
                     css.clone(),
                 ))),
@@ -122,11 +144,24 @@ impl ResourceFetcher for InlineFetcher {
                 || Err(missing(&url)),
                 |blob| Ok(LoadedSource::Font(blob.clone())),
             ),
-            // This double serves no module but the two entries and the ones
-            // it was given, and no plain fetch.
+            // This double serves no module but the two entries and the ones it
+            // was given, and no plain fetch but the ones it was told succeed.
             SourceRequest::Module(url) | SourceRequest::Fetch { url } => Err(missing(&url)),
         };
         completion.complete(answer);
+    }
+
+    fn style_sheet_probe(&self) -> Option<StyleSheetProbe> {
+        if !self.probes_style_sheets {
+            return None;
+        }
+        let held: FxHashSet<String> = self
+            .sheets
+            .iter()
+            .filter(|(_, sheet)| !matches!(sheet, TestSheet::Missing))
+            .map(|(url, _)| url.clone())
+            .collect();
+        Some(Arc::new(move |url: &str| held.contains(&resolved(url))))
     }
 }
 
@@ -212,10 +247,15 @@ pub(crate) struct TestViewSpec {
     modules: Vec<(String, String)>,
     config: crate::main::tree::PageConfig,
     sheets: Vec<(String, TestSheet)>,
+    /// Sheets the host holds and the view does not list: what an adoption
+    /// asks for by URL.
+    served_sheets: Vec<(String, TestSheet)>,
     fonts: Vec<(String, dom::FontBlob)>,
     /// A face the view registers at construction and its family, the page's
     /// default font.
     default_font: Option<(String, dom::FontBlob)>,
+    fetchable: FxHashSet<String>,
+    probes_style_sheets: bool,
     target: TestTarget,
     width: f32,
     height: f32,
@@ -235,8 +275,11 @@ impl TestViewSpec {
             modules: Vec::new(),
             config: crate::main::tree::PageConfig::default(),
             sheets: Vec::new(),
+            served_sheets: Vec::new(),
             fonts: Vec::new(),
             default_font: None,
+            fetchable: FxHashSet::default(),
+            probes_style_sheets: false,
             target: TestTarget::None,
             width: 393.0,
             height: 727.0,
@@ -280,6 +323,30 @@ impl TestViewSpec {
     /// not with whatever the machine has.
     pub(crate) fn with_default_font(mut self, family: &str, bytes: &'static [u8]) -> Self {
         self.default_font = Some((family.to_owned(), dom::FontBlob::from_static(bytes)));
+        self
+    }
+
+    /// A URL a plain fetch (`fetchResource`) succeeds for, resolved against
+    /// the view's base. What it registers is whatever else this host was
+    /// given: [`Self::with_module`] and [`Self::serving_style_sheet`] stand
+    /// in for a container installer.
+    pub(crate) fn with_fetchable(mut self, url: &str) -> Self {
+        self.fetchable.insert(resolved(url));
+        self
+    }
+
+    /// One sheet this host holds at `url` as CSS text, which the view does
+    /// not list: an adoption by that URL is what mounts it.
+    pub(crate) fn serving_style_sheet(mut self, url: &str, css: &str) -> Self {
+        self.served_sheets
+            .push((resolved(url), TestSheet::Text(css.to_owned())));
+        self
+    }
+
+    /// Answers `hasStyleSheet` from the sheets this host holds, listed and
+    /// served alike, rather than `true` for every URL.
+    pub(crate) fn with_style_sheet_probe(mut self) -> Self {
+        self.probes_style_sheets = true;
         self
     }
 
@@ -343,8 +410,11 @@ impl TestViewSpec {
             modules,
             config,
             sheets,
+            served_sheets,
             fonts,
             default_font,
+            fetchable,
+            probes_style_sheets,
             target,
             width,
             height,
@@ -360,7 +430,7 @@ impl TestViewSpec {
             style_sheets: sheets.iter().map(|(url, _)| url.clone()).collect(),
             background_entry: background.as_ref().map(|_| BACKGROUND_ENTRY.to_owned()),
             ..ViewSources::new(
-                "app:///",
+                BASE,
                 ENTRY,
                 crate::ScreenMetrics::for_viewport(width, height, 1.0),
             )
@@ -369,8 +439,10 @@ impl TestViewSpec {
             entry: crate::main::runtime::card_entry(&entry),
             background,
             modules: modules.into_iter().collect(),
-            sheets: sheets.into_iter().collect(),
+            sheets: sheets.into_iter().chain(served_sheets).collect(),
             fonts: fonts.into_iter().collect(),
+            fetchable,
+            probes_style_sheets,
         });
         block_on(async move {
             let group = LynxGroup::new(requester, StyleThreads::Sequential)

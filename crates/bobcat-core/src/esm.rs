@@ -129,6 +129,17 @@ pub(crate) const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
 /// exports the view calls into its realm through.
 pub(crate) const RUNTIME_MODULE_SPECIFIER: &str = "bobcat:runtime";
 
+/// What a `frame` element's `src` does in the realm that wrote it: the
+/// fetch, the `ShadowRealm` child, and the call into
+/// [`FRAME_BOOT_MODULE_SPECIFIER`] there. [`ELEMENT_MODULE_SPECIFIER`]
+/// imports it.
+pub(crate) const FRAME_MODULE_SPECIFIER: &str = "bobcat:frame";
+
+/// A nested card's main-thread boot, which a frame's `ShadowRealm` child
+/// imports: the page boot's steps over the frame binding
+/// (`main/runtime/frames.rs`), without a document of its own or a BTS.
+pub(crate) const FRAME_BOOT_MODULE_SPECIFIER: &str = "bobcat:frame-boot";
+
 /// The MTS realm's `Worker` class. The one built-in name without a colon,
 /// which the module normalizer passes through by name.
 pub(crate) const WORKER_CLASS_MODULE_SPECIFIER: &str = "bobcat-internal";
@@ -171,6 +182,7 @@ pub const MTS_CHUNK_PREAMBLE: &str = concat!(
     "__LoadLepusChunk, __LoadStyleSheet, __AdoptStyleSheet } from \"bobcat:runtime\"; ",
     "import { __CreatePage, __CreateElement, __CreateWrapperElement, __CreateText, ",
     "__CreateImage, __CreateView, __CreateScrollView, __CreateRawText, __CreateList, ",
+    "__CreateFrame, ",
     "__AppendElement, __InsertElementBefore, __RemoveElement, __ReplaceElement, ",
     "__ReplaceElements, __SwapElement, __SetClasses, __SetID, __GetID, __GetTag, ",
     "__GetChildren, __GetAttributeByName, __GetAttributeNames, __GetElementUniqueID, ",
@@ -249,6 +261,8 @@ pub(crate) const BUILTIN_MODULES: &[BuiltinModule] = &[
     builtin_module!(SELECTOR_QUERY_SPECIFIER, "selector-query"),
     builtin_module!(ELEMENT_MODULE_SPECIFIER, "element-papi"),
     builtin_module!(RUNTIME_MODULE_SPECIFIER, "main-thread-runtime"),
+    builtin_module!(FRAME_MODULE_SPECIFIER, "frame"),
+    builtin_module!(FRAME_BOOT_MODULE_SPECIFIER, "frame-boot"),
     builtin_module!(TIMER_MODULE_SPECIFIER, "timers"),
     builtin_module!(FUTURE_MODULE_SPECIFIER, "future"),
     builtin_module!(REQUIRE_MODULE_SPECIFIER, "module"),
