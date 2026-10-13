@@ -532,7 +532,11 @@ fn an_instant_scroll_that_moves_its_container_is_recorded_once_for_the_host() {
         .dom
         .scroll_to_with(scroller, Vector2D::new(0.0, 30.0), ScrollBehavior::Instant);
     assert!(h.doc.dom.has_instant_scrolls());
-    assert_eq!(h.doc.dom.take_instant_scrolls().as_slice(), [scroller]);
+    assert_eq!(
+        h.doc.dom.take_instant_scrolls().as_slice(),
+        [(scroller, Vector2D::zero())],
+        "once, with the offset before the first move"
+    );
     assert!(h.doc.dom.take_instant_scrolls().is_empty(), "taken once");
 
     // The document's own write, as an adopted painter offset, is not one.

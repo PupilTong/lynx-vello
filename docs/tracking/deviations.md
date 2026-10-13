@@ -603,10 +603,13 @@ consequential choice about whether to follow the spec or the quirk.
     and release targets, suppressed by a consumed scroll or a cancel, and not
     by a delivered `longpress`; `dblclick` follows a second `click` at the
     same target within 500 ms. The order after a release is `pointerup`,
-    `touchend`, `mouseup`, `click`, `dblclick`, `tap`. The event object of a
-    `click`/`dblclick` carries `button`, `buttons`, `clientX`, `clientY`,
-    `pageX` and `pageY` (web-core gives a `click` the last four; `button` and
-    `buttons` are `MouseEvent`'s), and its `detail` is `{x, y}`.
+    `touchend`, `mouseup`, `click`, `dblclick`, `tap`. The event object of
+    every pointer-shaped event (`pointer*`, `mouse*`, `click`, `dblclick`,
+    `tap`, `longpress`) carries `x`, `y`, `clientX`, `clientY`, `pageX`,
+    `pageY`, `button` and `buttons` (2026-10-13 user ruling: by payload
+    shape, not by name; web-core gives a `click` only the four client and
+    page coordinates and a `pointer*` event none), a `pointer*` event
+    `pointerId` and `pointerType` too, and the `detail` is `{x, y}`.
   - **Compatibility mouse events for a mouse only (2026-10-13, architect
     ruling).** `mousedown`/`mousemove`/`mouseup` follow a mouse pointer's
     `pointerdown`/`pointermove`/`pointerup` at the same target (Pointer
@@ -659,13 +662,16 @@ consequential choice about whether to follow the spec or the quirk.
       keep sending `touchmove` to a scrolling page). Only
       `PointerPhase::Cancel` produces `touchcancel`.
 - **W3C `scroll`/`scrollend` under Lynx's `scroll` name (2026-10-13,
-  architect ruling, accepted collision).** CSSOM-View's two events fire at
-  every scroll container, non-bubbling, with a `{}` detail. Lynx's own
-  `scroll` (`bindscroll` on `scroll-view` and `list`; web-core's
-  `lynxscroll`, renamed to `scroll` by `W3cEventNameToLynx`) fires only on
-  those components and carries `scrollTop`, `scrollLeft`, `scrollHeight`,
-  `scrollWidth`, `deltaX` and `deltaY` in its `detail`; a card that reads
-  them gets `undefined` here until the follow-up fills the Lynx detail.
+  architect ruling).** CSSOM-View's two events fire at every scroll
+  container, non-bubbling. Lynx's own `scroll` (`bindscroll` on
+  `scroll-view` and `list`; web-core's `lynxscroll`, renamed to `scroll` by
+  `W3cEventNameToLynx`) fires only on those components; here every scroll
+  container fires it. Its Lynx `detail` is built from the extras channel
+  (user ruling 2026-10-13, "kernel events are W3C"): `scrollTop`,
+  `scrollLeft`, `scrollHeight`, `scrollWidth` read at delivery, `deltaX`/
+  `deltaY` the change the post that queued it made (0 for `scrollend`), and
+  `isDragging`, **always `false`** in this step, as web-core reports it
+  (native reports whether a finger holds the container).
   Recorded choices inside the step:
   - **A `scrollend` ends a scroll that happened.** The main thread records
     every container that scrolled (an adopted offset moved it, or a
@@ -688,6 +694,11 @@ consequential choice about whether to follow the spec or the quirk.
     `Document::scroll_to_with(.., Instant)`, is a script-facing instant
     scroll. That matches web-core, whose `scrollTop` assignment fires a
     browser `scroll`, and not native Lynx, which fires nothing for it.
+- **`wheel`'s `detail` is `{}` (2026-10-13, user ruling).** It was
+  `{x, y, deltaX, deltaY}`. `deltaX`, `deltaY`, `x`, `y`, `clientX`,
+  `clientY`, `pageX` and `pageY` are on the event object, where W3C
+  `WheelEvent` and native Lynx put them; web-core forwards the DOM
+  `UIEvent.detail` number instead.
 - **Keyboard: `keydown`/`keyup` only, targeted at the document element
   (2026-10-13, architect ruling).** W3C UI Events' two key events reach the
   page with `key`, `code`, `repeat`, `altKey`, `ctrlKey`, `metaKey` and

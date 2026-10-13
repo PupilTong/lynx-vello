@@ -552,11 +552,12 @@ pub(crate) struct DocumentLayoutState {
     /// node or per container. An entry dies as a scroll request's does.
     pub(crate) auto_scroll_requests: Vec<(NodeId, AutoScrollRequest)>,
     /// The containers a script-facing instant scroll moved since the host
-    /// last took them, each once, in the order they moved: CSSOM-View's
+    /// last took them, each once with the offset it had before the first
+    /// such move, in the order they moved: CSSOM-View's
     /// pending scroll event targets for the scrolls the document itself
     /// performs. Bounded by the scroll containers, and empty unless a script
     /// scrolled one; see `scroll::request`.
-    pub(crate) instant_scrolls: SmallVec<[NodeId; 2]>,
+    pub(crate) instant_scrolls: SmallVec<[(NodeId, euclid::default::Vector2D<f32>); 2]>,
     /// The grid items whose `position: sticky` insets resolve against their
     /// grid area rather than the grid container: the area's edges in the
     /// container's border-box coordinates, unrounded as the layout run

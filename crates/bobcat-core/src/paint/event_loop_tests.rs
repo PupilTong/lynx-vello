@@ -2130,7 +2130,10 @@ fn a_wheel_scrolls_and_reaches_a_wheel_listener() {
     let page = SCROLLING_GESTURE_PAGE.replace(
         "__AddEventListener(view, 'tap', note, {});",
         "__AddEventListener(view, 'wheel', (event) => {
-               entries.push(event.type + ':' + event.detail.deltaY);
+               // `WheelEvent`'s delta, on the event itself; the Lynx
+               // `detail` of a wheel is native's `{}`.
+               entries.push(event.type + ':' + event.deltaY + ':' +
+                 JSON.stringify(event.detail));
                __SetAttribute(view, 'log', entries.join());
              }, {});",
     );
@@ -2139,7 +2142,7 @@ fn a_wheel_scrolls_and_reaches_a_wheel_listener() {
         Point2D::new(100.0, 100.0),
         dom::Vector2D::new(0.0, 30.0),
     ));
-    wait_for_log(&mut engine, "wheel:30");
+    wait_for_log(&mut engine, "wheel:30:{}");
     let offset = engine
         .painter
         .scroll_intents

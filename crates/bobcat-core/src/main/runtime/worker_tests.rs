@@ -1072,7 +1072,10 @@ fn a_published_dom_event_carries_values_only_and_no_propagation_methods() {
     pair.check(
         r"
         const d = results[0];
-        const keys = 'currentTarget,detail,eventPhase,params,target,timestamp,type';
+        // The W3C members a pointer-shaped event carries on itself travel
+        // with it: they are values too.
+        const keys = 'button,buttons,clientX,clientY,currentTarget,detail,eventPhase,' +
+          'pageX,pageY,params,target,timestamp,type,x,y';
         if (d.keys !== keys) throw Error(d.keys);
         if (d.targetKeys !== 'dataset,id,uid') throw Error(d.targetKeys);
         const expected = 'handler:tap:2:button:first:3:3:12:30:0:{}:false:false:false';

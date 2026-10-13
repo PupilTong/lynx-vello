@@ -60,7 +60,10 @@ pub type TouchPoints = SmallVec<[TouchPoint; 2]>;
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub enum EventDetail {
-    /// Nothing at all: an `error`, a dialog's `close`, a `slotchange`.
+    /// Nothing at all: an `error`, a `load`, a dialog's `close`, a
+    /// `scroll`, a `slotchange`. What a Lynx handler reads beside a W3C
+    /// event's own payload (a `load`'s size, a `scroll`'s metrics) is the
+    /// host's to carry, not this type's.
     #[default]
     None,
     /// A pointer at a position: the pointer events, the compatibility mouse
@@ -95,8 +98,6 @@ pub enum EventDetail {
         repeat: bool,
         modifiers: Modifiers,
     },
-    /// A size in px: an `<image>`'s or `<svg>`'s `load`.
-    Size { width: f64, height: f64 },
     /// An element's exposure changed. The payload is read off the target at
     /// delivery, so the variant carries nothing.
     Exposure,
@@ -115,11 +116,7 @@ impl EventDetail {
             Self::Pointer { position, .. }
             | Self::Wheel { position, .. }
             | Self::Touch { position, .. } => Some(*position),
-            Self::None
-            | Self::Key { .. }
-            | Self::Size { .. }
-            | Self::Exposure
-            | Self::ContentVisibility { .. } => None,
+            Self::None | Self::Key { .. } | Self::Exposure | Self::ContentVisibility { .. } => None,
         }
     }
 

@@ -1618,17 +1618,20 @@ two comma-joined decimal id strings — the nodes, and position for position eac
 step's shadow-retargeted target, less every step at a UA shadow tree's
 content, which script names none of, so an event at shadow chrome starts at
 its host (routed input events are composed, the components' events are not,
-as HTML and web-core fire them) — plus the name and then numbers alone: the
-`timestamp` (milliseconds on the view's timeline), the position the `detail`
-reports, the wheel delta (`undefined` for every event without one, which keeps
-the two keys out of the `detail`), a pointer's W3C `button` and `buttons`
-(never in the `detail`: the realm puts them on the event object of a
-compatibility mouse event, a `click` and a `dblclick`, web-core's shape), and
-four numbers per touch point (`identifier`, `x`, `y`, flags) for the four
-touch events; a key event crosses its `key` and `code` strings, `repeat` and a
-modifier bitmask instead. The realm builds
-the `detail` object and the three touch lists out of them; no JSON is
-formatted on the host side and none is parsed in the realm. One call
+as HTML and web-core fire them) — plus the name and then primitives alone: the
+`timestamp` (milliseconds on the view's timeline); the extras channel
+(`extraCount`, then name/value pairs: what a Lynx handler reads beside the W3C
+payload, such as a `load`'s size or a `scroll`'s metrics, which the realm makes
+the Lynx `detail`); then the W3C payload's kind and values — for an input
+event the position, the wheel delta, a pointer's `button`, `buttons`,
+`pointerId` and `pointerType` (each `undefined` where the shape has none), and
+four numbers per touch point (`identifier`, `x`, `y`, flags); for a key event
+its `key` and `code` strings, `repeat` and a modifier bitmask. Kernel events
+are W3C-shaped and `element-papi.ts` is the Lynx layer that reshapes them
+(user ruling 2026-10-13; `docs/tracking/dom-events.md`). The realm builds
+the `detail` object, the W3C members on the event object and the three touch
+lists out of them; no JSON is formatted on the host side and none is parsed
+in the realm. One call
 is one dispatch, so one event object serves it, and the host keeps no listener
 index at all. The realm runs the capture, bubble and `global-bindEvent` passes,
 derives `eventPhase` per step, and ends the dispatch itself; neither
@@ -1651,7 +1654,7 @@ script-facing instant scroll (`dom::Document::take_instant_scrolls`) queues
 its `scroll` from its entry's epilogue and gets its `scrollend` from the
 painter's rest post after carrying the request out. A wheel gesture rests
 once, 100 ms after its last tick (`WHEEL_REST_SECONDS`). All are component
-events, non-bubbling with a `{}` detail, queued only for a name a realm
+events, non-bubbling, with Lynx's scroll metrics as extras, queued only for a name a realm
 listener or a component hears at that moment; which containers are scrolling
 is tracked regardless.
 

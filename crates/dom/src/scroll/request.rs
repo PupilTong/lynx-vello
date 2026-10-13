@@ -236,10 +236,11 @@ impl<T> Document<T> {
                 return None;
             }
         } else if behavior == ScrollBehavior::Instant {
-            let moved = self.scroll_to(id, target) != scroll_box.offset;
+            let previous = scroll_box.offset;
+            let moved = self.scroll_to(id, target) != previous;
             let recorded = &mut self.layout_state_mut().instant_scrolls;
-            if moved && script_facing && !recorded.contains(&id) {
-                recorded.push(id);
+            if moved && script_facing && !recorded.iter().any(|(held, _)| *held == id) {
+                recorded.push((id, previous));
             }
         }
         let state = self.layout_state_mut();
@@ -261,8 +262,9 @@ impl<T> Document<T> {
     }
 
     /// The containers a script-facing instant [`Self::scroll_to_with`] moved
-    /// since the last call, each once, in the order they first moved, and
-    /// forgets them. The host fires `scroll` at each, in the task that
+    /// since the last call, each once with the offset it had before the
+    /// first of those moves (so the host can report the change), in the
+    /// order they first moved, and forgets them. The host fires `scroll` at each, in the task that
     /// scrolled; its `scrollend` follows when the painter, which carries the
     /// request out, posts the container at rest. A smooth one is the
     /// painter's to move, and the host learns its offsets, and its end, from
@@ -270,7 +272,7 @@ impl<T> Document<T> {
     ///
     /// No allocation while a container or two moved, and none at all when
     /// nothing did.
-    pub fn take_instant_scrolls(&mut self) -> SmallVec<[NodeId; 2]> {
+    pub fn take_instant_scrolls(&mut self) -> SmallVec<[(NodeId, Vector2D<f32>); 2]> {
         std::mem::take(&mut self.layout_state_mut().instant_scrolls)
     }
 

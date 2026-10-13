@@ -96,9 +96,8 @@ const ERROR_EVENT: &str = "error";
 /// the realm builds a different object out of, never per event name, so the
 /// realm reads the discriminator alone and the one dispatch export stays
 /// general. Mirrored by the realm's own `DETAIL_*` constants in
-/// `element-papi.ts`.
+/// `element-papi.ts`. (1 was a `load`'s size, which crosses as extras now.)
 const DETAIL_INPUT: f64 = 0.0;
-const DETAIL_SIZE: f64 = 1.0;
 const DETAIL_EMPTY: f64 = 2.0;
 const DETAIL_EXPOSURE: f64 = 3.0;
 const DETAIL_KEY: f64 = 4.0;
@@ -110,40 +109,85 @@ const MODIFIER_CTRL: u8 = 2;
 const MODIFIER_META: u8 = 4;
 const MODIFIER_SHIFT: u8 = 8;
 
+/// One value of the extras channel: what a Lynx handler reads beside a W3C
+/// event's own payload, when it is cheap to compute here (a `load`'s size,
+/// a `scroll`'s metrics). The kernel's events stay W3C-shaped
+/// ([`EventDetail`]); the realm's Lynx layer turns a dispatch's extras into
+/// the Lynx `detail`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Extra {
+    Number(f64),
+    Bool(bool),
+}
+
+/// One dispatch's extras: names, each with its value. Empty for nearly
+/// every event.
+type Extras<'a> = &'a [(&'static str, Extra)];
+
+/// Inline arguments for one dispatch: the six of the header, then an
+/// input event's discriminator and eight detail numbers. Extras and touch
+/// points spill.
+type Arguments<'a> = SmallVec<[HostArgument<'a>; 15]>;
+
+/// Appends the extras channel: the count, then each name and its value.
+fn encode_extras<'a>(extras: Extras<'a>, arguments: &mut Arguments<'a>) {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a handful of extras, far inside an f64's integers"
+    )]
+    arguments.push(HostArgument::Number(extras.len() as f64));
+    for (name, value) in extras {
+        arguments.push(HostArgument::String(name));
+        arguments.push(match *value {
+            Extra::Number(number) => HostArgument::Number(number),
+            Extra::Bool(flag) => HostArgument::Boolean(flag),
+        });
+    }
+}
+
+/// The W3C `PointerEvent.pointerType` of a device.
+fn pointer_type(device: dom::input::PointerKind) -> &'static str {
+    match device {
+        dom::input::PointerKind::Touch => "touch",
+        dom::input::PointerKind::Pen => "pen",
+        _ => "mouse",
+    }
+}
+
 /// The script boundary's encoding of `dom`'s [`EventDetail`]: the
-/// discriminator, then the numbers that kind spends, in the order the realm
+/// discriminator, then the values that kind spends, in the order the realm
 /// reads them. `dom`'s detail is the one description of what an event
 /// carries; this is only how it crosses, and the object is built in the
 /// realm, because its shape is JavaScript's.
 ///
-/// - [`DETAIL_INPUT`] for a pointer, wheel or touch event: the device position, the wheel delta
-///   (`undefined` for every event without one, which is what keeps the two `detail` keys absent
-///   there rather than `NaN`), then four numbers per touch point.
-/// - [`DETAIL_SIZE`] for a `load`: the size, in px.
-/// - [`DETAIL_EXPOSURE`] for a `uiappear`/`uidisappear`: no numbers. The realm builds web-core's
+/// - [`DETAIL_INPUT`] for a pointer, wheel or touch event, eight values: the device position; the
+///   wheel delta; W3C `button`, `buttons`, `pointerId` and `pointerType` — each `undefined` for a
+///   shape that has none, which is how the realm tells the three apart — then four numbers per
+///   touch point. The realm puts the W3C members on the event object.
+/// - [`DETAIL_EXPOSURE`] for a `uiappear`/`uidisappear`: nothing. The realm builds web-core's
 ///   detail (`ExposureServices.ts:202-208`) from the target's own unique id and its `exposure-id`
 ///   and `exposure-scene` attributes, which are the live element's because
 ///   [`MainThreadRuntime::dispatch`] resolves the target before it calls the realm.
 /// - [`DETAIL_KEY`] for `keydown`/`keyup`: the W3C `key` and `code` strings, borrowed from the
 ///   detail, `repeat` as a boolean and the modifiers as one bitmask. The realm puts them on the
-///   event object itself, as `KeyboardEvent` and web-core do, and the `detail` is `{}`.
-/// - [`DETAIL_EMPTY`] for everything else: the realm's `{}`, and no numbers.
-fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut SmallVec<[HostArgument<'a>; 12]>) {
-    let (position, delta, buttons, points): (_, _, _, &[dom::event::TouchPoint]) = match detail {
+///   event object itself, as `KeyboardEvent` and web-core do.
+/// - [`DETAIL_EMPTY`] for everything else: nothing.
+fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut Arguments<'a>) {
+    let (position, delta, pointer, points): (_, _, _, &[dom::event::TouchPoint]) = match detail {
         EventDetail::Pointer {
             position,
+            id,
+            device,
             button,
             buttons,
-            ..
-        } => (*position, None, Some((*button, *buttons)), &[]),
+        } => (
+            *position,
+            None,
+            Some((*button, *buttons, *id, pointer_type(*device))),
+            &[],
+        ),
         EventDetail::Wheel { position, delta } => (*position, Some(*delta), None, &[]),
         EventDetail::Touch { position, points } => (*position, None, None, points),
-        EventDetail::Size { width, height } => {
-            arguments.push(HostArgument::Number(DETAIL_SIZE));
-            arguments.push(HostArgument::Number(*width));
-            arguments.push(HostArgument::Number(*height));
-            return;
-        }
         EventDetail::Exposure => {
             arguments.push(HostArgument::Number(DETAIL_EXPOSURE));
             return;
@@ -173,26 +217,24 @@ fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut SmallVec<[HostArgu
             return;
         }
         // `None`, and the engine's own `ContentVisibility`, which never
-        // reaches a realm: `{}`.
+        // reaches a realm.
         _ => {
             arguments.push(HostArgument::Number(DETAIL_EMPTY));
             return;
         }
     };
+    let number = |value: Option<f64>| value.map_or(HostArgument::Undefined, HostArgument::Number);
     arguments.push(HostArgument::Number(DETAIL_INPUT));
     arguments.push(HostArgument::Number(f64::from(position.x)));
     arguments.push(HostArgument::Number(f64::from(position.y)));
-    for delta in [delta.map(|delta| delta.x), delta.map(|delta| delta.y)] {
-        arguments.push(delta.map_or(HostArgument::Undefined, |value| {
-            HostArgument::Number(f64::from(value))
-        }));
-    }
-    for value in [
-        buttons.map(|(button, _)| f64::from(button)),
-        buttons.map(|(_, buttons)| f64::from(buttons)),
-    ] {
-        arguments.push(value.map_or(HostArgument::Undefined, HostArgument::Number));
-    }
+    arguments.push(number(delta.map(|delta| f64::from(delta.x))));
+    arguments.push(number(delta.map(|delta| f64::from(delta.y))));
+    arguments.push(number(pointer.map(|(button, ..)| f64::from(button))));
+    arguments.push(number(pointer.map(|(_, buttons, ..)| f64::from(buttons))));
+    arguments.push(number(pointer.map(|(_, _, id, _)| f64::from(id))));
+    arguments.push(pointer.map_or(HostArgument::Undefined, |(.., kind)| {
+        HostArgument::String(kind)
+    }));
     for point in points {
         arguments.push(HostArgument::Number(f64::from(point.identifier)));
         arguments.push(HostArgument::Number(f64::from(point.position.x)));
@@ -624,10 +666,13 @@ impl DocumentSlot {
     /// so nothing here ends a scroll.
     fn instant_scrolls(&mut self) {
         let hears_scroll = self.listens(SCROLL_EVENT);
-        let moved = self.document_mut().take_instant_scrolls();
-        for node in moved {
+        let document = self.document.as_mut().expect(DOCUMENT_EXISTS);
+        let moved = document.take_instant_scrolls();
+        for (node, previous) in moved {
             if hears_scroll {
-                self.component_events.queue(node, SCROLL_EVENT);
+                let delta = document.scroll_offset(node) - previous;
+                self.component_events
+                    .queue_scroll(node, SCROLL_EVENT, delta);
             }
             if !self.scrolling.contains(&node) {
                 self.scrolling.push(node);
@@ -1377,7 +1422,7 @@ impl MainThreadRuntime {
             // a later one.
             if applied != before {
                 if hears_scroll {
-                    component_events.queue(node, SCROLL_EVENT);
+                    component_events.queue_scroll(node, SCROLL_EVENT, applied - before);
                 }
                 if !scrolling.contains(&node) {
                     scrolling.push(node);
@@ -1391,7 +1436,7 @@ impl MainThreadRuntime {
             {
                 scrolling.swap_remove(index);
                 if hears_end {
-                    component_events.queue(node, SCROLL_END_EVENT);
+                    component_events.queue_scroll(node, SCROLL_END_EVENT, dom::Vector2D::zero());
                 }
             }
             moved.push(node);
@@ -1506,18 +1551,26 @@ impl MainThreadRuntime {
         let timestamp = self.timeline_milliseconds;
         let mut failures = Vec::new();
         for event in events {
-            // [`EventDetail::None`] is the realm's `{}`, which is web-core's
-            // `error` detail exactly, and the `Event` a dialog fires carries
-            // nothing either; an `<image>`'s `load` carries the bitmap's
-            // *intrinsic* size, web-core's `naturalWidth`/`naturalHeight`,
-            // not the box it drew into.
+            // Every one of them is W3C-shaped, with no payload of its own:
+            // what a Lynx handler reads in its `detail` crosses as extras.
+            // An `error` and a dialog's `Event` carry nothing, and the realm's
+            // `{}` is web-core's `error` detail exactly. An `<image>`'s `load`
+            // carries the bitmap's *intrinsic* size, web-core's
+            // `naturalWidth`/`naturalHeight`, not the box it drew into.
             //
             // An `<svg>` is native's shape instead (ruled): its `load` carries
             // the element's border-box layout size, read here at delivery —
             // after the commit that applied the natural size, because the
             // page posts this entry only once nothing is left uncommitted —
             // and 0x0 when the element has no box. It has no `error` at all.
-            let (target, name, detail) = match event {
+            //
+            // A `scroll` or `scrollend` carries Lynx's scroll metrics (native's
+            // `bindscroll` detail, web-core's `lynxscroll`): the offset and the
+            // scrolling area read here, the delta its post moved the container
+            // by (0 for a `scrollend`), and `isDragging`, which this step
+            // reports false, as web-core does.
+            let mut extras: SmallVec<[(&'static str, Extra); 7]> = SmallVec::new();
+            let (target, name) = match event {
                 ComponentEvent::Image(dom::ImageOutcome::Loaded {
                     node,
                     width,
@@ -1536,22 +1589,50 @@ impl MainThreadRuntime {
                             (f64::from(width), f64::from(height))
                         }
                     };
-                    (node, LOAD_EVENT, EventDetail::Size { width, height })
+                    extras.push(("width", Extra::Number(width)));
+                    extras.push(("height", Extra::Number(height)));
+                    (node, LOAD_EVENT)
                 }
                 ComponentEvent::Image(dom::ImageOutcome::Failed { node }) => {
                     if is_svg(self.slot.borrow_mut().document_mut(), node) {
                         continue;
                     }
-                    (node, ERROR_EVENT, EventDetail::None)
+                    (node, ERROR_EVENT)
                 }
-                ComponentEvent::Plain { node, name } => (node, name, EventDetail::None),
+                ComponentEvent::Plain { node, name } => (node, name),
+                ComponentEvent::Scroll { node, name, delta } => {
+                    let scroll_box = self.slot.borrow_mut().document_mut().scroll_box(node);
+                    let (offset, size) = scroll_box.map_or_else(
+                        || (dom::Vector2D::zero(), dom::Size2D::zero()),
+                        |scroll_box| (scroll_box.offset, scroll_box.scroll_size),
+                    );
+                    for (key, value) in [
+                        ("scrollTop", offset.y),
+                        ("scrollLeft", offset.x),
+                        ("scrollHeight", size.height),
+                        ("scrollWidth", size.width),
+                        ("deltaX", delta.x),
+                        ("deltaY", delta.y),
+                    ] {
+                        extras.push((key, Extra::Number(f64::from(value))));
+                    }
+                    extras.push(("isDragging", Extra::Bool(false)));
+                    (node, name)
+                }
             };
             // Not composed either, as HTML and web-core fire every one of
             // them: one queued at a UA shadow tree's node stays inside that
             // tree.
-            if let Err(error) =
-                self.dispatch(js_runtime, target, name, false, false, timestamp, &detail)
-            {
+            if let Err(error) = self.dispatch(
+                js_runtime,
+                target,
+                name,
+                false,
+                false,
+                timestamp,
+                &EventDetail::None,
+                &extras,
+            ) {
                 failures.push(error);
             }
         }
@@ -1598,6 +1679,7 @@ impl MainThreadRuntime {
             true,
             payload.timestamp,
             &payload.detail,
+            &[],
         )
     }
 
@@ -1645,6 +1727,7 @@ impl MainThreadRuntime {
                 true,
                 at,
                 &payload.detail,
+                &[],
             )
         } else {
             Ok(false)
@@ -1666,6 +1749,7 @@ impl MainThreadRuntime {
                 true,
                 at,
                 &payload.detail,
+                &[],
             )
         } else {
             Ok(false)
@@ -1726,8 +1810,14 @@ impl MainThreadRuntime {
     /// reaches no step at all. The Rust walk keeps those steps: a component's
     /// shadow tree is its own.
     ///
-    /// Everything else crosses as numbers, and the realm builds the objects:
-    /// the `timestamp`, then the detail as [`encode_detail`] writes it. No
+    /// Everything else crosses as primitives, and the realm builds the
+    /// objects, in this order: the `timestamp`; the extras channel
+    /// ([`encode_extras`]: the count, then name/value pairs), which is what a
+    /// Lynx handler reads beside the W3C payload and which the realm makes
+    /// the Lynx `detail` whenever there are any; then the W3C payload as
+    /// [`encode_detail`] writes it, last because a touch event's points give
+    /// it no fixed length. The kernel's events are W3C-shaped, and the realm
+    /// is the Lynx layer that reshapes them (user ruling, 2026-10-13). No
     /// JSON is formatted here and none is parsed there.
     ///
     /// The document is released before the realm's call, which is what lets
@@ -1748,6 +1838,7 @@ impl MainThreadRuntime {
         composed: bool,
         timestamp: f64,
         detail: &EventDetail,
+        extras: Extras<'_>,
     ) -> Result<bool, MainThreadError> {
         let mut nodes = String::new();
         let mut targets = String::new();
@@ -1776,15 +1867,15 @@ impl MainThreadRuntime {
             document.dispatch_element_event_over(&steps, name, detail, timestamp);
         }
 
-        // Inline for the twelve an input event without touch points spends:
-        // six of header, then its six detail numbers. A touch event spills
-        // once, and its points are the only thing that ever grows this.
-        let mut arguments: SmallVec<[HostArgument<'_>; 12]> = SmallVec::new();
+        // The detail last, because a touch event's points make it the one
+        // part of variable length besides the extras before it.
+        let mut arguments = Arguments::new();
         arguments.push(HostArgument::String(&nodes));
         arguments.push(HostArgument::String(&targets));
         arguments.push(HostArgument::String(name));
         arguments.push(HostArgument::Boolean(bubbles));
         arguments.push(HostArgument::Number(timestamp));
+        encode_extras(extras, &mut arguments);
         encode_detail(detail, &mut arguments);
 
         let called = self
@@ -1978,6 +2069,7 @@ impl MainThreadRuntime {
                 false,
                 timestamp,
                 &EventDetail::Exposure,
+                &[],
             ) {
                 failures.push(error);
             }

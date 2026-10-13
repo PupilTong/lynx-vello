@@ -1318,13 +1318,13 @@ function dispatch(
     name,
     bubbles,
     payload.timestamp ?? 0,
+    ...extraArguments(payload),
     ...detailArguments(payload),
   );
 }
 
 /** The host's detail kinds, mirrored from `main/runtime/lib.rs`. */
 const DETAIL_POSITION = 0;
-const DETAIL_SIZE = 1;
 const DETAIL_EMPTY = 2;
 const DETAIL_EXPOSURE = 3;
 const DETAIL_KEY = 4;
@@ -1341,12 +1341,19 @@ interface DispatchPayload {
   y?: number;
   deltaX?: number;
   deltaY?: number;
-  /** A pointer event's W3C `button` and `buttons`. */
+  /** A pointer event's W3C `button`, `buttons`, `pointerId`, `pointerType`. */
   button?: number;
   buttons?: number;
+  pointerId?: number;
+  pointerType?: string;
+  /** The extras channel: name/value pairs the realm makes the `detail` of. */
+  extras?: [string, unknown][];
   touchNumbers?: number[];
   timestamp?: number;
-  /** An image `load`'s intrinsic size: the `DETAIL_SIZE` kind. */
+  /**
+   * An image `load`'s intrinsic size: extras `width` and `height`, and the
+   * `DETAIL_EMPTY` kind, as the host sends it.
+   */
   width?: number;
   height?: number;
   /** An image `error`: the `DETAIL_EMPTY` kind, which spends no numbers. */
@@ -1361,6 +1368,18 @@ interface DispatchPayload {
 }
 
 /**
+ * The extras channel as the host sends it: the count, then each name and its
+ * value. An image `load`'s size crosses here.
+ */
+function extraArguments(payload: DispatchPayload): [number, ...unknown[]] {
+  const extras: [string, unknown][] = payload.extras ??
+    (payload.width === undefined
+      ? []
+      : [["width", payload.width], ["height", payload.height]]);
+  return [extras.length, ...extras.flat()];
+}
+
+/**
  * The kind and the numbers behind it, as the host sends them. A tuple, so the
  * spread at the call site still fills the `detailKind` parameter.
  */
@@ -1371,8 +1390,8 @@ function detailArguments(payload: DispatchPayload): [number, ...unknown[]] {
   if (payload.exposure === true) {
     return [DETAIL_EXPOSURE];
   }
-  if (payload.width !== undefined) {
-    return [DETAIL_SIZE, payload.width, payload.height];
+  if (payload.width !== undefined || payload.extras !== undefined) {
+    return [DETAIL_EMPTY];
   }
   if (payload.key !== undefined) {
     const { key, code, repeat, modifiers } = payload.key;
@@ -1386,6 +1405,8 @@ function detailArguments(payload: DispatchPayload): [number, ...unknown[]] {
     payload.deltaY,
     payload.button,
     payload.buttons,
+    payload.pointerId,
+    payload.pointerType,
     ...(payload.touchNumbers ?? []),
   ];
 }
@@ -1606,6 +1627,7 @@ describe("event listeners", () => {
       "tap",
       true,
       0,
+      0,
       DETAIL_POSITION,
       0,
       0,
@@ -1694,6 +1716,7 @@ describe("event listeners", () => {
         "999",
         "tap",
         true,
+        0,
         0,
         DETAIL_POSITION,
         0,
@@ -2573,30 +2596,62 @@ describe("the event detail", () => {
     expect(Object.keys(detail)).toEqual(["x", "y"]);
   });
 
-  it("adds the delta for the one event that carries one", () => {
+  // Native's shape: a wheel's delta and position are the event's own
+  // members, as `WheelEvent`'s are, and its `detail` is empty.
+  it("gives a wheel an empty detail and its members on the event", () => {
     const { inner } = tree();
+    let seen: Record<string, unknown> | undefined;
+    __AddEventListener(inner, "wheel", (event: Record<string, unknown>) => {
+      seen = event;
+    }, {});
 
-    const detail = detailOf(inner, "wheel", {
-      x: 5,
-      y: 6,
-      deltaX: 0,
-      deltaY: 30,
-    });
+    dispatch([inner], "wheel", { x: 5, y: 6, deltaX: 0, deltaY: 30 });
 
-    expect(detail).toEqual({ x: 5, y: 6, deltaX: 0, deltaY: 30 });
-    expect(Object.keys(detail)).toEqual(["x", "y", "deltaX", "deltaY"]);
+    expect(seen!["detail"]).toEqual({});
+    for (
+      const [member, value] of Object.entries({
+        deltaX: 0,
+        deltaY: 30,
+        x: 5,
+        y: 6,
+        clientX: 5,
+        clientY: 6,
+        pageX: 5,
+        pageY: 6,
+      })
+    ) {
+      expect(seen![member], member).toBe(value);
+    }
+    expect("button" in seen!).toBe(false);
   });
 
-  // The host names a detail *kind*, not an event: the numbers behind
-  // `DETAIL_SIZE` make an `<image>` `load`'s `{width, height}`, web-core's
+  // The host's extras are the Lynx `detail`, whatever their names: an
+  // `<image>` `load`'s `{width, height}`, web-core's
   // `naturalWidth`/`naturalHeight` and not the box the bitmap drew into.
-  it("builds a size detail out of the kind the host named", () => {
+  it("makes the host's extras the detail", () => {
     const { inner } = tree();
 
     const detail = detailOf(inner, "load", { width: 40, height: 20 });
 
     expect(detail).toEqual({ width: 40, height: 20 });
     expect(Object.keys(detail)).toEqual(["width", "height"]);
+  });
+
+  it("makes any extras the detail, numbers and booleans alike, over the payload", () => {
+    const { inner } = tree();
+
+    const detail = detailOf(inner, "scroll", {
+      extras: [["scrollTop", 120], ["deltaY", 20], ["isDragging", false]],
+    });
+    expect(detail).toEqual({ scrollTop: 120, deltaY: 20, isDragging: false });
+
+    // A position payload gives way to them too: the extras are the detail.
+    const positioned = detailOf(inner, "tap", {
+      x: 1,
+      y: 2,
+      extras: [["custom", 7]],
+    });
+    expect(positioned).toEqual({ custom: 7 });
   });
 
   // web-core's `error` detail exactly: no keys, and no numbers spent to say
@@ -2650,8 +2705,8 @@ describe("the event detail", () => {
   });
 });
 
-describe("mouse and click events", () => {
-  /** The `MouseEvent` members a mouse or click event carries on itself. */
+describe("pointer, mouse and click events", () => {
+  /** The W3C members a pointer-shaped event carries on itself. */
   type MouseEventValues = Record<string, unknown> & {
     detail: Record<string, unknown>;
   };
@@ -2683,27 +2738,55 @@ describe("mouse and click events", () => {
     expect(event["pageY"]).toBe(30);
   });
 
-  it("puts the buttons and the client and page coordinates on a click", () => {
-    for (const name of ["click", "dblclick"]) {
-      const event = delivered(name, { x: 4, y: 5, button: 0, buttons: 0 });
+  it("gives every pointer-shaped event the mouse members, by shape not name", () => {
+    for (const name of ["click", "dblclick", "tap", "longpress", "mouseup"]) {
+      const event = delivered(name, {
+        x: 4,
+        y: 5,
+        button: 0,
+        buttons: 0,
+        pointerId: 3,
+        pointerType: "touch",
+      });
 
-      expect(event.detail).toEqual({ x: 4, y: 5 });
-      expect(event["button"]).toBe(0);
-      expect(event["buttons"]).toBe(0);
-      expect(event["clientX"]).toBe(4);
-      expect(event["pageY"]).toBe(5);
-      expect("x" in event, "web-core gives a click no top-level x").toBe(false);
+      expect(event.detail, name).toEqual({ x: 4, y: 5 });
+      expect(event["button"], name).toBe(0);
+      expect(event["buttons"], name).toBe(0);
+      expect(event["x"], name).toBe(4);
+      expect(event["clientX"], name).toBe(4);
+      expect(event["pageY"], name).toBe(5);
+      expect("pointerId" in event, `${name} is no PointerEvent`).toBe(false);
     }
   });
 
-  it("gives a pointer event and a tap no mouse members", () => {
-    for (const name of ["pointerdown", "tap"]) {
-      const event = delivered(name, { x: 1, y: 2, button: 0, buttons: 1 });
+  it("gives a pointer event its pointerId and pointerType as well", () => {
+    const event = delivered("pointerdown", {
+      x: 1,
+      y: 2,
+      button: 0,
+      buttons: 1,
+      pointerId: 7,
+      pointerType: "pen",
+    });
 
-      expect(event.detail).toEqual({ x: 1, y: 2 });
-      for (const member of ["button", "buttons", "clientX", "pageX"]) {
-        expect(member in event, `${name}.${member}`).toBe(false);
-      }
+    expect(event.detail).toEqual({ x: 1, y: 2 });
+    expect(event["pointerId"]).toBe(7);
+    expect(event["pointerType"]).toBe("pen");
+    expect(event["buttons"]).toBe(1);
+    expect(event["clientY"]).toBe(2);
+  });
+
+  it("gives a touch event its lists and no mouse members", () => {
+    const event = delivered("touchstart", {
+      x: 1,
+      y: 2,
+      touchNumbers: [1, 1, 2, 7],
+    });
+
+    expect(event.detail).toEqual({ x: 1, y: 2 });
+    expect(event["touches"]).toHaveLength(1);
+    for (const member of ["button", "clientX", "pointerId"]) {
+      expect(member in event, member).toBe(false);
     }
   });
 
@@ -2827,6 +2910,7 @@ describe("timestamp and params", () => {
       String(__GetElementUniqueID(inner)),
       "tap",
       undefined,
+      0,
       0,
       0,
       undefined,

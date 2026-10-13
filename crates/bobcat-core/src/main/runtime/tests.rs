@@ -2048,11 +2048,13 @@ fn adopted_offsets_queue_scroll_events_only_for_a_name_something_hears() {
     let queued = runtime.slot.borrow().component_events.take();
     assert_eq!(
         queued,
-        [ComponentEvent::Plain {
+        [ComponentEvent::Scroll {
             node: scroller,
-            name: "scroll"
+            name: "scroll",
+            delta: dom::Vector2D::new(0.0, 20.0),
         }],
-        "one `scroll`, and no `scrollend` with nothing to hear it"
+        "one `scroll`, with the change its post made, and no `scrollend` with nothing to \
+         hear it"
     );
 }
 
@@ -2123,6 +2125,95 @@ fn the_painter_names_pair_click_with_dblclick_and_keep_observed_names() {
         ["slotchange"],
         "the realm's close of an observed name is not forwarded; of another, it is"
     );
+}
+
+/// The extras channel end to end: a drag's `scroll` reaches the realm as a
+/// W3C event whose Lynx `detail` is the scroll metrics — the offset and the
+/// scrolling area read at delivery, the delta its post moved the container
+/// by — and its `scrollend` with a zero delta; an `<image>` `load` still
+/// reports `{width, height}`, now as extras.
+#[test]
+fn scroll_metrics_and_a_load_size_reach_the_lynx_detail_as_extras() {
+    let (mut js_runtime, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const scroller = __CreateView(0);
+                  __AppendElement(page, scroller);
+                  const card = __CreateView(0);
+                  __AppendElement(scroller, card);
+                  globalThis.held = [page, scroller, card];
+                  __SetInlineStyles(scroller, 'display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px');
+                  __SetInlineStyles(card, 'flex-shrink:0;width:200px;height:1000px');
+                  const note = (event) =>
+                    seen.push(event.type + ' ' + JSON.stringify(event.detail));
+                  __AddEventListener(scroller, 'scroll', note, {});
+                  __AddEventListener(scroller, 'scrollend', note, {});
+                  __AddEventListener(card, 'load', note, {});
+                  __FlushElementTree();
+                };
+                ",
+            "app:///extras.js",
+        )
+        .expect("main-thread script");
+    let (scroller, card) = (node_id(3), node_id(4));
+    let entry = |y: f32, rest: bool| {
+        (
+            scroller,
+            crate::link::ScrollEntry {
+                offset: dom::Vector2D::new(0.0, y),
+                at: 0.0,
+                rest: rest.then_some(dom::Vector2D::new(0.0, y)),
+                request: None,
+            },
+        )
+    };
+    // Delivered between the two posts, as the page's posted entry is: the
+    // offset is read at delivery.
+    runtime.adopt_scroll_offsets([entry(40.0, false)].into_iter());
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    runtime.adopt_scroll_offsets([entry(65.0, true)].into_iter());
+    runtime
+        .slot
+        .borrow()
+        .component_events
+        .queue_image(Some(dom::ImageOutcome::Loaded {
+            node: card,
+            width: 40,
+            height: 20,
+        }));
+    let failures = runtime.dispatch_component_events(&mut js_runtime);
+    assert!(failures.is_empty(), "no listener threw: {failures:?}");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r#"
+                const metrics = (top, delta) => JSON.stringify({
+                  scrollTop: top, scrollLeft: 0, scrollHeight: 1000, scrollWidth: 200,
+                  deltaX: 0, deltaY: delta, isDragging: false,
+                });
+                const expected = [
+                  'scroll ' + metrics(40, 40),
+                  'scroll ' + metrics(65, 25),
+                  'scrollend ' + metrics(65, 0),
+                  'load {"width":40,"height":20}',
+                ].join('|');
+                if (seen.join('|') !== expected) {
+                  throw new Error('unexpected deliveries: ' + seen.join('|'));
+                }
+                "#,
+            "app:///verify.js",
+            "verifying",
+        )
+        .expect("verification");
 }
 
 /// An engine component on the path that observes the event's name.
