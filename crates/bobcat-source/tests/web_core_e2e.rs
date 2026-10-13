@@ -84,6 +84,10 @@ const LATE: &[&str] = &[
 ];
 /// How long a card may go on changing before the suite refuses to pin it.
 const STABLE_DEADLINE: Duration = Duration::from_secs(10);
+/// How long one frame waits for the view to service it. The wait is this
+/// host's own, taken between posting a frame and drawing it, with the view
+/// pumped throughout.
+const FRAME_DEADLINE: Duration = Duration::from_secs(10);
 /// Turns between two capture attempts, each a 5 ms sleep apart.
 const STABLE_TICKS: usize = 20;
 
@@ -455,9 +459,9 @@ impl Card {
         card
     }
 
-    /// One turn of the view and of the painter. Says whether the view
-    /// reported that it finished booting during it.
-    fn turn(&mut self) -> bool {
+    /// One turn of the view: everything it reported is logged. Says whether
+    /// it reported that it finished booting.
+    fn pump(&mut self) -> bool {
         let mut booted = false;
         for event in self.view.pump() {
             match event {
@@ -479,14 +483,35 @@ impl Card {
                 }
             }
         }
-        // `tick`, not `pump`: an offscreen painter's `draw` returns at once
-        // because there is no window to present to, so a `pump` settle never
-        // publishes a clock and every card's animation timeline stays pinned
-        // at zero. `tick` is the offscreen turn — it reads the clock, services
-        // the gestures and composes — so a card whose screen depends on time
-        // (a CSS animation, a transition, a scroll-driven sample) is a thing
-        // this suite can judge at all.
-        self.painter.tick(false).unwrap();
+        booted
+    }
+
+    /// One turn of the view and one frame of the painter. Says whether the
+    /// view reported that it finished booting during it.
+    ///
+    /// A frame, not only a `pump`: an offscreen painter's `draw` returns at
+    /// once because there is no window to present to, so a `pump` settle
+    /// never publishes a clock and every card's animation timeline stays
+    /// pinned at zero. Posting a frame is the offscreen turn — it reads the
+    /// clock, services the gestures and composes — so a card whose screen
+    /// depends on time (a CSS animation, a transition, a scroll-driven
+    /// sample) is a thing this suite can judge at all.
+    ///
+    /// The frame is posted, waited for and drawn as three calls, and the view
+    /// is pumped while the post is outstanding: a job of the card that waits
+    /// on its host in the middle of a frame — a lazy bundle adopting its
+    /// stylesheet — is answered by that pump, and the post is serviced
+    /// behind it. A post the view has not serviced by [`FRAME_DEADLINE`] is
+    /// drawn from what the view had published.
+    fn turn(&mut self) -> bool {
+        let mut booted = self.pump();
+        let posted = self.painter.post_frame().unwrap();
+        let deadline = Instant::now() + FRAME_DEADLINE;
+        while !self.painter.frame_serviced(&posted) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_micros(200));
+            booted |= self.pump();
+        }
+        self.painter.draw_posted(posted, false).unwrap();
         booted
     }
 
