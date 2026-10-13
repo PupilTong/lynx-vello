@@ -111,6 +111,18 @@ missing_panics_doc = "allow"
 lto = "thin"
 codegen-units = 1
 
+# Debug info is most of a dev `target`: on macOS it stays in the object files,
+# which Cargo then keeps beside every artifact. Workspace crates keep line
+# tables, so panics and backtraces still name file and line; dependencies,
+# `vendor/stylo` included, carry none. A debugger therefore shows no locals.
+# When a problem needs them, raise these for that build instead of editing
+# this file (AGENTS.md, "Dev profile debug info and target size").
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 # `roxmltree` parses element nesting by recursion. Unoptimised it takes about
 # 17 KB of stack a level, so an SVG nested 123 deep would overflow the 2 MiB
 # blocking-pool thread a debug build parses it on, below the 256 levels the
