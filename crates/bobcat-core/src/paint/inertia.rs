@@ -73,6 +73,13 @@ use super::{ScrollIntents, note_changed, wrap_axes};
 /// `VelocityTracker` horizon.
 pub(crate) const VELOCITY_WINDOW_SECONDS: f64 = 0.1;
 
+/// How long a container a wheel moved stays off rest with no further wheel
+/// step on it, in seconds: the quiet interval that ends one wheel gesture.
+/// A wheel arrives as discrete ticks, so its end is the absence of the next
+/// one; until then the container is posted moving, and one `scrollend`
+/// follows the whole gesture rather than each tick.
+pub(crate) const WHEEL_REST_SECONDS: f64 = 0.1;
+
 /// The least span of steps a release velocity is measured over. Under it —
 /// the drag's steps all in one host tick — there is no motion to measure,
 /// only a division by nothing.
@@ -329,11 +336,56 @@ pub(super) fn chain_nodes(frame: &CommittedFrame, from: NodeId) -> SmallVec<[Nod
 }
 
 impl ScrollIntents {
-    /// Whether a fling, a bounce back or a glide is in progress, and so owes
-    /// the timeline another frame. An auto-scroll is asked separately,
-    /// against the frame it stands on ([`Self::is_auto_scrolling`]).
+    /// Whether a fling, a bounce back or a glide is in progress, or a wheel
+    /// gesture's quiet interval is running, and so owes the timeline another
+    /// frame. An auto-scroll is asked separately, against the frame it stands
+    /// on ([`Self::is_auto_scrolling`]).
     pub(super) fn is_animating(&self) -> bool {
-        !self.flings.is_empty() || !self.bounce_backs.is_empty() || !self.glides.is_empty()
+        !self.flings.is_empty()
+            || !self.bounce_backs.is_empty()
+            || !self.glides.is_empty()
+            || !self.wheel_steps.is_empty()
+    }
+
+    /// Records a wheel step that moved `node` at `at`, which holds it off rest
+    /// for [`WHEEL_REST_SECONDS`].
+    pub(super) fn note_wheel_step(&mut self, node: NodeId, at: f64) {
+        match self.wheel_steps.iter_mut().find(|(held, _)| *held == node) {
+            Some((_, last)) => *last = at,
+            None => self.wheel_steps.push((node, at)),
+        }
+    }
+
+    /// Ends the wheel gesture on `node`, if one is running: a drag or a
+    /// fling that moves the container has taken it over, and its own end
+    /// decides the rest.
+    pub(super) fn end_wheel_steps(&mut self, node: NodeId) {
+        if !self.wheel_steps.is_empty() {
+            self.wheel_steps.retain(|(held, _)| *held != node);
+        }
+    }
+
+    /// Whether a wheel gesture's quiet interval holds `node` off rest.
+    pub(super) fn is_wheeling(&self, node: NodeId) -> bool {
+        self.wheel_steps.iter().any(|(held, _)| *held == node)
+    }
+
+    /// Ends every wheel gesture whose last step is [`WHEEL_REST_SECONDS`]
+    /// old by `now`, and marks its container changed, so the next publish
+    /// posts it at rest.
+    fn tick_wheel_steps(&mut self, now: f64) {
+        let Self {
+            wheel_steps,
+            changed,
+            ..
+        } = self;
+        wheel_steps.retain(|(node, last)| {
+            let quiet = now - *last >= WHEEL_REST_SECONDS;
+            if quiet {
+                note_changed(changed, *node);
+            }
+            !quiet
+        });
     }
 
     fn offset_of_slot(&self, frame: &CommittedFrame, node: NodeId) -> Option<Vector2D<f32>> {
@@ -576,6 +628,9 @@ impl ScrollIntents {
         self.tick_bounce_backs(frame, now);
         self.tick_glides(frame, now);
         self.tick_auto_scrolls(frame, now);
+        if !self.wheel_steps.is_empty() {
+            self.tick_wheel_steps(now);
+        }
     }
 
     /// Whether some auto-scroll can move its container now, and so owes the

@@ -515,6 +515,11 @@ pub(super) struct ScrollIntents {
     handled: FxHashMap<NodeId, NonZeroU64>,
     /// The drags in progress, for their release velocity; see [`inertia`].
     drags: FxHashMap<PointerId, DragTrack>,
+    /// The containers a wheel step moved, each with the clock reading of
+    /// its latest step: held off rest until
+    /// [`inertia::WHEEL_REST_SECONDS`] pass with no further step, so a wheel
+    /// gesture ends once rather than at every tick.
+    wheel_steps: SmallVec<[(NodeId, f64); 1]>,
     /// The containers whose live offset changed, or whose hold a drag let
     /// go, since the last publish; see [`Painter::publish_scroll`]. Bounded
     /// by the containers one pass touches.
@@ -941,6 +946,9 @@ impl ScrollIntents {
                 }
                 if motion == Motion::Wheel {
                     self.stop_glides(slot.node);
+                    self.note_wheel_step(slot.node, at);
+                } else {
+                    self.end_wheel_steps(slot.node);
                 }
                 self.write(slot.node, moved);
                 if stretch_of(applied, axis.of(slot.max_offset)) != 0.0 {
@@ -966,6 +974,9 @@ impl ScrollIntents {
                 }
                 if motion == Motion::Wheel {
                     self.stop_glides(slot.node);
+                    self.note_wheel_step(slot.node, at);
+                } else {
+                    self.end_wheel_steps(slot.node);
                 }
                 self.write(slot.node, step.applied);
             }
@@ -1036,7 +1047,8 @@ impl ScrollIntents {
                     || self.is_flinging(frame, node)
                     || self.is_bouncing(node)
                     || self.is_gliding(node)
-                    || self.is_auto_scrolling_node(frame, node);
+                    || self.is_auto_scrolling_node(frame, node)
+                    || self.is_wheeling(node);
                 posting.push((
                     node,
                     ScrollEntry {
@@ -1693,6 +1705,15 @@ impl Painter {
         }
         self.poll_link();
         let at = self.clock.now_seconds();
+        // A key moves no scroll and is not routed by position: it is named
+        // and sent, and nothing of the pointer pipeline runs for it.
+        if matches!(event.kind, InputKind::Key { .. }) {
+            let mut decisions = InputDecisions::new();
+            self.gesture
+                .on_input(&event, None, at, &self.published, &mut decisions);
+            self.execute_decisions(&mut decisions, None, at);
+            return;
+        }
         let published = self.frame().cloned();
         if let Some(frame) = &published {
             self.scroll_intents.rebase(frame, at);
@@ -1763,7 +1784,7 @@ impl Painter {
         }
         let timestamp = at_seconds * 1000.0;
         for event in dispatches {
-            if !event.wanted(|name| self.published.listeners.contains(name)) {
+            if !self.published.listeners.contains(event.name) {
                 continue;
             }
             self.send(

@@ -489,10 +489,12 @@ struct DocumentSlot {
     /// against, less the names the document's components observe, which are
     /// published once and never closed.
     listened: FxHashSet<Arc<str>>,
-    /// The scroll containers that fired a `scroll` and owe a `scrollend`
-    /// when the painter posts them at rest. Filled only while something
-    /// hears `scrollend`, so a page that does not keeps it empty; a
-    /// container's own `scrollend` takes it back out.
+    /// The scroll containers that have scrolled since the painter last
+    /// posted them at rest: an adopted offset moved them, or a script-facing
+    /// instant scroll did. Kept whether or not anything listens, so a
+    /// `scrollend` listener added mid-scroll still hears the end; a rest
+    /// takes a container out, and so does its node being freed. Bounded by
+    /// the containers scrolling at once.
     scrolling: SmallVec<[dom::NodeId; 4]>,
     /// Where committed frames leave for the painting side.
     outbox: ViewOutbox,
@@ -614,22 +616,22 @@ impl DocumentSlot {
         Ok(())
     }
 
-    /// Queues `scroll` then `scrollend` at every container a script-facing
-    /// instant scroll moved ([`dom::Document::take_instant_scrolls`]), for
-    /// whichever of the two something hears. Such a container's scroll is
-    /// over, so it owes no later `scrollend`.
+    /// Queues a `scroll` at every container a script-facing instant scroll
+    /// moved ([`dom::Document::take_instant_scrolls`]), if something hears
+    /// it, and records the container as scrolling. Its `scrollend` comes
+    /// from the painter, which carries the request out and then posts the
+    /// container at rest — or, during a drag or a fling, once that ends —
+    /// so nothing here ends a scroll.
     fn instant_scrolls(&mut self) {
         let hears_scroll = self.listens(SCROLL_EVENT);
-        let hears_end = self.listens(SCROLL_END_EVENT);
         let moved = self.document_mut().take_instant_scrolls();
         for node in moved {
             if hears_scroll {
                 self.component_events.queue(node, SCROLL_EVENT);
             }
-            if hears_end {
-                self.component_events.queue(node, SCROLL_END_EVENT);
+            if !self.scrolling.contains(&node) {
+                self.scrolling.push(node);
             }
-            self.scrolling.retain(|held| *held != node);
         }
     }
 
@@ -649,23 +651,41 @@ impl DocumentSlot {
     /// Recorded here and forwarded to the painter, except for a name a
     /// component observes: that one was published when the document was
     /// built and stays open, so neither edge is forwarded.
+    ///
+    /// The painter's set is what [`Self::routes`] says, so an edge may move
+    /// two of its names: `dblclick` is decided here from the `click`s the
+    /// painter sends, so opening it opens `click` there too, and closing it
+    /// closes `click` unless the realm listens for `click` itself.
     fn listener_edge(&mut self, name: &str, available: bool) {
+        let paired = (name == DOUBLE_CLICK_EVENT).then_some(CLICK_EVENT);
+        let before = (self.routes(name), paired.map(|paired| self.routes(paired)));
+        if available {
+            self.listened.insert(Arc::from(name));
+        } else {
+            self.listened.remove(name);
+        }
+        if self.routes(name) != before.0 {
+            self.outbox.listener_edge(Arc::from(name), !before.0);
+        }
+        if let (Some(paired), Some(was)) = (paired, before.1)
+            && self.routes(paired) != was
+        {
+            self.outbox.listener_edge(Arc::from(paired), !was);
+        }
+    }
+
+    /// Whether the painter's name set must hold `name` on the realm's
+    /// account: a realm registration for it, or for `click` a `dblclick`
+    /// one as well. A name a component observes is never the realm's to
+    /// open or close there: it was published with the document and stays.
+    fn routes(&self, name: &str) -> bool {
         let observed = self
             .document
             .as_ref()
             .is_some_and(|document| document.observes_event(name));
-        if available {
-            let name: Arc<str> = Arc::from(name);
-            self.listened.insert(Arc::clone(&name));
-            if !observed {
-                self.outbox.listener_edge(name, true);
-            }
-        } else {
-            self.listened.remove(name);
-            if !observed {
-                self.outbox.listener_edge(Arc::from(name), false);
-            }
-        }
+        !observed
+            && (self.listened.contains(name)
+                || (name == CLICK_EVENT && self.listened.contains(DOUBLE_CLICK_EVENT)))
     }
 
     /// An exposure attribute of the live element `node` was written or
@@ -1314,11 +1334,12 @@ impl MainThreadRuntime {
     ///
     /// CSSOM-View's `scroll` and `scrollend` are decided here, never on the
     /// painter: an adopted post that moved its container queues one
-    /// `scroll` there, and a post naming the container at rest queues a
-    /// `scrollend` after it, when a `scroll` was fired for the container
-    /// since its last `scrollend`. Each is queued only while a realm
-    /// listener or a component hears its name, so a page that hears
-    /// neither pays two set lookups per take and allocates nothing.
+    /// `scroll` there and records it as scrolling, and a post naming a
+    /// scrolling container at rest queues a `scrollend` after it. Each is
+    /// queued only while a realm listener or a component hears its name at
+    /// that moment, so a page that hears neither allocates nothing; the
+    /// record of who is scrolling is kept regardless, so a `scrollend`
+    /// listener added mid-scroll hears the end.
     pub(crate) fn adopt_scroll_offsets(
         &mut self,
         entries: impl Iterator<Item = (dom::NodeId, crate::link::ScrollEntry)>,
@@ -1348,28 +1369,30 @@ impl MainThreadRuntime {
                 };
                 document.acknowledge_scroll_request(node, handled);
             }
-            let before = (hears_scroll || hears_end).then(|| document.scroll_offset(node));
-            document.scroll_to(node, entry.offset);
+            let before = document.scroll_offset(node);
+            let applied = document.scroll_to(node, entry.offset);
             // CSSOM-View: a container whose offset this post moved fires one
             // `scroll` (the mailbox holds one entry per container, so one per
-            // take), and owes a `scrollend` once it comes to rest — in this
-            // post or a later one.
-            if before.is_some_and(|before| document.scroll_offset(node) != before) {
+            // take), and has scrolled until it comes to rest — in this post or
+            // a later one.
+            if applied != before {
                 if hears_scroll {
                     component_events.queue(node, SCROLL_EVENT);
                 }
-                if hears_end && !scrolling.contains(&node) {
+                if !scrolling.contains(&node) {
                     scrolling.push(node);
                 }
             }
-            // A rest ends a scroll only where one was fired: the painter also
-            // posts a container at rest after carrying out an instant request,
-            // whose `scrollend` was fired when the document scrolled it.
+            // A rest ends a scroll only where one happened, so a container
+            // posted at rest with nothing moved since its last rest fires
+            // nothing. Whether `scrollend` is heard is asked now, at the end.
             if entry.rest.is_some()
                 && let Some(index) = scrolling.iter().position(|&held| held == node)
             {
                 scrolling.swap_remove(index);
-                component_events.queue(node, SCROLL_END_EVENT);
+                if hears_end {
+                    component_events.queue(node, SCROLL_END_EVENT);
+                }
             }
             moved.push(node);
             recenter |= frame.as_ref().is_some_and(|frame| {
@@ -1428,11 +1451,12 @@ impl MainThreadRuntime {
             .is_some_and(LynxDocument::needs_render)
     }
 
-    /// Queues the `scroll` and `scrollend` every script-facing instant
-    /// scroll of this entry owes: a UI method's `scrollTo`, `scrollBy` or
-    /// `scrollIntoView`, or a component's own instant scroll. Asked by the
-    /// page's epilogue, so they join the component events this entry
-    /// produced; one length check when nothing scrolled.
+    /// Queues the `scroll` every script-facing instant scroll of this entry
+    /// owes: a UI method's `scrollTo`, `scrollBy` or `scrollIntoView`, or a
+    /// component's own instant scroll. Asked by the page's epilogue, so it
+    /// joins the component events this entry produced; one length check
+    /// when nothing scrolled. The `scrollend` follows from the painter's
+    /// post of the container at rest.
     pub(crate) fn queue_instant_scroll_events(&mut self) {
         let mut slot = self.slot.borrow_mut();
         if slot
@@ -1585,8 +1609,10 @@ impl MainThreadRuntime {
     /// side has no tree to find it in. A second `click` at the same target
     /// within [`DOUBLE_CLICK_MILLISECONDS`] of the last one is then followed
     /// by a `dblclick` there, and a third starts over. The painting side sends
-    /// a `click` when either name is listened for, so each is dispatched only
-    /// when a realm listener or a component observes it.
+    /// a `click` when its name set holds `click`, which a realm `dblclick`
+    /// registration opens as well ([`DocumentSlot::listener_edge`]), so each
+    /// is dispatched here only when a realm listener or a component hears
+    /// it.
     fn dispatch_click(
         &mut self,
         js_runtime: &mut ScriptRuntime,

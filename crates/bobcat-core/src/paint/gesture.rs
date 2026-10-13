@@ -119,11 +119,6 @@ pub(crate) const TAP_EVENT: &str = "tap";
 /// nearest common inclusive ancestor of the two targets.
 pub(crate) const CLICK_EVENT: &str = "click";
 
-/// UI Events' `dblclick`: a second `click` at the same target soon enough.
-/// Decided where the `click` target is resolved, on the main thread; the
-/// router only forwards a `click` when either name is listened for.
-pub(crate) const DOUBLE_CLICK_EVENT: &str = "dblclick";
-
 /// Whether a pointer of this kind produces touch events.
 ///
 /// Touch and pen do; a mouse produces none, which is what both a browser and
@@ -174,15 +169,6 @@ pub(crate) struct EmitEvent {
     /// [`Self::target`] (the down's) and this one, which the main thread
     /// resolves, because it holds the tree and this side holds none.
     pub(crate) release: Option<NodeId>,
-}
-
-impl EmitEvent {
-    /// Whether this event is worth sending when `listening` says which
-    /// names have a listener: its own name, or for a `click` either
-    /// `click` or `dblclick`, since the second is decided from the first.
-    pub(crate) fn wanted(&self, listening: impl Fn(&str) -> bool) -> bool {
-        listening(self.name) || (self.name == CLICK_EVENT && listening(DOUBLE_CLICK_EVENT))
-    }
 }
 
 /// One decision the engine executes, in order.

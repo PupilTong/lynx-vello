@@ -1572,13 +1572,16 @@ fn a_resized_scroller_stays_on_the_page_the_painter_showed() {
     wheel(&mut painter, 30.0);
     wheel(&mut painter, 30.0);
     assert_eq!(shown(&painter, scroller), dom::Vector2D::new(0.0, 400.0));
+    // The wheel gesture's quiet interval ends: the container is at rest.
+    let frame = painter.frame().cloned().expect("a frame is adopted");
+    painter.scroll_intents.tick(&frame, 1.0);
     let _ = take(&main);
 
     document.set_inline_style(scroller, &paged_style("", 300));
     adopt(&mut painter, &main, &mut document);
     assert_eq!(shown(&painter, scroller), dom::Vector2D::new(0.0, 600.0));
     assert!(
-        !painter.scroll_intents.is_animating(),
+        !painter.scroll_intents.is_gliding(scroller),
         "a jump, not a glide"
     );
     painter.publish_scroll(0.0, None);
@@ -2137,4 +2140,53 @@ fn a_request_that_yields_to_a_pointer_is_dropped_under_a_finger() {
     assert!(document.scroll_to_yielding(scroller, dom::Vector2D::new(0.0, 600.0), Smooth));
     adopt(&mut painter, &main, &mut document);
     assert!(painter.scroll_intents.is_gliding(scroller), "and glides");
+}
+
+/// A wheel step posts its container moving, not at rest: the wheel gesture
+/// ends only once [`super::inertia::WHEEL_REST_SECONDS`] pass with no
+/// further step, and a step inside that interval restarts it. The quiet
+/// interval owes frames while it runs, and the tick that ends it posts the
+/// container at rest.
+#[test]
+fn a_wheel_rests_only_after_a_quiet_interval() {
+    use super::inertia::WHEEL_REST_SECONDS;
+
+    let (mut painter, main, scroller) = scrolling("");
+    let wheel = |painter: &mut Painter, at: f64| {
+        painter.clock.pin(at);
+        painter.dispatch_input(dom::input::InputEvent::wheel(
+            dom::Point2D::new(100.0, 100.0),
+            dom::Vector2D::new(0.0, 20.0),
+        ));
+    };
+    let rest_of = |main: &FarEnd| {
+        let (entries, _) = take(main);
+        entries
+            .iter()
+            .find(|(node, _)| *node == scroller)
+            .map(|(_, entry)| entry.rest)
+    };
+    let tick = |painter: &mut Painter, at: f64| {
+        let frame = painter.frame().cloned().expect("a frame is adopted");
+        painter.scroll_intents.tick(&frame, at);
+        painter.publish_scroll(at, None);
+    };
+
+    wheel(&mut painter, 0.0);
+    assert_eq!(rest_of(&main), Some(None), "a wheel step posts it moving");
+    assert!(painter.is_animating(), "the quiet interval owes frames");
+
+    wheel(&mut painter, 0.06);
+    assert_eq!(rest_of(&main), Some(None));
+    // 0.1 s after the first step but not after the second: still moving.
+    tick(&mut painter, 0.1);
+    assert_eq!(rest_of(&main), None, "nothing changed, nothing posted");
+
+    tick(&mut painter, 0.061 + WHEEL_REST_SECONDS);
+    assert_eq!(
+        rest_of(&main),
+        Some(Some(dom::Vector2D::new(0.0, 40.0))),
+        "the quiet interval ended the gesture at rest"
+    );
+    assert!(!painter.is_animating());
 }

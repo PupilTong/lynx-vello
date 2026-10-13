@@ -2056,6 +2056,75 @@ fn adopted_offsets_queue_scroll_events_only_for_a_name_something_hears() {
     );
 }
 
+/// The painter's name set follows the realm's edges with two adjustments:
+/// a `dblclick` registration opens `click` there too (the `dblclick` is
+/// decided from the `click`s the painter sends) and closing it closes
+/// `click` only when `click` is not listened for itself; and a name a
+/// component observes (`slotchange`) stays open whatever the realm's edges
+/// for it say, where an unobserved name's close closes it.
+#[test]
+fn the_painter_names_pair_click_with_dblclick_and_keep_observed_names() {
+    let (mut js_runtime, mut runtime, _elements, mut names) =
+        runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  globalThis.held = [page];
+                };
+                globalThis.listener = () => {};
+                ",
+            "app:///names.js",
+        )
+        .expect("main-thread script");
+    let mut step = |source: &str| {
+        let source = format!(
+            "import {{ __AddEventListener, __RemoveEventListener }} from 'bobcat:element';
+             const [page] = globalThis.held;
+             {source}"
+        );
+        runtime
+            .evaluate_module(&mut js_runtime, &source, "app:///step.mjs", "a step")
+            .expect("the step runs");
+    };
+
+    step("__AddEventListener(page, 'dblclick', globalThis.listener, {});");
+    assert_eq!(names.names(), ["click", "dblclick", "slotchange"]);
+    step("__AddEventListener(page, 'click', globalThis.listener, {});");
+    step("__RemoveEventListener(page, 'dblclick', globalThis.listener, {});");
+    assert_eq!(
+        names.names(),
+        ["click", "slotchange"],
+        "`click` is listened for itself"
+    );
+    step("__AddEventListener(page, 'dblclick', globalThis.listener, {});");
+    step("__RemoveEventListener(page, 'click', globalThis.listener, {});");
+    assert_eq!(
+        names.names(),
+        ["click", "dblclick", "slotchange"],
+        "`dblclick` still needs the `click`s"
+    );
+    step("__RemoveEventListener(page, 'dblclick', globalThis.listener, {});");
+    assert_eq!(names.names(), ["slotchange"]);
+
+    step(
+        "__AddEventListener(page, 'slotchange', globalThis.listener, {});
+         __AddEventListener(page, 'swipe', globalThis.listener, {});",
+    );
+    assert_eq!(names.names(), ["slotchange", "swipe"]);
+    step(
+        "__RemoveEventListener(page, 'slotchange', globalThis.listener, {});
+         __RemoveEventListener(page, 'swipe', globalThis.listener, {});",
+    );
+    assert_eq!(
+        names.names(),
+        ["slotchange"],
+        "the realm's close of an observed name is not forwarded; of another, it is"
+    );
+}
+
 /// An engine component on the path that observes the event's name.
 /// Records its delivery, marks the target so script can tell it ran first,
 /// and stops propagation — which must end only its own walk.

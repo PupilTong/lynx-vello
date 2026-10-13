@@ -262,10 +262,11 @@ impl<T> Document<T> {
 
     /// The containers a script-facing instant [`Self::scroll_to_with`] moved
     /// since the last call, each once, in the order they first moved, and
-    /// forgets them. The host fires `scroll` then `scrollend` at each, in the
-    /// task that scrolled: an instant scroll has finished by the time it
-    /// returns. A smooth one is the painter's to move, and the host learns
-    /// its offsets, and its end, from the painter's posts instead.
+    /// forgets them. The host fires `scroll` at each, in the task that
+    /// scrolled; its `scrollend` follows when the painter, which carries the
+    /// request out, posts the container at rest. A smooth one is the
+    /// painter's to move, and the host learns its offsets, and its end, from
+    /// the painter's posts alone.
     ///
     /// No allocation while a container or two moved, and none at all when
     /// nothing did.

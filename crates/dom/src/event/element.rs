@@ -167,8 +167,8 @@ impl ElementEvent<'_> {
     /// When the event happened, in milliseconds on the host's timeline: the
     /// value the host's script dispatch of the same event reports as its
     /// `timestamp`. This crate owns no clock, so it is whatever the caller of
-    /// the dispatch named; `slotchange`, which the document fires from inside
-    /// a mutation, reports `0`.
+    /// the dispatch named. An engine-only event the document fires from
+    /// inside a mutation, such as `slotchange`, reports `0`.
     #[must_use]
     pub fn timestamp(&self) -> f64 {
         self.timestamp

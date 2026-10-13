@@ -959,16 +959,18 @@ impl RealmOwner for Page {
     /// that commit decided
     /// and the component events this entry produced — `<image>` `load`s and
     /// `error`s, `<svg>` `load`s, `<dialog>` `cancel`s and `close`s, the
-    /// `scroll`s and `scrollend`s of the instant scrolls it performed (queued
-    /// first, before the commit) and of the offsets it adopted — each
+    /// `scroll`s of the instant scrolls it performed (queued first, before
+    /// the commit), and the `scroll`s and `scrollend`s of the offsets it
+    /// adopted — each
     /// posted as an entry of its own and never run here, the component events
     /// only once the commit has run: see
     /// [`Page::post_intersection_notifications`],
     /// [`Page::post_content_visibility_changes`] and
     /// [`Page::post_component_events`].
     fn after_timers(page: &Rc<Self>, runtime: &mut MainThreadRuntime) {
-        // A script-facing instant scroll this entry performed has finished;
-        // its `scroll` and `scrollend` join this entry's component events.
+        // A script-facing instant scroll this entry performed: its `scroll`
+        // joins this entry's component events, and its `scrollend` follows
+        // the painter's post of the container at rest.
         runtime.queue_instant_scroll_events();
         runtime.request_documents();
         runtime.commit_if_dirty();

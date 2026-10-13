@@ -1646,11 +1646,14 @@ fills in, `ToMain::DispatchEvent` carries, the Rust walk lends out and
 are published to the painter's name set once per document and never closed.
 CSSOM-View's `scroll` and `scrollend` are decided on this thread, never on
 the painter: `adopt_scroll_offsets` queues a `scroll` per container a post
-moved and a `scrollend` when a post names it at rest after a `scroll`, and a
+moved and a `scrollend` when a post names it at rest after it scrolled, and a
 script-facing instant scroll (`dom::Document::take_instant_scrolls`) queues
-both from its entry's epilogue; all are component events, non-bubbling with a
-`{}` detail, and queued only for a name a realm listener or a component
-hears.
+its `scroll` from its entry's epilogue and gets its `scrollend` from the
+painter's rest post after carrying the request out. A wheel gesture rests
+once, 100 ms after its last tick (`WHEEL_REST_SECONDS`). All are component
+events, non-bubbling with a `{}` detail, queued only for a name a realm
+listener or a component hears at that moment; which containers are scrolling
+is tracked regardless.
 
 One event deliberately does **not** take that path, because it is the
 engine's own rather than script's: css-contain-2 §4.4's

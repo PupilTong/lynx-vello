@@ -538,18 +538,41 @@ const SCROLL_EVENTS_PAGE: &str = r"
         };
         ";
 
+/// Runs display passes at `at` — the gesture clock, the rebase onto the
+/// newest commit (which carries out its scroll requests), then the pass's
+/// publish, as a drawn frame does — until the scroller's `log` equals
+/// `expected`. Equality, as [`wait_for_log`]: an extra event shows up in
+/// the value.
+fn drive_until_log(engine: &mut TestEngine, at: f64, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        adopt_at(engine, at);
+        engine.painter.publish_scroll(at, None);
+        let log = attribute_of(engine, 3, "log");
+        if log.as_deref() == Some(expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected log {expected:?}, last saw {log:?}"
+        );
+        std::thread::yield_now();
+    }
+}
+
 /// CSSOM-View's `scroll` and `scrollend`, end to end. An instant
-/// `scrollTo` fires both in the task that scrolled, and the painter's later
-/// post of the container at rest (it carries the request out too) fires no
-/// second `scrollend`. A drag that comes to rest fires one `scroll` for the
-/// offset its move posted and a `scrollend` for the rest its quiet release
-/// posted.
+/// `scrollTo` fires `scroll` in the task that scrolled; its `scrollend`
+/// comes from the painter, which carries the request out and posts the
+/// container at rest — once. A drag that comes to rest fires one `scroll`
+/// for the offset its move posted and a `scrollend` for the rest its quiet
+/// release posted. Two wheel ticks 30 ms apart are one wheel gesture: a
+/// `scroll` per tick, and one `scrollend` once the quiet interval passes.
 #[test]
-fn an_instant_scroll_and_a_drag_that_comes_to_rest_fire_scroll_then_scrollend() {
+fn instant_drag_and_wheel_scrolls_fire_scroll_then_one_scrollend() {
     let mut engine = booted(SCROLL_EVENTS_PAGE);
     touch_at(&mut engine, 0.0, PointerPhase::Down, 100.0);
     touch_at(&mut engine, 0.05, PointerPhase::Up, 100.0);
-    wait_for_log(&mut engine, "scroll,scrollend");
+    drive_until_log(&mut engine, 0.05, "scroll,scrollend");
     assert_eq!(
         scroll_offset_of(&mut engine, 3),
         dom::Vector2D::new(0.0, 100.0)
@@ -561,14 +584,69 @@ fn an_instant_scroll_and_a_drag_that_comes_to_rest_fire_scroll_then_scrollend() 
     touch_at(&mut engine, 1.5, PointerPhase::Move, 120.0);
     touch_at(&mut engine, 2.0, PointerPhase::Move, 120.0);
     touch_at(&mut engine, 2.0, PointerPhase::Up, 120.0);
-    for at in [2.1, 2.2, 2.5] {
-        frame_at(&mut engine, at);
-    }
-    wait_for_log(&mut engine, "scroll,scrollend,scroll,scrollend");
+    drive_until_log(&mut engine, 2.0, "scroll,scrollend,scroll,scrollend");
     assert_eq!(
         scroll_offset_of(&mut engine, 3),
         dom::Vector2D::new(0.0, 122.0)
     );
+
+    // Each tick is adopted before the next, so each is a `scroll` of its
+    // own; ticks adopted together would be one.
+    for (at, log) in [
+        (3.0, "scroll,scrollend,scroll,scrollend,scroll"),
+        (3.03, "scroll,scrollend,scroll,scrollend,scroll,scroll"),
+    ] {
+        engine.painter.clock.pin(at);
+        engine.dispatch_input(InputEvent::wheel(
+            Point2D::new(100.0, 100.0),
+            dom::Vector2D::new(0.0, 20.0),
+        ));
+        assert!(engine.is_animating(), "the quiet interval owes frames");
+        drive_until_log(&mut engine, at, log);
+    }
+    drive_until_log(
+        &mut engine,
+        3.2,
+        "scroll,scrollend,scroll,scrollend,scroll,scroll,scrollend",
+    );
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(0.0, 162.0)
+    );
+}
+
+/// A key reaches a listener on the page through the painter, named by the
+/// router and targeted at the document element, with the W3C members on
+/// the event object.
+#[test]
+fn a_key_reaches_a_page_listener_with_its_keyboard_members() {
+    let mut engine = booted(
+        r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const view = __CreateView(0);
+              __AppendElement(page, view);
+              globalThis.held = [page, view];
+              __AddEventListener(page, 'keydown', (event) => {
+                __SetAttribute(view, 'log',
+                  [event.type, event.key, event.code, event.shiftKey].join());
+              }, {});
+              __FlushElementTree();
+            };
+            ",
+    );
+    let shift = dom::input::Modifiers {
+        shift: true,
+        ..dom::input::Modifiers::default()
+    };
+    engine.dispatch_input(InputEvent::key(
+        dom::input::KeyPhase::Down,
+        "A",
+        "KeyA",
+        false,
+        shift,
+    ));
+    wait_for_log(&mut engine, "keydown,A,KeyA,true");
 }
 
 /// An outer column scroller (node 3, max offset 800) whose first child is
@@ -1643,7 +1721,10 @@ fn a_wheel_tick_ends_a_glide_where_the_wheel_puts_it() {
         "the wheel stepped to the next page ahead of {mid}, got {landed}"
     );
     assert!(!engine.painter.scroll_intents.is_gliding(node_id(3)));
-    assert!(!engine.is_animating(), "the glide ended");
+    assert!(
+        engine.painter.scroll_intents.is_wheeling(node_id(3)),
+        "the glide ended, and the wheel gesture's quiet interval runs"
+    );
     for at in [1.1, 1.3, 2.0] {
         frame_at(&mut engine, at);
         assert!(
@@ -1651,6 +1732,7 @@ fn a_wheel_tick_ends_a_glide_where_the_wheel_puts_it() {
             "the wheel's position stands at {at}"
         );
     }
+    assert!(!engine.is_animating(), "the wheel gesture has rested");
     engine.painter.publish_scroll(2.0, None);
     assert_eq!(
         scroll_offset_of(&mut engine, 3),
@@ -2592,6 +2674,8 @@ fn a_scroll_driven_color_follows_the_users_scroll() {
         engine.painter.begin_frame(at + 1.0, false).is_none(),
         "no frame post crosses for a scroll-driven animation"
     );
+    // The wheel gesture ends once its quiet interval has passed.
+    frame_at(&mut engine, at + 1.0);
     assert!(!engine.is_animating(), "the painter is idle at rest");
 }
 

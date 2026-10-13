@@ -667,15 +667,27 @@ consequential choice about whether to follow the spec or the quirk.
   `scrollWidth`, `deltaX` and `deltaY` in its `detail`; a card that reads
   them gets `undefined` here until the follow-up fills the Lynx detail.
   Recorded choices inside the step:
-  - **A `scrollend` follows a fired `scroll` only.** The painter posts a
-    container at rest after it carries out an instant request too, whose
-    `scrollend` fired with the request; a rest with no `scroll` fired since
-    the container's last `scrollend` fires nothing.
-  - **No debounce.** A wheel tick rests at once, so each tick that moves a
-    container is one `scroll` and one `scrollend`; browsers end a wheel
-    scroll after a quiet interval.
+  - **A `scrollend` ends a scroll that happened.** The main thread records
+    every container that scrolled (an adopted offset moved it, or a
+    script-facing instant scroll did) whether or not anything listens, and a
+    post naming it at rest ends that record and fires `scrollend` if the name
+    is heard at that moment. An instant scroll fires its `scroll` in the task
+    that scrolled and its `scrollend` from the painter's rest post after it
+    carried the request out — or after the drag or fling that holds the
+    container ends. A view with no painter attached never posts that rest.
+  - **A wheel gesture ends after 100 ms with no further tick**
+    (`WHEEL_REST_SECONDS`): each tick that moves a container is a `scroll`,
+    and the gesture one `scrollend`. A drag or fling that moves the
+    container takes it over, and its own end decides the rest. Browsers
+    debounce the same way, with their own intervals.
   - **The render's own positioning fires nothing**: `scroll-initial-target`
     and the re-snap after a layout change move a container without an event.
+  - **An attribute-driven instant scroll at connect fires `scroll` then
+    `scrollend` at mount**: a `scroll-top`/`scroll-left` on `scroll-view`, or
+    any other component attribute that scrolls through
+    `Document::scroll_to_with(.., Instant)`, is a script-facing instant
+    scroll. That matches web-core, whose `scrollTop` assignment fires a
+    browser `scroll`, and not native Lynx, which fires nothing for it.
 - **Keyboard: `keydown`/`keyup` only, targeted at the document element
   (2026-10-13, architect ruling).** W3C UI Events' two key events reach the
   page with `key`, `code`, `repeat`, `altKey`, `ctrlKey`, `metaKey` and
