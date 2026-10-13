@@ -184,8 +184,8 @@ pub enum DrawTarget {
     /// a shared window handle or an owned canvas.
     Window(WindowTarget),
     /// A texture the painter owns and nothing displays.
-    /// [`Painter::tick`](crate::Painter::tick) renders into it and
-    /// [`Painter::capture`](crate::Painter::capture) reads it back.
+    /// [`Painter::draw_posted`](crate::Painter::draw_posted) renders into it
+    /// and [`Painter::capture`](crate::Painter::capture) reads it back.
     ///
     /// Native only in practice: building one blocks the calling thread on a
     /// device request, and in a browser that thread is the one whose event
@@ -251,7 +251,9 @@ pub enum EngineError {
     /// never built and requests nothing.
     #[error("cannot resolve `{url}`: {message}")]
     InvalidUrl { url: String, message: String },
-    #[error("this painter presents into a window; `tick` advances an offscreen one")]
+    #[error(
+        "this painter presents into a window; `post_frame` and `draw_posted` advance an offscreen one"
+    )]
     NotOffscreen,
     /// One view has at most one interactive painter, and one painter observes
     /// at most one *live* view. A link whose view has been released is not an
@@ -540,7 +542,7 @@ pub trait EventRequester: Send + Sync + 'static {
 }
 
 /// The requester for a host with no event loop to wake: an offscreen view
-/// driven by its own `tick`, a benchmark, a test.
+/// that polls for its frames, a benchmark, a test.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoWakeup;
 

@@ -17,7 +17,7 @@ use bobcat_core::{
     DrawTarget, LynxView, NoWakeup, Painter, PreparsedDeclaration, PreparsedKeyframe,
     PreparsedRule, PreparsedStyleSheet, ViewSources,
 };
-use support::{FetcherDouble, solo_view, wait_for_script};
+use support::{FetcherDouble, solo_view, tick, wait_for_script};
 
 /// The screen these tests' views report, as a host with no screen to measure
 /// names it. None of them reads `SystemInfo`.
@@ -123,7 +123,7 @@ fn red_left_edge(painter: &mut Painter) -> usize {
 async fn a_view_animates_with_the_host_arranging_no_timeline() {
     let (_view, mut painter) = booted().await;
 
-    painter.tick(true).expect("first frame");
+    tick(&mut painter, true).expect("first frame");
     // The painter answers this over the frame that tick just read, so there
     // is no reply to be ahead of.
     assert!(
@@ -137,7 +137,7 @@ async fn a_view_animates_with_the_host_arranging_no_timeline() {
     // the first second, and a sample near 16px wraps back to 0. Only that it
     // moved at all, which no phase can fake at a quarter of a period.
     tokio::time::sleep(Duration::from_millis(250)).await;
-    painter.tick(true).expect("later frame");
+    tick(&mut painter, true).expect("later frame");
     let later = red_left_edge(&mut painter);
 
     assert_ne!(
@@ -155,7 +155,7 @@ async fn an_exported_curve_moves_pixels_between_commits() {
     let (_view, mut painter) = booted().await;
     // The synchronizing tick promotes the pending animation to running,
     // which is when the commit exports its curve.
-    painter.tick(true).expect("first frame");
+    tick(&mut painter, true).expect("first frame");
 
     let first = red_left_edge(&mut painter);
     tokio::time::sleep(Duration::from_millis(250)).await;

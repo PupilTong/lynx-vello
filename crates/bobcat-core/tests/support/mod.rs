@@ -64,9 +64,8 @@ where
 pub fn wait_for_script<F: ResourceFetcher + 'static>(
     view: &mut LynxView<F>,
 ) -> Result<(), LynxViewError> {
-    // Generous, like the engine's own BEGIN_FRAME_TIMEOUT: a debug-build
-    // boot takes about two seconds on its own, so a tight deadline only
-    // ever fires spuriously under parallel test load.
+    // Generous: a debug-build boot takes about two seconds on its own, so a
+    // tight deadline only ever fires spuriously under parallel test load.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         for event in view.pump() {
@@ -82,6 +81,38 @@ pub fn wait_for_script<F: ResourceFetcher + 'static>(
         assert!(Instant::now() < deadline, "script thread did not finish");
         std::thread::sleep(Duration::from_millis(1));
     }
+}
+
+/// One offscreen frame for a page that asks its host for nothing while the
+/// frame is outstanding: post it, wait for the view to service it, draw.
+///
+/// The wait is this helper's own, because the engine has none: a host waits
+/// in its own loop, where it also takes the view's turn. This one takes no
+/// turn, which is right for a page whose scripts make no synchronous request
+/// during a frame, and wrong for one that does — its job would park on an
+/// answer only `LynxView::pump` gives, with the frame post queued behind it.
+/// Such a test drives the three calls itself and pumps in between; this
+/// helper fails rather than drawing a frame the view never serviced.
+///
+/// # Errors
+///
+/// Whatever the post or the draw failed with.
+///
+/// # Panics
+///
+/// If the view does not service the frame within thirty seconds.
+pub fn tick(painter: &mut Painter, force: bool) -> Result<bool, bobcat_core::EngineError> {
+    let posted = painter.post_frame()?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !painter.frame_serviced(&posted) {
+        assert!(
+            Instant::now() < deadline,
+            "the view never serviced the frame: a page that asks its host for something during \
+             a frame needs its view pumped while the frame is outstanding"
+        );
+        std::thread::sleep(Duration::from_micros(200));
+    }
+    painter.draw_posted(posted, force)
 }
 
 /// What the double resolves to, and the one payload it hands back.

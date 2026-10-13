@@ -35,6 +35,9 @@ impl EventRequester for CaptureWakeup {
 
 const MAX_QUEUED_CAPTURES: usize = 8;
 const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
+/// How long one frame waits for the view to service it before the frame is
+/// drawn from what the view has already published.
+const FRAME_DEADLINE: Duration = Duration::from_secs(10);
 const DEVICE_PIXEL_RATIO: f32 = 1.0;
 
 #[derive(Clone, Debug)]
@@ -403,12 +406,7 @@ async fn capture_page(request: &CaptureRequest) -> Result<Screenshot, CaptureFai
     .await
     .map_err(|_| CaptureFailure::timeout("page startup", request.timeout))??;
 
-    painter
-        .tick(true)
-        .map_err(|source| CaptureFailure::Render {
-            url: request.url.clone(),
-            source: Box::new(source),
-        })?;
+    frame(&mut view, &mut painter, &wakeup, &request.url, true).await?;
     check_events(&mut view, &request.url)?;
 
     // UI Judge treats settle time as an explicit post-readiness delay rather
@@ -416,6 +414,7 @@ async fn capture_page(request: &CaptureRequest) -> Result<Screenshot, CaptureFai
     settle(
         &mut view,
         &mut painter,
+        &wakeup,
         &request.url,
         request.screenshot_settle,
     )
@@ -445,28 +444,61 @@ fn resources_config(page: &PageSource, timeout: Duration) -> ResourcesConfig {
 async fn settle(
     view: &mut LynxView<ViewResources>,
     painter: &mut Painter,
+    wakeup: &CaptureWakeup,
     url: &Url,
     mut remaining: Duration,
 ) -> Result<(), CaptureFailure> {
     while !remaining.is_zero() {
         // One display frame at a time. A realm timer is not this loop's to
         // wait out: the engine waits its own out and commits on its own
-        // thread, and the next tick picks that commit up.
+        // thread, and the next frame picks that commit up.
         let step = FRAME_INTERVAL.min(remaining);
         tokio::time::sleep(step).await;
-        // The view's turn first: it is the one call that services the host's
-        // resource system, and the tick that follows waits for the commit
-        // behind whatever it reported.
-        check_events(view, url)?;
-        painter
-            .tick(false)
-            .map_err(|source| CaptureFailure::Render {
-                url: url.clone(),
-                source: Box::new(source),
-            })?;
+        frame(view, painter, wakeup, url, false).await?;
         check_events(view, url)?;
         remaining = remaining.saturating_sub(step);
     }
+    Ok(())
+}
+
+/// One frame: post it, take the view's turns until the view has serviced it,
+/// draw.
+///
+/// The wait between the post and the draw is this host's, not the painter's,
+/// because the view may need this host during it. A script that adopts a
+/// stylesheet, requires a module or waits a `Future` parks its job on an
+/// answer `LynxView::pump` gives, and the frame post is queued behind that
+/// job; so every turn of the wait pumps first. The view wakes this host both
+/// when it asks for something and when it services the post, and the
+/// resource system wakes it when a load completes, so the wakeup is what the
+/// wait sleeps on. A frame the view has not serviced by [`FRAME_DEADLINE`] is
+/// drawn from what the view had published.
+async fn frame(
+    view: &mut LynxView<ViewResources>,
+    painter: &mut Painter,
+    wakeup: &CaptureWakeup,
+    url: &Url,
+    force: bool,
+) -> Result<(), CaptureFailure> {
+    let render = |source| CaptureFailure::Render {
+        url: url.clone(),
+        source: Box::new(source),
+    };
+    let posted = painter.post_frame().map_err(render)?;
+    let deadline = tokio::time::Instant::now() + FRAME_DEADLINE;
+    loop {
+        check_events(view, url)?;
+        if painter.frame_serviced(&posted) {
+            break;
+        }
+        if tokio::time::timeout_at(deadline, wakeup.0.notified())
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+    painter.draw_posted(posted, force).map_err(render)?;
     Ok(())
 }
 

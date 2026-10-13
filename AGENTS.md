@@ -2132,8 +2132,10 @@ goes on: `ScriptRunError`, `ListenerFailed`, `TimerFailed`, `WorkerThrew` and
 A `ScriptSource` prints as `main` or as `worker <id> <url>`, so the BTS's lines
 begin `[worker <id> bobcat:bts]`.
 Headed mode builds its painter over the window; headless builds one over
-`DrawTarget::Offscreen` and relays synthetic vsync ticks into `Painter::tick`,
-whether a tick becomes GPU work being the engine's decision. Fields drop in the
+`DrawTarget::Offscreen` and turns each synthetic vsync tick into one frame
+(`Painter::post_frame`, the view's `pump` on every wakeup until
+`Painter::frame_serviced`, then `Painter::draw_posted`), whether a frame
+becomes GPU work being the engine's decision. Fields drop in the
 order `vsync, painter, view, …, window`, so the display link stops before what
 it wakes goes away and the surface is released before the last window handle.
 
@@ -2197,8 +2199,9 @@ starts a fresh `LynxGroup`, constructs its non-`Send` `LynxView`, builds a
 `Painter` over `DrawTarget::Offscreen` beside it and attaches the two; both
 stay on that thread, the view because it owns the host's resource system and
 the painter because it owns the GPU target. It settles on a plain frame
-interval, taking `view.pump()` then `painter.tick(false)` per step, and returns
-its RGBA capture. Dropping that view releases its group, including the Lynx
+interval, one frame per step (`painter.post_frame()`, `view.pump()` on every
+wakeup until the view has serviced the post, `painter.draw_posted(…)`), and
+returns its RGBA capture. Dropping that view releases its group, including the Lynx
 main thread, QuickJS runtime and Stylo pool; no runtime is shared across jobs.
 BMP encoding runs on Tokio's blocking pool after the view is gone, so it cannot
 retain the view or hold the GPU lane. Queue saturation and an unavailable

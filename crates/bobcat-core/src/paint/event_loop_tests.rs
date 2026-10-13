@@ -1853,7 +1853,7 @@ fn a_wheel_scrolls_and_reaches_a_wheel_listener() {
 
 /// A stationary hold produces no further input, so only the frame half
 /// — `service_gesture_clock` plus the `needs_frame` continuation — can
-/// resolve it. This drives that half exactly as `draw`/`tick`
+/// resolve it. This drives that half exactly as `draw`/`post_frame`
 /// do, without needing a GPU output.
 #[test]
 fn a_stationary_hold_longpresses_on_the_frame_clock() {

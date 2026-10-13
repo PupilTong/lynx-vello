@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use bobcat_core::resource::{ResourceFetcher, SourceCompletion, SourceRequest};
 use bobcat_core::{DrawTarget, EngineEvent, EventRequester, NoWakeup, ViewSources};
-use support::{FetcherDouble, solo_view, wait_for_script};
+use support::{FetcherDouble, solo_view, tick, wait_for_script};
 
 /// The screen these tests' views report, as a host with no screen to measure
 /// names it. None of them reads `SystemInfo`.
@@ -294,7 +294,7 @@ async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
     painter
         .resize(400.0, 800.0, 1.0)
         .expect("resize while loading");
-    painter.tick(false).expect("tick while loading");
+    tick(&mut painter, false).expect("tick while loading");
     drop(view);
 
     // Cancellation is visible before the view releases its concrete fetcher —
@@ -364,7 +364,7 @@ async fn metrics_that_arrive_before_the_document_are_what_it_is_created_at() {
         // acknowledgement is proof that the resize ahead of it has already
         // been staged — which is
         // what lets the entry arrive afterwards rather than racing it.
-        painter.tick(false).expect("tick while loading");
+        tick(&mut painter, false).expect("tick while loading");
         let completion = fetcher
             .pending
             .lock()
@@ -608,9 +608,7 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
             dropped.recv().expect("pending fetch cancelled"),
             thread_tag()
         );
-        sibling_painter
-            .tick(true)
-            .expect("sibling still runs after cancellation");
+        tick(&mut sibling_painter, true).expect("sibling still runs after cancellation");
     })
     .await;
 }

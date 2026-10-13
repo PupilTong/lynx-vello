@@ -61,8 +61,9 @@ Ordinary pumping and native animation ticks do not deliver script frames. Timers
 and BTS microtask aliases use the existing realm timer/job machinery. This follows
 the independent worker rendering steps in
 [HTML's event-loop processing model](https://html.spec.whatwg.org/multipage/webappapis.html#event-loop-processing-model).
-Offscreen `Painter::tick` supplies one synthetic vsync before its existing wait
-for MTS's frame acknowledgement; it does not wait for BTS callbacks.
+Offscreen `Painter::post_frame` supplies one synthetic vsync before its frame
+post; the host's wait for MTS's acknowledgement of that post
+(`Painter::frame_serviced`) does not wait for BTS callbacks.
 
 ### Global JS API surface, native module bridge, and lifecycle
 

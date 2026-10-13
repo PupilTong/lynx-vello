@@ -19,7 +19,7 @@ use std::sync::Arc;
 use bobcat_core::{DrawTarget, LynxView, NoWakeup, Painter, ViewSources};
 use dom::Point2D;
 use dom::input::InputEvent;
-use support::{FetcherDouble, solo_view, wait_for_script};
+use support::{FetcherDouble, solo_view, tick, wait_for_script};
 
 /// The screen these tests' views report, as a host with no screen to measure
 /// names it. None of them reads `SystemInfo`.
@@ -94,7 +94,7 @@ fn wheel(painter: &mut Painter, delta_y: f32) {
 #[tokio::test]
 async fn a_wheel_scroll_moves_the_pixels_through_both_compose_paths() {
     let (_view, mut painter) = booted().await;
-    painter.tick(true).expect("the boot frame renders");
+    tick(&mut painter, true).expect("the boot frame renders");
     assert_eq!(
         pixel_at(&mut painter, 50, 50),
         RED,
@@ -106,7 +106,7 @@ async fn a_wheel_scroll_moves_the_pixels_through_both_compose_paths() {
     // commit recomposed at the intent offset — nothing recommitted.
     wheel(&mut painter, 30.0);
     assert!(
-        painter.tick(false).expect("the scrolled frame renders"),
+        tick(&mut painter, false).expect("the scrolled frame renders"),
         "a scroll must change the compose key even with no new commit"
     );
     assert_eq!(
@@ -125,7 +125,7 @@ async fn a_wheel_scroll_moves_the_pixels_through_both_compose_paths() {
     // commits it — this capture is the recommitted frame at its published
     // offsets.
     wheel(&mut painter, 40.0);
-    assert!(painter.tick(false).expect("the recentered frame renders"));
+    assert!(tick(&mut painter, false).expect("the recentered frame renders"));
     assert_eq!(
         pixel_at(&mut painter, 50, 20),
         RED,

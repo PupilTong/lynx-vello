@@ -3,10 +3,16 @@
 //!
 //! The clock is this embedder's substitute for an OS display loop — it
 //! relays ticks; whether a tick becomes GPU work is the painter's decision
-//! (`tick` renders only when the document changed). Screenshots come back as
-//! pixels, and writing the PNG is this side's IO. Both halves live on this
+//! (a frame renders only when the document changed). Screenshots come back
+//! as pixels, and writing the PNG is this side's IO. Both halves live on this
 //! thread, the one that built them, so every one of those calls is the work
 //! itself rather than a request for it.
+//!
+//! A frame is three calls with a wait in the middle ([`frame`]): the painter
+//! posts it, this loop waits for the view to service it, the painter draws.
+//! The wait is this loop's own because the view may need this thread during
+//! it — a script parked on a stylesheet or a module is parked on an answer
+//! `LynxView::pump` gives — so the wait pumps on every wakeup.
 
 use std::collections::VecDeque;
 use std::num::NonZeroU32;
@@ -24,6 +30,10 @@ use crate::cli::args::Options;
 use crate::cli::command::{COMMAND_HELP, Command, Console};
 use crate::cli::page::Program;
 use crate::cli::screenshot::save_screenshot;
+
+/// How long one frame waits for the view to service it before the frame is
+/// drawn from what the view has already published.
+const FRAME_DEADLINE: Duration = Duration::from_secs(10);
 
 /// This embedder's wakeup: a `Pump` on the same channel the console and the
 /// synthetic clock feed, so a wakeup from the Lynx main thread is one more
@@ -83,11 +93,23 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
         pollster::block_on(Painter::new(DrawTarget::Offscreen, width, height, ratio))?;
     painter.attach(&view)?;
 
-    painter.tick(true)?;
+    let mut script = ScriptGate::default();
+    // Commands that arrived while a frame was waiting for its view. They are
+    // newer than anything the script gate holds and older than anything still
+    // in the channel, which is the order the loop below takes the three in.
+    let mut held = VecDeque::new();
+    let mut host = Host {
+        view: &mut view,
+        receiver: &receiver,
+        held: &mut held,
+        input: &program.input,
+    };
+    if frame(&mut host, &mut painter, true)? {
+        script.finish();
+    }
     let console = Console::start(move |command| sender.send(HostEvent::Command(command)).is_ok())
         .map_err(CliError::Console)?;
     let mut clock = FrameClock::new(options.vsync_hz);
-    let mut script = ScriptGate::default();
     let mut running = true;
     println!(
         "bobcat: headless renderer running at {} Hz; enter `help` for commands",
@@ -98,34 +120,20 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
     loop {
         let command = if let Some(command) = script.next_ready() {
             Some(command)
+        } else if let Some(command) = host.held.pop_front() {
+            Some(command)
         } else if running {
             // The frame clock is the only deadline this loop has. A realm
             // timer is not one: the engine waits its own out and wakes this
             // loop through the requester like any other publication.
             match receiver.recv_timeout(clock.time_until_tick()) {
                 Ok(HostEvent::Command(command)) => Some(command),
-                Ok(HostEvent::Pump) => {
-                    if check_script(&mut view, &program.input)? {
-                        script.finish();
-                    }
-                    // The wakeup answers before the deadline, and the Lynx
-                    // main thread posts one per notification, so a chatty
-                    // commit would otherwise walk the frame clock forward
-                    // without ever letting it fire.
-                    if clock.time_until_tick().is_zero() {
-                        painter.tick(false)?;
-                        clock.advance();
-                    }
-                    None
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    if check_script(&mut view, &program.input)? {
-                        script.finish();
-                    }
-                    if clock.time_until_tick().is_zero() {
-                        painter.tick(false)?;
-                        clock.advance();
-                    }
+                // The wakeup answers before the deadline, and the Lynx main
+                // thread posts one per notification, so a chatty commit would
+                // otherwise walk the frame clock forward without ever letting
+                // it fire: both arms check the clock.
+                Ok(HostEvent::Pump) | Err(RecvTimeoutError::Timeout) => {
+                    turn(&mut host, &mut painter, Some(&mut clock), &mut script)?;
                     None
                 }
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
@@ -134,9 +142,7 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
             match receiver.recv() {
                 Ok(HostEvent::Command(command)) => Some(command),
                 Ok(HostEvent::Pump) => {
-                    if check_script(&mut view, &program.input)? {
-                        script.finish();
-                    }
+                    turn(&mut host, &mut painter, None, &mut script)?;
                     None
                 }
                 Err(_) => return Ok(()),
@@ -154,7 +160,14 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
             console.prompt();
             continue;
         };
-        if execute_command(command, &mut painter, &mut clock, &mut running)? {
+        if execute_command(
+            command,
+            &mut host,
+            &mut painter,
+            &mut clock,
+            &mut running,
+            &mut script,
+        )? {
             return Ok(());
         }
         console.prompt();
@@ -164,9 +177,11 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
 /// Executes one command and reports whether the render loop should exit.
 fn execute_command(
     command: Command,
+    host: &mut Host<'_>,
     painter: &mut Painter,
     clock: &mut FrameClock,
     running: &mut bool,
+    script: &mut ScriptGate,
 ) -> Result<bool, CliError> {
     match command {
         Command::Continue => {
@@ -179,7 +194,9 @@ fn execute_command(
             println!("Frame clock paused.");
         }
         Command::Frame => {
-            painter.tick(true)?;
+            if frame(host, painter, true)? {
+                script.finish();
+            }
             clock.restart();
             println!("Rendered one frame.");
         }
@@ -210,6 +227,68 @@ fn execute_command(
 enum HostEvent {
     Command(Command),
     Pump,
+}
+
+/// What a frame's wait needs of this embedder: the view whose turn it takes,
+/// the channel its wakeups arrive on, and somewhere to keep a command that
+/// arrives on that channel meanwhile.
+struct Host<'a> {
+    view: &'a mut LynxView<ViewResources>,
+    receiver: &'a flume::Receiver<HostEvent>,
+    held: &'a mut VecDeque<Command>,
+    input: &'a str,
+}
+
+/// One turn with no command to run: the view's, and then a frame if a
+/// running clock says one is due. A paused loop passes no clock.
+fn turn(
+    host: &mut Host<'_>,
+    painter: &mut Painter,
+    clock: Option<&mut FrameClock>,
+    script: &mut ScriptGate,
+) -> Result<(), CliError> {
+    if check_script(host.view, host.input)? {
+        script.finish();
+    }
+    if let Some(clock) = clock
+        && clock.time_until_tick().is_zero()
+    {
+        if frame(host, painter, false)? {
+            script.finish();
+        }
+        clock.advance();
+    }
+    Ok(())
+}
+
+/// One frame: post it, take this embedder's turns until the view has
+/// serviced it, draw. Answers whether the view reported its script finished
+/// during the wait.
+///
+/// Each turn pumps the view first, then sleeps on the channel: the view sends
+/// a `Pump` both when it asks this host for something and when it services
+/// the post, and the resource system sends one when a load completes. A
+/// command that arrives meanwhile is not this wait's to run and keeps its
+/// place in `held`. A frame the view has not serviced by [`FRAME_DEADLINE`]
+/// is drawn from what the view had published.
+fn frame(host: &mut Host<'_>, painter: &mut Painter, force: bool) -> Result<bool, CliError> {
+    let posted = painter.post_frame()?;
+    let deadline = Instant::now() + FRAME_DEADLINE;
+    let mut finished = false;
+    loop {
+        finished |= check_script(host.view, host.input)?;
+        if painter.frame_serviced(&posted) {
+            break;
+        }
+        match host.receiver.recv_deadline(deadline) {
+            Ok(HostEvent::Pump) => {}
+            Ok(HostEvent::Command(command)) => host.held.push_back(command),
+            // The deadline, or a channel nobody sends on any more.
+            Err(_) => break,
+        }
+    }
+    painter.draw_posted(posted, force)?;
+    Ok(finished)
 }
 
 fn check_script(view: &mut LynxView<ViewResources>, input: &str) -> Result<bool, CliError> {

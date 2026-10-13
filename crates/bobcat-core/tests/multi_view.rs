@@ -17,12 +17,13 @@ use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::{Arc, Barrier};
 use std::thread::ThreadId;
+use std::time::{Duration, Instant};
 
 use bobcat_core::{
     DrawTarget, LynxGroup, MAX_STYLE_THREADS, NoWakeup, Painter, PreparsedDeclaration,
     PreparsedRule, PreparsedStyleSheet, StyleThreads, ViewSources,
 };
-use support::{FetcherDouble, wait_for_script};
+use support::{FetcherDouble, tick, wait_for_script};
 
 /// The screen these tests' views report, as a host with no screen to measure
 /// names it. None of them reads `SystemInfo`.
@@ -137,7 +138,7 @@ fn run_view(color: &'static str, ready: &Barrier) -> ViewReport {
             .expect("the view's painter is built");
         painter.attach(&view).expect("a fresh view takes a painter");
         wait_for_script(&mut view).expect("the entry module boots");
-        painter.tick(true).expect("the first frame");
+        tick(&mut painter, true).expect("the first frame");
         let shot = painter.capture().expect("the committed frame");
         let top_left = <[u8; 4]>::try_from(&shot.pixels[..4]).expect("an RGBA frame");
         ViewReport {
@@ -238,7 +239,7 @@ async fn two_views_in_one_group_share_its_thread_and_still_paint_their_own_page(
     let painted: Vec<[u8; 4]> = views
         .iter_mut()
         .map(|(_view, painter)| {
-            painter.tick(true).expect("the first frame");
+            tick(painter, true).expect("the first frame");
             let shot = painter.capture().expect("the committed frame");
             <[u8; 4]>::try_from(&shot.pixels[..4]).expect("an RGBA frame")
         })
@@ -249,6 +250,109 @@ async fn two_views_in_one_group_share_its_thread_and_still_paint_their_own_page(
         [[255, 0, 0, 255], [0, 0, 255, 255]],
         "each view painted its own page over the document it owns, not its sibling's"
     );
+}
+
+/// A job parked on one view's host holds up its sibling's frame, and the
+/// sibling's host is not blocked by it.
+///
+/// The jobs of a group are one queue. The first view's frame callback adopts
+/// a sheet, which parks that job on a request only the first view's `pump`
+/// answers, and this test withholds that turn. The second view's frame post
+/// is queued behind the parked job, so it stays outstanding too — which its
+/// host reads, without waiting, from `frame_serviced` — until the first
+/// view's turn is taken.
+#[tokio::test]
+async fn a_job_parked_on_one_views_host_holds_up_a_siblings_frame_without_blocking_it() {
+    const ADOPTING: &str = r"
+        globalThis.renderPage = function renderPage() {
+          __CreatePage('card', 0);
+          lynx.requestAnimationFrame(function () {
+            __AdoptStyleSheet({ url: 'app:///late.css' });
+          });
+        };
+    ";
+    const PLAIN: &str = r"
+        globalThis.renderPage = function renderPage() {
+          __CreatePage('card', 0);
+        };
+    ";
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto)
+        .await
+        .expect("the group starts");
+
+    let adopting_fetcher = Rc::new(
+        FetcherDouble::card(ADOPTING)
+            .resolving_to("app:///adopting.js")
+            .with_preparsed_style_sheet(sheet("#ff0000")),
+    );
+    let mut views = Vec::new();
+    for (entry_url, fetcher) in [
+        ("app:///adopting.js", Rc::clone(&adopting_fetcher)),
+        (
+            "app:///plain.js",
+            Rc::new(FetcherDouble::card(PLAIN).resolving_to("app:///plain.js")),
+        ),
+    ] {
+        let mut view = group
+            .create_lynx_view(
+                32.0,
+                24.0,
+                1.0,
+                |_reports| fetcher,
+                Vec::new(),
+                ViewSources::new("app:///", entry_url, SCREEN),
+            )
+            .expect("the view is built on the group's thread");
+        let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
+            .await
+            .expect("each view's painter is built");
+        painter.attach(&view).expect("a fresh view takes a painter");
+        wait_for_script(&mut view).expect("the entry module boots");
+        views.push((view, painter));
+    }
+    let [
+        (adopting_view, adopting_painter),
+        (_plain_view, plain_painter),
+    ] = &mut views[..]
+    else {
+        unreachable!("two views were built");
+    };
+
+    // The post that delivers the frame callback: its job parks on the
+    // adoption. The sibling's post lands behind it.
+    let adopting_frame = adopting_painter.post_frame().expect("an offscreen post");
+    let plain_frame = plain_painter.post_frame().expect("an offscreen post");
+    let withheld = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < withheld {
+        assert!(
+            !adopting_painter.frame_serviced(&adopting_frame),
+            "the adopting view's frame was serviced with its adoption unanswered"
+        );
+        assert!(
+            !plain_painter.frame_serviced(&plain_frame),
+            "the sibling's frame overtook a job parked ahead of it in the group's queue"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(adopting_fetcher.style_sheet_fetch_count(), 0);
+
+    // The withheld turn answers the request, the job goes on, and both
+    // frames are serviced.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !(adopting_painter.frame_serviced(&adopting_frame)
+        && plain_painter.frame_serviced(&plain_frame))
+    {
+        for _event in adopting_view.pump() {}
+        assert!(Instant::now() < deadline, "the frames were never serviced");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(adopting_fetcher.style_sheet_fetch_count(), 1);
+    adopting_painter
+        .draw_posted(adopting_frame, false)
+        .expect("the adopting view's frame draws");
+    plain_painter
+        .draw_posted(plain_frame, false)
+        .expect("the sibling's frame draws");
 }
 
 /// A group whose views would have nowhere to restyle is a group that was

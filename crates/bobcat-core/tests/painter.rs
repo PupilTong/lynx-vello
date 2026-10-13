@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bobcat_core::{DrawTarget, LynxGroup, NoWakeup, Painter, StyleThreads, ViewSources};
-use support::{FetcherDouble, wait_for_script};
+use support::{FetcherDouble, tick, wait_for_script};
 
 /// The screen these tests' views report, as a host with no screen to measure
 /// names it. None of them reads `SystemInfo`.
@@ -131,7 +131,7 @@ async fn a_detached_view_can_be_painted_by_another_painter() {
     let mut first = offscreen_painter().await;
     first.attach(&view).expect("a fresh view takes a painter");
     wait_for_script(&mut view).expect("the entry module boots");
-    first.tick(true).expect("the first frame");
+    tick(&mut first, true).expect("the first frame");
     assert_eq!(top_left(&mut first), RED);
 
     first.detach();
@@ -146,7 +146,7 @@ async fn a_detached_view_can_be_painted_by_another_painter() {
     second
         .attach(&view)
         .expect("a detached view takes a painter again");
-    second.tick(true).expect("the same page, drawn again");
+    tick(&mut second, true).expect("the same page, drawn again");
     assert_eq!(
         top_left(&mut second),
         RED,
@@ -176,7 +176,7 @@ async fn a_view_dropped_under_its_painter_leaves_the_last_frame_standing() {
     let mut painter = offscreen_painter().await;
     painter.attach(&view).expect("a fresh view takes a painter");
     wait_for_script(&mut view).expect("the entry module boots");
-    painter.tick(true).expect("the frame the view committed");
+    tick(&mut painter, true).expect("the frame the view committed");
     assert_eq!(top_left(&mut painter), RED);
 
     drop(view);
@@ -188,9 +188,7 @@ async fn a_view_dropped_under_its_painter_leaves_the_last_frame_standing() {
         "the painter noticed the view had gone"
     );
     assert!(
-        painter
-            .tick(true)
-            .expect("the retained frame still renders"),
+        tick(&mut painter, true).expect("the retained frame still renders"),
         "the painter kept the frame it had adopted"
     );
     assert_eq!(
@@ -236,7 +234,7 @@ async fn a_dropped_views_last_frame_keeps_the_image_pixels_it_read() {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !images.retained().iter().any(|set| !set.is_empty()) {
         let _ = view.pump();
-        let _ = painter.tick(true);
+        let _ = tick(&mut painter, true);
         assert!(
             Instant::now() < deadline,
             "no committed frame ever drew the image"
@@ -253,9 +251,7 @@ async fn a_dropped_views_last_frame_keeps_the_image_pixels_it_read() {
         .pump()
         .expect("a released view is not a draw failure");
     assert!(
-        painter
-            .tick(true)
-            .expect("the retained frame still renders"),
+        tick(&mut painter, true).expect("the retained frame still renders"),
         "the painter kept the frame it had adopted"
     );
     assert_eq!(
@@ -290,7 +286,7 @@ async fn one_painter_re_attached_to_a_second_view_shows_the_second_page() {
         .expect("the first view is built");
     painter.attach(&first).expect("the first page takes it");
     wait_for_script(&mut first).expect("the first entry boots");
-    painter.tick(true).expect("the first page's frame");
+    tick(&mut painter, true).expect("the first page's frame");
     assert_eq!(top_left(&mut painter), RED);
 
     // A page is a group of its own, exactly as the browser embedder builds
@@ -320,7 +316,7 @@ async fn one_painter_re_attached_to_a_second_view_shows_the_second_page() {
     );
     wait_for_script(&mut second).expect("the second entry boots");
     assert!(
-        painter.tick(false).expect("the second page's frame"),
+        tick(&mut painter, false).expect("the second page's frame"),
         "the reset made the new page's first frame unrendered"
     );
     assert_eq!(
@@ -353,7 +349,7 @@ async fn a_painter_whose_view_is_gone_attaches_to_the_next_one() {
         .expect("the first view is built");
     painter.attach(&first).expect("the first page takes it");
     wait_for_script(&mut first).expect("the first entry boots");
-    painter.tick(true).expect("the first page's frame");
+    tick(&mut painter, true).expect("the first page's frame");
     assert_eq!(top_left(&mut painter), RED);
 
     // No `detach`, and no turn in between either: the painter has not yet
@@ -380,7 +376,7 @@ async fn a_painter_whose_view_is_gone_attaches_to_the_next_one() {
         "nothing of the new page has been rendered yet"
     );
     wait_for_script(&mut second).expect("the second entry boots");
-    painter.tick(true).expect("the second page's frame");
+    tick(&mut painter, true).expect("the second page's frame");
     assert_eq!(
         top_left(&mut painter),
         BLUE,
@@ -411,7 +407,7 @@ async fn a_painter_re_attached_through_the_auto_detach_resets_what_it_kept() {
         .expect("the first view is built");
     painter.attach(&first).expect("the first page takes it");
     wait_for_script(&mut first).expect("the first entry boots");
-    painter.tick(true).expect("the first page's frame");
+    tick(&mut painter, true).expect("the first page's frame");
     assert_eq!(top_left(&mut painter), RED);
 
     drop(first);
@@ -440,7 +436,7 @@ async fn a_painter_re_attached_through_the_auto_detach_resets_what_it_kept() {
         .expect("a painter that already noticed takes the next page");
     wait_for_script(&mut second).expect("the second entry boots");
     assert!(
-        painter.tick(false).expect("the second page's frame"),
+        tick(&mut painter, false).expect("the second page's frame"),
         "the attach dropped the first page's compose key"
     );
     assert_eq!(
@@ -497,7 +493,7 @@ async fn a_blurred_box_reaches_the_embedder_painter() {
         .expect("an offscreen painter is built");
     painter.attach(&view).expect("the page takes a painter");
     wait_for_script(&mut view).expect("the entry module boots");
-    painter.tick(true).expect("the blurred frame renders");
+    tick(&mut painter, true).expect("the blurred frame renders");
 
     let shot = painter.capture().expect("the committed frame");
     let luma = |x: usize, y: usize| i32::from(shot.pixels[(y * 64 + x) * 4]);
@@ -580,7 +576,7 @@ async fn a_backdrop_filtered_box_reaches_the_embedder_painter() {
         .expect("an offscreen painter is built");
     painter.attach(&view).expect("the page takes a painter");
     wait_for_script(&mut view).expect("the entry module boots");
-    painter.tick(true).expect("the filtered frame renders");
+    tick(&mut painter, true).expect("the filtered frame renders");
 
     let shot = painter.capture().expect("the committed frame");
     let luma = |x: usize, y: usize| i32::from(shot.pixels[(y * 64 + x) * 4]);

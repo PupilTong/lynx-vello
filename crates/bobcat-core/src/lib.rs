@@ -77,7 +77,7 @@ pub use dom::{
 pub use esm::{BTS_CHUNK_PREAMBLE, MTS_CHUNK_PREAMBLE};
 pub use main::tree::PageConfig;
 pub use native_module::{ModuleCall, ModuleCallback, NativeModule};
-pub use paint::Painter;
+pub use paint::{Painter, PostedFrame};
 pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 #[cfg(target_arch = "wasm32")]
 pub use view::configure_wasm_workers;
