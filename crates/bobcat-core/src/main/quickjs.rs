@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 #[cfg(test)]
 use std::time::Duration;
@@ -22,6 +22,7 @@ use std::time::Duration;
 use quickjs_rust_bridge as quickjs;
 
 use crate::jobs::JsThreadHandle;
+use crate::realm::child::ChildRealms;
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase, ScriptSourceLocation};
 
 /// A leaf host callback Bobcat installs in the realm.
@@ -97,8 +98,16 @@ pub(crate) struct ScriptEngine {
     evaluation: Option<quickjs::Value>,
     /// Per realm, like a rejection: a sibling's checkpoint may run this
     /// realm's promise jobs, and a panic one of them raised is this realm's
-    /// to resume, not the sibling's.
+    /// to resume, not the sibling's. A `ShadowRealm` child shares its
+    /// parent's: the child's code runs inside the parent's calls, so a panic
+    /// its host function raised there is the parent entry's to resume.
     host_panic: HostPanic,
+    /// The `ShadowRealm` children of an owner's realm, whose leftover
+    /// rejections go with this realm's when an entry of this realm has
+    /// already reported a failure. Weak, because the list is the realm
+    /// core's and drops after this engine; dangling for a child's own engine,
+    /// whose grandchildren are in that same flat list.
+    children: Weak<ChildRealms>,
 }
 
 /// The `QuickJS` runtime a group's realms share.
@@ -167,12 +176,7 @@ impl ScriptRuntime {
             .runtime
             .create_context()
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::Initialize))?;
-        Ok(ScriptEngine {
-            realm,
-            module_namespaces: HashMap::new(),
-            evaluation: None,
-            host_panic: HostPanic::default(),
-        })
+        Ok(ScriptEngine::adopt(realm, HostPanic::default()))
     }
 
     /// Registers one module source on the runtime, for every realm on it.
@@ -241,6 +245,95 @@ pub(crate) fn mark_checkpoint_later(js: &SharedRuntime, thread: &JsThreadHandle)
 }
 
 impl ScriptEngine {
+    /// One bridge realm as an engine of its own, with nothing loaded in it
+    /// yet.
+    fn adopt(realm: quickjs::Context, host_panic: HostPanic) -> Self {
+        Self {
+            realm,
+            module_namespaces: HashMap::new(),
+            evaluation: None,
+            host_panic,
+            children: Weak::new(),
+        }
+    }
+
+    /// Names the list this realm's `ShadowRealm` children live in, whose
+    /// leftover rejections [`Self::finish_operation`] drops with this
+    /// realm's own.
+    pub(crate) fn set_children(&mut self, children: Weak<ChildRealms>) {
+        self.children = children;
+    }
+
+    /// Installs the TC39 `ShadowRealm` constructor as a global of this
+    /// realm, with `hook` as its `HostInitializeShadowRealm`.
+    ///
+    /// Every `new ShadowRealm()` hands `hook` the fresh child realm as an
+    /// engine of its own, synchronously, in the middle of the JavaScript
+    /// call that constructs it: the hook installs what the child should have
+    /// and keeps it for as long as it lives, because dropping the engine
+    /// releases the realm. An `Err` refuses the construction with a
+    /// `TypeError` saying what it said. The child shares this realm's
+    /// [`HostPanic`], so a panic one of its host functions raises during a
+    /// call of this realm's is resumed by this realm's checkpoint; a hook
+    /// that panics is kept the same way and refuses the construction.
+    pub(crate) fn install_shadow_realm(
+        &mut self,
+        mut hook: impl FnMut(ScriptEngine) -> Result<(), String> + 'static,
+    ) -> Result<(), ScriptError> {
+        let host_panic = Rc::clone(&self.host_panic);
+        self.realm
+            .install_shadow_realm(move |child| {
+                let child = ScriptEngine::adopt(child, Rc::clone(&host_panic));
+                keep_host_panic(&host_panic, "the ShadowRealm host hook panicked", || {
+                    hook(child)
+                })
+            })
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::InstallShadowRealm))
+    }
+
+    /// Whether anything of another realm still needs this one: a
+    /// `ShadowRealm` whose child it is, a wrapped function whose target lives
+    /// in it, or an `importValue` still loading in it. Objects that are only
+    /// cyclic garbage count until a collection has finalized them.
+    pub(crate) fn is_referenced_across_realms(&self) -> bool {
+        self.realm.is_referenced_across_realms()
+    }
+
+    /// Reports one rejection this realm left unhandled, outside any
+    /// checkpoint of an entry of its own, and drops the rest of them.
+    ///
+    /// For a realm whose code runs inside another realm's entries — a
+    /// `ShadowRealm` child, whose rejections that entry's checkpoint leaves
+    /// queued for the child — and for the parent beside it, which a child's
+    /// own operations can leave rejections in. The queue has normally
+    /// already run dry, so this runs no job; one that does run is the
+    /// runtime's, as in any drain, and the caller announces it. The
+    /// generation is not bumped here, because this is not an entry: it is
+    /// the end of one, whose own checkpoint already did.
+    ///
+    /// A panic one of this realm's host functions raised is resumed here, as
+    /// [`Self::checkpoint`] resumes one.
+    pub(crate) fn take_unhandled_rejection(
+        &mut self,
+        runtime: &mut ScriptRuntime,
+    ) -> Result<usize, ScriptError> {
+        let drained = runtime.runtime.drain_pending_jobs(&self.realm);
+        if let Some(payload) = self.host_panic.take() {
+            panic::resume_unwind(payload);
+        }
+        drained.map_err(|error| {
+            // One report per failure, as an entry's own checkpoint makes it.
+            runtime.runtime.discard_unhandled_rejections(&self.realm);
+            map_quickjs_error(error, ScriptErrorPhase::ShadowRealmCheckpoint)
+        })
+    }
+
+    /// Drops every rejection this realm has left unhandled, for a caller that
+    /// is releasing it or has already reported its failure.
+    pub(crate) fn discard_own_rejections(&self, runtime: &mut ScriptRuntime) {
+        runtime.runtime.discard_unhandled_rejections(&self.realm);
+    }
+
     /// Ends one entry into this realm: the checkpoint runs whether the entry
     /// succeeded or not, because the jobs it queued are due either way.
     ///
@@ -283,10 +376,15 @@ impl ScriptEngine {
     }
 
     /// Drops the rejections this realm left behind a failure its caller has
-    /// already been told about. Only this realm's: a sibling's is still news
-    /// to the sibling.
+    /// already been told about. Only this realm's and its `ShadowRealm`
+    /// children's: the children's code ran inside this realm's entry, so what
+    /// they left is part of the one failure reported, while a sibling's is
+    /// still news to the sibling.
     fn discard_leftover_rejections(&mut self, runtime: &mut ScriptRuntime) {
-        runtime.runtime.discard_unhandled_rejections(&self.realm);
+        self.discard_own_rejections(runtime);
+        if let Some(children) = self.children.upgrade() {
+            children.discard_rejections(runtime);
+        }
     }
 
     /// Drains the runtime's promise-job queue on this realm's behalf.
@@ -444,18 +542,16 @@ impl ScriptEngine {
     ///
     /// Every export must be registered before that module first loads, and a
     /// name cannot be replaced. Registration retains the callback without
-    /// invoking it.
-    ///
-    /// The runtime is taken but not read: `QuickJS` is not reentrant, and the
-    /// exclusive borrow is how a caller proves no other realm on this runtime
-    /// is mid-entry while this one is furnished.
+    /// invoking it, and enters no JavaScript, so it needs no runtime borrow:
+    /// it happens on the owning thread before the realm's first JavaScript,
+    /// which for a `ShadowRealm` child is inside the hook that runs while the
+    /// parent's entry holds the runtime.
     ///
     /// A callback that panics throws "the host function panicked" into the
     /// script, and the panic itself is resumed by the checkpoint that ends
     /// the entry: see [`HostPanic`].
     pub(crate) fn register_host_module_function(
         &mut self,
-        _runtime: &mut ScriptRuntime,
         module_specifier: &str,
         export_name: &str,
         arity: u8,
@@ -481,12 +577,11 @@ impl ScriptEngine {
     /// ESM module: the realm asks it for a URL and gets back the compiled
     /// source, and the text never becomes a JavaScript value.
     ///
-    /// The runtime is taken for the same reason
-    /// [`Self::register_host_module_function`] takes it, and a loader that
-    /// panics is treated the way a host function that panics is.
+    /// Registered when [`Self::register_host_module_function`] registers, and
+    /// a loader that panics is treated the way a host function that panics
+    /// is.
     pub(crate) fn register_synchronous_loader<F>(
         &mut self,
-        _runtime: &mut ScriptRuntime,
         module_specifier: &str,
         export_name: &str,
         mut load: F,
@@ -955,7 +1050,6 @@ mod tests {
         let (mut runtime, mut engine) = engine();
         engine
             .register_host_module_function(
-                &mut runtime,
                 "bobcat-internal:test",
                 "answer",
                 0,
@@ -1094,7 +1188,6 @@ mod tests {
         let recorder = Arc::clone(&seen);
         engine
             .register_host_module_function(
-                &mut runtime,
                 "bobcat-internal:test",
                 "echo",
                 1,
@@ -1335,10 +1428,9 @@ mod tests {
     }
 
     /// Gives `engine` one host function, `explode`, that panics.
-    fn install_a_panicking_host_function(runtime: &mut ScriptRuntime, engine: &mut ScriptEngine) {
+    fn install_a_panicking_host_function(engine: &mut ScriptEngine) {
         engine
             .register_host_module_function(
-                runtime,
                 "bobcat-internal:test",
                 "explode",
                 0,
@@ -1350,7 +1442,7 @@ mod tests {
     #[test]
     fn a_host_function_that_panics_fails_its_entry_as_that_panic_even_when_caught() {
         let (mut runtime, mut engine) = engine();
-        install_a_panicking_host_function(&mut runtime, &mut engine);
+        install_a_panicking_host_function(&mut engine);
         let unwound = panic::catch_unwind(AssertUnwindSafe(|| {
             engine.execute_module(
                 &mut runtime,
@@ -1380,7 +1472,7 @@ mod tests {
     fn a_host_panic_a_siblings_checkpoint_ran_into_is_resumed_by_its_own_realm() {
         let (mut runtime, mut first) = engine();
         let mut second = runtime.create_realm().expect("a second view's realm");
-        install_a_panicking_host_function(&mut runtime, &mut first);
+        install_a_panicking_host_function(&mut first);
         runtime
             .register_module_source(
                 "app:///arm.js",

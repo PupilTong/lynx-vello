@@ -409,10 +409,10 @@ impl Worker {
                             id: crate::WorkerId::from(self.key),
                             url: Arc::from(self.url.as_str()),
                         },
-                        |engine, js| {
+                        |engine| {
                             let events = self.events.clone();
                             let key = self.key;
-                            install_worker_members(engine, js, key, &self.host, name, move |data| {
+                            install_worker_members(engine, key, &self.host, name, move |data| {
                                 let _ = events.send(WorkerEvent {
                                     key,
                                     payload: WorkerPayload::Message(data),
@@ -587,8 +587,13 @@ impl RealmOwner for Worker {
         if realm.closing.get() {
             return Vec::new();
         }
-        crate::timers::run_due_timers(&mut realm.core.engine, js, &realm.core.timers)
-            .unwrap_or_default()
+        let mut failures =
+            crate::timers::run_due_timers(&mut realm.core.engine, js, &realm.core.timers)
+                .unwrap_or_default();
+        // A `ShadowRealm` child's timers are tasks of this worker's too, so a
+        // `close()` stops them with the worker's own.
+        failures.extend(realm.core.children.run_due_timers(js).unwrap_or_default());
+        failures
     }
 
     /// A `close()` from the script that just ran ends the worker rather than

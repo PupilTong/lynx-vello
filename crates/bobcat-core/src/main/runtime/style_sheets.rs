@@ -6,7 +6,7 @@ use std::rc::Rc;
 use quickjs_rust_bridge::HostValue;
 use tokio_util::sync::CancellationToken;
 
-use super::{DocumentSlot, MainThreadError, ScriptEngine, ScriptRuntime, install};
+use super::{DocumentSlot, MainThreadError, ScriptEngine, install};
 use crate::jobs::JsThreadHandle;
 use crate::link::{SourceAnswer, ViewOutbox};
 use crate::main::tree::LynxDocument;
@@ -14,7 +14,6 @@ use crate::resource::{LoadedSource, SourceRequest, StyleSheetSource, unanswered_
 
 pub(super) fn install_styles(
     engine: &mut ScriptEngine,
-    js: &mut ScriptRuntime,
     document: &Rc<RefCell<DocumentSlot>>,
     outbox: &ViewOutbox,
     thread: JsThreadHandle,
@@ -26,7 +25,7 @@ pub(super) fn install_styles(
     // nothing. Without a probe every URL may be held, so the adoption finds
     // out, as it always did.
     let probe = outbox.style_sheet_probe().cloned();
-    install(engine, js, "hasStyleSheet", 1, move |args| {
+    install(engine, "hasStyleSheet", 1, move |args| {
         let Some(HostValue::String(url)) = args.first() else {
             return Err("hasStyleSheet expects a URL".to_owned());
         };
@@ -36,7 +35,7 @@ pub(super) fn install_styles(
     })?;
 
     let sources = outbox.host_outbox(outbox.token().clone());
-    install(engine, js, "preloadStyleSheet", 1, move |args| {
+    install(engine, "preloadStyleSheet", 1, move |args| {
         let Some(HostValue::String(url)) = args.first() else {
             return Err("preloadStyleSheet expects a URL".to_owned());
         };
@@ -47,7 +46,7 @@ pub(super) fn install_styles(
     let document = Rc::clone(document);
     let token = outbox.token().clone();
     let sources = outbox.host_outbox(token.clone());
-    install(engine, js, "adoptStyleSheet", 1, move |args| {
+    install(engine, "adoptStyleSheet", 1, move |args| {
         let Some(HostValue::String(url)) = args.first() else {
             return Err("adoptStyleSheet expects a URL".to_owned());
         };

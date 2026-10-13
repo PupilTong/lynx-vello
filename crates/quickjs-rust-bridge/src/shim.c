@@ -3,6 +3,7 @@
 #include "quickjs.h"
 
 #include <limits.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -154,6 +155,11 @@ typedef struct QjsRuntime {
     QjsHostRelease *host_release;
     void *host_opaque;
     JSClassID host_owner_class_id;
+    /* A `ShadowRealm` instance, and the object a wrapped function or a
+       pending `importValue` keeps its realms in. Registered per runtime, as
+       the host owner class is, from IDs the host allocated once. */
+    JSClassID shadow_realm_class_id;
+    JSClassID realm_link_class_id;
     QjsModuleSource *module_sources;
     QjsHostModuleName *host_module_names;
     QjsReservedPrefix *reserved_prefixes;
@@ -206,6 +212,16 @@ typedef struct QjsRequiredSource {
 typedef int QjsRequireLoad(void *opaque, const char *url,
                            QjsRequiredSource *source);
 
+/* HostInitializeShadowRealm: called inside `new ShadowRealm()` with the
+   fresh child realm, which the host owns from the moment it is called —
+   whatever it answers, C never frees the child itself. Nonzero refuses the
+   construction; `*message`, which the host keeps alive until its next call,
+   is then what the `TypeError` says. */
+typedef int QjsShadowRealmInit(void *opaque, QjsContext *child,
+                               const char **message);
+
+typedef struct QjsRealmToken QjsRealmToken;
+
 struct QjsContext {
     JSContext *raw;
     QjsRuntime *runtime;
@@ -234,6 +250,16 @@ struct QjsContext {
        re-entering a body that is already running? */
     uint64_t instance_serial;
     uint64_t link_mark;
+    /* The host's half of `ShadowRealm`, set by installing it. */
+    QjsShadowRealmInit *shadow_init;
+    void *shadow_opaque;
+    /* This realm's own intrinsic `%eval%` when it is a ShadowRealm's child,
+       taken before any code of it ran: `evaluate` is an indirect eval, and
+       the global `eval` binding is the child's code's to replace. */
+    JSValue shadow_eval;
+    /* How objects of other realms name this one; made the first time one
+       needs to. */
+    QjsRealmToken *token;
 };
 
 
@@ -260,6 +286,117 @@ static void qjs_host_owner_finalizer(JSRuntime *raw, JSValue value) {
 static const JSClassDef qjs_host_owner_class = {
     "QjsHostFunctionOwner",
     .finalizer = qjs_host_owner_finalizer,
+};
+
+
+/* One realm, as an object of another realm names it across a ShadowRealm
+   boundary.
+
+   What crosses is a JavaScript object of one realm that has to reach
+   another — a `ShadowRealm` instance in its parent, a wrapped function in
+   the realm it was handed to, a pending `importValue` — and the realm it
+   reaches is the host's, not the object's. QuickJS has no public way for a
+   class of ours to trace a `JSContext`, so a `JS_DupContext` held by one of
+   those objects would be a reference the collector cannot see, and every
+   cycle through it would be uncollectable. They hold this token instead: C
+   counts it, a finalizer may release it, and its `context` goes NULL as the
+   first thing `qjs_context_free` does, so every crossing after that throws
+   instead of reaching freed memory.
+
+   Two counts, because they answer two questions. `references` is memory:
+   the realm's own reference plus one per object that names the token, and
+   the token is freed when it reaches zero, whichever of the realm and the
+   objects goes last. `holders` is liveness, the host's question — how many
+   of those objects need this realm alive to do their job: a `ShadowRealm`
+   whose child it is, a wrapped function whose target lives in it, an
+   `importValue` whose module loads in it. A pending `importValue` also names
+   the realm that asked, only to settle its promise if it is still there, and
+   that watch is a reference and not a holder: it needs nothing kept. */
+struct QjsRealmToken {
+    /* NULL once `qjs_context_free` has begun. */
+    QjsContext *context;
+    size_t references;
+    size_t holders;
+};
+
+/* The realm's token, made on first use; the realm's own reference is the
+   first one. NULL only when it could not be allocated. */
+static QjsRealmToken *qjs_context_token(QjsContext *context) {
+    QjsRealmToken *token = context->token;
+
+    if (token == NULL) {
+        token = calloc(1, sizeof(*token));
+        if (token == NULL) {
+            return NULL;
+        }
+        token->context = context;
+        token->references = 1;
+        context->token = token;
+    }
+    return token;
+}
+
+static void qjs_token_hold(QjsRealmToken *token) {
+    token->references += 1;
+    token->holders += 1;
+}
+
+static void qjs_token_watch(QjsRealmToken *token) {
+    token->references += 1;
+}
+
+/* Pure C, so a GC finalizer may call it. */
+static void qjs_token_release(QjsRealmToken *token, int held) {
+    if (held) {
+        token->holders -= 1;
+    }
+    token->references -= 1;
+    if (token->references == 0) {
+        free(token);
+    }
+}
+
+/* What a wrapped function or a pending `importValue` keeps in a function-data
+   slot, which `js_c_function_data_mark` traces: the realm it works in, held,
+   and the realm a pending import settles a promise of, watched. Never exposed
+   to JavaScript. */
+typedef struct QjsShadowLink {
+    QjsRealmToken *target;
+    QjsRealmToken *caller;
+} QjsShadowLink;
+
+static void qjs_realm_link_finalizer(JSRuntime *raw, JSValue value) {
+    QjsShadowLink *link = JS_GetOpaque(value, JS_GetClassID(value));
+
+    (void)raw;
+    if (link == NULL) {
+        return;
+    }
+    qjs_token_release(link->target, 1);
+    if (link->caller != NULL) {
+        qjs_token_release(link->caller, 0);
+    }
+    free(link);
+}
+
+static const JSClassDef qjs_realm_link_class = {
+    "QjsRealmLink",
+    .finalizer = qjs_realm_link_finalizer,
+};
+
+/* A `ShadowRealm` instance holds its child realm's token as its opaque. */
+static void qjs_shadow_realm_finalizer(JSRuntime *raw, JSValue value) {
+    QjsRealmToken *token = JS_GetOpaque(value, JS_GetClassID(value));
+
+    (void)raw;
+    if (token != NULL) {
+        qjs_token_release(token, 1);
+    }
+}
+
+static const JSClassDef qjs_shadow_realm_class = {
+    "ShadowRealm",
+    .finalizer = qjs_shadow_realm_finalizer,
 };
 
 
@@ -971,7 +1108,11 @@ JSClassID qjs_host_owner_class_id_new(void) {
     return JS_NewClassID(&class_id);
 }
 
-QjsRuntime *qjs_runtime_new(JSClassID host_owner_class_id) {
+/* The three class IDs are allocated once per process by the host and
+   registered here per runtime. */
+QjsRuntime *qjs_runtime_new(JSClassID host_owner_class_id,
+                            JSClassID shadow_realm_class_id,
+                            JSClassID realm_link_class_id) {
     QjsRuntime *runtime = calloc(1, sizeof(*runtime));
     if (runtime == NULL) {
         return NULL;
@@ -988,12 +1129,22 @@ QjsRuntime *qjs_runtime_new(JSClassID host_owner_class_id) {
                             qjs_check_module_attributes, runtime);
     JS_SetModuleLoadDeferrer(runtime->raw, qjs_defer_module, runtime);
     runtime->host_owner_class_id = host_owner_class_id;
+    runtime->shadow_realm_class_id = shadow_realm_class_id;
+    runtime->realm_link_class_id = realm_link_class_id;
     if (JS_NewClass(runtime->raw, runtime->host_owner_class_id,
-                    &qjs_host_owner_class) < 0) {
+                    &qjs_host_owner_class) < 0 ||
+        JS_NewClass(runtime->raw, runtime->shadow_realm_class_id,
+                    &qjs_shadow_realm_class) < 0 ||
+        JS_NewClass(runtime->raw, runtime->realm_link_class_id,
+                    &qjs_realm_link_class) < 0) {
         JS_FreeRuntime(runtime->raw);
         free(runtime);
         return NULL;
     }
+    /* A wrapped function is a C-function-data callback, which is handed the
+       caller's context and nothing else; this is how it finds the class IDs
+       it checks its own data against. */
+    JS_SetRuntimeOpaque(runtime->raw, runtime);
     return runtime;
 }
 
@@ -1080,6 +1231,7 @@ QjsContext *qjs_context_new(QjsRuntime *runtime) {
         return NULL;
     }
     context->runtime = runtime;
+    context->shadow_eval = JS_UNDEFINED;
     context->raw = JS_NewContext(runtime->raw);
     if (context->raw == NULL) {
         free(context);
@@ -1090,6 +1242,14 @@ QjsContext *qjs_context_new(QjsRuntime *runtime) {
 }
 
 void qjs_context_free(QjsContext *context) {
+    /* First, before anything below can run a finalizer or a GC: every object
+       of another realm that names this one finds it gone from here on, and
+       throws instead of reaching what is about to be freed. */
+    if (context->token != NULL) {
+        context->token->context = NULL;
+        qjs_token_release(context->token, 0);
+        context->token = NULL;
+    }
     qjs_rejections_drop_context(context->runtime, context);
     qjs_host_modules_free(context, context->host_modules);
     qjs_module_instances_free(context->module_instances);
@@ -1099,6 +1259,8 @@ void qjs_context_free(QjsContext *context) {
         context->deferred_imports = pending->next;
         qjs_deferred_import_free(context->raw, pending);
     }
+    JS_FreeValue(context->raw, context->shadow_eval);
+    context->shadow_eval = JS_UNDEFINED;
     /* Pending jobs and settling promises keep the realm alive past this
        point. They must not find a wrapper the host no longer holds. */
     JS_SetContextOpaque(context->raw, NULL);
@@ -2485,4 +2647,941 @@ QjsValue *qjs_new_host_function(QjsContext *context, const char *name,
         return NULL;
     }
     return qjs_box(raw_context, function);
+}
+
+
+/* ShadowRealm (TC39, stage 2.7): a child realm on the same runtime, whose
+   values reach its parent only as primitives and as wrapped functions — a
+   function of one realm that is a callable of the other, whose arguments,
+   receiver and result are wrapped the same way on every call.
+
+   The host owns every child: `new ShadowRealm()` asks it to adopt one through
+   the realm's `QjsShadowRealmInit`, and the child lives for as long as the
+   host keeps it. JavaScript holds only tokens (`QjsRealmToken`), so a realm
+   the host has let go of is a `TypeError` at every boundary instead of
+   memory something still points at.
+
+   Two engine facts shape all of it. A C-function-data callback runs in its
+   *caller's* `JSContext` — only `JS_CLASS_C_FUNCTION` switches to the realm
+   it was made in — so a wrapped function carries its target realm in its
+   data and every call into a realm uses that realm's own `JSContext`. And
+   every boundary error is made in the realm whose code reached the boundary,
+   which is the callback's own `ctx`; the `importValue` continuations, which
+   run in the child, are the exception and make theirs in the realm that
+   asked. */
+
+static QjsRuntime *qjs_runtime_of(JSContext *raw) {
+    return JS_GetRuntimeOpaque(JS_GetRuntime(raw));
+}
+
+/* Asks the host's own interrupt state whether the running entry has been
+   interrupted. QuickJS has no public getter for an exception being
+   uncatchable, and `JS_Throw` clears the flag, so a boundary that replaces an
+   exception asks this instead; the host's answer stays set for as long as
+   its entry runs. */
+static int qjs_runtime_is_interrupted(QjsRuntime *runtime) {
+    return runtime->interrupt_callback != NULL &&
+           runtime->interrupt_callback(runtime->interrupt_opaque) != 0;
+}
+
+/* What QuickJS's own interrupt throws, so an interrupt that crossed a
+   boundary stays one no `catch` on the far side sees. */
+static JSValue qjs_throw_interrupted(JSContext *realm) {
+    JS_ThrowInternalError(realm, "interrupted");
+    JS_SetUncatchableException(realm, 1);
+    return JS_EXCEPTION;
+}
+
+static const char QJS_BOUNDARY_MESSAGE[] =
+    "a value thrown across a ShadowRealm boundary";
+
+/* Builds, without throwing, a `TypeError` (or `SyntaxError`) of `realm`
+   whose message is the string `message`, which it consumes. The message is
+   defined rather than formatted: `JS_Throw*Error` truncates at 256 bytes,
+   and a copied message is the original string as it stands. */
+static JSValue qjs_error_with_message(JSContext *realm, int syntax,
+                                      JSValue message) {
+    JSValue error;
+
+    if (JS_IsException(message)) {
+        return JS_EXCEPTION;
+    }
+    if (syntax) {
+        JS_ThrowSyntaxError(realm, "%s", "");
+    } else {
+        JS_ThrowTypeError(realm, "%s", "");
+    }
+    error = JS_GetException(realm);
+    if (JS_DefinePropertyValueStr(realm, error, "message", message,
+                                  JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE) <
+        0) {
+        JS_FreeValue(realm, error);
+        return JS_EXCEPTION;
+    }
+    return error;
+}
+
+static JSValue qjs_throw_with_message(JSContext *realm, int syntax,
+                                      JSValue message) {
+    JSValue error = qjs_error_with_message(realm, syntax, message);
+
+    if (JS_IsException(error)) {
+        return JS_EXCEPTION;
+    }
+    return JS_Throw(realm, error);
+}
+
+static JSValue qjs_throw_released(JSContext *realm) {
+    return JS_ThrowTypeError(realm,
+                             "this ShadowRealm's realm has been released");
+}
+
+/* The error a value thrown in one realm becomes in `realm`: a fresh
+   `TypeError` (a `SyntaxError` for source that did not parse), never the
+   thrown value itself. Its message is the original's when the original is an
+   `Error` whose own `message` is a data property holding a string, which is
+   read without invoking anything; otherwise a fixed one, so a thrown plain
+   object or a getter exposes nothing. */
+static JSValue qjs_boundary_error(JSContext *realm, JSValueConst original,
+                                  int syntax) {
+    JSValue message = JS_UNDEFINED;
+
+    if (JS_IsError(realm, original)) {
+        JSPropertyDescriptor descriptor;
+        JSAtom name = JS_NewAtom(realm, "message");
+        int found;
+
+        if (name == JS_ATOM_NULL) {
+            return JS_EXCEPTION;
+        }
+        /* An `Error` is an ordinary object, so this runs no trap. */
+        found = JS_GetOwnProperty(realm, &descriptor, original, name);
+        JS_FreeAtom(realm, name);
+        if (found < 0) {
+            return JS_EXCEPTION;
+        }
+        if (found > 0) {
+            if (!(descriptor.flags & JS_PROP_GETSET) &&
+                JS_IsString(descriptor.value)) {
+                message = JS_DupValue(realm, descriptor.value);
+            }
+            JS_FreeValue(realm, descriptor.value);
+            JS_FreeValue(realm, descriptor.getter);
+            JS_FreeValue(realm, descriptor.setter);
+        }
+    }
+    if (JS_IsUndefined(message)) {
+        message = JS_NewString(realm, QJS_BOUNDARY_MESSAGE);
+    }
+    return qjs_error_with_message(realm, syntax, message);
+}
+
+/* Replaces the pending exception, which code of another realm threw, with
+   its boundary error in `realm`. The original never reaches `realm`'s code.
+   An interrupt is thrown again as an interrupt. */
+static JSValue qjs_boundary_rethrow(QjsRuntime *runtime, JSContext *realm,
+                                    int syntax) {
+    JSValue original = JS_GetException(realm);
+    JSValue copy;
+
+    if (qjs_runtime_is_interrupted(runtime)) {
+        JS_FreeValue(realm, original);
+        return qjs_throw_interrupted(realm);
+    }
+    copy = qjs_boundary_error(realm, original, syntax);
+    JS_FreeValue(realm, original);
+    if (JS_IsException(copy)) {
+        return JS_EXCEPTION;
+    }
+    return JS_Throw(realm, copy);
+}
+
+/* A link object of `realm`'s, holding `target` and watching `caller`. The
+   opaque is set before anything can free the object, so its finalizer
+   always has both references to release. */
+static JSValue qjs_realm_link_new(QjsRuntime *runtime, JSContext *realm,
+                                  QjsRealmToken *target,
+                                  QjsRealmToken *caller) {
+    QjsShadowLink *link = malloc(sizeof(*link));
+    JSValue object;
+
+    if (link == NULL) {
+        return JS_ThrowOutOfMemory(realm);
+    }
+    object = JS_NewObjectClass(realm, (int)runtime->realm_link_class_id);
+    if (JS_IsException(object)) {
+        free(link);
+        return JS_EXCEPTION;
+    }
+    qjs_token_hold(target);
+    link->target = target;
+    link->caller = caller;
+    if (caller != NULL) {
+        qjs_token_watch(caller);
+    }
+    JS_SetOpaque(object, link);
+    return object;
+}
+
+static JSValue qjs_wrapped_call(JSContext *ctx, JSValueConst this_value,
+                                int argc, JSValueConst *argv, int magic,
+                                JSValue *data);
+
+/* CopyNameAndLength(wrapped, target), reading `target` in `source`, its own
+   realm, and defining on `wrapped` in `into`. -1 leaves whatever a read
+   threw pending. */
+static int qjs_copy_name_and_length(JSContext *source, JSContext *into,
+                                    JSValueConst wrapped,
+                                    JSValueConst target) {
+    JSAtom length_name = JS_NewAtom(source, "length");
+    double length = 0.0;
+    JSValue value;
+    int found;
+
+    if (length_name == JS_ATOM_NULL) {
+        return -1;
+    }
+    found = JS_GetOwnProperty(source, NULL, target, length_name);
+    if (found > 0) {
+        value = JS_GetProperty(source, target, length_name);
+        if (JS_IsException(value)) {
+            found = -1;
+        } else {
+            if (JS_IsNumber(value)) {
+                double number = 0.0;
+
+                JS_ToFloat64(source, &number, value);
+                if (isnan(number)) {
+                    length = 0.0;
+                } else if (!isfinite(number)) {
+                    /* +Infinity stays; -Infinity is 0. */
+                    length = number > 0 ? number : 0.0;
+                } else {
+                    number = trunc(number);
+                    length = number > 0 ? number : 0.0;
+                }
+            }
+            JS_FreeValue(source, value);
+        }
+    }
+    JS_FreeAtom(source, length_name);
+    if (found < 0) {
+        return -1;
+    }
+    if (JS_DefinePropertyValueStr(into, wrapped, "length",
+                                  JS_NewFloat64(into, length),
+                                  JS_PROP_CONFIGURABLE) < 0) {
+        return -1;
+    }
+    value = JS_GetPropertyStr(source, target, "name");
+    if (JS_IsException(value)) {
+        return -1;
+    }
+    if (!JS_IsString(value)) {
+        JS_FreeValue(source, value);
+        value = JS_NewString(into, "");
+        if (JS_IsException(value)) {
+            return -1;
+        }
+    }
+    return JS_DefinePropertyValueStr(into, wrapped, "name", value,
+                                     JS_PROP_CONFIGURABLE) < 0
+               ? -1
+               : 0;
+}
+
+/* WrappedFunctionCreate: a callable of `into` whose calls run `target` in
+   the realm `from` names. Its length is 0 because a function-data record's
+   length is what QuickJS pads the argument list to; the observable `length`
+   is defined over it. */
+static JSValue qjs_wrapped_function_create(QjsRuntime *runtime,
+                                           JSContext *into,
+                                           JSContext *error_realm,
+                                           QjsRealmToken *from,
+                                           JSValueConst target) {
+    JSValue data[2];
+    JSValue wrapped;
+    JSContext *source;
+    int status;
+
+    if (from->context == NULL) {
+        return qjs_throw_released(error_realm);
+    }
+    data[0] = target;
+    data[1] = qjs_realm_link_new(runtime, into, from, NULL);
+    if (JS_IsException(data[1])) {
+        return JS_EXCEPTION;
+    }
+    wrapped = JS_NewCFunctionData(into, qjs_wrapped_call, 0, 0, 2, data);
+    JS_FreeValue(into, data[1]);
+    if (JS_IsException(wrapped)) {
+        return JS_EXCEPTION;
+    }
+    /* A getter on `name` or `length` is code of `from`'s, which may reach a
+       host function that lets the realm go. */
+    source = JS_DupContext(from->context->raw);
+    status = qjs_copy_name_and_length(source, into, wrapped, target);
+    JS_FreeContext(source);
+    if (status < 0) {
+        JS_FreeValue(into, wrapped);
+        return qjs_boundary_rethrow(runtime, error_realm, 0);
+    }
+    return wrapped;
+}
+
+/* GetWrappedValue: a primitive crosses as itself — strings, symbols and
+   BigInts are the runtime's, not a realm's — and a callable crosses wrapped.
+   Any other object is a `TypeError` in `error_realm`. */
+static JSValue qjs_get_wrapped_value(QjsRuntime *runtime, JSContext *into,
+                                     JSContext *error_realm,
+                                     QjsRealmToken *from,
+                                     JSValueConst value) {
+    if (!JS_IsObject(value)) {
+        return JS_DupValue(into, value);
+    }
+    if (!JS_IsFunction(into, value)) {
+        return JS_ThrowTypeError(error_realm,
+                                 "an object that is not callable cannot "
+                                 "cross a ShadowRealm boundary");
+    }
+    return qjs_wrapped_function_create(runtime, into, error_realm, from,
+                                       value);
+}
+
+/* A wrapped function's [[Call]]: `data[0]` is the target, `data[1]` the
+   link holding its realm. The receiver and the arguments are wrapped into
+   the target's realm, the call runs there, and its result — or what it
+   threw — comes back wrapped. Nothing reads the link's realm after the call,
+   which may have let it go. A wrapped function is not a constructor. */
+static JSValue qjs_wrapped_call(JSContext *ctx, JSValueConst this_value,
+                                int argc, JSValueConst *argv, int magic,
+                                JSValue *data) {
+    QjsRuntime *runtime = qjs_runtime_of(ctx);
+    QjsShadowLink *link = JS_GetOpaque(data[1], runtime->realm_link_class_id);
+    QjsContext *caller = JS_GetContextOpaque(ctx);
+    QjsRealmToken *caller_token;
+    JSValue inline_arguments[QJS_HOST_INLINE_ARGS];
+    JSValue *arguments = inline_arguments;
+    JSValue receiver;
+    JSValue returned;
+    JSValue result = JS_EXCEPTION;
+    JSContext *target;
+    int built = 0;
+
+    (void)magic;
+    if (link == NULL || link->target->context == NULL || caller == NULL) {
+        return qjs_throw_released(ctx);
+    }
+    caller_token = qjs_context_token(caller);
+    if (caller_token == NULL) {
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    if (argc > QJS_HOST_INLINE_ARGS) {
+        if ((size_t)argc > SIZE_MAX / sizeof(*arguments)) {
+            return JS_ThrowRangeError(ctx, "too many call arguments");
+        }
+        arguments = malloc((size_t)argc * sizeof(*arguments));
+        if (arguments == NULL) {
+            return JS_ThrowOutOfMemory(ctx);
+        }
+    }
+    target = JS_DupContext(link->target->context->raw);
+    receiver =
+        qjs_get_wrapped_value(runtime, target, ctx, caller_token, this_value);
+    if (!JS_IsException(receiver)) {
+        for (built = 0; built < argc; ++built) {
+            arguments[built] = qjs_get_wrapped_value(runtime, target, ctx,
+                                                     caller_token, argv[built]);
+            if (JS_IsException(arguments[built])) {
+                break;
+            }
+        }
+        if (built == argc && link->target->context == NULL) {
+            /* A `name` or `length` getter of the caller's, read while
+               wrapping, let the target's realm go. */
+            result = qjs_throw_released(ctx);
+        } else if (built == argc) {
+            returned = JS_Call(target, data[0], receiver, argc, arguments);
+            if (JS_IsException(returned)) {
+                result = qjs_boundary_rethrow(runtime, ctx, 0);
+            } else {
+                result = qjs_get_wrapped_value(runtime, ctx, ctx, link->target,
+                                               returned);
+                JS_FreeValue(target, returned);
+            }
+        }
+        while (built > 0) {
+            JS_FreeValue(target, arguments[--built]);
+        }
+        JS_FreeValue(target, receiver);
+    }
+    if (arguments != inline_arguments) {
+        free(arguments);
+    }
+    JS_FreeContext(target);
+    return result;
+}
+
+/* `new ShadowRealm()`, in the parent realm `ctx`. The child is a fresh
+   context of this runtime with nothing installed, which the host's
+   initializer adopts; from that call on the child may already be freed, so
+   only its token is consulted. */
+static JSValue qjs_shadow_realm_construct(JSContext *ctx,
+                                          JSValueConst new_target, int argc,
+                                          JSValueConst *argv) {
+    QjsRuntime *runtime = qjs_runtime_of(ctx);
+    QjsContext *parent;
+    QjsContext *child;
+    QjsRealmToken *token = NULL;
+    QjsShadowRealmInit *init;
+    void *opaque;
+    JSValue prototype;
+    JSValue realm;
+    JSValue global;
+    const char *message = NULL;
+    int status;
+
+    (void)argc;
+    (void)argv;
+    /* OrdinaryCreateFromConstructor. The fallback is this realm's prototype
+       rather than the new target's realm's: QuickJS keeps
+       `JS_GetFunctionRealm` private. */
+    prototype = JS_GetPropertyStr(ctx, new_target, "prototype");
+    if (JS_IsException(prototype)) {
+        return JS_EXCEPTION;
+    }
+    if (!JS_IsObject(prototype)) {
+        JS_FreeValue(ctx, prototype);
+        prototype = JS_GetClassProto(ctx, runtime->shadow_realm_class_id);
+    }
+    realm = JS_NewObjectProtoClass(ctx, prototype,
+                                   runtime->shadow_realm_class_id);
+    JS_FreeValue(ctx, prototype);
+    if (JS_IsException(realm)) {
+        return JS_EXCEPTION;
+    }
+    /* Read after the `prototype` lookup, which can run code. */
+    parent = JS_GetContextOpaque(ctx);
+    if (parent == NULL || parent->shadow_init == NULL) {
+        JS_FreeValue(ctx, realm);
+        return JS_ThrowInternalError(ctx, "this realm is being released");
+    }
+    child = qjs_context_new(runtime);
+    if (child == NULL) {
+        JS_FreeValue(ctx, realm);
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    /* Before any code of the child's can replace it. */
+    global = JS_GetGlobalObject(child->raw);
+    child->shadow_eval = JS_GetPropertyStr(child->raw, global, "eval");
+    JS_FreeValue(child->raw, global);
+    if (JS_IsException(child->shadow_eval)) {
+        child->shadow_eval = JS_UNDEFINED;
+        JS_FreeValue(child->raw, JS_GetException(child->raw));
+    } else {
+        token = qjs_context_token(child);
+    }
+    if (token == NULL) {
+        qjs_context_free(child);
+        JS_FreeValue(ctx, realm);
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    qjs_token_hold(token);
+    JS_SetOpaque(realm, token);
+    init = parent->shadow_init;
+    opaque = parent->shadow_opaque;
+    status = init(opaque, child, &message);
+    /* The child is the host's now, and may already be gone. */
+    if (status != 0) {
+        JS_FreeValue(ctx, realm);
+        if (qjs_runtime_is_interrupted(runtime)) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            return qjs_throw_interrupted(ctx);
+        }
+        return qjs_throw_with_message(
+            ctx, 0,
+            JS_NewString(ctx, message != NULL
+                                  ? message
+                                  : "the host refused to initialize the "
+                                    "ShadowRealm"));
+    }
+    if (token->context == NULL) {
+        JS_FreeValue(ctx, realm);
+        return JS_ThrowTypeError(
+            ctx, "the host released the ShadowRealm during its initialization");
+    }
+    return realm;
+}
+
+/* `ShadowRealm.prototype.evaluate(sourceText)`: PerformShadowRealmEval.
+
+   The child's own `%eval%`, called indirectly, is the one QuickJS entry that
+   evaluates a script against the global variable environment with a fresh
+   declarative environment of its own, so a `let` of one call is not seen by
+   the next while a `var` is. It cannot tell a parse error from a
+   `SyntaxError` the code threw, which the two kinds of boundary error need,
+   so the text is compiled once, unrun, first. No evaluation depth is raised,
+   for the reason `qjs_eval` gives: a script cannot start a module body. */
+static JSValue qjs_shadow_realm_evaluate(JSContext *ctx,
+                                         JSValueConst this_value, int argc,
+                                         JSValueConst *argv) {
+    QjsRuntime *runtime = qjs_runtime_of(ctx);
+    QjsRealmToken *token =
+        JS_GetOpaque(this_value, runtime->shadow_realm_class_id);
+    JSContext *child;
+    JSValue eval;
+    JSValue compiled;
+    JSValue value;
+    JSValue result;
+    const char *text;
+    size_t length;
+
+    (void)argc;
+    if (token == NULL) {
+        return JS_ThrowTypeError(ctx, "ShadowRealm.prototype.evaluate called "
+                                      "on an object that is not a ShadowRealm");
+    }
+    if (!JS_IsString(argv[0])) {
+        return JS_ThrowTypeError(
+            ctx, "ShadowRealm.prototype.evaluate expects source text that is "
+                 "a string");
+    }
+    if (token->context == NULL) {
+        return qjs_throw_released(ctx);
+    }
+    child = JS_DupContext(token->context->raw);
+    eval = JS_DupValue(child, token->context->shadow_eval);
+    text = JS_ToCStringLen(ctx, &length, argv[0]);
+    if (text == NULL) {
+        result = JS_EXCEPTION;
+        goto done;
+    }
+    compiled = JS_Eval(child, text, length, "<input>",
+                       JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_COMPILE_ONLY);
+    JS_FreeCString(ctx, text);
+    if (JS_IsException(compiled)) {
+        result = qjs_boundary_rethrow(runtime, ctx, 1);
+        goto done;
+    }
+    JS_FreeValue(child, compiled);
+    value = JS_Call(child, eval, JS_UNDEFINED, 1, argv);
+    if (JS_IsException(value)) {
+        result = qjs_boundary_rethrow(runtime, ctx, 0);
+        goto done;
+    }
+    result = qjs_get_wrapped_value(runtime, ctx, ctx, token, value);
+    JS_FreeValue(child, value);
+done:
+    JS_FreeValue(child, eval);
+    JS_FreeContext(child);
+    return result;
+}
+
+/* `TypeError("module '<specifier>' has no export named '<name>'")` of
+   `realm`, built rather than formatted because neither name is bounded. */
+static JSValue qjs_missing_export_error(JSContext *realm,
+                                        JSValueConst specifier,
+                                        JSValueConst export_name) {
+    static const char PROLOGUE[] = "module '";
+    static const char INFIX[] = "' has no export named '";
+    static const char EPILOGUE[] = "'";
+    size_t fixed = sizeof(PROLOGUE) - 1 + sizeof(INFIX) - 1 +
+                   sizeof(EPILOGUE) - 1;
+    size_t specifier_length = 0;
+    size_t name_length = 0;
+    const char *specifier_text;
+    const char *name_text;
+    char *message;
+    size_t offset;
+    JSValue text;
+
+    specifier_text = JS_ToCStringLen(realm, &specifier_length, specifier);
+    if (specifier_text == NULL) {
+        return JS_EXCEPTION;
+    }
+    name_text = JS_ToCStringLen(realm, &name_length, export_name);
+    if (name_text == NULL) {
+        JS_FreeCString(realm, specifier_text);
+        return JS_EXCEPTION;
+    }
+    if (specifier_length > SIZE_MAX - fixed - name_length) {
+        message = NULL;
+    } else {
+        message = malloc(fixed + specifier_length + name_length);
+    }
+    if (message == NULL) {
+        JS_FreeCString(realm, specifier_text);
+        JS_FreeCString(realm, name_text);
+        return JS_ThrowOutOfMemory(realm);
+    }
+    offset = 0;
+    memcpy(message, PROLOGUE, sizeof(PROLOGUE) - 1);
+    offset += sizeof(PROLOGUE) - 1;
+    memcpy(message + offset, specifier_text, specifier_length);
+    offset += specifier_length;
+    memcpy(message + offset, INFIX, sizeof(INFIX) - 1);
+    offset += sizeof(INFIX) - 1;
+    memcpy(message + offset, name_text, name_length);
+    offset += name_length;
+    memcpy(message + offset, EPILOGUE, sizeof(EPILOGUE) - 1);
+    offset += sizeof(EPILOGUE) - 1;
+    JS_FreeCString(realm, specifier_text);
+    JS_FreeCString(realm, name_text);
+    text = JS_NewStringLen(realm, message, offset);
+    free(message);
+    return qjs_error_with_message(realm, 0, text);
+}
+
+/* The boundary error for what the child left pending, made in `caller`;
+   an exception of its own if even that fails. */
+static JSValue qjs_take_boundary_error(JSContext *child, JSContext *caller) {
+    JSValue pending = JS_GetException(child);
+    JSValue reason = qjs_boundary_error(caller, pending, 0);
+
+    JS_FreeValue(child, pending);
+    if (JS_IsException(reason)) {
+        reason = JS_GetException(caller);
+    }
+    return reason;
+}
+
+/* Settles the promise `importValue` answered, with `outcome` (consumed),
+   calling its resolving function in the realm that asked so that an
+   unhandled rejection is that realm's to report. */
+static void qjs_shadow_import_settle(JSContext *caller, JSValueConst settle,
+                                     JSValue outcome) {
+    JSValue returned = JS_Call(caller, settle, JS_UNDEFINED, 1,
+                               (JSValueConst *)&outcome);
+
+    JS_FreeValue(caller, returned);
+    JS_FreeValue(caller, outcome);
+}
+
+/* The two continuations of an `importValue`'s module load, which run in the
+   child (`ctx`): `data` is `{ resolve, reject, exportName, specifier, link }`,
+   the first two the caller's. A caller the host has let go of has no promise
+   left to settle; an interrupt settles nothing. Nothing of the child's —
+   not its error, not a promise of its own — reaches the caller. */
+static JSValue qjs_shadow_import_fulfilled(JSContext *ctx,
+                                           JSValueConst this_value, int argc,
+                                           JSValueConst *argv, int magic,
+                                           JSValue *data) {
+    QjsRuntime *runtime = qjs_runtime_of(ctx);
+    QjsShadowLink *link = JS_GetOpaque(data[4], runtime->realm_link_class_id);
+    JSContext *caller;
+    JSValue outcome;
+    JSValue value;
+    JSAtom name;
+    int found;
+    int fulfilled = 0;
+
+    (void)this_value;
+    (void)argc;
+    (void)magic;
+    if (link == NULL || link->caller == NULL ||
+        link->caller->context == NULL) {
+        return JS_UNDEFINED;
+    }
+    if (qjs_runtime_is_interrupted(runtime)) {
+        return qjs_throw_interrupted(ctx);
+    }
+    caller = JS_DupContext(link->caller->context->raw);
+    name = JS_ValueToAtom(ctx, data[2]);
+    if (name == JS_ATOM_NULL) {
+        outcome = qjs_take_boundary_error(ctx, caller);
+    } else {
+        /* A binding still in its temporal dead zone throws here; what it
+           threw stays the child's, as every boundary error does. */
+        found = JS_GetOwnProperty(ctx, NULL, argv[0], name);
+        if (found < 0) {
+            outcome = qjs_take_boundary_error(ctx, caller);
+        } else if (found == 0) {
+            outcome = qjs_missing_export_error(caller, data[3], data[2]);
+            if (JS_IsException(outcome)) {
+                outcome = JS_GetException(caller);
+            }
+        } else {
+            value = JS_GetProperty(ctx, argv[0], name);
+            if (JS_IsException(value)) {
+                outcome = qjs_take_boundary_error(ctx, caller);
+            } else {
+                outcome = qjs_get_wrapped_value(runtime, caller, caller,
+                                                link->target, value);
+                JS_FreeValue(ctx, value);
+                if (JS_IsException(outcome)) {
+                    /* Already the caller's own `TypeError`. */
+                    outcome = JS_GetException(caller);
+                } else {
+                    fulfilled = 1;
+                }
+            }
+        }
+        JS_FreeAtom(ctx, name);
+    }
+    if (qjs_runtime_is_interrupted(runtime)) {
+        JS_FreeValue(caller, outcome);
+        JS_FreeContext(caller);
+        return qjs_throw_interrupted(ctx);
+    }
+    qjs_shadow_import_settle(caller, data[fulfilled ? 0 : 1], outcome);
+    JS_FreeContext(caller);
+    return JS_UNDEFINED;
+}
+
+/* Forgets the child's unhandled rejections whose reason is `reason`.
+
+   A module body is an async function in QuickJS, so one that throws rejects
+   a promise of its own that nothing handles, beside the evaluation promise
+   the load handles; `import()` in any realm leaves that one behind. Here the
+   failure is the caller's to hear about — as its own rejection — and not
+   the child's, which asked for nothing, so the child's copy of it goes. */
+static void qjs_rejections_forget_reason(QjsRuntime *runtime,
+                                         QjsContext *context,
+                                         JSValueConst reason) {
+    QjsUnhandledRejection *current = runtime->rejection_head;
+    QjsUnhandledRejection *previous = NULL;
+
+    while (current != NULL) {
+        QjsUnhandledRejection *next = current->next;
+
+        if (current->context == context &&
+            JS_StrictEq(context->raw, current->reason, reason)) {
+            if (previous == NULL) {
+                runtime->rejection_head = next;
+            } else {
+                previous->next = next;
+            }
+            if (runtime->rejection_tail == current) {
+                runtime->rejection_tail = previous;
+            }
+            JS_FreeValue(context->raw, current->promise);
+            JS_FreeValue(context->raw, current->reason);
+            free(current);
+        } else {
+            previous = current;
+        }
+        current = next;
+    }
+}
+
+static JSValue qjs_shadow_import_rejected(JSContext *ctx,
+                                          JSValueConst this_value, int argc,
+                                          JSValueConst *argv, int magic,
+                                          JSValue *data) {
+    QjsRuntime *runtime = qjs_runtime_of(ctx);
+    QjsShadowLink *link = JS_GetOpaque(data[4], runtime->realm_link_class_id);
+    QjsContext *child = JS_GetContextOpaque(ctx);
+    JSContext *caller;
+    JSValue reason;
+
+    (void)this_value;
+    (void)argc;
+    (void)magic;
+    if (child != NULL) {
+        qjs_rejections_forget_reason(runtime, child, argv[0]);
+    }
+    if (link == NULL || link->caller == NULL ||
+        link->caller->context == NULL) {
+        return JS_UNDEFINED;
+    }
+    if (qjs_runtime_is_interrupted(runtime)) {
+        return qjs_throw_interrupted(ctx);
+    }
+    caller = JS_DupContext(link->caller->context->raw);
+    reason = qjs_boundary_error(caller, argv[0], 0);
+    if (JS_IsException(reason)) {
+        reason = JS_GetException(caller);
+    }
+    qjs_shadow_import_settle(caller, data[1], reason);
+    JS_FreeContext(caller);
+    return JS_UNDEFINED;
+}
+
+/* `ShadowRealm.prototype.importValue(specifier, exportName)`.
+
+   The load is the child's own `JS_LoadModuleInternal`, reached through
+   `JS_ResumeModuleLoad` with resolving functions of this shim's rather than
+   a promise's, so no promise of the child's is created or observed. A source
+   the child lacks is deferred the way any of its imports is — by the
+   runtime's deferrer, into the child's own pending loads — and completing it
+   on the child and resuming the child's loads is what goes on to settle
+   this. The specifier resolves against the calling script's name, as
+   `qjs_context_load_module`'s root resolves against its own. */
+static JSValue qjs_shadow_realm_import_value(JSContext *ctx,
+                                             JSValueConst this_value,
+                                             int argc, JSValueConst *argv) {
+    QjsRuntime *runtime = qjs_runtime_of(ctx);
+    QjsRealmToken *token =
+        JS_GetOpaque(this_value, runtime->shadow_realm_class_id);
+    QjsContext *caller;
+    QjsRealmToken *caller_token;
+    JSContext *child = NULL;
+    JSValue specifier;
+    JSValue promise = JS_UNDEFINED;
+    JSValue resolving[2] = {JS_UNDEFINED, JS_UNDEFINED};
+    JSValue settle[2] = {JS_UNDEFINED, JS_UNDEFINED};
+    JSValue data[5];
+    JSValue link;
+    JSValue result = JS_EXCEPTION;
+    const char *specifier_text = NULL;
+    const char *base_text = NULL;
+    JSAtom base;
+
+    (void)argc;
+    if (token == NULL) {
+        return JS_ThrowTypeError(ctx, "ShadowRealm.prototype.importValue "
+                                      "called on an object that is not a "
+                                      "ShadowRealm");
+    }
+    if (token->context == NULL) {
+        return qjs_throw_released(ctx);
+    }
+    specifier = JS_ToString(ctx, argv[0]);
+    if (JS_IsException(specifier)) {
+        return JS_EXCEPTION;
+    }
+    if (!JS_IsString(argv[1])) {
+        JS_FreeValue(ctx, specifier);
+        return JS_ThrowTypeError(ctx, "ShadowRealm.prototype.importValue "
+                                      "expects an export name that is a "
+                                      "string");
+    }
+    /* Again: the conversion above can run code that lets the child go. */
+    if (token->context == NULL) {
+        JS_FreeValue(ctx, specifier);
+        return qjs_throw_released(ctx);
+    }
+    caller = JS_GetContextOpaque(ctx);
+    if (caller == NULL) {
+        JS_FreeValue(ctx, specifier);
+        return JS_ThrowInternalError(ctx, "this realm is being released");
+    }
+    caller_token = qjs_context_token(caller);
+    if (caller_token == NULL) {
+        JS_FreeValue(ctx, specifier);
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    promise = JS_NewPromiseCapability(ctx, resolving);
+    if (JS_IsException(promise)) {
+        JS_FreeValue(ctx, specifier);
+        return JS_EXCEPTION;
+    }
+    child = JS_DupContext(token->context->raw);
+    link = qjs_realm_link_new(runtime, child, token, caller_token);
+    if (JS_IsException(link)) {
+        goto done;
+    }
+    data[0] = resolving[0];
+    data[1] = resolving[1];
+    data[2] = argv[1];
+    data[3] = specifier;
+    data[4] = link;
+    settle[0] =
+        JS_NewCFunctionData(child, qjs_shadow_import_fulfilled, 1, 0, 5, data);
+    settle[1] =
+        JS_NewCFunctionData(child, qjs_shadow_import_rejected, 1, 0, 5, data);
+    JS_FreeValue(child, link);
+    if (JS_IsException(settle[0]) || JS_IsException(settle[1])) {
+        goto done;
+    }
+    specifier_text = JS_ToCString(ctx, specifier);
+    if (specifier_text == NULL) {
+        goto done;
+    }
+    base = JS_GetScriptOrModuleName(ctx, 1);
+    if (base != JS_ATOM_NULL) {
+        base_text = JS_AtomToCString(ctx, base);
+        JS_FreeAtom(ctx, base);
+        if (base_text == NULL) {
+            goto done;
+        }
+    }
+    /* The load may link and evaluate a graph under this call, as a resumed
+       import does. */
+    runtime->evaluation_depth += 1;
+    JS_ResumeModuleLoad(child,
+                        base_text != NULL ? base_text : specifier_text,
+                        specifier_text, (JSValueConst *)settle, JS_UNDEFINED);
+    runtime->evaluation_depth -= 1;
+    if (qjs_runtime_is_interrupted(runtime)) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        result = qjs_throw_interrupted(ctx);
+    } else if (!JS_HasException(ctx)) {
+        result = JS_DupValue(ctx, promise);
+    }
+done:
+    JS_FreeCString(ctx, specifier_text);
+    JS_FreeCString(ctx, base_text);
+    JS_FreeValue(child, settle[0]);
+    JS_FreeValue(child, settle[1]);
+    JS_FreeContext(child);
+    JS_FreeValue(ctx, resolving[0]);
+    JS_FreeValue(ctx, resolving[1]);
+    JS_FreeValue(ctx, promise);
+    JS_FreeValue(ctx, specifier);
+    return result;
+}
+
+static const JSCFunctionListEntry qjs_shadow_realm_prototype[] = {
+    JS_CFUNC_DEF("evaluate", 1, qjs_shadow_realm_evaluate),
+    JS_CFUNC_DEF("importValue", 2, qjs_shadow_realm_import_value),
+    JS_PROP_STRING_DEF("[Symbol.toStringTag]", "ShadowRealm",
+                       JS_PROP_CONFIGURABLE),
+};
+
+/* Installs the global `ShadowRealm` constructor in this realm, backed by
+   `init`. A realm takes one (-6 for a second); -1 leaves the exception
+   pending. */
+int qjs_context_install_shadow_realm(QjsContext *context,
+                                     QjsShadowRealmInit *init, void *opaque) {
+    JSContext *raw = context->raw;
+    JSValue prototype;
+    JSValue constructor;
+    JSValue global;
+    int status;
+
+    if (context->shadow_init != NULL) {
+        return -6;
+    }
+    prototype = JS_NewObject(raw);
+    if (JS_IsException(prototype)) {
+        return -1;
+    }
+    if (JS_SetPropertyFunctionList(
+            raw, prototype, qjs_shadow_realm_prototype,
+            (int)(sizeof(qjs_shadow_realm_prototype) /
+                  sizeof(qjs_shadow_realm_prototype[0]))) < 0) {
+        JS_FreeValue(raw, prototype);
+        return -1;
+    }
+    constructor = JS_NewCFunction2(raw, qjs_shadow_realm_construct,
+                                   "ShadowRealm", 0, JS_CFUNC_constructor, 0);
+    if (JS_IsException(constructor)) {
+        JS_FreeValue(raw, prototype);
+        return -1;
+    }
+    /* `prototype` non-writable, `constructor` writable and configurable. */
+    if (JS_SetConstructor(raw, constructor, prototype) < 0) {
+        JS_FreeValue(raw, constructor);
+        JS_FreeValue(raw, prototype);
+        return -1;
+    }
+    global = JS_GetGlobalObject(raw);
+    status = JS_DefinePropertyValueStr(raw, global, "ShadowRealm", constructor,
+                                       JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    JS_FreeValue(raw, global);
+    if (status < 0) {
+        JS_FreeValue(raw, prototype);
+        return -1;
+    }
+    /* The fallback prototype of a construction whose new target has none. */
+    JS_SetClassProto(raw, context->runtime->shadow_realm_class_id, prototype);
+    context->shadow_init = init;
+    context->shadow_opaque = opaque;
+    return 0;
+}
+
+/* How many objects need this realm alive to do their job. */
+size_t qjs_context_shadow_holders(QjsContext *context) {
+    return context->token != NULL ? context->token->holders : 0;
 }

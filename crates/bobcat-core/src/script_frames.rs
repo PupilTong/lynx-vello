@@ -3,16 +3,14 @@
 
 use quickjs_rust_bridge::HostValue;
 
-use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
+use crate::main::quickjs::ScriptEngine;
 use crate::script::ScriptError;
 
 pub(crate) fn install(
     engine: &mut ScriptEngine,
-    js: &mut ScriptRuntime,
     mut notify: impl FnMut(bool) + 'static,
 ) -> Result<(), ScriptError> {
     engine.register_host_module_function(
-        js,
         crate::esm::HOST_MODULE_SPECIFIER,
         "requestScriptFrame",
         1,

@@ -2161,6 +2161,22 @@ consequential choice about whether to follow the spec or the quirk.
 
 ## JS runtime & APIs (see [js-runtime.md](js-runtime.md), [accessibility.md](accessibility.md))
 
+- **`ShadowRealm` children have no animation frames, and report under their
+  parent's source** (2026-10-13; `crates/bobcat-core/src/realm/child.rs`).
+  `requestAnimationFrame` is a member of a window's or a dedicated worker's
+  global, not of a ShadowRealm's; here a child has the realm core, whose
+  `requestScriptFrame` member is installed as a **no-op**, so a child that
+  imports `bobcat:animation-frame` links and its callbacks never run. The
+  display-frame demand is one flag per realm key — `None` for the MTS realm,
+  the worker's key for a worker — and a child has no key of its own: one
+  reporting under its parent's would cancel the parent's demand with its own
+  `false`. A child's `ConsoleMessage` and `ScriptReported`, and the failures
+  its owner reports for it, carry the **parent's** `ScriptSource` (`main`, or
+  `worker <id> <url>`), so an embedder cannot tell a child's output from its
+  parent's; a source of its own is a follow-up. A child is also freed only
+  by its owner's epilogue, once nothing of another realm refers to it, it has
+  no timer armed and no load or settle in flight — a child held only by
+  cyclic garbage waits for a collection.
 - **`lynx.createSelectorQuery()`/`NodesRef`** — modeled on WeChat Mini
   Program's batched `SelectorQuery`, not DOM `querySelector`: async,
   explicit `.exec()`, callback-based `invoke()`. This shape (async/batched

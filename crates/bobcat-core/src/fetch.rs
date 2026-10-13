@@ -41,7 +41,7 @@ use quickjs_rust_bridge::HostValue;
 use crate::esm::HOST_MODULE_SPECIFIER;
 use crate::future::FutureTable;
 use crate::link::HostOutbox;
-use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
+use crate::main::quickjs::ScriptEngine;
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
 use crate::script::ScriptError;
 
@@ -57,13 +57,12 @@ const FETCH_EXPORT: &str = "fetchResource";
 /// which case it answers `true` and starts nothing.
 pub(crate) fn install(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     sources: &HostOutbox,
     futures: &Rc<FutureTable>,
 ) -> Result<(), ScriptError> {
     let requests = sources.clone();
     let futures = Rc::clone(futures);
-    install_member(engine, js_runtime, FETCH_EXPORT, 1, move |arguments| {
+    install_member(engine, FETCH_EXPORT, 1, move |arguments| {
         const NAME: &str = "bobcat-internal:host.fetchResource";
         let url = string_argument(NAME, arguments, 0)?.to_owned();
         // Already fetched, as the fetcher itself answers: nothing is
@@ -95,18 +94,11 @@ pub(crate) fn install(
 
 fn install_member(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     name: &str,
     arity: u8,
     callback: impl FnMut(&[HostValue]) -> Result<HostValue, String> + 'static,
 ) -> Result<(), ScriptError> {
-    engine.register_host_module_function(
-        js_runtime,
-        HOST_MODULE_SPECIFIER,
-        name,
-        arity,
-        Box::new(callback),
-    )
+    engine.register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, Box::new(callback))
 }
 
 fn string_argument<'a>(

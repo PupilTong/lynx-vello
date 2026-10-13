@@ -16,7 +16,7 @@ use rustc_hash::FxHashMap;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::quickjs::{ScriptEngine, ScriptRuntime};
+use super::quickjs::ScriptEngine;
 use crate::background::{
     WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart,
 };
@@ -55,7 +55,6 @@ impl WorkerFactory {
     pub(super) fn install(
         &self,
         engine: &mut ScriptEngine,
-        runtime: &mut ScriptRuntime,
         outbox: ViewOutbox,
     ) -> Result<(Rc<WorkerOwner>, mpsc::UnboundedReceiver<WorkerEvent>), ScriptError> {
         let (events, incoming) = mpsc::unbounded_channel();
@@ -71,7 +70,6 @@ impl WorkerFactory {
         });
         let creator = Rc::downgrade(&owner);
         engine.register_host_module_function(
-            runtime,
             HOST_MODULE_SPECIFIER,
             "createWorker",
             3,
@@ -124,7 +122,6 @@ impl WorkerFactory {
         )?;
         let sender = Rc::downgrade(&owner);
         engine.register_host_module_function(
-            runtime,
             HOST_MODULE_SPECIFIER,
             "sendWorkerMessage",
             2,
@@ -142,7 +139,6 @@ impl WorkerFactory {
         )?;
         let terminator = Rc::downgrade(&owner);
         engine.register_host_module_function(
-            runtime,
             HOST_MODULE_SPECIFIER,
             "terminateWorker",
             1,

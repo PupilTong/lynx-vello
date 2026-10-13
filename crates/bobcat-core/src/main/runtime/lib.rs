@@ -898,20 +898,20 @@ impl MainThreadRuntime {
             thread.clone(),
             None,
             ScriptSource::Main,
-            |engine, js_runtime| {
-                install_bobcat(engine, js_runtime, &slot, &outbox, thread.clone())
+            |engine| {
+                install_bobcat(engine, &slot, &outbox, thread.clone())
                     .map_err(MainThreadError::into_script_error)?;
-                style_sheets::install_styles(engine, js_runtime, &slot, &outbox, thread)
+                style_sheets::install_styles(engine, &slot, &outbox, thread)
                     .map_err(MainThreadError::into_script_error)?;
-                install_startup_strings(engine, js_runtime, startup_strings(&mut startup))
+                install_startup_strings(engine, startup_strings(&mut startup))
                     .map_err(MainThreadError::into_script_error)?;
                 // The transport alone: the view's modules are the BTS's, and
                 // this realm has no `NativeModules`. What the transport is
                 // here for is a later MTS API answering calls through it.
-                crate::native_module::install(engine, js_runtime, &host, None)
+                crate::native_module::install(engine, &host, None)
                     .map_err(|error| context_of("installing the native module members", error))?;
                 workers
-                    .install(engine, js_runtime, outbox)
+                    .install(engine, outbox)
                     .map_err(|error| context_of("installing Worker", error))
             },
         )
@@ -936,6 +936,13 @@ impl MainThreadRuntime {
     /// and future settles that epilogue spawns.
     pub(crate) fn core(&mut self) -> &mut RealmCore {
         &mut self.core
+    }
+
+    /// How many `ShadowRealm` children this realm holds, grandchildren
+    /// included.
+    #[cfg(test)]
+    pub(crate) fn child_realms(&self) -> usize {
+        self.core.children.len()
     }
 
     /// How many of this realm's workers are still running, which is how many
@@ -1711,17 +1718,21 @@ impl MainThreadRuntime {
         self.core.timers.next_deadline()
     }
 
-    /// Runs every timer due now, in the order the standard fires them.
+    /// Runs every timer due now, in the order the standard fires them: this
+    /// realm's, then each `ShadowRealm` child's, in construction order.
     ///
     /// Returns whatever their callbacks threw. A timer is its own task, so
     /// one that throws neither stops the ones behind it nor ends the realm —
-    /// the same standing an event listener that throws already has.
+    /// the same standing an event listener that throws already has. A
+    /// child's callbacks are in the same batch, because what they call of
+    /// this realm's can remove elements too.
     pub(crate) fn run_due_timers(&mut self, js_runtime: &mut ScriptRuntime) -> Vec<ScriptError> {
-        let Some(mut failures) =
-            run_due_timers(&mut self.core.engine, js_runtime, &self.core.timers)
-        else {
+        let own = run_due_timers(&mut self.core.engine, js_runtime, &self.core.timers);
+        let children = self.core.children.run_due_timers(js_runtime);
+        if own.is_none() && children.is_none() {
             return Vec::new();
-        };
+        }
+        let mut failures: Vec<ScriptError> = own.into_iter().chain(children).flatten().collect();
         // Callbacks remove elements like any other realm entry point; the
         // count they ran up is settled here, at the end of the batch.
         if let Err(error) = self.finish_batch(js_runtime, true) {
@@ -2123,30 +2134,22 @@ await Promise.resolve().then(() => __FlushElementTree());
 
 fn install_bobcat(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     handle: &Rc<RefCell<DocumentSlot>>,
     outbox: &ViewOutbox,
     thread: crate::jobs::JsThreadHandle,
 ) -> Result<(), MainThreadError> {
-    install_host_module(engine, js_runtime, handle, thread)?;
-    install_event_members(engine, js_runtime, outbox)
+    install_host_module(engine, handle, thread)?;
+    install_event_members(engine, outbox)
 }
 
 fn install(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     name: &str,
     arity: u8,
     callback: impl FnMut(&[HostValue]) -> Result<HostValue, String> + 'static,
 ) -> Result<(), MainThreadError> {
     engine
-        .register_host_module_function(
-            js_runtime,
-            HOST_MODULE_SPECIFIER,
-            name,
-            arity,
-            Box::new(callback),
-        )
+        .register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, Box::new(callback))
         .map_err(|error| MainThreadError::from_engine("installing the host module", error))
 }
 
@@ -2157,13 +2160,13 @@ fn install(
 ///
 /// The document is taken unconditionally: see [`DocumentSlot::document_mut`].
 macro_rules! tree_members {
-    ($engine:ident, $js_runtime:ident, $handle:ident; $(
+    ($engine:ident, $handle:ident; $(
         fn $name:ident($($arg:ident: $parser:ident),*) |$document:ident| $body:block
     )*) => {$({
         const NAME: &str = concat!("bobcat-internal:host.", stringify!($name));
         let tree = Rc::clone($handle);
         let arity = 0u8 $(+ { let _ = stringify!($arg); 1u8 })*;
-        install($engine, $js_runtime, stringify!($name), arity, move |arguments| {
+        install($engine, stringify!($name), arity, move |arguments| {
             #[allow(unused_mut, reason = "zero-argument members never advance it")]
             let mut index = 0usize;
             $(
@@ -2180,13 +2183,12 @@ macro_rules! tree_members {
 
 fn install_host_module(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     handle: &Rc<RefCell<DocumentSlot>>,
     // `flushElementTree`'s, for the waits it makes on the listed author sheets
     // and before a painter has bound.
     thread: crate::jobs::JsThreadHandle,
 ) -> Result<(), MainThreadError> {
-    tree_members! { engine, js_runtime, handle;
+    tree_members! { engine, handle;
         fn createPage() |document| {
             Ok(node_id_value(document.document_element().id()))
         }
@@ -2217,7 +2219,7 @@ fn install_host_module(
     // also counts toward the next collection: a detached subtree is freed
     // only once the handles naming it are finalized.
     let tree = Rc::clone(handle);
-    install(engine, js_runtime, "removeElement", 1, move |arguments| {
+    install(engine, "removeElement", 1, move |arguments| {
         const NAME: &str = "bobcat-internal:host.removeElement";
         let child = node_id_argument(NAME, arguments, 0)?;
         let mut handle = borrow_slot(NAME, &tree)?;
@@ -2229,7 +2231,7 @@ fn install_host_module(
     })?;
 
     let tree = Rc::clone(handle);
-    install(engine, js_runtime, "replaceElement", 2, move |arguments| {
+    install(engine, "replaceElement", 2, move |arguments| {
         const NAME: &str = "bobcat-internal:host.replaceElement";
         let new_element = node_id_argument(NAME, arguments, 0)?;
         let old_element = node_id_argument(NAME, arguments, 1)?;
@@ -2246,10 +2248,10 @@ fn install_host_module(
         Ok(HostValue::Undefined)
     })?;
 
-    install_document_members(engine, js_runtime, handle)?;
-    install_attribute_members(engine, js_runtime, handle)?;
-    install_exposure_members(engine, js_runtime, handle)?;
-    install_readback_members(engine, js_runtime, handle)?;
+    install_document_members(engine, handle)?;
+    install_attribute_members(engine, handle)?;
+    install_exposure_members(engine, handle)?;
+    install_readback_members(engine, handle)?;
 
     let tree = Rc::clone(handle);
     // The realm's handle for `node` has been collected, and a handle is the
@@ -2260,7 +2262,7 @@ fn install_host_module(
     // listener the realm had on it is gone too, since those lived on the
     // handle — which the realm settles itself, before it calls this, by
     // closing whatever event names that handle alone held open.
-    install(engine, js_runtime, "dropElement", 1, move |arguments| {
+    install(engine, "dropElement", 1, move |arguments| {
         const NAME: &str = "bobcat-internal:host.dropElement";
         let node = node_id_argument(NAME, arguments, 0)?;
         let mut tree = borrow_slot(NAME, &tree)?;
@@ -2281,16 +2283,10 @@ fn install_host_module(
     })?;
 
     let tree = Rc::clone(handle);
-    install(
-        engine,
-        js_runtime,
-        "flushElementTree",
-        0,
-        move |_arguments| {
-            borrow_slot("bobcat-internal:host.flushElementTree", &tree)?.flush(&thread)?;
-            Ok(HostValue::Undefined)
-        },
-    )?;
+    install(engine, "flushElementTree", 0, move |_arguments| {
+        borrow_slot("bobcat-internal:host.flushElementTree", &tree)?.flush(&thread)?;
+        Ok(HostValue::Undefined)
+    })?;
 
     Ok(())
 }
@@ -2305,12 +2301,11 @@ fn install_host_module(
 /// does.
 fn install_document_members(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     handle: &Rc<RefCell<DocumentSlot>>,
 ) -> Result<(), MainThreadError> {
     const NAME: &str = "bobcat-internal:host.createDocument";
     let tree = Rc::clone(handle);
-    install(engine, js_runtime, "createDocument", 5, move |arguments| {
+    install(engine, "createDocument", 5, move |arguments| {
         // The five switches, in `PageConfig`'s order, as the boot module
         // wrote them. Read rather than passed through because Rust itself
         // needs the fields: the UA cascade and the document's own switches are
@@ -2346,11 +2341,10 @@ fn install_document_members(
 /// never read again, so the move says what the lifetime is.
 fn install_startup_strings(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     strings: [(&'static str, Option<String>); 4],
 ) -> Result<(), MainThreadError> {
     for (name, mut value) in strings {
-        install(engine, js_runtime, name, 0, move |_arguments| {
+        install(engine, name, 0, move |_arguments| {
             Ok(value.take().map_or(HostValue::Undefined, HostValue::String))
         })?;
     }
@@ -2385,12 +2379,11 @@ fn startup_strings(startup: &mut RealmStartup) -> [(&'static str, Option<String>
 /// be free.
 fn install_event_members(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     outbox: &ViewOutbox,
 ) -> Result<(), MainThreadError> {
     for (member, available) in [("listenerNameOpened", true), ("listenerNameClosed", false)] {
         let outbox = outbox.clone();
-        install(engine, js_runtime, member, 1, move |arguments| {
+        install(engine, member, 1, move |arguments| {
             let name = string_argument(member, arguments, 0)?;
             outbox.listener_edge(Arc::from(name), available);
             Ok(HostValue::Undefined)
@@ -2454,65 +2447,58 @@ fn method_answer(outcome: MethodOutcome) -> HostValue {
 /// empty style.
 fn install_readback_members(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     handle: &Rc<RefCell<DocumentSlot>>,
 ) -> Result<(), MainThreadError> {
     // Written out rather than generated, because the answer is either a
     // number or a string.
     let tree = Rc::clone(handle);
-    install(
-        engine,
-        js_runtime,
-        "callElementMethod",
-        3,
-        move |arguments| {
-            const NAME: &str = "bobcat-internal:host.callElementMethod";
-            let node = node_id_argument(NAME, arguments, 0)?;
-            let method = string_argument(NAME, arguments, 1)?;
-            let params = string_argument(NAME, arguments, 2)?;
-            let mut handle = borrow_slot(NAME, &tree)?;
-            let document = handle.document_mut();
-            validate_live_element(document, NAME, node)?;
-            // Every name is the element kind's own method first
-            // (`dom::CustomElement::invoke`, run by the kind's component in
-            // `tree`). The kinds' methods built are a pager's `selectTab`
-            // (`tree::viewpager`), a `scroll-view`'s `scrollTo`, `scrollBy`
-            // and `getScrollInfo` (`tree::scroll_container`), a `list`'s
-            // `scrollToPosition`, `scrollBy`, `getScrollContainerInfo` and
-            // `getVisibleCells` (`tree::list`), an
-            // `x-swiper`'s `scrollTo` (`tree::swiper`), an `x-refresh-view`'s
-            // `finishRefresh`, `finishLoadMore` and `autoStartRefresh`
-            // (`tree::refresh_view`), a scroll coordinator's
-            // `setFoldExpanded` (`tree::scroll_coordinator`), a `text`'s
-            // `getTextBoundingRect` (`tree::text`), and a dialog's
-            // `show`, `showModal`, `close` and `requestClose`
-            // (`tree::dialog`). On `NotFound` the shared base set every
-            // element has answers (`tree::base_methods`): the documented UI
-            // methods `boundingClientRect`, `scrollIntoView`,
-            // `scrollTo`/`scrollBy` and `focus`/`blur` (user ruling
-            // 2026-10-09), of which all but `focus`/`blur` are built; a name
-            // neither answers is code 3. No name is matched here. A kind's
-            // `scrollTo`/`scrollBy` shadows the base set's, and no kind
-            // answers `boundingClientRect`, so it is the same method on every
-            // element, as web-core answers it ahead of the element
-            // (`createInvokeUIMethod.ts:16-28`). The kind's method runs
-            // inside the `[CEReactions]` scope `invoke_element_method` opens
-            // and the base method outside it, which needs none: the base set
-            // records scroll requests and reads geometry, and queues no
-            // custom element reaction.
-            let call = MethodCall {
-                name: method,
-                params,
-            };
-            let outcome = match document.invoke_element_method(node, call) {
-                MethodOutcome::NotFound => invoke_base_method(document, node, call),
-                outcome => outcome,
-            };
-            Ok(method_answer(outcome))
-        },
-    )?;
+    install(engine, "callElementMethod", 3, move |arguments| {
+        const NAME: &str = "bobcat-internal:host.callElementMethod";
+        let node = node_id_argument(NAME, arguments, 0)?;
+        let method = string_argument(NAME, arguments, 1)?;
+        let params = string_argument(NAME, arguments, 2)?;
+        let mut handle = borrow_slot(NAME, &tree)?;
+        let document = handle.document_mut();
+        validate_live_element(document, NAME, node)?;
+        // Every name is the element kind's own method first
+        // (`dom::CustomElement::invoke`, run by the kind's component in
+        // `tree`). The kinds' methods built are a pager's `selectTab`
+        // (`tree::viewpager`), a `scroll-view`'s `scrollTo`, `scrollBy`
+        // and `getScrollInfo` (`tree::scroll_container`), a `list`'s
+        // `scrollToPosition`, `scrollBy`, `getScrollContainerInfo` and
+        // `getVisibleCells` (`tree::list`), an
+        // `x-swiper`'s `scrollTo` (`tree::swiper`), an `x-refresh-view`'s
+        // `finishRefresh`, `finishLoadMore` and `autoStartRefresh`
+        // (`tree::refresh_view`), a scroll coordinator's
+        // `setFoldExpanded` (`tree::scroll_coordinator`), a `text`'s
+        // `getTextBoundingRect` (`tree::text`), and a dialog's
+        // `show`, `showModal`, `close` and `requestClose`
+        // (`tree::dialog`). On `NotFound` the shared base set every
+        // element has answers (`tree::base_methods`): the documented UI
+        // methods `boundingClientRect`, `scrollIntoView`,
+        // `scrollTo`/`scrollBy` and `focus`/`blur` (user ruling
+        // 2026-10-09), of which all but `focus`/`blur` are built; a name
+        // neither answers is code 3. No name is matched here. A kind's
+        // `scrollTo`/`scrollBy` shadows the base set's, and no kind
+        // answers `boundingClientRect`, so it is the same method on every
+        // element, as web-core answers it ahead of the element
+        // (`createInvokeUIMethod.ts:16-28`). The kind's method runs
+        // inside the `[CEReactions]` scope `invoke_element_method` opens
+        // and the base method outside it, which needs none: the base set
+        // records scroll requests and reads geometry, and queues no
+        // custom element reaction.
+        let call = MethodCall {
+            name: method,
+            params,
+        };
+        let outcome = match document.invoke_element_method(node, call) {
+            MethodOutcome::NotFound => invoke_base_method(document, node, call),
+            outcome => outcome,
+        };
+        Ok(method_answer(outcome))
+    })?;
 
-    tree_members! { engine, js_runtime, handle;
+    tree_members! { engine, handle;
         fn getComputedStyleMap(
             node: node_id_argument,
             properties: string_argument,
@@ -2556,12 +2542,11 @@ fn install_readback_members(
 /// exception [`install_attribute_writes`] makes for the exposure attributes.
 fn install_attribute_members(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     handle: &Rc<RefCell<DocumentSlot>>,
 ) -> Result<(), MainThreadError> {
-    install_attribute_writes(engine, js_runtime, handle)?;
+    install_attribute_writes(engine, handle)?;
 
-    tree_members! { engine, js_runtime, handle;
+    tree_members! { engine, handle;
         // Deliberately name-based: this PAPI receives record keys, custom
         // properties have no numeric id, and Stylo's internal PropertyId is
         // not a stable script ABI. A future numeric-key `__AddInlineStyle`
@@ -2660,11 +2645,10 @@ fn install_attribute_members(
 /// registration reads the attributes as they now are.
 fn install_attribute_writes(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     handle: &Rc<RefCell<DocumentSlot>>,
 ) -> Result<(), MainThreadError> {
     let tree = Rc::clone(handle);
-    install(engine, js_runtime, "setAttribute", 3, move |arguments| {
+    install(engine, "setAttribute", 3, move |arguments| {
         const NAME: &str = "bobcat-internal:host.setAttribute";
         let node = node_id_argument(NAME, arguments, 0)?;
         let name = string_argument(NAME, arguments, 1)?;
@@ -2680,7 +2664,7 @@ fn install_attribute_writes(
     })?;
 
     let tree = Rc::clone(handle);
-    install(engine, js_runtime, "removeAttribute", 2, move |arguments| {
+    install(engine, "removeAttribute", 2, move |arguments| {
         const NAME: &str = "bobcat-internal:host.removeAttribute";
         let node = node_id_argument(NAME, arguments, 0)?;
         let name = string_argument(NAME, arguments, 1)?;
@@ -2710,11 +2694,10 @@ fn install_attribute_writes(
 /// next intersection delivery entry.
 fn install_exposure_members(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     handle: &Rc<RefCell<DocumentSlot>>,
 ) -> Result<(), MainThreadError> {
     let tree = Rc::clone(handle);
-    install(engine, js_runtime, "exposureEvents", 2, move |arguments| {
+    install(engine, "exposureEvents", 2, move |arguments| {
         const NAME: &str = "bobcat-internal:host.exposureEvents";
         let node = node_id_argument(NAME, arguments, 0)?;
         let wants = flag_argument(NAME, arguments, 1)?;
@@ -2725,7 +2708,7 @@ fn install_exposure_members(
     })?;
 
     let tree = Rc::clone(handle);
-    install(engine, js_runtime, "switchExposure", 2, move |arguments| {
+    install(engine, "switchExposure", 2, move |arguments| {
         const NAME: &str = "bobcat-internal:host.switchExposure";
         let on = flag_argument(NAME, arguments, 0)?;
         let send_event = flag_argument(NAME, arguments, 1)?;

@@ -48,6 +48,12 @@
 //! - [`Scene::Frame`]: the realm's animation-frame callbacks, on the painter's vsync.
 //! - [`Scene::HostCall`]: a call the host made into the realm. MTS: a page update, and a native
 //!   module's answer to a call the realm made. Worker: a native module's answer.
+//! - [`Scene::ShadowRealm`]: a rejection a `ShadowRealm` child of the realm left unhandled, which
+//!   the epilogue reads once it has serviced the children — and one the realm itself left beside
+//!   them, read in the same step for a realm that has children, because a child's timer or module
+//!   load can run the parent's code outside any entry of the parent's own. A child's timer
+//!   callback, module load and future settle are reported under Timer, Module and Future, as the
+//!   owner's own are.
 //! - The Disposal row, MTS only: the JavaScript disposal the page runs after the view has ended and
 //!   before its realm is released. The view has already ended, so the row does not end it.
 //! - The Panic row: the engine panicked while it served the owner.
@@ -111,6 +117,9 @@ pub(crate) enum Scene {
     Frame,
     /// A call the host made into the realm.
     HostCall,
+    /// What a `ShadowRealm` child of the realm left unhandled — or the realm
+    /// itself, beside its children, after the epilogue ran their jobs.
+    ShadowRealm,
 }
 
 /// One row of a realm kind's table: what a failure is reported as.
@@ -162,6 +171,7 @@ pub(crate) fn main_thread(scene: Scene) -> Row<EngineEvent> {
     let (event, ends, context): (fn(ScriptError) -> EngineEvent, _, _) = match scene {
         Scene::Open => (|error| EngineEvent::StartupFailed(error.into()), true, None),
         Scene::Boot | Scene::Frame | Scene::HostCall => (EngineEvent::ScriptRunError, false, None),
+        Scene::ShadowRealm => (EngineEvent::ScriptRunError, false, Some("in a ShadowRealm")),
         Scene::Module => (
             EngineEvent::ScriptRunError,
             false,
@@ -232,6 +242,7 @@ pub(crate) fn worker(scene: Scene) -> Row<WorkerPayload> {
         Scene::Listener => "delivering a message to a worker",
         Scene::Frame => "running animation callbacks",
         Scene::HostCall => "running a native module callback",
+        Scene::ShadowRealm => "running a ShadowRealm job",
     };
     Row {
         event: WorkerPayload::Errored,
@@ -282,7 +293,7 @@ mod tests {
     );
 
     /// Every row of the MTS table, as it is expected to be.
-    fn main_thread_rows() -> [Expected<EngineEvent>; 10] {
+    fn main_thread_rows() -> [Expected<EngineEvent>; 11] {
         let startup_failed: fn(&EngineEvent) -> bool =
             |event| matches!(event, EngineEvent::StartupFailed(LynxViewError::Script(_)));
         let script_run_error: fn(&EngineEvent) -> bool =
@@ -344,6 +355,13 @@ mod tests {
                 None,
             ),
             (
+                "ShadowRealm",
+                main_thread(Scene::ShadowRealm),
+                script_run_error,
+                false,
+                Some("in a ShadowRealm"),
+            ),
+            (
                 "Disposal",
                 main_thread_disposal(),
                 listener_failed,
@@ -361,7 +379,7 @@ mod tests {
     }
 
     /// Every row of the worker table, as it is expected to be.
-    fn worker_rows() -> [Expected<WorkerPayload>; 9] {
+    fn worker_rows() -> [Expected<WorkerPayload>; 10] {
         let failed: fn(&WorkerPayload) -> bool = |event| matches!(event, WorkerPayload::Failed(_));
         let errored: fn(&WorkerPayload) -> bool =
             |event| matches!(event, WorkerPayload::Errored(_));
@@ -415,6 +433,13 @@ mod tests {
                 errored,
                 false,
                 Some("running a native module callback"),
+            ),
+            (
+                "ShadowRealm",
+                worker(Scene::ShadowRealm),
+                errored,
+                false,
+                Some("running a ShadowRealm job"),
             ),
             (
                 "Panic",

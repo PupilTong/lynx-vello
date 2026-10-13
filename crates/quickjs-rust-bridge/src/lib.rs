@@ -24,6 +24,13 @@
 //! realm can also load one module by name as the root of a graph, the way an
 //! `import()` of it would, and hold the promise that load settles.
 //!
+//! A realm may carry the TC39 `ShadowRealm` built-in
+//! ([`Context::install_shadow_realm`]): each `new ShadowRealm()` is a child
+//! realm on the same runtime that the host adopts as a [`Context`] of its own
+//! and owns, and whose values reach the parent only as primitives and wrapped
+//! functions. The whole callable boundary is in the engine; JavaScript holds a
+//! child only through a token that a released realm turns into a `TypeError`.
+//!
 //! The host-function boundary carries primitives plus opaque structured
 //! clones: anything that is not a primitive is serialized by `QuickJS` itself
 //! into a [`StructuredClone`], which the host can hold, move between threads
@@ -88,7 +95,11 @@ mod implementation {
     const QJS_PROMISE_FULFILLED: i32 = 1;
     const QJS_PROMISE_REJECTED: i32 = 2;
 
-    static HOST_OWNER_CLASS_ID: OnceLock<u32> = OnceLock::new();
+    /// The bridge's three class IDs — host-function owner, `ShadowRealm`
+    /// instance, realm link — allocated once per process and registered in
+    /// every runtime. One initializer allocates all three: separate cells
+    /// would race `JS_NewClassID`'s counter against each other.
+    static CLASS_IDS: OnceLock<[u32; 3]> = OnceLock::new();
 
     /// Limits and timeout applied when a runtime is created.
     ///
@@ -926,10 +937,15 @@ mod implementation {
             }
 
             unsafe {
-                let host_owner_class_id =
-                    *HOST_OWNER_CLASS_ID.get_or_init(|| ffi::qjs_host_owner_class_id_new());
-                let raw =
-                    NonNull::new(ffi::qjs_runtime_new(host_owner_class_id)).ok_or_else(|| {
+                let [host_owner, shadow_realm, realm_link] = *CLASS_IDS.get_or_init(|| {
+                    [
+                        ffi::qjs_host_owner_class_id_new(),
+                        ffi::qjs_host_owner_class_id_new(),
+                        ffi::qjs_host_owner_class_id_new(),
+                    ]
+                });
+                let raw = NonNull::new(ffi::qjs_runtime_new(host_owner, shadow_realm, realm_link))
+                    .ok_or_else(|| {
                         Error::bridge(
                             ErrorKind::OutOfMemory,
                             ErrorPhase::CreateRuntime,
@@ -986,16 +1002,7 @@ mod implementation {
                         "QuickJS could not allocate a context",
                     )
                 })?;
-            Ok(Context {
-                inner: Rc::new(ContextInner {
-                    raw,
-                    runtime: Rc::clone(&self.inner),
-                    module_normalizer: RefCell::new(None),
-                    normalized_name: RefCell::new(CString::default()),
-                    require_loader: RefCell::new(None),
-                    required: RefCell::new(ParkedRequire::default()),
-                }),
-            })
+            Ok(Context::adopt(raw, &self.inner))
         }
 
         #[must_use]
@@ -1318,6 +1325,79 @@ mod implementation {
         normalized_name: RefCell<CString>,
         require_loader: RefCell<Option<Box<RequireLoader>>>,
         required: RefCell<ParkedRequire>,
+        shadow_hook: RefCell<Option<Box<ShadowRealmHook>>>,
+        /// What the last refused `new ShadowRealm()` says, kept alive for the
+        /// shim to read until the next construction.
+        shadow_error: RefCell<CString>,
+    }
+
+    type ShadowRealmHook = dyn FnMut(Context) -> Result<(), String>;
+
+    /// The shim's `QjsShadowRealmInit`: hands the fresh child to the parent's
+    /// hook as a [`Context`] of its own, which is what makes the host its
+    /// owner — from here on `qjs_context_free` runs when the last handle to
+    /// it drops, whatever the hook answers.
+    unsafe extern "C" fn shadow_realm_init(
+        opaque: *mut c_void,
+        child: *mut ffi::QjsContext,
+        message: *mut *const c_char,
+    ) -> c_int {
+        let parent = opaque.cast::<ContextInner>().cast_const();
+        // SAFETY: the opaque is `Rc::as_ptr` of the parent's `ContextInner`,
+        // which the shim calls back into only while the parent's C context —
+        // and therefore that allocation — is alive. Taking a strong count of
+        // our own keeps it alive across the hook, which may drop every handle
+        // the host had.
+        let parent = unsafe {
+            Rc::increment_strong_count(parent);
+            Rc::from_raw(parent)
+        };
+        let refused = NonNull::new(child).map_or_else(
+            || Some("QuickJS could not allocate the ShadowRealm's realm".to_owned()),
+            |child| {
+                let child = Context::adopt(child, &parent.runtime);
+                catch_unwind(AssertUnwindSafe(|| {
+                    let Ok(mut hook) = parent.shadow_hook.try_borrow_mut() else {
+                        return Err(
+                            "ShadowRealm initialization is already running in this realm"
+                                .to_owned(),
+                        );
+                    };
+                    match hook.as_mut() {
+                        Some(hook) => hook(child),
+                        None => Err("this realm has no ShadowRealm host hook".to_owned()),
+                    }
+                }))
+                .unwrap_or_else(|_| Err("the ShadowRealm host hook panicked".to_owned()))
+                .err()
+            },
+        );
+        let Some(text) = refused else {
+            return 0;
+        };
+        let text: String = text
+            .chars()
+            .filter(|&character| character != '\0')
+            .collect();
+        let text = CString::new(text).unwrap_or_default();
+        // Our own count is the last one only when the hook dropped every
+        // handle on the parent, which frees what `shadow_error` lives in as
+        // this returns; a static message outlives that.
+        let parked = if Rc::strong_count(&parent) > 1 {
+            parent.shadow_error.try_borrow_mut().ok().map(|mut parked| {
+                *parked = text;
+                parked.as_ptr()
+            })
+        } else {
+            None
+        };
+        let pointer =
+            parked.unwrap_or_else(|| c"the host released this realm during its hook".as_ptr());
+        // SAFETY: the out-parameter is the shim's, valid for this call; the
+        // buffer it points at is parked on the parent, which outlives this
+        // call, until the next construction, and the shim copies it first.
+        unsafe { *message = pointer };
+        -1
     }
 
     unsafe extern "C" fn normalize_module(
@@ -1439,6 +1519,23 @@ mod implementation {
     }
 
     impl Context {
+        /// Takes ownership of one C realm of `runtime`'s: from here on
+        /// `qjs_context_free` runs when the last handle to it drops.
+        fn adopt(raw: NonNull<ffi::QjsContext>, runtime: &Rc<RuntimeInner>) -> Self {
+            Self {
+                inner: Rc::new(ContextInner {
+                    raw,
+                    runtime: Rc::clone(runtime),
+                    module_normalizer: RefCell::new(None),
+                    normalized_name: RefCell::new(CString::default()),
+                    require_loader: RefCell::new(None),
+                    required: RefCell::new(ParkedRequire::default()),
+                    shadow_hook: RefCell::new(None),
+                    shadow_error: RefCell::new(CString::default()),
+                }),
+            }
+        }
+
         fn reclaim(&self) {
             self.inner.runtime.reclaim();
         }
@@ -1467,6 +1564,78 @@ mod implementation {
                     Rc::as_ptr(&self.inner).cast_mut().cast(),
                 );
             }
+        }
+
+        /// Installs the TC39 `ShadowRealm` constructor on this realm's global
+        /// object, with `hook` as its `HostInitializeShadowRealm`.
+        ///
+        /// `new ShadowRealm()` makes a fresh child realm on this realm's
+        /// runtime — its own global object and intrinsics, no module loading,
+        /// no native modules, no `ShadowRealm` of its own — and calls `hook`
+        /// with it, synchronously, inside the construction. The child is the
+        /// hook's: it is what installs whatever the child should have, and it
+        /// must keep the [`Context`] for as long as the realm should live,
+        /// because the host owns every child and dropping the last handle
+        /// releases it. `Err(message)` refuses the construction with a
+        /// `TypeError(message)` in this realm. The hook runs in the middle of
+        /// a JavaScript call, so it must not need `&mut Runtime`; a nested
+        /// `new ShadowRealm()` of this realm from inside it is refused.
+        ///
+        /// JavaScript holds a child only weakly. The `ShadowRealm` object,
+        /// the wrapped functions crossing its boundary and a pending
+        /// `importValue` keep tokens rather than references, so a realm the
+        /// host has released is a `TypeError` at every crossing from then on
+        /// rather than a realm kept alive behind its back.
+        /// [`Self::is_referenced_across_realms`] is how the host learns that
+        /// nothing needs a child any more.
+        ///
+        /// Values still never cross in Rust: the callable boundary is the
+        /// engine's, and a child's [`Value`] passed to this realm's methods is
+        /// [`ErrorKind::WrongRealm`]. Everything a child runs during one of
+        /// this realm's entries runs under that entry's execution limits.
+        ///
+        /// A realm takes one hook; a second install is
+        /// [`ErrorKind::InvalidInput`].
+        pub fn install_shadow_realm<F>(&mut self, hook: F) -> Result<(), Error>
+        where
+            F: FnMut(Context) -> Result<(), String> + 'static,
+        {
+            self.reclaim();
+            // SAFETY: the stable allocation outlives its C context, whose
+            // opaque the shim clears before releasing it; no JavaScript runs
+            // between the install and the hook being stored.
+            let status = unsafe {
+                ffi::qjs_context_install_shadow_realm(
+                    self.raw().as_ptr(),
+                    shadow_realm_init,
+                    Rc::as_ptr(&self.inner).cast_mut().cast(),
+                )
+            };
+            match status {
+                0 => {
+                    *self.inner.shadow_hook.borrow_mut() = Some(Box::new(hook));
+                    Ok(())
+                }
+                -6 => Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::CreateContext,
+                    "a ShadowRealm constructor is already installed in this realm",
+                )),
+                _ => Err(capture_exception(self.raw(), ErrorPhase::CreateContext)),
+            }
+        }
+
+        /// Whether anything of another realm still needs this one: a
+        /// `ShadowRealm` whose child it is, a wrapped function whose target
+        /// lives in it, or an `importValue` still loading in it.
+        ///
+        /// Those objects say so from their finalizers, so one that is only
+        /// cyclic garbage still counts until [`Runtime::run_gc`] has
+        /// collected it.
+        #[must_use]
+        pub fn is_referenced_across_realms(&self) -> bool {
+            // SAFETY: a read of a count the shim keeps on this live context.
+            unsafe { ffi::qjs_context_shadow_holders(self.raw().as_ptr()) > 0 }
         }
 
         /// Takes one not-yet-dispatched module name. Repeated imports share
@@ -5555,6 +5724,777 @@ mod implementation {
                 .function("bad\0name", 0, |_| Ok(HostValue::Undefined))
                 .expect_err("a NUL in the name");
             assert_eq!(error.kind, ErrorKind::InvalidInput);
+        }
+
+        /// The children every `new ShadowRealm()` of a test made, in order.
+        type Realms = Rc<RefCell<Vec<Context>>>;
+
+        /// A hook that keeps every child in `realms` and installs itself on
+        /// each, so a child can make `ShadowRealm`s of its own. It holds the
+        /// list weakly: a child's own hook lives in the child, and a strong
+        /// list there would be a cycle no drop ends.
+        fn keep_realms(realms: &Realms) -> Box<ShadowRealmHook> {
+            let realms = Rc::downgrade(realms);
+            Box::new(move |mut child| {
+                let realms = realms.upgrade().ok_or("the test let its realms go")?;
+                child
+                    .install_shadow_realm(keep_realms(&realms))
+                    .map_err(|error| error.message)?;
+                realms.borrow_mut().push(child);
+                Ok(())
+            })
+        }
+
+        /// `thrown(f)` names what `f` threw by the constructor of *this*
+        /// realm it is an instance of, so an error object that leaked from a
+        /// child reads as foreign.
+        const SHADOW_PRELUDE: &str = "globalThis.thrown = (f) => {
+            try { f(); return 'no throw'; } catch (e) {
+                const name = e === null || typeof e !== 'object' ? 'primitive'
+                    : e.constructor === TypeError ? 'TypeError'
+                    : e.constructor === SyntaxError ? 'SyntaxError'
+                    : e.constructor === Error ? 'Error'
+                    : 'foreign ' + e.name;
+                return name + ': ' + (typeof e === 'object' && e !== null ? e.message : String(e));
+            }
+        };";
+
+        fn shadow_parent_with(options: RuntimeOptions) -> (Runtime, Context, Realms) {
+            let runtime = Runtime::with_options(options).expect("runtime should initialize");
+            let mut parent = runtime.create_context().expect("realm should initialize");
+            let realms = Realms::default();
+            parent
+                .install_shadow_realm(keep_realms(&realms))
+                .expect("ShadowRealm should install");
+            run(&mut parent, SHADOW_PRELUDE);
+            (runtime, parent, realms)
+        }
+
+        fn shadow_parent() -> (Runtime, Context, Realms) {
+            shadow_parent_with(RuntimeOptions::default())
+        }
+
+        fn run(realm: &mut Context, source: &str) -> Value {
+            realm
+                .evaluate(EvalSource::new(source), EvalOptions::default())
+                .unwrap_or_else(|error| panic!("{source}: {error:?}"))
+        }
+
+        fn run_text(realm: &mut Context, source: &str) -> String {
+            let value = run(realm, source);
+            let units = value
+                .to_utf16()
+                .unwrap_or_else(|error| panic!("{source}: {error:?}"));
+            String::from_utf16(&units).expect("test strings are well-formed")
+        }
+
+        fn assert_js(realm: &mut Context, source: &str) {
+            assert_eq!(run(realm, source).as_boolean(), Some(true), "{source}");
+        }
+
+        #[test]
+        fn shadow_realm_primitives_cross_and_globals_stay_apart() {
+            let (_runtime, mut parent, realms) = shadow_parent();
+            assert_js(
+                &mut parent,
+                "globalThis.r = new ShadowRealm(); globalThis.marker = 'parent'; true",
+            );
+            assert_eq!(realms.borrow().len(), 1);
+            for check in [
+                "r.evaluate('1 + 1') === 2",
+                "r.evaluate('\"a\" + \"b\"') === 'ab'",
+                "r.evaluate('10n') === 10n",
+                "r.evaluate('null') === null",
+                "r.evaluate('undefined') === undefined",
+                "r.evaluate('Symbol.iterator') === Symbol.iterator",
+                "r.evaluate('Symbol.for(\"shared\")') === Symbol.for('shared')",
+                "r.evaluate('typeof marker') === 'undefined'",
+                "r.evaluate('globalThis.marker = \"child\"') === 'child' && marker === 'parent'",
+                "r.evaluate('Object.getPrototypeOf([]) === Array.prototype')",
+                "Object.prototype.toString.call(r) === '[object ShadowRealm]'",
+                "r.evaluate.length === 1 && r.importValue.length === 2",
+                "ShadowRealm.length === 0 && ShadowRealm.name === 'ShadowRealm'",
+                "Object.getPrototypeOf(r) === ShadowRealm.prototype",
+            ] {
+                assert_js(&mut parent, check);
+            }
+            // The hook's handle is the child realm itself.
+            let marker = run_text(&mut realms.borrow_mut()[0], "marker");
+            assert_eq!(marker, "child");
+        }
+
+        #[test]
+        fn shadow_realm_evaluate_is_an_indirect_eval() {
+            let (_runtime, mut parent, _realms) = shadow_parent();
+            run(&mut parent, "globalThis.r = new ShadowRealm()");
+            for check in [
+                "r.evaluate('let a = 1; a') === 1",
+                "r.evaluate('typeof a') === 'undefined'",
+                "r.evaluate('var b = 2; b') === 2",
+                "r.evaluate('b') === 2",
+                "r.evaluate('let b = 9; b') === 9 && r.evaluate('b') === 2",
+                "r.evaluate('let a = 3; a') === 3",
+                "r.evaluate('const c = 4; c') === 4 && r.evaluate('const c = 5; c') === 5",
+            ] {
+                assert_js(&mut parent, check);
+            }
+        }
+
+        #[test]
+        fn shadow_realm_constructor_and_brand_checks() {
+            let (_runtime, mut parent, realms) = shadow_parent();
+            run(&mut parent, "globalThis.r = new ShadowRealm()");
+            assert_eq!(
+                run_text(&mut parent, "thrown(() => ShadowRealm())"),
+                "TypeError: must be called with new"
+            );
+            for source in [
+                "thrown(() => r.evaluate(1))",
+                "thrown(() => r.evaluate.call({}, '1'))",
+                "thrown(() => ShadowRealm.prototype.evaluate('1'))",
+                "thrown(() => r.importValue.call(1, 'x', 'y'))",
+            ] {
+                let thrown = run_text(&mut parent, source);
+                assert!(thrown.starts_with("TypeError: "), "{source}: {thrown}");
+            }
+            assert_js(
+                &mut parent,
+                "class Sub extends ShadowRealm { three() { return this.evaluate('3'); } }
+                 const sub = new Sub();
+                 sub.three() === 3 && sub instanceof ShadowRealm
+                     && Object.getPrototypeOf(sub) === Sub.prototype",
+            );
+            assert_js(
+                &mut parent,
+                "const d = Object.getOwnPropertyDescriptor(ShadowRealm, 'prototype');
+                 !d.writable && !d.enumerable && !d.configurable
+                     && ShadowRealm.prototype.constructor === ShadowRealm",
+            );
+            assert_js(
+                &mut parent,
+                "const g = Object.getOwnPropertyDescriptor(globalThis, 'ShadowRealm');
+                 g.writable && !g.enumerable && g.configurable",
+            );
+            assert_eq!(realms.borrow().len(), 2);
+        }
+
+        #[test]
+        fn shadow_realm_wraps_functions_both_ways() {
+            let (_runtime, mut parent, _realms) = shadow_parent();
+            run(&mut parent, "globalThis.r = new ShadowRealm()");
+            for check in [
+                "r.evaluate('(f, x) => f(f(x))')(x => x * 2, 5) === 20",
+                "const g = r.evaluate('(function named(a, b, c) {})');
+                 typeof g === 'function' && g.name === 'named' && g.length === 3
+                     && Object.getPrototypeOf(g) === Function.prototype",
+                "const id = r.evaluate('x => x'); const k = () => 1; const back = id(k);
+                 back !== k && back() === 1 && id(id) !== id && typeof id(id) === 'function'",
+                "const d = Object.getOwnPropertyDescriptor(r.evaluate('function f() {}; f'), 'name');
+                 d.value === 'f' && !d.writable && !d.enumerable && d.configurable",
+            ] {
+                assert_js(&mut parent, check);
+            }
+            let thrown = run_text(
+                &mut parent,
+                "const w = r.evaluate('(function () {})'); thrown(() => new w())",
+            );
+            assert!(thrown.starts_with("TypeError: "), "{thrown}");
+        }
+
+        #[test]
+        fn shadow_realm_copies_name_and_length_through_the_boundary() {
+            let (_runtime, mut parent, _realms) = shadow_parent();
+            run(&mut parent, "globalThis.r = new ShadowRealm()");
+            assert_eq!(
+                run_text(
+                    &mut parent,
+                    "thrown(() => r.evaluate('const f = () => 1; \
+                     Object.defineProperty(f, \"name\", { get() { throw new Error(\"no name\"); } }); \
+                     f'))",
+                ),
+                "TypeError: no name"
+            );
+            for (length, expected) in [
+                ("Infinity", "Infinity"),
+                ("-Infinity", "0"),
+                ("-1", "0"),
+                ("\"x\"", "0"),
+                ("2.7", "2"),
+                ("NaN", "0"),
+            ] {
+                let source = format!(
+                    "String(r.evaluate('const f = () => 1; \
+                     Object.defineProperty(f, \"length\", {{ value: {length} }}); f').length)"
+                );
+                assert_eq!(run_text(&mut parent, &source), expected, "{length}");
+            }
+            assert_js(
+                &mut parent,
+                "r.evaluate('const f = () => 1; delete f.length; f').length === 0
+                     && r.evaluate('const f = () => 1; Object.defineProperty(f, \"name\", { value: 3 }); f').name === ''",
+            );
+        }
+
+        #[test]
+        fn shadow_realm_refuses_objects_that_are_not_callable() {
+            let (_runtime, mut parent, _realms) = shadow_parent();
+            run(&mut parent, "globalThis.r = new ShadowRealm()");
+            for source in [
+                "thrown(() => r.evaluate('({})'))",
+                "thrown(() => r.evaluate('[]'))",
+                "thrown(() => r.evaluate('x => 1')({}))",
+                "thrown(() => r.evaluate('async () => 1')())",
+            ] {
+                let thrown = run_text(&mut parent, source);
+                assert!(
+                    thrown.starts_with("TypeError: an object that is not callable"),
+                    "{source}: {thrown}"
+                );
+            }
+        }
+
+        #[test]
+        fn shadow_realm_errors_cross_as_copies() {
+            let (_runtime, mut parent, _realms) = shadow_parent();
+            run(&mut parent, "globalThis.r = new ShadowRealm()");
+            for (source, expected) in [
+                (
+                    "thrown(() => r.evaluate('throw new RangeError(\"boom\")'))",
+                    "TypeError: boom",
+                ),
+                (
+                    "thrown(() => r.evaluate('throw { message: \"secret\" }'))",
+                    "TypeError: a value thrown across a ShadowRealm boundary",
+                ),
+                (
+                    "thrown(() => r.evaluate('throw \"text\"'))",
+                    "TypeError: a value thrown across a ShadowRealm boundary",
+                ),
+                (
+                    "thrown(() => r.evaluate('const e = new Error(); \
+                     Object.defineProperty(e, \"message\", { get() { globalThis.ran = true; return \"x\"; } }); \
+                     throw e'))",
+                    "TypeError: a value thrown across a ShadowRealm boundary",
+                ),
+                (
+                    "thrown(() => r.evaluate('throw new SyntaxError(\"thrown\")'))",
+                    "TypeError: thrown",
+                ),
+                (
+                    "thrown(() => r.evaluate('() => { throw new Error(\"called\"); }')())",
+                    "TypeError: called",
+                ),
+                (
+                    "thrown(() => r.evaluate('f => f()')(() => { throw new Error('parent'); }))",
+                    "TypeError: parent",
+                ),
+            ] {
+                assert_eq!(run_text(&mut parent, source), expected, "{source}");
+            }
+            assert_js(&mut parent, "r.evaluate('globalThis.ran') === undefined");
+            let parse = run_text(&mut parent, "thrown(() => r.evaluate('('))");
+            assert!(parse.starts_with("SyntaxError: "), "{parse}");
+            assert_js(
+                &mut parent,
+                "(() => {
+                    try { r.evaluate('throw new Error(\"a\".repeat(1000))'); }
+                    catch (e) { return e.constructor === TypeError && e.message === 'a'.repeat(1000); }
+                })()",
+            );
+        }
+
+        #[test]
+        fn shadow_realm_wraps_the_receiver() {
+            let (_runtime, mut parent, _realms) = shadow_parent();
+            run(&mut parent, "globalThis.r = new ShadowRealm()");
+            for check in [
+                "r.evaluate('(function () { return typeof this; })').call(1) === 'object'",
+                "r.evaluate('(function () { \"use strict\"; return typeof this; })').call(1) === 'number'",
+                "r.evaluate('(function () { return this === globalThis; })')()",
+                "r.evaluate('(function () { \"use strict\"; return this === undefined; })')()",
+                "r.evaluate('(function () { \"use strict\"; return typeof this === \"function\" ? this() : -1; })')
+                     .call(() => 7) === 7",
+            ] {
+                assert_js(&mut parent, check);
+            }
+            let thrown = run_text(
+                &mut parent,
+                "thrown(() => r.evaluate('(function () { return 1; })').call({}))",
+            );
+            assert!(thrown.starts_with("TypeError: "), "{thrown}");
+        }
+
+        #[test]
+        fn shadow_realm_import_value_resolves_a_wrapped_export_of_the_child() {
+            let (mut runtime, mut parent, realms) = shadow_parent();
+            runtime
+                .register_module_source(
+                    "app:counter",
+                    "export let count = 0;
+                     export function bump() { count += 1; return count; }
+                     export function where() { return globalThis.marker; }",
+                )
+                .unwrap();
+            run(
+                &mut parent,
+                "globalThis.r = new ShadowRealm();
+                 r.evaluate('globalThis.marker = \"child\"');
+                 globalThis.marker = 'parent';
+                 globalThis.results = [];
+                 r.importValue('app:counter', 'bump')
+                     .then((bump) => { results.push(bump(), bump()); return r.importValue('app:counter', 'where'); })
+                     .then((where) => results.push(where(), typeof where));",
+            );
+            runtime.drain_pending_jobs(&parent).unwrap();
+            assert_eq!(
+                run_text(&mut parent, "results.join()"),
+                "1,2,child,function"
+            );
+            // The instance is the child's: the parent has none until it
+            // imports the module itself, and then it has its own.
+            assert!(parent.module_namespace("app:counter").is_err());
+            assert!(
+                realms.borrow_mut()[0]
+                    .module_namespace("app:counter")
+                    .is_ok()
+            );
+            run(
+                &mut parent,
+                "import('app:counter').then((m) => results.push(m.bump()))",
+            );
+            runtime.drain_pending_jobs(&parent).unwrap();
+            assert_eq!(
+                run_text(&mut parent, "results.join()"),
+                "1,2,child,function,1"
+            );
+        }
+
+        #[test]
+        fn shadow_realm_import_value_failures_reject_in_the_caller() {
+            let (mut runtime, mut parent, realms) = shadow_parent();
+            runtime
+                .register_module_source(
+                    "app:answer",
+                    "export const answer = 42; export const data = {};",
+                )
+                .unwrap();
+            runtime
+                .register_module_source("app:throws", "throw new Error('module boom');")
+                .unwrap();
+            run(
+                &mut parent,
+                "globalThis.r = new ShadowRealm();
+                 globalThis.reasons = [];
+                 const note = (p) => p.then(
+                     () => reasons.push('fulfilled'),
+                     (e) => reasons.push((e.constructor === TypeError ? 'TypeError: ' : 'foreign: ') + e.message));
+                 note(r.importValue('app:answer', 'missing'));
+                 note(r.importValue('app:throws', 'anything'));
+                 note(r.importValue('app:none', 'anything'));
+                 note(r.importValue('app:answer', 'data'));",
+            );
+            runtime.drain_pending_jobs(&parent).unwrap();
+            assert_eq!(
+                run_text(&mut parent, "reasons.sort().join('\\n')"),
+                "TypeError: an object that is not callable cannot cross a ShadowRealm boundary\n\
+                 TypeError: module 'app:answer' has no export named 'missing'\n\
+                 TypeError: module 'app:none' is not preloaded\n\
+                 TypeError: module boom"
+            );
+            for source in [
+                "thrown(() => r.importValue('app:answer', 1))",
+                "thrown(() => r.importValue.call({}, 'app:answer', 'answer'))",
+            ] {
+                let thrown = run_text(&mut parent, source);
+                assert!(thrown.starts_with("TypeError: "), "{source}: {thrown}");
+            }
+            // The specifier's own conversion is the caller's code, and what
+            // it throws is the caller's own error.
+            assert_eq!(
+                run_text(
+                    &mut parent,
+                    "thrown(() => r.importValue({ toString() { throw new Error('own'); } }, 'x'))",
+                ),
+                "Error: own"
+            );
+            // A rejection nothing handles is the caller's to report.
+            run(
+                &mut parent,
+                "r.importValue('app:none', 'answer'); undefined",
+            );
+            runtime
+                .drain_pending_jobs(&realms.borrow()[0])
+                .expect("the child has nothing unhandled");
+            let error = runtime
+                .drain_pending_jobs(&parent)
+                .expect_err("the caller's rejection");
+            assert_eq!(error.name.as_deref(), Some("TypeError"));
+            assert!(error.message.contains("app:none"), "{error:?}");
+        }
+
+        #[test]
+        fn shadow_realm_import_value_defers_to_the_childs_own_loader() {
+            let mut runtime = Runtime::new().unwrap();
+            let mut parent = runtime.create_context().unwrap();
+            let realms = Realms::default();
+            let kept = Rc::downgrade(&realms);
+            parent
+                .install_shadow_realm(move |mut child| {
+                    child.enable_module_loading(|_, name| Ok(name.to_owned()));
+                    kept.upgrade()
+                        .ok_or("the test let its realms go")?
+                        .borrow_mut()
+                        .push(child);
+                    Ok(())
+                })
+                .unwrap();
+            run(
+                &mut parent,
+                "(() => {
+                    const r = new ShadowRealm();
+                    r.importValue('app:///late.js', 'value').then((v) => { globalThis.late = v; });
+                 })();",
+            );
+            // Only the pending load still needs the child.
+            runtime.run_gc();
+            assert!(realms.borrow()[0].is_referenced_across_realms());
+            assert_eq!(parent.take_module_request(), None);
+            {
+                let mut realms = realms.borrow_mut();
+                let child = &mut realms[0];
+                assert_eq!(
+                    child.take_module_request().as_deref(),
+                    Some("app:///late.js")
+                );
+                child
+                    .complete_module(
+                        "app:///late.js",
+                        Ok(("app:///late.js", "export const value = 7;")),
+                    )
+                    .unwrap();
+                child.resume_module_loads().unwrap();
+            }
+            runtime.drain_pending_jobs(&parent).unwrap();
+            assert_js(&mut parent, "late === 7");
+            runtime.run_gc();
+            assert!(!realms.borrow()[0].is_referenced_across_realms());
+        }
+
+        #[test]
+        fn shadow_realm_hook_receives_a_full_realm() {
+            let mut runtime = Runtime::new().unwrap();
+            runtime
+                .register_module_source(
+                    "app:uses-host",
+                    "import { answer } from 'bobcat-internal:host'; export const get = () => answer();",
+                )
+                .unwrap();
+            let mut parent = runtime.create_context().unwrap();
+            let realms = Realms::default();
+            let kept = Rc::downgrade(&realms);
+            parent
+                .install_shadow_realm(move |mut child| {
+                    child
+                        .register_host_module_function("bobcat-internal:host", "answer", 0, |_| {
+                            Ok(HostValue::Number(42.0))
+                        })
+                        .map_err(|error| error.message)?;
+                    child
+                        .evaluate(
+                            EvalSource::new("globalThis.seeded = 5"),
+                            EvalOptions::default(),
+                        )
+                        .map_err(|error| error.message)?;
+                    kept.upgrade()
+                        .ok_or("the test let its realms go")?
+                        .borrow_mut()
+                        .push(child);
+                    Ok(())
+                })
+                .unwrap();
+            run(
+                &mut parent,
+                "globalThis.r = new ShadowRealm();
+                 r.importValue('app:uses-host', 'get').then((get) => { globalThis.got = get(); });",
+            );
+            runtime.drain_pending_jobs(&parent).unwrap();
+            assert_js(&mut parent, "got === 42 && r.evaluate('seeded') === 5");
+        }
+
+        #[test]
+        fn shadow_realm_hook_refusals_are_type_errors() {
+            let cases: [(Box<ShadowRealmHook>, &str); 3] = [
+                (
+                    Box::new(|_child| Err("no realms\0 today".to_owned())),
+                    "TypeError: no realms today",
+                ),
+                (
+                    Box::new(|_child| panic!("the hook failed")),
+                    "TypeError: the ShadowRealm host hook panicked",
+                ),
+                (
+                    Box::new(|_child| Ok(())),
+                    "TypeError: the host released the ShadowRealm during its initialization",
+                ),
+            ];
+            for (hook, expected) in cases {
+                let (_runtime, mut parent) = runtime_and_realm();
+                parent.install_shadow_realm(hook).unwrap();
+                run(&mut parent, SHADOW_PRELUDE);
+                assert_eq!(
+                    run_text(&mut parent, "thrown(() => new ShadowRealm())"),
+                    expected
+                );
+                // The realm is still usable afterwards.
+                assert_eq!(
+                    run_text(&mut parent, "thrown(() => new ShadowRealm())"),
+                    expected
+                );
+            }
+        }
+
+        #[test]
+        fn shadow_realms_nest() {
+            let (_runtime, mut parent, realms) = shadow_parent();
+            assert_js(
+                &mut parent,
+                "const outer = new ShadowRealm();
+                 outer.evaluate('new ShadowRealm().evaluate(\"x => x * 2\")')(21) === 42",
+            );
+            assert_eq!(realms.borrow().len(), 2);
+        }
+
+        #[test]
+        fn a_released_shadow_realm_throws_at_every_boundary() {
+            let (mut runtime, mut parent, realms) = shadow_parent();
+            assert_js(
+                &mut parent,
+                "globalThis.r = new ShadowRealm(); globalThis.f = r.evaluate('() => 1'); f() === 1",
+            );
+            realms.borrow_mut().clear();
+            runtime.run_gc();
+            for source in [
+                "thrown(() => r.evaluate('1'))",
+                "thrown(() => f())",
+                "thrown(() => r.importValue('app:x', 'y'))",
+            ] {
+                assert_eq!(
+                    run_text(&mut parent, source),
+                    "TypeError: this ShadowRealm's realm has been released",
+                    "{source}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_child_released_during_a_call_into_it_is_never_reached_again() {
+            let runtime = Runtime::new().unwrap();
+            let mut parent = runtime.create_context().unwrap();
+            let realms = Realms::default();
+            let kept = Rc::downgrade(&realms);
+            parent
+                .install_shadow_realm(move |mut child| {
+                    let releasing = kept.clone();
+                    child
+                        .define_global_function("release", 0, move |_| {
+                            if let Some(realms) = releasing.upgrade() {
+                                // Dropped after the borrow ends: the drop
+                                // runs the collector.
+                                let released = mem::take(&mut *realms.borrow_mut());
+                                drop(released);
+                            }
+                            Ok(HostValue::Undefined)
+                        })
+                        .map_err(|error| error.message)?;
+                    kept.upgrade()
+                        .ok_or("the test let its realms go")?
+                        .borrow_mut()
+                        .push(child);
+                    Ok(())
+                })
+                .unwrap();
+            run(&mut parent, SHADOW_PRELUDE);
+            assert_eq!(
+                run_text(
+                    &mut parent,
+                    "globalThis.r = new ShadowRealm();
+                     thrown(() => r.evaluate('() => { release(); return () => 1; }')())",
+                ),
+                "TypeError: this ShadowRealm's realm has been released"
+            );
+            assert!(realms.borrow().is_empty());
+            assert_eq!(
+                run_text(&mut parent, "thrown(() => r.evaluate('1'))"),
+                "TypeError: this ShadowRealm's realm has been released"
+            );
+        }
+
+        #[test]
+        fn a_child_outlives_its_released_parent() {
+            let (mut runtime, mut parent, realms) = shadow_parent();
+            run(
+                &mut parent,
+                "globalThis.r = new ShadowRealm(); r.evaluate('g => { globalThis.keep = g; }')(() => 1);",
+            );
+            drop(parent);
+            runtime.run_gc();
+            let error = realms.borrow_mut()[0]
+                .evaluate(EvalSource::new("keep()"), EvalOptions::default())
+                .expect_err("the parent is gone");
+            assert_eq!(error.name.as_deref(), Some("TypeError"));
+            assert!(error.message.contains("released"), "{error:?}");
+        }
+
+        #[test]
+        fn wrappers_outlive_the_shadow_realm_object() {
+            let (mut runtime, mut parent, realms) = shadow_parent();
+            run(
+                &mut parent,
+                "globalThis.f = new ShadowRealm().evaluate('() => 5');",
+            );
+            runtime.run_gc();
+            assert_js(&mut parent, "f() === 5");
+            assert!(realms.borrow()[0].is_referenced_across_realms());
+            assert!(!parent.is_referenced_across_realms());
+            run(&mut parent, "delete globalThis.f");
+            runtime.run_gc();
+            assert!(!realms.borrow()[0].is_referenced_across_realms());
+        }
+
+        #[test]
+        fn a_cycle_through_a_shadow_realm_is_freed_with_its_parent() {
+            let runtime = Runtime::new().unwrap();
+            let mut parent = runtime.create_context().unwrap();
+            let realms = Realms::default();
+            let watcher = Rc::downgrade(&realms);
+            // The parent's hook is the only owner of its children here.
+            parent
+                .install_shadow_realm(move |child| {
+                    realms.borrow_mut().push(child);
+                    Ok(())
+                })
+                .unwrap();
+            run(
+                &mut parent,
+                "globalThis.r = new ShadowRealm();
+                 r.evaluate('g => { globalThis.keep = g; }')(() => r);
+                 globalThis.back = r.evaluate('() => keep');",
+            );
+            assert!(parent.is_referenced_across_realms());
+            drop(parent);
+            assert!(watcher.upgrade().is_none(), "the children go with the hook");
+            // `JS_FreeRuntime` asserts that every object was collected.
+            drop(runtime);
+        }
+
+        #[test]
+        fn shadow_realm_code_runs_under_the_parent_entrys_deadline() {
+            let results = run_with_watchdog(|| {
+                let (_runtime, mut parent, _realms) = shadow_parent_with(RuntimeOptions {
+                    execution_timeout: Some(TEST_EXECUTION_TIMEOUT),
+                    ..RuntimeOptions::default()
+                });
+                let results: Vec<_> = [
+                    "new ShadowRealm().evaluate('for (;;) {}')",
+                    "try { new ShadowRealm().evaluate('for (;;) {}'); } catch (e) { 'caught'; }",
+                    "new ShadowRealm().evaluate('try { for (;;) {} } catch (e) {}')",
+                    "const f = new ShadowRealm().evaluate('() => { for (;;) {} }');
+                     try { f(); } catch (e) { 'caught'; }",
+                    "new ShadowRealm().evaluate('f => f()')(() => { for (;;) {} })",
+                ]
+                .into_iter()
+                .map(|source| {
+                    let error = parent
+                        .evaluate(EvalSource::new(source), EvalOptions::default())
+                        .map(|value| format!("{value:?}"));
+                    (source, error.map_err(|error| (error.kind, error.phase)))
+                })
+                .collect();
+                let reused = parent
+                    .evaluate(EvalSource::new("21 * 2"), EvalOptions::default())
+                    .expect("realm should remain reusable")
+                    .as_number();
+                (results, reused)
+            });
+            let (results, reused) = results;
+            for (source, result) in results {
+                assert_eq!(
+                    result,
+                    Err((ErrorKind::ExecutionTimeout, ErrorPhase::Evaluate)),
+                    "{source}"
+                );
+            }
+            assert_eq!(reused, Some(42.0));
+        }
+
+        #[test]
+        fn a_host_interrupt_reaches_through_a_shadow_realm() {
+            let (kind, phase, reused) =
+                run_with_external_interrupt(|runtime, realm, handle_sender| {
+                    let realms = Realms::default();
+                    realm.install_shadow_realm(keep_realms(&realms)).unwrap();
+                    handle_sender
+                        .send(runtime.interrupt_handle())
+                        .expect("test should receive interrupt handle");
+                    realm
+                        .evaluate(
+                            EvalSource::new(
+                                "try { new ShadowRealm().evaluate('for (;;) {}'); } catch (e) {}",
+                            ),
+                            EvalOptions::default(),
+                        )
+                        .expect_err("host request must interrupt the child")
+                });
+            assert_eq!(kind, ErrorKind::Interrupted);
+            assert_eq!(phase, ErrorPhase::Evaluate);
+            assert_eq!(reused, Some(42.0));
+        }
+
+        #[test]
+        fn a_childs_own_rejection_waits_for_its_own_drain() {
+            let (mut runtime, mut parent, realms) = shadow_parent();
+            run(
+                &mut parent,
+                "globalThis.r = new ShadowRealm(); r.evaluate('Promise.reject(new Error(\"child\")); undefined');",
+            );
+            runtime.drain_pending_jobs(&parent).unwrap();
+            let error = runtime
+                .drain_pending_jobs(&realms.borrow()[0])
+                .expect_err("the child's rejection");
+            assert_eq!(error.message, "child");
+            run(
+                &mut parent,
+                "r.evaluate('Promise.reject(new Error(\"again\")); undefined');",
+            );
+            assert_eq!(runtime.discard_unhandled_rejections(&realms.borrow()[0]), 1);
+            runtime.drain_pending_jobs(&realms.borrow()[0]).unwrap();
+            runtime.drain_pending_jobs(&parent).unwrap();
+        }
+
+        #[test]
+        fn shadow_realm_installs_once_and_child_values_stay_in_their_realm() {
+            let (_runtime, mut parent, realms) = shadow_parent();
+            let error = parent
+                .install_shadow_realm(|_| Ok(()))
+                .expect_err("a second install");
+            assert_eq!(
+                (error.kind, error.phase),
+                (ErrorKind::InvalidInput, ErrorPhase::CreateContext)
+            );
+            run(&mut parent, "globalThis.r = new ShadowRealm()");
+            let child_value = realms.borrow()[0].number(1.0).unwrap();
+            let global = parent.global_object().unwrap();
+            let error = parent
+                .set_property(&global, "leak", &child_value)
+                .expect_err("a child value");
+            assert_eq!(error.kind, ErrorKind::WrongRealm);
+            let identity = parent
+                .evaluate(EvalSource::new("(x) => x"), EvalOptions::default())
+                .unwrap();
+            let error = parent
+                .call(&identity, None, &[child_value])
+                .expect_err("a child value");
+            assert_eq!(error.kind, ErrorKind::WrongRealm);
         }
     }
 }

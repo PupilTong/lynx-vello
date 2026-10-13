@@ -49,7 +49,7 @@ use quickjs_rust_bridge::{HostValue, RequiredKind, RequiredSource};
 use crate::esm::HOST_MODULE_SPECIFIER;
 use crate::jobs::JsThreadHandle;
 use crate::link::HostOutbox;
-use crate::main::quickjs::{ScriptEngine, ScriptRuntime, normalize_module_url};
+use crate::main::quickjs::{ScriptEngine, normalize_module_url};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
 use crate::script::ScriptError;
 
@@ -62,12 +62,10 @@ const LOAD_EXPORT: &str = "loadModuleSync";
 
 pub(crate) fn install(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     sources: HostOutbox,
     thread: JsThreadHandle,
 ) -> Result<(), ScriptError> {
     engine.register_host_module_function(
-        js_runtime,
         HOST_MODULE_SPECIFIER,
         RESOLVE_EXPORT,
         2,
@@ -79,7 +77,7 @@ pub(crate) fn install(
         }),
     )?;
     let token = sources.token().clone();
-    engine.register_synchronous_loader(js_runtime, HOST_MODULE_SPECIFIER, LOAD_EXPORT, move |url| {
+    engine.register_synchronous_loader(HOST_MODULE_SPECIFIER, LOAD_EXPORT, move |url| {
         // This receiver lives only for this call, as a stylesheet's does:
         // caching and in-flight sharing are the fetcher's, and the realm's
         // own cache is what makes a URL loaded at most once anyway.

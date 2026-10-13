@@ -78,6 +78,16 @@ pub(crate) type RequireLoad = unsafe extern "C" fn(
     source: *mut QjsRequiredSource,
 ) -> c_int;
 
+/// `HostInitializeShadowRealm`, called inside `new ShadowRealm()` with the
+/// fresh child realm. The child is the host's from the call on, whatever it
+/// answers. Nonzero refuses the construction, and `message` — which the host
+/// keeps alive until its next call — is what the `TypeError` says.
+pub(crate) type ShadowRealmInit = unsafe extern "C" fn(
+    opaque: *mut c_void,
+    child: *mut QjsContext,
+    message: *mut *const c_char,
+) -> c_int;
+
 #[repr(C)]
 pub(crate) struct QjsRuntime {
     _private: [u8; 0],
@@ -96,7 +106,11 @@ pub(crate) struct QjsValue {
 
 unsafe extern "C" {
     pub(crate) fn qjs_host_owner_class_id_new() -> u32;
-    pub(crate) fn qjs_runtime_new(host_owner_class_id: u32) -> *mut QjsRuntime;
+    pub(crate) fn qjs_runtime_new(
+        host_owner_class_id: u32,
+        shadow_realm_class_id: u32,
+        realm_link_class_id: u32,
+    ) -> *mut QjsRuntime;
     pub(crate) fn qjs_runtime_free(runtime: *mut QjsRuntime);
     pub(crate) fn qjs_context_new(runtime: *mut QjsRuntime) -> *mut QjsContext;
     pub(crate) fn qjs_context_free(context: *mut QjsContext);
@@ -105,6 +119,12 @@ unsafe extern "C" {
         normalize: ModuleNormalize,
         opaque: *mut c_void,
     );
+    pub(crate) fn qjs_context_install_shadow_realm(
+        context: *mut QjsContext,
+        init: ShadowRealmInit,
+        opaque: *mut c_void,
+    ) -> c_int;
+    pub(crate) fn qjs_context_shadow_holders(context: *mut QjsContext) -> usize;
     pub(crate) fn qjs_context_take_module_request(context: *mut QjsContext) -> *const c_char;
     pub(crate) fn qjs_context_complete_module(
         context: *mut QjsContext,

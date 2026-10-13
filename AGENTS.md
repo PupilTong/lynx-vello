@@ -229,7 +229,8 @@ thread itself — its scheduler and its job queue — `lifetime.rs` the task set
 token and latches a view and a worker are both built from, `realm/` the one
 constructor every realm is opened with (`mod.rs`'s `open_realm`, which
 installs the `RealmCore` members and then the host modules its caller
-passes), the one driver a view's page and a worker share (`owner.rs`) and the
+passes), a realm's `ShadowRealm` children (`child.rs`), the one driver a
+view's page and a worker share (`owner.rs`) and the
 table per realm kind their failures are reported by (`policy.rs`), `timers.rs`
 and `clock.rs`/`alarm.rs` the timer machinery both realm kinds share,
 `future.rs` the per-realm table the `Future` class is written over, `fetch.rs`
@@ -306,8 +307,11 @@ entries of their own (the intersection delivery also drains the Lynx exposure
 transitions — `uiappear`/`uidisappear`, then the `exposure` and `disexposure`
 lists — and is posted for them even when no observer crossed a threshold, as
 after `lynx.stopExposure`) — the boot report once, the frame-post acknowledgement, the module requests
-the operation left, the future settles, the `@font-face` loads, the next timer
-deadline, and the checkpoint generation as of this entry. `Settles::settle` is
+the operation left, the future settles, what the realm's `ShadowRealm`
+children left unhandled, the `@font-face` loads, the release of every child
+nothing needs any more, the next timer deadline, and the checkpoint
+generation as of this entry. A child's timers run with the realm's own, and
+its module requests and future settles follow the realm's. `Settles::settle` is
 the epilogue alone, for a wake carrying no operation. What a failure is
 reported as, and whether it ends the view or the worker, is the realm kind's
 table in `realm/policy.rs`, read by the scene the failure happened in.
@@ -1411,7 +1415,10 @@ realm, enables module loading and installs the core every realm has under
 `waitFuture`/`takeFuture`/`settleFuture`, `fetchResource`,
 `resolveModuleUrl`/`loadModuleSync`, and the diagnostics pair
 `reportScriptError`/`logScriptMessage`, which send `ScriptReported` and
-`ConsoleMessage` through the realm's own `HostOutbox`. Every other host module
+`ConsoleMessage` through the realm's own `HostOutbox`, and then the global
+`ShadowRealm` (below). Registering a host member takes no runtime borrow: it
+enters no JavaScript, and a child is furnished from inside the parent's entry,
+which holds the runtime. Every other host module
 is a parameter of that call: `MainThreadRuntime::new` passes the document,
 stylesheet, startup-string (the module table among them), event-name and
 `Worker` members and `bobcat-internal:native-modules`, and a worker passes
@@ -1421,8 +1428,46 @@ two things about a realm: the key its display-frame demand is reported under,
 `None` for MTS and the worker's key for a worker, and the `ScriptSource` its
 diagnostics carry, `Main` for MTS and, for a worker, `Worker { id, url }`
 over its key and its URL, whatever that URL is. What it
-answers with, `RealmCore { engine, timers, futures }`, is the first field of
-both `MainThreadRuntime` and the worker thread's `WorkerRealm`.
+answers with, `RealmCore { engine, children, timers, futures }`, is the first
+field of both `MainThreadRuntime` and the worker thread's `WorkerRealm`.
+
+The core ends with the TC39 **`ShadowRealm`** constructor, so it is a global
+of every realm kind — the MTS realm, the BTS and every plain `Worker` — a
+bucket-1 capability like the W3C `Worker` (user ruling, no fork change). The
+bridge's hook (`Context::install_shadow_realm`) hands each `new ShadowRealm()`
+to `realm/child.rs`, inside the construction: the child gets module loading
+and the same core, installed by the same `install_realm_core`, over a timer
+table and a future table of its own and the parent's `HostOutbox`, thread and
+`ScriptSource`, and a `ShadowRealm` constructor of its own, and no host module
+of its parent's kind (no document, no worker members), so `bobcat:timers`
+links in a child and `bobcat:element` does not. `requestScriptFrame` is a
+no-op there: the frame demand is one flag per realm key, and a child under its
+parent's key would cancel the parent's demand with its own `false`. The child
+is then kept in `RealmCore::children`, a flat `ChildRealms` list that holds
+grandchildren too and is declared after `engine`, so the parent realm and its
+`ShadowRealm` objects are freed first and the children after; the hook holds
+the list weakly, because a strong one would be a cycle through the child's own
+hook. The child's `ScriptEngine` shares its parent's `HostPanic`. A child has
+no entries of its own — its code runs inside the owner's — so the owner's one
+epilogue services it: its due timers after the owner's own (through each
+owner's `run_due_timers`, so a page settles a child callback's removals in
+the same batch and a worker that called `close()` runs none), its module
+requests (`load_child_module`) and future settles (`settle_child_future`)
+after the owner's, each completed in the child, which it finds by key and a
+released child drops; then one unhandled rejection per child and then the
+owner's own, reported under `Scene::ShadowRealm`, because an entry's
+checkpoint reports for the owner's realm alone and a child's operation can
+leave a rejection in the parent (an `importValue` that rejects); and the
+earliest child deadline joins the owner's. The epilogue's last step before the
+deadline frees every child nothing needs any more — no `ShadowRealm`, wrapped
+function or `importValue` of another realm refers to it
+(`is_referenced_across_realms`), no timer is armed and no load or settle is in
+flight — outside every JavaScript call, because freeing a realm collects the
+whole runtime; nothing else frees a child while its owner lives, and a child
+the hook could not furnish is kept retired for that step. A child's
+diagnostics carry the parent's `ScriptSource`. Each operation detaches the
+child from the list and puts it back after, so a `new ShadowRealm()` in the
+child's code meets no borrow.
 
 The members that answer with a list encode it in the return string, since
 the boundary's value type carries no array: `attributeNames` and
@@ -1939,9 +1984,33 @@ both `Atomics` and `SharedArrayBuffer` are absent, while ordinary
 `ArrayBuffer`, typed arrays, and `DataView` remain available. This does not
 disable Rust-side atomics used for interruption or host synchronization.
 Because QuickJS formerly coupled its process-global class-ID mutex to the same
-feature, the bridge allocates its one host class ID through a Rust `OnceLock`
-and registers that ID separately in each runtime, preserving concurrent native
-realm creation.
+feature, the bridge allocates its three class IDs (host-function owner,
+`ShadowRealm` instance, realm link) in one Rust `OnceLock` initializer and
+registers them separately in each runtime, preserving concurrent native realm
+creation.
+
+A realm can also carry the TC39 **`ShadowRealm`** built-in
+(`Context::install_shadow_realm`), implemented in the shim over public QuickJS
+API only. `new ShadowRealm()` makes a fresh child context on the same runtime
+and hands it, synchronously, to the host's hook (HostInitializeShadowRealm) as
+a `Context` of its own: the host owns every child, installs whatever it should
+have, and keeps it for as long as it should live; an `Err` from the hook is a
+`TypeError` in the parent. `evaluate` is the child's own `%eval%` called
+indirectly (a fresh lexical environment per call, after a compile-only parse
+so a parse failure is a `SyntaxError` and anything thrown a `TypeError`), and
+`importValue` is the child's own module load, deferred through the child's
+loader like any import of its. Values cross only as primitives and wrapped
+functions; every boundary error is a fresh `TypeError` of the realm whose code
+reached the boundary, carrying the original's `message` only when it is an
+`Error` with a string data property, and an interrupt stays uncatchable on the
+far side. JavaScript holds a child only through a C-counted **token**, never
+an untraced `JS_DupContext`: its context goes NULL as the first step of
+`qjs_context_free`, so a released realm is a `TypeError` at every crossing
+rather than memory something points at, and
+`Context::is_referenced_across_realms` reports whether a `ShadowRealm`, a
+wrapped function or a pending `importValue` still needs the realm.
+No `Value` crosses realms in Rust; a child's code runs under the parent
+entry's execution limits.
 
 It also owns the **host-function seam**: `Realm::function`,
 `define_global_function`, and `register_host_module_function` back a JS
@@ -1966,7 +2035,14 @@ only *records* the address; the drop happens at the next `&mut Realm` entry
 point, because a handler may own a `Value` whose `Drop` calls `JS_FreeValue`
 and re-entering QuickJS from inside its own GC is unsound. Capturing a
 same-realm `Value` is therefore safe, but forms a reference cycle that leaks
-the realm unless the function is collected first. The crate must remain
+the realm unless the function is collected first. The same holds one level up
+for `ShadowRealm` children: a child `Context` is freed when the host drops its
+last handle, so a child kept by its parent's hook is freed with the parent,
+while a child kept from a closure the child itself owns (one of its own host
+functions, or its own hook) is a cycle that leaks it. The token counts that
+`is_referenced_across_realms` reads are updated by finalizers, so a
+`ShadowRealm` or wrapper that is only cyclic garbage still counts until
+`Runtime::run_gc` has collected it. The crate must remain
 independent of Bobcat, the DOM, resources, and runtime policy — it knows
 nothing about Lynx.
 

@@ -10,7 +10,7 @@ use quickjs_rust_bridge::HostValue;
 
 use crate::background::WorkerKey;
 use crate::link::HostOutbox;
-use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
+use crate::main::quickjs::ScriptEngine;
 use crate::script::ScriptError;
 
 /// The worker realm's own host module. A worker realm declares three: this
@@ -64,19 +64,17 @@ pub(super) struct WorkerFlags {
 /// serves it is the embedder's own thread.
 pub(super) fn install_worker_members(
     engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
     key: WorkerKey,
     host: &HostOutbox,
     name: String,
     mut post: impl FnMut(HostValue) + 'static,
 ) -> Result<WorkerFlags, ScriptError> {
-    crate::native_module::install(engine, js_runtime, host, Some(key))?;
+    crate::native_module::install(engine, host, Some(key))?;
 
     let mut name = Some(name);
     let scope_installed = Rc::new(Cell::new(false));
     let installed = Rc::clone(&scope_installed);
     engine.register_host_module_function(
-        js_runtime,
         WORKER_HOST_MODULE_SPECIFIER,
         "workerName",
         0,
@@ -87,7 +85,6 @@ pub(super) fn install_worker_members(
     )?;
 
     engine.register_host_module_function(
-        js_runtime,
         WORKER_HOST_MODULE_SPECIFIER,
         "postWorkerMessage",
         1,
@@ -104,7 +101,6 @@ pub(super) fn install_worker_members(
     let closing = Rc::new(Cell::new(false));
     let closer = Rc::clone(&closing);
     engine.register_host_module_function(
-        js_runtime,
         WORKER_HOST_MODULE_SPECIFIER,
         "closeWorker",
         0,

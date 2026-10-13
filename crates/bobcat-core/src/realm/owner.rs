@@ -35,8 +35,13 @@
 //! load of its root module — and the futures it asked to settle are each a
 //! task the epilogue spawns — [`load_module`] and [`settle_future`] — which
 //! waits for its answer outside any job and then enters the realm to hand it
-//! over. [`module_answer`] is the one reading of a module request's answer,
-//! for those loads and for the entry a role completes itself.
+//! over. A realm's `ShadowRealm` children ([`super::child`]) have no entries
+//! of their own: their code runs inside the owner's, and the epilogue
+//! services them beside the realm — their timers, their module requests and
+//! future settles ([`load_child_module`], [`settle_child_future`]), what they
+//! left unhandled, and their release. [`module_answer`] is the one reading of
+//! a module request's answer, for those loads and for the entry a role
+//! completes itself.
 //!
 //! # The end
 //!
@@ -64,6 +69,7 @@ use std::future::Future;
 use std::rc::Rc;
 
 use super::RealmCore;
+use super::child::{ChildKey, ChildRealms};
 use super::policy::{self, Row, Scene};
 use crate::future::HostFuture;
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job};
@@ -130,8 +136,12 @@ pub(crate) trait RealmOwner: Sized + 'static {
     /// worker has nothing to do.
     fn before_operation(&self, _realm: &mut Self::Realm) {}
 
-    /// Runs every timer of `realm`'s that has come due, and answers with what
-    /// their callbacks threw. The first thing the [`epilogue`] runs.
+    /// Runs every timer of `realm`'s that has come due — its own, then each
+    /// `ShadowRealm` child's — and answers with what their callbacks threw.
+    /// The first thing the [`epilogue`] runs. The owner's, rather than the
+    /// driver's, because what gates a batch and what ends one are the role's:
+    /// a worker that called `close()` runs none, and a page settles the
+    /// removals the batch made.
     fn run_due_timers(realm: &mut Self::Realm, js: &mut ScriptRuntime) -> Vec<ScriptError>;
 
     /// What this owner's role settles right after the due timers, before the
@@ -304,8 +314,9 @@ pub(crate) fn enter_now<O: RealmOwner, T>(
 ///    during a synchronous wait inside it. The end has already done what an end owes.
 /// 2. **The count**, in tests.
 /// 3. **Due timers.** A timer that has come due runs before the role's next step, so on a page its
-///    mutation rides the same commit as whatever else this entry changed. Each callback that threw
-///    is reported under [`Scene::Timer`].
+///    mutation rides the same commit as whatever else this entry changed: the realm's own, then
+///    each `ShadowRealm` child's, in construction order, both through
+///    [`RealmOwner::run_due_timers`]. Each callback that threw is reported under [`Scene::Timer`].
 /// 4. **Nothing more, for an owner that ended while those callbacks ran**: a callback parked on a
 ///    synchronous wait lets the thread's tasks run, and one of them may end the owner — a
 ///    `Terminate` its consumer read, a release, a panic in another of its tasks. The callbacks of
@@ -323,12 +334,19 @@ pub(crate) fn enter_now<O: RealmOwner, T>(
 /// 10. **The module requests** this entry produced, each asked of the host and spawned as a
 ///     [`load_module`] of its own — except the one [`RealmOwner::entry_name`] names, which the role
 ///     answers itself. A worker names none, so the request the load of its root module raised for
-///     its script is among those asked of the host.
+///     its script is among those asked of the host. Then each child's, each spawned as a
+///     [`load_child_module`] that completes it in the child.
 /// 11. **The futures** a `.then` asked this realm to settle, each spawned as a [`settle_future`] of
-///     its own.
-/// 12. **[`RealmOwner::after_settles`]**: a page's `@font-face` loads.
-/// 13. **The next timer deadline**, republished only when it moved.
-/// 14. **The checkpoint generation**, last, so it names the generation this entry ran the shared
+///     its own; then each child's, as a [`settle_child_future`].
+/// 12. **What the children left unhandled**, one rejection per child, and then what the realm
+///     itself left beside them, each reported under [`Scene::ShadowRealm`]; skipped for a realm
+///     with no children. Nothing more, for an owner a report ended.
+/// 13. **[`RealmOwner::after_settles`]**: a page's `@font-face` loads.
+/// 14. **The release of every child nothing needs any more**, outside every JavaScript call: see
+///     [`ChildRealms::release_unneeded`]. Nothing else frees a child while its owner lives.
+/// 15. **The next timer deadline** — the earliest of the realm's own and every child's —
+///     republished only when it moved.
+/// 16. **The checkpoint generation**, last, so it names the generation this entry ran the shared
 ///     job queue up to: the clock task compares a bump against it to tell this owner's own entries
 ///     from a sibling's.
 ///
@@ -386,12 +404,68 @@ fn epilogue<O: RealmOwner>(owner: &Rc<O>, realm: &mut O::Realm, js: &mut ScriptR
         let answer = owner.host().request(SourceRequest::Module(url.clone()));
         spawn(owner, load_module(Rc::clone(owner), url, answer));
     }
+    let children = Rc::clone(&O::core(realm).children);
+    for (child, url) in children.take_module_requests() {
+        let answer = owner.host().request(SourceRequest::Module(url.clone()));
+        spawn(
+            owner,
+            load_child_module(Rc::clone(owner), child, url, answer),
+        );
+    }
     for (id, future) in O::core(realm).futures.take_settle_requests() {
         spawn(owner, settle_future(Rc::clone(owner), id, future));
     }
+    for (child, id, future) in children.take_settle_requests() {
+        spawn(
+            owner,
+            settle_child_future(Rc::clone(owner), child, id, future),
+        );
+    }
+    report_shadow_realm_rejections(owner, realm, js, &children);
+    if lifetime.ended() {
+        return;
+    }
     O::after_settles(owner, realm);
-    lifetime.arm_deadline(O::core(realm).timers.next_deadline());
+    children.release_unneeded();
+    let deadline = match (
+        O::core(realm).timers.next_deadline(),
+        children.next_deadline(),
+    ) {
+        (Some(own), Some(child)) => Some(own.min(child)),
+        (own, child) => own.or(child),
+    };
+    lifetime.arm_deadline(deadline);
     lifetime.record_checkpoint(js.checkpoint_generation());
+}
+
+/// What the realm's `ShadowRealm` children left unhandled, one rejection per
+/// child, and then what the realm itself did, each reported under
+/// [`Scene::ShadowRealm`]. A realm with no children skips the step, so its
+/// own rejections are its entries' checkpoints' alone, as they always were.
+///
+/// The children's are read here because no entry is theirs: their code runs
+/// inside the owner's entries, whose checkpoints report for the owner's realm
+/// and leave a child's rejections queued for the child. The owner's own are
+/// read beside them because a child's timer, module load or future settle
+/// can run the owner's code — a wrapped function, an `importValue` it
+/// rejects — in an operation that checkpoints for the child.
+fn report_shadow_realm_rejections<O: RealmOwner>(
+    owner: &Rc<O>,
+    realm: &mut O::Realm,
+    js: &mut ScriptRuntime,
+    children: &ChildRealms,
+) {
+    if children.is_empty() {
+        return;
+    }
+    for error in children.take_unhandled_rejections(js) {
+        policy::report(owner, Scene::ShadowRealm, error);
+    }
+    match O::core(realm).engine.take_unhandled_rejection(js) {
+        Ok(executed) if executed > 0 => js.mark_checkpoint(),
+        Ok(_) => {}
+        Err(error) => policy::report(owner, Scene::ShadowRealm, error),
+    }
 }
 
 /// One resource load `owner`'s realm asked for: an import, or a worker's load
@@ -429,6 +503,59 @@ async fn load_module<O: RealmOwner>(owner: Rc<O>, url: String, answer: SourceAns
             .map_err(String::as_str);
         if let Err(error) = O::core(realm).engine.complete_module(js, &url, loaded) {
             policy::report(&completing, Scene::Module, error);
+        }
+    })
+    .await;
+}
+
+/// One module request a `ShadowRealm` child of `owner`'s realm made, shaped
+/// like [`load_module`] and completed in the child: an `import()` the child's
+/// code made, or a module of an `importValue`.
+///
+/// A child that has been released by the time the answer arrives drops it.
+/// What the completion returns is reported under [`Scene::Module`], as the
+/// owner's own imports are.
+async fn load_child_module<O: RealmOwner>(
+    owner: Rc<O>,
+    child: ChildKey,
+    url: String,
+    answer: SourceAnswer,
+) {
+    let loaded = await_source(answer)
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|answer| module_answer(&url, answer))
+        .map_err(|reason| format!("module '{url}': {reason}"));
+    let completing = Rc::clone(&owner);
+    enter(&owner, move |realm, js| {
+        let loaded = loaded
+            .as_ref()
+            .map(|(response, source)| (response.as_str(), source.as_str()))
+            .map_err(String::as_str);
+        let children = Rc::clone(&O::core(realm).children);
+        if let Some(Err(error)) = children.complete_module(js, child, &url, loaded) {
+            policy::report(&completing, Scene::Module, error);
+        }
+    })
+    .await;
+}
+
+/// One future a `.then` in a `ShadowRealm` child of `owner`'s realm asked to
+/// settle, shaped like [`settle_future`] and delivered into the child, or
+/// dropped for a child that has been released. A failure is reported under
+/// [`Scene::Future`].
+async fn settle_child_future<O: RealmOwner>(
+    owner: Rc<O>,
+    child: ChildKey,
+    id: u32,
+    future: HostFuture,
+) {
+    let outcome = future.await;
+    let settling = Rc::clone(&owner);
+    enter(&owner, move |realm, js| {
+        let children = Rc::clone(&O::core(realm).children);
+        if let Some(Err(error)) = children.deliver_future(js, child, id, outcome) {
+            policy::report(&settling, Scene::Future, error);
         }
     })
     .await;
