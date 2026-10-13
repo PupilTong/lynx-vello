@@ -94,6 +94,23 @@ export interface NativeModuleCallbackMessage {
   args: string
 }
 
+/**
+ * One `keydown` or `keyup`, the browser's own W3C `key` and `code` passed
+ * through. `modifiers` is a bitmask: alt 1, ctrl 2, meta 4, shift 8.
+ */
+export interface KeyFields {
+  key: string
+  code: string
+  down: boolean
+  repeat: boolean
+  modifiers: number
+}
+
+/** Key input. The Worker answers nothing. */
+export interface KeyMessage extends KeyFields {
+  type: 'bobcat-key'
+}
+
 /** Pointer input. The Worker answers nothing. */
 export interface PointerMessage extends PointerFields {
   type: 'bobcat-pointer'
@@ -163,6 +180,7 @@ export type RequestMessage<O extends Operation = Operation> = {
 export type FacadeMessage =
   | InitMessage
   | NativeModuleCallbackMessage
+  | KeyMessage
   | PointerMessage
   | RequestMessage
   | WheelMessage

@@ -1848,6 +1848,65 @@ fn a_dispatch_runs_the_path_listeners_and_skips_the_steps_with_none() {
         .expect("verification");
 }
 
+/// A key event crosses as its two strings, `repeat` and a modifier bitmask,
+/// and reaches the page as a `KeyboardEvent`-shaped event: the members on
+/// the event itself, the `detail` empty.
+#[test]
+fn a_key_event_reaches_the_page_with_its_keyboard_members() {
+    let (mut js_runtime, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  globalThis.held = [page];
+                  __AddEventListener(page, 'keydown', (event) => {
+                    seen.push([event.type, event.key, event.code, event.repeat,
+                               event.altKey, event.ctrlKey, event.metaKey,
+                               event.shiftKey, JSON.stringify(event.detail)].join(','));
+                  }, {});
+                };
+                ",
+            "app:///keys.js",
+        )
+        .expect("main-thread script");
+
+    let payload = InputEventPayload {
+        detail: dom::event::EventDetail::Key {
+            key: Arc::from("ArrowLeft"),
+            code: Arc::from("ArrowLeft"),
+            repeat: true,
+            modifiers: dom::input::Modifiers {
+                alt: true,
+                ..dom::input::Modifiers::default()
+            },
+        },
+        timestamp: 0.0,
+    };
+    runtime
+        .dispatch_input_event(
+            &mut js_runtime,
+            dom::NodeId::DOCUMENT_ELEMENT,
+            "keydown",
+            &payload,
+        )
+        .expect("dispatch");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                if (seen.join('|') !== 'keydown,ArrowLeft,ArrowLeft,true,true,false,false,false,{}') {
+                  throw new Error('unexpected deliveries: ' + seen.join('|'));
+                }
+                ",
+            "app:///verify.js",
+            "verifying",
+        )
+        .expect("verification");
+}
+
 /// An engine component on the path that observes the event's name.
 /// Records its delivery, marks the target so script can tell it ran first,
 /// and stops propagation — which must end only its own walk.

@@ -147,6 +147,12 @@ import { splitRecord } from "bobcat:record";
 //   `height`, in px.
 // - `DETAIL_EMPTY` — an `<image>`'s `error`: no numbers, and a `detail` of
 //   `{}`.
+// - `DETAIL_KEY` — `keydown` and `keyup`: the W3C `key` and `code` strings,
+//   `repeat` as a boolean, and a modifier bitmask (alt 1, ctrl 2, meta 4,
+//   shift 8). They become `key`, `code`, `repeat`, `altKey`, `ctrlKey`,
+//   `metaKey` and `shiftKey` on the event object itself, where
+//   `KeyboardEvent` and web-core (`createCrossThreadEvent.ts`) put them; the
+//   `detail` is `{}`. With no focus model the target is the page element.
 // - `DETAIL_EXPOSURE` — an element's `uiappear` or `uidisappear`: no numbers
 //   either. The `detail` is web-core's (`ExposureServices.ts:198-208`), built
 //   here out of the event's own target: its node id as `unique-id`, and its
@@ -2650,6 +2656,16 @@ interface DispatchedEvent {
   touches?: TouchPointValues[];
   targetTouches?: TouchPointValues[];
   changedTouches?: TouchPointValues[];
+  // The W3C `KeyboardEvent` members only a key event carries, on the event
+  // itself as `KeyboardEvent` and web-core (`createCrossThreadEvent.ts`) put
+  // them. Absent on every other event, like the touch lists.
+  key?: string;
+  code?: string;
+  repeat?: boolean;
+  altKey?: boolean;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  shiftKey?: boolean;
 }
 
 /**
@@ -2717,11 +2733,46 @@ const DETAIL_POSITION = 0;
 const DETAIL_SIZE = 1;
 const DETAIL_EMPTY = 2;
 const DETAIL_EXPOSURE = 3;
+const DETAIL_KEY = 4;
+
+/** The modifier bits a key event's last argument carries. */
+const MODIFIER_ALT = 1;
+const MODIFIER_CTRL = 2;
+const MODIFIER_META = 4;
+const MODIFIER_SHIFT = 8;
+
+/**
+ * The `KeyboardEvent` members one `DETAIL_KEY` dispatch puts on its event:
+ * the host's `key` and `code` strings, `repeat`, and the modifier bitmask
+ * unpacked into the four standard booleans.
+ */
+function keyMembers(values: unknown[]): {
+  key: string;
+  code: string;
+  repeat: boolean;
+  altKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+} {
+  const modifiers = Number(values[3]);
+  return {
+    key: String(values[0]),
+    code: String(values[1]),
+    repeat: values[2] === true,
+    altKey: (modifiers & MODIFIER_ALT) !== 0,
+    ctrlKey: (modifiers & MODIFIER_CTRL) !== 0,
+    metaKey: (modifiers & MODIFIER_META) !== 0,
+    shiftKey: (modifiers & MODIFIER_SHIFT) !== 0,
+  };
+}
 
 /**
  * The `detail` object one kind's numbers make, for an event at `target`.
  *
  * `DETAIL_EMPTY` spends none and is web-core's `error` detail exactly.
+ * `DETAIL_KEY`'s values are the event's own members ([`keyMembers`]), and
+ * its `detail` is `{}` too.
  * `DETAIL_EXPOSURE` spends none either: it is web-core's exposure detail,
  * read off `target` itself — the event's own target, which the host resolved
  * before it called, so its attributes answer — and is the only kind that
@@ -2732,7 +2783,7 @@ const DETAIL_EXPOSURE = 3;
  * [`touchLists`] reads.
  */
 function detailOf(kind: number, numbers: unknown[], target: number): EventDetail {
-  if (kind === DETAIL_EMPTY) {
+  if (kind === DETAIL_EMPTY || kind === DETAIL_KEY) {
     return {};
   }
   if (kind === DETAIL_EXPOSURE) {
@@ -3138,6 +3189,9 @@ function dispatchEvent(
     : undefined;
   if (lists !== undefined) {
     Object.assign(event, lists);
+  }
+  if (kind === DETAIL_KEY) {
+    Object.assign(event, keyMembers(detailNumbers));
   }
 
   // Points the event at one delivery. `currentTarget` is rebuilt per step,

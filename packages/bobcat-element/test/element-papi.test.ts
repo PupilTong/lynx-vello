@@ -1327,6 +1327,7 @@ const DETAIL_POSITION = 0;
 const DETAIL_SIZE = 1;
 const DETAIL_EMPTY = 2;
 const DETAIL_EXPOSURE = 3;
+const DETAIL_KEY = 4;
 
 /**
  * What a test asks one dispatch's `detail` to be made of.
@@ -1349,6 +1350,11 @@ interface DispatchPayload {
   empty?: boolean;
   /** A `uiappear`/`uidisappear`: the `DETAIL_EXPOSURE` kind, no numbers. */
   exposure?: boolean;
+  /**
+   * A `keydown`/`keyup`: the `DETAIL_KEY` kind — the two strings, `repeat`
+   * and the modifier bitmask (alt 1, ctrl 2, meta 4, shift 8).
+   */
+  key?: { key: string; code: string; repeat: boolean; modifiers: number };
 }
 
 /**
@@ -1364,6 +1370,10 @@ function detailArguments(payload: DispatchPayload): [number, ...unknown[]] {
   }
   if (payload.width !== undefined) {
     return [DETAIL_SIZE, payload.width, payload.height];
+  }
+  if (payload.key !== undefined) {
+    const { key, code, repeat, modifiers } = payload.key;
+    return [DETAIL_KEY, key, code, repeat, modifiers];
   }
   return [
     DETAIL_POSITION,
@@ -2632,6 +2642,78 @@ describe("the event detail", () => {
       "exposure-id": "card-7",
       "exposure-scene": "",
     });
+  });
+});
+
+describe("key events", () => {
+  /** The `KeyboardEvent` members a key event carries on itself. */
+  interface KeyEvent {
+    detail: Record<string, unknown>;
+    key?: string;
+    code?: string;
+    repeat?: boolean;
+    altKey?: boolean;
+    ctrlKey?: boolean;
+    metaKey?: boolean;
+    shiftKey?: boolean;
+  }
+
+  it("puts the key members on the event and leaves the detail empty", () => {
+    const { inner } = tree();
+    const seen: KeyEvent[] = [];
+    __AddEventListener(inner, "keydown", (event: KeyEvent) => {
+      seen.push(event);
+    }, {});
+
+    dispatch([inner], "keydown", {
+      key: { key: "A", code: "KeyA", repeat: true, modifiers: 2 | 8 },
+    });
+
+    expect(seen).toHaveLength(1);
+    const event = seen[0]!;
+    expect(event.detail).toEqual({});
+    expect(event.key).toBe("A");
+    expect(event.code).toBe("KeyA");
+    expect(event.repeat).toBe(true);
+    expect(event.altKey).toBe(false);
+    expect(event.ctrlKey).toBe(true);
+    expect(event.metaKey).toBe(false);
+    expect(event.shiftKey).toBe(true);
+  });
+
+  it("gives an event of another kind none of the key members", () => {
+    const { inner } = tree();
+    let seen: object | undefined;
+    __AddEventListener(inner, "tap", (event: object) => {
+      seen = event;
+    }, {});
+
+    dispatch([inner], "tap", { x: 1, y: 2 });
+
+    expect(seen).toBeDefined();
+    for (const member of ["key", "code", "repeat", "altKey", "shiftKey"]) {
+      expect(member in seen!, member).toBe(false);
+    }
+  });
+
+  it("publishes the key members to a background handler", () => {
+    const { inner } = tree();
+    __AddEvent(inner, "bindEvent", "keyup", "3:0:bindkeyup");
+
+    dispatch([inner], "keyup", {
+      key: { key: "Enter", code: "Enter", repeat: false, modifiers: 4 },
+    });
+
+    const published = mock.named("publishEvent");
+    expect(published).toHaveLength(1);
+    const event = published[0]![3] as Record<string, unknown>;
+    expect(event["type"]).toBe("keyup");
+    expect(event["detail"]).toEqual({});
+    expect(event["key"]).toBe("Enter");
+    expect(event["code"]).toBe("Enter");
+    expect(event["repeat"]).toBe(false);
+    expect(event["metaKey"]).toBe(true);
+    expect(event["altKey"]).toBe(false);
   });
 });
 

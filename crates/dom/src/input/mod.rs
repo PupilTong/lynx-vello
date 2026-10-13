@@ -9,7 +9,8 @@
 //! harness gets whatever its author types — but all of them can produce the
 //! same three facts: *where* (viewport CSS px), *what kind of device*, and
 //! *what it just did*. [`InputEvent`] is exactly those three facts and nothing
-//! else: plain `Copy` data, no traits to implement, no callbacks to register,
+//! else: plain data (a key's two strings shared behind an `Arc`), no traits to
+//! implement, no callbacks to register,
 //! no host handle for the document to hold. A host adapter is a `match` and a
 //! constructor call, and a test is a literal.
 //!
@@ -25,7 +26,7 @@
 //! # use dom::input::InputEvent;
 //! # use dom::Point2D;
 //! # fn f<T: Sync>(document: &dom::Document<T>) {
-//! let target = document.route_input(InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 120.0)));
+//! let target = document.route_input(&InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 120.0)));
 //! # let _ = target;
 //! # }
 //! ```
@@ -68,8 +69,12 @@
 //!
 //! # Recorded limits
 //!
-//! - Two devices are modeled — pointers and wheels. Keyboard, focus, and IME have no consumer yet;
-//!   [`InputEvent`] and its enums are `#[non_exhaustive]` so they can arrive without a break.
+//! - Three devices are modeled — pointers, wheels and keys (`keydown`/`keyup` only). Focus and IME
+//!   have no consumer yet, so a key event is not routed here: the runtime targets it at the
+//!   document element until a focus model exists. [`InputEvent`] and its enums are
+//!   `#[non_exhaustive]` so the rest can arrive without a break.
+
+use std::sync::Arc;
 
 use euclid::default::{Point2D, Vector2D};
 
@@ -106,7 +111,31 @@ pub enum PointerPhase {
     Cancel,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Whether a key went down or came up: W3C UI Events' `keydown` and
+/// `keyup`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum KeyPhase {
+    Down,
+    Up,
+}
+
+/// The modifier keys held while a key event happened, as W3C UI Events'
+/// `KeyboardEvent` reports them (`altKey`, `ctrlKey`, `metaKey`,
+/// `shiftKey`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "the four independent booleans `KeyboardEvent` itself reports"
+)]
+pub struct Modifiers {
+    pub alt: bool,
+    pub ctrl: bool,
+    pub meta: bool,
+    pub shift: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum InputKind {
     Pointer {
@@ -119,10 +148,29 @@ pub enum InputKind {
         /// platform-specific physical-pixel, line, or page units first.
         delta: Vector2D<f32>,
     },
+    /// A key went down or came up. Carries no position: a key event is not
+    /// routed by hit testing, and the event's position is unused.
+    Key {
+        phase: KeyPhase,
+        /// W3C UI Events `KeyboardEvent.key`: the key's value under the
+        /// current layout and modifiers (`"a"`, `"A"`, `"Enter"`,
+        /// `"ArrowLeft"`, `" "`).
+        key: Arc<str>,
+        /// W3C UI Events `KeyboardEvent.code`: the physical key, whatever
+        /// the layout (`"KeyA"`, `"Enter"`, `"ArrowLeft"`, `"Space"`).
+        code: Arc<str>,
+        /// The key is held and this is an auto-repeat.
+        repeat: bool,
+        modifiers: Modifiers,
+    },
 }
 
 /// A normalized host input event in document coordinates.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// `Clone` rather than `Copy`: a key event carries its two W3C strings, each
+/// shared behind an `Arc`, so a copy of the event is two reference-count
+/// increments and never an allocation.
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct InputEvent {
     /// Viewport CSS px — the same space [`Document::elements_from_point`] and
@@ -166,6 +214,31 @@ impl InputEvent {
         }
     }
 
+    /// A key event: `phase` names `keydown` or `keyup`; `key` and `code` are
+    /// the W3C UI Events strings, which the embedder maps from its platform
+    /// (a browser passes its own through). The position is the origin and
+    /// unused: a key event is not hit-tested.
+    #[must_use]
+    pub fn key(
+        phase: KeyPhase,
+        key: impl Into<Arc<str>>,
+        code: impl Into<Arc<str>>,
+        repeat: bool,
+        modifiers: Modifiers,
+    ) -> Self {
+        Self {
+            position: Point2D::origin(),
+            kind: InputKind::Key {
+                phase,
+                key: key.into(),
+                code: code.into(),
+                repeat,
+                modifiers,
+            },
+            default_prevented: false,
+        }
+    }
+
     /// This event with [`Self::default_prevented`] set as given — the
     /// embedder's word to the runtime's input router that something already
     /// claimed the event. This crate never reads the flag.
@@ -179,7 +252,7 @@ impl InputEvent {
     fn is_finite(&self) -> bool {
         let position = self.position.x.is_finite() && self.position.y.is_finite();
         let payload = match self.kind {
-            InputKind::Pointer { .. } => true,
+            InputKind::Pointer { .. } | InputKind::Key { .. } => true,
             InputKind::Wheel { delta } => delta.x.is_finite() && delta.y.is_finite(),
         };
         position && payload
@@ -189,13 +262,18 @@ impl InputEvent {
 impl<T: Sync> Document<T> {
     /// Routes one input event against the rendered frame: the topmost
     /// hit-testable element at its position, or `None` before the first
-    /// render or outside every element.
+    /// render or outside every element. A key event has no position to
+    /// route by and answers `None`: its target is the focus target, which
+    /// the runtime decides.
     ///
     /// A pure read — no flush, no rebuild, no state. Everything that follows
     /// routing (event naming, the user-agent default action, gesture
     /// synthesis) is the runtime layer's input router.
     #[must_use]
-    pub fn route_input(&self, event: InputEvent) -> Option<NodeId> {
+    pub fn route_input(&self, event: &InputEvent) -> Option<NodeId> {
+        if matches!(event.kind, InputKind::Key { .. }) {
+            return None;
+        }
         if !event.is_finite() {
             debug_assert!(false, "host input events must be finite, got {event:?}");
             return None;
@@ -231,10 +309,10 @@ mod tests {
         document.render();
 
         let over_child =
-            document.route_input(InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 30.0)));
+            document.route_input(&InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 30.0)));
         assert_eq!(over_child, Some(child));
 
-        let over_page = document.route_input(InputEvent::pointer(
+        let over_page = document.route_input(&InputEvent::pointer(
             Point2D::new(500.0, 500.0),
             1,
             PointerKind::Touch,
@@ -242,8 +320,10 @@ mod tests {
         ));
         assert_eq!(over_page, Some(root));
 
-        let outside =
-            document.route_input(InputEvent::wheel(Point2D::new(10_000.0, 10.0), (0.0, 50.0)));
+        let outside = document.route_input(&InputEvent::wheel(
+            Point2D::new(10_000.0, 10.0),
+            (0.0, 50.0),
+        ));
         assert_eq!(outside, None);
     }
 
@@ -251,7 +331,7 @@ mod tests {
     fn routing_answers_nothing_before_the_first_render() {
         let (document, _root, _child) = page();
         assert_eq!(
-            document.route_input(InputEvent::pointer(
+            document.route_input(&InputEvent::pointer(
                 Point2D::new(50.0, 50.0),
                 1,
                 PointerKind::Touch,

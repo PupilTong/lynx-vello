@@ -16,10 +16,12 @@
 //!
 //! [`ElementEvent::detail`]: super::ElementEvent::detail
 
+use std::sync::Arc;
+
 use euclid::default::{Point2D, Vector2D};
 use smallvec::SmallVec;
 
-use crate::input::{PointerId, PointerKind};
+use crate::input::{Modifiers, PointerId, PointerKind};
 
 /// In a touch event's `touches`: the finger is still down once this event
 /// has been applied, so a lifted or cancelled finger never carries it.
@@ -79,6 +81,15 @@ pub enum EventDetail {
         position: Point2D<f32>,
         points: TouchPoints,
     },
+    /// A key event (`keydown`, `keyup`): W3C UI Events' `key` and `code`
+    /// strings, whether it is an auto-repeat, and the modifiers held. Shared
+    /// behind `Arc`s, so carrying one is never an allocation.
+    Key {
+        key: Arc<str>,
+        code: Arc<str>,
+        repeat: bool,
+        modifiers: Modifiers,
+    },
     /// A size in px: an `<image>`'s or `<svg>`'s `load`.
     Size { width: f64, height: f64 },
     /// An element's exposure changed. The payload is read off the target at
@@ -99,9 +110,11 @@ impl EventDetail {
             Self::Pointer { position, .. }
             | Self::Wheel { position, .. }
             | Self::Touch { position, .. } => Some(*position),
-            Self::None | Self::Size { .. } | Self::Exposure | Self::ContentVisibility { .. } => {
-                None
-            }
+            Self::None
+            | Self::Key { .. }
+            | Self::Size { .. }
+            | Self::Exposure
+            | Self::ContentVisibility { .. } => None,
         }
     }
 

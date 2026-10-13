@@ -1,6 +1,8 @@
 import { ImageDecoder } from './image-decoder.ts'
 import type {
   InitMessage,
+  KeyFields,
+  KeyMessage,
   NativeModuleCallMessage,
   NativeModuleCallbackMessage,
   Operation,
@@ -25,6 +27,10 @@ const POINTER_PHASE_DOWN = 0
 const POINTER_PHASE_MOVE = 1
 const POINTER_PHASE_UP = 2
 const POINTER_PHASE_CANCEL = 3
+const MODIFIER_ALT = 1
+const MODIFIER_CTRL = 2
+const MODIFIER_META = 4
+const MODIFIER_SHIFT = 8
 const WHEEL_DELTA_MODE_LINE = 1
 const WHEEL_DELTA_MODE_PAGE = 2
 // This embedder's policy for the browser's abstract line unit, matching the
@@ -317,6 +323,7 @@ class CanvasPointerInput {
   #height: number
   #previousTouchAction: string
   #send: (values: PointerFields) => void
+  #sendKey: (values: KeyFields) => void
   #sendWheel: (values: WheelFields) => void
   #width: number
 
@@ -326,11 +333,13 @@ class CanvasPointerInput {
     height: number,
     send: (values: PointerFields) => void,
     sendWheel: (values: WheelFields) => void,
+    sendKey: (values: KeyFields) => void,
   ) {
     this.#canvas = canvas
     this.#height = height
     this.#previousTouchAction = canvas.style.touchAction
     this.#send = send
+    this.#sendKey = sendKey
     this.#sendWheel = sendWheel
     this.#width = width
 
@@ -345,6 +354,10 @@ class CanvasPointerInput {
     // Not passive: a forwarded wheel is prevented, so the listener has to be
     // allowed to prevent it.
     canvas.addEventListener('wheel', this.#onWheel, { passive: false })
+    // Keys reach the canvas only while it has focus, which takes a
+    // `tabindex` the embedding page decides on; nothing is prevented.
+    canvas.addEventListener('keydown', this.#onKey)
+    canvas.addEventListener('keyup', this.#onKey)
   }
 
   resize(width: number, height: number): void {
@@ -384,6 +397,8 @@ class CanvasPointerInput {
       this.#onLostPointerCapture,
     )
     this.#canvas.removeEventListener('wheel', this.#onWheel)
+    this.#canvas.removeEventListener('keydown', this.#onKey)
+    this.#canvas.removeEventListener('keyup', this.#onKey)
     this.reset()
     this.#canvas.style.touchAction = this.#previousTouchAction
   }
@@ -460,6 +475,23 @@ class CanvasPointerInput {
     if (message !== undefined) {
       this.#send(message)
     }
+  }
+
+  /** The browser's own W3C `key` and `code`, passed through unchanged. */
+  #onKey = (event: KeyboardEvent) => {
+    if (this.#disposed) {
+      return
+    }
+    this.#sendKey({
+      code: event.code,
+      down: event.type === 'keydown',
+      key: event.key,
+      modifiers: (event.altKey ? MODIFIER_ALT : 0) |
+        (event.ctrlKey ? MODIFIER_CTRL : 0) |
+        (event.metaKey ? MODIFIER_META : 0) |
+        (event.shiftKey ? MODIFIER_SHIFT : 0),
+      repeat: event.repeat,
+    })
   }
 
   #onWheel = (event: WheelEvent) => {
@@ -771,6 +803,20 @@ class RenderWorkerClient {
     }
   }
 
+  dispatchKey(values: KeyFields): void {
+    if (this.#fatalError !== undefined) {
+      return
+    }
+    try {
+      this.#worker.postMessage({
+        type: 'bobcat-key',
+        ...values,
+      } satisfies KeyMessage)
+    } catch (error) {
+      this.#fail(error)
+    }
+  }
+
   dispatchWheel(values: WheelFields): void {
     if (this.#fatalError !== undefined) {
       return
@@ -823,8 +869,9 @@ export default function init(): Promise<void> {
 /**
  * A Worker-owned Bobcat view attached to one HTML canvas. Active
  * `pointerdown`/`pointermove`/`pointerup`/`pointercancel` sequences on the
- * canvas, and its `wheel` events, are captured and forwarded to the native
- * input router automatically.
+ * canvas, its `wheel` events, and its `keydown`/`keyup` events while it has
+ * focus (give it a `tabindex` for that), are captured and forwarded to the
+ * native input router automatically.
  */
 export class BobcatCanvas {
   #client: RenderWorkerClient
@@ -851,6 +898,7 @@ export class BobcatCanvas {
       height,
       (values) => client.dispatchPointer(values),
       (values) => client.dispatchWheel(values),
+      (values) => client.dispatchKey(values),
     )
     this.#unsubscribeFatal = client.subscribeFatal((error) => {
       this.#fatalError = error

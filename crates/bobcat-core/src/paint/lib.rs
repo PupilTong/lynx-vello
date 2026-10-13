@@ -1263,6 +1263,11 @@ fn route_published(
     event: &InputEvent,
     animation_now: Option<f64>,
 ) -> Option<HitTarget> {
+    // A key event is not routed by position: the router targets it at the
+    // focus target itself.
+    if matches!(event.kind, InputKind::Key { .. }) {
+        return None;
+    }
     let finite = event.position.x.is_finite()
         && event.position.y.is_finite()
         && match event.kind {
@@ -1678,6 +1683,10 @@ impl Painter {
     /// A detached painter routes nothing: it has no frame to hit-test against
     /// and nobody to deliver to, so the event is dropped before the gesture
     /// router sees it rather than opening a sequence that can never close.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "the embedder hands the event over; a key event's strings are shared, not copied"
+    )]
     pub fn dispatch_input(&mut self, event: InputEvent) {
         if !self.is_attached() {
             return;

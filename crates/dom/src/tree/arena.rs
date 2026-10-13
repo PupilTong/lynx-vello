@@ -61,6 +61,13 @@ const KEY_BITS: u32 = 32;
 const KEY_MASK: u64 = (1 << KEY_BITS) - 1;
 
 impl NodeId {
+    /// Every document's permanent document element. It is filed second and
+    /// can never be freed, so this one handle names it in any document for
+    /// the document's whole life — which is what lets a layer without the
+    /// document (the runtime's input router, targeting a key event before a
+    /// focus model exists) name it.
+    pub const DOCUMENT_ELEMENT: Self = DOCUMENT_ELEMENT_NODE_ID;
+
     /// The arena index, with the generation masked off. Only for asking "is
     /// this the same physical slot" and for indexing inside this module —
     /// nothing accepts a bare key back as a handle.

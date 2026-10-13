@@ -85,6 +85,14 @@ const DETAIL_INPUT: f64 = 0.0;
 const DETAIL_SIZE: f64 = 1.0;
 const DETAIL_EMPTY: f64 = 2.0;
 const DETAIL_EXPOSURE: f64 = 3.0;
+const DETAIL_KEY: f64 = 4.0;
+
+/// The bits a key event's modifiers cross as, in [`DETAIL_KEY`]'s last
+/// number. Mirrored by `element-papi.ts`.
+const MODIFIER_ALT: u8 = 1;
+const MODIFIER_CTRL: u8 = 2;
+const MODIFIER_META: u8 = 4;
+const MODIFIER_SHIFT: u8 = 8;
 
 /// The script boundary's encoding of `dom`'s [`EventDetail`]: the
 /// discriminator, then the numbers that kind spends, in the order the realm
@@ -100,6 +108,9 @@ const DETAIL_EXPOSURE: f64 = 3.0;
 ///   detail (`ExposureServices.ts:202-208`) from the target's own unique id and its `exposure-id`
 ///   and `exposure-scene` attributes, which are the live element's because
 ///   [`MainThreadRuntime::dispatch`] resolves the target before it calls the realm.
+/// - [`DETAIL_KEY`] for `keydown`/`keyup`: the W3C `key` and `code` strings, borrowed from the
+///   detail, `repeat` as a boolean and the modifiers as one bitmask. The realm puts them on the
+///   event object itself, as `KeyboardEvent` and web-core do, and the `detail` is `{}`.
 /// - [`DETAIL_EMPTY`] for everything else: the realm's `{}`, and no numbers.
 fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut SmallVec<[HostArgument<'a>; 10]>) {
     let (position, delta, points): (_, _, &[dom::event::TouchPoint]) = match detail {
@@ -114,6 +125,30 @@ fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut SmallVec<[HostArgu
         }
         EventDetail::Exposure => {
             arguments.push(HostArgument::Number(DETAIL_EXPOSURE));
+            return;
+        }
+        EventDetail::Key {
+            key,
+            code,
+            repeat,
+            modifiers,
+        } => {
+            let mut bits = 0;
+            for (held, bit) in [
+                (modifiers.alt, MODIFIER_ALT),
+                (modifiers.ctrl, MODIFIER_CTRL),
+                (modifiers.meta, MODIFIER_META),
+                (modifiers.shift, MODIFIER_SHIFT),
+            ] {
+                if held {
+                    bits |= bit;
+                }
+            }
+            arguments.push(HostArgument::Number(DETAIL_KEY));
+            arguments.push(HostArgument::String(key));
+            arguments.push(HostArgument::String(code));
+            arguments.push(HostArgument::Boolean(*repeat));
+            arguments.push(HostArgument::Number(f64::from(bits)));
             return;
         }
         // `None`, and the engine's own `ContentVisibility`, which never

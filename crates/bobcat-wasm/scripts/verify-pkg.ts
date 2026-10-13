@@ -318,6 +318,8 @@ for (const requiredPointerStep of [
   'message.defaultPrevented',
   "message?.type === 'bobcat-wheel'",
   'renderer.dispatchWheel(',
+  "message?.type === 'bobcat-key'",
+  'renderer.dispatchKey(',
 ]) {
   if (!renderWorker.includes(requiredPointerStep)) {
     throw new Error(
@@ -423,6 +425,7 @@ for (const requiredExport of [
 for (const requiredMethod of [
   'dispatchPointer(',
   'dispatchWheel(',
+  'dispatchKey(',
   'registerScript(',
   'registerStyleSheet(',
   'registerLynxXml(',
@@ -489,7 +492,11 @@ for (const requiredDeclaration of [
     throw new Error(`browser declarations are missing ${requiredDeclaration}`)
   }
 }
-for (const privateInputBridge of ['dispatchPointer', 'dispatchWheel']) {
+for (const privateInputBridge of [
+  'dispatchPointer',
+  'dispatchWheel',
+  'dispatchKey',
+]) {
   if (declarations.includes(privateInputBridge)) {
     throw new Error(
       `browser declarations expose the private input bridge ${privateInputBridge}`,

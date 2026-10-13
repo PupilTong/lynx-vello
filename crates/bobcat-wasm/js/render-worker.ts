@@ -490,6 +490,25 @@ self.addEventListener('message', (event) => {
     }
     // The same queue as pointer input, for the same reason.
     requestQueue = requestQueue.then(dispatch)
+  } else if (message?.type === 'bobcat-key') {
+    const dispatch = () => {
+      if (!running || renderer === undefined) {
+        return
+      }
+      try {
+        renderer.dispatchKey(
+          message.key,
+          message.code,
+          message.down,
+          message.repeat,
+          message.modifiers,
+        )
+      } catch (error) {
+        reportFatal(error)
+      }
+    }
+    // The same queue as pointer input, for the same reason.
+    requestQueue = requestQueue.then(dispatch)
   } else if (message?.type === 'bobcat-native-module-callback') {
     const answer = (): void => {
       if (!running || renderer === undefined) {

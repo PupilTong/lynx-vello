@@ -19,6 +19,10 @@
 //!   (`pointerdown`/`pointermove`/`pointerup`/`pointercancel`), a wheel becomes `wheel`, each
 //!   targeted at the routed node. Lynx's `tap` and `longpress` are *synthesized* from the sequence
 //!   beside them.
+//! - **Key events.** A key phase becomes `keydown`/`keyup` (W3C UI Events), carrying the W3C
+//!   `key`/`code` strings, `repeat` and the modifiers. A key is never hit-tested: with no focus
+//!   model its target is the document element ([`NodeId::DOCUMENT_ELEMENT`]), which is the one
+//!   thing a focus model will change.
 //! - **Touch events.** A pointer that [`produces_touch_events`] also produces the W3C touch name
 //!   for its phase (`touchstart`/`touchmove`/`touchend`/`touchcancel`), carrying the three lists
 //!   ([`TouchPoint`]) the standard gives one. Every finger is tracked from its down, and the node
@@ -61,7 +65,7 @@ use dom::event::EventDetail;
 // names it: the router fills the points in, the Rust walk reads them, and the
 // main thread encodes them into the realm's argument list.
 pub(crate) use dom::event::{TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET, TouchPoint, TouchPoints};
-use dom::input::{InputEvent, InputKind, PointerId, PointerKind, PointerPhase};
+use dom::input::{InputEvent, InputKind, KeyPhase, PointerId, PointerKind, PointerPhase};
 use dom::scroll::ScrollAxes;
 use dom::{HitTarget, NodeId, Point2D, Vector2D};
 use smallvec::SmallVec;
@@ -195,6 +199,17 @@ fn pointer_event_name(phase: PointerPhase) -> Option<&'static str> {
         // `PointerPhase` is `#[non_exhaustive]` so keyboard and focus can
         // arrive without a break; an unnamed phase dispatches nothing rather
         // than guessing.
+        _ => None,
+    }
+}
+
+/// The W3C UI Events name a key phase dispatches under: `keydown` and
+/// `keyup`, and nothing else (`keypress` is deprecated, and `input` and the
+/// composition events need an editing model).
+fn key_event_name(phase: KeyPhase) -> Option<&'static str> {
+    match phase {
+        KeyPhase::Down => Some("keydown"),
+        KeyPhase::Up => Some("keyup"),
         _ => None,
     }
 }
@@ -341,6 +356,31 @@ impl GestureRouter {
                     EventDetail::Wheel {
                         position: event.position,
                         delta,
+                    },
+                ));
+            }
+            InputKind::Key {
+                phase,
+                ref key,
+                ref code,
+                repeat,
+                modifiers,
+            } => {
+                let Some(name) = key_event_name(phase) else {
+                    return;
+                };
+                // No hit test and no focus model: the document element is
+                // the focus target, as it is in a browser with nothing
+                // focused. A focus model changes this target and nothing
+                // else.
+                out.push(emit(
+                    name,
+                    NodeId::DOCUMENT_ELEMENT,
+                    EventDetail::Key {
+                        key: key.clone(),
+                        code: code.clone(),
+                        repeat,
+                        modifiers,
                     },
                 ));
             }
@@ -801,6 +841,10 @@ mod tests {
             self.feed_routed(event, Some(target()), at);
         }
 
+        #[allow(
+            clippy::needless_pass_by_value,
+            reason = "the cases hand over event literals"
+        )]
         fn feed_routed(&mut self, event: InputEvent, hit: Option<NodeId>, at: f64) {
             let hit = hit.map(|node| HitTarget { node, scroll: None });
             self.router
@@ -882,6 +926,49 @@ mod tests {
                 })
                 .collect()
         }
+    }
+
+    #[test]
+    fn a_key_is_keydown_then_keyup_at_the_document_element_with_its_strings() {
+        use dom::input::{KeyPhase, Modifiers};
+
+        let mut harness = Harness::new();
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        // Routing hit nothing: a key event is never hit-tested.
+        harness.feed_routed(
+            InputEvent::key(KeyPhase::Down, "A", "KeyA", false, shift),
+            None,
+            0.0,
+        );
+        harness.feed_routed(
+            InputEvent::key(KeyPhase::Up, "A", "KeyA", false, shift),
+            Some(target()),
+            0.1,
+        );
+        assert_eq!(
+            harness.trace(),
+            [
+                format!("keydown@{}", NodeId::DOCUMENT_ELEMENT.to_bits()),
+                format!("keyup@{}", NodeId::DOCUMENT_ELEMENT.to_bits()),
+            ],
+            "no focus model: the document element is the target, whatever routing hit"
+        );
+        let InputDecision::Emit(down) = &harness.out[0] else {
+            panic!("an emit");
+        };
+        assert_eq!(
+            down.detail,
+            EventDetail::Key {
+                key: "A".into(),
+                code: "KeyA".into(),
+                repeat: false,
+                modifiers: shift,
+            }
+        );
+        assert!(!harness.router.needs_frame(), "a key arms nothing");
     }
 
     #[test]

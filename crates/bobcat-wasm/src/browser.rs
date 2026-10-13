@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::{fmt, mem};
 
-use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
+use bobcat_core::input::{InputEvent, KeyPhase, Modifiers, Point2D, PointerKind, PointerPhase};
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, FontBlob, FrameSize, LynxGroup, LynxView, ModuleCall,
     ModuleCallback, NativeModule, PageConfig, Painter, ScreenMetrics, StyleThreads, ViewSources,
@@ -41,6 +41,10 @@ const POINTER_PHASE_DOWN: u8 = 0;
 const POINTER_PHASE_MOVE: u8 = 1;
 const POINTER_PHASE_UP: u8 = 2;
 const POINTER_PHASE_CANCEL: u8 = 3;
+const MODIFIER_ALT: u8 = 1;
+const MODIFIER_CTRL: u8 = 2;
+const MODIFIER_META: u8 = 4;
+const MODIFIER_SHIFT: u8 = 8;
 static RENDERER_CREATED: AtomicBool = AtomicBool::new(false);
 
 /// Lost-wake-safe engine signal: one durable wakeup covering both a lifecycle
@@ -855,6 +859,36 @@ impl BobcatRenderer {
         }
         let event = InputEvent::wheel(Point2D::new(x, y), (delta_x, delta_y))
             .with_default_prevented(default_prevented);
+        // As for a pointer: with no page loaded the painter is attached to no
+        // view, so there is nothing to route and nothing to buffer.
+        if let Some(painter) = self.painter.as_mut() {
+            painter.dispatch_input(event);
+            self.events.request_event();
+        }
+        Ok(())
+    }
+
+    /// Route one browser `KeyboardEvent` into the opaque native view: its own
+    /// W3C `key` and `code`, passed through, `keydown` when `down`, and the
+    /// modifier bitmask the facade packed (alt 1, ctrl 2, meta 4, shift 8).
+    #[wasm_bindgen(js_name = dispatchKey)]
+    pub fn dispatch_key(
+        &mut self,
+        key: String,
+        code: String,
+        down: bool,
+        repeat: bool,
+        modifiers: u8,
+    ) -> Result<(), JsValue> {
+        self.ensure_running()?;
+        let phase = if down { KeyPhase::Down } else { KeyPhase::Up };
+        let modifiers = Modifiers {
+            alt: modifiers & MODIFIER_ALT != 0,
+            ctrl: modifiers & MODIFIER_CTRL != 0,
+            meta: modifiers & MODIFIER_META != 0,
+            shift: modifiers & MODIFIER_SHIFT != 0,
+        };
+        let event = InputEvent::key(phase, key, code, repeat, modifiers);
         // As for a pointer: with no page loaded the painter is attached to no
         // view, so there is nothing to route and nothing to buffer.
         if let Some(painter) = self.painter.as_mut() {

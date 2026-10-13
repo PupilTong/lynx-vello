@@ -28,7 +28,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
+use bobcat_core::input::{InputEvent, KeyPhase, Modifiers, Point2D, PointerKind, PointerPhase};
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, Painter, ScreenMetrics,
     StyleThreads,
@@ -36,8 +36,11 @@ use bobcat_core::{
 use bobcat_resources::ViewResources;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
+use winit::event::{
+    ElementState, KeyEvent, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::keyboard::ModifiersState;
 use winit::monitor::MonitorHandle;
 use winit::platform::macos::MonitorHandleExtMacOS;
 use winit::window::{Window, WindowId};
@@ -120,6 +123,9 @@ struct MacApplication {
     console: Console,
     pointer: Option<PhysicalPosition<f64>>,
     pressed: bool,
+    /// The modifier keys as winit last reported them, which every key event
+    /// carries.
+    modifiers: ModifiersState,
     error: Option<CliError>,
 }
 
@@ -155,6 +161,7 @@ impl MacApplication {
             console,
             pointer: None,
             pressed: false,
+            modifiers: ModifiersState::empty(),
             error: None,
         }
     }
@@ -356,6 +363,29 @@ impl MacApplication {
         self.dispatch(InputEvent::wheel(point, wheel_delta_css(delta, scale)));
     }
 
+    /// One key going down or up, as W3C UI Events' `keydown`/`keyup`: winit's
+    /// logical key is the `key`, its physical key the `code`
+    /// ([`super::keys`]).
+    fn key_event(&mut self, event: &KeyEvent) {
+        let phase = match event.state {
+            ElementState::Pressed => KeyPhase::Down,
+            ElementState::Released => KeyPhase::Up,
+        };
+        let modifiers = Modifiers {
+            alt: self.modifiers.alt_key(),
+            ctrl: self.modifiers.control_key(),
+            meta: self.modifiers.super_key(),
+            shift: self.modifiers.shift_key(),
+        };
+        self.dispatch(InputEvent::key(
+            phase,
+            super::keys::key_value(&event.logical_key),
+            super::keys::code_value(event.physical_key),
+            event.repeat,
+            modifiers,
+        ));
+    }
+
     fn touch_event(&mut self, touch: Touch) {
         let phase = match touch.phase {
             TouchPhase::Started => PointerPhase::Down,
@@ -523,6 +553,14 @@ impl ApplicationHandler<UserEvent> for MacApplication {
             }
             WindowEvent::Touch(touch) => {
                 self.touch_event(touch);
+                Ok(())
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+                Ok(())
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                self.key_event(&event);
                 Ok(())
             }
             _ => Ok(()),

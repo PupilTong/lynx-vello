@@ -72,9 +72,13 @@ impl Harness {
             .copied()
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "the cases hand over event literals"
+    )]
     fn route(&mut self, event: InputEvent) -> Option<NodeId> {
         self.doc.dom.render();
-        self.doc.dom.route_input(event)
+        self.doc.dom.route_input(&event)
     }
 
     fn scroll_to(&mut self, id: NodeId, x: f32, y: f32) {

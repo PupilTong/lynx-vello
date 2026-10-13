@@ -634,6 +634,23 @@ consequential choice about whether to follow the spec or the quirk.
       flowing while the drag recognizer scrolls (native; browsers likewise
       keep sending `touchmove` to a scrolling page). Only
       `PointerPhase::Cancel` produces `touchcancel`.
+- **Keyboard: `keydown`/`keyup` only, targeted at the document element
+  (2026-10-13, architect ruling).** W3C UI Events' two key events reach the
+  page with `key`, `code`, `repeat`, `altKey`, `ctrlKey`, `metaKey` and
+  `shiftKey` on the event object and a `{}` detail, which is web-core's shape
+  (`createCrossThreadEvent.ts`), bubbling and composed. Recorded deviations:
+  - **No focus model**, so the target is always the document element (the
+    page), as it is in a browser with nothing focused; the painter does not
+    hit-test a key. A focus model changes that one target and nothing else.
+  - **No `keypress`, `input` or composition events**, and no IME.
+  - **No `keyCode`.** web-core forwards the deprecated numeric `keyCode` for
+    parity with iOS/Android; this engine reports the W3C `key`/`code` only.
+  - **The macOS CLI maps winit's keys** through a table
+    (`crates/bobcat-cli/src/cli/keys.rs`): winit's variant names are the UI
+    Events values, except the Command key (`Meta`, `MetaLeft`/`MetaRight`)
+    and the space bar's `key` (`" "`). The browser embedder passes the
+    browser's own strings through, and its canvas hears keys only while it has
+    focus, which takes a `tabindex` the embedding page chooses.
 - **`pointer-events: none` hit-test fall-through** — Lynx falls through to
   the *next sibling* under the point; W3C says the element (and normally its
   subtree) becomes fully transparent to hit-testing, continuing the search
