@@ -108,7 +108,7 @@
 use euclid::default::{Size2D, Vector2D};
 
 use crate::Document;
-use crate::paint::compose::{CapturedShape, ComposeAssembly, ComposeOp, FilterGroup};
+use crate::paint::compose::{BackdropRoot, CapturedShape, ComposeAssembly, ComposeOp, FilterGroup};
 use crate::paint::shape::{BoxShape, with_shape};
 use crate::paint::{
     BoxFragment, PathScratch, background, border, convert, filters, mask, shadow, text,
@@ -320,24 +320,20 @@ impl WalkSink<'_> {
         }
     }
 
-    /// Records a `backdrop-filter` entry over the already-emitted `ops`,
-    /// answering whether one was recorded.
+    /// Records a `backdrop-filter` entry over the ops already emitted from
+    /// its Backdrop Root's content start up to `end`, answering whether one
+    /// was recorded.
     ///
     /// The monolithic sink records none, for the same reason it records no
     /// filter group: with no side table and no composer its walk simply
     /// leaves the backdrop unfiltered, which keeps it a usable culling
     /// oracle for a page that uses the property.
-    fn push_backdrop(
-        &mut self,
-        entry: FilterGroup,
-        ops: std::ops::Range<u32>,
-        frame: &PaintOrder,
-    ) -> bool {
+    fn push_backdrop(&mut self, entry: FilterGroup, end: u32, frame: &PaintOrder) -> bool {
         match self {
             Self::Monolithic(..) => false,
             Self::Compose(assembly) => assembly.push_backdrop(
                 entry,
-                ops,
+                end,
                 frame.spaces(),
                 frame.animations(),
                 frame.anchored(),
@@ -1184,10 +1180,10 @@ fn open_scope<T>(
     // `opacity`, `clip-path`, `mask-image` and `filter` apply to the backdrop
     // and to the element together.
     let content_start = sink.content_boundary();
-    if let Some((root_start, end)) = backdrop_end
-        && let Some(entry) = backdrop_entry(style, layer, space, scale, ratio)
+    if let Some((root, end)) = backdrop_end
+        && let Some(entry) = backdrop_entry(style, layer, space, scale, ratio, root)
     {
-        sink.push_backdrop(entry, root_start..end, frame);
+        sink.push_backdrop(entry, end, frame);
     }
 
     // A current `opacity` animation roots at every reading, 1 included,
@@ -1252,20 +1248,22 @@ fn push_clip_path(
     true
 }
 
-/// Where the Backdrop Root Image of a scope about to open begins: the
-/// content start of the nearest enclosing Backdrop Root, or the start of the
-/// program when there is none.
+/// The Backdrop Root of a scope about to open: the nearest enclosing scope
+/// that is one, or the document's root element when there is none.
 ///
-/// Falling back to zero *is* the spec's root-element rule: the document root
-/// element is always a Backdrop Root, and nothing is painted before program
-/// index zero.
-fn nearest_backdrop_root(scratch: &Scratch) -> u32 {
+/// Falling back to the document *is* the spec's root-element rule: the
+/// document root element is always a Backdrop Root. Its image begins at
+/// program index zero, before which nothing is painted, and lies over the
+/// canvas, which a group's image does not.
+fn nearest_backdrop_root(scratch: &Scratch) -> BackdropRoot {
     scratch
         .scopes
         .iter()
         .rev()
         .find(|scope| scope.backdrop_root)
-        .map_or(0, |scope| scope.content_start)
+        .map_or(BackdropRoot::Document, |scope| BackdropRoot::Group {
+            content_start: scope.content_start,
+        })
 }
 
 /// Whether this element is a Backdrop Root (filter-effects-2 §2.2) by its
@@ -1320,6 +1318,7 @@ fn backdrop_entry(
     space: Option<u32>,
     scale: Affine,
     ratio: f64,
+    root: BackdropRoot,
 ) -> Option<FilterGroup> {
     let list = &style.get_effects().backdrop_filter.0;
     if list.is_empty() {
@@ -1355,6 +1354,7 @@ fn backdrop_entry(
         transform,
         before: filters::passes(list, plan.before.clone()),
         after: filters::passes(list, plan.after.clone()),
+        root,
         open_pushes: 0,
     };
     Some(FilterGroup::with_backdrop(
@@ -3761,6 +3761,11 @@ mod tests {
         assert_eq!(finished.filter_groups.len(), 1, "one backdrop entry");
         let entry = &finished.filter_groups[0];
         assert!(entry.is_backdrop());
+        assert_eq!(
+            entry.reads_canvas(),
+            entry.ops.start == 0,
+            "the canvas lies under the document root's image and under no group's",
+        );
         let count = finished.program[entry.ops.start as usize..entry.ops.end as usize]
             .iter()
             .filter(|op| matches!(op, ComposeOp::Fragment { .. }))

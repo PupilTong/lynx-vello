@@ -250,7 +250,14 @@ consequential choice about whether to follow the spec or the quirk.
 
   It is **painted** as of 2026-09-19, as a prefix bake on the flat render
   path (`crates/dom/src/paint/compose.rs`'s `PushBackdrop`,
-  `crates/dom/src/render/blur.rs`), with these recorded narrowings:
+  `crates/dom/src/render/blur.rs`). The Backdrop Root Image of the document's
+  root element holds the canvas: an element whose Backdrop Root is the
+  document's bakes over the colour the painter clears its target to (white),
+  and an element inside a group Backdrop Root over transparent black, since
+  that group's own pixels start empty. The filtered image is composited
+  source-over in both cases (filter-effects-2's last step), so inside a group
+  the group's unfiltered pixels show through wherever its filtered copy is
+  translucent, as they do in Chromium. These are the recorded narrowings:
 
   - **`will-change` Backdrop Roots are not honored**, and this one *is* observable. `will-change`
     is in the fork's author grammar, and filter-effects-2 makes an element naming a rooting
@@ -284,9 +291,10 @@ consequential choice about whether to follow the spec or the quirk.
     carries.
   - **Items culled at commit are absent from a straddling crop.** The walker discards items that
     can put no ink in the viewport, so an element whose border box extends past the viewport bakes
-    a crop in which the off-screen part holds only what survived culling. Those pixels are outside
-    the viewport, so nothing visible reads them directly — but a σ large enough to reach back in
-    can, and that part of the crop will be emptier than the spec's Backdrop Root Image.
+    a crop in which the off-screen part holds only what survived culling, over the canvas colour
+    at the document's root. Those pixels are outside the viewport, so nothing visible reads them
+    directly — but a σ large enough to reach back in can, and that part of the crop will be
+    emptier than the spec's Backdrop Root Image.
   - **No composite curve**, like `filter`: an animated `backdrop-filter` recommits and re-bakes
     every tick.
   - **The area budget is shared with `filter: blur()`** (`MAX_FILTER_DIMENSION`,

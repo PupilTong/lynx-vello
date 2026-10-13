@@ -2675,7 +2675,10 @@ Subsystems:
   (2026-08-04): `FrameImages` and the `render::gpu` wgpu backend. `render::blur`
   is the one exception: a `filter: blur()` bake is a partial replay of a
   committed frame's compose program, so it reads `CommittedFrame`'s filter side
-  table, while still naming no node, style, layout or paint-order type.
+  table, while still naming no node, style, layout or paint-order type. A
+  `backdrop-filter` bake at the document's root renders over the canvas
+  colour its caller composites over, which `FilterTextures::prepare` and
+  `Headless::prepare_filters` therefore take.
 
 **Vector images** (`docs/svg-lynx-component-design.md`): an SVG document used
 as an image — `<image src>`, `background-image`, `mask-image`, the Lynx

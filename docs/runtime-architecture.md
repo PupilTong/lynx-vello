@@ -2299,7 +2299,17 @@ border. The range points **backwards**: from the content start of the
 element's nearest Backdrop Root ancestor (`filter`, `opacity < 1`, `mask`,
 `clip-path`, `mix-blend-mode`, `backdrop-filter`, a current `opacity` animation
 at any reading, exported or not, or the root) to the element's own scope open —
-exactly what was painted before it inside that root. A `will-change` naming one
+exactly what was painted before it inside that root. What that prefix was
+painted *over* belongs to the image as well. A group's own pixels start empty,
+so a backdrop inside one bakes over transparent black. Under the document
+root's image lies the canvas, which is the colour the painter clears its
+target to (`paint::CANVAS`) and no op of the program, so an entry whose
+Backdrop Root is the document's (`FilterGroup::reads_canvas`) bakes over that
+colour, and is recorded even when nothing was painted before the element.
+Baked without it the texture is transparent where the page painted nothing
+and translucent wherever the blur spreads painted content toward such a
+place, and the op's source-over fill leaves the unfiltered pixels showing
+there. A `will-change` naming one
 of those properties is a Backdrop Root per the spec and is deliberately not one
 here, since no group layer is opened per `will-change` element (recorded in
 `docs/tracking/deviations.md`); the current `opacity` animation, which Web
@@ -2336,8 +2346,9 @@ group's ancestors' clips.
 
 The device side is `dom::render::blur::FilterTextures`, one per
 `vello::Renderer`, owned beside that renderer's `AtlasResidency` by `Headless`
-and by the painter's `WindowGraphics`. Its cache holds one commit's bakes, and
-each entry re-bakes on its own two conditional readings. The painter's scroll
+and by the painter's `WindowGraphics`. Its cache holds one commit's bakes,
+taken over one canvas colour, and each entry re-bakes on its own two
+conditional readings. The painter's scroll
 generation counts when some op in the entry's range and the entry's own space
 differ in their innermost scroll or sticky node, a node on one path and not
 the other. A blurred scroller's content slides under the blur, and a backdrop

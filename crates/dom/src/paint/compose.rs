@@ -45,7 +45,10 @@
 //! in the same side table and its range is everything already painted inside
 //! the element's nearest Backdrop Root ancestor, so its bake reads program
 //! ops that precede it rather than ops it brackets — there is no matching
-//! pop. With a texture the op draws it, shaped by the element's own rounded
+//! pop. What that range is painted *over* is the entry's [`BackdropRoot`]:
+//! the canvas when the root is the document's, which no program op draws and
+//! the bake therefore takes as its base colour, and nothing when it is a
+//! group. With a texture the op draws it, shaped by the element's own rounded
 //! border box, as the first thing inside the element's group; without one it
 //! draws nothing at all, and the unfiltered backdrop the op sits on top of
 //! is what shows.
@@ -532,6 +535,36 @@ fn differs(
     pick(spaces, a) != pick(spaces, b)
 }
 
+/// The Backdrop Root (filter-effects-2 §2.2) a `backdrop-filter` entry reads:
+/// where its range begins, and what the pixels in that range were painted
+/// over.
+///
+/// The two are one fact. A group's own pixels start as transparent black and
+/// its content starts past the layers it pushed; the document's root element
+/// starts at the program's first op, and under everything it painted lies the
+/// canvas, which is the composite render's base colour rather than an op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackdropRoot {
+    /// The document's root element. The range begins at program index zero,
+    /// and the bake renders over the canvas colour.
+    Document,
+    /// A group scope that is a Backdrop Root — `opacity`, `filter`, `mask`,
+    /// `clip-path`, `backdrop-filter` or `mix-blend-mode`. The range begins
+    /// at the scope's content start, and the bake renders over transparent
+    /// black.
+    Group { content_start: u32 },
+}
+
+impl BackdropRoot {
+    /// The program index the root's own content begins at.
+    pub(crate) fn content_start(self) -> u32 {
+        match self {
+            Self::Document => 0,
+            Self::Group { content_start } => content_start,
+        }
+    }
+}
+
 /// What a [`FilterGroup`] needs beyond σ and a rect to be a
 /// `backdrop-filter` entry rather than a `filter: blur()` group.
 ///
@@ -552,6 +585,8 @@ pub(crate) struct Backdrop {
     pub(crate) before: Vec<crate::paint::filters::Pass>,
     /// The passes following it, drawn over the composed backdrop.
     pub(crate) after: Vec<crate::paint::filters::Pass>,
+    /// The Backdrop Root the entry's range begins at.
+    pub(crate) root: BackdropRoot,
     /// Layers the range leaves open at its end: the group scopes between the
     /// Backdrop Root and this element. The bake pops exactly this many, so
     /// the `before` passes do not land inside one.
@@ -651,6 +686,18 @@ impl FilterGroup {
     #[must_use]
     pub fn is_backdrop(&self) -> bool {
         self.backdrop.is_some()
+    }
+
+    /// Whether this entry's Backdrop Root Image holds the canvas: a
+    /// `backdrop-filter` entry whose Backdrop Root is the document's root
+    /// element. Its bake renders over the colour the composite render clears
+    /// its target to, where every other entry's renders over transparent
+    /// black.
+    #[must_use]
+    pub fn reads_canvas(&self) -> bool {
+        self.backdrop
+            .as_ref()
+            .is_some_and(|backdrop| backdrop.root == BackdropRoot::Document)
     }
 
     /// Whether this entry's baked pixels depend on the timeline reading: a
@@ -839,23 +886,31 @@ impl ComposeAssembly {
         u32::try_from(self.program.len()).expect("a frame cannot hold 2^32 program ops")
     }
 
-    /// Records a `backdrop-filter` entry over the already-emitted `ops`,
-    /// answering whether one was recorded. `spaces` is the frame's space
-    /// tree the ops' spaces index, and `slots` its animation slots.
+    /// Records a `backdrop-filter` entry over the ops already emitted from
+    /// its Backdrop Root's content start up to `end`, answering whether one
+    /// was recorded. `spaces` is the frame's space tree the ops' spaces
+    /// index, and `slots` its animation slots.
     ///
-    /// An empty range records nothing and answers `false`: there is nothing
-    /// behind the element to filter, so the op would bake a transparent
-    /// texture and draw it over nothing.
+    /// An empty range inside a group records nothing and answers `false`:
+    /// there is nothing behind the element to filter, so the op would bake a
+    /// transparent texture and draw it over nothing. An empty range at the
+    /// document's root still records, because the canvas is behind the
+    /// element there and a colour pass changes it.
     pub(crate) fn push_backdrop(
         &mut self,
         mut entry: FilterGroup,
-        ops: Range<u32>,
+        end: u32,
         spaces: &[Space],
         slots: &[AnimationSlot],
         anchored: &[AnchoredSlot],
     ) -> bool {
         self.seal_fragment();
-        if ops.start >= ops.end {
+        let Some(root) = entry.backdrop.as_ref().map(|backdrop| backdrop.root) else {
+            debug_assert!(false, "push_backdrop is only called with a backdrop entry");
+            return false;
+        };
+        let ops = root.content_start()..end;
+        if ops.is_empty() && root != BackdropRoot::Document {
             return false;
         }
         debug_assert!(
@@ -872,8 +927,6 @@ impl ComposeAssembly {
         entry.inner_animations = inner_animations;
         if let Some(backdrop) = entry.backdrop.as_mut() {
             backdrop.open_pushes = open_pushes;
-        } else {
-            debug_assert!(false, "push_backdrop is only called with a backdrop entry");
         }
         self.filter_groups.push(entry);
         self.program.push(ComposeOp::PushBackdrop { index });
@@ -1499,6 +1552,14 @@ fn draw_filtered(
 /// No clip layer is opened for the crop. The shape *is* the fill, which
 /// keeps the op a single draw and keeps a fragment cut from ever landing
 /// between a push and its pop.
+///
+/// The fill is source-over, which is how filter-effects-2 composites the
+/// filtered image into the element's parent. At the document's root the
+/// texture was baked over the canvas, so it is as opaque as the canvas and
+/// covers the unfiltered pixels under it. Inside a group
+/// ([`BackdropRoot::Group`]) it is translucent wherever the group painted
+/// nothing or the blur spread what it painted toward such a place, and the
+/// group's unfiltered pixels show through it there.
 fn draw_backdrop(
     scene: &mut Scene,
     entry: &FilterGroup,
@@ -1967,7 +2028,12 @@ mod tests {
         );
     }
 
+    /// A backdrop entry whose Backdrop Root is the document's.
     fn backdrop_entry(space: Option<u32>) -> FilterGroup {
+        backdrop_entry_in(space, BackdropRoot::Document)
+    }
+
+    fn backdrop_entry_in(space: Option<u32>, root: BackdropRoot) -> FilterGroup {
         FilterGroup::with_backdrop(
             2.0,
             Rect::new(0.0, 0.0, 8.0, 8.0),
@@ -1977,30 +2043,28 @@ mod tests {
                 transform: Affine::IDENTITY,
                 before: Vec::new(),
                 after: Vec::new(),
+                root,
                 open_pushes: 0,
             },
         )
     }
 
-    /// A backdrop's range is everything already recorded from the boundary it
-    /// is handed, and the flags are read off exactly that slice.
+    /// A backdrop's range is everything already recorded from its Backdrop
+    /// Root's content start, and the flags are read off exactly that slice.
     #[test]
     fn a_backdrop_records_the_program_behind_it() {
         let mut assembly = assembly();
-        let root_start = assembly.content_boundary();
-        assert_eq!(root_start, 0, "nothing precedes the frame root");
+        assert_eq!(
+            assembly.content_boundary(),
+            BackdropRoot::Document.content_start(),
+            "nothing precedes the frame root",
+        );
         assembly.push_op(push(None));
         assembly.push_op(push(SCROLLED));
         assembly.push_op(ComposeOp::Pop);
         let end = assembly.content_boundary();
         assert!(
-            assembly.push_backdrop(
-                backdrop_entry(None),
-                root_start..end,
-                &SPACES,
-                &slots(true),
-                &[]
-            ),
+            assembly.push_backdrop(backdrop_entry(None), end, &SPACES, &slots(true), &[]),
             "a non-empty range records an entry",
         );
         let finished = assembly.finish();
@@ -2008,6 +2072,10 @@ mod tests {
         let entry = &finished.filter_groups[0];
         assert_eq!(entry.ops, 0..3, "the whole prefix");
         assert!(entry.is_backdrop());
+        assert!(
+            entry.reads_canvas(),
+            "the document's root is over the canvas"
+        );
         assert!(
             entry.inner_chains,
             "the prefix holds an op on another scroll chain",
@@ -2050,7 +2118,7 @@ mod tests {
                 let mut backdrop = assembly();
                 backdrop.push_op(push(op));
                 let end = backdrop.content_boundary();
-                backdrop.push_backdrop(backdrop_entry(space), 0..end, &SPACES, &slots, &[]);
+                backdrop.push_backdrop(backdrop_entry(space), end, &SPACES, &slots, &[]);
                 assert_eq!(
                     backdrop.finish().filter_groups[0].samples_animations(),
                     expected,
@@ -2071,23 +2139,45 @@ mod tests {
         }
     }
 
-    /// Nothing painted behind the element is nothing to filter: the entry is
-    /// refused outright rather than recorded with an empty range, so the
-    /// frame's filter table stays empty and the bake pre-step stays skipped.
+    /// Nothing painted behind the element inside a group is nothing to
+    /// filter: the entry is refused outright rather than recorded with an
+    /// empty range, so the frame's filter table stays empty and the bake
+    /// pre-step stays skipped.
     #[test]
-    fn an_empty_range_records_no_backdrop_at_all() {
+    fn an_empty_range_in_a_group_records_no_backdrop_at_all() {
         let mut assembly = assembly();
-        let start = assembly.content_boundary();
+        assembly.push_op(push(None));
+        let content_start = assembly.content_boundary();
         assert!(!assembly.push_backdrop(
-            backdrop_entry(None),
-            start..start,
+            backdrop_entry_in(None, BackdropRoot::Group { content_start }),
+            content_start,
             &SPACES,
             &slots(true),
             &[]
         ));
         let finished = assembly.finish();
         assert!(finished.filter_groups.is_empty());
-        assert!(finished.program.is_empty());
+        assert_eq!(finished.program.len(), 1, "the group's own push and no op");
+    }
+
+    /// Nothing painted behind the element at the document's root still
+    /// leaves the canvas behind it, so the entry is recorded with its empty
+    /// range and bakes the canvas colour alone.
+    #[test]
+    fn an_empty_range_at_the_document_root_still_records_a_backdrop() {
+        let mut assembly = assembly();
+        let end = assembly.content_boundary();
+        assert!(assembly.push_backdrop(backdrop_entry(None), end, &SPACES, &slots(true), &[]));
+        let finished = assembly.finish();
+        let [entry] = &finished.filter_groups[..] else {
+            panic!("one backdrop entry");
+        };
+        assert_eq!(entry.ops, 0..0);
+        assert!(entry.reads_canvas());
+        assert!(matches!(
+            finished.program[..],
+            [ComposeOp::PushBackdrop { index: 0 }]
+        ));
     }
 
     /// Without a texture the op encodes nothing: the unfiltered backdrop the
@@ -2199,13 +2289,7 @@ mod tests {
             assembly.push_op(ComposeOp::Pop);
             let end = assembly.content_boundary();
             assembly.push_filter(group(None));
-            assert!(assembly.push_backdrop(
-                backdrop_entry(None),
-                0..end,
-                &SPACES,
-                &slots(true),
-                &[]
-            ));
+            assert!(assembly.push_backdrop(backdrop_entry(None), end, &SPACES, &slots(true), &[]));
             assembly.push_op(push(None));
             assembly.push_op(ComposeOp::Pop);
             assembly.pop_filter(&SPACES, &slots(true), &[]);
@@ -2234,14 +2318,14 @@ mod tests {
         assembly.push_op(push(ANIMATED));
         assembly.push_op(ComposeOp::Pop);
         let end = assembly.content_boundary();
-        let root_content = assembly.content_boundary();
-        assert!(assembly.push_backdrop(backdrop_entry(None), 0..end, &SPACES, &slots(true), &[]));
+        let content_start = assembly.content_boundary();
+        assert!(assembly.push_backdrop(backdrop_entry(None), end, &SPACES, &slots(true), &[]));
         assembly.push_op(push(None));
         assembly.push_op(ComposeOp::Pop);
         let child_end = assembly.content_boundary();
         assert!(assembly.push_backdrop(
-            backdrop_entry(None),
-            root_content..child_end,
+            backdrop_entry_in(None, BackdropRoot::Group { content_start }),
+            child_end,
             &SPACES,
             &slots(true),
             &[]
@@ -2250,6 +2334,10 @@ mod tests {
         let [root, child] = &finished.filter_groups[..] else {
             panic!("two backdrops");
         };
+        assert!(
+            root.reads_canvas() && !child.reads_canvas(),
+            "only the document's root is over the canvas",
+        );
         assert!(root.samples_animations(), "the root's prefix animates");
         assert!(
             child.samples_animations(),

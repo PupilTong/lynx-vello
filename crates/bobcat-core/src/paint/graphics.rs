@@ -26,10 +26,11 @@ use dom::render::blur::FilterTextures;
 use dom::render::gpu::read_texture;
 use dom::render::gpu::{AtlasResidency, render_params, renderer_options};
 use dom::render::vector_textures::VectorTextures;
-use dom::vello::peniko::{Color, ImageData};
+use dom::vello::peniko::ImageData;
 use dom::vello::util::{RenderContext, RenderSurface};
 use dom::{CommittedFrame, ScrollSlot, Vector2D, vello};
 
+use super::CANVAS;
 use crate::view::{EngineError, FrameSize};
 
 /// The draw target an embedder lends a view.
@@ -210,7 +211,7 @@ impl WindowGraphics {
                 &handle.queue,
                 scene,
                 &self.surface.target_view,
-                &render_params(Color::WHITE, size.width, size.height),
+                &render_params(CANVAS, size.width, size.height),
             )
             .map_err(|error| EngineError::Render(error.to_string()))
     }
@@ -274,6 +275,7 @@ impl WindowGraphics {
                 offset_of,
                 scroll_generation,
                 animation_now,
+                CANVAS,
             )
             .map_err(|error| EngineError::Gpu(error.to_string()))
     }

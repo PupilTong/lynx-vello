@@ -530,9 +530,8 @@ async fn a_blurred_box_reaches_the_embedder_painter() {
 /// A 64x64 page: an opaque white ground, a black left half, and one 32x32
 /// box over the seam carrying `backdrop-filter: blur(5px)`.
 ///
-/// The ground is painted rather than left to the render's base colour: a
-/// backdrop is made of what the scene drew, so a transparent page would leave
-/// the light half out of the element's backdrop entirely.
+/// The page paints its ground itself; [`blur_view_page`] leaves it to the
+/// painter's canvas.
 fn backdrop_page() -> Vec<u8> {
     br"
 globalThis.renderPage = function renderPage() {
@@ -606,6 +605,104 @@ async fn a_backdrop_filtered_box_reaches_the_embedder_painter() {
         "while above the box it is still a step ({}, {})",
         luma(30, 8),
         luma(34, 8),
+    );
+}
+
+/// A 128x240 page that paints no ground: a black left half over the
+/// painter's bare canvas, and three 80x56 `<blur-view blur-radius="5">`s
+/// centred on the seam — one plain, one rotated by its own `transform`, one
+/// inside a wrapper that carries the rotation.
+fn blur_view_page() -> Vec<u8> {
+    br"
+globalThis.renderPage = function renderPage() {
+  const page = __CreatePage('card', 0);
+  __SetInlineStyles(page, 'width:128px;height:240px;position:relative');
+  const half = __CreateView(0);
+  __SetInlineStyles(
+    half,
+    'position:absolute;left:0px;top:0px;width:64px;height:240px;background-color:#000000'
+  );
+  __AppendElement(page, half);
+  function frost(parent, style) {
+    const view = __CreateElement('blur-view', 0);
+    __SetAttribute(view, 'blur-radius', '5');
+    __SetInlineStyles(view, 'position:absolute;left:24px;width:80px;height:56px;' + style);
+    __AppendElement(parent, view);
+  }
+  frost(page, 'top:12px');
+  frost(page, 'top:92px;transform:rotate(8deg)');
+  const wrapper = __CreateView(0);
+  __SetInlineStyles(
+    wrapper,
+    'position:absolute;left:0px;top:172px;width:128px;height:56px;transform:rotate(-8deg)'
+  );
+  __AppendElement(page, wrapper);
+  frost(wrapper, 'top:0px');
+};
+"
+    .to_vec()
+}
+
+/// A `<blur-view>` over a coloured box's edge on the painter's bare canvas
+/// blurs that edge on both sides, with or without a transform on the view or
+/// on an ancestor of it.
+///
+/// The canvas is the colour the painter clears its target to, which no page
+/// content draws; filter-effects-2 puts it in the document root's Backdrop
+/// Root Image, so the view's bake has to render over it. Without it the
+/// blurred copy of the black half fades to transparency toward the canvas
+/// and the half's own sharp edge shows through, which reads here as a profile
+/// that stays black up to the seam.
+#[tokio::test]
+async fn a_blur_view_over_the_bare_canvas_blurs_an_edge_on_both_sides() {
+    let group = group().await;
+    let mut view = group
+        .create_lynx_view(
+            128.0,
+            240.0,
+            1.0,
+            |_reports| Rc::new(FetcherDouble::card(blur_view_page()).resolving_to(SCRIPT_URL)),
+            Vec::new(),
+            ViewSources::new("app:///", SCRIPT_URL, SCREEN),
+        )
+        .expect("the view is built");
+    let mut painter = Painter::new(DrawTarget::Offscreen, 128.0, 240.0, 1.0)
+        .await
+        .expect("an offscreen painter is built");
+    painter.attach(&view).expect("the page takes a painter");
+    wait_for_script(&mut view).expect("the entry module boots");
+    painter.tick(true).expect("the filtered frame renders");
+
+    let shot = painter.capture().expect("the committed frame");
+    let luma = |x: usize, y: usize| i32::from(shot.pixels[(y * 128 + x) * 4]);
+
+    // The seam is x = 64.0, so 63 and 64 are the symmetric pair, and each
+    // view's centre row crosses it well inside the view.
+    for (label, row) in [
+        ("plain", 40),
+        ("rotated", 120),
+        ("in a rotated wrapper", 200),
+    ] {
+        for distance in 0..=9_usize {
+            let dark = luma(63 - distance, row);
+            let light = luma(64 + distance, row);
+            assert!(
+                (dark + light - 255).abs() <= 8,
+                "{label}: the blurred edge is symmetric at {distance} px \
+                 ({dark} dark, {light} light)",
+            );
+        }
+        assert!(
+            luma(61, row) > 40,
+            "{label}: the black side of the edge is lightened, not left sharp ({})",
+            luma(61, row),
+        );
+    }
+    assert!(
+        luma(60, 4) < 8 && luma(68, 4) >= 250,
+        "while above the views the edge is still a step ({}, {})",
+        luma(60, 4),
+        luma(68, 4),
     );
 }
 

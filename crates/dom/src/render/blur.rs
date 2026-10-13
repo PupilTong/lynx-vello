@@ -17,7 +17,7 @@
 //! that renderer's [`AtlasResidency`], and asked once per rendered frame for
 //! the table of baked textures the compose program indexes by entry.
 //!
-//! The two differ in three places and nowhere else. A `filter: blur()`
+//! The two differ in four places and nowhere else. A `filter: blur()`
 //! group's rect carries a 3σ transparent margin and its sampler is
 //! clamp-to-edge, so what the kernel reads past the content is the
 //! transparent black filter-effects-1 specifies. A `backdrop-filter` entry's
@@ -25,15 +25,28 @@
 //! with no margin because the property enlarges no ink overflow — and its
 //! sampler is `MirrorRepeat`, so what the kernel reads past the crop is the
 //! backdrop reflected back in (user ruling, 2026-09-19; it is also what
-//! Chromium does). And a backdrop's σ may be zero, because a colour-only
-//! list still has to produce its isolated copy of the backdrop.
+//! Chromium does). A backdrop's σ may be zero, because a colour-only
+//! list still has to produce its isolated copy of the backdrop. And a
+//! backdrop whose Backdrop Root is the document's root element
+//! ([`crate::FilterGroup::reads_canvas`]) bakes over the **canvas colour**
+//! rather than over transparent black: filter-effects-2's Backdrop Root
+//! Image of the root holds the canvas under everything the page painted,
+//! and the canvas is the base colour of the composite render, which no op in
+//! the entry's range draws. Baked without it, the texture is transparent
+//! wherever the page painted nothing and translucent wherever the blur
+//! spreads painted content toward such a place, and drawn source-over it
+//! leaves the unfiltered pixels showing there. A backdrop inside any other
+//! Backdrop Root keeps the transparent base, because that group's own pixels
+//! start empty.
 //!
 //! # One pre-step, cached
 //!
 //! [`FilterTextures::prepare`] is the whole of it, and it is skipped
 //! altogether for a frame with no filter entry — which is every frame of a
 //! page that neither blurs nor filters a backdrop. Its cache is keyed on the
-//! commit id, and each entry re-bakes on its own two conditional readings:
+//! commit id and on the canvas colour the bakes were taken over, which a
+//! target clears to for its whole life, and each entry re-bakes on its own
+//! two conditional readings:
 //!
 //! - the painter's **scroll generation**, when some op in the entry's range and the entry's own
 //!   space differ in their innermost scroll or sticky node — a node on one path and not the other.
@@ -72,7 +85,8 @@
 //!
 //! 1. **Bake.** The entry's ops replay into a scratch [`vello::Scene`] with the entry's own space
 //!    factored out (see [`crate::CommittedFrame::bake_filter`]) and render into a `STORAGE_BINDING`
-//!    target over `Color::TRANSPARENT`.
+//!    target over `Color::TRANSPARENT`, or over the canvas colour for an entry that [reads the
+//!    canvas](crate::FilterGroup::reads_canvas).
 //! 2. **Premultiply.** vello writes its target *unpremultiplied*, and filtering unpremultiplied
 //!    color pulls the color of fully transparent pixels into their neighbours — a white square on
 //!    white gets a dark halo. So the first pass is `vec4(rgb * a, a)`, and the whole rest of the
@@ -116,7 +130,7 @@
 //! vello's 8192² atlas binds first.
 
 use euclid::default::Vector2D;
-use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+use vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
 use vello::wgpu;
 
 use super::gpu::{AtlasResidency, GpuError, render_params};
@@ -716,6 +730,8 @@ pub struct FilterTextures {
     order: Vec<u32>,
     /// The commit the bakes belong to. See the module doc.
     commit: Option<u64>,
+    /// The canvas colour the bakes were taken over.
+    canvas: Option<Color>,
     /// Per entry, the readings its bake was taken at; see [`reading`].
     readings: Vec<(u64, u64)>,
     /// Per entry, whether this prepare bakes it. A field so the pass
@@ -746,6 +762,12 @@ impl FilterTextures {
     /// its vector draws were baked into, both index-parallel with their
     /// side tables: an entry's range may draw either.
     ///
+    /// `canvas` is the colour the composite render of this frame clears its
+    /// target to — the `base_color` it hands [`render_params`]. An entry that
+    /// [reads the canvas](crate::FilterGroup::reads_canvas) bakes over it,
+    /// so the two must be the same colour or the filtered backdrop is the
+    /// backdrop of another canvas.
+    ///
     /// # Errors
     ///
     /// [`GpuError::Render`] if a bake render fails. The table then holds a
@@ -769,9 +791,11 @@ impl FilterTextures {
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
         animation_now: Option<f64>,
+        canvas: Color,
     ) -> Result<&[Option<ImageData>], GpuError> {
         let groups = frame.filter_groups();
         let commit = frame.commit_id();
+        self.adopt_canvas(canvas);
         let readings = Readings {
             scroll_generation,
             animation_now,
@@ -820,6 +844,7 @@ impl FilterTextures {
             vectors,
             offset_of,
             animation_now,
+            canvas,
         )?;
         self.commit = Some(commit);
         Ok(&self.images)
@@ -841,6 +866,17 @@ impl FilterTextures {
     /// page's groups will want textures of their own.
     pub fn forget(&mut self) {
         self.commit = None;
+    }
+
+    /// Records the canvas colour this prepare bakes over, forgetting the
+    /// cached bakes when it is not the one they were taken over: those belong
+    /// to no frame drawn over this canvas. The same colour, which is every
+    /// prepare of a target after its first, leaves the cache as it is.
+    fn adopt_canvas(&mut self, canvas: Color) {
+        if self.canvas != Some(canvas) {
+            self.canvas = Some(canvas);
+            self.forget();
+        }
     }
 
     /// Fills `due` with the entries this prepare bakes, answering whether the
@@ -911,6 +947,7 @@ impl FilterTextures {
         vectors: &[Option<ImageData>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
+        canvas: Color,
     ) -> Result<(), GpuError> {
         let Self {
             pipelines,
@@ -950,13 +987,21 @@ impl FilterTextures {
             // including a bake: a patch-free bake frees the whole image
             // atlas, which is exactly the loss `AtlasResidency` repairs.
             atlas.prepare_all(renderer, bake, images, filtered, vectors);
+            // The canvas is under the document root's Backdrop Root Image
+            // and is no op of the frame, so it enters here, as the base the
+            // range composes over; every other entry starts from nothing.
+            let base = if group.reads_canvas() {
+                canvas
+            } else {
+                Color::TRANSPARENT
+            };
             renderer
                 .render_to_texture(
                     device,
                     queue,
                     bake,
                     &bank.target.view,
-                    &render_params(vello::peniko::Color::TRANSPARENT, width, height),
+                    &render_params(base, width, height),
                 )
                 .map_err(|error| GpuError::Render(error.to_string()))?;
 
@@ -1266,6 +1311,23 @@ mod tests {
         assert_eq!(level_size(7, 3, 0), (7, 3));
     }
 
+    /// The canvas colour is part of what a cached bake belongs to: the same
+    /// colour keeps the cache, so a still frame over a still canvas bakes
+    /// once, and another colour forgets it.
+    #[test]
+    fn a_canvas_change_forgets_the_bakes_and_the_same_canvas_keeps_them() {
+        use crate::vello::peniko::Color;
+
+        let mut textures = FilterTextures::default();
+        textures.adopt_canvas(Color::WHITE);
+        // What a successful prepare over that canvas leaves behind.
+        textures.commit = Some(3);
+        textures.adopt_canvas(Color::WHITE);
+        assert_eq!(textures.commit, Some(3), "the same canvas keeps the cache");
+        textures.adopt_canvas(Color::BLACK);
+        assert_eq!(textures.commit, None, "another canvas forgets it");
+    }
+
     /// A colour-only `backdrop-filter` plans no work at all: no decimation
     /// level and no kernel. `run_chain` reads exactly that pair to decide it
     /// owes only the premultiply.
@@ -1306,6 +1368,7 @@ mod tests {
                     transform: Affine::IDENTITY,
                     before: Vec::new(),
                     after: Vec::new(),
+                    root: crate::paint::compose::BackdropRoot::Document,
                     open_pushes: 0,
                 },
             );

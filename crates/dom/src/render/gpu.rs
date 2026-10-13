@@ -281,12 +281,20 @@ impl Headless {
     ///
     /// Call before composing, at the same `animation_now` the composition
     /// will use, with the `vectors` table [`Self::prepare_vectors`] answered
-    /// for this frame. A frame with no filter entry answers an empty slice
-    /// and touches no GPU resource.
+    /// for this frame, and with the `base_color` [`Self::render_frame`] will
+    /// be given for it: a `backdrop-filter` element at the document's root
+    /// filters the canvas along with what the page painted over it. A frame
+    /// with no filter entry answers an empty slice and touches no GPU
+    /// resource.
     ///
     /// # Errors
     ///
     /// [`GpuError::Render`] if a bake render fails.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one bake pre-step's full inputs: the frame, its two pixel tables, the three \
+                  compose readings, and the canvas colour"
+    )]
     pub fn prepare_filters(
         &mut self,
         frame: &CommittedFrame,
@@ -295,6 +303,7 @@ impl Headless {
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         scroll_generation: u64,
         animation_now: Option<f64>,
+        base_color: vello::peniko::Color,
     ) -> Result<&[Option<ImageData>], GpuError> {
         let Self {
             context,
@@ -316,6 +325,7 @@ impl Headless {
             offset_of,
             scroll_generation,
             animation_now,
+            base_color,
         )
     }
 

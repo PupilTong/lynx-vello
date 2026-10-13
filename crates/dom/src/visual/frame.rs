@@ -536,6 +536,12 @@ impl CommittedFrame {
     /// backdrop pops the layers the range left open and draws its pre-blur
     /// passes over the whole bake rect, so neither lands inside a clip.
     ///
+    /// `scene` holds the range's ops and nothing under them. What they
+    /// compose over is the base colour `scene` is rendered with, which is
+    /// the caller's: the canvas colour for an entry that
+    /// [reads the canvas](FilterGroup::reads_canvas), transparent black for
+    /// every other.
+    ///
     /// Offsets on a circular axis are normalized as [`Self::compose_into`]
     /// normalizes them, and the seam copy of a straddling container the
     /// entry does not ride is baked into the texture with the rest.

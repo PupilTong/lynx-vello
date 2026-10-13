@@ -97,13 +97,15 @@ pub fn capture_document_sized<T: Sync>(
     frame.resolve_images(pixels, &mut images, &mut sources);
     // The vector textures first, since a filter bake may draw them; then,
     // with no offsets, no generation and no timeline reading, the filter
-    // bakes: a capture composes the frame exactly as it was committed.
+    // bakes: a capture composes the frame exactly as it was committed. They
+    // take the capture's background, which is the canvas a backdrop at the
+    // document's root filters.
     let vectors: Vec<Option<ImageData>> = gpu
         .prepare_vectors(&frame)
         .map_err(CaptureError::Gpu)?
         .to_vec();
     let filtered: Vec<Option<ImageData>> = gpu
-        .prepare_filters(&frame, &images, &vectors, &|_| None, 0, None)
+        .prepare_filters(&frame, &images, &vectors, &|_| None, 0, None, background)
         .map_err(CaptureError::Gpu)?
         .to_vec();
     let mut composed = Scene::new();

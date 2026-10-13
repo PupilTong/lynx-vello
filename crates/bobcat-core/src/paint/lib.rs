@@ -166,6 +166,15 @@ pub(crate) struct FarEnd {
     notices: mpsc::UnboundedReceiver<crate::link::ViewNotice>,
 }
 
+/// The canvas colour: what a painter's target holds before a frame composes
+/// over it, and so what shows wherever the page painted nothing.
+///
+/// Named once because two renders read it. The composite render clears to
+/// it, and the bake of a `backdrop-filter` element at the document's root
+/// renders over it, since filter-effects-2's Backdrop Root Image of the root
+/// holds the canvas (see [`dom::render::blur`]).
+const CANVAS: Color = Color::WHITE;
+
 /// Where a painter's pixels go: a window's presentation stack, or a texture
 /// it owns and nothing displays. It is built with the painter and is the one
 /// it has for its whole life, whatever views come and go past it.
@@ -294,6 +303,7 @@ impl Output {
                     offset_of,
                     scroll_generation,
                     animation_now,
+                    CANVAS,
                 )
                 .map_err(|error| EngineError::Gpu(error.to_string()))?,
             Self::Window(graphics) => graphics.prepare_filters(
@@ -332,7 +342,7 @@ impl Output {
             #[cfg(test)]
             Self::None => Ok(()),
             Self::Offscreen(gpu) => gpu
-                .render_frame(scene, images, size.width, size.height, Color::WHITE)
+                .render_frame(scene, images, size.width, size.height, CANVAS)
                 .map_err(|error| EngineError::Gpu(error.to_string())),
             Self::Window(graphics) => graphics.render_to_target(scene, images, size),
         }

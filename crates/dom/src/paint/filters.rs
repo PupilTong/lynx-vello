@@ -72,11 +72,12 @@
 //!
 //! filter-effects-2 applies the same list to a *different* image: the
 //! Backdrop Root Image, which is everything painted before the element
-//! inside its nearest Backdrop Root ancestor, cropped to the element's own
-//! border box. The split is the same one, and so is every pass, but the two
-//! halves land elsewhere: `before` is drawn inside the backdrop's own bake,
-//! over the whole bake rect, and `after` is drawn at compose time over the
-//! drawn backdrop, bounded by the element's rounded border box. Both halves
+//! inside its nearest Backdrop Root ancestor, over the canvas when that root
+//! is the document's, cropped to the element's own border box. The split is
+//! the same one, and so is every pass, but the two halves land elsewhere:
+//! `before` is drawn inside the backdrop's own bake, over the whole bake
+//! rect, and `after` is drawn at compose time over the drawn backdrop,
+//! bounded by the element's rounded border box. Both halves
 //! travel as [`Pass`] values on the frame's filter side table rather than as
 //! a style the bake would have to re-read, because a bake runs on the
 //! painter's thread with no document in reach.
