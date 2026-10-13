@@ -4089,6 +4089,44 @@ mod implementation {
             );
         }
 
+        /// A module whose body throws fails its `require` with that throw and
+        /// leaves no rejection behind, so a caller that catches it has
+        /// handled it: not the evaluation promise, not the promise `QuickJS`
+        /// runs each module body as, and not those of the modules on the
+        /// failing path of its graph.
+        #[test]
+        fn a_caught_module_throw_leaves_no_rejection_behind() {
+            for (name, text) in [
+                ("app:///plain.mjs", "throw Error('boom');"),
+                (
+                    "app:///graph.mjs",
+                    "import 'app:///inner.mjs';\nthrow Error('outer');",
+                ),
+                ("app:///deep.mjs", "import 'app:///throws.mjs';"),
+            ] {
+                let (mut runtime, mut realm, _host) = loader_realm(
+                    RequireHost::default()
+                        .module(name, text)
+                        .module("app:///inner.mjs", "export {};")
+                        .module("app:///throws.mjs", "throw Error('deep');"),
+                );
+                // The oldest rejection left is what the checkpoint reports:
+                // the unrelated one, only if the throw left none before it.
+                let error = run_loader(
+                    &mut runtime,
+                    &mut realm,
+                    "entry",
+                    &format!(
+                        "try {{ loadModuleSync('{name}', 'unread'); throw Error('not thrown'); }}\n\
+                         catch (error) {{ if (error.message === 'not thrown') throw error; }}\n\
+                         Promise.reject(Error('unrelated'));"
+                    ),
+                )
+                .expect_err("the unrelated rejection is left");
+                assert_eq!(error.message, "unrelated", "{name}");
+            }
+        }
+
         /// A module that threw is kept as the failure it is: `QuickJS` answers
         /// a second evaluation from the first one's exception rather than
         /// running the body again, and the realm hears about it once.
