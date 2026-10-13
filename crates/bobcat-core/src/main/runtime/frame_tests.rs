@@ -20,6 +20,10 @@ use crate::view::{EngineEvent, NoWakeup};
 
 const CARD: &str = "app:///child.web.bundle";
 
+/// A second card the host serves, with no page CSS: what replaces [`CARD`]
+/// when the host page writes a new `src`.
+const SECOND: &str = "app:///second.web.bundle";
+
 /// The nested card's `root`, as a compiled card's root defines its
 /// `renderPage`: a global the boot calls with the processed init data. It
 /// throws — which the test sees as a diagnostic — unless its `__Card__` is
@@ -35,8 +39,8 @@ fn root(src: &str) -> String {
 }
 
 /// The host page: a text of its own, then a 100×50 frame showing `src`.
-/// `updatePage` clears the frame's `src`, so a test reaches the page realm
-/// through `LynxView::update_data`.
+/// `updatePage` writes the data's `src` to the frame, `null` included, so a
+/// test reaches the page realm through `LynxView::update_data`.
 fn host_entry(src: &str) -> String {
     format!(
         r"
@@ -49,8 +53,8 @@ fn host_entry(src: &str) -> String {
         __SetAttribute(frame, 'src', '{src}');
         __AppendElement(page, frame);
         __FlushElementTree();
-        globalThis.updatePage = () => {{
-            __SetAttribute(frame, 'src', null);
+        globalThis.updatePage = (data) => {{
+            __SetAttribute(frame, 'src', data.src);
             __FlushElementTree();
         }};
     "
@@ -63,13 +67,28 @@ fn serving_the_card(src: &str) -> TestViewSpec {
     serving_a_root(src, &root(src))
 }
 
-/// The same, with `root` as the card's root body.
+/// The same, with `root` as the card's root body. [`SECOND`] is served
+/// too, with its own root and no page CSS.
 fn serving_a_root(src: &str, root: &str) -> TestViewSpec {
     TestViewSpec::new(&host_entry(src))
         .with_fetchable(CARD)
         .with_module(&format!("{CARD}/root.js"), &super::card_entry(root))
         .serving_style_sheet(&format!("{CARD}/style-info.css"), "text { color: red }")
+        .with_fetchable(SECOND)
+        .with_module(
+            &format!("{SECOND}/root.js"),
+            &super::card_entry(&self::root(SECOND)),
+        )
         .with_style_sheet_probe()
+}
+
+/// Writes `src` (JSON: a string or `null`) to the host's frame through
+/// `updatePage`.
+fn write_src(engine: &mut TestEngine, src: &str) {
+    engine
+        .view
+        .update_data(format!(r#"{{"src":{src}}}"#), String::new())
+        .expect("the view takes an update");
 }
 
 /// What the frame shows, read off the document.
@@ -163,8 +182,9 @@ fn reported(events: &[EngineEvent]) -> Vec<&str> {
 
 /// A frame's `src` boots the card in a `ShadowRealm` bound to it: the
 /// card's tree is the nested page in the frame's shadow root, inside the
-/// frame's own 100×50 box, and its page CSS styles that tree alone. Clearing
-/// `src` frees the nested tree.
+/// frame's own 100×50 box, and its page CSS styles that tree alone. Removing
+/// `src` keeps the card, as native and web-core do; a different `src`
+/// replaces it, and the first card's nodes are freed.
 #[test]
 fn a_frames_src_boots_the_card_inside_it() {
     a_frame_boots(CARD);
@@ -206,20 +226,34 @@ fn a_frame_boots(src: &str) {
     );
 
     let nested = state.nested;
-    engine
-        .view
-        .update_data("{}".to_owned(), String::new())
-        .expect("the view takes an update");
-    pump_until(
+    // A removal does nothing. `update_data` is answered in order, so once
+    // a later update has run, so has this one.
+    write_src(&mut engine, "null");
+    write_src(&mut engine, &format!("{src:?}"));
+    for _ in 0..20 {
+        events.extend(engine.pump());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let kept = pump_until(&mut engine, &mut events, "the card is kept", |_| true);
+    assert_eq!(kept.nested, nested, "removing src keeps the nested tree");
+    assert_eq!(kept.nested_color, Some(red));
+
+    write_src(&mut engine, &format!("{SECOND:?}"));
+    let replaced = pump_until(
         &mut engine,
         &mut events,
-        "the nested card was released",
-        |state| state.nested.is_empty(),
+        "the second card replaced the first",
+        |state| state.nested.len() == 2 && state.nested.iter().all(|id| !nested.contains(id)),
+    );
+    assert_eq!(
+        replaced.nested_color,
+        Some(AbsoluteColor::BLACK),
+        "the second card has no page CSS, and the first card's is gone"
     );
     let freed = engine
         .probe_document(move |tree| nested.iter().all(|id| tree.get(*id).is_none()))
         .expect("the document answers");
-    assert!(freed, "clearing src freed every nested node");
+    assert!(freed, "a new src freed every node of the first card");
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 

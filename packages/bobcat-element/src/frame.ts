@@ -4,13 +4,19 @@
 // `bobcat:element` calls `frameSourceChanged` after it has written `src` to a
 // frame's node. From there the load is this module's:
 //
-// 1. The frame's current card is let go of first — `releaseFrame` frees its
-//    nested page and retires the `ShadowRealm` that built it — and a `null`
-//    or empty `src` stops there.
+// 1. A `null` or empty `src` does nothing: the frame keeps the card it has,
+//    as native's `FrameElement::OnSetSrc` ignores a `src` it cannot load
+//    (`lynx/core/renderer/dom/fiber/frame_element.cc`) and web-core's
+//    `LynxView` keeps its running card when `url` is removed
+//    (`web-core/ts/client/mainthread/LynxView.ts`). A new `src` lets go of
+//    the frame's current card first — `releaseFrame` frees its nested page
+//    and retires the `ShadowRealm` that built it. The other release is the
+//    frame's own: `dropElement` releases a frame whose handle was collected.
 // 2. `fetchResource(src)` fetches the container, `src` as written: the
 //    fetcher resolves it against the view's base URL, and its installer
-//    registers the card's `root` at `<src path>/root.js` and its page CSS at
-//    `<src path>/style-info.css` before the fetch settles. `true` is a
+//    (`BundleInstaller`) registers the card's `root` at `<U>/root.js` and its
+//    StyleInfo at `<U>/style-info.css`, `U` the resolved `src`, before the
+//    fetch settles. `true` is a
 //    container this view already fetched, which still starts in a later
 //    microtask, so a start is never inside the `__SetAttribute` that asked
 //    for it.
@@ -19,12 +25,12 @@
 //    and the page data and `SystemInfo` as JSON text — which binds the child
 //    to the frame and runs the card there.
 //
-// Every step checks that the frame still wants this load: a later `src`
-// write bumps the frame's generation, and a fetch or an import that settles
+// Every step checks that the frame still wants this load: a later, different
+// `src` bumps the frame's generation, and a fetch or an import that settles
 // for an earlier one starts nothing. A write of the `src` the frame already
 // has does nothing, as native's `FrameElement::OnSetSrc` skips an unchanged
-// `src` (`lynx/core/renderer/dom/fiber/frame_element.cc`) and web-core's
-// `LynxView` an unchanged `url` (`web-core/ts/client/mainthread/LynxView.ts`).
+// `src` and web-core's `LynxView` an unchanged `url`; nor does a removal,
+// which leaves a load in flight to finish.
 //
 // What the nested card does is the child's to report: a failure in the child
 // reports there, through the same diagnostics pair, and its `boot` answers
@@ -55,9 +61,9 @@ type Boot = (
 
 /** One frame's load, filed on its handle. */
 interface FrameLoad {
-  /** Bumped by every `src` change; a load of an earlier one is stale. */
+  /** Bumped by every new `src`; a load of an earlier one is stale. */
   generation: number;
-  /** The card the frame shows or is loading, or `null` for none. */
+  /** The card the frame shows or is loading, or `null` before its first. */
   src: string | null;
   /** The realm the current load created, held for the frame's life. */
   realm: ShadowRealm | undefined;
@@ -71,18 +77,20 @@ interface FrameHandle {
 
 /**
  * The frame `handle` (node `frameId`) was given `src`: `null` for a removed
- * attribute, otherwise the written value, stringified.
+ * attribute, otherwise the written value, stringified. Only a non-empty `src`
+ * other than the frame's current one does anything.
  */
 export function frameSourceChanged(handle: object, frameId: number, src: string | null): undefined {
+  if (src === null || src === "") return undefined;
   const frame = handle as FrameHandle;
   const load = frame[loadSymbol] ??= { generation: 0, src: null, realm: undefined };
-  const wanted = src === "" ? null : src;
-  if (wanted === load.src) return undefined;
+  if (src === load.src) return undefined;
+  const replaced = load.src !== null;
   load.generation += 1;
-  load.src = wanted;
+  load.src = src;
   load.realm = undefined;
-  releaseFrame(frameId);
-  if (wanted === null) return undefined;
+  if (replaced) releaseFrame(frameId);
+  const wanted = src;
   const generation = load.generation;
   const current = () => load.generation === generation;
   let fetched: number | true;

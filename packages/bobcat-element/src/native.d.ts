@@ -450,7 +450,8 @@ declare module "bobcat-internal:host" {
   /**
    * Releases the binding of the `frame` element `frame`: frees its nested
    * page with everything under it, the bindings of frames inside it first,
-   * and retires the child it was bound to, which the owner's next epilogue
+   * removes the sheets the child mounted on the frame's shadow root, and
+   * retires the child it was bound to, which the owner's next epilogue
    * frees. A frame that is not bound is left alone.
    */
   export function releaseFrame(frame: number): void;

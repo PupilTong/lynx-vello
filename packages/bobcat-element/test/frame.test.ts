@@ -108,12 +108,12 @@ beforeEach(() => {
 });
 
 describe("frameSourceChanged", () => {
-  it("releases, fetches src as written, and boots it in a fresh realm once the fetch settles", async () => {
+  it("fetches src as written, and boots it in a fresh realm once the fetch settles", async () => {
     const frame = {};
     frameSourceChanged(frame, 3, "child.web.bundle");
     const [id] = futures();
+    // A frame with no card yet has nothing to release.
     expect(calls).toEqual([
-      ["releaseFrame", 3],
       ["fetchResource", "child.web.bundle"],
       ["settleFuture", id],
     ]);
@@ -123,7 +123,7 @@ describe("frameSourceChanged", () => {
     future.__BobcatSettleFuture(id!, false, undefined);
     await drain();
     expect(FakeShadowRealm.created).toBe(1);
-    expect(calls.slice(3)).toEqual([
+    expect(calls.slice(2)).toEqual([
       ["importValue", "bobcat:frame-boot", "boot"],
       ["boot", 3, "child.web.bundle", "{}", "{}", SYSTEM_INFO],
     ]);
@@ -133,7 +133,6 @@ describe("frameSourceChanged", () => {
     already.add("app:///cached.web.bundle");
     frameSourceChanged({}, 3, "app:///cached.web.bundle");
     expect(calls).toEqual([
-      ["releaseFrame", 3],
       ["fetchResource", "app:///cached.web.bundle"],
     ]);
     expect(FakeShadowRealm.created).toBe(0);
@@ -167,31 +166,57 @@ describe("frameSourceChanged", () => {
     await drain();
     expect(FakeShadowRealm.created).toBe(1);
     // The `src` changes before the realm's import settles.
-    frameSourceChanged(frame, 3, null);
+    frameSourceChanged(frame, 3, "app:///second.web.bundle");
     FakeShadowRealm.release!();
     await drain();
     expect(calls.filter(call => call[0] === "boot")).toEqual([]);
   });
 
-  it("releases and starts nothing for a null or empty src", async () => {
+  it("does nothing for a null or empty src: the frame keeps its card, as native and web-core do", async () => {
     const frame = {};
     frameSourceChanged(frame, 3, "app:///child.web.bundle");
     const [first] = futures();
     calls.length = 0;
     frameSourceChanged(frame, 3, null);
-    expect(calls).toEqual([["releaseFrame", 3]]);
+    frameSourceChanged(frame, 3, "");
+    expect(calls).toEqual([]);
 
-    const other = {};
-    frameSourceChanged(other, 4, "app:///child.web.bundle");
-    const [second] = futures();
-    calls.length = 0;
-    frameSourceChanged(other, 4, "");
-    expect(calls).toEqual([["releaseFrame", 4]]);
-
+    // The load in flight is still the frame's, and boots.
     future.__BobcatSettleFuture(first!, false, undefined);
-    future.__BobcatSettleFuture(second!, false, undefined);
     await drain();
-    expect(FakeShadowRealm.created).toBe(0);
+    expect(FakeShadowRealm.created).toBe(1);
+    expect(calls.filter(call => call[0] === "boot")).toEqual([
+      ["boot", 3, "app:///child.web.bundle", "{}", "{}", SYSTEM_INFO],
+    ]);
+
+    // Nor does a removal undo what the next write compares against: the
+    // same `src` again is still unchanged.
+    calls.length = 0;
+    frameSourceChanged(frame, 3, null);
+    frameSourceChanged(frame, 3, "app:///child.web.bundle");
+    expect(calls).toEqual([]);
+
+    // A frame that never had a card ignores both, too.
+    frameSourceChanged({}, 4, null);
+    frameSourceChanged({}, 4, "");
+    expect(calls).toEqual([]);
+  });
+
+  it("releases the old card first when a new src replaces it", async () => {
+    already.add("app:///first.web.bundle");
+    already.add("app:///second.web.bundle");
+    const frame = {};
+    frameSourceChanged(frame, 3, "app:///first.web.bundle");
+    await drain();
+    calls.length = 0;
+    frameSourceChanged(frame, 3, "app:///second.web.bundle");
+    expect(calls).toEqual([
+      ["releaseFrame", 3],
+      ["fetchResource", "app:///second.web.bundle"],
+    ]);
+    await drain();
+    expect(FakeShadowRealm.created).toBe(2);
+    expect(calls.at(-1)).toEqual(["boot", 3, "app:///second.web.bundle", "{}", "{}", SYSTEM_INFO]);
   });
 
   it("does nothing for the src the frame already has, as native and web-core skip it", () => {
@@ -199,9 +224,6 @@ describe("frameSourceChanged", () => {
     frameSourceChanged(frame, 3, "app:///child.web.bundle");
     calls.length = 0;
     frameSourceChanged(frame, 3, "app:///child.web.bundle");
-    expect(calls).toEqual([]);
-    // Nor for a removal of a `src` the frame never had.
-    frameSourceChanged({}, 4, null);
     expect(calls).toEqual([]);
   });
 
@@ -218,7 +240,7 @@ describe("frameSourceChanged", () => {
   it("reports nothing for a stale fetch that failed", async () => {
     const frame = {};
     frameSourceChanged(frame, 3, "app:///nope.web.bundle");
-    frameSourceChanged(frame, 3, null);
+    frameSourceChanged(frame, 3, "app:///other.web.bundle");
     future.__BobcatSettleFuture(futures()[0]!, true, "not found");
     await drain();
     expect(calls.filter(call => call[0] === "reportError")).toEqual([]);

@@ -583,6 +583,24 @@ impl StyleEngine {
         Self::note_flush(&mut self.changed_position_try_names, &invalidations);
     }
 
+    /// Removes every sheet of one shadow tree, leaving it styled by no
+    /// author rule of its own.
+    pub(crate) fn clear_scoped_stylesheets(&mut self, styles: &mut AuthorStyles<ShadowStyleSheet>) {
+        let sheets: Vec<ShadowStyleSheet> = styles.stylesheets.iter().cloned().collect();
+        let guard = self.lock.read();
+        for sheet in sheets {
+            styles.stylesheets.remove_stylesheet(
+                None,
+                styles.data.custom_media_map(),
+                sheet,
+                &guard,
+            );
+        }
+        let invalidations = styles.flush(&mut self.stylist, &guard);
+        drop(guard);
+        Self::note_flush(&mut self.changed_position_try_names, &invalidations);
+    }
+
     /// Installs rules this engine built as one author-origin sheet.
     pub(crate) fn append_rules(&mut self, rules: Vec<CssRule>) {
         let sheet = self.stylesheet_from_rules(rules);
@@ -894,6 +912,27 @@ impl<T> Document<T> {
         {
             let (engine, shadow) = self.shadow_style_parts(shadow_root);
             engine.append_scoped_rules(&mut shadow.styles, rules);
+        }
+        self.mark_subtree_dirty(host);
+    }
+
+    /// Removes every sheet [`Document::add_shadow_stylesheet`] and
+    /// [`Document::append_shadow_rules`] mounted on one shadow tree: the
+    /// shadow-root counterpart of emptying a shadow root's
+    /// `adoptedStyleSheets` (CSSOM §Using CSS style sheets). The tree is
+    /// matched again against the document's UA rules alone.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `shadow_root` is not a live shadow root.
+    pub fn clear_shadow_stylesheets(&mut self, shadow_root: NodeId) {
+        let host = self
+            .shadow_host(shadow_root)
+            .expect("Document::clear_shadow_stylesheets: not a live shadow root");
+        self.note_visual_mutation();
+        {
+            let (engine, shadow) = self.shadow_style_parts(shadow_root);
+            engine.clear_scoped_stylesheets(&mut shadow.styles);
         }
         self.mark_subtree_dirty(host);
     }

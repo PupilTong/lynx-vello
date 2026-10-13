@@ -132,6 +132,39 @@ fn document_rules_stop_at_the_boundary_and_scoped_rules_stay_inside() {
     assert_eq!(harness.doc.value(outside, "color"), "rgb(255, 0, 0)");
 }
 
+/// Clearing a shadow root's sheets unstyles its tree and its `:host`, and a
+/// sheet mounted afterwards styles it alone.
+#[test]
+fn clearing_a_shadow_roots_sheets_drops_their_rules() {
+    let mut harness = Harness::new();
+    let inside = harness.shadow_el(harness.shadow, "target");
+    harness.doc.dom.add_shadow_stylesheet(
+        harness.shadow,
+        "target { width: 9px; } :host { color: rgb(255, 0, 0); }",
+    );
+    harness
+        .doc
+        .dom
+        .add_shadow_stylesheet(harness.shadow, "target { height: 4px; }");
+    harness.doc.flush();
+    assert_eq!(harness.doc.value(inside, "width"), "9px");
+    assert_eq!(harness.doc.value(harness.host, "color"), "rgb(255, 0, 0)");
+
+    harness.doc.dom.clear_shadow_stylesheets(harness.shadow);
+    harness.doc.flush();
+    assert_eq!(harness.doc.value(inside, "width"), "auto");
+    assert_eq!(harness.doc.value(inside, "height"), "auto");
+    assert_eq!(harness.doc.value(harness.host, "color"), "rgb(0, 0, 0)");
+
+    harness
+        .doc
+        .dom
+        .add_shadow_stylesheet(harness.shadow, "target { width: 2px; }");
+    harness.doc.flush();
+    assert_eq!(harness.doc.value(inside, "width"), "2px");
+    assert_eq!(harness.doc.value(inside, "height"), "auto");
+}
+
 #[test]
 fn host_matches_the_host_from_inside_the_shadow_tree_only() {
     let mut harness = Harness::new();

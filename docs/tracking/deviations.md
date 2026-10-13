@@ -2399,11 +2399,6 @@ consequential choice about whether to follow the spec or the quirk.
     `<U>/root.js`. A source-built `.lynx.bundle` names its main-thread
     entry `<name>__main-thread` and has no `root`, so its load fails with one
     diagnostic and the frame stays empty.
-  - *Removing `src`, or writing `""`, releases the frame's card*: the nested
-    page is freed and its realm retired. Native ignores a non-string `src`
-    (`FrameElement::OnSetSrc`) and web-core's `LynxView` renders nothing for
-    an empty `url` but disposes nothing, so both keep the old card. A write
-    of the frame's current `src` does nothing, as in both.
   - *The nested card's first flush is queued a microtask after its
     `renderPage`*, as the page boot queues its own; until the page's first
     flush has settled the listed sheets and the painter binding, a child's

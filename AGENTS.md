@@ -1578,7 +1578,9 @@ root, makes it the realm's root, records `FrameBinding { page, retired }` in
 `DocumentSlot::frames` under the host, and answers the page's id.
 `releaseFrame(frame)` is idempotent: it releases every binding inside the
 nested page first, frees the nested page with its whole subtree (inside a
-shadow tree, so `dom` frees it whole), and sets the child's `retired`, so the
+shadow tree, so `dom` frees it whole), removes every sheet the child mounted
+on the frame's shadow root (`Document::clear_shadow_stylesheets`, so the next
+card is styled by its own sheet alone), and sets the child's `retired`, so the
 epilogue's release step frees the child whoever refers to it; a
 `dropElement` of a bound frame host releases it first. A disconnected frame
 keeps its binding and its realm, and nodes a released child created and never
@@ -1592,11 +1594,13 @@ members drop.
 (`packages/bobcat-element/src/frame.ts`, `bobcat:frame`). `__CreateFrame`
 and `__CreateElement("frame")` mark the handle, and `__SetAttribute(frame,
 "src", value)` hands the new value (`null` for a removal) to
-`frameSourceChanged` after the native write. A value equal to the frame's
-current one does nothing, as native's `FrameElement::OnSetSrc` and web-core's
-`LynxView` `url` setter skip it; any other bumps the frame's generation,
-calls `releaseFrame`, and stops for `null` or `""`. Otherwise it calls
-`fetchResource(src)` with `src` as written — the fetcher resolves it against
+`frameSourceChanged` after the native write. A `null` or `""` does nothing —
+the frame keeps its card, as native's `FrameElement::OnSetSrc` ignores it and
+web-core's `LynxView` keeps its running card when `url` is removed — and
+neither does a value equal to the frame's current one, which both skip. Any
+other bumps the frame's generation, calls `releaseFrame` when the frame had a
+card (so a frame's card is released only by a new `src` or by `dropElement`
+of its handle), and calls `fetchResource(src)` with `src` as written — the fetcher resolves it against
 `ViewSources::base_url`, and `bobcat-source`'s `BundleInstaller` registers
 the card through `ContainerSources`, its `root` at `<U>/root.js` and its
 StyleInfo at `<U>/style-info.css` (`U` the resolved `src`), before the fetch
@@ -2895,7 +2899,11 @@ of the element path in the same file.
   `pnpm --filter reactlynx-test-fixtures build` before Rust tests, clippy or
   benches: the emitted `dist/index.rs` registry is what names the bundles, and
   no compiled fixture is versioned. Upstream provenance for the five `basic-*`
-  cards is in that package's `NOTICE.lynx-stack`. Native builds use the shared
+  cards and the `react-frame`/`react-frame-inner` pair (lynx-stack's
+  web-core-e2e `api-frame-src`/`api-frame-inner`: a red host page whose
+  100px `<frame src="./react-frame-inner.web.bundle">` shows a blue card,
+  rendered end to end by `crates/bobcat-source/tests/frame.rs`) is in that
+  package's `NOTICE.lynx-stack`. Native builds use the shared
   `scripts/lynx-bytecode.ts` hook to disable BTS manifest bytecode. MTS keeps
   the compiler's default encoding. The fixture-only source repack remains
   necessary for Bobcat's source evaluator.

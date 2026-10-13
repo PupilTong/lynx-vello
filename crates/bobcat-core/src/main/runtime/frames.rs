@@ -36,7 +36,8 @@
 //! the subtree is inside a shadow tree, so `dom` frees it whole — after
 //! releasing every frame bound inside it, and sets the bound child's
 //! `retired` flag, so the owner's next epilogue frees the child realm
-//! whoever still refers to it. A `dropElement` of a bound frame host
+//! whoever still refers to it. The sheets the child mounted on the frame's
+//! shadow root are removed with it. A `dropElement` of a bound frame host
 //! releases it first. A frame that is only disconnected keeps its binding
 //! and its realm (`docs/tracking/deviations.md`). What a released child
 //! created and never attached stays until the view ends.
@@ -191,28 +192,33 @@ impl DocumentSlot {
 
     /// Releases the binding of `frame`, if it has one: every frame bound
     /// inside its nested page first, then the nested page and its whole
-    /// subtree, and the bound child is retired.
+    /// subtree, and the sheets the child mounted on the frame's shadow root,
+    /// so a card loaded into the frame next is styled by its own alone. The
+    /// bound child is retired.
     pub(super) fn release_frame(&mut self, frame: NodeId) {
         let Some(binding) = self.frames.remove(&frame) else {
             return;
         };
         binding.retired.set(true);
         let document = self.document.as_ref().expect(super::DOCUMENT_EXISTS);
-        if document.get(binding.page).is_none() {
-            // A raw `dropElement` of the nested page's id freed it while the
-            // frame was disconnected; nothing is left under the binding.
-            return;
+        let shadow = document.shadow_root(frame);
+        if document.get(binding.page).is_some() {
+            let nested: Vec<NodeId> = self
+                .frames
+                .keys()
+                .copied()
+                .filter(|host| document.is_ancestor(binding.page, *host))
+                .collect();
+            for host in nested {
+                self.release_frame(host);
+            }
+            self.document_mut().drop_element(binding.page);
         }
-        let nested: Vec<NodeId> = self
-            .frames
-            .keys()
-            .copied()
-            .filter(|host| document.is_ancestor(binding.page, *host))
-            .collect();
-        for host in nested {
-            self.release_frame(host);
+        // Otherwise a raw `dropElement` of the nested page's id freed it
+        // while the frame was disconnected; its sheets are still mounted.
+        if let Some(shadow) = shadow {
+            self.document_mut().clear_shadow_stylesheets(shadow);
         }
-        self.document_mut().drop_element(binding.page);
     }
 
     /// How many frames this slot has bound, for a test.
