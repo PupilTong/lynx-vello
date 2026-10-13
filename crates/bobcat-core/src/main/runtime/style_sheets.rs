@@ -6,6 +6,7 @@ use std::rc::Rc;
 use quickjs_rust_bridge::HostValue;
 use tokio_util::sync::CancellationToken;
 
+use super::frames::{RealmRoot, SheetTarget};
 use super::{DocumentSlot, MainThreadError, ScriptEngine, install};
 use crate::jobs::JsThreadHandle;
 use crate::link::{SourceAnswer, ViewOutbox};
@@ -15,6 +16,8 @@ use crate::resource::{LoadedSource, SourceRequest, StyleSheetSource, unanswered_
 pub(super) fn install_styles(
     engine: &mut ScriptEngine,
     document: &Rc<RefCell<DocumentSlot>>,
+    // Where an adoption mounts: the document, or the frame's shadow root.
+    root: &Rc<RealmRoot>,
     outbox: &ViewOutbox,
     thread: JsThreadHandle,
 ) -> Result<(), MainThreadError> {
@@ -44,12 +47,18 @@ pub(super) fn install_styles(
     })?;
 
     let document = Rc::clone(document);
+    let root = Rc::clone(root);
     let token = outbox.token().clone();
     let sources = outbox.host_outbox(token.clone());
     install(engine, "adoptStyleSheet", 1, move |args| {
         let Some(HostValue::String(url)) = args.first() else {
             return Err("adoptStyleSheet expects a URL".to_owned());
         };
+        let mut slot = document.borrow_mut();
+        // Before the request: a frame realm bound to no frame, or whose frame
+        // was released, has nowhere to mount and asks for nothing. Nothing
+        // releases a frame while this call waits, because no JavaScript runs.
+        let target = root.sheets(slot.document_mut())?;
         // This receiver lives only for this call. Cache lookup and sharing an
         // in-flight preload belong to the resource fetcher on the host thread.
         let answer = sources.request(SourceRequest::StyleSheet(url.clone()));
@@ -60,19 +69,24 @@ pub(super) fn install_styles(
         // none of its jobs: no JavaScript of this realm's or any sibling's
         // runs before this returns. The view's own token is first, so a
         // release ends the wait rather than the response doing it.
-        let mut slot = document.borrow_mut();
+        //
         // The listed sheets first: they are the page's own cascade and were
         // requested before this one, so an adoption a card makes while the
         // entry evaluates still lands behind them, as it did when they were
-        // mounted at the document's construction.
-        slot.settle_sheets(&thread)?;
-        settle_style_sheet(slot.document_mut(), &thread, &token, url, answer)?;
+        // mounted at the document's construction. A frame's sheets are a
+        // cascade of their own, in the frame's shadow tree, which the listed
+        // sheets have no order against.
+        if matches!(target, SheetTarget::Document) {
+            slot.settle_sheets(&thread)?;
+        }
+        settle_style_sheet(slot.document_mut(), &thread, &token, url, answer, target)?;
         Ok(HostValue::Undefined)
     })
 }
 
 /// Waits inside a job for the answer to one author stylesheet request, then
-/// mounts it on `document` after every sheet it already holds.
+/// mounts it on `target` — the document, or one frame's shadow root — after
+/// every sheet it already holds.
 ///
 /// The one path both kinds of author sheet take: `adoptStyleSheet` with the
 /// answer to the request it just made, and the first `__FlushElementTree`
@@ -86,6 +100,7 @@ pub(super) fn settle_style_sheet(
     token: &CancellationToken,
     url: &str,
     answer: SourceAnswer,
+    target: SheetTarget,
 ) -> Result<(), String> {
     let sheet = match wait_for_source(thread, token, answer) {
         Ok(LoadedSource::StyleSheet(sheet)) => Ok(sheet),
@@ -95,10 +110,18 @@ pub(super) fn settle_style_sheet(
         Err(reason) => Err(reason),
     }
     .map_err(|reason| format!("loading stylesheet {url}: {reason}"))?;
-    match sheet {
-        StyleSheetSource::Text(css) => crate::style::add_style_sheet_text(document, &css),
-        StyleSheetSource::Preparsed(sheet) => {
+    match (target, sheet) {
+        (SheetTarget::Document, StyleSheetSource::Text(css)) => {
+            crate::style::add_style_sheet_text(document, &css);
+        }
+        (SheetTarget::Document, StyleSheetSource::Preparsed(sheet)) => {
             crate::style::add_preparsed_style_sheet(document, &sheet);
+        }
+        (SheetTarget::Shadow(shadow), StyleSheetSource::Text(css)) => {
+            crate::style::add_style_sheet_text_to_shadow(document, shadow, &css);
+        }
+        (SheetTarget::Shadow(shadow), StyleSheetSource::Preparsed(sheet)) => {
+            crate::style::add_preparsed_style_sheet_to_shadow(document, shadow, &sheet);
         }
     }
     Ok(())

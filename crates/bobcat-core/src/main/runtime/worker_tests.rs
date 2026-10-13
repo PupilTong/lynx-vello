@@ -4150,6 +4150,38 @@ fn a_callback_for_a_worker_that_has_ended_says_so_and_invoking_it_does_nothing()
     );
 }
 
+/// A worker realm's children get the core alone: no document members, so
+/// `bobcat:element` does not link in one, and no `bindFrame`.
+#[test]
+fn a_worker_realms_children_have_no_document_members() {
+    let mut pair = Pair::new(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.results = [];
+        globalThis.worker = new Worker('./worker.js');
+        worker.onmessage = event => results.push(event.data);
+    ",
+    );
+    pair.answer(
+        r"import 'bobcat:worker';
+        const realm = new ShadowRealm();
+        let failed;
+        try { await realm.importValue('bobcat:element', '__CreatePage'); } catch (error) { failed = error; }
+        postMessage(failed instanceof TypeError ? 'refused' : 'linked ' + failed);
+        postMessage(await new Promise(resolve => realm.evaluate(`report => {
+            import('bobcat-internal:host').then(H => report(typeof H.bindFrame));
+        }`)(resolve)));
+    ",
+    );
+    pair.deliver();
+    pair.deliver();
+    pair.check(
+        r#"if (JSON.stringify(results) !== '["refused","undefined"]') throw Error(JSON.stringify(results));
+        worker.terminate();"#,
+    );
+    assert!(worker_failures(pair.notices()).is_empty());
+}
+
 /// A Worker realm has `ShadowRealm` too, and its children are serviced by
 /// the worker's own epilogue: a child evaluates, and its timer fires on the
 /// worker thread and calls the worker's own function it was handed.

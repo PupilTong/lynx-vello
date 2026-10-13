@@ -12,8 +12,8 @@
 //! Each tag owns its UA rules and tests. Numeric text and list attributes
 //! flow through `attr()`; boolean flags use attribute selectors. Only `image`,
 //! `svg`, `blur_view`, `swiper`, `refresh_view`, `viewpager`,
-//! `scroll_container`, `list`, `scroll_coordinator`, `dialog`, `overlay` and
-//! `markdown` need components: for image resources (an `svg`'s `content` as a document
+//! `scroll_container`, `list`, `scroll_coordinator`, `dialog`, `overlay`,
+//! `markdown` and `frame` need components: for image resources (an `svg`'s `content` as a document
 //! handed to the host as its bytes), blur hints,
 //! the swiper's UA shadow tree, item count and `scrollTo` UI method, the
 //! refresh view's UA shadow tree, its header and footer slot assignment and
@@ -26,10 +26,12 @@
 //! `:open`/`:modal` state, top-layer membership and four UI methods
 //! ([`dialog`]), the overlay's UA shadow tree, the top-layer membership of
 //! the `dialog` in it, and its `showoverlay` and `dismissoverlay` events
-//! ([`overlay`]), and the markdown element's UA shadow tree rendered from its
+//! ([`overlay`]), the markdown element's UA shadow tree rendered from its
 //! `content`, its `parseEnd`, `link` and `imageTap` events and its
 //! `getContent`, `getImages`, `getParseResult`, `getTextBoundingRect` and
-//! `getCharIndexByPoint` UI methods ([`markdown`]). A component's UI methods are its
+//! `getCharIndexByPoint` UI methods ([`markdown`]), and the frame's open
+//! shadow root, which the nested page of the realm bound to it goes into
+//! ([`frame`]). A component's UI methods are its
 //! [`dom::CustomElement::invoke`], which the runtime's `callElementMethod`
 //! reaches through [`dom::Document::invoke_element_method`]. The methods
 //! every element has whatever its kind, which `callElementMethod` runs when
@@ -45,6 +47,7 @@
 mod base_methods;
 mod blur_view;
 pub(crate) mod dialog;
+mod frame;
 mod image;
 mod list;
 mod markdown;
@@ -72,6 +75,7 @@ use std::rc::Rc;
 use dom::{Document, ImageOutcome, NodeId, StylesheetOrigin};
 
 pub(crate) use self::base_methods::invoke_base_method;
+pub(crate) use self::frame::is_frame;
 pub(crate) use self::svg::is_svg;
 pub(crate) use self::swiper::Autoplays;
 pub use self::ua_sheet::PageConfig;
@@ -120,6 +124,7 @@ pub(crate) fn new_document(
     dialog::define(&mut document, events.clone());
     // After `dialog`: every overlay builds one in its shadow tree.
     overlay::define(&mut document, events);
+    frame::define(&mut document);
     document.add_stylesheet(
         &ua_sheet::ua_stylesheet(config),
         StylesheetOrigin::UserAgent,

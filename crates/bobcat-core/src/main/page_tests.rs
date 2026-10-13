@@ -5140,6 +5140,46 @@ globalThis.updatePage = () => {{
     });
 }
 
+/// A frame's child goes with its frame: the epilogue of the entry that
+/// released the frame frees the child it retired, though the page still
+/// holds its `ShadowRealm`.
+#[test]
+fn a_released_frames_child_is_freed_by_the_releasing_entrys_epilogue() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned
+            .boot(&format!(
+                "{ONE_BOX}
+import {{ releaseFrame }} from 'bobcat-internal:host';
+const frame = __CreateElement('frame', 0);
+globalThis.frame = frame;
+globalThis.realm = new ShadowRealm();
+await new Promise(resolve => realm.evaluate(`(frame, bound) => {{
+  import('bobcat-internal:host').then(H => {{ H.bindFrame(frame); bound(); }});
+}}`)(__GetElementUniqueID(frame), resolve));
+globalThis.updatePage = () => {{
+  releaseFrame(__GetElementUniqueID(globalThis.frame));
+}};
+"
+            ))
+            .await;
+        assert_eq!(child_realms(&owned.page).await, Some(1));
+
+        owned.page.apply(vec![update_command(1)]).await;
+        assert_eq!(
+            child_realms(&owned.page).await,
+            Some(0),
+            "the retired child goes though the page still refers to it"
+        );
+        let events = owned.events();
+        assert!(
+            !events.iter().any(EngineEvent::is_fatal),
+            "the release ended nothing: {events:?}"
+        );
+    });
+}
+
 /// A child's module request goes to the view's host like the owner's own and
 /// is completed in the child, and a future a `.then` in the child asked to
 /// settle is delivered into the child: both by tasks the owner's epilogue

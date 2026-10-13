@@ -1471,7 +1471,8 @@ members group as the document's own life, tree vocabulary over numeric
 edges, timers, the one-shot startup strings the realm alone reads (the
 page-data triple handed over as plain JSON and processor-name strings, and
 the native module table it posts unread to its BTS), the stylesheet pair, the
-diagnostics pair, the display-frame demand, and the three worker operations.
+diagnostics pair, the display-frame demand, the three worker operations, and
+the frame pair `bindFrame`/`releaseFrame` (below).
 Those four one-shot strings do not arrive separately: they, the entry's
 resolved URL, the BTS entry's, the listed stylesheets' answers and the screen
 are one `RealmStartup`, which is everything a realm is opened with and nothing
@@ -1491,9 +1492,12 @@ enters no JavaScript, and a child is furnished from inside the parent's entry,
 which holds the runtime. Every other host module
 is a parameter of that call: `MainThreadRuntime::new` passes the document,
 stylesheet, startup-string (the module table among them), event-name and
-`Worker` members and `bobcat-internal:native-modules`, and a worker passes
-`bobcat-internal:worker` and `bobcat-internal:native-modules`, the same
-`invokeNativeModule` in both. The constructor has no role field; it is told
+frame members, the `Worker` members and `bobcat-internal:native-modules`, and
+a worker passes `bobcat-internal:worker` and
+`bobcat-internal:native-modules`, the same `invokeNativeModule` in both. So
+is what the realm's `ShadowRealm` children get beyond the core, a
+`realm::child::ChildHostModules`: the MTS realm passes its document members
+(the `DocumentHost` in `main/runtime/lib.rs`), a worker `None`. The constructor has no role field; it is told
 two things about a realm: the key its display-frame demand is reported under,
 `None` for MTS and the worker's key for a worker, and the `ScriptSource` its
 diagnostics carry, `Main` for MTS and, for a worker, `Worker { id, url }`
@@ -1508,9 +1512,14 @@ bridge's hook (`Context::install_shadow_realm`) hands each `new ShadowRealm()`
 to `realm/child.rs`, inside the construction: the child gets module loading
 and the same core, installed by the same `install_realm_core`, over a timer
 table and a future table of its own and the parent's `HostOutbox`, thread and
-`ScriptSource`, and a `ShadowRealm` constructor of its own, and no host module
-of its parent's kind (no document, no worker members), so `bobcat:timers`
-links in a child and `bobcat:element` does not. `requestScriptFrame` is a
+`ScriptSource`, and a `ShadowRealm` constructor of its own, and then its
+owner's `ChildHostModules`, installed over the child's `retired` flag, which
+`adopt` creates first and `ChildRealms::keep` stores: an MTS realm's children,
+grandchildren included, get the page realm's document members (the frame
+binding, below), so `bobcat:element` links in them, and a worker realm's get
+nothing more, so `bobcat:timers` links in one and `bobcat:element` does not.
+No child has a worker member or `bobcat-internal:native-modules`.
+`requestScriptFrame` is a
 no-op there: the frame demand is one flag per realm key, and a child under its
 parent's key would cancel the parent's demand with its own `false`. The child
 is then kept in `RealmCore::children`, a flat `ChildRealms` list that holds
@@ -1538,6 +1547,44 @@ the hook could not furnish is kept retired for that step. A child's
 diagnostics carry the parent's `ScriptSource`. Each operation detaches the
 child from the list and puts it back after, so a `new ShadowRealm()` in the
 child's code meets no borrow.
+
+**The frame binding** (`main/runtime/frames.rs`) is how a `frame` element
+renders another card: one PAPI over one document, with each realm's rendering
+root its own (user ruling: no second engine, no scoped copy of the PAPI, no
+admission check or per-realm node set — the host card and its frames are one
+trust domain). An MTS realm's child installs exactly the page realm's
+document, attribute, readback, exposure, event-name, stylesheet and frame
+members over the same `Rc<RefCell<DocumentSlot>>`, `ViewOutbox` and thread;
+its startup strings answer `undefined`, and it has no `Worker` members and no
+`bobcat-internal:native-modules`. What differs is the realm's `RealmRoot`:
+`Document` for the page realm, and for a child `Frame`, empty until its
+`bindFrame`. Three members read it: `createPage` (the document's `page`, or
+the child's nested page — a child bound to no frame throws `this ShadowRealm
+is bound to no frame`), `adoptStyleSheet` (on the document after the listed
+sheets, or through `style::add_*_to_shadow` on the frame's shadow root, with
+no listed sheet settled), and `flushElementTree` (the page realm's parks as
+before; a child's commits only once the page realm's first flush has settled
+the listed sheets and the binding, and otherwise returns, leaving the commit
+to the epilogue's `commit_if_dirty`). Every other member is root-agnostic:
+node ids are document-global and each realm's `bobcat:element` has its own
+handle table. `bindFrame(frame)` is a child's alone (the page realm's throws
+`the page realm is bound to its document`): it refuses a node that is not a
+live `frame`, a frame already bound, a realm already bound and a frame more
+than `MAX_FRAME_DEPTH` (8) frames deep counted over shadow-including
+ancestors at the bind, then creates a `page[part=page]` in the frame's shadow
+root, makes it the realm's root, records `FrameBinding { page, retired }` in
+`DocumentSlot::frames` under the host, and answers the page's id.
+`releaseFrame(frame)` is idempotent: it releases every binding inside the
+nested page first, frees the nested page with its whole subtree (inside a
+shadow tree, so `dom` frees it whole), and sets the child's `retired`, so the
+epilogue's release step frees the child whoever refers to it; a
+`dropElement` of a bound frame host releases it first. A disconnected frame
+keeps its binding and its realm, and nodes a released child created and never
+attached stay until the view ends. The published listener names are the union
+of every realm's (`DocumentSlot::listened` counts the realms holding each
+name, `RealmListenerNames` deduplicates one realm's): a child closing `tap`
+leaves the page's open, and what a freed child held open is closed when its
+members drop.
 
 The members that answer with a list encode it in the return string, since
 the boundary's value type carries no array: `attributeNames` and
@@ -1945,7 +1992,14 @@ shadow content, the anchor found from the character the tap hits; UI
 methods `getContent`, `getImages`, `getParseResult`, `getTextBoundingRect`
 and `getCharIndexByPoint` in web-core's rendered-text offsets, which
 `rendered.rs` counts with markdown-it's line breaks between block tags; the
-typewriter, truncation and selection are deferred), and
+typewriter, truncation and selection are deferred),
+`tree::frame` (`frame`, web-core's nested `lynx-view`: a component whose
+`constructed` attaches an open shadow root and nothing else — no shadow
+sheet and no slot, so light children never render — `display: flex;
+contain: strict` whatever `defaultDisplayLinear` says, the shared box block,
+and `is_frame`; the nested page the frame binding puts in the shadow root is a
+`page`, which the UA sheet sizes 100% of the frame; `src` is an ordinary
+attribute, observed by nothing), and
 `tree::blur_view` (`blur-radius` reflected into a
 `backdrop-filter: blur()` presentational hint, under both the native tag
 `blur-view` and web-core's `x-blur-view`, as a CSS length rather than
@@ -1958,9 +2012,9 @@ attributes use UA `attr()` declarations and registered custom properties;
 `tail-color-convert` uses an attribute selector. Only image resources, blur
 hints, the swiper's item count, the refresh view's slot
 assignment, the dialog's `:open`/`:modal` state, the overlay's shadow
-tree, its dialog's top-layer membership and its events, and the markdown
-element's shadow tree, its rendering and its events need
-`dom::CustomElement` callbacks. Runtime attribute members perform
+tree, its dialog's top-layer membership and its events, the markdown
+element's shadow tree, its rendering and its events, and the frame's
+shadow root need `dom::CustomElement` callbacks. Runtime attribute members perform
 DOM mutations; Stylo tracks attribute dependencies and recascades on changes.
 HTML's own rules — the dialog's, the popover's and the display `dialog` maps
 `block` to — are written with their selectors inside `:where()` and ordered

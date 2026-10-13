@@ -154,13 +154,6 @@ pub(crate) fn add_style_sheet_text(document: &mut LynxDocument, css: &str) {
 /// # Panics
 ///
 /// Panics if `shadow_root` is not a live shadow root of `document`.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the <frame> element mounts its card's sheets here"
-    )
-)]
 pub(crate) fn add_preparsed_style_sheet_to_shadow(
     document: &mut LynxDocument,
     shadow_root: NodeId,
@@ -176,13 +169,6 @@ pub(crate) fn add_preparsed_style_sheet_to_shadow(
 /// # Panics
 ///
 /// Panics if `shadow_root` is not a live shadow root of `document`.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the <frame> element mounts its card's sheets here"
-    )
-)]
 pub(crate) fn add_style_sheet_text_to_shadow(
     document: &mut LynxDocument,
     shadow_root: NodeId,

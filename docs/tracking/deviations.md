@@ -2346,6 +2346,34 @@ consequential choice about whether to follow the spec or the quirk.
   - *Events fire on transitions only.* web-core re-runs `showModal()` and
     fires `showoverlay` for every write of a showing value (`"true"` to
     `""`); here a rewrite that keeps the overlay shown fires nothing.
+- **`<frame>` renders its card in the host's document**, in the frame's shadow
+  root, driven by a `ShadowRealm` child of the MTS realm bound to it
+  (`bobcat-core`'s `main/runtime/frames.rs`, user ruling: one PAPI, no second
+  engine). Native stands up a second `LynxTemplateRender` per frame
+  (`LynxFrameView.java`) and web-core a nested `lynx-view` with an iframe
+  realm; what follows from sharing one document:
+  - *A disconnected frame keeps its realm.* The frame component has no
+    `disconnected_callback`: removing a bound frame leaves its nested page and
+    its child realm in place, and only `releaseFrame` — or a `dropElement` of
+    the frame once its handle is collected — frees them. Native tears a
+    frame's render down with its UI; web-core's `lynx-view` disposes in its
+    `disconnectedCallback`.
+  - *The nested card's `PageConfig` is ignored.* The nested page is styled by
+    the host document's UA sheet, built from the host's
+    `defaultDisplayLinear`, `defaultOverflowVisible` and the rest; native and
+    web-core each read the nested bundle's own page config.
+  - *`rpx`, `vw` and `vh` inside a frame are the viewport's.* web-core
+    rebases them on the frame (`--rpx-unit: calc(1cqw / 7.5)`,
+    `--vw-unit: 1cqw`, `--vh-unit: 1cqh` on `lynx-view`,
+    `web-core/css/index.css`); here the document's one device resolves every
+    length, the frame's included.
+  - *`@font-face` in a frame's sheets is not loaded.* A sheet a frame realm
+    adopts is mounted on the frame's shadow root, and `dom` loads no
+    `@font-face` rule of a shadow-tree sheet
+    (`Document::append_shadow_rules`).
+  - *No `load` event, no `data`/`global-props`, no `auto-width`/`auto-height`
+    or `preset-*`*: none is built yet, and a frame with no author height is
+    0 tall (strict containment).
 
 - **`markdown` / `x-markdown` (2026-10-14)** — Lynx-only (bucket 2): native
   registers `markdown`, web-core `x-markdown`; both are defined, on one

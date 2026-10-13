@@ -21,7 +21,11 @@ interface BobcatNative {
     enableJSDataProcessor: boolean,
     enableCssInheritance: boolean,
   ): void;
-  /** Marks the permanent page live and returns its `NodeId`. */
+  /**
+   * Returns the `NodeId` of this realm's page: the document's permanent
+   * `page` in the page realm, and in a `ShadowRealm` child the nested page
+   * its `bindFrame` created, which throws until the child is bound.
+   */
   createPage(): number;
   /** Creates a detached element and returns its `NodeId`. */
   createElement(tag: string): number;
@@ -262,7 +266,8 @@ interface BobcatNative {
   /**
    * Frees the element of a collected handle, and only it: its element
    * children are unlinked into detached roots, and what no handle could name
-   * — the text node a `raw-text` reflects — goes with it.
+   * — the text node a `raw-text` reflects — goes with it. A bound `frame` is
+   * released first, as `releaseFrame` releases it.
    */
   dropElement(nodeId: number): void;
   /**
@@ -271,7 +276,9 @@ interface BobcatNative {
    * The first call waits for every author stylesheet the view listed and
    * mounts them in listed order before anything is styled; a sheet that
    * failed to load throws `loading stylesheet <url>: <reason>`. Before a
-   * painter has bound the view it then waits for the binding.
+   * painter has bound the view it then waits for the binding. In a
+   * `ShadowRealm` child it never waits: until the page realm's first call has
+   * settled both, it commits nothing and returns.
    */
   flushElementTree(): void;
   /**
@@ -431,6 +438,22 @@ declare module "bobcat-internal:host" {
   export const swapElement: BobcatNative["swapElement"];
   export const dropElement: BobcatNative["dropElement"];
   export const flushElementTree: BobcatNative["flushElementTree"];
+  /**
+   * Binds the `frame` element `frame` to this `ShadowRealm` child and answers
+   * the `NodeId` of the nested page it creates in the frame's shadow root
+   * (`part="page"`), which this realm's `createPage` answers from then on and
+   * where its `adoptStyleSheet` mounts. Throws for a node that is not a live
+   * frame, a frame already bound, a realm already bound, a frame nested more
+   * than eight deep, and in the page realm, which is bound to its document.
+   */
+  export function bindFrame(frame: number): number;
+  /**
+   * Releases the binding of the `frame` element `frame`: frees its nested
+   * page with everything under it, the bindings of frames inside it first,
+   * and retires the child it was bound to, which the owner's next epilogue
+   * frees. A frame that is not bound is left alone.
+   */
+  export function releaseFrame(frame: number): void;
   export const listenerNameOpened: BobcatNative["listenerNameOpened"];
   export const listenerNameClosed: BobcatNative["listenerNameClosed"];
   export const exposureEvents: BobcatNative["exposureEvents"];
