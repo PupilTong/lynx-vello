@@ -8,6 +8,9 @@
 
 #[cfg(target_arch = "wasm32")]
 mod browser;
+// The editing seam's pure half, which the native test build checks too.
+#[cfg(any(target_arch = "wasm32", test))]
+mod text_input;
 
 #[cfg(target_arch = "wasm32")]
 pub use browser::*;

@@ -15,6 +15,7 @@ use dom::editing::{Command, TextInputState};
 use dom::input::{InputEvent, KeyPhase, Modifiers, PointerKind, PointerPhase};
 
 use crate::EngineEvent;
+use crate::editing::TextInputSource;
 use crate::test_support::{TestEngine, TestViewSpec, wait_for_boot};
 
 /// Solid em squares: at 20px every character is a 20px-wide box.
@@ -354,6 +355,54 @@ fn a_keydown_without_text_types_nothing_and_the_commit_inserts_once() {
     assert!(
         states.0.iter().all(|state| state.value != "yy"),
         "the key without text inserted nothing: {:?}",
+        states.0
+    );
+}
+
+/// A host that sets [`TextInputSource::Commands`] — the browser host, whose
+/// `<textarea>` proxy reports every insertion and deletion as a
+/// `beforeinput` it forwards as a command — gets only movement and
+/// select-all from a `keydown`: a key's text types nothing, and a Backspace
+/// sent both as a key and as the proxy's command deletes once.
+#[test]
+fn a_host_that_sends_commands_deletes_once_and_keys_only_move() {
+    let mut engine = booted(&["keydown"], "");
+    engine
+        .view
+        .set_text_input_source(TextInputSource::Commands)
+        .expect("a live view takes the setting");
+    let mut states = States::default();
+    focus_host(&mut engine, &mut states);
+
+    engine.view.edit(Command::Insert("abc".to_owned())).unwrap();
+    engine.dispatch_input(InputEvent::key(
+        KeyPhase::Down,
+        "Backspace",
+        "Backspace",
+        false,
+        Modifiers::default(),
+    ));
+    engine.view.edit(Command::DeleteBackward).unwrap();
+    engine.dispatch_input(key("x"));
+    engine.dispatch_input(InputEvent::key(
+        KeyPhase::Down,
+        "ArrowLeft",
+        "ArrowLeft",
+        false,
+        Modifiers::default(),
+    ));
+    wait_for_log(&mut engine, "keydown|keydown|keydown");
+    let moved = states.wait(&mut engine, "with the caret moved left", |state| {
+        state.selection == (1..1)
+    });
+    // Keys that deleted and typed would have left "ax".
+    assert_eq!(moved.value, "ab");
+    assert!(
+        states
+            .0
+            .iter()
+            .all(|state| state.value != "a" && !state.value.contains('x')),
+        "a key typed or deleted: {:?}",
         states.0
     );
 }
