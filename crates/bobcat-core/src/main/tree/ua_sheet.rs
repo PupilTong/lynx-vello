@@ -205,8 +205,12 @@ impl Default for PageConfig {
 /// ([`super::popover`]). The overlay's is one more, after it: only an
 /// overlay's first child renders, which web-core itself pins and native's
 /// measurement of child 0 alone agrees with ([`super::overlay`] carries the
-/// argument). `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions`
-/// pins the set to exactly those twenty rules.
+/// argument). An editing host's `display: -lynx-text` is the last
+/// ([`EDITING_HOST_RULE`]): a `contenteditable` element is laid out as one
+/// paragraph whatever its tag's own `display` says, because the editor
+/// addresses that paragraph's layout.
+/// `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions`
+/// pins the set to exactly those twenty-one rules.
 #[must_use]
 pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     let component_tags = format!(
@@ -259,6 +263,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          {overlays}\
          {markdowns}\
          {text}\
+         {EDITING_HOST_RULE}\n\
          {inheritance}\
          {carriers}\
          {frames}\
@@ -282,6 +287,20 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     )
 }
 
+/// HTML's `contenteditable` editing host, laid out as one plain-text
+/// paragraph (`docs/editable-text-design.md`, "Editing host"): `dom`'s
+/// editor places its caret and selection in that paragraph's layout, and
+/// `pre-wrap`'s `white-space-collapse: preserve` keeps the layout's text
+/// byte for byte the text being edited, as a browser's plain-text editing
+/// relies on. `display` is `!important`: an editing host is a paragraph by
+/// what it is, not by a default a page may override, so unlike a `text`'s
+/// plain `-lynx-text` it does not yield to an author `display: none`.
+/// `white-space` is a plain declaration. Both apply to every
+/// value but an ASCII case-insensitive `"false"`, which is HTML's reading of
+/// the attribute and `dom::Document::is_editing_host`'s.
+pub(super) const EDITING_HOST_RULE: &str = "[contenteditable]:not([contenteditable=\"false\" i]) \
+     { display: -lynx-text !important; white-space: pre-wrap; }";
+
 #[cfg(test)]
 mod tests {
     use dom::stylo::computed_values::{box_sizing, position};
@@ -296,11 +315,11 @@ mod tests {
         X_FOLDVIEW_HEADER_TAG, X_FOLDVIEW_SLOT_DRAG_TAG, X_FOLDVIEW_SLOT_TAG, X_FOLDVIEW_TAG,
         X_FOLDVIEW_TOOLBAR_TAG,
     };
-    use super::super::test_support::{child, document, overflow, style_of, with_config};
+    use super::super::test_support::{child, display, document, overflow, style_of, with_config};
     use super::{
-        BLUR_VIEW_TAG, DIALOG_TAG, PageConfig, REFRESH_FOOTER_TAG, REFRESH_HEADER_TAG,
-        SWIPER_ITEM_TAG, SWIPER_TAG, VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_BLUR_VIEW_TAG,
-        X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG, ua_stylesheet,
+        BLUR_VIEW_TAG, DIALOG_TAG, EDITING_HOST_RULE, PageConfig, REFRESH_FOOTER_TAG,
+        REFRESH_HEADER_TAG, SWIPER_ITEM_TAG, SWIPER_TAG, VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG,
+        X_BLUR_VIEW_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG, ua_stylesheet,
     };
 
     /// The tags that get `web-elements`' common container block and keep
@@ -652,6 +671,43 @@ mod tests {
         assert!(!sheet.contains(INHERITANCE_RULE));
     }
 
+    /// A `contenteditable` element is one paragraph that keeps its white
+    /// space, whatever its tag or an author `!important` says, for every
+    /// value but HTML's `"false"`, which the selector's `i` flag matches in
+    /// any case.
+    #[test]
+    fn an_editing_host_is_one_preserving_paragraph() {
+        use dom::stylo::computed_values::white_space_collapse::T as Collapse;
+
+        let mut document = document();
+        let hosts: Vec<(dom::NodeId, bool)> = [
+            ("", true),
+            ("true", true),
+            ("plaintext-only", true),
+            ("FALSE", false),
+            ("false", false),
+        ]
+        .into_iter()
+        .map(|(value, editable)| {
+            let view = child(&mut document, "view", "display: flex !important;");
+            document.set_attribute(view, "contenteditable", value);
+            (view, editable)
+        })
+        .collect();
+        document.layout();
+        for (view, editable) in hosts {
+            assert_eq!(display(&document, view) == Display::LynxText, editable);
+            assert_eq!(
+                *style_of(&document, view)
+                    .get_inherited_text()
+                    .get_white_space_collapse()
+                    == Collapse::Preserve,
+                editable
+            );
+            assert_eq!(document.is_editing_host(view), editable);
+        }
+    }
+
     /// `enableCSSInheritance` adds its one rule and changes nothing else:
     /// taking that line back out leaves the sheet the switch-off config
     /// builds. The rule follows the text block, whose `color: initial` it
@@ -741,7 +797,7 @@ mod tests {
     /// [`super::super::overlay`] carries the argument.
     #[test]
     fn the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions() {
-        const ALLOWED: [&str; 20] = [
+        const ALLOWED: [&str; 21] = [
             "viewpager, x-viewpager-ng { flex-direction: row !important; \
              linear-direction: row !important; flex-wrap: nowrap !important; }",
             "viewpager-item, x-viewpager-item-ng { position: relative !important; }",
@@ -777,6 +833,7 @@ mod tests {
             "text > image, text > wrapper > image, inline-text > image, \
              inline-text > wrapper > image, text > inline-truncation > image, \
              text > inline-truncation > wrapper > image { padding: 0 !important; }",
+            EDITING_HOST_RULE,
         ];
 
         for config in [

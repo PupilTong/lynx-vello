@@ -1610,7 +1610,22 @@ fn paint_item<T>(
                     sink, space, document, &paragraph, &runs, transform, images,
                 );
             }
+            // The focused editing host's selection sits over its backgrounds
+            // and under its glyphs; its caret and composition underline over
+            // them. One `Option` test for every other paragraph.
+            let editing = text::EditingPaint::of(document, element, paragraph.layout, style);
+            if let Some(editing) = &editing {
+                text::paint_selection(sink.scene_for(space), paragraph.layout, transform, editing);
+            }
             text::paint(sink.scene_for(space), &paragraph, transform, &runs);
+            if let Some(editing) = &editing {
+                text::paint_caret_and_composition(
+                    sink.scene_for(space),
+                    paragraph.layout,
+                    transform,
+                    editing,
+                );
+            }
         }
     }
 }

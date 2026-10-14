@@ -939,6 +939,131 @@ fn wavy_path(band: &DecorationBand) -> BezPath {
     path
 }
 
+/// The selection highlight's colour: a UA constant until `::selection` is
+/// supported (deferred in `docs/editable-text-design.md`). Chromium's light
+/// blue for a focused selection, opaque, painted behind the glyphs.
+const SELECTION_BACKGROUND: Color = Color::from_rgba8(0xB4, 0xD5, 0xFE, 0xFF);
+
+/// What the focused editing host paints under and over its paragraph
+/// (`crate::editing`): the selection highlight, the caret, and the IME
+/// composition's underline.
+pub(crate) struct EditingPaint {
+    selection: parley::Selection,
+    composition: Option<core::ops::Range<usize>>,
+    /// The caret's colour; `None` while the selection is a range, which
+    /// shows no caret.
+    caret: Option<Color>,
+    /// The composition underline's colour: the host's text colour.
+    underline: Color,
+    /// How tall the caret is in a paragraph with no line to measure.
+    empty_line_height: f32,
+}
+
+impl EditingPaint {
+    /// The editing state `element` paints, when it is the focused host.
+    pub(crate) fn of<T>(
+        document: &crate::Document<T>,
+        element: crate::NodeId,
+        layout: &Layout<crate::layout::TextBrush>,
+        style: &ComputedValues,
+    ) -> Option<Self> {
+        let session = document.editing.session.as_ref()?;
+        if session.host != element {
+            return None;
+        }
+        let selection = session.selection_in(layout);
+        let caret = selection.is_collapsed().then(|| caret_color(style));
+        Some(Self {
+            selection,
+            composition: session.composition.clone(),
+            caret,
+            underline: convert::current_color(style),
+            empty_line_height: crate::editing::empty_line_height(style),
+        })
+    }
+}
+
+/// The caret's colour: `caret-color: auto`, which is the text's own
+/// colour. The stylo fork compiles `caret-color` for Gecko only (its
+/// longhand has no `servo_pref`), so no other value can reach here yet; the
+/// gap is recorded in `docs/editable-text-design.md`.
+fn caret_color(style: &ComputedValues) -> Color {
+    convert::current_color(style)
+}
+
+/// The selection highlight, one box per line the selection covers, under
+/// everything the paragraph paints.
+pub(crate) fn paint_selection(
+    scene: &mut Scene,
+    layout: &Layout<crate::layout::TextBrush>,
+    transform: Affine,
+    editing: &EditingPaint,
+) {
+    editing.selection.geometry_with(layout, |rect, _| {
+        scene.fill(
+            Fill::NonZero,
+            transform,
+            SELECTION_BACKGROUND,
+            None,
+            &Rect::new(rect.x0, rect.y0, rect.x1, rect.y1),
+        );
+    });
+}
+
+/// The caret and the composition underline, over the glyphs. The caret does
+/// not blink (deferred in `docs/editable-text-design.md`).
+pub(crate) fn paint_caret_and_composition(
+    scene: &mut Scene,
+    layout: &Layout<crate::layout::TextBrush>,
+    transform: Affine,
+    editing: &EditingPaint,
+) {
+    if let Some(range) = &editing.composition {
+        let composed = parley::Selection::new(
+            parley::Cursor::from_byte_index(layout, range.start, parley::Affinity::Downstream),
+            parley::Cursor::from_byte_index(layout, range.end, parley::Affinity::Upstream),
+        );
+        composed.geometry_with(layout, |rect, line| {
+            let Some(line) = layout.get(line) else {
+                return;
+            };
+            let metrics = line.metrics();
+            // One CSS px under the baseline by half the descent, kept inside
+            // the line box.
+            let y = f64::from(
+                (metrics.baseline + metrics.descent * 0.5).min(metrics.block_max_coord - 1.0),
+            );
+            scene.fill(
+                Fill::NonZero,
+                transform,
+                editing.underline,
+                None,
+                &Rect::new(rect.x0, y, rect.x1, y + 1.0),
+            );
+        });
+    }
+    if let Some(color) = editing.caret {
+        let caret = crate::editing::caret_box(
+            layout,
+            editing.selection.focus(),
+            crate::editing::CARET_WIDTH,
+            editing.empty_line_height,
+        );
+        scene.fill(
+            Fill::NonZero,
+            transform,
+            color,
+            None,
+            &Rect::new(
+                f64::from(caret.min_x()),
+                f64::from(caret.min_y()),
+                f64::from(caret.max_x()),
+                f64::from(caret.max_y()),
+            ),
+        );
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {

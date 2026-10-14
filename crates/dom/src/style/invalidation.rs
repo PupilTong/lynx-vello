@@ -436,6 +436,7 @@ impl<T> Document<T> {
         }
         let slot_assignment = is_slot_assignment_attribute(name);
         let popover = is_popover_attribute(name).then(|| self.popover_state(id));
+        let editing = crate::editing::is_contenteditable_attribute(name);
         let name = LocalName::from(name);
         let base = self.begin_reactions();
         self.enqueue_attribute_changed(id, &name, Some(value));
@@ -447,6 +448,9 @@ impl<T> Document<T> {
         }
         if let Some(old) = popover {
             self.note_popover_attribute_change(id, old);
+        }
+        if editing {
+            self.fix_up_focus();
         }
         self.drain_reactions(base);
     }
@@ -478,6 +482,7 @@ impl<T> Document<T> {
         }
         let slot_assignment = is_slot_assignment_attribute(name);
         let popover = is_popover_attribute(name).then(|| self.popover_state(id));
+        let editing = crate::editing::is_contenteditable_attribute(name);
         let name = LocalName::from(name);
         let base = self.begin_reactions();
         self.enqueue_attribute_changed(id, &name, None);
@@ -488,6 +493,9 @@ impl<T> Document<T> {
         }
         if let Some(old) = popover {
             self.note_popover_attribute_change(id, old);
+        }
+        if editing {
+            self.fix_up_focus();
         }
         self.drain_reactions(base);
     }

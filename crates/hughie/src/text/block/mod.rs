@@ -837,6 +837,18 @@ impl TextBlock {
             .map_or(&self.paragraph.natural, |part| &part.layout)
     }
 
+    /// The paragraph's content text after white-space processing: the
+    /// string whose UTF-8 byte offsets [`Self::display`]'s clusters index,
+    /// up to a truncation cut where one was applied. Under
+    /// `white-space-collapse: preserve` on every run it is the runs' own text
+    /// concatenated, each tab and carriage return shown as a space, which is
+    /// what lets an editor address the display layout in the offsets of the
+    /// text it edits. Readable before any layout.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.content.block.text
+    }
+
     /// How many parley style indices this block's display layout has.
     ///
     /// The range [`Self::source_of`] is defined over, so a painter can build

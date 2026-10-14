@@ -3258,6 +3258,14 @@ Subsystems:
   container to its first one — `scrollIntoView`'s position with
   `block: start`, `inline: nearest` — as an instant scroll request and
   rebuilds the frame in the same commit.
+- `editing/` — HTML `contenteditable` plain-text editing
+  (`docs/editable-text-design.md`): editing hosts, the one focused element
+  and its queued focus events, a parley `Selection` and an IME composition
+  over the host's committed paragraph, the Chromium-shaped command set with
+  its `beforeinput`/`input`/`composition*` events reported as data
+  (`prepare_editing`/`commit_editing`), and `TextInputState`. The caret,
+  selection highlight and composition underline are painted by
+  `paint/text.rs`. Nothing reaches a realm yet (PR E2).
 - `input/` and `event/` — the `InputEvent` host seam, `Document::event_steps`,
   which computes a path for a *script* dispatch above,
   `Document::dispatch_element_event_over`, which walks those same steps here
