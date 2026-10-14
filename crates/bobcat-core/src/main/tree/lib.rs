@@ -78,6 +78,11 @@ pub(crate) type LynxDocument = Document<()>;
 
 pub(crate) const PAGE_TAG: &str = "page";
 
+/// DOM's `slotchange`, which a component with a UA shadow tree observes
+/// ([`dom::CustomElement::observed_events`]) to learn that its assigned
+/// children changed.
+pub(super) const SLOT_CHANGE: &str = "slotchange";
+
 /// Creates the document with its permanent `page` element, the components the
 /// engine defines, and the UA cascade.
 ///
@@ -176,10 +181,19 @@ pub(crate) enum ComponentEvent {
     /// an `<image>`'s intrinsic size and an `<svg>`'s layout size, or `error`,
     /// which an `<svg>` does not fire.
     Image(ImageOutcome),
-    /// An event whose detail is `{}`, named by the component that queued it:
-    /// a `<dialog>`'s `close` and `cancel` ([`dialog`]), an `<overlay>`'s
-    /// `showoverlay` and `dismissoverlay` ([`overlay`]).
+    /// An event whose detail is `{}`, named by the component that queued
+    /// it: a `<dialog>`'s `close` and `cancel` ([`dialog`]), an
+    /// `<overlay>`'s `showoverlay` and `dismissoverlay` ([`overlay`]).
     Plain { node: NodeId, name: &'static str },
+    /// A scroll container's `scroll` or `scrollend`, which the runtime
+    /// queues, with the change in its offset the event reports (zero for a
+    /// `scrollend`); the rest of Lynx's scroll metrics are read at
+    /// delivery.
+    Scroll {
+        node: NodeId,
+        name: &'static str,
+        delta: dom::Vector2D<f32>,
+    },
 }
 
 /// The events this document's components have produced and not delivered
@@ -224,6 +238,14 @@ impl ComponentEvents {
         self.0
             .borrow_mut()
             .push(ComponentEvent::Plain { node, name });
+    }
+
+    /// Queues a `scroll` or `scrollend` at `node`, with the offset change it
+    /// reports.
+    pub(crate) fn queue_scroll(&self, node: NodeId, name: &'static str, delta: dom::Vector2D<f32>) {
+        self.0
+            .borrow_mut()
+            .push(ComponentEvent::Scroll { node, name, delta });
     }
 
     /// Takes everything queued since the last drain.

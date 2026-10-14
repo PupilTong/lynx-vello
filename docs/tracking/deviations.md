@@ -593,8 +593,39 @@ consequential choice about whether to follow the spec or the quirk.
     no `longpress` at all, no gesture API — `web-core` limitations, not Lynx
     semantics). This engine implements the native semantics; matching
     web-core's degradations was rejected.
-  - **`click` is not synthesized** (Android and the fragment path emit it
-    beside `tap` with re-targeting at release); no consumer yet.
+  - **`click` and `dblclick` are dispatched beside `tap` (2026-10-13,
+    architect ruling)**, a superset of both references: Lynx has no event of
+    either name in script (Android and the fragment path emit a native
+    `click` beside `tap`, re-targeted at release), and web-core renames the
+    browser's `click` to `tap` (`W3cEventNameToLynx`). Here `click` is UI
+    Events': every pointer kind, the primary button of the primary pointer,
+    no movement slop, at the nearest common inclusive ancestor of the down
+    and release targets, suppressed by a consumed scroll or a cancel, and not
+    by a delivered `longpress`; `dblclick` follows a second `click` at the
+    same target within 500 ms. The order after a release is `pointerup`,
+    `touchend`, `mouseup`, `click`, `dblclick`, `tap`. The event object of
+    every pointer-shaped event (`pointer*`, `mouse*`, `click`, `dblclick`,
+    `tap`, `longpress`) carries `x`, `y`, `clientX`, `clientY`, `pageX`,
+    `pageY`, `button` and `buttons` (2026-10-13 user ruling: by payload
+    shape, not by name; web-core gives a `click` only the four client and
+    page coordinates and a `pointer*` event none), a `pointer*` event
+    `pointerId` and `pointerType` too, and the `detail` is `{x, y}`.
+  - **Compatibility mouse events for a mouse only (2026-10-13, architect
+    ruling).** `mousedown`/`mousemove`/`mouseup` follow a mouse pointer's
+    `pointerdown`/`pointermove`/`pointerup` at the same target (Pointer
+    Events Level 3 §11); touch and pen produce none, where browsers emit them
+    for touch after the touch events. Their event object carries web-core's
+    `button`, `buttons`, `x`, `y`, `clientX`, `clientY`, `pageX` and `pageY`
+    (all in the one viewport CSS px space); their `detail` is the `{x, y}`
+    every pointer event has, where web-core leaves the DOM `UIEvent.detail`
+    number. Both shipped embedders report a mouse honestly as
+    `PointerKind::Mouse`, so they produce these events. **A mouse drag
+    scrolls** a scroll container here (user ruling 2026-10-13, an engine
+    policy in `PointerKind::drags_to_scroll`), unlike every browser; a drag
+    that scrolls suppresses `click` and `tap` as a touch drag does, and
+    `mousemove` keeps flowing while it scrolls. Deferred:
+    `pointerover`/`out`/`enter`/`leave`, `mouseover`/`out`/`enter`/`leave`,
+    `auxclick`, `contextmenu`.
   - **`timestamp` is milliseconds on the view's timeline epoch**, which is
     this engine's time origin — web-core's time-origin semantics, and DOM's
     for `Event.timeStamp`. Native Lynx reports epoch milliseconds instead.
@@ -634,6 +665,61 @@ consequential choice about whether to follow the spec or the quirk.
       flowing while the drag recognizer scrolls (native; browsers likewise
       keep sending `touchmove` to a scrolling page). Only
       `PointerPhase::Cancel` produces `touchcancel`.
+- **W3C `scroll`/`scrollend` under Lynx's `scroll` name (2026-10-13,
+  architect ruling).** CSSOM-View's two events fire at every scroll
+  container, non-bubbling. Lynx's own `scroll` (`bindscroll` on
+  `scroll-view` and `list`; web-core's `lynxscroll`, renamed to `scroll` by
+  `W3cEventNameToLynx`) fires only on those components; here every scroll
+  container fires it. Its Lynx `detail` is built from the extras channel
+  (user ruling 2026-10-13, "kernel events are W3C"): `scrollTop`,
+  `scrollLeft`, `scrollHeight`, `scrollWidth` read at delivery, `deltaX`/
+  `deltaY` the change the post that queued it made (0 for `scrollend`), and
+  `isDragging`, **always `false`** in this step, as web-core reports it
+  (native reports whether a finger holds the container).
+  Recorded choices inside the step:
+  - **A `scrollend` ends a scroll that happened.** The main thread records
+    every container that scrolled (an adopted offset moved it, or a
+    script-facing instant scroll did) whether or not anything listens, and a
+    post naming it at rest ends that record and fires `scrollend` if the name
+    is heard at that moment. An instant scroll fires its `scroll` in the task
+    that scrolled and its `scrollend` from the painter's rest post after it
+    carried the request out — or after the drag or fling that holds the
+    container ends. A view with no painter attached never posts that rest.
+  - **A wheel gesture ends after 100 ms with no further tick**
+    (`WHEEL_REST_SECONDS`): each tick that moves a container is a `scroll`,
+    and the gesture one `scrollend`. A drag or fling that moves the
+    container takes it over, and its own end decides the rest. Browsers
+    debounce the same way, with their own intervals.
+  - **The render's own positioning fires nothing**: `scroll-initial-target`
+    and the re-snap after a layout change move a container without an event.
+  - **An attribute-driven instant scroll at connect fires `scroll` then
+    `scrollend` at mount**: a `scroll-top`/`scroll-left` on `scroll-view`, or
+    any other component attribute that scrolls through
+    `Document::scroll_to_with(.., Instant)`, is a script-facing instant
+    scroll. That matches web-core, whose `scrollTop` assignment fires a
+    browser `scroll`, and not native Lynx, which fires nothing for it.
+- **`wheel`'s `detail` is `{}` (2026-10-13, user ruling).** It was
+  `{x, y, deltaX, deltaY}`. `deltaX`, `deltaY`, `x`, `y`, `clientX`,
+  `clientY`, `pageX` and `pageY` are on the event object, where W3C
+  `WheelEvent` and native Lynx put them; web-core forwards the DOM
+  `UIEvent.detail` number instead.
+- **Keyboard: `keydown`/`keyup` only, targeted at the document element
+  (2026-10-13, architect ruling).** W3C UI Events' two key events reach the
+  page with `key`, `code`, `repeat`, `altKey`, `ctrlKey`, `metaKey` and
+  `shiftKey` on the event object and a `{}` detail, which is web-core's shape
+  (`createCrossThreadEvent.ts`), bubbling and composed. Recorded deviations:
+  - **No focus model**, so the target is always the document element (the
+    page), as it is in a browser with nothing focused; the painter does not
+    hit-test a key. A focus model changes that one target and nothing else.
+  - **No `keypress`, `input` or composition events**, and no IME.
+  - **No `keyCode`.** web-core forwards the deprecated numeric `keyCode` for
+    parity with iOS/Android; this engine reports the W3C `key`/`code` only.
+  - **The macOS CLI maps winit's keys** through a table
+    (`crates/bobcat-cli/src/cli/keys.rs`): winit's variant names are the UI
+    Events values, except the Command key (`Meta`, `MetaLeft`/`MetaRight`)
+    and the space bar's `key` (`" "`). The browser embedder passes the
+    browser's own strings through, and its canvas hears keys only while it has
+    focus, which takes a `tabindex` the embedding page chooses.
 - **`pointer-events: none` hit-test fall-through** — Lynx falls through to
   the *next sibling* under the point; W3C says the element (and normally its
   subtree) becomes fully transparent to hit-testing, continuing the search

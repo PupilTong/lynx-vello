@@ -107,6 +107,10 @@ use crate::visual::PaintOrder;
 /// say, one commit behind at worst.
 pub(crate) const RELEVANCE_PASSES: u32 = 4;
 
+/// [css-contain-2 §4.4](https://drafts.csswg.org/css-contain-2/#content-visibility-auto-state-change-event)'s
+/// event type, which engine components observe by this name.
+const CONTENT_VISIBILITY_AUTO_STATE_CHANGE: &str = "contentvisibilityautostatechange";
+
 /// One element whose skipping state changed in a commit: what
 /// [css-contain-2 §4.4](https://drafts.csswg.org/css-contain-2/#content-visibility-auto-state-change-event)
 /// fires `contentvisibilityautostatechange` for.
@@ -254,20 +258,26 @@ impl<T> Document<T> {
     ///
     /// The queue is drained whether or not anything listens, because it is
     /// the record of one commit rather than a mailbox: a document that
-    /// defines no components pays the drain and one `is_empty` check per
-    /// change.
-    pub fn dispatch_content_visibility_changes(&mut self) {
+    /// observes no `contentvisibilityautostatechange` pays the drain and one
+    /// set lookup per change.
+    ///
+    /// `timestamp` is what each delivery reports as
+    /// [`ElementEvent::timestamp`](crate::event::ElementEvent::timestamp):
+    /// the host's clock reading for the task, in milliseconds.
+    pub fn dispatch_content_visibility_changes(&mut self, timestamp: f64) {
         // Taken first, so a handler that renders — and queues changes of its
         // own — leaves them for the next drain instead of extending this
         // walk.
         for change in self.take_content_visibility_changes() {
             self.dispatch_element_event(
                 change.node,
-                crate::event::ElementEventKind::ContentVisibilityAutoStateChange {
+                CONTENT_VISIBILITY_AUTO_STATE_CHANGE,
+                &crate::event::EventDetail::ContentVisibility {
                     skipped: change.skipped,
                 },
                 true,
                 false,
+                timestamp,
             );
         }
     }

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use dom::event::EventDetail;
+
 use super::{FarEnd, Painter, ToMain};
 use crate::link::{FramePost, ScrollEntry, ScrollMailbox};
 use crate::main::tree::{
@@ -228,13 +230,24 @@ fn a_commit_whose_pixels_can_no_longer_be_read_is_not_adopted() {
     );
 }
 
+/// A tap's detail, as the router decides one: a touch pointer's position.
+fn tap_detail() -> EventDetail {
+    EventDetail::Pointer {
+        position: dom::Point2D::new(1.0, 1.0),
+        id: 1,
+        device: dom::input::PointerKind::Touch,
+        button: 0,
+        buttons: 0,
+    }
+}
+
 /// An emit decision costs one name-table lookup and stops there unless a
 /// listener exists; when it crosses, it crosses as plain data — the
 /// target id, not a path. Liveness is the main thread's to check at
 /// delivery.
 #[test]
 fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
-    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT, TouchPoints};
+    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
 
     let (mut painter, mut main) = detached();
     // The permanent page element's packed handle, as script would name it.
@@ -244,9 +257,8 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
         decisions.push(InputDecision::Emit(EmitEvent {
             name: TAP_EVENT,
             target,
-            position: dom::Point2D::new(1.0, 1.0),
-            wheel: None,
-            touches: TouchPoints::new(),
+            detail: tap_detail(),
+            release: None,
         }));
         painter.execute_decisions(&mut decisions, None, 0.25);
         assert!(decisions.is_empty(), "the queue is always drained");
@@ -286,6 +298,7 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
         name,
         target: sent,
         payload,
+        ..
     } = command
     else {
         panic!("an emit decision becomes a dispatch command");
@@ -293,9 +306,7 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     assert_eq!(name, TAP_EVENT);
     assert_eq!(sent, target);
     // The decision's own facts, as values: nothing is encoded on this side.
-    assert_eq!(payload.position, dom::Point2D::new(1.0, 1.0));
-    assert_eq!(payload.wheel, None, "a tap carries no wheel delta");
-    assert!(payload.touches.is_empty(), "a tap carries no touch points");
+    assert_eq!(payload.detail, tap_detail());
     // The pass's clock reading, in milliseconds.
     assert!((payload.timestamp - 250.0).abs() < f64::EPSILON);
 
@@ -341,16 +352,20 @@ fn a_wheel_delta_and_touch_points_cross_as_values() {
     decisions.push(InputDecision::Emit(EmitEvent {
         name: "wheel",
         target,
-        position: dom::Point2D::new(5.0, 6.0),
-        wheel: Some(dom::Vector2D::new(0.0, 30.0)),
-        touches: TouchPoints::new(),
+        detail: EventDetail::Wheel {
+            position: dom::Point2D::new(5.0, 6.0),
+            delta: dom::Vector2D::new(0.0, 30.0),
+        },
+        release: None,
     }));
     decisions.push(InputDecision::Emit(EmitEvent {
         name: "touchmove",
         target,
-        position: dom::Point2D::new(30.5, 40.0),
-        wheel: None,
-        touches: touches.clone(),
+        detail: EventDetail::Touch {
+            position: dom::Point2D::new(30.5, 40.0),
+            points: touches.clone(),
+        },
+        release: None,
     }));
     painter.execute_decisions(&mut decisions, None, 0.5);
 
@@ -361,16 +376,24 @@ fn a_wheel_delta_and_touch_points_cross_as_values() {
     else {
         panic!("an emit decision becomes a dispatch command");
     };
-    assert_eq!(payload.wheel, Some(dom::Vector2D::new(0.0, 30.0)));
-    assert_eq!(payload.position, dom::Point2D::new(5.0, 6.0));
+    assert_eq!(
+        payload.detail,
+        EventDetail::Wheel {
+            position: dom::Point2D::new(5.0, 6.0),
+            delta: dom::Vector2D::new(0.0, 30.0),
+        }
+    );
 
     let ToMain::DispatchEvent { payload, .. } =
         main.commands.try_recv().expect("then the touch event")
     else {
         panic!("an emit decision becomes a dispatch command");
     };
-    assert_eq!(payload.touches.as_slice(), touches.as_slice());
-    assert_eq!(payload.wheel, None);
+    assert_eq!(payload.detail.touch_points(), touches.as_slice());
+    assert_eq!(
+        payload.detail.position(),
+        Some(dom::Point2D::new(30.5, 40.0))
+    );
     assert!((payload.timestamp - 500.0).abs() < f64::EPSILON);
 }
 
@@ -1194,7 +1217,7 @@ fn frame_posts_coalesce_to_the_latest_clock_and_greatest_sequence() {
 /// marker, so its listener never sees a document older than its pass.
 #[test]
 fn a_dispatch_in_a_scrolling_pass_follows_the_marker() {
-    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT, TouchPoints};
+    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
 
     let (mut painter, mut main, scroller) = scrolling("");
     main.outbox.listener_edge(Arc::from(TAP_EVENT), true);
@@ -1209,9 +1232,8 @@ fn a_dispatch_in_a_scrolling_pass_follows_the_marker() {
     decisions.push(InputDecision::Emit(EmitEvent {
         name: TAP_EVENT,
         target: scroller,
-        position: dom::Point2D::new(1.0, 1.0),
-        wheel: None,
-        touches: TouchPoints::new(),
+        detail: tap_detail(),
+        release: None,
     }));
     painter.execute_decisions(&mut decisions, Some(&frame), 0.5);
     assert!(matches!(main.commands.try_recv(), Ok(ToMain::Posted)));
@@ -1252,7 +1274,7 @@ fn a_vsync_follows_the_marker_of_its_pass() {
 /// applied them, so the acknowledgement implies the tap below.
 #[test]
 fn a_frame_post_is_fenced_behind_every_command_sent_before_it() {
-    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT, TouchPoints};
+    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
 
     let (mut painter, mut main, scroller) = scrolling("");
     main.outbox.listener_edge(Arc::from(TAP_EVENT), true);
@@ -1267,9 +1289,8 @@ fn a_frame_post_is_fenced_behind_every_command_sent_before_it() {
     decisions.push(InputDecision::Emit(EmitEvent {
         name: TAP_EVENT,
         target: scroller,
-        position: dom::Point2D::new(1.0, 1.0),
-        wheel: None,
-        touches: TouchPoints::new(),
+        detail: tap_detail(),
+        release: None,
     }));
     painter.execute_decisions(&mut decisions, Some(&frame), 0.5);
     let sent = main.seat.commands.sent();
@@ -1551,13 +1572,16 @@ fn a_resized_scroller_stays_on_the_page_the_painter_showed() {
     wheel(&mut painter, 30.0);
     wheel(&mut painter, 30.0);
     assert_eq!(shown(&painter, scroller), dom::Vector2D::new(0.0, 400.0));
+    // The wheel gesture's quiet interval ends: the container is at rest.
+    let frame = painter.frame().cloned().expect("a frame is adopted");
+    painter.scroll_intents.tick(&frame, 1.0);
     let _ = take(&main);
 
     document.set_inline_style(scroller, &paged_style("", 300));
     adopt(&mut painter, &main, &mut document);
     assert_eq!(shown(&painter, scroller), dom::Vector2D::new(0.0, 600.0));
     assert!(
-        !painter.scroll_intents.is_animating(),
+        !painter.scroll_intents.is_gliding(scroller),
         "a jump, not a glide"
     );
     painter.publish_scroll(0.0, None);
@@ -2116,4 +2140,53 @@ fn a_request_that_yields_to_a_pointer_is_dropped_under_a_finger() {
     assert!(document.scroll_to_yielding(scroller, dom::Vector2D::new(0.0, 600.0), Smooth));
     adopt(&mut painter, &main, &mut document);
     assert!(painter.scroll_intents.is_gliding(scroller), "and glides");
+}
+
+/// A wheel step posts its container moving, not at rest: the wheel gesture
+/// ends only once [`super::inertia::WHEEL_REST_SECONDS`] pass with no
+/// further step, and a step inside that interval restarts it. The quiet
+/// interval owes frames while it runs, and the tick that ends it posts the
+/// container at rest.
+#[test]
+fn a_wheel_rests_only_after_a_quiet_interval() {
+    use super::inertia::WHEEL_REST_SECONDS;
+
+    let (mut painter, main, scroller) = scrolling("");
+    let wheel = |painter: &mut Painter, at: f64| {
+        painter.clock.pin(at);
+        painter.dispatch_input(dom::input::InputEvent::wheel(
+            dom::Point2D::new(100.0, 100.0),
+            dom::Vector2D::new(0.0, 20.0),
+        ));
+    };
+    let rest_of = |main: &FarEnd| {
+        let (entries, _) = take(main);
+        entries
+            .iter()
+            .find(|(node, _)| *node == scroller)
+            .map(|(_, entry)| entry.rest)
+    };
+    let tick = |painter: &mut Painter, at: f64| {
+        let frame = painter.frame().cloned().expect("a frame is adopted");
+        painter.scroll_intents.tick(&frame, at);
+        painter.publish_scroll(at, None);
+    };
+
+    wheel(&mut painter, 0.0);
+    assert_eq!(rest_of(&main), Some(None), "a wheel step posts it moving");
+    assert!(painter.is_animating(), "the quiet interval owes frames");
+
+    wheel(&mut painter, 0.06);
+    assert_eq!(rest_of(&main), Some(None));
+    // 0.1 s after the first step but not after the second: still moving.
+    tick(&mut painter, 0.1);
+    assert_eq!(rest_of(&main), None, "nothing changed, nothing posted");
+
+    tick(&mut painter, 0.061 + WHEEL_REST_SECONDS);
+    assert_eq!(
+        rest_of(&main),
+        Some(Some(dom::Vector2D::new(0.0, 40.0))),
+        "the quiet interval ended the gesture at rest"
+    );
+    assert!(!painter.is_animating());
 }

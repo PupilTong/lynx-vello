@@ -121,33 +121,53 @@ import { splitRecord } from "bobcat:record";
 // **The whole walk is this file's.** The host computes the event path while
 // it holds the document, releases it, and makes one call:
 // `__BobcatDispatchEvent(nodes, targets, name, bubbles, timestamp,
-// detailKind, ...detailNumbers)`, where `nodes` is the path in target-first
-// order as comma-joined decimal node ids and `targets` carries, position for
-// position, the shadow-retargeted target of that step. Two strings because
-// the boundary takes primitives and structured clones only, a clone can be
-// minted by the realm alone, and a decimal id cannot contain the separator —
-// the same encoding `childElementIds` uses. Releasing the document before the
-// call is what lets a listener mutate the tree.
+// extraCount, ...extraNameValuePairs, detailKind, ...detailValues)`, where
+// `nodes` is the path in target-first order as comma-joined decimal node ids
+// and `targets` carries, position for position, the shadow-retargeted target
+// of that step. Two strings because the boundary takes primitives and
+// structured clones only, a clone can be minted by the realm alone, and a
+// decimal id cannot contain the separator — the same encoding
+// `childElementIds` uses. Releasing the document before the call is what
+// lets a listener mutate the tree.
 //
-// Everything else is numbers, and the objects they describe are built here,
-// because their shape is JavaScript's. `timestamp` is the event's own, in
-// milliseconds on the view's timeline. `detailKind` says which shape the
-// numbers behind it make, and is the only thing that branches: one kind per
-// `detail` *shape*, never per event name, so one export carries every
-// producer the host has.
+// **Kernel events are W3C; this file is the Lynx layer** (user ruling,
+// 2026-10-13). The host dispatches every event whose name exists in W3C with
+// W3C's shape: `detailKind` and the values behind it are the W3C payload,
+// and the members a W3C event interface has (`MouseEvent`'s, `WheelEvent`'s,
+// `KeyboardEvent`'s, `PointerEvent`'s) go on the event object here. What a
+// Lynx handler reads beside that, when the host can compute it cheaply,
+// crosses as **extras**: `extraCount` name/value pairs, which become the
+// Lynx `detail` whenever there are any — an `<image>` `load`'s
+// `{width, height}`, a `scroll`'s `scrollTop`, `scrollLeft`, `scrollHeight`,
+// `scrollWidth`, `deltaX`, `deltaY` and `isDragging`. No rule here knows an
+// extra's name. With no extras, the `detail` is this file's default shaping
+// of the payload: `{x, y}` for a pointer or touch event, `{}` for a wheel
+// (native's), the exposure object for `uiappear`/`uidisappear`, `{}`
+// otherwise. The Lynx-only events (`tap`, `longpress`, `uiappear`, the
+// components' own) keep Lynx's structure.
 //
-// - `DETAIL_POSITION` — every routed input event. `x`/`y` are the device
-//   position the `detail` reports; `deltaX`/`deltaY` are the wheel delta,
-//   `undefined` for every event that has none, which is what keeps those two
-//   keys out of the `detail` rather than `NaN` in it; then four numbers per
-//   touch point — `identifier`, `x`, `y`, and a flag bitmask over
-//   `touches`/`targetTouches`/`changedTouches` — which the four touch events
-//   alone carry.
-// - `DETAIL_SIZE` — an `<image>`'s `load`: the bitmap's intrinsic `width` and
-//   `height`, in px.
-// - `DETAIL_EMPTY` — an `<image>`'s `error`: no numbers, and a `detail` of
-//   `{}`.
-// - `DETAIL_EXPOSURE` — an element's `uiappear` or `uidisappear`: no numbers
+// `timestamp` is the event's own, in milliseconds on the view's timeline.
+// `detailKind` names one W3C payload *shape*, never an event name:
+//
+// - `DETAIL_POSITION` — every routed pointer, wheel and touch event, eight
+//   values: the device position; the wheel delta; `button`, `buttons`,
+//   `pointerId` and `pointerType` — each `undefined` for a shape without
+//   it, which is how the three shapes are told apart — then four numbers per
+//   touch point (`identifier`, `x`, `y`, and a flag bitmask over
+//   `touches`/`targetTouches`/`changedTouches`), which the four touch events
+//   alone carry. A pointer shape puts `x`, `y`, `clientX`, `clientY`,
+//   `pageX`, `pageY`, `button` and `buttons` on the event object, and a
+//   `pointer*` event `pointerId` and `pointerType` too; a wheel shape puts
+//   `deltaX`, `deltaY` and the six coordinates there (`positionMembers`).
+// - `DETAIL_EMPTY` — nothing: an `error`, a `load`, a `scroll`, a dialog's
+//   events.
+// - `DETAIL_KEY` — `keydown` and `keyup`: the W3C `key` and `code` strings,
+//   `repeat` as a boolean, and a modifier bitmask (alt 1, ctrl 2, meta 4,
+//   shift 8). They become `key`, `code`, `repeat`, `altKey`, `ctrlKey`,
+//   `metaKey` and `shiftKey` on the event object itself, where
+//   `KeyboardEvent` and web-core (`createCrossThreadEvent.ts`) put them; the
+//   `detail` is `{}`. With no focus model the target is the page element.
+// - `DETAIL_EXPOSURE` — an element's `uiappear` or `uidisappear`: no values
 //   either. The `detail` is web-core's (`ExposureServices.ts:198-208`), built
 //   here out of the event's own target: its node id as `unique-id`, and its
 //   `exposure-id` (null when it has none) and `exposure-scene` (`""` when it
@@ -2650,28 +2670,47 @@ interface DispatchedEvent {
   touches?: TouchPointValues[];
   targetTouches?: TouchPointValues[];
   changedTouches?: TouchPointValues[];
+  // The W3C `MouseEvent`, `PointerEvent` and `WheelEvent` members a pointer
+  // or wheel event carries on itself ([`positionMembers`]). Absent on every
+  // other event.
+  button?: number;
+  buttons?: number;
+  clientX?: number;
+  clientY?: number;
+  pageX?: number;
+  pageY?: number;
+  x?: number;
+  y?: number;
+  pointerId?: number;
+  pointerType?: string;
+  // The W3C `KeyboardEvent` members only a key event carries, on the event
+  // itself as `KeyboardEvent` and web-core (`createCrossThreadEvent.ts`) put
+  // them. Absent on every other event, like the touch lists.
+  key?: string;
+  code?: string;
+  repeat?: boolean;
+  altKey?: boolean;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  shiftKey?: boolean;
 }
 
 /**
- * What one dispatched event reports about itself, beyond its name and target.
+ * The Lynx `detail` of one dispatched event.
  *
- * Every key is optional because the host sends one detail *kind* per
- * dispatch and each kind writes its own: a routed input event writes the
- * device position in viewport CSS px and — for `wheel` alone — the scroll
- * delta; an `<image>`'s `load` writes the bitmap's intrinsic size; its
- * `error` writes nothing, and the detail is `{}`; an element's `uiappear` or
- * `uidisappear` writes the five exposure keys. A key a kind does not write
- * is absent, not `undefined`-valued: the transport carries an
- * `undefined`-valued key as one. A listener may write into this object; it is
- * minted per dispatch, like the event that carries it.
+ * Every key is optional because what it holds depends on the dispatch: the
+ * host's extras when it sent any (an `<image>` `load`'s `width`/`height`, a
+ * `scroll`'s metrics, whatever names it chose), and otherwise this file's
+ * default shaping of the W3C payload — the device position in viewport CSS
+ * px for a pointer or touch event, the five exposure keys for `uiappear` or
+ * `uidisappear`, nothing for the rest. A key that is not written is absent,
+ * not `undefined`-valued: the transport carries an `undefined`-valued key as
+ * one. A listener may write into this object; it is minted per dispatch,
+ * like the event that carries it.
  */
 interface EventDetail extends Partial<ExposureDetail> {
   x?: number;
   y?: number;
-  deltaX?: number;
-  deltaY?: number;
-  width?: number;
-  height?: number;
 }
 
 /**
@@ -2714,25 +2753,117 @@ function exposureDetail(
  * nothing here branches on the event's name.
  */
 const DETAIL_POSITION = 0;
-const DETAIL_SIZE = 1;
 const DETAIL_EMPTY = 2;
 const DETAIL_EXPOSURE = 3;
+const DETAIL_KEY = 4;
+
+/** The modifier bits a key event's last argument carries. */
+const MODIFIER_ALT = 1;
+const MODIFIER_CTRL = 2;
+const MODIFIER_META = 4;
+const MODIFIER_SHIFT = 8;
+
+/**
+ * The Lynx `detail` the host's extras make: one key per name, with the value
+ * the host sent. No rule here knows any name; what the host sends is what a
+ * Lynx handler reads (an `<image>` `load`'s `width`/`height`, a `scroll`'s
+ * metrics).
+ */
+function extrasOf(pairs: unknown[]): EventDetail {
+  const extras: Record<string, unknown> = {};
+  for (let at = 0; at + 1 < pairs.length; at += 2) {
+    extras[String(pairs[at])] = pairs[at + 1];
+  }
+  return extras as EventDetail;
+}
+
+/**
+ * The W3C members a position detail puts on the event object itself, by
+ * which shape the host's values make — never by the event's name, save the
+ * one `PointerEvent` pair. Every coordinate is the one viewport CSS px the
+ * `detail` reports: this runtime has no separate client or page space.
+ *
+ * - A pointer shape (`button` sent): `x`, `y`, `clientX`, `clientY`, `pageX`,
+ *   `pageY`, `button` and `buttons` — `MouseEvent`'s, which every event a
+ *   pointer produces carries here (`pointer*`, `mouse*`, `click`, `dblclick`,
+ *   `tap`, `longpress`), and a `pointer*` event `PointerEvent`'s `pointerId`
+ *   and `pointerType` besides.
+ * - A wheel shape (a delta sent): `WheelEvent`'s `deltaX` and `deltaY` with
+ *   the same six coordinates — where native Lynx puts them too.
+ * - A touch shape: nothing; its three lists carry the points.
+ */
+function positionMembers(
+  name: string,
+  values: unknown[],
+): Record<string, number | string> | undefined {
+  const x = Number(values[0]);
+  const y = Number(values[1]);
+  const coordinates = { x, y, clientX: x, clientY: y, pageX: x, pageY: y };
+  if (values[2] !== undefined) {
+    return {
+      ...coordinates,
+      deltaX: Number(values[2]),
+      deltaY: Number(values[3]),
+    };
+  }
+  if (values[4] === undefined) {
+    return undefined;
+  }
+  const members: Record<string, number | string> = {
+    ...coordinates,
+    button: Number(values[4]),
+    buttons: Number(values[5]),
+  };
+  if (name.startsWith("pointer")) {
+    members["pointerId"] = Number(values[6]);
+    members["pointerType"] = String(values[7]);
+  }
+  return members;
+}
+
+/**
+ * The `KeyboardEvent` members one `DETAIL_KEY` dispatch puts on its event:
+ * the host's `key` and `code` strings, `repeat`, and the modifier bitmask
+ * unpacked into the four standard booleans.
+ */
+function keyMembers(values: unknown[]): {
+  key: string;
+  code: string;
+  repeat: boolean;
+  altKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+} {
+  const modifiers = Number(values[3]);
+  return {
+    key: String(values[0]),
+    code: String(values[1]),
+    repeat: values[2] === true,
+    altKey: (modifiers & MODIFIER_ALT) !== 0,
+    ctrlKey: (modifiers & MODIFIER_CTRL) !== 0,
+    metaKey: (modifiers & MODIFIER_META) !== 0,
+    shiftKey: (modifiers & MODIFIER_SHIFT) !== 0,
+  };
+}
 
 /**
  * The `detail` object one kind's numbers make, for an event at `target`.
  *
  * `DETAIL_EMPTY` spends none and is web-core's `error` detail exactly.
+ * `DETAIL_KEY`'s values are the event's own members ([`keyMembers`]), and
+ * its `detail` is `{}` too.
  * `DETAIL_EXPOSURE` spends none either: it is web-core's exposure detail,
  * read off `target` itself — the event's own target, which the host resolved
  * before it called, so its attributes answer — and is the only kind that
  * reads the target at all.
- * `DETAIL_SIZE` spends two, an image `load`'s `naturalWidth`/`naturalHeight`.
- * `DETAIL_POSITION` spends two, then two more for a wheel delta that may be
- * absent; whatever follows those four is the touch numbers, which
- * [`touchLists`] reads.
+ * `DETAIL_POSITION` is `{x, y}` for a pointer or touch shape and `{}` for a
+ * wheel (native's); its other values are the event's own members
+ * ([`positionMembers`]) and the touch numbers ([`touchLists`]). Extras,
+ * when the host sends any, replace all of this.
  */
 function detailOf(kind: number, numbers: unknown[], target: number): EventDetail {
-  if (kind === DETAIL_EMPTY) {
+  if (kind === DETAIL_EMPTY || kind === DETAIL_KEY) {
     return {};
   }
   if (kind === DETAIL_EXPOSURE) {
@@ -2742,15 +2873,12 @@ function detailOf(kind: number, numbers: unknown[], target: number): EventDetail
       getAttribute(target, EXPOSURE_SCENE) ?? "",
     );
   }
-  if (kind === DETAIL_SIZE) {
-    return { width: Number(numbers[0]), height: Number(numbers[1]) };
-  }
-  const detail: EventDetail = { x: Number(numbers[0]), y: Number(numbers[1]) };
+  // A wheel's `detail` is native's `{}`: its delta and position are the
+  // event's own members (`positionMembers`).
   if (numbers[2] !== undefined) {
-    detail.deltaX = Number(numbers[2]);
-    detail.deltaY = Number(numbers[3]);
+    return {};
   }
-  return detail;
+  return { x: Number(numbers[0]), y: Number(numbers[1]) };
 }
 
 /**
@@ -3095,9 +3223,15 @@ function dispatchEvent(
   eventName: unknown,
   bubbles: unknown,
   timestamp: unknown,
-  detailKind: unknown,
-  ...detailNumbers: unknown[]
+  extraCount: unknown,
+  ...rest: unknown[]
 ): undefined {
+  // The extras' name/value pairs first, then the detail kind and its values,
+  // which run to the end because a touch event's points have no fixed count.
+  const pairs = Number(extraCount ?? 0) * 2;
+  const extras = pairs > 0 ? extrasOf(rest.slice(0, pairs)) : undefined;
+  const detailKind = rest[pairs];
+  const detailNumbers = rest.slice(pairs + 1);
   const steps = pathSteps(pathIds, targetIds);
   const first = steps[0];
   if (first === undefined) {
@@ -3111,7 +3245,9 @@ function dispatchEvent(
   // the time origin rather than `NaN`.
   const stamp = Number(timestamp ?? 0);
   const kind = Number(detailKind);
-  const detail = detailOf(kind, detailNumbers, targetNodeId);
+  // The Lynx `detail`: the extras when the host sent any, the default
+  // shaping of the W3C payload otherwise.
+  const detail = extras ?? detailOf(kind, detailNumbers, targetNodeId);
   const event: DispatchedEvent = {
     type: name,
     eventPhase: NONE,
@@ -3131,13 +3267,22 @@ function dispatchEvent(
   // Assigned rather than declared above, so an event that carries no touches
   // has no such keys at all — the transport would carry three
   // `undefined`-valued ones to a background handler otherwise. Only a
-  // position detail can have any: its first four numbers are the position and
-  // the wheel delta, and the points follow them.
+  // position detail can have any: its first eight values are the position,
+  // the wheel delta and the pointer members, and the points follow them.
   const lists = kind === DETAIL_POSITION
-    ? touchLists(detailNumbers.slice(4))
+    ? touchLists(detailNumbers.slice(8))
     : undefined;
   if (lists !== undefined) {
     Object.assign(event, lists);
+  }
+  if (kind === DETAIL_POSITION) {
+    const members = positionMembers(name, detailNumbers);
+    if (members !== undefined) {
+      Object.assign(event, members);
+    }
+  }
+  if (kind === DETAIL_KEY) {
+    Object.assign(event, keyMembers(detailNumbers));
   }
 
   // Points the event at one delivery. `currentTarget` is rebuilt per step,

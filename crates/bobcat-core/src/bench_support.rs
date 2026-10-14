@@ -170,11 +170,17 @@ impl ScriptHarness {
     pub fn dispatch(&mut self, target: u64, name: &Arc<str>) -> bool {
         let target = dom::NodeId::from_bits(target).expect("a well-formed packed handle");
         let payload = InputEventPayload {
-            position: dom::Point2D::new(123.5, 456.25),
+            detail: dom::event::EventDetail::Pointer {
+                position: dom::Point2D::new(123.5, 456.25),
+                id: 1,
+                device: dom::input::PointerKind::Touch,
+                button: 0,
+                buttons: 0,
+            },
             ..InputEventPayload::default()
         };
         self.runtime
-            .dispatch_input_event(&mut self.js_runtime, target, name, &payload)
+            .dispatch_input_event(&mut self.js_runtime, target, name, &payload, None)
             .expect("the benchmark dispatch completes")
     }
 

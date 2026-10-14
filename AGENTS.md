@@ -1618,17 +1618,45 @@ two comma-joined decimal id strings — the nodes, and position for position eac
 step's shadow-retargeted target, less every step at a UA shadow tree's
 content, which script names none of, so an event at shadow chrome starts at
 its host (routed input events are composed, the components' events are not,
-as HTML and web-core fire them) — plus the name and then numbers alone: the
-`timestamp` (milliseconds on the view's timeline), the position the `detail`
-reports, the wheel delta (`undefined` for every event without one, which keeps
-the two keys out of the `detail`), and four numbers per touch point
-(`identifier`, `x`, `y`, flags) for the four touch events. The realm builds
-the `detail` object and the three touch lists out of them; no JSON is
-formatted on the host side and none is parsed in the realm. One call
+as HTML and web-core fire them) — plus the name and then primitives alone: the
+`timestamp` (milliseconds on the view's timeline); the extras channel
+(`extraCount`, then name/value pairs: what a Lynx handler reads beside the W3C
+payload, such as a `load`'s size or a `scroll`'s metrics, which the realm makes
+the Lynx `detail`); then the W3C payload's kind and values — for an input
+event the position, the wheel delta, a pointer's `button`, `buttons`,
+`pointerId` and `pointerType` (each `undefined` where the shape has none), and
+four numbers per touch point (`identifier`, `x`, `y`, flags); for a key event
+its `key` and `code` strings, `repeat` and a modifier bitmask. Kernel events
+are W3C-shaped and `element-papi.ts` is the Lynx layer that reshapes them
+(user ruling 2026-10-13; `docs/tracking/dom-events.md`). The realm builds
+the `detail` object, the W3C members on the event object and the three touch
+lists out of them; no JSON is formatted on the host side and none is parsed
+in the realm. One call
 is one dispatch, so one event object serves it, and the host keeps no listener
 index at all. The realm runs the capture, bubble and `global-bindEvent` passes,
 derives `eventPhase` per step, and ends the dispatch itself; neither
 `stopPropagation` nor `stopImmediatePropagation` crosses the boundary.
+
+That host side is one function, `MainThreadRuntime::dispatch`, the only place
+an event script hears is delivered. It computes the steps once and, before the
+realm's call, runs `dom`'s Rust walk over them
+(`Document::dispatch_element_event_over`), so an engine component whose
+definition lists the type in `CustomElement::observed_events` hears it first;
+a component's `stop_propagation` ends that walk only. What the event carries
+is `dom::event::EventDetail` (one variant per payload shape), which the router
+fills in, `ToMain::DispatchEvent` carries, the Rust walk lends out and
+`encode_detail` turns into the realm's numbers. The names components observe
+are published to the painter's name set once per document and never closed.
+CSSOM-View's `scroll` and `scrollend` are decided on this thread, never on
+the painter: `adopt_scroll_offsets` queues a `scroll` per container a post
+moved and a `scrollend` when a post names it at rest after it scrolled, and a
+script-facing instant scroll (`dom::Document::take_instant_scrolls`) queues
+its `scroll` from its entry's epilogue and gets its `scrollend` from the
+painter's rest post after carrying the request out. A wheel gesture rests
+once, 100 ms after its last tick (`WHEEL_REST_SECONDS`). All are component
+events, non-bubbling, with Lynx's scroll metrics as extras, queued only for a name a realm
+listener or a component hears at that moment; which containers are scrolling
+is tracked regardless.
 
 One event deliberately does **not** take that path, because it is the
 engine's own rather than script's: css-contain-2 §4.4's
@@ -2451,10 +2479,10 @@ Everything else is forwarded and unconditionally `preventDefault()`ed, because
 the Worker answers nothing and the facade cannot learn synchronously whether
 the engine consumed the scroll — the canvas owns wheel scrolling outright, the
 way `touch-action: none` makes it own touch panning. A browser mouse is
-reported truthfully by the facade and then fed to the engine as
-`PointerKind::Pen` by `dispatchPointer`, exactly as the macOS host does, so a
-primary-button drag scrolls: the engine's drag recognizer latches touch and pen
-only. Hover moves and secondary mouse buttons do not cross the boundary.
+reported truthfully by the facade and fed to the engine as
+`PointerKind::Mouse` by `dispatchPointer`, as the macOS host does, and a
+primary-button drag still scrolls: the engine's drag recognizer latches every
+pointer kind, a mouse included (user ruling 2026-10-13). Hover moves and secondary mouse buttons do not cross the boundary.
 
 **Host `NativeModules` and `globalProps` are the page's, not the Worker's.**
 `BobcatCanvas.create` takes an optional
@@ -2761,10 +2789,12 @@ Subsystems:
   `block: start`, `inline: nearest` — as an instant scroll request and
   rebuilds the frame in the same commit.
 - `input/` and `event/` — the `InputEvent` host seam, `Document::event_steps`,
-  which computes a path for a *script* dispatch above, and
-  `Document::dispatch_element_event`, which walks that path here for an event
-  the engine decides, delivering it to defined `CustomElement`s through
-  `handle_event` and to nothing else.
+  which computes a path for a *script* dispatch above,
+  `Document::dispatch_element_event_over`, which walks those same steps here
+  first, delivering to defined `CustomElement`s through `handle_event`, and
+  `Document::dispatch_element_event`, the same walk for an event only the
+  engine hears. `event::EventDetail` is the one description of an event's
+  payload; `CustomElement::observed_events` gates the walk.
 - `render/` — the DOM-free floor absorbed from the former `pulsar` crate
   (2026-08-04): `FrameImages` and the `render::gpu` wgpu backend. `render::blur`
   is the one exception: a `filter: blur()` bake is a partial replay of a
@@ -3149,7 +3179,9 @@ would host it:
   (`docs/tracking/deviations.md`).
 - **Gesture detectors and the arena.** `crates/bobcat-core/src/paint/gesture.rs`
   has no fling or velocity, no `:active` driving, no `consume-slide-event`, no
-  per-element `GestureDetector`/arena relations and no `click`; `tapSlop` is
+  per-element `GestureDetector`/arena relations and no `pointerover`/`out`/
+  `enter`/`leave`, mouse boundary events, `auxclick` or `contextmenu`
+  (`click`, `dblclick` and the compatibility mouse events are built); `tapSlop` is
   the default 50 px rather than the page config's.
 - **The rest of the `<image>` element surface.** `src`, `placeholder`,
   `mode`, `auto-size` and `blur-radius` work, and `load` (with the bitmap's

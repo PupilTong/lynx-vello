@@ -461,6 +461,7 @@ fn the_one_comparison_retargeting_rule_agrees_with_the_standards_predicate() {
             for composed in [false, true] {
                 let actual: Vec<(NodeId, NodeId, bool)> = document
                     .event_path(target, composed)
+                    .0
                     .into_iter()
                     .map(|entry| (entry.node, entry.target, entry.at_target))
                     .collect();
@@ -486,4 +487,221 @@ fn the_one_comparison_retargeting_rule_agrees_with_the_standards_predicate() {
         }
     }
     assert!(checked > 80, "only {checked} paths compared");
+}
+
+// ---------------------------------------------------------------------------
+// The Rust walk: the observed-events gate and a walk over caller-held steps
+// ---------------------------------------------------------------------------
+
+mod rust_walk {
+    use std::sync::{Arc, Mutex};
+
+    use super::super::{ElementEvent, EventDetail, EventPhase};
+    use crate::input::PointerKind;
+    use crate::tree::document::tests::device;
+    use crate::{CustomElement, Document, NodeId, Point2D};
+
+    type Log = Arc<Mutex<Vec<String>>>;
+
+    /// Records `type:phase:timestamp:x` per delivery, and stops the walk at
+    /// its own element when `stops` is set.
+    struct Listener {
+        who: &'static str,
+        log: Log,
+        stops: bool,
+    }
+
+    impl CustomElement<()> for Listener {
+        fn observed_events(&self) -> &'static [&'static str] {
+            &["pointerdown"]
+        }
+
+        fn handle_event(
+            &self,
+            _document: &mut Document<()>,
+            _element: NodeId,
+            event: &mut ElementEvent<'_>,
+        ) {
+            let phase = match event.phase() {
+                EventPhase::Capturing => "capture",
+                EventPhase::AtTarget => "at-target",
+                EventPhase::Bubbling => "bubble",
+            };
+            let x = event.detail().position().map_or(-1.0, |point| point.x);
+            self.log.lock().expect("never poisoned").push(format!(
+                "{}:{}:{phase}:{}:{x}",
+                self.who,
+                event.type_name(),
+                event.timestamp()
+            ));
+            if self.stops {
+                event.stop_propagation();
+            }
+        }
+    }
+
+    /// `page > outer(probe-outer) > inner(probe-inner)`, both listening.
+    fn page(log: &Log, outer_stops: bool) -> (Document<()>, NodeId, NodeId) {
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        document.define(
+            "probe-outer",
+            Box::new(Listener {
+                who: "outer",
+                log: Arc::clone(log),
+                stops: outer_stops,
+            }),
+        );
+        document.define(
+            "probe-inner",
+            Box::new(Listener {
+                who: "inner",
+                log: Arc::clone(log),
+                stops: false,
+            }),
+        );
+        let page = document.document_element().id();
+        let outer = document.create_element("probe-outer", ());
+        let inner = document.create_element("probe-inner", ());
+        document.append_child(page, outer);
+        document.append_child(outer, inner);
+        (document, outer, inner)
+    }
+
+    fn pointer(x: f32) -> EventDetail {
+        EventDetail::Pointer {
+            position: Point2D::new(x, 0.0),
+            id: 1,
+            device: PointerKind::Touch,
+            button: 0,
+            buttons: 1,
+        }
+    }
+
+    fn take(log: &Log) -> Vec<String> {
+        std::mem::take(&mut *log.lock().expect("never poisoned"))
+    }
+
+    #[test]
+    fn a_type_no_definition_observes_walks_nothing() {
+        let log = Log::default();
+        let (mut document, _outer, inner) = page(&log, false);
+        assert!(document.observes_event("pointerdown"));
+        assert!(!document.observes_event("click"));
+        assert_eq!(
+            document.observed_event_names().collect::<Vec<_>>(),
+            ["pointerdown"],
+            "the union of the definitions' lists, each name once"
+        );
+
+        let steps = document.event_steps(inner, true, true);
+        document.dispatch_element_event_over(&steps, "click", &pointer(1.0), 5.0);
+        document.dispatch_element_event(inner, "click", &pointer(1.0), true, true, 5.0);
+        assert!(
+            take(&log).is_empty(),
+            "a defined element on the path hears only what its definition observes"
+        );
+    }
+
+    #[test]
+    fn a_document_with_no_observer_walks_nothing_for_slotchange() {
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        assert!(!document.observes_event("slotchange"));
+        assert_eq!(document.observed_event_names().count(), 0);
+        let page = document.document_element().id();
+        // Nothing to call and nothing to fail: the gate returns first.
+        document.dispatch_element_event(page, "slotchange", &EventDetail::None, true, false, 0.0);
+    }
+
+    #[test]
+    fn a_walk_over_caller_held_steps_delivers_in_order_and_leaves_them_reusable() {
+        let log = Log::default();
+        let (mut document, _outer, inner) = page(&log, false);
+        let steps = document.event_steps(inner, true, true);
+        document.dispatch_element_event_over(&steps, "pointerdown", &pointer(3.0), 12.5);
+        assert_eq!(
+            take(&log),
+            [
+                "outer:pointerdown:capture:12.5:3",
+                "inner:pointerdown:at-target:12.5:3",
+                "outer:pointerdown:bubble:12.5:3",
+            ],
+            "capture root-inward, the target once, bubble outward, with the caller's detail and \
+             timestamp"
+        );
+        // The steps were only borrowed: the caller hands the same list on.
+        assert_eq!(steps, document.event_steps(inner, true, true));
+    }
+
+    #[test]
+    fn a_non_bubbling_walk_over_steps_skips_the_bubble_pass_above_the_target() {
+        let log = Log::default();
+        let (mut document, _outer, inner) = page(&log, false);
+        let steps = document.event_steps(inner, false, true);
+        document.dispatch_element_event_over(&steps, "pointerdown", &pointer(0.0), 0.0);
+        assert_eq!(
+            take(&log),
+            [
+                "outer:pointerdown:capture:0:0",
+                "inner:pointerdown:at-target:0:0"
+            ]
+        );
+    }
+
+    #[test]
+    fn stop_propagation_ends_the_rust_walk_only() {
+        let log = Log::default();
+        let (mut document, _outer, inner) = page(&log, true);
+        let steps = document.event_steps(inner, true, true);
+        document.dispatch_element_event_over(&steps, "pointerdown", &pointer(0.0), 0.0);
+        assert_eq!(
+            take(&log),
+            ["outer:pointerdown:capture:0:0"],
+            "the capture-phase stop keeps the target from hearing it"
+        );
+        // A second walk over the same steps starts afresh: the stop belonged
+        // to that one dispatch's event object, not to the path.
+        document.dispatch_element_event_over(&steps, "pointerdown", &pointer(0.0), 0.0);
+        assert_eq!(take(&log), ["outer:pointerdown:capture:0:0"]);
+    }
+}
+
+#[test]
+fn the_nearest_common_event_ancestor_is_inclusive_and_crosses_shadow_boundaries() {
+    let (mut document, page, outer, inner) = nested();
+    let sibling = document.create_element("view", ());
+    document.append_child(outer, sibling);
+    assert_eq!(
+        document.nearest_common_event_ancestor(inner, inner),
+        Some(inner)
+    );
+    assert_eq!(
+        document.nearest_common_event_ancestor(inner, outer),
+        Some(outer),
+        "an ancestor of the other is the answer itself"
+    );
+    assert_eq!(
+        document.nearest_common_event_ancestor(inner, sibling),
+        Some(outer)
+    );
+    assert_eq!(
+        document.nearest_common_event_ancestor(sibling, page),
+        Some(page)
+    );
+
+    // A node inside a shadow tree meets a light node at the host or above.
+    let shadow = document.attach_shadow(inner, ShadowRootMode::Open);
+    let chrome = document.create_element("view", ());
+    document.append_child(shadow, chrome);
+    assert_eq!(
+        document.nearest_common_event_ancestor(chrome, inner),
+        Some(inner)
+    );
+    assert_eq!(
+        document.nearest_common_event_ancestor(chrome, sibling),
+        Some(outer)
+    );
+
+    // Two detached trees share nothing.
+    let loose = document.create_element("view", ());
+    assert_eq!(document.nearest_common_event_ancestor(loose, inner), None);
 }

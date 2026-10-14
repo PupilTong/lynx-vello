@@ -726,16 +726,21 @@ struct Recorder {
 }
 
 impl dom::CustomElement<()> for Recorder {
+    fn observed_events(&self) -> &'static [&'static str] {
+        &["contentvisibilityautostatechange"]
+    }
+
     fn handle_event(
         &self,
         document: &mut dom::Document<()>,
         element: dom::NodeId,
-        event: &mut dom::event::ElementEvent,
+        event: &mut dom::event::ElementEvent<'_>,
     ) {
-        let dom::event::ElementEventKind::ContentVisibilityAutoStateChange { skipped } =
-            event.kind()
-        else {
-            panic!("an engine event this page never fires: {:?}", event.kind())
+        let dom::event::EventDetail::ContentVisibility { skipped } = *event.detail() else {
+            panic!(
+                "an engine event this page never fires: {:?}",
+                event.detail()
+            )
         };
         let target = document
             .get(event.target())
@@ -1480,6 +1485,7 @@ fn tap(target: dom::NodeId) -> ToMain {
         target,
         name: "tap",
         payload: InputEventPayload::default(),
+        release: None,
     }
 }
 
@@ -3145,6 +3151,7 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
             target,
             name: "tap",
             payload: InputEventPayload::default(),
+            release: None,
         }])
         .await;
         for _ in 0..64 {

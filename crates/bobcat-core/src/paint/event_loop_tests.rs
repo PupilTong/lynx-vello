@@ -240,6 +240,61 @@ fn a_quick_release_delivers_tap_to_the_realm() {
     wait_for_log(&mut engine, "tap:12");
 }
 
+/// Two 100x100 views side by side in a row (node 3 the row, 4 and 5 the
+/// views); the page's listeners append `type@uid` to the row's `log`.
+const CLICK_PAGE: &str = r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const row = __CreateView(0);
+          const left = __CreateView(0);
+          const right = __CreateView(0);
+          __AppendElement(page, row);
+          __AppendElement(row, left);
+          __AppendElement(row, right);
+          globalThis.held = [page, row, left, right];
+          globalThis.entries = [];
+          __SetInlineStyles(row, 'display:flex;flex-direction:row;width:200px;height:100px');
+          __SetInlineStyles(left, 'width:100px;height:100px');
+          __SetInlineStyles(right, 'width:100px;height:100px');
+          const note = (event) => {
+            entries.push(event.type + '@' + event.target.uid);
+            __SetAttribute(row, 'log', entries.join());
+          };
+          for (const name of ['click', 'dblclick', 'tap']) {
+            __AddEventListener(page, name, note, {});
+          }
+          __FlushElementTree();
+        };
+        ";
+
+fn touch_xy(id: u32, phase: PointerPhase, x: f32, y: f32) -> InputEvent {
+    InputEvent::pointer(Point2D::new(x, y), id, PointerKind::Touch, phase)
+}
+
+/// `click` end to end: a press that leaves one view for its sibling clicks
+/// their common parent (and is no `tap`, at 100px of travel); two quick
+/// presses on one view click it twice and add a `dblclick` after the
+/// second, each before that release's `tap`.
+#[test]
+fn a_click_reaches_the_common_ancestor_and_two_quick_ones_a_dblclick() {
+    let mut engine = booted(CLICK_PAGE);
+    engine.painter.clock.pin(0.0);
+    engine.dispatch_input(touch_xy(1, PointerPhase::Down, 50.0, 50.0));
+    engine.dispatch_input(touch_xy(1, PointerPhase::Up, 150.0, 50.0));
+    wait_for_log(&mut engine, "click@3");
+
+    engine.painter.clock.pin(1.0);
+    engine.dispatch_input(touch_xy(1, PointerPhase::Down, 50.0, 50.0));
+    engine.dispatch_input(touch_xy(1, PointerPhase::Up, 50.0, 50.0));
+    engine.painter.clock.pin(1.2);
+    engine.dispatch_input(touch_xy(1, PointerPhase::Down, 50.0, 50.0));
+    engine.dispatch_input(touch_xy(1, PointerPhase::Up, 50.0, 50.0));
+    wait_for_log(
+        &mut engine,
+        "click@3,click@4,tap@4,click@4,dblclick@4,tap@4",
+    );
+}
+
 /// The page a `timestamp`/`params` test reads: one `tap` listener that
 /// logs what every dispatched event carries beside its detail.
 const STAMPED_GESTURE_PAGE: &str = r"
@@ -449,6 +504,149 @@ fn a_scroll_consuming_drag_suppresses_the_tap() {
         offset,
         "the document adopts the posted offset"
     );
+}
+
+/// A 200px column scroller (node 3, max offset 800) whose `scroll` and
+/// `scrollend` listeners log their type into its `log`; its first `tap`
+/// scrolls it instantly to 100 through the `scrollTo` UI method.
+const SCROLL_EVENTS_PAGE: &str = r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const scroller = __CreateView(0);
+          __AppendElement(page, scroller);
+          globalThis.held = [page, scroller];
+          globalThis.entries = [];
+          __SetInlineStyles(scroller, 'display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px');
+          for (let i = 0; i < 5; i++) {
+            const card = __CreateView(0);
+            __AppendElement(scroller, card);
+            held.push(card);
+            __SetInlineStyles(card, 'flex-shrink:0;width:200px;height:200px');
+          }
+          const note = (event) => {
+            entries.push(event.type);
+            __SetAttribute(scroller, 'log', entries.join());
+          };
+          __AddEventListener(scroller, 'scroll', note, {});
+          __AddEventListener(scroller, 'scrollend', note, {});
+          __AddEventListener(scroller, 'tap', () => {
+            if (globalThis.scrolled) return;
+            globalThis.scrolled = true;
+            __InvokeUIMethod(scroller, 'scrollTo', { top: 100 }, () => {});
+          }, {});
+          __FlushElementTree();
+        };
+        ";
+
+/// Runs display passes at `at` — the gesture clock, the rebase onto the
+/// newest commit (which carries out its scroll requests), then the pass's
+/// publish, as a drawn frame does — until the scroller's `log` equals
+/// `expected`. Equality, as [`wait_for_log`]: an extra event shows up in
+/// the value.
+fn drive_until_log(engine: &mut TestEngine, at: f64, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        adopt_at(engine, at);
+        engine.painter.publish_scroll(at, None);
+        let log = attribute_of(engine, 3, "log");
+        if log.as_deref() == Some(expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected log {expected:?}, last saw {log:?}"
+        );
+        std::thread::yield_now();
+    }
+}
+
+/// CSSOM-View's `scroll` and `scrollend`, end to end. An instant
+/// `scrollTo` fires `scroll` in the task that scrolled; its `scrollend`
+/// comes from the painter, which carries the request out and posts the
+/// container at rest — once. A drag that comes to rest fires one `scroll`
+/// for the offset its move posted and a `scrollend` for the rest its quiet
+/// release posted. Two wheel ticks 30 ms apart are one wheel gesture: a
+/// `scroll` per tick, and one `scrollend` once the quiet interval passes.
+#[test]
+fn instant_drag_and_wheel_scrolls_fire_scroll_then_one_scrollend() {
+    let mut engine = booted(SCROLL_EVENTS_PAGE);
+    touch_at(&mut engine, 0.0, PointerPhase::Down, 100.0);
+    touch_at(&mut engine, 0.05, PointerPhase::Up, 100.0);
+    drive_until_log(&mut engine, 0.05, "scroll,scrollend");
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(0.0, 100.0)
+    );
+
+    // Slow: 30px over half a second, then held still before the release,
+    // so the release has no speed to fling with.
+    touch_at(&mut engine, 1.0, PointerPhase::Down, 150.0);
+    touch_at(&mut engine, 1.5, PointerPhase::Move, 120.0);
+    touch_at(&mut engine, 2.0, PointerPhase::Move, 120.0);
+    touch_at(&mut engine, 2.0, PointerPhase::Up, 120.0);
+    drive_until_log(&mut engine, 2.0, "scroll,scrollend,scroll,scrollend");
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(0.0, 122.0)
+    );
+
+    // Each tick is adopted before the next, so each is a `scroll` of its
+    // own; ticks adopted together would be one.
+    for (at, log) in [
+        (3.0, "scroll,scrollend,scroll,scrollend,scroll"),
+        (3.03, "scroll,scrollend,scroll,scrollend,scroll,scroll"),
+    ] {
+        engine.painter.clock.pin(at);
+        engine.dispatch_input(InputEvent::wheel(
+            Point2D::new(100.0, 100.0),
+            dom::Vector2D::new(0.0, 20.0),
+        ));
+        assert!(engine.is_animating(), "the quiet interval owes frames");
+        drive_until_log(&mut engine, at, log);
+    }
+    drive_until_log(
+        &mut engine,
+        3.2,
+        "scroll,scrollend,scroll,scrollend,scroll,scroll,scrollend",
+    );
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        dom::Vector2D::new(0.0, 162.0)
+    );
+}
+
+/// A key reaches a listener on the page through the painter, named by the
+/// router and targeted at the document element, with the W3C members on
+/// the event object.
+#[test]
+fn a_key_reaches_a_page_listener_with_its_keyboard_members() {
+    let mut engine = booted(
+        r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const view = __CreateView(0);
+              __AppendElement(page, view);
+              globalThis.held = [page, view];
+              __AddEventListener(page, 'keydown', (event) => {
+                __SetAttribute(view, 'log',
+                  [event.type, event.key, event.code, event.shiftKey].join());
+              }, {});
+              __FlushElementTree();
+            };
+            ",
+    );
+    let shift = dom::input::Modifiers {
+        shift: true,
+        ..dom::input::Modifiers::default()
+    };
+    engine.dispatch_input(InputEvent::key(
+        dom::input::KeyPhase::Down,
+        "A",
+        "KeyA",
+        false,
+        shift,
+    ));
+    wait_for_log(&mut engine, "keydown,A,KeyA,true");
 }
 
 /// An outer column scroller (node 3, max offset 800) whose first child is
@@ -1523,7 +1721,10 @@ fn a_wheel_tick_ends_a_glide_where_the_wheel_puts_it() {
         "the wheel stepped to the next page ahead of {mid}, got {landed}"
     );
     assert!(!engine.painter.scroll_intents.is_gliding(node_id(3)));
-    assert!(!engine.is_animating(), "the glide ended");
+    assert!(
+        engine.painter.scroll_intents.is_wheeling(node_id(3)),
+        "the glide ended, and the wheel gesture's quiet interval runs"
+    );
     for at in [1.1, 1.3, 2.0] {
         frame_at(&mut engine, at);
         assert!(
@@ -1531,6 +1732,7 @@ fn a_wheel_tick_ends_a_glide_where_the_wheel_puts_it() {
             "the wheel's position stands at {at}"
         );
     }
+    assert!(!engine.is_animating(), "the wheel gesture has rested");
     engine.painter.publish_scroll(2.0, None);
     assert_eq!(
         scroll_offset_of(&mut engine, 3),
@@ -1928,7 +2130,10 @@ fn a_wheel_scrolls_and_reaches_a_wheel_listener() {
     let page = SCROLLING_GESTURE_PAGE.replace(
         "__AddEventListener(view, 'tap', note, {});",
         "__AddEventListener(view, 'wheel', (event) => {
-               entries.push(event.type + ':' + event.detail.deltaY);
+               // `WheelEvent`'s delta, on the event itself; the Lynx
+               // `detail` of a wheel is native's `{}`.
+               entries.push(event.type + ':' + event.deltaY + ':' +
+                 JSON.stringify(event.detail));
                __SetAttribute(view, 'log', entries.join());
              }, {});",
     );
@@ -1937,7 +2142,7 @@ fn a_wheel_scrolls_and_reaches_a_wheel_listener() {
         Point2D::new(100.0, 100.0),
         dom::Vector2D::new(0.0, 30.0),
     ));
-    wait_for_log(&mut engine, "wheel:30");
+    wait_for_log(&mut engine, "wheel:30:{}");
     let offset = engine
         .painter
         .scroll_intents
@@ -2472,6 +2677,8 @@ fn a_scroll_driven_color_follows_the_users_scroll() {
         engine.painter.begin_frame(at + 1.0, false).is_none(),
         "no frame post crosses for a scroll-driven animation"
     );
+    // The wheel gesture ends once its quiet interval has passed.
+    frame_at(&mut engine, at + 1.0);
     assert!(!engine.is_animating(), "the painter is idle at rest");
 }
 

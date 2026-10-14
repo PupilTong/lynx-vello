@@ -915,33 +915,43 @@ and no cancelable event anywhere on this path — Lynx dispatches none — so
 suppressing a user-agent default action stays gesture arbitration's job,
 arriving on the separate `InputEvent::default_prevented` seam.
 
-There is a second dispatch, and this crate runs all of it: an event the
-*engine* decides, delivered to the engine's own components rather than to
-script. `Document::dispatch_element_event(target, kind, bubbles, composed)`
-builds the same path and walks it here — capture pass root-inward, the target
-once, bubble pass target-outward — calling `CustomElement::handle_event` on
-every step whose node is a constructed custom element, so a `<list>` can hear
-what a commit decided about its rows. It exists because handing the path up so
-the layer above can call back down per step would buy nothing: these handlers
-are Rust, owned by this document, and already called from inside its
-mutations. The at-target capture step is skipped rather than delivered twice
-(a component has one hook, not a registration set per phase); every hook takes
-`&mut Document`, so the path is collected up front and each step re-checks
-liveness before the call; each call is its own `[CEReactions]` scope, so what a
-handler's mutation raised is drained before the next step. `ElementEvent`
-answers `kind`/`target`/`current_target`/`phase` and carries both stop
-methods behind one flag, because a node's local name resolves to at most one
-definition. A shadow root has no hook, so the shadow root a non-composed path
-ends at is delivered to its host's `handle_event` (with `element` and
-`current_target` the host) — where a script component would listen on
-`this.shadowRoot`; a shadow root the path crosses delivers nothing, since its
-host follows it as itself. `ElementEventKind` is the extension point. Its
-variants are css-contain-2 §4.4's `ContentVisibilityAutoStateChange { skipped }`,
-which `Document::dispatch_content_visibility_changes` fires from the queue the
-relevance pass filled — `bubbles`, not composed, not cancelable, and never
-reaching a realm — and DOM's `SlotChange`, fired by the slot assignment paths
-above. A document that defines nothing pays one `is_empty` check
-per dispatch and builds no path.
+There is a second walk, and this crate runs all of it: the one that delivers
+to the engine's own components rather than to script.
+`Document::dispatch_element_event_over(&steps, type_name, &detail, timestamp)`
+walks steps the caller already computed — capture pass root-inward, the
+target once, bubble pass target-outward — calling `CustomElement::handle_event`
+on every step whose node is a constructed custom element.
+`bobcat-core`'s one dispatch entry computes the steps once, runs this walk over
+them and then hands the same steps to the realm, so a component hears every
+event script hears, first; a component's `stop_propagation` ends this walk
+only. `Document::dispatch_element_event(target, type_name, &detail, bubbles,
+composed, timestamp)` computes the steps itself, for an event only the engine
+hears. The walk exists here because handing the path up so the layer above
+can call back down per step would buy nothing: these handlers are Rust, owned
+by this document, and already called from inside its mutations. The at-target
+capture step is skipped rather than delivered twice (a component has one hook,
+not a registration set per phase); every hook takes `&mut Document`, so the
+path is collected up front and each step re-checks liveness before the call;
+each call is its own `[CEReactions]` scope, so what a handler's mutation
+raised is drained before the next step. `ElementEvent` answers
+`type_name`/`detail`/`timestamp`/`target`/`current_target`/`phase` and carries
+both stop methods behind one flag, because a node's local name resolves to at
+most one definition. `dom::event::EventDetail` is the one description of an
+event's payload, one variant per shape. A shadow root has no hook, so the
+shadow root a non-composed path ends at is delivered to its host's
+`handle_event` (with `element` and `current_target` the host) — where a script
+component would listen on `this.shadowRoot`; a shadow root the path crosses
+delivers nothing, since its host follows it as itself. For a non-bubbling
+event that step is in the capture pass only, so a handler that keeps only
+bubble-phase deliveries never sees one. A definition names the types it
+handles in `CustomElement::observed_events`; `define` unions them into one
+set, and a type nothing observes costs one set lookup and builds no path. The
+engine-only types are css-contain-2 §4.4's
+`contentvisibilityautostatechange` (`EventDetail::ContentVisibility {
+skipped }`), which `Document::dispatch_content_visibility_changes` fires from
+the queue the relevance pass filled — `bubbles`, not composed, not cancelable,
+and never reaching a realm — and DOM's `slotchange`, fired by the slot
+assignment paths above.
 
 ## Text
 

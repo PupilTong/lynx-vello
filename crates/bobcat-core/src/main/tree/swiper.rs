@@ -295,7 +295,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use dom::event::{ElementEvent, ElementEventKind, EventPhase};
+use dom::event::{ElementEvent, EventPhase};
 use dom::scroll::{
     ScrollBehavior, ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition,
 };
@@ -306,7 +306,7 @@ use dom::{
 use serde_json::Value;
 use smallvec::SmallVec;
 
-use super::{InvalidParams, LynxDocument, element_child, is_truthy};
+use super::{InvalidParams, LynxDocument, SLOT_CHANGE, element_child, is_truthy};
 use crate::clock::ClockInstant;
 
 /// The swiper tag, web-core's only spelling of it.
@@ -605,6 +605,12 @@ impl CustomElement<()> for Swiper {
         vec!["autoplay".to_owned(), "interval".to_owned()]
     }
 
+    /// Its own shadow tree's `slotchange`, which is how it learns that its
+    /// assigned children changed.
+    fn observed_events(&self) -> &'static [&'static str] {
+        &[SLOT_CHANGE]
+    }
+
     fn connected_callback(&self, document: &mut LynxDocument, element: NodeId) {
         self.handle_autoplay(document, element);
     }
@@ -644,8 +650,13 @@ impl CustomElement<()> for Swiper {
 
     /// `slotchange` at the swiper's own slot, delivered at its shadow root,
     /// once per pass: the capture delivery is skipped, the bubble one counts.
-    fn handle_event(&self, document: &mut LynxDocument, element: NodeId, event: &mut ElementEvent) {
-        if event.kind() == ElementEventKind::SlotChange
+    fn handle_event(
+        &self,
+        document: &mut LynxDocument,
+        element: NodeId,
+        event: &mut ElementEvent<'_>,
+    ) {
+        if event.type_name() == SLOT_CHANGE
             && event.phase() == EventPhase::Bubbling
             && slot(document, element) == Some(event.target())
         {

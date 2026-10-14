@@ -21,7 +21,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::{Doc, device};
-use dom::event::{ElementEvent, ElementEventKind, EventPhase};
+use dom::event::{ElementEvent, EventDetail, EventPhase};
 use dom::{CustomElement, Document, FontBlob, NodeId};
 use euclid::default::{Point2D, Vector2D};
 
@@ -815,7 +815,7 @@ fn take(log: &Log) -> Vec<String> {
     std::mem::take(&mut *log.lock().expect("the log is never poisoned"))
 }
 
-type Action = Box<dyn Fn(&mut Document<()>, NodeId, &mut ElementEvent) + Send + Sync>;
+type Action = Box<dyn Fn(&mut Document<()>, NodeId, &mut ElementEvent<'_>) + Send + Sync>;
 
 /// An engine component that records every event it hears as
 /// `who:phase:target:state`, naming the target by its `id` attribute.
@@ -860,6 +860,10 @@ impl Recorder {
 }
 
 impl CustomElement<()> for Recorder {
+    fn observed_events(&self) -> &'static [&'static str] {
+        &["contentvisibilityautostatechange"]
+    }
+
     fn connected_callback(&self, _document: &mut Document<()>, _element: NodeId) {
         if self.connections {
             self.record(format!("{}:connected", self.who));
@@ -873,12 +877,12 @@ impl CustomElement<()> for Recorder {
             "the element a hook is called about is the event's currentTarget",
         );
         assert_eq!(
-            event.kind().name(),
+            event.type_name(),
             "contentvisibilityautostatechange",
-            "the only kind this suite fires",
+            "the only type this suite fires",
         );
-        let ElementEventKind::ContentVisibilityAutoStateChange { skipped } = event.kind() else {
-            panic!("an engine event this suite never fires: {:?}", event.kind())
+        let EventDetail::ContentVisibility { skipped } = *event.detail() else {
+            panic!("a detail this suite never fires: {:?}", event.detail())
         };
         let target = document
             .get(event.target())
@@ -942,7 +946,7 @@ fn every_revealed_row_reaches_its_own_component_and_the_scroller_above_it() {
     );
 
     assert!(page.doc.dom.has_pending_content_visibility_changes());
-    page.doc.dom.dispatch_content_visibility_changes();
+    page.doc.dom.dispatch_content_visibility_changes(0.0);
     assert!(
         !page.doc.dom.has_pending_content_visibility_changes(),
         "the dispatch is what empties the queue",
@@ -967,7 +971,7 @@ fn every_revealed_row_reaches_its_own_component_and_the_scroller_above_it() {
         "the phases report the DOM constants",
     );
 
-    page.doc.dom.dispatch_content_visibility_changes();
+    page.doc.dom.dispatch_content_visibility_changes(0.0);
     assert!(
         take(&log).is_empty(),
         "and a second dispatch has nothing left to deliver",
@@ -982,13 +986,13 @@ fn a_scroll_delivers_both_directions_once_each_in_frame_order() {
     let log = log();
     let mut page = recording_page(&log, None);
     assert!(page.doc.dom.render());
-    page.doc.dom.dispatch_content_visibility_changes();
+    page.doc.dom.dispatch_content_visibility_changes(0.0);
     let before = admitted_rows(0.0, VIEWPORT_HEIGHT);
     assert_eq!(take(&log).len(), before.len() * 3);
 
     assert_eq!(page.scroll_to(150.0).y, 150.0);
     assert!(page.doc.dom.render(), "the scroll left a frame owed");
-    page.doc.dom.dispatch_content_visibility_changes();
+    page.doc.dom.dispatch_content_visibility_changes(0.0);
 
     let after = admitted_rows(150.0, VIEWPORT_HEIGHT);
     let expected: Vec<String> = (0..ROWS)
@@ -1017,7 +1021,7 @@ fn a_row_that_stops_propagation_keeps_the_scroller_from_hearing_the_bubble() {
         })),
     );
     assert!(page.doc.dom.render());
-    page.doc.dom.dispatch_content_visibility_changes();
+    page.doc.dom.dispatch_content_visibility_changes(0.0);
 
     let expected: Vec<String> = admitted_rows(0.0, VIEWPORT_HEIGHT)
         .into_iter()
@@ -1043,7 +1047,7 @@ fn a_row_freed_before_the_dispatch_delivers_nothing() {
     page.doc.dom.remove_element(freed);
     page.doc.dom.drop_subtree(freed);
 
-    page.doc.dom.dispatch_content_visibility_changes();
+    page.doc.dom.dispatch_content_visibility_changes(0.0);
     let delivered = take(&log);
     assert!(
         !delivered.iter().any(|entry| entry.contains(":row0:")),
@@ -1072,7 +1076,7 @@ fn a_document_with_no_definitions_drains_the_queue_and_does_nothing_else() {
         "the commit queued the rows it revealed",
     );
 
-    page.doc.dom.dispatch_content_visibility_changes();
+    page.doc.dom.dispatch_content_visibility_changes(0.0);
     assert!(
         !page.doc.dom.has_pending_content_visibility_changes(),
         "the queue is the record of one commit, so it is drained whether or not anyone listens",
@@ -1109,7 +1113,7 @@ fn a_handler_that_mutates_the_tree_is_drained_before_the_next_step() {
     assert!(page.doc.dom.render());
     assert!(take(&log).is_empty());
 
-    page.doc.dom.dispatch_content_visibility_changes();
+    page.doc.dom.dispatch_content_visibility_changes(0.0);
     let delivered = take(&log);
     assert_eq!(
         delivered[..4],

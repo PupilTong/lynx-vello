@@ -1,5 +1,5 @@
-//! Dispatch to the engine's own components: the one walk this crate runs
-//! itself, and the one that never reaches script.
+//! Dispatch to the engine's own components: the walk this crate runs
+//! itself, over the same path a script dispatch is handed.
 //!
 //! [`Document::event_steps`](crate::Document::event_steps) exists because a
 //! *script* listener lives in a realm this crate knows nothing about, so the
@@ -10,22 +10,37 @@
 //! siblings). Handing the path *up* so the layer above can call back *down*
 //! per step would buy nothing and cost a crossing per node.
 //!
-//! So [`Document::dispatch_element_event`] is the whole dispatch:
-//! [`Document::event_steps`] builds the standard's path, the walk runs here,
-//! and [`CustomElement::handle_event`](crate::CustomElement::handle_event) is invoked on every step
-//! whose node is a defined custom element. A `<list>`, an `<image>` or any other engine
-//! component can therefore hear an event the engine itself decides.
+//! So the walk is here, in two entry points over one loop:
+//!
+//! - [`Document::dispatch_element_event_over`] walks steps the caller already computed. The host's
+//!   one dispatch entry uses it for every event script hears as well (routed input, component
+//!   events, exposure): it computes the path once, runs this walk over it first, and then hands the
+//!   same steps to the realm. A handler's [`ElementEvent::stop_propagation`] ends this walk and
+//!   nothing else; the script dispatch that follows runs whatever happened here.
+//! - [`Document::dispatch_element_event`] computes the path itself and walks it, for an event only
+//!   the engine hears: `slotchange` and `contentvisibilityautostatechange`, which never reach a
+//!   realm.
+//!
+//! [`CustomElement::handle_event`](crate::CustomElement::handle_event) is invoked on every step
+//! whose node is a defined custom element. An event is identified by its W3C type name
+//! ([`ElementEvent::type_name`]) and carries one [`EventDetail`] shape ([`ElementEvent::detail`]).
 //!
 //! # What this path is not
 //!
-//! It is **not** the script event system, and nothing on it reaches a realm.
-//! An `addEventListener` registration lives in the realm, the host keeps no
-//! index of it, and this walk consults nothing but the definition table — so
-//! a page that listens for the same event name in JavaScript hears nothing
-//! from here, deliberately. An event that script must see crosses the boundary
-//! the routed-input path already owns (`bobcat-core`'s
-//! `__BobcatDispatchEvent`), and an event both must see would have to be
-//! dispatched on both, once each.
+//! It is **not** the script event system. An `addEventListener` registration
+//! lives in the realm, the host keeps no index of it, and this walk consults
+//! nothing but the definition table. The two walks share a path and an order
+//! (this one first) and nothing else: no stop, no event object and no
+//! listener set crosses between them.
+//!
+//! # Which names are walked
+//!
+//! A definition says which event types it handles, in
+//! [`CustomElement::observed_events`](crate::CustomElement::observed_events), the analogue of
+//! `observed_attributes`; [`Document::define`](crate::Document::define) unions them into one set
+//! for the document. A dispatch of a type no definition observes is one set lookup and returns
+//! before any path work, and there is no per-element registration anywhere: whether an element
+//! hears an event is its definition's answer.
 //!
 //! # The walk
 //!
@@ -51,6 +66,11 @@
 //!   host: a shadow root as `currentTarget` is not representable when the call is the host's. Only
 //!   that step, so a host never hears one event twice: a shadow root the path crosses is followed
 //!   by its host, which is called as itself.
+//! - **A non-bubbling event reaches a host's boundary step in the capture pass only.** The bubble
+//!   pass of a non-bubbling event keeps its at-target steps alone, so for a non-composed,
+//!   non-bubbling event fired inside a UA shadow tree (the `scroll` of a container in a swiper's
+//!   shadow tree) the host's one delivery is [`EventPhase::Capturing`]. A handler that filters on
+//!   [`EventPhase::Bubbling`] never sees it; filter on the phase only for an event that bubbles.
 //! - **Propagation stops where a handler says.** [`ElementEvent::stop_propagation`] is read after
 //!   each call, so a handler that stops during the capture pass keeps the target itself from
 //!   hearing the event.
@@ -74,11 +94,13 @@
 //!
 //! # Cost when nothing listens
 //!
-//! A document with no definitions returns before the path is built, so a
-//! dispatch costs one `is_empty` check. A document that *has* definitions
-//! pays the path — the same `SmallVec` walk a routed event pays — plus one
-//! load per step for the node's definition pointer.
+//! A type no definition observes costs one hash-set lookup, before the path
+//! is built in [`Document::dispatch_element_event`] and before any step is
+//! visited in [`Document::dispatch_element_event_over`]. An observed type
+//! pays one definition lookup per step and one call per defined element on
+//! the path.
 
+use super::{EventDetail, EventSteps};
 use crate::tree::document::{Document, NodeId};
 
 /// Which pass of the walk a delivery belongs to — DOM's `Event.eventPhase`,
@@ -109,45 +131,6 @@ impl EventPhase {
     }
 }
 
-/// What an [`ElementEvent`] is, and the payload that goes with it.
-///
-/// The enum is the extension point: an engine-decided event that a
-/// component must hear adds a variant here, and every handler that does not
-/// match it keeps compiling — which is what keeps the hook one method rather
-/// than one method per event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ElementEventKind {
-    /// [css-contain-2 §4.4](https://drafts.csswg.org/css-contain-2/#content-visibility-auto-state-change-event):
-    /// a `content-visibility: auto` element started or stopped skipping its
-    /// contents, decided by the commit that determined relevance.
-    ContentVisibilityAutoStateChange {
-        /// The state the element changed **to**: `true` when it now skips.
-        skipped: bool,
-    },
-    /// [DOM §4.2.2.5](https://dom.spec.whatwg.org/#signal-a-slot-change): the
-    /// target slot's assigned nodes changed. Fired by the document itself,
-    /// at the end of the mutation that changed them, with `bubbles: true` and
-    /// `composed: false` — so it ends at the slot's shadow root, where the
-    /// host's own handler hears it ([`Document::dispatch_element_event`]).
-    SlotChange,
-}
-
-impl ElementEventKind {
-    /// The event's type, as the web platform spells it.
-    ///
-    /// Nothing in this crate routes on the string — the walk matches the
-    /// variant — but a handler that logs or forwards one needs the name the
-    /// specification gives it.
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::ContentVisibilityAutoStateChange { .. } => "contentvisibilityautostatechange",
-            Self::SlotChange => "slotchange",
-        }
-    }
-}
-
 /// One in-flight dispatch, as the handler on each step sees it.
 ///
 /// The read half is the DOM event interface this crate can answer — `type`,
@@ -156,19 +139,39 @@ impl ElementEventKind {
 /// cancelable, because the engine decides the event *after* the fact it
 /// reports has already happened.
 #[derive(Debug)]
-pub struct ElementEvent {
-    kind: ElementEventKind,
+pub struct ElementEvent<'a> {
+    type_name: &'static str,
+    detail: &'a EventDetail,
+    timestamp: f64,
     target: NodeId,
     current_target: NodeId,
     phase: EventPhase,
     stopped: bool,
 }
 
-impl ElementEvent {
-    /// What happened, and its payload.
+impl ElementEvent<'_> {
+    /// The event's type, as the web platform spells it: `slotchange`,
+    /// `pointerdown`, `contentvisibilityautostatechange`. The identity a
+    /// handler matches on.
     #[must_use]
-    pub fn kind(&self) -> ElementEventKind {
-        self.kind
+    pub fn type_name(&self) -> &'static str {
+        self.type_name
+    }
+
+    /// What the event carries; see [`EventDetail`].
+    #[must_use]
+    pub fn detail(&self) -> &EventDetail {
+        self.detail
+    }
+
+    /// When the event happened, in milliseconds on the host's timeline: the
+    /// value the host's script dispatch of the same event reports as its
+    /// `timestamp`. This crate owns no clock, so it is whatever the caller of
+    /// the dispatch named. An engine-only event the document fires from
+    /// inside a mutation, such as `slotchange`, reports `0`.
+    #[must_use]
+    pub fn timestamp(&self) -> f64 {
+        self.timestamp
     }
 
     /// The node the event was dispatched at, as this step may see it: the
@@ -222,37 +225,65 @@ impl<T> Document<T> {
     /// on every step whose node is a defined custom element — and, for a
     /// non-composed event, on the host of the shadow root its path ends at.
     ///
-    /// Nothing about this reaches script: the realm's own listener
-    /// registrations are not consulted, and a realm is not entered. This
-    /// module's own doc has the walk, the per-step liveness re-check and the
-    /// reaction boundary.
+    /// The entry point of an event only the engine hears (`slotchange`,
+    /// `contentvisibilityautostatechange`): nothing about this reaches
+    /// script. A dispatch that script hears too computes its path once and
+    /// runs [`Self::dispatch_element_event_over`] over it before handing the
+    /// same steps up. `timestamp` is [`ElementEvent::timestamp`].
     ///
-    /// A target that is no longer live dispatches nothing — the rule a stale
-    /// path already follows — and so does a document that defines no
-    /// components at all, which is the check the whole call costs when
-    /// nobody can listen.
+    /// A name no definition observes
+    /// ([`CustomElement::observed_events`](crate::CustomElement::observed_events))
+    /// returns before anything else, and so does a target that is no longer
+    /// live, the rule a stale path already follows.
     pub fn dispatch_element_event(
         &mut self,
         target: NodeId,
-        kind: ElementEventKind,
+        type_name: &'static str,
+        detail: &EventDetail,
         bubbles: bool,
         composed: bool,
+        timestamp: f64,
     ) {
-        if !self.has_custom_definitions() || self.get(target).is_none() {
+        if !self.observes_event(type_name) || self.get(target).is_none() {
             return;
         }
         // Computed once, owning no borrow: every handler below takes the
         // document mutably, and one of them may free a node this list names.
         let steps = self.event_steps(target, bubbles, composed);
+        self.dispatch_element_event_over(&steps, type_name, detail, timestamp);
+    }
+
+    /// The Rust walk over a path the caller already computed with
+    /// [`Self::event_steps`], for the event `type_name` carrying `detail`.
+    ///
+    /// The host's one dispatch entry calls this: it computes the steps once,
+    /// runs this walk over them, and then hands the same steps to script.
+    /// [`ElementEvent::stop_propagation`] ends this walk alone; what the
+    /// caller does with the steps afterwards is the caller's.
+    ///
+    /// Gated on the definitions: when no
+    /// [`CustomElement::observed_events`](crate::CustomElement::observed_events)
+    /// names `type_name`, this is one set lookup and returns. Otherwise each
+    /// step costs one definition lookup and, on a defined element, one call.
+    pub fn dispatch_element_event_over(
+        &mut self,
+        steps: &EventSteps,
+        type_name: &str,
+        detail: &EventDetail,
+        timestamp: f64,
+    ) {
+        let Some(&type_name) = self.custom_elements_observed_event(type_name) else {
+            return;
+        };
         // The shadow root a non-composed path ends at, whose host hears the
         // event in its place; see the module doc.
-        let boundary = (!composed)
-            .then(|| self.tree_root(target))
-            .filter(|&root| self.is_shadow_root(root));
+        let boundary = steps.boundary;
         let mut event = ElementEvent {
-            kind,
-            target,
-            current_target: target,
+            type_name,
+            detail,
+            timestamp,
+            target: steps.target,
+            current_target: steps.target,
             phase: EventPhase::AtTarget,
             stopped: false,
         };

@@ -13,7 +13,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::Doc;
-use dom::event::{ElementEvent, ElementEventKind, EventPhase};
+use dom::event::{ElementEvent, EventPhase};
 use dom::{
     CustomElement, Document, MethodCall, MethodError, MethodOutcome, NodeId, ShadowRootMode,
 };
@@ -1100,6 +1100,10 @@ struct SlotHost {
 }
 
 impl CustomElement<()> for SlotHost {
+    fn observed_events(&self) -> &'static [&'static str] {
+        &["slotchange"]
+    }
+
     fn constructed(&self, document: &mut Document<()>, element: NodeId) {
         let shadow = document.attach_shadow(element, ShadowRootMode::Open);
         for &name in self.slots {
@@ -1115,7 +1119,12 @@ impl CustomElement<()> for SlotHost {
         }
     }
 
-    fn handle_event(&self, document: &mut Document<()>, element: NodeId, event: &mut ElementEvent) {
+    fn handle_event(
+        &self,
+        document: &mut Document<()>,
+        element: NodeId,
+        event: &mut ElementEvent<'_>,
+    ) {
         assert_eq!(event.current_target(), element);
         let phase = match event.phase() {
             EventPhase::Capturing => "capture",
@@ -1135,7 +1144,7 @@ impl CustomElement<()> for SlotHost {
             .push(format!(
                 "{}:{}:{phase}:{slot}:{count}",
                 self.who,
-                event.kind().name()
+                event.type_name()
             ));
     }
 }
@@ -1337,6 +1346,10 @@ fn a_slot_signalled_by_a_slotchange_handler_fires_after_the_current_set() {
         log: Log,
     }
     impl CustomElement<()> for Mover {
+        fn observed_events(&self) -> &'static [&'static str] {
+            &["slotchange"]
+        }
+
         fn constructed(&self, document: &mut Document<()>, element: NodeId) {
             let shadow = document.attach_shadow(element, ShadowRootMode::Open);
             for name in ["a", "b"] {
@@ -1350,10 +1363,9 @@ fn a_slot_signalled_by_a_slotchange_handler_fires_after_the_current_set() {
             &self,
             document: &mut Document<()>,
             _element: NodeId,
-            event: &mut ElementEvent,
+            event: &mut ElementEvent<'_>,
         ) {
-            if event.kind() != ElementEventKind::SlotChange || event.phase() != EventPhase::Bubbling
-            {
+            if event.type_name() != "slotchange" || event.phase() != EventPhase::Bubbling {
                 return;
             }
             let slot = event.target();
