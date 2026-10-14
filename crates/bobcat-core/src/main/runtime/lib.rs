@@ -794,12 +794,12 @@ struct DocumentSlot {
     exposure: Exposure,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
-    /// Whether [`editing::EDITING_ROUTED_EVENTS`] are open in the painter's
-    /// name set on the editing account: the document had an editing host at
-    /// the last [`Self::sync_editing_routes`]. Beside the listener table
-    /// rather than in it: the kernel is no realm, and a row of its would be
-    /// an invitee [`realm_calls`] has no realm to call for.
-    editing_routed: bool,
+    /// Which [`editing::EditingRoute`]s the editing account routes in the
+    /// painter's name set, one bit per route
+    /// ([`editing::EditingRoute::bit`]). Beside the listener table rather
+    /// than in it: the kernel is no realm, and a row of its would be an
+    /// invitee [`realm_calls`] has no realm to call for.
+    editing_routes: u8,
     /// The event names the document's components observe on an element that
     /// exists, as [`dom::Document::take_observed_name_changes`] said when last
     /// drained ([`Self::sync_names`]). With the document's listener
@@ -877,7 +877,7 @@ impl DocumentSlot {
             autoplays: Autoplays::default(),
             exposure: Exposure::new(),
             removals: 0,
-            editing_routed: false,
+            editing_routes: 0,
             observed: FxHashSet::default(),
             scrolling: SmallVec::new(),
             outbox,
@@ -1263,8 +1263,7 @@ impl DocumentSlot {
     /// Whether the painter's name set must hold `name`: a realm
     /// registration or a live component element wants it
     /// ([`Self::listens`]), or, for `click`, a `dblclick`; or, on the editing
-    /// account, it is one of [`editing::EDITING_ROUTED_EVENTS`] while the
-    /// document has an editing host.
+    /// account, it is a name of an open [`editing::EditingRoute`].
     fn routes(&self, name: &str) -> bool {
         self.routes_given(name, &|name| self.registered(name))
     }
@@ -1276,32 +1275,57 @@ impl DocumentSlot {
         let wants = |name: &str| registered(name) || self.observed.contains(name);
         wants(name)
             || (name == CLICK_EVENT && wants(DOUBLE_CLICK_EVENT))
-            || (self.editing_routed && editing::EDITING_ROUTED_EVENTS.contains(&name))
+            || self.editing_routes(name)
     }
 
-    /// Moves the editing account's names in the painter's set when
-    /// [`dom::Document::has_editing_hosts`] changed since the last call: the
-    /// first editing host routes [`editing::EDITING_ROUTED_EVENTS`], and the
-    /// last one freed or made uneditable stops routing them. Published
-    /// through [`Self::change_names`], so each name moves only where
-    /// [`Self::routes`] changes and a name a realm or a component wants
-    /// anyway is not touched. One counter read when nothing changed.
+    /// Whether an [`editing::EditingRoute`] the editing account holds
+    /// routes `name`.
+    fn editing_routes(&self, name: &str) -> bool {
+        editing::EditingRoute::ALL
+            .into_iter()
+            .any(|route| self.editing_routes & route.bit() != 0 && route.names().contains(&name))
+    }
+
+    /// Routes or stops routing one [`editing::EditingRoute`]'s names in the
+    /// painter's name set. Published through [`Self::change_names`], after
+    /// the waiting last removals ([`Self::apply_pending_last_removals`]), so
+    /// each of its names moves only where [`Self::routes`] changes — a name
+    /// a realm or a component wants anyway, or another route holds, is not
+    /// touched — and in order with the listener table's own changes. Nothing
+    /// at all when the route is already in that state.
     ///
-    /// The waiting last removals are applied first
-    /// ([`Self::apply_pending_last_removals`]), so the table and what the
-    /// painter was told agree before the account moves.
-    fn sync_editing_routes(&mut self) {
-        let editable = self
-            .document
-            .as_ref()
-            .is_some_and(LynxDocument::has_editing_hosts);
-        if editable == self.editing_routed {
+    /// The change is a `watch` write ([`ViewOutbox::set_name_routed`]),
+    /// with no acknowledgement and no wakeup, which the painter adopts at the
+    /// start of its next routing pass ([`crate::Painter::dispatch_input`]
+    /// polls the link first). So a route opened inside a job routes every
+    /// event the painter decides after that job wrote it; one it decided
+    /// before was filtered against the old set and never crossed.
+    fn set_editing_route(&mut self, route: editing::EditingRoute, open: bool) {
+        if (self.editing_routes & route.bit() != 0) == open {
             return;
         }
         self.apply_pending_last_removals();
-        self.change_names(&editing::EDITING_ROUTED_EVENTS, |slot| {
-            slot.editing_routed = editable;
+        self.change_names(route.names(), |slot| {
+            if open {
+                slot.editing_routes |= route.bit();
+            } else {
+                slot.editing_routes &= !route.bit();
+            }
         });
+    }
+
+    /// Moves the two routes the document's state decides, once per entry
+    /// from the page's epilogue: [`editing::EditingRoute::Hosts`] while
+    /// [`dom::Document::has_editing_hosts`], [`editing::EditingRoute::Focus`]
+    /// while an element is focused. One counter read and one field read when
+    /// nothing changed. The drag route is the press's own
+    /// ([`MainThreadRuntime::set_pressed`]).
+    fn sync_editing_routes(&mut self) {
+        let (hosts, focused) = self.document.as_ref().map_or((false, false), |document| {
+            (document.has_editing_hosts(), document.focused().is_some())
+        });
+        self.set_editing_route(editing::EditingRoute::Hosts, hosts);
+        self.set_editing_route(editing::EditingRoute::Focus, focused);
     }
 
     /// An exposure attribute of the live element `node` was written or

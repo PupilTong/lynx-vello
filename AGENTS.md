@@ -2002,16 +2002,18 @@ prepares the command in `dom`, dispatches the events before the change at the
 host, commits unless a cancelable `beforeinput` was canceled, and dispatches
 the rest. A routed `keydown`/`keyup` is delivered at `Document::focused()`
 when there is one, and a `keydown` nobody canceled runs the keyboard's editing
-command (`key_command`); a primary `pointerdown` nobody canceled inside an
-editing host focuses it (dispatching `focus`/`focusin`, and `blur`/`focusout`
-at the host that lost it — drained from `dom` right after the press) and
-places the caret, a second and third quick press select the word and the
-line, and a held mouse drag extends. While `Document::has_editing_hosts()`
-the slot keeps `pointerdown`, `pointermove`, `pointerup`, `pointercancel` and
-`keydown` open in the painter's name set on an editing account of its own
-(`DocumentSlot::sync_editing_routes`, from the page's epilogue), so those
-reach main with no realm listener, and an event routed only on that account
-skips the realm. The epilogue publishes the focused host's `TextInputState`
+command (`key_command`); a mouse's primary `pointerdown`, or a finger's or
+pen's tap (the `click`), nobody canceled inside an editing host focuses it
+(dispatching `focus`/`focusin`, and `blur`/`focusout` at the host that lost
+it — drained from `dom` right after the press) and places the caret, a second
+and third quick press select the word and the line, and a held mouse drag
+extends. The slot routes those names on an editing account of its own, by
+state (`editing::EditingRoute`): `pointerdown` and `click` while
+`Document::has_editing_hosts()`, `keydown` while an element is focused (both
+from the page's epilogue, `DocumentSlot::sync_editing_routes`), and
+`pointermove`/`pointerup`/`pointercancel` only while a mouse drag is held
+(`MainThreadRuntime::set_pressed`, inside the press's job). An event routed
+only on that account skips the realm. The epilogue publishes the focused host's `TextInputState`
 after its commit when it changed.
 
 That host side is one function, `MainThreadRuntime::dispatch`, the only place

@@ -10228,13 +10228,40 @@ fn a_reset_cards_page_takes_its_exposure_registration_with_it() {
     assert_eq!(exposure_observer(&elements, fresh), None);
 }
 
-/// The editing account of the painter's name set: the pointer and key names
-/// an editing host's default actions need are routed while the document has
-/// one — whether or not the realm listens — and closed when the last one
-/// goes, except for a name the realm itself listens for.
+/// The published names an editing-routing test is about: the pointer
+/// names, `click` and the keys. The components' own (`slotchange`) are
+/// published with the document and are not the editing account's.
+fn routed(names: &mut PublishedNames) -> Vec<String> {
+    let mut routed = names.names();
+    routed.retain(|name| {
+        ["click", "keydown", "keyup"].contains(&name.as_str()) || name.starts_with("pointer")
+    });
+    routed
+}
+
+/// A primary mouse button event at (10, 10), with `button` and `buttons`.
+fn mouse(button: i16, buttons: u16) -> InputEventPayload {
+    InputEventPayload {
+        detail: EventDetail::Pointer {
+            position: dom::Point2D::new(10.0, 10.0),
+            id: 1,
+            device: dom::input::PointerKind::Mouse,
+            button,
+            buttons,
+        },
+        timestamp: 0.0,
+    }
+}
+
+/// The editing account of the painter's name set routes by state: with an
+/// unfocused host only the press and the tap (`pointerdown`, `click`), the
+/// key while something is focused, and the drag's moves and release only
+/// while a mouse press that placed a caret is held. A name the realm listens
+/// for itself is never closed by it, and the last host going closes the
+/// rest.
 #[test]
-fn an_editing_host_routes_the_pointer_and_key_names_while_it_exists() {
-    let (mut js_runtime, mut runtime, _elements, mut names) =
+fn an_editing_host_routes_its_names_by_state() {
+    let (mut js_runtime, mut runtime, elements, mut names) =
         runtime_over_watching_names(ingredients());
     runtime
         .run_main_thread_script(
@@ -10245,38 +10272,76 @@ fn an_editing_host_routes_the_pointer_and_key_names_while_it_exists() {
                   const host = __CreateView(0);
                   __AppendElement(page, host);
                   globalThis.held = [page, host];
-                  __AddEventListener(page, 'pointerup', () => {}, {});
+                  __SetInlineStyles(host, 'width:200px;height:40px');
+                  __AddEventListener(page, 'pointercancel', () => {}, {});
+                  __FlushElementTree();
                 };
                 ",
             "app:///editing-routes.js",
         )
         .expect("main-thread script");
     runtime.sync_editing_routes();
-    assert!(!names.contains("pointerdown"), "no host yet");
-    assert!(names.contains("pointerup"), "the realm's own");
+    assert_eq!(routed(&mut names), ["pointercancel"], "no host yet");
 
     runtime
         .evaluate_module(
             &mut js_runtime,
             r"
-                import { __SetAttribute } from 'bobcat:element';
+                import { __SetAttribute, __FlushElementTree } from 'bobcat:element';
                 __SetAttribute(held[1], 'contenteditable', 'true');
+                __FlushElementTree();
                 ",
             "app:///editable.js",
             "editing",
         )
         .expect("an attribute write");
     runtime.sync_editing_routes();
-    for name in [
-        "pointerdown",
-        "pointermove",
-        "pointerup",
-        "pointercancel",
-        "keydown",
-    ] {
-        assert!(names.contains(name), "{name} is routed for the host");
-    }
-    assert!(!names.contains("keyup"), "keyup has no editing action");
+    assert_eq!(
+        routed(&mut names),
+        ["click", "pointercancel", "pointerdown"],
+        "an unfocused host routes the press and the tap alone"
+    );
+
+    let host = elements
+        .tree()
+        .document_element()
+        .first_child()
+        .expect("the host")
+        .id();
+    assert!(
+        runtime
+            .deliver_input_event(&mut js_runtime, host, "pointerdown", &mouse(0, 1), None)
+            .is_empty()
+    );
+    assert_eq!(
+        elements.tree().focused(),
+        Some(host),
+        "the press focused it"
+    );
+    assert_eq!(
+        routed(&mut names),
+        [
+            "click",
+            "pointercancel",
+            "pointerdown",
+            "pointermove",
+            "pointerup"
+        ],
+        "the press opened the drag at once, inside its own job"
+    );
+    runtime.sync_editing_routes();
+    assert!(names.contains("keydown"), "the focus opens the key");
+
+    assert!(
+        runtime
+            .deliver_input_event(&mut js_runtime, host, "pointerup", &mouse(0, 0), None)
+            .is_empty()
+    );
+    assert_eq!(
+        routed(&mut names),
+        ["click", "keydown", "pointercancel", "pointerdown"],
+        "the release closed the drag, all but the realm's own name"
+    );
 
     runtime
         .evaluate_module(
@@ -10290,11 +10355,9 @@ fn an_editing_host_routes_the_pointer_and_key_names_while_it_exists() {
         )
         .expect("an attribute write");
     runtime.sync_editing_routes();
-    for name in ["pointerdown", "pointermove", "pointercancel", "keydown"] {
-        assert!(!names.contains(name), "{name} closes with the last host");
-    }
-    assert!(
-        names.contains("pointerup"),
-        "a name the realm listens for stays open"
+    assert_eq!(
+        routed(&mut names),
+        ["pointercancel"],
+        "the last host and the focus it held close the rest"
     );
 }

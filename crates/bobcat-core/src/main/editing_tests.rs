@@ -144,7 +144,8 @@ fn key(text: &str) -> InputEvent {
     InputEvent::key(KeyPhase::Down, text, "", false, Modifiers::default())
 }
 
-/// Taps the host, which focuses it, and waits for the state that says so.
+/// Taps the host with a finger, which focuses it on the tap (the `click`),
+/// and waits for the state that says so.
 fn focus_host(engine: &mut TestEngine, states: &mut States) {
     engine.dispatch_input(touch(PointerPhase::Down, 20.0, 20.0));
     engine.dispatch_input(touch(PointerPhase::Up, 20.0, 20.0));
@@ -326,11 +327,12 @@ fn a_keydown_types_into_the_focused_host_unless_canceled() {
     assert_eq!(target, Some(node_id(HOST)));
 }
 
-/// A press on a host nobody listens to the pointer events of focuses it
-/// (`focus` then `focusin`, with no `relatedTarget`) and places the caret at
-/// the character pressed; keys typed with no `keydown` listener reach it,
-/// a mouse drag extends the selection, and a quick second press selects the
-/// word. Ahem makes every character a 20px box, so offsets are exact.
+/// A finger's tap on a host nobody listens to the pointer events of
+/// focuses it (`focus` then `focusin`, with no `relatedTarget`); keys typed
+/// with no `keydown` listener reach it; a mouse press places the caret at
+/// the character pressed, a mouse drag extends the selection, and a quick
+/// second press selects the word. Ahem makes every character a 20px box, so
+/// offsets are exact.
 #[test]
 fn a_press_focuses_the_host_and_places_the_caret_where_it_landed() {
     let mut engine = TestViewSpec::new(&page(&["focus", "focusin"], ""))
@@ -407,4 +409,43 @@ fn a_press_focuses_the_host_and_places_the_caret_where_it_landed() {
         Some("focus:null|focusin:null"),
         "a press on the focused host does not focus it again"
     );
+}
+
+/// A finger that starts a scroll on a host does not focus it: touch focuses
+/// on the tap, and a drag the scroller consumed is no tap. A tap afterwards
+/// does. The host (node 4) is the first child of a 200px column scroller
+/// (node 3) and twice its height.
+#[test]
+fn a_touch_drag_that_scrolls_does_not_focus_the_host_and_a_tap_does() {
+    let mut engine = TestViewSpec::new(
+        r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const scroller = __CreateView(0);
+          const host = __CreateView(0);
+          __AppendElement(page, scroller);
+          __AppendElement(scroller, host);
+          globalThis.held = [page, scroller, host];
+          __SetInlineStyles(scroller, 'display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px');
+          __SetInlineStyles(host, 'flex-shrink:0;width:200px;height:400px');
+          __SetAttribute(host, 'contenteditable', '');
+          __FlushElementTree();
+        };
+        ",
+    )
+    .boot();
+    let focused = |engine: &mut TestEngine| engine.probe_document(|tree| tree.focused()).flatten();
+
+    engine.dispatch_input(touch(PointerPhase::Down, 100.0, 100.0));
+    engine.dispatch_input(touch(PointerPhase::Move, 100.0, 70.0));
+    engine.dispatch_input(touch(PointerPhase::Up, 100.0, 70.0));
+    let offset = engine
+        .probe_document(|tree| tree.scroll_offset(node_id(3)))
+        .expect("the view answers");
+    assert!(offset.y > 0.0, "the drag scrolled: {offset:?}");
+    assert_eq!(focused(&mut engine), None, "a scroll is no tap");
+
+    engine.dispatch_input(touch(PointerPhase::Down, 100.0, 100.0));
+    engine.dispatch_input(touch(PointerPhase::Up, 100.0, 100.0));
+    assert_eq!(focused(&mut engine), Some(node_id(4)), "the tap focused it");
 }
