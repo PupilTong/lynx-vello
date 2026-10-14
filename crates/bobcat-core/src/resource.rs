@@ -31,8 +31,9 @@ use crate::style::PreparsedStyleSheet;
 /// **A fetcher's base URL must be the view's
 /// [`ViewSources::base_url`](crate::ViewSources::base_url).** Every script
 /// request reaches it absolute: the entry, the BTS entry and every
-/// synchronous load resolved against that base, a worker script against the
-/// entry's response URL and an import against its importer's. The
+/// synchronous load resolved against that base, a worker script against
+/// `__Card__` — the view's card URL, or else the entry's response URL — and
+/// an import against its importer's. The
 /// stylesheets and plain fetches it is asked for carry the URL as it was
 /// named, and it resolves them against its own base by URL rules. A lazy
 /// container is fetched, and its sections registered, by the fetcher's

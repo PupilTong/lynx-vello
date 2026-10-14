@@ -48,11 +48,13 @@
 //!   completion value and which is `export default`'d here ([`bts_module_source`]). An XML page's
 //!   background-thread script is a `Web` body, because web-core runs it through that same chunk
 //!   wrapper.
-//! - A named Lepus chunk is wrapped in nothing at all: the realm compiles it as a function body,
-//!   whose parameters are the bindings `MTS_CHUNK_PREAMBLE` gives a card's root, so an `import`
-//!   could not appear in it anyway.
+//! - A container's `main-thread` or `*__main-thread` section is the same preamble with the body as
+//!   the module's default export, because what `ReactLynx` calls is its value.
+//! - Any other named Lepus chunk is wrapped in nothing at all: the realm compiles it as a function
+//!   body, whose parameters are the bindings `MTS_CHUNK_PREAMBLE` gives a card's root, so an
+//!   `import` could not appear in it anyway.
 //!
-//! The BTS boot script ([`background_boot_source`]) is no card body: it is
+//! The BTS boot script (`background_boot_source`) is no card body: it is
 //! this crate's own module, and imports what it uses.
 
 use std::sync::Arc;

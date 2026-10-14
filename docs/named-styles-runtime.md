@@ -7,25 +7,28 @@ either case. Core carries no decoded bundle metadata in its view configuration.
 
 ## Entry identity and URL mapping
 
-The host passes the entry's response URL to `__BobcatInitEntry` before it
-completes the module boot imports the application entry as. The `__Card__`
-import in MTS reads that JS binding from `bobcat:runtime`; there is no native
-URL getter. The string `"__Card__"` remains
-an accepted alias, replaced by JavaScript. A local Lepus chunk load accepts
-either the alias or the same entry URL, and its resource URL is built the same
-way and in the same place: `chunkURL` beside `styleSheetURL`, appending
-`/<encoded-name>.js` with the suffixes preserved. `PageSource` registers the
-chunk under exactly that string (`named_chunk_url`).
+The host passes the card URL to `__BobcatInitEntry` before it completes the
+module boot imports the application entry as: the view's
+`ViewSources::card_url` when it names one — a container page names its
+container URL `U` there, its entry being `<U>/root.js` — and otherwise the
+entry's response URL (a raw entry, an XML page). The `__Card__` import in MTS
+reads that JS binding from `bobcat:runtime`; there is no native URL getter.
+The string `"__Card__"` remains an accepted alias, replaced by JavaScript. A
+local Lepus chunk load accepts either the alias or the same card URL, and its
+resource URL is built the same way and in the same place: `chunkURL` beside
+`styleSheetURL`, appending `/<encoded-name>.js` with the suffixes preserved.
+`ContainerSources` registers the chunk under exactly that string
+(`named_chunk_url` in `crates/bobcat-source/src/container.rs`).
 
 `__LoadStyleSheet(key, bundleName)` appends `/custom_section/<encoded-key>.css`
-to the entry or bundle URL's path, the key encoded as a section body's name is
+to the card or bundle URL's path, the key encoded as a section body's name is
 (`form_urlencoded`, a space as `%20`). The rule is one function per side —
 `styleSheetURL` in `packages/bobcat-element/src/section-url.ts` and
-`named_style_url` in `crates/bobcat-source/src/page.rs`. Query and fragment
-suffixes are preserved after the appended path. For example:
+`named_style_url` in `crates/bobcat-source/src/container.rs`. Query and
+fragment suffixes are preserved after the appended path. For example:
 
-- With entry `https://app.test/main.js`, loading `('CSS', '__Card__')`
-  requests `https://app.test/main.js/custom_section/CSS.css`.
+- With card `https://app.test/card.web.bundle`, loading `('CSS', '__Card__')`
+  requests `https://app.test/card.web.bundle/custom_section/CSS.css`.
 - Loading `('CSS', 'https://cdn.test/component.bundle?rev=2')`
   requests `https://cdn.test/component.bundle/custom_section/CSS.css?rev=2`.
 - Loading `('A &/中', './component.bundle#entry')` requests
@@ -34,10 +37,11 @@ suffixes are preserved after the appended path. For example:
 JS constructs the specifier; URL resolution and transport policy remain with
 the embedder. It can answer registered URLs, load CSS from a server, or decode a
 container and return preparsed styles through the same completion. There is no
-additional resource protocol or Rust bundle-name lookup. Lazy components are
-loaded through `lynx.fetchBundle` and the reference fetcher's
-`LazyBundleInstaller`, which registers a fetched container's named stylesheets
-at these same URLs ([worker resources](worker-resources-runtime.md)
+additional resource protocol or Rust bundle-name lookup. A page's container
+and a lazy one are registered by the same `ContainerSources`: lazy components
+are loaded through `lynx.fetchBundle` and the reference fetcher's
+`BundleInstaller`, which registers a fetched container's named stylesheets at
+these same URLs ([worker resources](worker-resources-runtime.md)
 "Lazy containers").
 
 ## Preload and adopt
@@ -51,7 +55,7 @@ over at view construction like `fetch_probe`, called synchronously on
 its base, then looked up — so an unregistered URL is `false` without any
 transport, the network included, being consulted. A container's named sheets
 are registered before any of its script can ask (`PageSource::register_with`
-at boot, `LazyBundleInstaller::install` before a `loadScript`), so the registry
+at boot, `BundleInstaller::install` before a `loadScript`), so the registry
 is the whole answer. A fetcher with no probe answers every URL as held.
 
 When the sheet is not held, `__LoadStyleSheet` answers **`null`** and sends

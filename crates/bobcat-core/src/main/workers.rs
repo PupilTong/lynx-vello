@@ -79,10 +79,13 @@ impl WorkerFactory {
                     .ok_or("the creating realm has been released")?;
                 let specifier = string(arguments, 0)?;
                 let name = string(arguments, 1)?.to_owned();
-                // Where the specifier resolves from: the MTS entry's response
-                // URL, which the realm holds as `__Card__` and hands over with
-                // every construction. It is absolute: an entry answered from
-                // one that is not fails the view's startup before it runs.
+                // Where the specifier resolves from: `__Card__`, which the
+                // realm hands over with every construction — the view's card
+                // URL (a container page's container URL), or else the MTS
+                // entry's response URL. It is absolute: a card URL is resolved
+                // at the view's construction, and an entry answered from a
+                // response URL that is not fails the view's startup before it
+                // runs.
                 // Rust joins the specifier to it by URL rules and still does
                 // not remember it. An absolute URL joins to itself,
                 // `bobcat:bts` included. A specifier that does not resolve

@@ -26,7 +26,7 @@ resource bounds.
   `{encoding:"CSS", content:{ruleList}}` descriptor (pre-#4138 encoders), else a
   `.lynx.bundle`'s CSS custom section. Each registers at
   `<container path>/custom_section/<encoded key>.css` with the `?#` suffix kept
-  (`named_style_url` in `src/page.rs`, `styleSheetURL` in
+  (`named_style_url` in `src/container.rs`, `styleSheetURL` in
   `packages/bobcat-element/src/section-url.ts`).
 - Binary string map: `u32 count`, then `{u32 klen, key, u32 vlen, val}` × count (UTF-8),
   rejecting trailing bytes.
@@ -56,7 +56,9 @@ Any executable root Lepus, Lepus chunk, `JS_BYTECODE` or `JsBytecode` custom
 section returns `ConvertError::CodeCacheBundle`: real QuickJS/Lepus bytecode is
 **rejected**, never executed or decompiled. Named external modules keep their
 names and acquire no invented page root; `PageSource::from_native_bundle`
-requires an explicit entry name.
+(over `ContainerSources::from_native_bundle`) requires an explicit entry
+name, which it registers under its own name and, as the entry, at
+`<container>/root.js`.
 
 The layout it reads: `u32 total_size` (== file size), `u32 magic`
 (`0x00241922` LepusNG/QuickJS, `0xdd737199` legacy Lepus), four `u32len+utf8`
@@ -86,6 +88,35 @@ bounded ZIP decoder; entry selection goes through `PageSource`
 (`src/page.rs`), which also registers resources. The crate has no Cargo
 feature flags — every embedder, Wasm included, gets all three parsers.
 
+## 4. One registration path for every container — `src/container.rs`
+
+A `.web.bundle` or `.lynx.bundle` becomes a `ContainerSources`, whoever asked:
+a page (`PageSource` holds one), a `<frame>`'s main bundle, or a fetch
+(`BundleInstaller`, the one `ContainerInstaller`). With `U` the container
+URL, `P` its path (one trailing `/` dropped), `S` its `?#` suffix and names
+`form_urlencoded` (space `%20`) after one leading `/` is stripped:
+
+| What | URL | Body |
+| --- | --- | --- |
+| Lepus `root` / explicit native entry | `P/root.js S` | `mts_entry_source` |
+| Lepus chunk or string section `main-thread`/`*__main-thread` | `P/<name>.js S` | `MTS_CHUNK_PREAMBLE` + `export default ` + body |
+| other Lepus chunk | `P/<name>.js S` | verbatim |
+| other string custom section | `P/<name>.js S` | `.json` verbatim, else `bts_module_source` |
+| manifest path `p` | `P/<p> S` (no `.js`; `?`/`#` in `p` escaped) | same choice by name |
+| named stylesheet `k` | `P/custom_section/<k>.css S` | `PreparsedStyleSheet` |
+| non-empty StyleInfo | `P/style-info.css S` | lowered `PreparsedStyleSheet` |
+| BTS boot (entry + non-empty manifest) | `U#background-thread` | `__BobcatRegisterBundle(U)` + `requireModule('/app-service.js')` |
+
+`packages/bobcat-element/src/section-url.ts` builds the same strings. Same URL
+with the same text deduplicates; different text, or a sheet URL a script also
+reaches, is `SourceError::ConflictingSection`; an opaque URL is
+`SourceError::OpaqueContainerUrl`. The native decoder files a custom source
+section `n` as both `custom_sections[n]` and manifest `/n`, so it lands at
+both `P/n.js` and `P/n`. A page's view names `root.js` as its entry, `U` as
+its `card_url` (`__Card__`) and `style-info.css` as its only listed sheet.
+XML (`bobcat-memory://lynx-xml/*`) and ZIP (`bobcat-memory://archive/`) keep
+their own URLs.
+
 Registering a card's bodies includes their import wrappers, because the engine
 loads every entry as the fetcher answered it: an MTS body (a container's root
 Lepus script, an XML main-thread script) is prefixed with
@@ -93,8 +124,9 @@ Lepus script, an XML main-thread script) is prefixed with
 `BTS_CHUNK_PREAMBLE` (`bts_module_source`; an XML background-thread script
 takes the `.web.bundle` `CommonJS` shape), each on the body's own first line,
 so a line of the body keeps its number and a column on its first line is
-offset by the prefix's length. A named Lepus chunk and a `.json` body stay
-verbatim.
+offset by the prefix's length. A container's `main-thread`/`*__main-thread`
+section is the MTS preamble, `export default ` and the body. Any other named
+Lepus chunk and a `.json` body stay verbatim.
 
 ## Full specs
 

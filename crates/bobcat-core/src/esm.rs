@@ -157,14 +157,14 @@ pub(crate) const LYNX_MODULES_SPECIFIER: &str = "bobcat:lynx-modules";
 /// The names are this realm's, so the list is defined here.
 /// `bobcat-source` is what prepends it, to every card body it registers for
 /// this realm: a page's root Lepus script, an XML page's main-thread script
-/// and a lazy container's `main-thread` section. The engine adds nothing to
+/// and a container's `main-thread`/`*__main-thread` section. The engine adds nothing to
 /// an entry: it loads every entry as the fetcher answered it, so a
 /// main-thread script that is not a card's body imports what it uses itself.
 ///
-/// The list does not name the entry: `MainThreadRuntime::complete_entry`
-/// hands the entry's response URL to `__BobcatInitEntry` before the body
-/// runs, so no such statement is compiled into every body this is prepended
-/// to.
+/// The list does not name the card: `MainThreadRuntime::complete_entry`
+/// hands the card URL — the view's `ViewSources::card_url`, or else the
+/// entry's response URL — to `__BobcatInitEntry` before the body runs, so no
+/// such statement is compiled into every body this is prepended to.
 pub const MTS_CHUNK_PREAMBLE: &str = concat!(
     "import { __Card__, lynx, console, SystemInfo, __globalProps, NativeModules, ",
     "_AddEventListener, _ReportError, _SetSourceMapRelease, __OnLifecycleEvent, ",

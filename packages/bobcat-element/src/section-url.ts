@@ -6,14 +6,15 @@
 // named section as a `.js` file, a manifest path as the path it is, a named
 // stylesheet as `custom_section/<encoded name>.css`, and the page's own
 // StyleInfo as `style-info.css`. `bobcat-source` registers exactly these
-// strings (`named_chunk_url`, `bundle_path_url`, `named_style_url` and
-// `bundle_style_url` in `crates/bobcat-source`), so the rule
+// strings, for every container through one `ContainerSources`
+// (`named_chunk_url`, `bundle_path_url`, `named_style_url` and
+// `bundle_style_url` in `crates/bobcat-source/src/container.rs`), so the rule
 // lives in one module rather than once per realm — MTS builds them for
 // `__LoadLepusChunk`, `lynx.loadScript` and `__LoadStyleSheet`, BTS for
 // `lynx.requireModule`, `lynx.loadScript` and `nativeApp.loadScript`.
 
 /**
- * One section name as `PageSource` percent-encodes it: `form_urlencoded`'s
+ * One section name as `ContainerSources` percent-encodes it: `form_urlencoded`'s
  * byte serializer, which escapes `!~'()` where `encodeURIComponent` leaves
  * them, and writes a space as `%20` rather than `+`.
  */

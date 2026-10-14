@@ -20,7 +20,7 @@
 //!   (`lower_style.rs:322-338`). No test in this file re-serializes CSS itself: every asserted
 //!   string is the return value of one production call on one decoded item.
 //! * the engine's stylesheet hand-off, through [`registered_style_sheet`] —
-//!   `PageSource::from_bytes` runs the whole lowering (`page.rs:262-270`) and
+//!   `PageSource::from_bytes` runs the whole lowering (`ContainerSources::from_template`) and
 //!   `PageSource::register_with` installs the result in an embedder-owned `Resources` under the URL
 //!   the card's `ViewSources` name, which is the URL `bobcat-core` asks for at view startup.
 //!

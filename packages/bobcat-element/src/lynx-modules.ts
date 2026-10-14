@@ -174,7 +174,7 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
    * URL's own extension first and the engine's syntax detection where that
    * says nothing, so three shapes come back:
    *
-   * - an **ES module**, which is what a body this container carried is: `PageSource` wrote it,
+   * - an **ES module**, which is what a body this container carried is: `ContainerSources` wrote it,
    *   and its default export is the value native's host would have kept as that script's
    *   completion value — the compiler's `{init}` object for a `.lynx.bundle` body,
    *   `module.exports` for a `.web.bundle` one, the parsed value for a `.json` one. A

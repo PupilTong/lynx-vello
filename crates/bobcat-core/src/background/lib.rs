@@ -121,7 +121,8 @@ pub(crate) struct WorkerStart {
     /// The worker's `self.name`, empty when the constructor named none.
     pub(crate) name: String,
     /// The worker's script URL: the `new Worker` specifier joined to the
-    /// creating entry's response URL by URL rules, which leaves an absolute
+    /// creating realm's `__Card__` — its view's card URL, or else its entry's
+    /// response URL — by URL rules, which leaves an absolute
     /// URL such as `bobcat:bts` as it is. The realm's root module is the
     /// module at this URL, loaded by it, and with the key it is what the
     /// worker's diagnostics are named by: the creating realm and the worker
