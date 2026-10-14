@@ -219,8 +219,44 @@ fn the_real_lazy_chunk_installs_the_sections_both_realms_ask_for() {
         .find(|(url, _)| url.as_str().ends_with("/main-thread.js"))
         .expect("the MTS section");
     // The MTS body is an *expression* the card calls, so it is the module's
-    // default export, and the whole module is one physical line: a body keeps
-    // the line numbering it had in the container.
-    assert!(main_thread.starts_with(bobcat_core::MTS_CHUNK_PREAMBLE));
+    // default export, after the entry's own bindings — exactly that, so a
+    // body keeps the line numbering it had in the container.
+    let body = template.custom_sections.as_ref().unwrap()["main-thread"]["content"]
+        .as_str()
+        .expect("the MTS section's source");
+    assert_eq!(
+        main_thread.as_ref(),
+        format!("{}export default {body}", bobcat_core::MTS_CHUNK_PREAMBLE)
+    );
     assert!(main_thread.contains("export default (function"));
+}
+
+/// A full card fetched as a container is registered exactly as its page is:
+/// its `root` at `root.js` as the entry's module — the entry's own bindings
+/// and the body, no `export default` — rather than as a BTS body, whoever
+/// asked for it.
+#[test]
+fn a_fetched_full_card_registers_its_root_as_the_entry_module() {
+    let bytes = fixtures::fixture("basic-class-selector").page;
+    let url = Url::parse(&format!("{ORIGIN}/card.web.bundle")).expect("a URL");
+    let sources = ContainerSources::from_bytes(&url, bytes).expect("the card decodes");
+    let template = bobcat_source::web::decode(bytes).expect("the card decodes");
+
+    let root = format!("{ORIGIN}/card.web.bundle/root.js");
+    assert_eq!(sources.entry().map(Url::as_str), Some(root.as_str()));
+    let (_, registered) = sources
+        .scripts()
+        .iter()
+        .find(|(at, _)| at.as_str() == root)
+        .expect("the root is registered");
+    assert_eq!(
+        registered.as_ref(),
+        bobcat_source::mts_entry_source(&template.lepus_code["root"])
+    );
+    assert!(!registered.contains("export default"));
+    assert_eq!(
+        sources.style_info().map(Url::as_str),
+        Some(format!("{ORIGIN}/card.web.bundle/style-info.css").as_str()),
+        "registered, though only a page lists it"
+    );
 }

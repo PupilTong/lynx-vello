@@ -689,6 +689,8 @@ pub(crate) fn looks_like_lynx_xml(mut bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use bobcat_resources::ResourcesConfig;
 
     use super::*;
@@ -1296,6 +1298,142 @@ mod tests {
                 assert!(Instant::now() < deadline, "BTS did not become ready");
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
+        }
+    }
+
+    /// One path, proven: a page's container is exactly what a fetch of the
+    /// same bytes from the same URL registers — every script at the same URL
+    /// with the same text, the same stylesheets, the same entry and boot.
+    #[test]
+    fn a_page_registers_what_a_fetch_of_its_bytes_registers() {
+        for name in [
+            "basic-class-selector",
+            "css-custom-sections",
+            "react-bts-query",
+        ] {
+            let input =
+                Url::parse(&format!("https://cdn.test/app/{name}.web.bundle?rev=1")).unwrap();
+            let bytes = crate::fixtures::fixture(name).page;
+            let page = PageSource::from_bytes(&input, bytes).expect("the card decodes");
+            let fetched = ContainerSources::from_bytes(&input, bytes).expect("the card decodes");
+            assert_eq!(page.container(), Some(&fetched), "{name}");
+            assert!(fetched.entry().is_some(), "{name} has a root");
+        }
+    }
+
+    /// A native page names its entry explicitly, which a fetch cannot: the
+    /// page is the fetch plus exactly that entry at `root.js` and the boot
+    /// script that starts its card — nothing else differs.
+    #[test]
+    fn a_native_page_is_its_fetch_plus_the_named_entry_and_its_boot() {
+        let input = Url::parse("https://cdn.test/app/react-native.lynx.bundle").unwrap();
+        let bytes = crate::fixtures::fixture("react-native").page;
+        let entry = "react-native__main-thread";
+        let page = PageSource::from_native_bundle(&input, bytes, entry).expect("the card decodes");
+        let page = page.container().expect("a container page");
+        let fetched = ContainerSources::from_bytes(&input, bytes).expect("the card decodes");
+        assert!(fetched.entry().is_none() && fetched.background_entry().is_none());
+
+        let template = crate::native::decode(bytes).unwrap();
+        let mut expected: BTreeMap<String, String> = fetched
+            .scripts()
+            .iter()
+            .map(|(url, text)| (url.to_string(), text.to_string()))
+            .collect();
+        expected.insert(
+            format!("{input}/root.js"),
+            mts_entry_source(&template.lepus_code[entry]),
+        );
+        expected.insert(
+            format!("{input}#background-thread"),
+            background_boot_source(&input, template.manifest.contains_key("/app-service.js")),
+        );
+        let registered: BTreeMap<String, String> = page
+            .scripts()
+            .iter()
+            .map(|(url, text)| (url.to_string(), text.to_string()))
+            .collect();
+        assert_eq!(registered, expected);
+        assert_eq!(page.style_sheets(), fetched.style_sheets());
+        assert_eq!(page.style_info(), fetched.style_info());
+        assert_eq!(
+            page.entry().map(Url::as_str),
+            Some(format!("{input}/root.js").as_str())
+        );
+        assert_eq!(
+            page.background_entry().map(Url::as_str),
+            Some(format!("{input}#background-thread").as_str())
+        );
+    }
+
+    /// A container page boots with the container as its card: `__Card__` is
+    /// the input URL rather than the entry's, and a named chunk and a named
+    /// stylesheet are found under it by the URLs MTS builds from it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_container_page_boots_with_the_container_as_its_card() {
+        use std::time::{Duration, Instant};
+
+        use bobcat_core::{EngineEvent, LynxGroup, NoWakeup, StyleThreads};
+
+        let input = Url::parse("https://cdn.test/app/card.web.bundle?rev=1").unwrap();
+        let mut template = crate::web::decode(&web_bundle(Some(
+            r"
+            if (__Card__ !== 'https://cdn.test/app/card.web.bundle?rev=1')
+                throw Error('the card is not the container: ' + __Card__);
+            if (__LoadLepusChunk('chunk', {}) !== true) throw Error('the chunk was not found');
+            if (globalThis.chunkRuns !== 1) throw Error('the chunk did not run');
+            if (__LoadStyleSheet('CSS', '__Card__') === null)
+                throw Error('the CSS section is not held');
+            console.log('container card checked');
+        ",
+        )))
+        .unwrap();
+        template.lepus_code.insert(
+            "chunk".into(),
+            "globalThis.chunkRuns = (globalThis.chunkRuns ?? 0) + 1;".into(),
+        );
+        template.custom_sections = Some(serde_json::json!({
+            "CSS": {"encoding": "CSS", "content": {"ruleList": [
+                {"type": "StyleRule", "selectorText": {"value": ".box"},
+                 "style": [{"name": "width", "value": "10px"}]}
+            ]}},
+        }));
+        let page =
+            PageSource::from_template_with_background(&input, template, BundleTarget::Web).unwrap();
+        let sources = page.view_sources(SCREEN);
+        assert_eq!(
+            sources.entry,
+            "https://cdn.test/app/card.web.bundle/root.js?rev=1"
+        );
+        let resources = resources();
+        page.register_with(&resources);
+        let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
+            .await
+            .unwrap();
+        let mut view = group
+            .create_lynx_view(32.0, 24.0, 1.0, resources.builder(), Vec::new(), sources)
+            .unwrap();
+        let mut painter = binding_painter().await;
+        painter.attach(&view).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let (mut checked, mut finished) = (false, false);
+        while !checked || !finished {
+            for event in view.pump() {
+                match event {
+                    EngineEvent::ScriptFinished => finished = true,
+                    EngineEvent::ConsoleMessage { message, .. } => {
+                        assert_eq!(message, "container card checked");
+                        checked = true;
+                    }
+                    event => panic!("the container card failed: {event:?}"),
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "checked={checked} finished={finished}"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     }
 
