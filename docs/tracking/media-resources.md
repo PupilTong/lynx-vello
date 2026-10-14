@@ -137,8 +137,9 @@ its own. `load` carries
 carries `{}`. Both are non-bubbling, as web-core mints them
 (`web-elements/src/elements/common/commonEventInitConfiguration.ts`), which
 the `bubbles` flag every dispatch now carries into the realm expresses
-generally. Neither detail is JSON: a `load` crosses as the `DETAIL_SIZE` kind
-and two numbers, an `error` as `DETAIL_EMPTY` and none, on the same one
+generally. Neither detail is JSON: a `load` crosses as the W3C payload
+`DETAIL_EMPTY` with two extras, `width` and `height`, which the realm makes its
+Lynx `detail` (2026-10-13), and an `error` as `DETAIL_EMPTY` alone, on the same one
 `__BobcatDispatchEvent` export a routed input event uses; see
 [dom-events.md](dom-events.md). Their `timestamp` is the newest reading of the
 view's timeline the main thread has been handed — a frame post's `now` or a

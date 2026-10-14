@@ -39,7 +39,8 @@ use std::time::Duration;
 use dom::input::{InputEvent, InputKind, PointerId};
 use dom::render::gpu::Headless;
 use dom::scroll::{
-    ChainLink, ScrollAxes, ScrollBehavior, ScrollRequest, drive_chain, settle_offset,
+    AutoScrollRequest, ChainLink, ScrollAxes, ScrollBehavior, ScrollRequest, drive_chain,
+    settle_offset,
 };
 use dom::vello::Scene;
 use dom::vello::peniko::{Color, ImageData};
@@ -54,7 +55,7 @@ pub(crate) use self::gesture::RouterHost;
 use self::gesture::{GestureRouter, InputDecision, InputDecisions};
 pub use self::graphics::WindowTarget;
 use self::graphics::{FrameAcquisition, WindowGraphics};
-use self::inertia::{Axis, BounceBack, ChainOutcome, DragTrack, Fling, Glide};
+use self::inertia::{AutoScroll, Axis, BounceBack, ChainOutcome, DragTrack, Fling, Glide};
 use self::motion::{ElasticStep, Motion, resolve_elastic_step, stretch_of, unwind_stretch};
 use crate::clock::ClockInstant;
 use crate::link::{FramePost, InputEventPayload, Published, ScrollEntry, ToMain, ViewSeat};
@@ -499,14 +500,26 @@ pub(super) struct ScrollIntents {
     /// The axes moving to a snap position or to a smooth scroll's target;
     /// see [`inertia`].
     glides: SmallVec<[Glide; 2]>,
-    /// The newest programmatic scroll request handled per container
-    /// ([`dom::ScrollSlot::request`]), which every post for it names. An
+    /// The axes a script set moving at a constant rate (Lynx's
+    /// `autoScroll`); see [`inertia`]. A `Vec`, not an inline buffer: almost
+    /// no page has one, so the painter of a page without holds the three
+    /// words and nothing else.
+    auto_scrolls: Vec<AutoScroll>,
+    /// The newest programmatic scroll request or auto-scroll change handled
+    /// per container ([`dom::ScrollSlot::request`],
+    /// [`CommittedFrame::auto_scroll_requests`]), which every post for it
+    /// names. An
     /// entry is written when a request is first seen and pruned by every
     /// rebase to the containers the adopted frame still has a slot for, so
     /// it is bounded by the live containers that ever received a request.
     handled: FxHashMap<NodeId, NonZeroU64>,
     /// The drags in progress, for their release velocity; see [`inertia`].
     drags: FxHashMap<PointerId, DragTrack>,
+    /// The containers a wheel step moved, each with the clock reading of
+    /// its latest step: held off rest until
+    /// [`inertia::WHEEL_REST_SECONDS`] pass with no further step, so a wheel
+    /// gesture ends once rather than at every tick.
+    wheel_steps: SmallVec<[(NodeId, f64); 1]>,
     /// The containers whose live offset changed, or whose hold a drag let
     /// go, since the last publish; see [`Painter::publish_scroll`]. Bounded
     /// by the containers one pass touches.
@@ -640,14 +653,32 @@ impl ScrollIntents {
         self.settle_at_rest(frame);
     }
 
-    /// Carries out each programmatic scroll `frame` brings that this painter
-    /// has not handled yet: the request's serial is newer than the one
-    /// recorded for the container.
+    /// Carries out each programmatic scroll and each auto-scroll change
+    /// `frame` brings that this painter has not handled yet: its serial is
+    /// newer than the one recorded for the container.
+    ///
+    /// The two do not replace one another — a scroll request says where the
+    /// container is, an auto-scroll change whether it moves on from there —
+    /// so one container's pair in one frame is both carried out, the scroll
+    /// first.
     fn apply_requests(&mut self, frame: &CommittedFrame, now: f64) {
         if !self.handled.is_empty() {
             self.handled
                 .retain(|node, _| frame.slot_of(*node).is_some());
         }
+        // Chosen against the serials as they stood before this frame: the
+        // scroll request below may raise a container's past an auto-scroll
+        // change made before it in the same turn.
+        let auto_scrolls: SmallVec<[(NodeId, AutoScrollRequest); 1]> = frame
+            .auto_scroll_requests()
+            .iter()
+            .filter(|(node, request)| {
+                self.handled
+                    .get(node)
+                    .is_none_or(|handled| *handled < request.serial)
+            })
+            .copied()
+            .collect();
         for slot in frame.scroll_slots() {
             let Some(request) = slot.request else {
                 continue;
@@ -662,10 +693,19 @@ impl ScrollIntents {
             self.handled.insert(slot.node, request.serial);
             self.apply_request(frame, slot, request, now);
         }
+        for (node, request) in auto_scrolls {
+            let handled = self.handled.entry(node).or_insert(request.serial);
+            *handled = (*handled).max(request.serial);
+            self.apply_auto_scroll(node, request);
+        }
     }
 
     /// One programmatic scroll of `slot`'s container. Whatever the painter
-    /// was moving it with stops ([`Self::stop_motion_on`]). An instant one
+    /// was moving it with stops ([`Self::stop_motion_on`]), except an
+    /// auto-scroll, which goes on from where the request leaves the
+    /// container. One that yields to a pointer
+    /// ([`dom::Document::scroll_to_yielding`]) is dropped whole while a drag
+    /// holds the container. An instant one
     /// puts the live offset on the target, where a drag holding the
     /// container continues from; a smooth one glides there from rest, to
     /// the position the at-rest snap rule would move the target to, so a
@@ -681,6 +721,13 @@ impl ScrollIntents {
         now: f64,
     ) {
         let node = slot.node;
+        if request.yields_to_pointer && self.is_held(node) {
+            // A turn no script asked for, under a finger — or under the
+            // fling that finger let go, which keeps its holds: nothing
+            // moves. Posted all the same, so the request reads as handled.
+            note_changed(&mut self.changed, node);
+            return;
+        }
         self.stop_motion_on(frame, node, now);
         // The request decides where the container goes, not the area it
         // stood on before.
@@ -729,11 +776,17 @@ impl ScrollIntents {
     /// position here, and the at-rest rule then finds it on a position and
     /// leaves it. A container something is moving follows nothing — where
     /// it rests is decided when the drag, fling, bounce back or glide ends —
-    /// so what was read for it is dropped with the rest.
+    /// so what was read for it is dropped with the rest. A container with
+    /// an auto-scroll is not at rest either, even while that stands at its
+    /// edge for a range that grows: snapped away from the edge it would
+    /// move straight back.
     fn settle_at_rest(&mut self, frame: &CommittedFrame) {
         let mut snapped = std::mem::take(&mut self.snapped);
         for slot in frame.scroll_slots() {
-            if self.is_held(slot.node) || self.is_bouncing(slot.node) || self.is_gliding(slot.node)
+            if self.is_held(slot.node)
+                || self.is_bouncing(slot.node)
+                || self.is_gliding(slot.node)
+                || self.has_auto_scroll(slot.node)
             {
                 continue;
             }
@@ -893,6 +946,9 @@ impl ScrollIntents {
                 }
                 if motion == Motion::Wheel {
                     self.stop_glides(slot.node);
+                    self.note_wheel_step(slot.node, at);
+                } else {
+                    self.end_wheel_steps(slot.node);
                 }
                 self.write(slot.node, moved);
                 if stretch_of(applied, axis.of(slot.max_offset)) != 0.0 {
@@ -918,6 +974,9 @@ impl ScrollIntents {
                 }
                 if motion == Motion::Wheel {
                     self.stop_glides(slot.node);
+                    self.note_wheel_step(slot.node, at);
+                } else {
+                    self.end_wheel_steps(slot.node);
                 }
                 self.write(slot.node, step.applied);
             }
@@ -948,9 +1007,9 @@ impl ScrollIntents {
     }
 
     /// Hands the changed containers to `post` as main adopts them — clamped
-    /// to the committed range, and `rest` where nothing holds, flings or
-    /// bounces them — and forgets them. A container `frame` no longer carries
-    /// is dropped. Both buffers keep their capacity.
+    /// to the committed range, and `rest` where nothing holds, flings,
+    /// bounces, glides or auto-scrolls them — and forgets them. A container `frame` no longer
+    /// carries is dropped. Both buffers keep their capacity.
     ///
     /// An axis with a [`dom::ScrollSlot::wrap_period`] is normalized into
     /// its period and posted unclamped: the document admits the whole
@@ -987,7 +1046,9 @@ impl ScrollIntents {
                 let moving = self.is_held(node)
                     || self.is_flinging(frame, node)
                     || self.is_bouncing(node)
-                    || self.is_gliding(node);
+                    || self.is_gliding(node)
+                    || self.is_auto_scrolling_node(frame, node)
+                    || self.is_wheeling(node);
                 posting.push((
                     node,
                     ScrollEntry {
@@ -1214,6 +1275,11 @@ fn route_published(
     event: &InputEvent,
     animation_now: Option<f64>,
 ) -> Option<HitTarget> {
+    // A key event is not routed by position: the router targets it at the
+    // focus target itself.
+    if matches!(event.kind, InputKind::Key { .. }) {
+        return None;
+    }
     let finite = event.position.x.is_finite()
         && event.position.y.is_finite()
         && match event.kind {
@@ -1617,7 +1683,10 @@ impl Painter {
                     .upgrade()
                     .is_some_and(|seat| seat.frame_demand.borrow_mut().is_pending())
                 || self.gesture.needs_frame()
-                || self.scroll_intents.is_animating())
+                || self.scroll_intents.is_animating()
+                || self
+                    .frame()
+                    .is_some_and(|frame| self.scroll_intents.is_auto_scrolling(frame)))
     }
 
     /// Routes one normalized OS input event against the frame this painter
@@ -1626,12 +1695,25 @@ impl Painter {
     /// A detached painter routes nothing: it has no frame to hit-test against
     /// and nobody to deliver to, so the event is dropped before the gesture
     /// router sees it rather than opening a sequence that can never close.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "the embedder hands the event over; a key event's strings are shared, not copied"
+    )]
     pub fn dispatch_input(&mut self, event: InputEvent) {
         if !self.is_attached() {
             return;
         }
         self.poll_link();
         let at = self.clock.now_seconds();
+        // A key moves no scroll and is not routed by position: it is named
+        // and sent, and nothing of the pointer pipeline runs for it.
+        if matches!(event.kind, InputKind::Key { .. }) {
+            let mut decisions = InputDecisions::new();
+            self.gesture
+                .on_input(&event, None, at, &self.published, &mut decisions);
+            self.execute_decisions(&mut decisions, None, at);
+            return;
+        }
         let published = self.frame().cloned();
         if let Some(frame) = &published {
             self.scroll_intents.rebase(frame, at);
@@ -1711,11 +1793,10 @@ impl Painter {
                     target: event.target,
                     name: event.name,
                     payload: InputEventPayload {
-                        position: event.position,
-                        wheel: event.wheel,
-                        touches: event.touches,
+                        detail: event.detail,
                         timestamp,
                     },
+                    release: event.release,
                 },
             );
         }

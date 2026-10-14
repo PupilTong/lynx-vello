@@ -112,7 +112,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use stylo::LocalName;
 
-use crate::event::{ElementEvent, ElementEventKind};
+use crate::event::{ElementEvent, EventDetail};
 use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeId, NodeSlot};
 
 const MAX_REACTION_DEPTH: usize = 64;
@@ -138,8 +138,8 @@ pub trait CustomElement<T> {
         Vec::new()
     }
 
-    /// The event types [`Self::handle_event`] is called for, by their names
-    /// (`"slotchange"`, `"tap"`): the analogue of
+    /// The event types [`Self::handle_event`] is called for, by their W3C
+    /// names (`"slotchange"`, `"pointerdown"`): the analogue of
     /// [`Self::observed_attributes`] for events.
     ///
     /// Read once, by [`Document::define`], which unions every definition's
@@ -197,20 +197,26 @@ pub trait CustomElement<T> {
     /// One event reaching this element, on the standard's path, for a type
     /// this definition names in [`Self::observed_events`].
     ///
-    /// Not a lifecycle callback: it is called by
-    /// [`Document::dispatch_element_event`], which walks the capture and
-    /// bubble passes of [`Document::event_steps`] and delivers to every
-    /// defined element on them — so `element` is the event's
-    /// `currentTarget`, and [`ElementEvent::target`] is what the event was
-    /// fired at. A component hears events aimed at its descendants exactly
-    /// as a bubble-phase listener would.
+    /// Not a lifecycle callback: it is called by the Rust walk
+    /// ([`Document::dispatch_element_event_over`], or
+    /// [`Document::dispatch_element_event`] for an event only the engine
+    /// hears), which walks the capture and bubble passes of
+    /// [`Document::event_steps`] and delivers to every defined element on
+    /// them — so `element` is the event's `currentTarget`, and
+    /// [`ElementEvent::target`] is what the event was fired at. A component
+    /// hears events aimed at its descendants exactly as a listener on it
+    /// would. [`ElementEvent::type_name`] says which event this is and
+    /// [`ElementEvent::detail`] what it carries.
     ///
-    /// **This path never reaches script.** It is how the engine's own
-    /// components — `<image>` today, `<list>` when it exists — observe
-    /// something the engine decided, such as a `content-visibility: auto`
-    /// element starting or stopping to skip its contents. An
-    /// `addEventListener` registration in a realm is unrelated state, in
-    /// another layer, and is not consulted here.
+    /// Two kinds of event arrive here. One is the engine's own, which never
+    /// reaches script: a `slotchange`, a `content-visibility: auto` element
+    /// starting or stopping to skip its contents. The other is every event
+    /// script hears too (routed input, a component's `load`, `scroll`): the
+    /// host's one dispatch runs this walk first, over the path it then hands
+    /// to the realm. [`ElementEvent::stop_propagation`] ends this walk only;
+    /// the script dispatch runs regardless. An `addEventListener`
+    /// registration in a realm is unrelated state, in another layer, and is
+    /// not consulted here.
     ///
     /// Called *inline*, unlike a reaction: the walk has no queue of its own,
     /// because it is not inside a tree mutation that a callback could
@@ -221,14 +227,22 @@ pub trait CustomElement<T> {
     ///
     /// One event a component hears without being on the path is a
     /// non-composed one fired inside its own shadow tree, such as the
-    /// standard's `slotchange` at one of its slots, or the
-    /// [`ElementEventKind::Tap`] a host fires at the node it hit: the path ends at the
+    /// standard's `slotchange` at one of its slots, or the non-composed `tap`
+    /// a host fires at the shadow node a tap hit: the path ends at the
     /// shadow root, and the shadow root's step is delivered here with
     /// `element` the host — where a script component would listen on
     /// `this.shadowRoot`. The shadow root cannot be the `currentTarget` of a
     /// call that is the host's, so [`ElementEvent::current_target`] is the
     /// host there too; [`ElementEvent::target`] is the node inside the shadow
     /// tree the event was fired at.
+    ///
+    /// For such an event that also does not bubble (the W3C `scroll` of a
+    /// scroll container inside the component's shadow tree), that boundary
+    /// step exists in the capture pass only, so the host's one delivery
+    /// reports [`EventPhase::Capturing`](crate::event::EventPhase::Capturing).
+    /// A handler that keeps only [`EventPhase::Bubbling`](crate::event::EventPhase::Bubbling)
+    /// deliveries, which is right for `slotchange` because it bubbles, never
+    /// sees one: filter on the phase only for an event that bubbles.
     fn handle_event(&self, document: &mut Document<T>, element: NodeId, event: &mut ElementEvent) {
         let _ = (document, element, event);
     }
@@ -665,7 +679,14 @@ impl<T> Document<T> {
                     "slotchange did not reach a fixpoint: a handler keeps changing slot \
                      assignments",
                 );
-                self.dispatch_element_event(slot, ElementEventKind::SlotChange, true, false);
+                self.dispatch_element_event(
+                    slot,
+                    SLOT_CHANGE,
+                    &EventDetail::None,
+                    true,
+                    false,
+                    0.0,
+                );
             }
         }
     }
@@ -725,6 +746,12 @@ impl<T> Document<T> {
     /// The host publishes these once, as names its router must route.
     pub fn observed_event_names(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.custom_elements.observed_events.iter().copied()
+    }
+
+    /// The set's own `'static` spelling of `type_name`, which is how the
+    /// walk names an event whose caller only had a borrowed name.
+    pub(crate) fn custom_elements_observed_event(&self, type_name: &str) -> Option<&&'static str> {
+        self.custom_elements.observed_events.get(type_name)
     }
 
     /// The handler of a node that is a *constructed* custom element, for a

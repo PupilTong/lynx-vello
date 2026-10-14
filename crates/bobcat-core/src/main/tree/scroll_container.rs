@@ -1,15 +1,16 @@
 //! The `scroll-view` tag: a main-thread scroll container, and the component
-//! that answers three of its UI methods.
+//! that answers four of its UI methods.
 //!
 //! The UA sheet carries the container itself: which axis scrolls, which one
 //! clips, and which way the subtree stacks ([`UA_RULES`]). Its container
 //! defaults (border box, the configured display mode) ride the same rule as
 //! `view`'s, in [`super::ua_sheet`]. The component ([`ScrollView`]) adds
-//! three of the methods Lynx documents for the tag
+//! four of the methods Lynx documents for the tag
 //! (lynxjs.org/api/elements/built-in/scroll-view), which the runtime's
 //! `callElementMethod` reaches through
 //! [`dom::Document::invoke_element_method`]: `scrollTo` ([`scroll_to`]),
-//! `scrollBy` ([`scroll_by`]) and `getScrollInfo` ([`scroll_info`]). It
+//! `scrollBy` ([`scroll_by`]), `autoScroll` ([`auto_scroll`]) and
+//! `getScrollInfo` ([`scroll_info`]). It
 //! reacts to no attribute and adds no event; the threshold events and the
 //! rest of what neither the sheet nor this module covers are recorded in
 //! `docs/tracking/deviations.md`.
@@ -17,8 +18,9 @@
 //! `list` is the other Lynx scroller and carries the same axis rules, written
 //! against its own attribute spellings. They live with the rest of that tag's
 //! policy in [`super::list`], one module per tag, as do its own methods,
-//! which share this module's `scrollBy` ([`scroll_by`]) whole and its
-//! offset reader ([`offset_px`]) and cell geometry ([`rect_in_scroller`]).
+//! which share this module's `scrollBy` ([`scroll_by`]) and `autoScroll`
+//! ([`auto_scroll`]) whole and its offset reader ([`offset_px`]) and cell
+//! geometry ([`rect_in_scroller`]).
 //!
 //! # The references
 //!
@@ -27,9 +29,10 @@
 //!   `clampScrollToPosition` at `:1078-1118`.
 //! - Android `lynx/platform/android/lynx_android/src/main/java/com/lynx/tasm/behavior/ui/scroll/`
 //!   `UIScrollView.java`: `autoScroll` at `:746-749`, `getScrollInfo` at `:922-931`, `scrollBy` and
-//!   `scrollTo` at `:960-1050`.
+//!   `scrollTo` at `:960-1050`; `AndroidScrollView.java:142-235` is the auto-scroll itself.
 //! - Harmony `lynx/platform/harmony/lynx_harmony/src/main/cpp/ui/ui_scroll.cc`: the method switch
-//!   at `:64-155`, `InvokeScrollTo` and `InvokeGetScrollInfo` at `:750-799`.
+//!   at `:64-155`, `InvokeScrollTo` and `InvokeGetScrollInfo` at `:750-799`; the auto-scroll both
+//!   its tags share is `ui/utils/auto_scroller.cc`.
 //! - web-core `lynx-stack/packages/web-platform/web-elements/src/elements/ScrollView/`
 //!   `ScrollView.ts`: the `scrollTo` overload (`:32-83`) and `autoScroll` (`:84-112`). It has no
 //!   `scrollBy` of its own, so `HTMLElement.scrollBy` answers one, and no `getScrollInfo`, so that
@@ -53,15 +56,7 @@
 //!
 //! # Not built
 //!
-//! `autoScroll({rate, start})` and `takeContentScreenshot` stay unanswered
-//! (code 3). `autoScroll` moves the scroller at a constant rate, frame after
-//! frame, until it reaches the boundary or a second call stops it (iOS's
-//! `CADisplayLink` at `:1345-1360`, web-core's 100 ms `scrollBy` interval at
-//! `:84-112`). Nothing here can carry that: a script-facing scroll is one
-//! [`dom::scroll::ScrollRequest`], whose behaviors are `Instant` and
-//! `Smooth` to one target, and a component has no per-frame hook to issue a
-//! new request each frame. It needs a request kind the painter drives at a
-//! rate, with a way to end it. `takeContentScreenshot` needs a pixel
+//! `takeContentScreenshot` stays unanswered (code 3): it needs a pixel
 //! readback of the scroller's whole content from the painter, which does not
 //! exist.
 
@@ -136,6 +131,10 @@ impl CustomElement<()> for ScrollView {
                 is_horizontal(document, element),
             )
             .map(|by| Some(by.record())),
+            "autoScroll" => {
+                let horizontal = is_horizontal(document, element);
+                auto_scroll(document, element, call.params, horizontal).map(|()| None)
+            }
             "getScrollInfo" => Ok(Some(scroll_info(document, element).record())),
             _ => return MethodOutcome::NotFound,
         };
@@ -420,6 +419,73 @@ pub(super) fn scroll_by(
     })
 }
 
+/// `autoScroll({rate, start = false, autoStop = true})` on `view`: starts
+/// moving the axis at `rate` CSS px per second, or stops it. `horizontal` is
+/// the scrolling axis, read by the caller as for [`scroll_by`]; `list`
+/// shares this method whole ([`super::list`]).
+///
+/// The motion is the painter's ([`dom::Document::auto_scroll`]): the offset
+/// changes on the painter's clock and comes back through its posts, so the
+/// `scroll` events and the `scrollend` at its end are a user scroll's. It
+/// yields to a finger and to every other motion and goes on afterwards, and
+/// a `scrollTo` or `scrollBy` moves the container without ending it (user
+/// ruling 2026-10-13; iOS's list offers that as `touchBehavior: "pause"`,
+/// and every reference's timer outlives a `scrollTo`). Every reference but
+/// iOS's list writes the offset under a finger each frame instead.
+///
+/// - `params` must be a JSON object, else code 4 (Harmony `ui_scroll.cc:104-107`).
+/// - `start` is read with JavaScript truthiness, as web-core's `if (options.start)` reads it, and a
+///   missing one is `false`: web-core, iOS (`boolValue` of nothing), Harmony (`start{false}`) and
+///   Android's list since 4.1 (`UIListContainer.java:1100-1101`). Android's `scroll-view` reads a
+///   missing one as `true` (`AndroidScrollView.java:144`).
+/// - Without `start` the auto-scroll ends where it stands and nothing else is read. A container
+///   with none answers the same.
+/// - `rate` is CSS px per second, a JSON number or a string in `px`, `rpx` or `ppx` or with no unit
+///   ([`offset_px`]): positive toward the end edge, negative toward the start edge. The natives
+///   read a number on `scroll-view` and a unit string on `list`; web-core `parseFloat`s a string
+///   and ignores its unit. Zero, missing or unreadable is code 4 and changes nothing, an
+///   auto-scroll in progress included: Harmony's answer (`auto_scroller.cc:84-88`), where iOS
+///   (`LynxUIScroller.m:1346-1349`) and Android (`:147-150`) return without one.
+/// - `autoStop` is `true` unless it is the JSON `false`, as web-core's `XList` reads it
+///   (`XList.ts:191`) and iOS's and Harmony's lists default it. With it the auto-scroll ends for
+///   good at the edge it moves toward, which is all iOS's and Android's `scroll-view` do; without,
+///   it stays at the edge and goes on when the content grows. Read on both tags (user ruling
+///   2026-10-13), as Harmony reads it; web-core's `ScrollView` reads none and never ends
+///   (`ScrollView.ts:96-108`).
+///
+/// The rate is per second of the painter's clock, as Harmony's and
+/// web-core's `XList`'s is; iOS and Android move `rate / 60` per frame of a
+/// timer or of the display.
+///
+/// A `display: none` `scroll-view`, or one that is no scroll container at
+/// the next commit, starts nothing, and the call still succeeds.
+pub(super) fn auto_scroll(
+    document: &mut LynxDocument,
+    view: NodeId,
+    params: &str,
+    horizontal: bool,
+) -> Result<(), InvalidParams> {
+    let params = object(params)?;
+    if !params.get("start").is_some_and(is_truthy) {
+        document.auto_scroll(view, 0.0, horizontal, true);
+        return Ok(());
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a rate beyond f32 is refused just below"
+    )]
+    let rate = params
+        .get("rate")
+        .and_then(|rate| offset_px(document, rate))
+        .ok_or(InvalidParams)? as f32;
+    if rate == 0.0 || !rate.is_finite() {
+        return Err(InvalidParams);
+    }
+    let stop_at_edge = params.get("autoStop") != Some(&Value::Bool(false));
+    document.auto_scroll(view, rate, horizontal, stop_at_edge);
+    Ok(())
+}
+
 /// What `getScrollInfo` reports, in CSS px.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ScrollInfo {
@@ -484,7 +550,8 @@ mod tests {
     use super::super::LynxDocument;
     use super::super::test_support::{child, document, element_under, overflow, style_of};
     use super::{
-        InvalidParams, SCROLL_VIEW_TAG, ScrollInfo, ScrolledBy, scroll_by, scroll_info, scroll_to,
+        InvalidParams, SCROLL_VIEW_TAG, ScrollInfo, ScrolledBy, auto_scroll, scroll_by,
+        scroll_info, scroll_to,
     };
 
     #[test]
@@ -1102,13 +1169,144 @@ mod tests {
         );
     }
 
-    /// `autoScroll` and `takeContentScreenshot` are not built, and every
-    /// other name is left to the host.
+    /// The change `autoScroll` recorded for `view`, as the painter will read
+    /// it: the rate, the axis and whether it ends at the edge.
+    fn auto(document: &LynxDocument, view: NodeId) -> Option<(f32, bool, bool)> {
+        document
+            .pending_auto_scroll(view)
+            .map(|request| (request.rate, request.horizontal, request.stop_at_edge))
+    }
+
+    /// A start records the rate on the scrolling axis and moves nothing: the
+    /// painter does. `start` is read with JavaScript truthiness and is
+    /// `false` when missing, where the call ends the auto-scroll instead.
+    #[test]
+    fn auto_scroll_starts_on_the_scrolling_axis_and_stops_without_start() {
+        let (mut document, view) = vertical(5);
+        assert_eq!(
+            invoke(
+                &mut document,
+                view,
+                "autoScroll",
+                r#"{"rate":60,"start":true}"#
+            ),
+            MethodOutcome::Done
+        );
+        assert_eq!(auto(&document, view), Some((60.0, false, true)));
+        assert_eq!(document.scroll_offset(view), Vector2D::zero());
+        assert_eq!(document.pending_scroll_request(view), None);
+        let started = document.pending_auto_scroll(view).expect("recorded").serial;
+
+        for stop in [r#"{"rate":60}"#, r#"{"rate":60,"start":false}"#, "{}"] {
+            auto_scroll(&mut document, view, stop, false).expect("valid params");
+            let stopped = document.pending_auto_scroll(view).expect("recorded");
+            assert_eq!(stopped.rate, 0.0, "{stop}");
+            assert!(stopped.serial > started, "{stop}: a newer change");
+        }
+
+        let (mut document, view) = scroller(Some(("scroll-x", "")), 5);
+        assert_eq!(
+            invoke(
+                &mut document,
+                view,
+                "autoScroll",
+                r#"{"rate":-45.5,"start":1}"#
+            ),
+            MethodOutcome::Done
+        );
+        assert_eq!(auto(&document, view), Some((-45.5, true, true)));
+    }
+
+    /// The rate is CSS px per second in `scrollTo`'s offset grammar; `1rpx`
+    /// is the viewport width over 750 (393px here) and `1ppx` one device
+    /// pixel. Only the JSON `false` turns `autoStop` off.
+    #[test]
+    fn auto_scroll_reads_unit_rates_and_auto_stop() {
+        let (mut document, view) = vertical(5);
+        for (params, expected) in [
+            (r#"{"rate":"80px","start":true}"#, (80.0, false, true)),
+            (r#"{"rate":"150rpx","start":true}"#, (78.6, false, true)),
+            (r#"{"rate":"-12","start":true}"#, (-12.0, false, true)),
+            (
+                r#"{"rate":20,"start":true,"autoStop":false}"#,
+                (20.0, false, false),
+            ),
+            (
+                r#"{"rate":20,"start":true,"autoStop":0}"#,
+                (20.0, false, true),
+            ),
+            (
+                r#"{"rate":20,"start":true,"autoStop":true}"#,
+                (20.0, false, true),
+            ),
+        ] {
+            auto_scroll(&mut document, view, params, false).expect("valid params");
+            let (rate, horizontal, stop_at_edge) = auto(&document, view).expect("recorded");
+            assert!((rate - expected.0).abs() < 0.001, "{params}: got {rate}");
+            assert_eq!(
+                (horizontal, stop_at_edge),
+                (expected.1, expected.2),
+                "{params}"
+            );
+        }
+    }
+
+    /// A start with no usable rate is code 4 and changes nothing, an
+    /// auto-scroll already asked for included.
+    #[test]
+    fn auto_scroll_refuses_a_start_without_a_rate() {
+        let (mut document, view) = vertical(5);
+        auto_scroll(&mut document, view, r#"{"rate":60,"start":true}"#, false)
+            .expect("valid params");
+        let pending = document.pending_auto_scroll(view);
+        for params in [
+            r#"{"start":true}"#,
+            r#"{"rate":0,"start":true}"#,
+            r#"{"rate":"0px","start":true}"#,
+            r#"{"rate":"fast","start":true}"#,
+            r#"{"rate":true,"start":true}"#,
+            r#"{"rate":1e300,"start":true}"#,
+            "[]",
+            "not json",
+        ] {
+            assert_eq!(
+                invoke(&mut document, view, "autoScroll", params),
+                MethodOutcome::Failed(MethodError::InvalidParams),
+                "{params}"
+            );
+            assert_eq!(document.pending_auto_scroll(view), pending, "{params}");
+        }
+    }
+
+    /// A `display: none` `scroll-view` has no slot in the frame, so the
+    /// change it recorded has nowhere to go and the commit drops it; the
+    /// call succeeds all the same.
+    #[test]
+    fn auto_scroll_on_a_scroll_view_with_no_box_starts_nothing() {
+        let (mut document, view) = vertical(5);
+        document.set_inline_style(view, "display: none");
+        document.layout();
+        assert_eq!(
+            invoke(
+                &mut document,
+                view,
+                "autoScroll",
+                r#"{"rate":60,"start":true}"#
+            ),
+            MethodOutcome::Done
+        );
+        let frame = document.commit();
+        assert_eq!(frame.slot_of(view), None);
+        assert!(frame.auto_scroll_requests().is_empty());
+        assert_eq!(document.pending_auto_scroll(view), None);
+    }
+
+    /// `takeContentScreenshot` is not built, and every other name is left to
+    /// the host.
     #[test]
     fn methods_not_built_are_not_found() {
         let (mut document, view) = vertical(5);
         for name in [
-            "autoScroll",
             "takeContentScreenshot",
             "selectTab",
             "boundingClientRect",

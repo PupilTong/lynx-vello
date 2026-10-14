@@ -13,7 +13,8 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::Doc;
-use dom::event::{ElementEvent, ElementEventKind, EventPhase};
+use dom::event::{ElementEvent, EventDetail, EventPhase};
+use dom::input::PointerKind;
 use dom::{
     CustomElement, Document, MethodCall, MethodError, MethodOutcome, NodeId, ShadowRootMode,
 };
@@ -1197,7 +1198,12 @@ impl CustomElement<()> for SlotHost {
         }
     }
 
-    fn handle_event(&self, document: &mut Document<()>, element: NodeId, event: &mut ElementEvent) {
+    fn handle_event(
+        &self,
+        document: &mut Document<()>,
+        element: NodeId,
+        event: &mut ElementEvent<'_>,
+    ) {
         assert_eq!(event.current_target(), element);
         let phase = match event.phase() {
             EventPhase::Capturing => "capture",
@@ -1217,7 +1223,7 @@ impl CustomElement<()> for SlotHost {
             .push(format!(
                 "{}:{}:{phase}:{slot}:{count}",
                 self.who,
-                event.kind().name()
+                event.type_name()
             ));
     }
 }
@@ -1439,11 +1445,17 @@ impl CustomElement<()> for TapHost {
         }
     }
 
-    fn handle_event(&self, document: &mut Document<()>, element: NodeId, event: &mut ElementEvent) {
-        let ElementEventKind::Tap { x, y } = event.kind() else {
-            return;
+    fn handle_event(
+        &self,
+        document: &mut Document<()>,
+        element: NodeId,
+        event: &mut ElementEvent<'_>,
+    ) {
+        assert_eq!(event.type_name(), "tap", "the only type it observes");
+        let Some(position) = event.detail().position() else {
+            panic!("a tap carries a position: {:?}", event.detail());
         };
-        assert_eq!(event.kind().name(), "tap");
+        let (x, y) = (position.x, position.y);
         assert_eq!(event.current_target(), element);
         let phase = match event.phase() {
             EventPhase::Capturing => "capture",
@@ -1479,13 +1491,18 @@ fn shadow_child(doc: &Doc, host: NodeId, tag: &str) -> NodeId {
         .expect("the constructor built it")
 }
 
+/// The non-composed `tap` a host fires at the node a tap hit, with the
+/// pointer detail its gesture recognizer gives one.
 fn tap(doc: &mut Doc, target: NodeId) {
-    doc.dom.dispatch_element_event(
-        target,
-        ElementEventKind::Tap { x: 3.0, y: 4.5 },
-        true,
-        false,
-    );
+    let detail = EventDetail::Pointer {
+        position: dom::Point2D::new(3.0, 4.5),
+        id: 1,
+        device: PointerKind::Touch,
+        button: 0,
+        buttons: 0,
+    };
+    doc.dom
+        .dispatch_element_event(target, "tap", &detail, true, false, 0.0);
 }
 
 #[test]
@@ -1600,10 +1617,9 @@ fn a_slot_signalled_by_a_slotchange_handler_fires_after_the_current_set() {
             &self,
             document: &mut Document<()>,
             _element: NodeId,
-            event: &mut ElementEvent,
+            event: &mut ElementEvent<'_>,
         ) {
-            if event.kind() != ElementEventKind::SlotChange || event.phase() != EventPhase::Bubbling
-            {
+            if event.type_name() != "slotchange" || event.phase() != EventPhase::Bubbling {
                 return;
             }
             let slot = event.target();

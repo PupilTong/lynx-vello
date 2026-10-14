@@ -168,7 +168,6 @@ use super::quickjs::{ScriptRuntime, SharedRuntime};
 use super::runtime::{DocumentIngredients, MainThreadRuntime, RealmStartup};
 use super::{AttachedView, GroupContext};
 use crate::background::WorkerEvent;
-#[cfg(test)]
 use crate::clock::ClockInstant;
 use crate::lifetime::{Lifetime, Settles, run_job, serve_clock};
 use crate::link::{FramePost, HostOutbox, ScrollEntry, ScrollMailbox, ToMain, ViewOutbox};
@@ -589,8 +588,11 @@ impl Page {
                 target,
                 name,
                 payload,
+                release,
             } => {
-                if let Err(error) = runtime.dispatch_input_event(js, target, name, &payload) {
+                if let Err(error) =
+                    runtime.dispatch_input_event(js, target, name, &payload, release)
+                {
                     policy::report(self, Scene::Listener, error.into_script_error());
                 }
             }
@@ -933,6 +935,13 @@ impl RealmOwner for Page {
         runtime.run_due_timers(js)
     }
 
+    /// The realm's next timer or an `x-swiper`'s next autoplay turn,
+    /// whichever is sooner: the clock task waits for one deadline, and the
+    /// epilogue it wakes runs both kinds.
+    fn next_deadline(runtime: &mut MainThreadRuntime) -> Option<ClockInstant> {
+        runtime.next_deadline()
+    }
+
     /// First the documents an `<svg content>` handed over in this entry,
     /// asked of the host as one [`crate::link::ViewNotice::RequestDocuments`]
     /// beside the image sources the commit asks for: the host parses each,
@@ -949,13 +958,20 @@ impl RealmOwner for Page {
     /// outside an update, the `contentvisibilityautostatechange` deliveries
     /// that commit decided
     /// and the component events this entry produced — `<image>` `load`s and
-    /// `error`s, `<svg>` `load`s, `<dialog>` `cancel`s and `close`s — each
+    /// `error`s, `<svg>` `load`s, `<dialog>` `cancel`s and `close`s, the
+    /// `scroll`s of the instant scrolls it performed (queued first, before
+    /// the commit), and the `scroll`s and `scrollend`s of the offsets it
+    /// adopted — each
     /// posted as an entry of its own and never run here, the component events
     /// only once the commit has run: see
     /// [`Page::post_intersection_notifications`],
     /// [`Page::post_content_visibility_changes`] and
     /// [`Page::post_component_events`].
     fn after_timers(page: &Rc<Self>, runtime: &mut MainThreadRuntime) {
+        // A script-facing instant scroll this entry performed: its `scroll`
+        // joins this entry's component events, and its `scrollend` follows
+        // the painter's post of the container at rest.
+        runtime.queue_instant_scroll_events();
         runtime.request_documents();
         runtime.commit_if_dirty();
         // The update first, always: it must run whether or not exposure

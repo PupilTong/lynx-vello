@@ -23,7 +23,7 @@ use crate::layout::anchors::{AnchorBuckets, AnchorRegistry, AnchoredBox, Pending
 use crate::layout::committed_box::{CommittedBox, CommittedBoxTable};
 use crate::layout::relevance::{Relevance, RelevanceTable};
 use crate::layout::text_block::TextBlockStore;
-use crate::scroll::ScrollRequest;
+use crate::scroll::{AutoScrollRequest, ScrollRequest};
 use crate::tree::node::Node;
 use crate::tree::top_layer::TopLayer;
 
@@ -61,6 +61,13 @@ const KEY_BITS: u32 = 32;
 const KEY_MASK: u64 = (1 << KEY_BITS) - 1;
 
 impl NodeId {
+    /// Every document's permanent document element. It is filed second and
+    /// can never be freed, so this one handle names it in any document for
+    /// the document's whole life — which is what lets a layer without the
+    /// document (the runtime's input router, targeting a key event before a
+    /// focus model exists) name it.
+    pub const DOCUMENT_ELEMENT: Self = DOCUMENT_ELEMENT_NODE_ID;
+
     /// The arena index, with the generation masked off. Only for asking "is
     /// this the same physical slot" and for indexing inside this module —
     /// nothing accepts a bare key back as a handle.
@@ -538,6 +545,19 @@ pub(crate) struct DocumentLayoutState {
     /// The serial the next scroll request takes: one counter per document,
     /// so serials order every request against every post that names one.
     pub(crate) next_scroll_request: NonZeroU64,
+    /// Each scroll container's pending auto-scroll change, the newest only;
+    /// see `scroll::request`. A list rather than a per-node field or a field
+    /// of the scroll request because almost no document ever calls
+    /// `autoScroll`: one that never does keeps it empty and pays nothing per
+    /// node or per container. An entry dies as a scroll request's does.
+    pub(crate) auto_scroll_requests: Vec<(NodeId, AutoScrollRequest)>,
+    /// The containers a script-facing instant scroll moved since the host
+    /// last took them, each once with the offset it had before the first
+    /// such move, in the order they moved: CSSOM-View's
+    /// pending scroll event targets for the scrolls the document itself
+    /// performs. Bounded by the scroll containers, and empty unless a script
+    /// scrolled one; see `scroll::request`.
+    pub(crate) instant_scrolls: SmallVec<[(NodeId, euclid::default::Vector2D<f32>); 2]>,
     /// The grid items whose `position: sticky` insets resolve against their
     /// grid area rather than the grid container: the area's edges in the
     /// container's border-box coordinates, unrounded as the layout run
@@ -629,6 +649,8 @@ impl DocumentLayoutState {
             initial_targets: Vec::new(),
             scroll_requests: FxHashMap::default(),
             next_scroll_request: NonZeroU64::MIN,
+            auto_scroll_requests: Vec::new(),
+            instant_scrolls: SmallVec::new(),
             sticky_containing_blocks: Vec::new(),
             anchored: FxHashMap::default(),
             anchor_pending: PendingReads::default(),
@@ -678,6 +700,9 @@ impl DocumentLayoutState {
         }
         if !self.scroll_requests.is_empty() {
             self.scroll_requests.remove(&slot);
+        }
+        if !self.auto_scroll_requests.is_empty() {
+            self.auto_scroll_requests.retain(|(node, _)| *node != slot);
         }
         if !self.anchored.is_empty() {
             self.anchored.remove(&slot);
@@ -757,6 +782,8 @@ impl DocumentLayoutState {
             initial_targets: _,
             scroll_requests: _,
             next_scroll_request: _,
+            auto_scroll_requests: _,
+            instant_scrolls: _,
             sticky_containing_blocks: _,
             anchored: _,
             anchor_pending: _,
@@ -809,6 +836,8 @@ impl DocumentLayoutState {
             initial_targets: _,
             scroll_requests: _,
             next_scroll_request: _,
+            auto_scroll_requests: _,
+            instant_scrolls: _,
             sticky_containing_blocks: _,
             anchored: _,
             anchor_pending: _,

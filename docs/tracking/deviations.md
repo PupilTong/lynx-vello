@@ -593,8 +593,39 @@ consequential choice about whether to follow the spec or the quirk.
     no `longpress` at all, no gesture API — `web-core` limitations, not Lynx
     semantics). This engine implements the native semantics; matching
     web-core's degradations was rejected.
-  - **`click` is not synthesized** (Android and the fragment path emit it
-    beside `tap` with re-targeting at release); no consumer yet.
+  - **`click` and `dblclick` are dispatched beside `tap` (2026-10-13,
+    architect ruling)**, a superset of both references: Lynx has no event of
+    either name in script (Android and the fragment path emit a native
+    `click` beside `tap`, re-targeted at release), and web-core renames the
+    browser's `click` to `tap` (`W3cEventNameToLynx`). Here `click` is UI
+    Events': every pointer kind, the primary button of the primary pointer,
+    no movement slop, at the nearest common inclusive ancestor of the down
+    and release targets, suppressed by a consumed scroll or a cancel, and not
+    by a delivered `longpress`; `dblclick` follows a second `click` at the
+    same target within 500 ms. The order after a release is `pointerup`,
+    `touchend`, `mouseup`, `click`, `dblclick`, `tap`. The event object of
+    every pointer-shaped event (`pointer*`, `mouse*`, `click`, `dblclick`,
+    `tap`, `longpress`) carries `x`, `y`, `clientX`, `clientY`, `pageX`,
+    `pageY`, `button` and `buttons` (2026-10-13 user ruling: by payload
+    shape, not by name; web-core gives a `click` only the four client and
+    page coordinates and a `pointer*` event none), a `pointer*` event
+    `pointerId` and `pointerType` too, and the `detail` is `{x, y}`.
+  - **Compatibility mouse events for a mouse only (2026-10-13, architect
+    ruling).** `mousedown`/`mousemove`/`mouseup` follow a mouse pointer's
+    `pointerdown`/`pointermove`/`pointerup` at the same target (Pointer
+    Events Level 3 §11); touch and pen produce none, where browsers emit them
+    for touch after the touch events. Their event object carries web-core's
+    `button`, `buttons`, `x`, `y`, `clientX`, `clientY`, `pageX` and `pageY`
+    (all in the one viewport CSS px space); their `detail` is the `{x, y}`
+    every pointer event has, where web-core leaves the DOM `UIEvent.detail`
+    number. Both shipped embedders report a mouse honestly as
+    `PointerKind::Mouse`, so they produce these events. **A mouse drag
+    scrolls** a scroll container here (user ruling 2026-10-13, an engine
+    policy in `PointerKind::drags_to_scroll`), unlike every browser; a drag
+    that scrolls suppresses `click` and `tap` as a touch drag does, and
+    `mousemove` keeps flowing while it scrolls. Deferred:
+    `pointerover`/`out`/`enter`/`leave`, `mouseover`/`out`/`enter`/`leave`,
+    `auxclick`, `contextmenu`.
   - **`timestamp` is milliseconds on the view's timeline epoch**, which is
     this engine's time origin — web-core's time-origin semantics, and DOM's
     for `Event.timeStamp`. Native Lynx reports epoch milliseconds instead.
@@ -634,6 +665,61 @@ consequential choice about whether to follow the spec or the quirk.
       flowing while the drag recognizer scrolls (native; browsers likewise
       keep sending `touchmove` to a scrolling page). Only
       `PointerPhase::Cancel` produces `touchcancel`.
+- **W3C `scroll`/`scrollend` under Lynx's `scroll` name (2026-10-13,
+  architect ruling).** CSSOM-View's two events fire at every scroll
+  container, non-bubbling. Lynx's own `scroll` (`bindscroll` on
+  `scroll-view` and `list`; web-core's `lynxscroll`, renamed to `scroll` by
+  `W3cEventNameToLynx`) fires only on those components; here every scroll
+  container fires it. Its Lynx `detail` is built from the extras channel
+  (user ruling 2026-10-13, "kernel events are W3C"): `scrollTop`,
+  `scrollLeft`, `scrollHeight`, `scrollWidth` read at delivery, `deltaX`/
+  `deltaY` the change the post that queued it made (0 for `scrollend`), and
+  `isDragging`, **always `false`** in this step, as web-core reports it
+  (native reports whether a finger holds the container).
+  Recorded choices inside the step:
+  - **A `scrollend` ends a scroll that happened.** The main thread records
+    every container that scrolled (an adopted offset moved it, or a
+    script-facing instant scroll did) whether or not anything listens, and a
+    post naming it at rest ends that record and fires `scrollend` if the name
+    is heard at that moment. An instant scroll fires its `scroll` in the task
+    that scrolled and its `scrollend` from the painter's rest post after it
+    carried the request out — or after the drag or fling that holds the
+    container ends. A view with no painter attached never posts that rest.
+  - **A wheel gesture ends after 100 ms with no further tick**
+    (`WHEEL_REST_SECONDS`): each tick that moves a container is a `scroll`,
+    and the gesture one `scrollend`. A drag or fling that moves the
+    container takes it over, and its own end decides the rest. Browsers
+    debounce the same way, with their own intervals.
+  - **The render's own positioning fires nothing**: `scroll-initial-target`
+    and the re-snap after a layout change move a container without an event.
+  - **An attribute-driven instant scroll at connect fires `scroll` then
+    `scrollend` at mount**: a `scroll-top`/`scroll-left` on `scroll-view`, or
+    any other component attribute that scrolls through
+    `Document::scroll_to_with(.., Instant)`, is a script-facing instant
+    scroll. That matches web-core, whose `scrollTop` assignment fires a
+    browser `scroll`, and not native Lynx, which fires nothing for it.
+- **`wheel`'s `detail` is `{}` (2026-10-13, user ruling).** It was
+  `{x, y, deltaX, deltaY}`. `deltaX`, `deltaY`, `x`, `y`, `clientX`,
+  `clientY`, `pageX` and `pageY` are on the event object, where W3C
+  `WheelEvent` and native Lynx put them; web-core forwards the DOM
+  `UIEvent.detail` number instead.
+- **Keyboard: `keydown`/`keyup` only, targeted at the document element
+  (2026-10-13, architect ruling).** W3C UI Events' two key events reach the
+  page with `key`, `code`, `repeat`, `altKey`, `ctrlKey`, `metaKey` and
+  `shiftKey` on the event object and a `{}` detail, which is web-core's shape
+  (`createCrossThreadEvent.ts`), bubbling and composed. Recorded deviations:
+  - **No focus model**, so the target is always the document element (the
+    page), as it is in a browser with nothing focused; the painter does not
+    hit-test a key. A focus model changes that one target and nothing else.
+  - **No `keypress`, `input` or composition events**, and no IME.
+  - **No `keyCode`.** web-core forwards the deprecated numeric `keyCode` for
+    parity with iOS/Android; this engine reports the W3C `key`/`code` only.
+  - **The macOS CLI maps winit's keys** through a table
+    (`crates/bobcat-cli/src/cli/keys.rs`): winit's variant names are the UI
+    Events values, except the Command key (`Meta`, `MetaLeft`/`MetaRight`)
+    and the space bar's `key` (`" "`). The browser embedder passes the
+    browser's own strings through, and its canvas hears keys only while it has
+    focus, which takes a `tabindex` the embedding page chooses.
 - **`pointer-events: none` hit-test fall-through** — Lynx falls through to
   the *next sibling* under the point; W3C says the element (and normally its
   subtree) becomes fully transparent to hit-testing, continuing the search
@@ -1446,7 +1532,7 @@ consequential choice about whether to follow the spec or the quirk.
     performance shortcut, not a behavior.
 
 - **`scroll-view` UI methods (2026-10-10): `scrollTo`, `scrollBy` and
-  `getScrollInfo` on the scrolling axis; `autoScroll` and
+  `getScrollInfo` on the scrolling axis, `autoScroll` since 2026-10-13;
   `takeContentScreenshot` not built.** `crates/bobcat-core/src/main/tree/scroll_container.rs`
   answers them in the `scroll-view` component's `CustomElement::invoke`.
   References: iOS `LynxUIScroller.m:1078-1118,1219-1360`, Android
@@ -1509,12 +1595,69 @@ consequential choice about whether to follow the spec or the quirk.
     (`LynxUIScroller.m:1324-1325`), is not followed. Values are `f32`, where
     Android answers integers (`putInt`). web-core has no `getScrollInfo`
     (code 3).
-  - *`autoScroll` and `takeContentScreenshot` are code 3.* `autoScroll`
-    needs a scroll request the painter drives at a constant rate until the
-    boundary, with a way to stop it: `dom::scroll::ScrollRequest` carries
-    `Instant | Smooth` to one target only, and a component has no per-frame
-    hook. `takeContentScreenshot` needs a pixel readback from the painter,
-    which does not exist.
+  - *`takeContentScreenshot` is code 3.* It needs a pixel readback from the
+    painter, which does not exist.
+  - *`autoScroll({rate, start = false, autoStop = true})` (2026-10-13) is a
+    motion of the painter, shared whole with `list`.* The document records
+    a change of the container's auto-scroll (`dom::Document::auto_scroll`,
+    `crates/dom/src/scroll/request.rs`), the committed frame carries it
+    beside its scroll slots, and the painter moves the scrolling axis on its
+    own clock (`crates/bobcat-core/src/paint/inertia.rs`). References: iOS
+    `LynxUIScroller.m:1337-1375,1975-2040`, Android
+    `AndroidScrollView.java:142-235`, Harmony `ui/utils/auto_scroller.cc`,
+    web-core `ScrollView.ts:84-112` and `XList.ts:118-205`. Where it leaves
+    a reference:
+    - *It yields to a finger and to every other motion, and goes on
+      afterwards* (user ruling 2026-10-13). While a drag holds the
+      container, or a fling, a bounce back or a glide moves it, the
+      auto-scroll adds nothing; it continues from where they leave it.
+      Every reference writes the offset each frame whatever the finger
+      does, except iOS's list, whose `touchBehavior: "pause"` is this and
+      whose `"stop"`, `"forbid"` and default are not built
+      (`LynxUIListContainer.mm:1062-1070`, iOS-only and undocumented).
+    - *`scrollTo` and `scrollBy` do not end it*, as in every reference:
+      an instant one moves the container and the auto-scroll goes on from
+      there, a smooth one glides first. iOS's list answers a pending
+      `scrollToPosition` callback with an error when an auto-scroll starts
+      (`:1038-1042`); here the two do not interact.
+    - *`autoStop` is read on both tags, default `true`* (user ruling
+      2026-10-13), as Harmony reads it: the auto-scroll ends for good at the
+      edge it moves toward, which is all iOS's and Android's `scroll-view`
+      do. With the JSON `false` it stays at the edge and goes on when the
+      content grows. web-core's `ScrollView` reads no `autoStop` and never
+      ends (`ScrollView.ts:96-108`).
+    - *`start` defaults to `false`*, as web-core, iOS, Harmony and
+      Android's list since 4.1 read it; Android's `scroll-view` defaults it
+      to `true` (`AndroidScrollView.java:144`).
+    - *The rate is per second of the painter's clock*, Harmony's and
+      web-core `XList`'s rule. iOS and Android move `rate / 60` per tick of
+      a timer or of the display, so their speed follows the tick rate.
+      web-core's `ScrollView` issues a smooth `scrollBy` of both axes every
+      100 ms.
+    - *A `rate` is a number or a `px`/`rpx`/`ppx` string on both tags*; the
+      natives read a number on `scroll-view` and a unit string on `list`,
+      and web-core `parseFloat`s a string and ignores its unit. A `start`
+      with a zero, missing or unreadable rate is code 4 and leaves an
+      auto-scroll in progress running (Harmony's answer; iOS and Android
+      return without one; web-core's `ScrollView` stops the one in
+      progress).
+    - *A negative rate stops at the start edge.* Android's and Harmony's do;
+      iOS's `scroll-view` and web-core's `XList` test the end edge only.
+    - *A write is at most about sixty a second and at least one physical
+      pixel* (`AUTO_SCROLL_MIN_INTERVAL_SECONDS`, 1/80 s: every frame of a
+      60 Hz display, every second one at 120 Hz, 45 a second at 90 Hz and
+      72 at 144 Hz). iOS's list steps every 16 ms and lowers that until a
+      step is a device pixel (`:1047-1058`); Android's `scroll-view` every
+      16 ms; the others every display frame. An auto-scroll that cannot
+      move — its container held, or at its edge with `autoStop: false` —
+      owes no frame at all, where every reference keeps its timer or frame
+      callback running.
+    - *It moves its own container only and never stretches*: no scroll
+      chaining, no `contain-bounce` overshoot. A snapping container is not
+      snapped while it has an auto-scroll and settles when that ends. No
+      right-to-left mirroring, as for the other methods.
+    - *The call answers at once.* A painter replaced while an auto-scroll
+      runs does not continue it, as it does not continue a glide.
 
 - **`scrollIntoView` UI method (2026-10-10): the CSSOM-View algorithm with
   `container: "nearest"`, on every element.** User ruling 2026-10-10: Lynx's
@@ -1639,10 +1782,10 @@ consequential choice about whether to follow the spec or the quirk.
     moved, and the cross axis consumes nothing and leaves the whole `offset`
     unconsumed, as the natives answer; web-core has no `scrollBy` of its
     own and `HTMLElement.scrollBy` reads no `offset`.
-  - *`autoScroll` and `getScrollInfo` are code 3*: `autoScroll` for
-    `scroll-view`'s reason (no constant-rate scroll request the painter
-    drives), `getScrollInfo` because only the natives answer it on a list
-    and the docs do not list it (the `setDragGesture` ruling, 2026-10-11).
+  - *`autoScroll` is `scroll-view`'s* (2026-10-13), on the list's axis,
+    with every consequence listed there. *`getScrollInfo` is code 3*
+    because only the natives answer it on a list and the docs do not list
+    it (the `setDragGesture` ruling, 2026-10-11).
     The list has no `scrollTo` of its own, as web-core's `XList` has none,
     so the base set's CSSOM-View `scrollTo` answers.
 
@@ -1820,9 +1963,54 @@ consequential choice about whether to follow the spec or the quirk.
       `scroll-snap-align` on an item decides where it lands.
     **Native over web-core for the index rules; the standard algorithm for
     the position; the architect's decision, to be confirmed by the user.**
-  - *Not implemented:* `autoplay`, `interval` and `smooth-scroll`, deferred by the user
-    (web-core's `XSwiperAutoScroll.ts`; `smooth-scroll` only matters to
-    autoplay and to Android's `scrollTo` default); every event; every UI
+  - *`autoplay`, `interval` and `smooth-scroll` (2026-10-13) are a timer of
+    the component's, web-core's `XSwiperAutoScroll.ts` without the script.*
+    A connected swiper with `autoplay` keeps one timer in the document's
+    `Autoplays` (`crates/bobcat-core/src/main/tree/swiper.rs`); the page
+    waits for it with its realm's own timers and runs it in its epilogue,
+    and a page with no such swiper arms and reads nothing. Each turn goes to
+    the next item's snap position, or from the last to the first under
+    `circular`, and does nothing on the last item otherwise. web-core and
+    Android are the only references: neither iOS nor Harmony has a swiper,
+    and the tag is in no public type declaration. Where it leaves one:
+    - *Removing `autoplay` does not stop the timer* (user ruling
+      2026-10-13, web-core to the letter: its handler has no branch for the
+      attribute going away, `XSwiperAutoScroll.ts:62-70`). The timer starts
+      when the swiper is connected with `autoplay` and starts over when
+      `autoplay` or `interval` changes on a connected swiper that has it;
+      only disconnection ends it. Android cancels on `autoplay=false`
+      (`XSwiperUI.java:684-691`) and applies a new `interval` from the next
+      turn rather than at once (`:851-853`).
+    - *A turn that comes due while a finger holds the swiper is not carried
+      out, and the timer goes on unchanged* (user ruling 2026-10-13): the
+      turn is `Document::scroll_to_yielding`, a request the painter declines
+      while a pointer has the container, the fling that pointer let go
+      included. web-core scrolls under the finger. Android stops its timer
+      for the drag and waits a whole interval after it (`:208-220`).
+    - *`smooth-scroll` present with any value makes the turn instant*,
+      `"false"` and `"true"` included, which is web-core as written
+      (`XSwiper.ts:28-31,101`); Android reads a boolean that defaults to
+      `true` (`:877-885`). `duration` is not read, as in web-core; Android
+      turns over it, 500 ms by default.
+    - *`interval` is `parseFloat`'s reading in milliseconds, 5000 when
+      missing or no number*, web-core's rule, and no shorter than 4 ms: a
+      browser's `setInterval` of 0, which web-core's e2e suite uses, settles
+      at the nested-timer clamp. `Infinity` reads as no number.
+    - *The current item is the one whose snap position is nearest the
+      document's offset*, which is web-core's geometric current restated;
+      Android keeps a stored page index. A turn counts from the offset the
+      painter last posted, so one that comes before a smooth turn has
+      landed asks for the same item again.
+    - *A `circular` swiper's turn from the last item runs along the shorter
+      arc*, the painter's rule for any smooth request. web-core travels
+      forward by re-slotting its first item, and backward with two items
+      (`XSwiperCircular.ts:44-118`); Android always forward (`:754-757`).
+    - *A turn does not replace a `scrollTo` the painter has not handled
+      yet*, and the document's own offset waits for the painter's post even
+      for an instant turn.
+    - *Not built:* Android's `finish-reset`, and autoplay's part in the
+      swiper's events, none of which exist here.
+  - *Not implemented:* every event; every UI
     method but `scrollTo`; `contain: strict`/
     `content-visibility` from the twentieth item (`x-swiper.css:77-80`), a
     browser shortcut.
@@ -2244,8 +2432,9 @@ consequential choice about whether to follow the spec or the quirk.
     and punycode for non-ASCII hosts (an `href` keeps the host
     percent-encoded).
   - *Deferred* (no reference behavior is approximated): the typewriter
-    animation and its attributes, events and the `typewriterCursor` style;
-    `text-maxline`, `overflow` and the `truncation` marker;
+    animation and its attributes, events and the `typewriterCursor` style
+    (over the document's component timers, `Autoplays`, PR #408, as a
+    follow-up); `text-maxline`, `overflow` and the `truncation` marker;
     `markdown-effect`; selection (`text-selection`, `getSelectedText`,
     `setTextSelection`, `selectionchange`); `childrenexpose`/
     `exposure-tags`; the native-only `allow-break-around-punctuation`,

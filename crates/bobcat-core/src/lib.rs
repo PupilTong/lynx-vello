@@ -67,7 +67,9 @@ mod view;
 /// this boundary.
 pub mod input {
     pub use dom::Point2D;
-    pub use dom::input::{InputEvent, InputKind, PointerId, PointerKind, PointerPhase};
+    pub use dom::input::{
+        InputEvent, InputKind, KeyPhase, Modifiers, PointerId, PointerKind, PointerPhase,
+    };
 }
 
 pub use dom::{

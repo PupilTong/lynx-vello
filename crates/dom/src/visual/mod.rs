@@ -139,7 +139,7 @@ pub(crate) use self::sticky_frame::StickySample;
 pub(crate) use self::sticky_frame::{StickySamples, StickySlot};
 use crate::render::image::{DocumentRequest, ImageEvent, ImageOutcome, ImageRole};
 use crate::scroll::initial_target::InitialTarget;
-use crate::scroll::{SnapAxis, SnapPoint};
+use crate::scroll::{AutoScrollRequest, SnapAxis, SnapPoint};
 use crate::tree::document::Document;
 use crate::{FrameImages, NodeId};
 
@@ -177,6 +177,10 @@ pub(crate) struct PaintOrder {
     /// with its slot; see `scroll::initial_target`. Rarely non-empty, so
     /// not a recycled buffer.
     initial_targets: Vec<InitialTarget>,
+    /// The pending auto-scroll change of each container that has one and a
+    /// slot here; see `scroll::request`. Rarely non-empty, so not a
+    /// recycled buffer and not a field of every [`ScrollSlot`].
+    auto_scroll_requests: Vec<(NodeId, AutoScrollRequest)>,
     /// The index of the first item of the topmost top-layer entry that
     /// blocks the document (HTML's modal dialog), its `::backdrop`'s when it
     /// has one: every item before it is inert to hit testing. `None` while
@@ -378,6 +382,7 @@ impl PaintOrder {
             auto_boxes: Vec::new(),
             snap_points: Vec::new(),
             initial_targets: Vec::new(),
+            auto_scroll_requests: Vec::new(),
             inert_floor: None,
             commit_id: 0,
         }
@@ -467,6 +472,12 @@ impl PaintOrder {
     #[must_use]
     pub(crate) fn initial_targets(&self) -> &[InitialTarget] {
         &self.initial_targets
+    }
+
+    /// The pending auto-scroll changes this frame carries.
+    #[must_use]
+    pub(crate) fn auto_scroll_requests(&self) -> &[(NodeId, AutoScrollRequest)] {
+        &self.auto_scroll_requests
     }
 
     #[must_use]
@@ -937,8 +948,9 @@ impl<T: Sync> Document<T> {
         self.record_last_successful_options();
         let _ = self.next_commit_id();
         let frame = self.build_frame_with_relevance();
-        // A request is carried by the container's scroll slot, so one whose
-        // container this frame has no slot for has nowhere to go.
+        // A request is carried by the container's scroll slot, and an
+        // auto-scroll change beside the slots, so one whose container this
+        // frame has no slot for has nowhere to go.
         self.retain_scroll_requests(|node| frame.slot_of(node).is_some());
         // Asked again now the frame is final: the relevance pass inside the
         // build reveals and skips subtrees with no style change to notice it,

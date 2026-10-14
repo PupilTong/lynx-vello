@@ -462,6 +462,8 @@ self.addEventListener('message', (event) => {
           message.pointerId,
           message.device,
           message.phase,
+          message.button,
+          message.buttons,
           message.defaultPrevented,
         )
       } catch (error) {
@@ -483,6 +485,25 @@ self.addEventListener('message', (event) => {
           message.deltaX,
           message.deltaY,
           message.defaultPrevented,
+        )
+      } catch (error) {
+        reportFatal(error)
+      }
+    }
+    // The same queue as pointer input, for the same reason.
+    requestQueue = requestQueue.then(dispatch)
+  } else if (message?.type === 'bobcat-key') {
+    const dispatch = () => {
+      if (!running || renderer === undefined) {
+        return
+      }
+      try {
+        renderer.dispatchKey(
+          message.key,
+          message.code,
+          message.down,
+          message.repeat,
+          message.modifiers,
         )
       } catch (error) {
         reportFatal(error)

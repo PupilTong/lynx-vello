@@ -222,7 +222,10 @@ the public view facade, `paint/` the `Painter` with its `gesture.rs` input
 router, `motion.rs` scroll kinematics (lynx-ui's rubber band, fling decay,
 bounce back, and the glide — the bounce back's spring toward a snap position
 or a smooth programmatic scroll's target) with `inertia.rs` running them over
-the scroll intents,
+the scroll intents, beside the constant-rate motion of Lynx's `autoScroll`
+(which yields to every one of them and to a finger, writes at most about
+sixty times a second and a physical pixel at a time, and owes no frame while
+it cannot move),
 `images.rs` image protocol and `graphics.rs` GPU target. `link.rs` is
 the one channel set a view spans its two threads with, `jobs.rs` the engine
 thread itself — its scheduler and its job queue — `lifetime.rs` the task set,
@@ -1615,17 +1618,45 @@ two comma-joined decimal id strings — the nodes, and position for position eac
 step's shadow-retargeted target, less every step at a UA shadow tree's
 content, which script names none of, so an event at shadow chrome starts at
 its host (routed input events are composed, the components' events are not,
-as HTML and web-core fire them) — plus the name and then numbers alone: the
-`timestamp` (milliseconds on the view's timeline), the position the `detail`
-reports, the wheel delta (`undefined` for every event without one, which keeps
-the two keys out of the `detail`), and four numbers per touch point
-(`identifier`, `x`, `y`, flags) for the four touch events. The realm builds
-the `detail` object and the three touch lists out of them; no JSON is
-formatted on the host side and none is parsed in the realm. One call
+as HTML and web-core fire them) — plus the name and then primitives alone: the
+`timestamp` (milliseconds on the view's timeline); the extras channel
+(`extraCount`, then name/value pairs: what a Lynx handler reads beside the W3C
+payload, such as a `load`'s size or a `scroll`'s metrics, which the realm makes
+the Lynx `detail`); then the W3C payload's kind and values — for an input
+event the position, the wheel delta, a pointer's `button`, `buttons`,
+`pointerId` and `pointerType` (each `undefined` where the shape has none), and
+four numbers per touch point (`identifier`, `x`, `y`, flags); for a key event
+its `key` and `code` strings, `repeat` and a modifier bitmask. Kernel events
+are W3C-shaped and `element-papi.ts` is the Lynx layer that reshapes them
+(user ruling 2026-10-13; `docs/tracking/dom-events.md`). The realm builds
+the `detail` object, the W3C members on the event object and the three touch
+lists out of them; no JSON is formatted on the host side and none is parsed
+in the realm. One call
 is one dispatch, so one event object serves it, and the host keeps no listener
 index at all. The realm runs the capture, bubble and `global-bindEvent` passes,
 derives `eventPhase` per step, and ends the dispatch itself; neither
 `stopPropagation` nor `stopImmediatePropagation` crosses the boundary.
+
+That host side is one function, `MainThreadRuntime::dispatch`, the only place
+an event script hears is delivered. It computes the steps once and, before the
+realm's call, runs `dom`'s Rust walk over them
+(`Document::dispatch_element_event_over`), so an engine component whose
+definition lists the type in `CustomElement::observed_events` hears it first;
+a component's `stop_propagation` ends that walk only. What the event carries
+is `dom::event::EventDetail` (one variant per payload shape), which the router
+fills in, `ToMain::DispatchEvent` carries, the Rust walk lends out and
+`encode_detail` turns into the realm's numbers. The names components observe
+are published to the painter's name set once per document and never closed.
+CSSOM-View's `scroll` and `scrollend` are decided on this thread, never on
+the painter: `adopt_scroll_offsets` queues a `scroll` per container a post
+moved and a `scrollend` when a post names it at rest after it scrolled, and a
+script-facing instant scroll (`dom::Document::take_instant_scrolls`) queues
+its `scroll` from its entry's epilogue and gets its `scrollend` from the
+painter's rest post after carrying the request out. A wheel gesture rests
+once, 100 ms after its last tick (`WHEEL_REST_SECONDS`). All are component
+events, non-bubbling, with Lynx's scroll metrics as extras, queued only for a name a realm
+listener or a component hears at that moment; which containers are scrolling
+is tracked regardless.
 
 One event deliberately does **not** take that path, because it is the
 engine's own rather than script's: css-contain-2 §4.4's
@@ -1740,13 +1771,13 @@ reflection and its UA box), `tree::scroll_container` (`scroll-view` and
 way the subtree stacks, from `web-elements`' own `scroll-view.css` and
 `x-list.css`; `enable-scroll="false"` leaves the box a scroll container only
 script can move — and a `scroll-view` component whose `CustomElement::invoke`
-answers the `scrollTo`, `scrollBy` and `getScrollInfo` UI methods on the axis
-the tag scrolls; `autoScroll` and `takeContentScreenshot` are not built),
+answers the `scrollTo`, `scrollBy`, `autoScroll` and `getScrollInfo` UI
+methods on the axis the tag scrolls; `takeContentScreenshot` is not built),
 `tree::list` (`list`'s scroll axis, `list-type` layout modes and cell
 virtualization as UA rules, and a `list` component whose `CustomElement::invoke`
-answers `scrollToPosition`, `scrollBy` (`scroll-view`'s, on the list's axis),
-`getScrollContainerInfo` and `getVisibleCells`; `autoScroll` and
-`getScrollInfo` are not built, and the base set's `scrollTo` answers on a list),
+answers `scrollToPosition`, `scrollBy` and `autoScroll` (`scroll-view`'s, on
+the list's axis), `getScrollContainerInfo` and `getVisibleCells`;
+`getScrollInfo` is not built, and the base set's `scrollTo` answers on a list),
 `tree::base_methods` (the UI methods every element has, which
 `callElementMethod` runs when the element's kind has no method of the name:
 `boundingClientRect` over `Document::bounding_client_rect`,
@@ -1767,7 +1798,11 @@ the item count the component keeps in `--swiper-count` on `slotchange` at its
 slot; the five `mode` layouts with `coverflow` and `carry` as
 compositor-exported `view()` transform animations — `carry` a scale,
 `coverflow` a turn drawn with 2D functions (scale, skew, translate) — and
-`current` by the viewpager recipe; `autoplay`, `interval` and `smooth-scroll` deferred, no events; its
+`current` by the viewpager recipe; `autoplay`, `interval` and `smooth-scroll`
+as a timer of the component's — kept in the document's `Autoplays`, which the
+page waits out beside its realm's timers (`RealmOwner::next_deadline`) and
+runs in its epilogue, each turn a `Document::scroll_to_yielding` request the
+painter declines while a pointer holds the swiper; no events; its
 one UI method, `scrollTo({index, smooth})`, scrolls the item into view at its
 snap position through `Document::scroll_into_view`, its `CustomElement::invoke`), `tree::refresh_view` (`x-refresh-view`/`x-refresh-header`/
 `x-refresh-footer`: a component with web-core's UA shadow tree, a `#container`
@@ -2461,10 +2496,10 @@ Everything else is forwarded and unconditionally `preventDefault()`ed, because
 the Worker answers nothing and the facade cannot learn synchronously whether
 the engine consumed the scroll — the canvas owns wheel scrolling outright, the
 way `touch-action: none` makes it own touch panning. A browser mouse is
-reported truthfully by the facade and then fed to the engine as
-`PointerKind::Pen` by `dispatchPointer`, exactly as the macOS host does, so a
-primary-button drag scrolls: the engine's drag recognizer latches touch and pen
-only. Hover moves and secondary mouse buttons do not cross the boundary.
+reported truthfully by the facade and fed to the engine as
+`PointerKind::Mouse` by `dispatchPointer`, as the macOS host does, and a
+primary-button drag still scrolls: the engine's drag recognizer latches every
+pointer kind, a mouse included (user ruling 2026-10-13). Hover moves and secondary mouse buttons do not cross the boundary.
 
 **Host `NativeModules` and `globalProps` are the page's, not the Worker's.**
 `BobcatCanvas.create` takes an optional
@@ -2752,6 +2787,14 @@ Subsystems:
   `scroll/request.rs` is CSSOM-View's `scrollTo({behavior})`: a script-facing
   scroll is a request the committed frame carries to the painter, which
   animates a smooth one and names the request in the offsets it posts back.
+  `Document::scroll_to_yielding` is the one request the painter may decline,
+  while a pointer holds the container, for a turn a timer asked for rather
+  than a script (an `x-swiper`'s autoplay); the document moves no offset for
+  it. Lynx's `autoScroll` rides the same file as `Document::auto_scroll`: a
+  change of a container's constant-rate motion, kept in a list that is empty
+  unless a script asked for one and carried beside the frame's scroll slots
+  rather than in them, so it costs a container that never auto-scrolls
+  nothing and arrives together with a scroll request of the same turn.
   `scroll/into_view.rs` is CSSOM-View's `scrollIntoView(options)`
   (`Document::scroll_into_view`, the editor's draft with its `container`
   option): each scroll container on the element's containing-block chain,
@@ -2763,10 +2806,12 @@ Subsystems:
   `block: start`, `inline: nearest` — as an instant scroll request and
   rebuilds the frame in the same commit.
 - `input/` and `event/` — the `InputEvent` host seam, `Document::event_steps`,
-  which computes a path for a *script* dispatch above, and
-  `Document::dispatch_element_event`, which walks that path here for an event
-  the engine decides, delivering it to defined `CustomElement`s through
-  `handle_event` and to nothing else.
+  which computes a path for a *script* dispatch above,
+  `Document::dispatch_element_event_over`, which walks those same steps here
+  first, delivering to defined `CustomElement`s through `handle_event`, and
+  `Document::dispatch_element_event`, the same walk for an event only the
+  engine hears. `event::EventDetail` is the one description of an event's
+  payload; `CustomElement::observed_events` gates the walk.
 - `render/` — the DOM-free floor absorbed from the former `pulsar` crate
   (2026-08-04): `FrameImages` and the `render::gpu` wgpu backend. `render::blur`
   is the one exception: a `filter: blur()` bake is a partial replay of a
@@ -3147,13 +3192,15 @@ would host it:
   `__SetAttribute(element, "update-list-info", …)` — delivers a compiled
   `<list>`'s cells as real element children, which is the only path one
   receives children on. `<list>` is a `dom::CustomElement` for its UI
-  methods only (`scrollToPosition`, `scrollBy`, `getScrollContainerInfo`,
-  `getVisibleCells`): there is no cell recycling, no `autoScroll`, no
-  threshold or scroll events, and no sticky-bottom or snap rules
+  methods only (`scrollToPosition`, `scrollBy`, `autoScroll`,
+  `getScrollContainerInfo`, `getVisibleCells`): there is no cell recycling,
+  no threshold or scroll events, and no sticky-bottom or snap rules
   (`docs/tracking/deviations.md`).
 - **Gesture detectors and the arena.** `crates/bobcat-core/src/paint/gesture.rs`
   has no fling or velocity, no `:active` driving, no `consume-slide-event`, no
-  per-element `GestureDetector`/arena relations and no `click`; `tapSlop` is
+  per-element `GestureDetector`/arena relations and no `pointerover`/`out`/
+  `enter`/`leave`, mouse boundary events, `auxclick` or `contextmenu`
+  (`click`, `dblclick` and the compatibility mouse events are built); `tapSlop` is
   the default 50 px rather than the page config's.
 - **The rest of the `<image>` element surface.** `src`, `placeholder`,
   `mode`, `auto-size` and `blur-radius` work, and `load` (with the bitmap's
@@ -3170,13 +3217,13 @@ would host it:
   `scrollTo`/`scrollBy` on every element, `selectTab` on
   the two pager tags only, `scrollTo({index, smooth})` on `x-swiper` only,
   the three scroll methods on `scroll-view` only, where they shadow the
-  standard two, the four list methods on `list` only, whose `scrollBy`
+  standard two, the five list methods on `list` only, whose `scrollBy`
   shadows the standard one, the refresh view's three on `x-refresh-view`
   only, `setFoldExpanded` on `scroll-coordinator` and `x-foldview-ng` only,
   `getTextBoundingRect` on `text` only, the dialog's on `dialog` only) through
   `__InvokeUIMethod`; every other name — the base set's `focus`/`blur` (no
-  focus model), a `scroll-view`'s `autoScroll` and `takeContentScreenshot`,
-  a `list`'s `autoScroll` and `getScrollInfo`, a scroll coordinator's
+  focus model), a `scroll-view`'s `takeContentScreenshot`,
+  a `list`'s `getScrollInfo`, a scroll coordinator's
   `getScrollInfo`, an `image`'s four animation methods (nothing plays image
   frames), a `text`'s `getSelectedText` and `setTextSelection` (no
   selection model), `requestUIInfo`,
@@ -3186,8 +3233,8 @@ would host it:
 - **The text `layout` event.** The per-line ranges `hughie`'s
   `text/block/content.rs` computes have no delivery path.
 - **`rpx`-aware view/device policy** and the rest of the `<list>` component
-  (`autoScroll`, scroll and threshold events, sticky cells and snapping; the
-  layout mapping and virtualization are UA rules already, and four UI methods
+  (scroll and threshold events, sticky cells and snapping; the
+  layout mapping and virtualization are UA rules already, and five UI methods
   are built).
 - **Animated image playback.** `bobcat-resources` decodes an image's first
   frame only, with no `region-to-decode` and no `blur-radius`

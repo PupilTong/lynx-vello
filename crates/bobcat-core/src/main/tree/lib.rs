@@ -73,6 +73,7 @@ use dom::{Document, ImageOutcome, NodeId, StylesheetOrigin};
 
 pub(crate) use self::base_methods::invoke_base_method;
 pub(crate) use self::svg::is_svg;
+pub(crate) use self::swiper::Autoplays;
 pub use self::ua_sheet::PageConfig;
 pub(crate) use crate::view::Viewport;
 
@@ -94,18 +95,20 @@ pub(super) const SLOT_CHANGE: &str = "slotchange";
 /// methods queue, the `overlay` component its `showoverlay` and
 /// `dismissoverlay`, and the `markdown` component its `parseEnd`, `link` and
 /// `imageTap`, for the runtime to dispatch once it is out of the
-/// JavaScript call that caused them.
+/// JavaScript call that caused them. `autoplays` is where the `x-swiper`
+/// component keeps its autoplay timers, for the runtime to wait out and run.
 #[must_use]
 pub(crate) fn new_document(
     viewport: Viewport,
     config: PageConfig,
     events: ComponentEvents,
+    autoplays: Autoplays,
 ) -> LynxDocument {
     let mut document = Document::new(viewport.device(), PAGE_TAG, ());
     blur_view::define(&mut document);
     image::define(&mut document, events.clone());
     svg::define(&mut document, events.clone());
-    swiper::define(&mut document);
+    swiper::define(&mut document, autoplays);
     refresh_view::define(&mut document);
     viewpager::define(&mut document);
     scroll_container::define(&mut document);
@@ -186,10 +189,19 @@ pub(crate) enum ComponentEvent {
     /// an `<image>`'s intrinsic size and an `<svg>`'s layout size, or `error`,
     /// which an `<svg>` does not fire.
     Image(ImageOutcome),
-    /// An event whose detail is `{}`, named by the component that queued it:
-    /// a `<dialog>`'s `close` and `cancel` ([`dialog`]), an `<overlay>`'s
-    /// `showoverlay` and `dismissoverlay` ([`overlay`]).
+    /// An event whose detail is `{}`, named by the component that queued
+    /// it: a `<dialog>`'s `close` and `cancel` ([`dialog`]), an
+    /// `<overlay>`'s `showoverlay` and `dismissoverlay` ([`overlay`]).
     Plain { node: NodeId, name: &'static str },
+    /// A scroll container's `scroll` or `scrollend`, which the runtime
+    /// queues, with the change in its offset the event reports (zero for a
+    /// `scrollend`); the rest of Lynx's scroll metrics are read at
+    /// delivery.
+    Scroll {
+        node: NodeId,
+        name: &'static str,
+        delta: dom::Vector2D<f32>,
+    },
     /// An event whose detail is made of strings the component read when it
     /// queued the event, named by that component. [`ComponentDetail`] is the
     /// detail's shape.
@@ -214,12 +226,14 @@ pub(crate) enum ComponentEvent {
 ///
 /// Owned, because the event outlives the call that queued it: the component
 /// reads its attributes or its content at that moment, and the runtime
-/// delivers from an entry of its own. Each string crosses to the realm as one
-/// primitive argument, and the realm builds the object (`element-papi.ts`,
-/// `detailOf`); no JSON is written or parsed. A `None` is a key the realm
-/// leaves out of the object, neither `undefined`-valued nor `""`: web-core's
-/// `{id: undefined}` loses that key when it is serialized, and the transport
-/// here would carry an `undefined`-valued key as one.
+/// delivers from an entry of its own. The event itself is `EventDetail::None`
+/// on the kernel's side; each string crosses as one entry of the extras
+/// channel (`"id"`, `"url"`, `"content"`, `"contentId"`), from which the
+/// realm's Lynx layer builds the `detail` object, so no JSON is written or
+/// parsed. A `None` pushes no entry, and the key is absent from the object —
+/// neither `undefined`-valued nor `""`: web-core's `{id: undefined}` loses
+/// that key when it is serialized, and the transport here would carry an
+/// `undefined`-valued key as one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ComponentDetail {
     /// `{id}`: a content id, such as the `content-id` attribute an
@@ -283,6 +297,14 @@ impl ComponentEvents {
         self.0
             .borrow_mut()
             .push(ComponentEvent::Plain { node, name });
+    }
+
+    /// Queues a `scroll` or `scrollend` at `node`, with the offset change it
+    /// reports.
+    pub(crate) fn queue_scroll(&self, node: NodeId, name: &'static str, delta: dom::Vector2D<f32>) {
+        self.0
+            .borrow_mut()
+            .push(ComponentEvent::Scroll { node, name, delta });
     }
 
     /// Queues an event at `node` whose detail is `detail`'s strings, bubbling

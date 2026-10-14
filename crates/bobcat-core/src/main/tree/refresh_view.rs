@@ -154,7 +154,7 @@
 //!   (`docs/tracking/deviations.md`).
 //! - Every event (`startrefresh`, `headeroffset`, `startloadmore`, …).
 
-use dom::event::{ElementEvent, ElementEventKind, EventPhase};
+use dom::event::{ElementEvent, EventPhase};
 use dom::scroll::{
     ScrollBehavior, ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition,
 };
@@ -264,8 +264,8 @@ impl CustomElement<()> for RefreshView {
     /// `slotchange` at the default slot — the one slot with no `name` —
     /// delivered at the shadow root once per pass: the capture delivery is
     /// skipped, the bubble one acts. The named slots' own are ignored.
-    fn handle_event(&self, document: &mut LynxDocument, _: NodeId, event: &mut ElementEvent) {
-        if event.kind() != ElementEventKind::SlotChange || event.phase() != EventPhase::Bubbling {
+    fn handle_event(&self, document: &mut LynxDocument, _: NodeId, event: &mut ElementEvent<'_>) {
+        if event.type_name() != SLOT_CHANGE || event.phase() != EventPhase::Bubbling {
             return;
         }
         let slot = event.target();

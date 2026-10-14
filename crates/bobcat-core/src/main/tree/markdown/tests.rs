@@ -2,7 +2,8 @@
 
 use std::fmt::Write as _;
 
-use dom::event::ElementEventKind;
+use dom::event::EventDetail;
+use dom::input::PointerKind;
 use dom::stylo::properties::PropertyId;
 use dom::{MethodCall, MethodError, MethodOutcome, NodeId, Point2D};
 
@@ -864,7 +865,14 @@ fn tap(document: &mut LynxDocument, x: f32, y: f32) {
         .expect("something is under the point")
         .node;
     if document.shadow_root_of(hit).is_some() {
-        document.dispatch_element_event(hit, ElementEventKind::Tap { x, y }, true, false);
+        let detail = EventDetail::Pointer {
+            position: Point2D::new(x, y),
+            id: 1,
+            device: PointerKind::Touch,
+            button: 0,
+            buttons: 0,
+        };
+        document.dispatch_element_event(hit, "tap", &detail, true, false, 0.0);
     }
 }
 

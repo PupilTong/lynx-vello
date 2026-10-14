@@ -1849,6 +1849,476 @@ fn a_dispatch_runs_the_path_listeners_and_skips_the_steps_with_none() {
         .expect("verification");
 }
 
+/// A key event crosses as its two strings, `repeat` and a modifier bitmask,
+/// and reaches the page as a `KeyboardEvent`-shaped event: the members on
+/// the event itself, the `detail` empty.
+#[test]
+fn a_key_event_reaches_the_page_with_its_keyboard_members() {
+    let (mut js_runtime, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  globalThis.held = [page];
+                  __AddEventListener(page, 'keydown', (event) => {
+                    seen.push([event.type, event.key, event.code, event.repeat,
+                               event.altKey, event.ctrlKey, event.metaKey,
+                               event.shiftKey, JSON.stringify(event.detail)].join(','));
+                  }, {});
+                };
+                ",
+            "app:///keys.js",
+        )
+        .expect("main-thread script");
+
+    let payload = InputEventPayload {
+        detail: dom::event::EventDetail::Key {
+            key: Arc::from("ArrowLeft"),
+            code: Arc::from("ArrowLeft"),
+            repeat: true,
+            modifiers: dom::input::Modifiers {
+                alt: true,
+                ..dom::input::Modifiers::default()
+            },
+        },
+        timestamp: 0.0,
+    };
+    runtime
+        .dispatch_input_event(
+            &mut js_runtime,
+            dom::NodeId::DOCUMENT_ELEMENT,
+            "keydown",
+            &payload,
+            None,
+        )
+        .expect("dispatch");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                if (seen.join('|') !== 'keydown,ArrowLeft,ArrowLeft,true,true,false,false,false,{}') {
+                  throw new Error('unexpected deliveries: ' + seen.join('|'));
+                }
+                ",
+            "app:///verify.js",
+            "verifying",
+        )
+        .expect("verification");
+}
+
+/// A `click` is dispatched at the nearest common ancestor of its two targets,
+/// and a second one at the same target within 500 ms adds a `dblclick` after
+/// it; a third starts over.
+#[test]
+fn a_click_targets_the_common_ancestor_and_two_make_a_dblclick() {
+    let (mut js_runtime, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const outer = __CreateView(0);
+                  const a = __CreateView(0);
+                  const b = __CreateView(0);
+                  __AppendElement(page, outer);
+                  __AppendElement(outer, a);
+                  __AppendElement(outer, b);
+                  globalThis.held = [page, outer, a, b];
+                  const note = (event) => seen.push(event.type + '@' + event.target.uid +
+                    ':' + event.button + ':' + event.detail.x);
+                  __AddEventListener(page, 'click', note, {});
+                  __AddEventListener(page, 'dblclick', note, {});
+                };
+                ",
+            "app:///clicks.js",
+        )
+        .expect("main-thread script");
+
+    // `page` is 2, `outer` 3, `a` 4, `b` 5.
+    let mut click = |down: u64, release: u64, at: f64| {
+        let payload = InputEventPayload {
+            detail: dom::event::EventDetail::Pointer {
+                position: dom::Point2D::new(7.0, 8.0),
+                id: 1,
+                device: dom::input::PointerKind::Mouse,
+                button: 0,
+                buttons: 0,
+            },
+            timestamp: at,
+        };
+        runtime
+            .dispatch_input_event(
+                &mut js_runtime,
+                node_id(down),
+                "click",
+                &payload,
+                Some(node_id(release)),
+            )
+            .expect("dispatch");
+    };
+    click(4, 5, 0.0);
+    click(5, 4, 300.0);
+    click(4, 5, 400.0);
+    click(4, 5, 1000.0);
+    click(4, 4, 2000.0);
+    click(5, 5, 2100.0);
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                const expected = [
+                  'click@3:0:7', 'click@3:0:7', 'dblclick@3:0:7', 'click@3:0:7',
+                  'click@3:0:7', 'click@4:0:7', 'click@5:0:7',
+                ].join('|');
+                if (seen.join('|') !== expected) {
+                  throw new Error('unexpected deliveries: ' + seen.join('|'));
+                }
+                ",
+            "app:///verify.js",
+            "verifying",
+        )
+        .expect("verification");
+}
+
+/// `scroll` and `scrollend` are queued only for a name something hears: an
+/// adopted offset on a page with neither listener queues nothing, and one
+/// with a `scroll` listener queues the `scroll` alone, once per adopt.
+#[test]
+fn adopted_offsets_queue_scroll_events_only_for_a_name_something_hears() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const scroller = __CreateView(0);
+                  __AppendElement(page, scroller);
+                  const card = __CreateView(0);
+                  __AppendElement(scroller, card);
+                  globalThis.held = [page, scroller, card];
+                  __SetInlineStyles(scroller, 'display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px');
+                  __SetInlineStyles(card, 'flex-shrink:0;width:200px;height:1000px');
+                  globalThis.listen = () =>
+                    __AddEventListener(scroller, 'scroll', () => {}, {});
+                  __FlushElementTree();
+                };
+                ",
+            "app:///scroll-gate.js",
+        )
+        .expect("main-thread script");
+    let scroller = node_id(3);
+    let entry = |y: f32| {
+        (
+            scroller,
+            crate::link::ScrollEntry {
+                offset: dom::Vector2D::new(0.0, y),
+                at: 0.0,
+                rest: Some(dom::Vector2D::new(0.0, y)),
+                request: None,
+            },
+        )
+    };
+
+    runtime.adopt_scroll_offsets([entry(40.0)].into_iter());
+    assert_eq!(
+        elements.tree().scroll_offset(scroller),
+        dom::Vector2D::new(0.0, 40.0)
+    );
+    assert!(!runtime.has_component_events(), "nothing hears either name");
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            "globalThis.listen();",
+            "app:///listen.js",
+            "listening",
+        )
+        .expect("listening");
+    runtime.adopt_scroll_offsets([entry(40.0)].into_iter());
+    assert!(
+        !runtime.has_component_events(),
+        "an offset that did not move fires nothing"
+    );
+    runtime.adopt_scroll_offsets([entry(60.0)].into_iter());
+    let queued = runtime.slot.borrow().component_events.take();
+    assert_eq!(
+        queued,
+        [ComponentEvent::Scroll {
+            node: scroller,
+            name: "scroll",
+            delta: dom::Vector2D::new(0.0, 20.0),
+        }],
+        "one `scroll`, with the change its post made, and no `scrollend` with nothing to \
+         hear it"
+    );
+}
+
+/// The painter's name set follows the realm's edges with two adjustments:
+/// a `dblclick` registration opens `click` there too (the `dblclick` is
+/// decided from the `click`s the painter sends) and closing it closes
+/// `click` only when `click` is not listened for itself; and a name a
+/// component observes (`slotchange`, and the markdown component's `tap`)
+/// stays open whatever the realm's edges for it say, where an unobserved
+/// name's close closes it.
+#[test]
+fn the_painter_names_pair_click_with_dblclick_and_keep_observed_names() {
+    let (mut js_runtime, mut runtime, _elements, mut names) =
+        runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  globalThis.held = [page];
+                };
+                globalThis.listener = () => {};
+                ",
+            "app:///names.js",
+        )
+        .expect("main-thread script");
+    let mut step = |source: &str| {
+        let source = format!(
+            "import {{ __AddEventListener, __RemoveEventListener }} from 'bobcat:element';
+             const [page] = globalThis.held;
+             {source}"
+        );
+        runtime
+            .evaluate_module(&mut js_runtime, &source, "app:///step.mjs", "a step")
+            .expect("the step runs");
+    };
+
+    step("__AddEventListener(page, 'dblclick', globalThis.listener, {});");
+    assert_eq!(names.names(), ["click", "dblclick", "slotchange", "tap"]);
+    step("__AddEventListener(page, 'click', globalThis.listener, {});");
+    step("__RemoveEventListener(page, 'dblclick', globalThis.listener, {});");
+    assert_eq!(
+        names.names(),
+        ["click", "slotchange", "tap"],
+        "`click` is listened for itself"
+    );
+    step("__AddEventListener(page, 'dblclick', globalThis.listener, {});");
+    step("__RemoveEventListener(page, 'click', globalThis.listener, {});");
+    assert_eq!(
+        names.names(),
+        ["click", "dblclick", "slotchange", "tap"],
+        "`dblclick` still needs the `click`s"
+    );
+    step("__RemoveEventListener(page, 'dblclick', globalThis.listener, {});");
+    assert_eq!(names.names(), ["slotchange", "tap"]);
+
+    step(
+        "__AddEventListener(page, 'slotchange', globalThis.listener, {});
+         __AddEventListener(page, 'swipe', globalThis.listener, {});",
+    );
+    assert_eq!(names.names(), ["slotchange", "swipe", "tap"]);
+    step(
+        "__RemoveEventListener(page, 'slotchange', globalThis.listener, {});
+         __RemoveEventListener(page, 'swipe', globalThis.listener, {});",
+    );
+    assert_eq!(
+        names.names(),
+        ["slotchange", "tap"],
+        "the realm's close of an observed name is not forwarded; of another, it is"
+    );
+}
+
+/// The extras channel end to end: a drag's `scroll` reaches the realm as a
+/// W3C event whose Lynx `detail` is the scroll metrics — the offset and the
+/// scrolling area read at delivery, the delta its post moved the container
+/// by — and its `scrollend` with a zero delta; an `<image>` `load` still
+/// reports `{width, height}`, now as extras.
+#[test]
+fn scroll_metrics_and_a_load_size_reach_the_lynx_detail_as_extras() {
+    let (mut js_runtime, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const scroller = __CreateView(0);
+                  __AppendElement(page, scroller);
+                  const card = __CreateView(0);
+                  __AppendElement(scroller, card);
+                  globalThis.held = [page, scroller, card];
+                  __SetInlineStyles(scroller, 'display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px');
+                  __SetInlineStyles(card, 'flex-shrink:0;width:200px;height:1000px');
+                  const note = (event) =>
+                    seen.push(event.type + ' ' + JSON.stringify(event.detail));
+                  __AddEventListener(scroller, 'scroll', note, {});
+                  __AddEventListener(scroller, 'scrollend', note, {});
+                  __AddEventListener(card, 'load', note, {});
+                  __FlushElementTree();
+                };
+                ",
+            "app:///extras.js",
+        )
+        .expect("main-thread script");
+    let (scroller, card) = (node_id(3), node_id(4));
+    let entry = |y: f32, rest: bool| {
+        (
+            scroller,
+            crate::link::ScrollEntry {
+                offset: dom::Vector2D::new(0.0, y),
+                at: 0.0,
+                rest: rest.then_some(dom::Vector2D::new(0.0, y)),
+                request: None,
+            },
+        )
+    };
+    // Delivered between the two posts, as the page's posted entry is: the
+    // offset is read at delivery.
+    runtime.adopt_scroll_offsets([entry(40.0, false)].into_iter());
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    runtime.adopt_scroll_offsets([entry(65.0, true)].into_iter());
+    runtime
+        .slot
+        .borrow()
+        .component_events
+        .queue_image(Some(dom::ImageOutcome::Loaded {
+            node: card,
+            width: 40,
+            height: 20,
+        }));
+    let failures = runtime.dispatch_component_events(&mut js_runtime);
+    assert!(failures.is_empty(), "no listener threw: {failures:?}");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r#"
+                const metrics = (top, delta) => JSON.stringify({
+                  scrollTop: top, scrollLeft: 0, scrollHeight: 1000, scrollWidth: 200,
+                  deltaX: 0, deltaY: delta, isDragging: false,
+                });
+                const expected = [
+                  'scroll ' + metrics(40, 40),
+                  'scroll ' + metrics(65, 25),
+                  'scrollend ' + metrics(65, 0),
+                  'load {"width":40,"height":20}',
+                ].join('|');
+                if (seen.join('|') !== expected) {
+                  throw new Error('unexpected deliveries: ' + seen.join('|'));
+                }
+                "#,
+            "app:///verify.js",
+            "verifying",
+        )
+        .expect("verification");
+}
+
+/// An engine component on the path that observes the event's name.
+/// Records its delivery, marks the target so script can tell it ran first,
+/// and stops propagation — which must end only its own walk.
+struct StoppingComponent {
+    log: Rc<RefCell<Vec<String>>>,
+}
+
+impl dom::CustomElement<()> for StoppingComponent {
+    fn observed_events(&self) -> &'static [&'static str] {
+        &["tap"]
+    }
+
+    fn handle_event(
+        &self,
+        document: &mut LynxDocument,
+        _element: dom::NodeId,
+        event: &mut dom::event::ElementEvent<'_>,
+    ) {
+        let x = event.detail().position().map_or(-1.0, |point| point.x);
+        self.log
+            .borrow_mut()
+            .push(format!("{}:{:?}:{x}", event.type_name(), event.phase()));
+        document.set_attribute(event.target(), "data-rust", "seen");
+        event.stop_propagation();
+    }
+}
+
+/// The one dispatch runs the Rust walk over the path first and the realm's
+/// walk over the same path after it, and a component's `stop_propagation`
+/// ends the Rust walk alone.
+#[test]
+fn the_rust_walk_runs_before_the_realm_and_its_stop_does_not_reach_script() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  // Built later, once the test has defined the tag: a
+                  // definition never reaches an element created before it.
+                  globalThis.build = function () {
+                    const outer = __CreateElement('x-probe', 0);
+                    const inner = __CreateView(0);
+                    __AppendElement(page, outer);
+                    __AppendElement(outer, inner);
+                    globalThis.held = [page, outer, inner];
+                    const note = (label) => () =>
+                      seen.push(label + ':' + __GetAttributeByName(inner, 'data-rust'));
+                    __AddEventListener(inner, 'tap', note('inner'), {});
+                    __AddEventListener(outer, 'tap', note('outer'), {});
+                  };
+                };
+                ",
+            "app:///rust-walk.js",
+        )
+        .expect("main-thread script");
+    let log = Rc::new(RefCell::new(Vec::new()));
+    elements.tree().define(
+        "x-probe",
+        Box::new(StoppingComponent {
+            log: Rc::clone(&log),
+        }),
+    );
+    assert!(elements.tree().observes_event("tap"));
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            "globalThis.build();",
+            "app:///rust-walk-tree.js",
+            "building",
+        )
+        .expect("the tree");
+
+    // `page` is 2, the probe 3, the view 4.
+    runtime
+        .dispatch_for_test(&mut js_runtime, node_id(4), &tap(), event_point())
+        .expect("dispatch");
+    assert_eq!(
+        *log.borrow(),
+        ["tap:Capturing:12"],
+        "the component hears the capture step with the dispatch's detail, and its stop ends \
+         its own walk before the bubble step"
+    );
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                // Both script listeners ran, after the component marked the
+                // target: its stop never reached the realm.
+                if (seen.join('|') !== 'inner:seen|outer:seen') {
+                  throw new Error('unexpected deliveries: ' + seen.join('|'));
+                }
+                ",
+            "app:///verify.js",
+            "verifying",
+        )
+        .expect("verification");
+}
+
 #[test]
 fn add_event_delivers_on_the_real_path_and_a_catch_form_ends_the_walk() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -2592,6 +3062,92 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
     assert_eq!(offset(), dom::Vector2D::new(400.0, 0.0));
 }
 
+/// An `x-swiper` given `autoplay` through `__SetAttribute` keeps a timer the
+/// page waits for with its realm's own: nothing is armed before the
+/// attribute, the deadline is one `interval` away after it, and the turn
+/// that comes due asks the painter for the next item as a request that
+/// yields to a pointer, then waits for the one after. No script runs for it.
+#[test]
+fn an_autoplaying_swiper_arms_the_pages_deadline_and_turns_when_due() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const swiper = __CreateElement('x-swiper', 0);
+                  __SetInlineStyles(swiper, 'width:200px;height:100px');
+                  __AppendElement(page, swiper);
+                  for (let i = 0; i < 3; i++) {
+                    __AppendElement(swiper, __CreateElement('x-swiper-item', 0));
+                  }
+                  __FlushElementTree();
+                  globalThis.swiper = swiper;
+                };
+                ",
+            "app:///autoplay.js",
+        )
+        .expect("main-thread script");
+    assert_eq!(runtime.next_deadline(), None, "no autoplay, nothing armed");
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __SetAttribute } from 'bobcat:element';
+                __SetAttribute(swiper, 'interval', '20');
+                __SetAttribute(swiper, 'autoplay', true);
+                ",
+            "app:///start.js",
+            "starting autoplay",
+        )
+        .expect("starting autoplay");
+    let armed = runtime
+        .next_deadline()
+        .expect("the swiper's timer is armed");
+    let wait = armed.duration_since(ClockInstant::now());
+    assert!(
+        wait <= std::time::Duration::from_millis(20),
+        "one interval away"
+    );
+
+    let content = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let swiper = tree.get(page).expect("the page").child_ids()[0];
+        crate::main::tree::swiper::content(&tree, swiper).expect("the swiper's `#content`")
+    };
+    assert!(
+        runtime.run_due_timers(&mut js_runtime).is_empty(),
+        "a turn throws nothing"
+    );
+    assert_eq!(
+        elements.tree().pending_scroll_request(content),
+        None,
+        "not due yet"
+    );
+
+    std::thread::sleep(wait + std::time::Duration::from_millis(5));
+    assert!(runtime.run_due_timers(&mut js_runtime).is_empty());
+    let frame = elements.tree().commit();
+    let slot = frame.slot_of(content).expect("the scroller has a slot");
+    let request = frame.scroll_slots()[slot as usize]
+        .request
+        .expect("the turn is a scroll request");
+    assert_eq!(
+        request.target,
+        dom::Vector2D::new(200.0, 0.0),
+        "the next item"
+    );
+    assert_eq!(request.behavior, dom::scroll::ScrollBehavior::Smooth);
+    assert!(request.yields_to_pointer);
+    assert!(
+        runtime.next_deadline().expect("armed again") > armed,
+        "the following turn"
+    );
+}
+
 /// `scrollTo({index, smooth})` on a swiper, through both paths a card reaches
 /// a UI method by: `__InvokeUIMethod`, and the selector-query `invoke` the
 /// background thread's `lynx.createSelectorQuery()` sends
@@ -3287,7 +3843,11 @@ fn a_scroll_view_answers_its_scroll_info_and_what_scroll_by_consumed() {
                 expectAnswer(viaPapi('scrollTo', {index: 5}), 4, undefined);
                 expectAnswer(viaPapi('getScrollInfo', {}), 0,
                              {scrollX: 0, scrollY: 42.5, scrollRange: 100, maxScrollOffset: 100});
-                expectAnswer(viaPapi('autoScroll', {rate: 60, start: true}), 3, undefined);
+                // The painter moves it; the document's offset stays put.
+                expectAnswer(viaPapi('autoScroll', {rate: 60, start: true}), 0, undefined);
+                expectAnswer(viaPapi('autoScroll', {start: true}), 4, undefined);
+                expectAnswer(viaPapi('autoScroll', {start: false}), 0, undefined);
+                expectAnswer(viaPapi('takeContentScreenshot', {}), 3, undefined);
                 ",
             "app:///scroll-view-methods.js",
             "scroll-view methods",
@@ -3369,7 +3929,9 @@ fn a_list_answers_its_methods_and_the_base_set_answers_scroll_to() {
                 ]);
                 expectAnswer(viaPapi('scrollToPosition', {position: 5}), 4, undefined);
                 expectAnswer(viaPapi('scrollBy', {}), 4, undefined);
-                expectAnswer(viaPapi('autoScroll', {rate: 60, start: true}), 3, undefined);
+                expectAnswer(viaPapi('autoScroll', {rate: '60px', start: true, autoStop: false}),
+                             0, undefined);
+                expectAnswer(viaPapi('autoScroll', {rate: 0, start: true}), 4, undefined);
                 expectAnswer(viaPapi('getScrollInfo', {}), 3, undefined);
                 // The base set's `scrollTo`, which the list does not shadow.
                 expectAnswer(viaPapi('scrollTo', {top: 50}), 0, undefined);
@@ -4119,11 +4681,11 @@ fn a_component_event_with_a_string_detail_reaches_script_built_per_shape() {
 type TapLog = Rc<RefCell<Vec<String>>>;
 
 /// A test component that builds `<view><text/></view>` in its shadow tree,
-/// as a UA component builds its content, and records every
-/// [`dom::event::ElementEventKind::Tap`] it hears as
-/// `phase:target-tag:x,y`. In the bubble pass it also writes the tapped
-/// tag to its own `heard` attribute, which script's `tap` listener reads to
-/// see that the component heard the tap first.
+/// as a UA component builds its content, and records every `tap` it hears
+/// as `phase:target-tag:x,y`. For a bubble-pass delivery whose target is its
+/// own shadow content — the one the markdown component acts on — it also
+/// writes the tapped tag to its own `heard` attribute, which script's `tap`
+/// listener reads to see that the component heard the tap first.
 struct TapProbe {
     log: TapLog,
 }
@@ -4145,11 +4707,13 @@ impl dom::CustomElement<()> for TapProbe {
         &self,
         document: &mut LynxDocument,
         element: dom::NodeId,
-        event: &mut dom::event::ElementEvent,
+        event: &mut dom::event::ElementEvent<'_>,
     ) {
-        let dom::event::ElementEventKind::Tap { x, y } = event.kind() else {
-            return;
+        assert_eq!(event.type_name(), "tap", "the only type it observes");
+        let Some(position) = event.detail().position() else {
+            panic!("a tap carries a position: {:?}", event.detail());
         };
+        let (x, y) = (position.x, position.y);
         let phase = match event.phase() {
             dom::event::EventPhase::Capturing => "capture",
             dom::event::EventPhase::AtTarget => "at-target",
@@ -4160,7 +4724,9 @@ impl dom::CustomElement<()> for TapProbe {
             .and_then(dom::Node::tag_name)
             .unwrap_or("?")
             .to_owned();
-        if event.phase() == dom::event::EventPhase::Bubbling {
+        if event.phase() == dom::event::EventPhase::Bubbling
+            && document.shadow_root_of(event.target()) == document.shadow_root(element)
+        {
             document.set_attribute(element, "heard", &tag);
         }
         self.log.borrow_mut().push(format!("{phase}:{tag}:{x},{y}"));
@@ -4170,9 +4736,11 @@ impl dom::CustomElement<()> for TapProbe {
 /// A `tap` the gesture path delivers at a component's UA shadow content is
 /// heard first by that component, through `dom`'s walk, with the shadow node
 /// it hit as the target and the gesture's position; script's `tap` follows,
-/// starting at the host, retargeted, and sees what the component did. A tap
-/// at the host's light child reaches script alone: the host only displays
-/// it.
+/// starting at the host, retargeted, and sees what the component did; the
+/// same dispatch's Rust walk hands the component that composed `tap` too, at
+/// the host as itself. A tap at the host's light child fires no
+/// non-composed `tap`: the component hears only the composed one, as an
+/// ancestor of a target outside its shadow tree.
 #[test]
 fn a_tap_at_shadow_content_is_heard_by_its_component_before_script() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -4238,8 +4806,13 @@ fn a_tap_at_shadow_content_is_heard_by_its_component_before_script() {
         .expect("the tap at shadow content");
     assert_eq!(
         std::mem::take(&mut *log.borrow_mut()),
-        ["capture:text:12,30", "bubble:text:12,30"],
-        "the shadow root's step, in both passes, as the host's own"
+        [
+            "capture:text:12,30",
+            "bubble:text:12,30",
+            "at-target:x-tap-probe:12,30"
+        ],
+        "the non-composed tap's shadow-root step, in both passes, with the inner \
+         node; then the one dispatch's composed tap at the host as itself"
     );
     expect_seen(
         &mut js_runtime,
@@ -4250,9 +4823,11 @@ fn a_tap_at_shadow_content_is_heard_by_its_component_before_script() {
     runtime
         .dispatch_for_test(&mut js_runtime, light, &tap(), event_point())
         .expect("the tap at light content");
-    assert!(
-        log.borrow().is_empty(),
-        "a light child is not the component's content"
+    assert_eq!(
+        std::mem::take(&mut *log.borrow_mut()),
+        ["capture:view:12,30", "bubble:view:12,30"],
+        "a light child's tap fires no non-composed tap; the composed one reaches \
+         the host as an ancestor, its target outside the host's shadow tree"
     );
     // `heard` is still the earlier tap's.
     expect_seen(
@@ -4456,7 +5031,14 @@ fn a_tap_a_component_observes_is_routed_with_no_script_listener() {
     runtime
         .dispatch_for_test(&mut js_runtime, text, &tap(), event_point())
         .expect("a tap no script listens for is no error");
-    assert_eq!(*log.borrow(), ["capture:text:12,30", "bubble:text:12,30"]);
+    assert_eq!(
+        *log.borrow(),
+        [
+            "capture:text:12,30",
+            "bubble:text:12,30",
+            "at-target:x-tap-probe:12,30"
+        ]
+    );
 }
 
 /// An event at a UA component's shadow content — an `<x-swiper>`'s

@@ -138,7 +138,7 @@ pub mod snap;
 mod sticky_geometry_tests;
 
 pub use into_view::{ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition};
-pub use request::{ScrollBehavior, ScrollRequest};
+pub use request::{AutoScrollRequest, ScrollBehavior, ScrollRequest};
 pub use snap::{
     PROXIMITY_RATIO, SNAPPED_TOLERANCE, ScrollKind, SnapAxis, SnapAxisPositions, SnapPoint,
     SnapPositions, SnapStrictness, resolve_step, settle_offset,

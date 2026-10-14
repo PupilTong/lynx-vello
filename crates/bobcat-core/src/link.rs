@@ -38,11 +38,9 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use dom::input::PointerId;
 use dom::scroll::ScrollAxes;
-use dom::{CommittedFrame, FrameImages, HitTarget, NodeId, Point2D, Vector2D};
+use dom::{CommittedFrame, FrameImages, HitTarget, NodeId, Vector2D};
 use rustc_hash::{FxHashMap, FxHashSet};
-use smallvec::SmallVec;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -161,6 +159,10 @@ pub(crate) enum ToMain {
         target: NodeId,
         name: &'static str,
         payload: InputEventPayload,
+        /// For a `click` alone: the node the release routed to. The event
+        /// is dispatched at the nearest common inclusive ancestor of
+        /// `target` and this one, which only this side's tree can answer.
+        release: Option<NodeId>,
     },
     Vsync(f64),
     /// The view's [`ScrollMailbox`] holds something to take: scroll offsets,
@@ -198,53 +200,19 @@ pub(crate) enum ToMain {
     Trap(std::sync::mpsc::Sender<bool>),
 }
 
-/// Everything one routed event carries beside its type and target: the facts
-/// the router decided, as values. Nothing here is encoded — the realm builds
-/// the `detail` object and the touch lists out of the numbers the boundary
-/// hands over, because the shape they take is JavaScript's.
+/// Everything one routed event carries beside its type and target: what the
+/// router decided the event carries, in `dom`'s one description of it, and
+/// when it happened. Nothing here is encoded: the main thread lends the
+/// detail to the Rust walk as it is and encodes it into the realm's numbers
+/// at that boundary alone.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct InputEventPayload {
-    /// The device position, in viewport CSS px: the event's `detail.x`/`y`.
-    pub(crate) position: Point2D<f32>,
-    /// The wheel delta, for the one event whose `detail` carries one.
-    pub(crate) wheel: Option<Vector2D<f32>>,
-    /// The three touch lists, for the four events that carry them. Empty
-    /// otherwise.
-    pub(crate) touches: TouchPoints,
+    pub(crate) detail: dom::event::EventDetail,
     /// The event's `timestamp`: milliseconds on the view's own timeline,
     /// taken from the reading of the pass that decided the event — an
     /// input's arrival, or the gesture tick's `now`.
     pub(crate) timestamp: f64,
 }
-
-/// In `touches`: the finger is still down once this event has been applied,
-/// so a lifted or cancelled finger never carries it.
-pub(crate) const TOUCH_ACTIVE: u8 = 1;
-
-/// In `targetTouches`: [`TOUCH_ACTIVE`], and the finger's captured target is
-/// the target of the event carrying it.
-pub(crate) const TOUCH_TARGET: u8 = 2;
-
-/// In `changedTouches`: the one finger this event is about.
-pub(crate) const TOUCH_CHANGED: u8 = 4;
-
-/// One entry of a touch event's three lists: which finger, where it is in
-/// viewport CSS px, and which lists it belongs to ([`TOUCH_ACTIVE`],
-/// [`TOUCH_TARGET`], [`TOUCH_CHANGED`], or-ed together).
-///
-/// One point can sit in all three at once — a move of the only finger down on
-/// the event's own target does — so the lists are one sequence with flags
-/// rather than three.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct TouchPoint {
-    pub(crate) identifier: PointerId,
-    pub(crate) position: Point2D<f32>,
-    pub(crate) flags: u8,
-}
-
-/// The points one touch event carries, in the order their fingers went down,
-/// with a lifted or cancelled finger last. Empty for every other event.
-pub(crate) type TouchPoints = SmallVec<[TouchPoint; 2]>;
 
 pub(crate) enum PageUpdate {
     Reload {

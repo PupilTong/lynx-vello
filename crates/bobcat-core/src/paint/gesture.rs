@@ -19,22 +19,37 @@
 //!   (`pointerdown`/`pointermove`/`pointerup`/`pointercancel`), a wheel becomes `wheel`, each
 //!   targeted at the routed node. Lynx's `tap` and `longpress` are *synthesized* from the sequence
 //!   beside them.
+//! - **Compatibility mouse events** (Pointer Events Level 3 §11). A [`PointerKind::Mouse`]
+//!   pointer's down, move and up are followed at once by `mousedown`/`mousemove`/`mouseup` at the
+//!   same target with the same detail. Touch and pen produce none (a recorded deviation), and
+//!   neither does a cancel.
+//! - **`click`** (UI Events), for every pointer kind: the primary button of the primary pointer
+//!   pressed and released, with no movement slop, suppressed when the drag recognizer's scroll
+//!   consumed the sequence or the sequence was cancelled. The release emits one decision naming the
+//!   down's target and the release's, after the release's pointer, touch and mouse events and
+//!   before `tap`; the main thread targets it at their nearest common inclusive ancestor and
+//!   follows a second one at the same target within 500 ms with `dblclick`. `tap` keeps its own
+//!   rules and fires beside it.
+//! - **Key events.** A key phase becomes `keydown`/`keyup` (W3C UI Events), carrying the W3C
+//!   `key`/`code` strings, `repeat` and the modifiers. A key is never hit-tested: with no focus
+//!   model its target is the document element ([`NodeId::DOCUMENT_ELEMENT`]), which is the one
+//!   thing a focus model will change.
 //! - **Touch events.** A pointer that [`produces_touch_events`] also produces the W3C touch name
 //!   for its phase (`touchstart`/`touchmove`/`touchend`/`touchcancel`), carrying the three lists
 //!   ([`TouchPoint`]) the standard gives one. Every finger is tracked from its down, and the node
 //!   its down routed to is that finger's target for the finger's whole life — the standard's
 //!   implicit capture, so a move that leaves the node still dispatches at it. Multi-touch is always
 //!   on.
-//! - **User-agent scrolling.** The drag recognizer (touch/pen, latched at the down on the nearest
-//!   user-scrollable, 8px slop with the slop subtracted from the first movement, per-pointer
-//!   independent) and wheel scrolling (per-event nearest scrollable filtered by the CSS-pixel
-//!   delta's axes). Both were `dom`'s default action; the engine now routes with
-//!   `default_prevented` set so `dom` performs none, and this router is the one decision point. The
-//!   scroll *primitives* (`drive_chain`'s remainder chaining, the step rule, the published chain
-//!   links) stay in `dom`. A drag that scrolled ends with a [`InputDecision::ScrollEnd`] at its
-//!   release or cancel, ahead of the release's own events, so the containers it moved settle onto
-//!   their css-scroll-snap-1 positions (the executor's intents own that; the router only marks the
-//!   end).
+//! - **User-agent scrolling.** The drag recognizer (every pointer kind, a mouse included by ruling,
+//!   latched at the down on the nearest user-scrollable, 8px slop with the slop subtracted from the
+//!   first movement, per-pointer independent) and wheel scrolling (per-event nearest scrollable
+//!   filtered by the CSS-pixel delta's axes). Both were `dom`'s default action; the engine now
+//!   routes with `default_prevented` set so `dom` performs none, and this router is the one
+//!   decision point. The scroll *primitives* (`drive_chain`'s remainder chaining, the step rule,
+//!   the published chain links) stay in `dom`. A drag that scrolled ends with a
+//!   [`InputDecision::ScrollEnd`] at its release or cancel, ahead of the release's own events, so
+//!   the containers it moved settle onto their css-scroll-snap-1 positions (the executor's intents
+//!   own that; the router only marks the end).
 //! - **Gesture synthesis** per the 2026-08-21 ruling (recorded in `docs/tracking/deviations.md`):
 //!   `tap` fires at release, targeted at the down-routed node, unless the sequence travelled past
 //!   the 50px radial [`TAP_SLOP`], the drag recognizer's scroll consumed (reported back by the
@@ -52,19 +67,21 @@
 //! # What this module deliberately is not
 //!
 //! No fling or velocity, no `:active` driving, no `consume-slide-event`, no
-//! per-element `GestureDetector`/arena relations, no `click` — recorded
-//! follow-ups. Scroll *events* (`scroll`/`scrolltolower`…) are component
-//! events above this layer.
+//! per-element `GestureDetector`/arena relations — recorded follow-ups. No
+//! `pointerover`/`out`/`enter`/`leave`, `mouseover`/`out`/`enter`/`leave`,
+//! `auxclick` or `contextmenu` (deferred). Scroll *events* (`scroll`,
+//! `scrollend`) are the main thread's, decided from the offsets this side
+//! posts.
 
-use dom::input::{InputEvent, InputKind, PointerId, PointerKind, PointerPhase};
+use dom::event::EventDetail;
+// The touch vocabulary is `dom`'s, because every layer that names an event
+// names it: the router fills the points in, the Rust walk reads them, and the
+// main thread encodes them into the realm's argument list.
+pub(crate) use dom::event::{TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET, TouchPoint, TouchPoints};
+use dom::input::{InputEvent, InputKind, KeyPhase, PointerId, PointerKind, PointerPhase};
 use dom::scroll::ScrollAxes;
 use dom::{HitTarget, NodeId, Point2D, Vector2D};
 use smallvec::SmallVec;
-
-// The touch vocabulary is the link's, because both sides of the link name it:
-// the router fills the points in, and the main thread reads them out into the
-// realm's argument list.
-pub(crate) use crate::link::{TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET, TouchPoint, TouchPoints};
 
 /// How far a sequence may travel, in viewport CSS px, and still deliver `tap`.
 ///
@@ -81,7 +98,7 @@ pub(crate) const TAP_SLOP: f32 = 50.0;
 /// the same travel.
 pub(crate) const LONG_PRESS_MOVE_SLOP: f32 = 8.0;
 
-/// How far a touch/pen drag travels before it starts scrolling, in viewport
+/// How far a pointer drag travels before it starts scrolling, in viewport
 /// CSS px. The first movement subtracts the slop instead of jumping.
 pub(crate) const DRAG_SLOP: f32 = 8.0;
 
@@ -98,15 +115,18 @@ pub(crate) const LONG_PRESS_EVENT: &str = "longpress";
 /// The event name a released sequence synthesizes.
 pub(crate) const TAP_EVENT: &str = "tap";
 
+/// UI Events' `click`: the primary button pressed and released, at the
+/// nearest common inclusive ancestor of the two targets.
+pub(crate) const CLICK_EVENT: &str = "click";
+
 /// Whether a pointer of this kind produces touch events.
 ///
 /// Touch and pen do; a mouse produces none, which is what both a browser and
-/// web-core do — a mouse gesture is reported through the pointer events and
-/// `tap` alone. The policy is the drag-to-scroll one because it asks the same
-/// question (is this device a finger on the content?), and naming it here
-/// keeps the two call sites from drifting apart.
+/// web-core do — a mouse gesture is reported through the pointer events, the
+/// compatibility mouse events and `tap`. Not the drag-to-scroll policy, which
+/// a mouse drag shares here by ruling.
 pub(crate) fn produces_touch_events(device: PointerKind) -> bool {
-    device.drags_to_scroll()
+    matches!(device, PointerKind::Touch | PointerKind::Pen)
 }
 
 /// The published-frame facts the router may ask for while deciding. Borrowed
@@ -131,21 +151,23 @@ pub(crate) trait RouterHost {
     fn has_listener(&self, name: &str) -> bool;
 }
 
-/// One event this layer decided to dispatch: the type and the target. The
-/// propagation chain is the event module's to compute from the target.
+/// One event this layer decided to dispatch: the type, the target and what
+/// it carries. The propagation chain is the event module's to compute from
+/// the target.
 #[derive(Clone, Debug)]
 pub(crate) struct EmitEvent {
     pub(crate) name: &'static str,
     /// The node the event targets. It may have been freed since the decision
     /// was formed — the executor checks liveness before building a path.
     pub(crate) target: NodeId,
-    /// The device position the event's `detail` reports.
-    pub(crate) position: Point2D<f32>,
-    /// The wheel delta, for the one event whose `detail` carries one.
-    pub(crate) wheel: Option<Vector2D<f32>>,
-    /// The three touch lists, for the four events that carry them. Empty
-    /// otherwise.
-    pub(crate) touches: TouchPoints,
+    /// What the event carries, in `dom`'s one description of it: a pointer
+    /// event's position and device, a wheel's delta, a touch event's lists.
+    pub(crate) detail: EventDetail,
+    /// For a `click` alone: the node the release routed to. The event's
+    /// target is then the nearest common inclusive ancestor of
+    /// [`Self::target`] (the down's) and this one, which the main thread
+    /// resolves, because it holds the tree and this side holds none.
+    pub(crate) release: Option<NodeId>,
 }
 
 /// One decision the engine executes, in order.
@@ -169,14 +191,47 @@ pub(crate) enum InputDecision {
 /// An inline-first batch of ordered decisions produced by the input router.
 pub(crate) type InputDecisions = SmallVec<[InputDecision; 4]>;
 
-fn emit(name: &'static str, target: NodeId, position: Point2D<f32>) -> InputDecision {
+fn emit(name: &'static str, target: NodeId, detail: EventDetail) -> InputDecision {
     InputDecision::Emit(EmitEvent {
         name,
         target,
-        position,
-        wheel: None,
-        touches: TouchPoints::new(),
+        detail,
+        release: None,
     })
+}
+
+/// The detail every event a pointer produces carries, the synthesized ones
+/// included.
+fn pointer_detail(
+    position: Point2D<f32>,
+    id: PointerId,
+    device: PointerKind,
+    button: i16,
+    buttons: u16,
+) -> EventDetail {
+    EventDetail::Pointer {
+        position,
+        id,
+        device,
+        button,
+        buttons,
+    }
+}
+
+/// Pointer Events Level 3 §11's compatibility mouse event for a pointer
+/// event, dispatched at the same target right after it — for a mouse alone.
+/// A touch or pen pointer produces none (a recorded deviation: browsers do
+/// produce them for touch, after the touch events), and a cancel has none.
+fn compat_mouse_event_name(device: PointerKind, phase: PointerPhase) -> Option<&'static str> {
+    if device != PointerKind::Mouse {
+        return None;
+    }
+    match phase {
+        PointerPhase::Down => Some("mousedown"),
+        PointerPhase::Move => Some("mousemove"),
+        PointerPhase::Up => Some("mouseup"),
+        _ => None,
+    }
 }
 
 /// The W3C name a routed pointer phase dispatches under. Lynx's
@@ -190,6 +245,17 @@ fn pointer_event_name(phase: PointerPhase) -> Option<&'static str> {
         // `PointerPhase` is `#[non_exhaustive]` so keyboard and focus can
         // arrive without a break; an unnamed phase dispatches nothing rather
         // than guessing.
+        _ => None,
+    }
+}
+
+/// The W3C UI Events name a key phase dispatches under: `keydown` and
+/// `keyup`, and nothing else (`keypress` is deprecated, and `input` and the
+/// composition events need an editing model).
+fn key_event_name(phase: KeyPhase) -> Option<&'static str> {
+    match phase {
+        KeyPhase::Down => Some("keydown"),
+        KeyPhase::Up => Some("keyup"),
         _ => None,
     }
 }
@@ -232,6 +298,7 @@ struct ActiveTouch {
 #[derive(Debug)]
 struct Sequence {
     pointer: PointerId,
+    device: PointerKind,
     target: NodeId,
     down_position: Point2D<f32>,
     latest_position: Point2D<f32>,
@@ -253,6 +320,14 @@ impl Sequence {
     }
 }
 
+/// The primary pointer's press, watched from down to release for `click`.
+#[derive(Clone, Copy, Debug)]
+struct ClickCandidate {
+    pointer: PointerId,
+    /// What the down routed to.
+    target: NodeId,
+}
+
 /// The per-view router state. Owned by the engine, fed on the painting side
 /// only.
 #[derive(Debug, Default)]
@@ -271,6 +346,12 @@ pub(crate) struct GestureRouter {
     /// next touch event reports. Independent of `sequence`: multi-touch is
     /// always on here, while synthesis is single-finger.
     touches: SmallVec<[ActiveTouch; 2]>,
+    /// The primary pointer's press that can still become a `click`: armed by
+    /// a primary-button down with no other pointer down, ended by its
+    /// release, its cancel or a scroll its drag consumed. Independent of
+    /// `sequence`: there is no movement slop and a second pointer does not
+    /// end it.
+    click: Option<ClickCandidate>,
 }
 
 impl GestureRouter {
@@ -299,7 +380,13 @@ impl GestureRouter {
         out: &mut InputDecisions,
     ) {
         match event.kind {
-            InputKind::Pointer { id, device, phase } => {
+            InputKind::Pointer {
+                id,
+                device,
+                phase,
+                button,
+                buttons,
+            } => {
                 self.fire_due(at, host, out);
                 self.drag_step(
                     event,
@@ -310,13 +397,18 @@ impl GestureRouter {
                     host,
                     out,
                 );
+                let detail = pointer_detail(event.position, id, device, button, buttons);
                 if let Some(target) = target
                     && let Some(name) = pointer_event_name(phase)
                 {
-                    out.push(emit(name, target.node, event.position));
+                    out.push(emit(name, target.node, detail.clone()));
+                    if let Some(compat) = compat_mouse_event_name(device, phase) {
+                        out.push(emit(compat, target.node, detail.clone()));
+                    }
                 }
                 self.touch_step(event, target, id, device, phase, out);
-                self.synthesize(event, target, id, phase, at, out);
+                self.click_step(target, id, phase, button, &detail, out);
+                self.synthesize(event, target, id, device, phase, at, out);
             }
             InputKind::Wheel { delta } => {
                 let Some(target) = target else {
@@ -325,13 +417,39 @@ impl GestureRouter {
                 if !event.default_prevented {
                     Self::wheel_scroll(target, delta, host, out);
                 }
-                out.push(InputDecision::Emit(EmitEvent {
-                    name: "wheel",
-                    target: target.node,
-                    position: event.position,
-                    wheel: Some(delta),
-                    touches: TouchPoints::new(),
-                }));
+                out.push(emit(
+                    "wheel",
+                    target.node,
+                    EventDetail::Wheel {
+                        position: event.position,
+                        delta,
+                    },
+                ));
+            }
+            InputKind::Key {
+                phase,
+                ref key,
+                ref code,
+                repeat,
+                modifiers,
+            } => {
+                let Some(name) = key_event_name(phase) else {
+                    return;
+                };
+                // No hit test and no focus model: the document element is
+                // the focus target, as it is in a browser with nothing
+                // focused. A focus model changes this target and nothing
+                // else.
+                out.push(emit(
+                    name,
+                    NodeId::DOCUMENT_ELEMENT,
+                    EventDetail::Key {
+                        key: key.clone(),
+                        code: code.clone(),
+                        repeat,
+                        modifiers,
+                    },
+                ));
             }
             // `InputKind` is `#[non_exhaustive]`; an unknown kind decides
             // nothing rather than guessing.
@@ -344,6 +462,12 @@ impl GestureRouter {
     /// what claims the sequence away from synthesis, so a drag at a
     /// scroller's boundary that moves nothing keeps its tap, matching Lynx.
     pub(crate) fn note_scroll_consumed(&mut self, pointer: PointerId) {
+        if self
+            .click
+            .is_some_and(|candidate| candidate.pointer == pointer)
+        {
+            self.click = None;
+        }
         if let Some(sequence) = self
             .sequence
             .as_mut()
@@ -535,13 +659,14 @@ impl GestureRouter {
             .iter()
             .find(|point| point.flags & TOUCH_ACTIVE != 0)
             .map_or(changed, |point| point.position);
-        out.push(InputDecision::Emit(EmitEvent {
+        out.push(emit(
             name,
             target,
-            position,
-            wheel: None,
-            touches,
-        }));
+            EventDetail::Touch {
+                position,
+                points: touches,
+            },
+        ));
     }
 
     /// The three lists for one touch event, flagged per point: every finger
@@ -604,12 +729,60 @@ impl GestureRouter {
         });
     }
 
+    /// The `click` half (UI Events): a primary-button press of the primary
+    /// pointer, released anywhere, with no movement slop. The release emits
+    /// one `click` decision naming both targets, after the release's own
+    /// pointer, touch and mouse events and before any `tap`; the main thread
+    /// targets it at their nearest common inclusive ancestor and decides a
+    /// `dblclick` from it. A release that routed to nothing clicks nothing,
+    /// and neither does a cancelled sequence or one whose drag consumed a
+    /// scroll ([`Self::note_scroll_consumed`]).
+    fn click_step(
+        &mut self,
+        target: Option<HitTarget>,
+        id: PointerId,
+        phase: PointerPhase,
+        button: i16,
+        detail: &EventDetail,
+        out: &mut InputDecisions,
+    ) {
+        match phase {
+            // Read before `synthesize` records this down: a pointer that goes
+            // down while another is down is not the primary one.
+            PointerPhase::Down if self.down_pointers.is_empty() && button == 0 => {
+                self.click = target.map(|hit| ClickCandidate {
+                    pointer: id,
+                    target: hit.node,
+                });
+            }
+            PointerPhase::Up => {
+                if let Some(candidate) = self.click.take_if(|candidate| candidate.pointer == id)
+                    && button == 0
+                    && let Some(release) = target
+                {
+                    out.push(InputDecision::Emit(EmitEvent {
+                        name: CLICK_EVENT,
+                        target: candidate.target,
+                        detail: detail.clone(),
+                        release: Some(release.node),
+                    }));
+                }
+            }
+            PointerPhase::Cancel if self.click.is_some_and(|candidate| candidate.pointer == id) => {
+                self.click = None;
+            }
+            _ => {}
+        }
+    }
+
     /// The synthesis half: sequence lifecycle and the `tap` decision.
+    #[allow(clippy::too_many_arguments, reason = "one private dispatch site")]
     fn synthesize(
         &mut self,
         event: &InputEvent,
         target: Option<HitTarget>,
         id: PointerId,
+        device: PointerKind,
         phase: PointerPhase,
         at: f64,
         out: &mut InputDecisions,
@@ -629,6 +802,7 @@ impl GestureRouter {
                     // it starts no sequence.
                     self.sequence = target.map(|target| Sequence {
                         pointer: id,
+                        device,
                         target: target.node,
                         down_position: event.position,
                         latest_position: event.position,
@@ -660,7 +834,11 @@ impl GestureRouter {
                     && !sequence.longpress_fired
                     && !sequence.travelled_beyond(event.position, TAP_SLOP)
                 {
-                    out.push(emit(TAP_EVENT, sequence.target, event.position));
+                    out.push(emit(
+                        TAP_EVENT,
+                        sequence.target,
+                        pointer_detail(event.position, id, device, 0, 0),
+                    ));
                 }
             }
             PointerPhase::Cancel => {
@@ -696,7 +874,14 @@ impl GestureRouter {
             out.push(emit(
                 LONG_PRESS_EVENT,
                 sequence.target,
-                sequence.latest_position,
+                // Held down: no button changed, the primary one is held.
+                pointer_detail(
+                    sequence.latest_position,
+                    sequence.pointer,
+                    sequence.device,
+                    -1,
+                    1,
+                ),
             ));
         }
     }
@@ -782,6 +967,10 @@ mod tests {
             self.feed_routed(event, Some(target()), at);
         }
 
+        #[allow(
+            clippy::needless_pass_by_value,
+            reason = "the cases hand over event literals"
+        )]
         fn feed_routed(&mut self, event: InputEvent, hit: Option<NodeId>, at: f64) {
             let hit = hit.map(|node| HitTarget { node, scroll: None });
             self.router
@@ -827,9 +1016,10 @@ mod tests {
             self.out
                 .iter()
                 .filter_map(|decision| match decision {
-                    InputDecision::Emit(event) if !event.touches.is_empty() => {
+                    InputDecision::Emit(event) if !event.detail.touch_points().is_empty() => {
                         let points: Vec<String> = event
-                            .touches
+                            .detail
+                            .touch_points()
                             .iter()
                             .map(|point| {
                                 let mut lists = String::new();
@@ -848,12 +1038,13 @@ mod tests {
                                 )
                             })
                             .collect();
+                        let position = event.detail.position().expect("a touch event has one");
                         Some(format!(
                             "{}@{} detail={},{} [{}]",
                             event.name,
                             event.target.to_bits(),
-                            event.position.x,
-                            event.position.y,
+                            position.x,
+                            position.y,
                             points.join(" ")
                         ))
                     }
@@ -864,20 +1055,209 @@ mod tests {
     }
 
     #[test]
+    fn a_key_is_keydown_then_keyup_at_the_document_element_with_its_strings() {
+        use dom::input::{KeyPhase, Modifiers};
+
+        let mut harness = Harness::new();
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        // Routing hit nothing: a key event is never hit-tested.
+        harness.feed_routed(
+            InputEvent::key(KeyPhase::Down, "A", "KeyA", false, shift),
+            None,
+            0.0,
+        );
+        harness.feed_routed(
+            InputEvent::key(KeyPhase::Up, "A", "KeyA", false, shift),
+            Some(target()),
+            0.1,
+        );
+        assert_eq!(
+            harness.trace(),
+            [
+                format!("keydown@{}", NodeId::DOCUMENT_ELEMENT.to_bits()),
+                format!("keyup@{}", NodeId::DOCUMENT_ELEMENT.to_bits()),
+            ],
+            "no focus model: the document element is the target, whatever routing hit"
+        );
+        let InputDecision::Emit(down) = &harness.out[0] else {
+            panic!("an emit");
+        };
+        assert_eq!(
+            down.detail,
+            EventDetail::Key {
+                key: "A".into(),
+                code: "KeyA".into(),
+                repeat: false,
+                modifiers: shift,
+            }
+        );
+        assert!(!harness.router.needs_frame(), "a key arms nothing");
+    }
+
+    fn pen(id: u32, phase: PointerPhase, x: f32, y: f32) -> InputEvent {
+        InputEvent::pointer(Point2D::new(x, y), id, PointerKind::Pen, phase)
+    }
+
+    /// The emitted `click`s, as `click@down>release`.
+    fn clicks(harness: &Harness) -> Vec<String> {
+        harness
+            .out
+            .iter()
+            .filter_map(|decision| match decision {
+                InputDecision::Emit(event) if event.name == CLICK_EVENT => Some(format!(
+                    "click@{}>{}",
+                    event.target.to_bits(),
+                    event.release.map_or(0, NodeId::to_bits)
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_mouse_gets_compatibility_mouse_events_right_after_its_pointer_events() {
+        let mut harness = Harness::new();
+        harness.feed(mouse(1, PointerPhase::Down, 10.0, 10.0), 0.0);
+        harness.feed(mouse(1, PointerPhase::Move, 11.0, 10.0), 0.05);
+        harness.feed(mouse(1, PointerPhase::Up, 11.0, 10.0), 0.1);
+        assert_eq!(
+            harness.trace(),
+            [
+                "pointerdown",
+                "mousedown",
+                "pointermove",
+                "mousemove",
+                "pointerup",
+                "mouseup",
+                "click",
+                "tap"
+            ]
+            .map(|name| format!("{name}@{TARGET}")),
+            "each at the pointer event's own target, then the click and the tap"
+        );
+        let InputDecision::Emit(mouse_down) = &harness.out[1] else {
+            panic!("an emit");
+        };
+        let InputDecision::Emit(pointer_down) = &harness.out[0] else {
+            panic!("an emit");
+        };
+        assert_eq!(
+            mouse_down.detail, pointer_down.detail,
+            "the same position and buttons"
+        );
+        assert!(matches!(
+            mouse_down.detail,
+            EventDetail::Pointer {
+                button: 0,
+                buttons: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn touch_and_pen_get_no_compatibility_mouse_events_but_do_click() {
+        for feed in [touch, pen] {
+            let mut harness = Harness::new();
+            harness.feed(feed(1, PointerPhase::Down, 10.0, 10.0), 0.0);
+            harness.feed(feed(1, PointerPhase::Up, 10.0, 10.0), 0.1);
+            let names = harness.emitted();
+            assert!(
+                !names.iter().any(|name| name.starts_with("mouse")),
+                "got {names:?}"
+            );
+            assert_eq!(clicks(&harness), [format!("click@{TARGET}>{TARGET}")]);
+        }
+    }
+
+    #[test]
+    fn a_click_names_the_down_and_the_release_target_for_the_main_thread() {
+        let mut harness = Harness::new();
+        harness.feed_routed(
+            mouse(1, PointerPhase::Down, 10.0, 10.0),
+            Some(target()),
+            0.0,
+        );
+        harness.feed_routed(mouse(1, PointerPhase::Up, 200.0, 10.0), Some(other()), 0.1);
+        assert_eq!(
+            clicks(&harness),
+            [format!("click@{TARGET}>{OTHER}")],
+            "no slop: the common ancestor is resolved where the tree is"
+        );
+
+        // A release that routed to nothing clicks nothing.
+        harness.out.clear();
+        harness.feed(mouse(1, PointerPhase::Down, 10.0, 10.0), 0.2);
+        harness.feed_routed(mouse(1, PointerPhase::Up, 10.0, 10.0), None, 0.3);
+        assert!(clicks(&harness).is_empty());
+    }
+
+    #[test]
+    fn a_consumed_scroll_or_a_cancel_suppresses_the_click() {
+        let mut harness = Harness::new();
+        harness.host.scroller = Some(scroller());
+        harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.0);
+        harness.feed(touch(1, PointerPhase::Move, 10.0, 40.0), 0.05);
+        harness.router.note_scroll_consumed(1);
+        harness.feed(touch(1, PointerPhase::Up, 10.0, 40.0), 0.1);
+        assert!(clicks(&harness).is_empty(), "the scroll claimed it");
+
+        harness.feed(touch(2, PointerPhase::Down, 10.0, 10.0), 0.2);
+        harness.feed(touch(2, PointerPhase::Cancel, 10.0, 10.0), 0.25);
+        harness.feed(touch(2, PointerPhase::Up, 10.0, 10.0), 0.3);
+        assert!(clicks(&harness).is_empty(), "the cancel ended it");
+    }
+
+    #[test]
+    fn only_the_primary_pointer_and_button_click() {
+        let mut harness = Harness::new();
+        harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.0);
+        harness.feed(touch(2, PointerPhase::Down, 50.0, 10.0), 0.01);
+        harness.feed(touch(2, PointerPhase::Up, 50.0, 10.0), 0.02);
+        harness.feed(touch(1, PointerPhase::Up, 10.0, 10.0), 0.03);
+        assert_eq!(
+            clicks(&harness),
+            [format!("click@{TARGET}>{TARGET}")],
+            "the second finger is not primary; the first still clicks"
+        );
+
+        harness.out.clear();
+        let secondary = |phase, buttons| mouse(1, phase, 10.0, 10.0).with_buttons(2, buttons);
+        harness.feed(secondary(PointerPhase::Down, 2), 0.1);
+        harness.feed(secondary(PointerPhase::Up, 0), 0.2);
+        assert!(
+            clicks(&harness).is_empty(),
+            "a secondary button does not click"
+        );
+    }
+
+    #[test]
     fn a_quick_release_is_pointer_events_then_a_tap_at_the_release_point() {
         let mut harness = Harness::new();
         harness.feed(touch(1, PointerPhase::Down, 10.0, 10.0), 0.0);
         harness.feed(touch(1, PointerPhase::Up, 12.0, 11.0), 0.1);
         assert_eq!(
             harness.emitted(),
-            ["pointerdown", "touchstart", "pointerup", "touchend", "tap"],
-            "the touch event rides between the raw event and the synthesis"
+            [
+                "pointerdown",
+                "touchstart",
+                "pointerup",
+                "touchend",
+                "click",
+                "tap"
+            ],
+            "the touch event rides between the raw event and the synthesis, and the click \
+             precedes the tap"
         );
-        let InputDecision::Emit(tap) = &harness.out[4] else {
+        let InputDecision::Emit(tap) = &harness.out[5] else {
             panic!("the last decision is the tap");
         };
         assert_eq!(tap.target, target());
-        assert!((tap.position.x - 12.0).abs() < f32::EPSILON);
+        let position = tap.detail.position().expect("a tap carries a position");
+        assert!((position.x - 12.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -894,9 +1274,10 @@ mod tests {
                 "pointermove",
                 "touchmove",
                 "pointerup",
-                "touchend"
+                "touchend",
+                "click"
             ],
-            "60px of travel is not a tap"
+            "60px of travel is not a tap, and a click has no slop"
         );
     }
 
@@ -907,7 +1288,14 @@ mod tests {
         harness.feed(touch(1, PointerPhase::Up, 100.0, 10.0), 0.1);
         assert_eq!(
             harness.emitted(),
-            ["pointerdown", "touchstart", "pointerup", "touchend"]
+            [
+                "pointerdown",
+                "touchstart",
+                "pointerup",
+                "touchend",
+                "click"
+            ],
+            "the click is at the two targets' common ancestor, whatever the distance"
         );
     }
 
@@ -929,6 +1317,7 @@ mod tests {
                 "touchmove",
                 "pointerup",
                 "touchend",
+                "click",
                 "tap"
             ],
             "no longpress, tap survives"
@@ -967,9 +1356,10 @@ mod tests {
                 "touchstart",
                 "longpress",
                 "pointerup",
-                "touchend"
+                "touchend",
+                "click"
             ],
-            "the release is not a tap"
+            "the release is not a tap; a long press still clicks"
         );
     }
 
@@ -986,7 +1376,8 @@ mod tests {
                 "touchstart",
                 "longpress",
                 "pointerup",
-                "touchend"
+                "touchend",
+                "click"
             ],
             "the decision order is the delivery order"
         );
@@ -1001,7 +1392,14 @@ mod tests {
         harness.feed(touch(1, PointerPhase::Up, 10.0, 10.0), 0.9);
         assert_eq!(
             harness.emitted(),
-            ["pointerdown", "touchstart", "pointerup", "touchend", "tap"],
+            [
+                "pointerdown",
+                "touchstart",
+                "pointerup",
+                "touchend",
+                "click",
+                "tap"
+            ],
             "an unconsumed longpress does not suppress the tap"
         );
     }
@@ -1085,6 +1483,7 @@ mod tests {
                 "touchmove",
                 "pointerup",
                 "touchend",
+                "click",
                 "tap"
             ],
             "an 8-50px nudge that moved nothing still taps, matching Lynx"
@@ -1137,23 +1536,59 @@ mod tests {
         );
     }
 
+    /// A mouse drag scrolls (user ruling 2026-10-13): it latches the drag
+    /// recognizer like a finger, the compatibility `mousemove` goes on
+    /// flowing while it scrolls, and the consumed scroll claims the sequence
+    /// from `click` and `tap` alike.
     #[test]
-    fn a_mouse_drag_does_not_scroll_but_still_taps() {
+    fn a_mouse_drag_scrolls_and_its_consumed_scroll_suppresses_click_and_tap() {
         let mut harness = Harness::new();
         harness.host.scroller = Some(scroller());
         harness.feed(mouse(1, PointerPhase::Down, 10.0, 10.0), 0.0);
-        harness.feed(mouse(1, PointerPhase::Move, 10.0, 30.0), 0.05);
-        harness.feed(mouse(1, PointerPhase::Up, 10.0, 30.0), 0.1);
+        harness.feed(mouse(1, PointerPhase::Move, 10.0, 70.0), 0.05);
+        harness.router.note_scroll_consumed(1);
+        harness.feed(mouse(1, PointerPhase::Up, 10.0, 70.0), 0.1);
         assert_eq!(
-            harness.emitted(),
-            ["pointerdown", "pointermove", "pointerup", "tap"],
-            "matching every browser, a mouse drag scrolls nothing"
+            harness.trace(),
+            [
+                format!("pointerdown@{TARGET}"),
+                format!("mousedown@{TARGET}"),
+                // 60px of travel less the 8px slop.
+                format!("scroll@{SCROLLER}:-0,-52"),
+                format!("pointermove@{TARGET}"),
+                format!("mousemove@{TARGET}"),
+                "scrollend#1".to_owned(),
+                format!("pointerup@{TARGET}"),
+                format!("mouseup@{TARGET}"),
+            ],
+            "a scroll decision, the mouse events beside it, and no click or tap"
         );
-        assert!(
-            !harness
-                .out
-                .iter()
-                .any(|decision| matches!(decision, InputDecision::Scroll { .. }))
+    }
+
+    /// The wheel is no pointer sequence: a mouse wheel during a press scrolls
+    /// as any wheel does and claims nothing from the press's `click`/`tap`.
+    #[test]
+    fn a_mouse_wheel_is_unaffected_by_the_mouse_drag_policy() {
+        let mut harness = Harness::new();
+        harness.host.scroller = Some(scroller());
+        harness.feed(mouse(1, PointerPhase::Down, 10.0, 10.0), 0.0);
+        harness.feed(
+            InputEvent::wheel(Point2D::new(10.0, 10.0), Vector2D::new(0.0, 30.0)),
+            0.05,
+        );
+        harness.feed(mouse(1, PointerPhase::Up, 10.0, 10.0), 0.1);
+        assert_eq!(
+            harness.trace(),
+            [
+                format!("pointerdown@{TARGET}"),
+                format!("mousedown@{TARGET}"),
+                format!("scroll@{SCROLLER}:0,30"),
+                format!("wheel@{TARGET}"),
+                format!("pointerup@{TARGET}"),
+                format!("mouseup@{TARGET}"),
+                format!("click@{TARGET}"),
+                format!("tap@{TARGET}"),
+            ]
         );
     }
 
@@ -1370,7 +1805,16 @@ mod tests {
         assert!(harness.touch_trace().is_empty());
         assert_eq!(
             harness.emitted(),
-            ["pointerdown", "pointermove", "pointerup", "tap"]
+            [
+                "pointerdown",
+                "mousedown",
+                "pointermove",
+                "mousemove",
+                "pointerup",
+                "mouseup",
+                "click",
+                "tap"
+            ]
         );
     }
 

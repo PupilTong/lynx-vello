@@ -1,9 +1,13 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use dom::event::EventDetail;
+
 use super::{FarEnd, Painter, ToMain};
 use crate::link::{FramePost, ScrollEntry, ScrollMailbox};
-use crate::main::tree::{ComponentEvents, LynxDocument, PageConfig, Viewport, new_document};
+use crate::main::tree::{
+    Autoplays, ComponentEvents, LynxDocument, PageConfig, Viewport, new_document,
+};
 use crate::resource::SourceRequest;
 use crate::test_support::TestViewSpec;
 use crate::view::{EngineEvent, EventRequester, FrameSize, NoWakeup};
@@ -14,6 +18,7 @@ fn document() -> LynxDocument {
         Viewport::new(393.0, 727.0),
         PageConfig::default(),
         ComponentEvents::default(),
+        Autoplays::default(),
     )
 }
 
@@ -225,13 +230,24 @@ fn a_commit_whose_pixels_can_no_longer_be_read_is_not_adopted() {
     );
 }
 
+/// A tap's detail, as the router decides one: a touch pointer's position.
+fn tap_detail() -> EventDetail {
+    EventDetail::Pointer {
+        position: dom::Point2D::new(1.0, 1.0),
+        id: 1,
+        device: dom::input::PointerKind::Touch,
+        button: 0,
+        buttons: 0,
+    }
+}
+
 /// An emit decision costs one name-table lookup and stops there unless a
 /// listener exists; when it crosses, it crosses as plain data — the
 /// target id, not a path. Liveness is the main thread's to check at
 /// delivery.
 #[test]
 fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
-    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT, TouchPoints};
+    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
 
     let (mut painter, mut main) = detached();
     // The permanent page element's packed handle, as script would name it.
@@ -241,9 +257,8 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
         decisions.push(InputDecision::Emit(EmitEvent {
             name: TAP_EVENT,
             target,
-            position: dom::Point2D::new(1.0, 1.0),
-            wheel: None,
-            touches: TouchPoints::new(),
+            detail: tap_detail(),
+            release: None,
         }));
         painter.execute_decisions(&mut decisions, None, 0.25);
         assert!(decisions.is_empty(), "the queue is always drained");
@@ -283,6 +298,7 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
         name,
         target: sent,
         payload,
+        ..
     } = command
     else {
         panic!("an emit decision becomes a dispatch command");
@@ -290,9 +306,7 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     assert_eq!(name, TAP_EVENT);
     assert_eq!(sent, target);
     // The decision's own facts, as values: nothing is encoded on this side.
-    assert_eq!(payload.position, dom::Point2D::new(1.0, 1.0));
-    assert_eq!(payload.wheel, None, "a tap carries no wheel delta");
-    assert!(payload.touches.is_empty(), "a tap carries no touch points");
+    assert_eq!(payload.detail, tap_detail());
     // The pass's clock reading, in milliseconds.
     assert!((payload.timestamp - 250.0).abs() < f64::EPSILON);
 
@@ -312,7 +326,7 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
 /// behind it: a `tap` crosses to the main thread for the component alone.
 #[test]
 fn a_name_a_component_observes_crosses_with_no_realm_listener() {
-    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT, TouchPoints};
+    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
 
     let (mut painter, mut main) = detached();
     let target = dom::NodeId::from_bits(2).expect("a well-formed packed handle");
@@ -321,9 +335,8 @@ fn a_name_a_component_observes_crosses_with_no_realm_listener() {
         decisions.push(InputDecision::Emit(EmitEvent {
             name: TAP_EVENT,
             target,
-            position: dom::Point2D::new(1.0, 1.0),
-            wheel: None,
-            touches: TouchPoints::new(),
+            detail: tap_detail(),
+            release: None,
         }));
         painter.execute_decisions(&mut decisions, None, 0.25);
     };
@@ -331,7 +344,7 @@ fn a_name_a_component_observes_crosses_with_no_realm_listener() {
     emit(&mut painter);
     assert!(
         main.commands.try_recv().is_err(),
-        "nothing routes `tap` yet"
+        "nothing routes `tap` yet: no document published its names"
     );
 
     main.outbox.publish_observed_names([TAP_EVENT]);
@@ -377,16 +390,20 @@ fn a_wheel_delta_and_touch_points_cross_as_values() {
     decisions.push(InputDecision::Emit(EmitEvent {
         name: "wheel",
         target,
-        position: dom::Point2D::new(5.0, 6.0),
-        wheel: Some(dom::Vector2D::new(0.0, 30.0)),
-        touches: TouchPoints::new(),
+        detail: EventDetail::Wheel {
+            position: dom::Point2D::new(5.0, 6.0),
+            delta: dom::Vector2D::new(0.0, 30.0),
+        },
+        release: None,
     }));
     decisions.push(InputDecision::Emit(EmitEvent {
         name: "touchmove",
         target,
-        position: dom::Point2D::new(30.5, 40.0),
-        wheel: None,
-        touches: touches.clone(),
+        detail: EventDetail::Touch {
+            position: dom::Point2D::new(30.5, 40.0),
+            points: touches.clone(),
+        },
+        release: None,
     }));
     painter.execute_decisions(&mut decisions, None, 0.5);
 
@@ -397,16 +414,24 @@ fn a_wheel_delta_and_touch_points_cross_as_values() {
     else {
         panic!("an emit decision becomes a dispatch command");
     };
-    assert_eq!(payload.wheel, Some(dom::Vector2D::new(0.0, 30.0)));
-    assert_eq!(payload.position, dom::Point2D::new(5.0, 6.0));
+    assert_eq!(
+        payload.detail,
+        EventDetail::Wheel {
+            position: dom::Point2D::new(5.0, 6.0),
+            delta: dom::Vector2D::new(0.0, 30.0),
+        }
+    );
 
     let ToMain::DispatchEvent { payload, .. } =
         main.commands.try_recv().expect("then the touch event")
     else {
         panic!("an emit decision becomes a dispatch command");
     };
-    assert_eq!(payload.touches.as_slice(), touches.as_slice());
-    assert_eq!(payload.wheel, None);
+    assert_eq!(payload.detail.touch_points(), touches.as_slice());
+    assert_eq!(
+        payload.detail.position(),
+        Some(dom::Point2D::new(30.5, 40.0))
+    );
     assert!((payload.timestamp - 500.0).abs() < f64::EPSILON);
 }
 
@@ -1230,7 +1255,7 @@ fn frame_posts_coalesce_to_the_latest_clock_and_greatest_sequence() {
 /// marker, so its listener never sees a document older than its pass.
 #[test]
 fn a_dispatch_in_a_scrolling_pass_follows_the_marker() {
-    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT, TouchPoints};
+    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
 
     let (mut painter, mut main, scroller) = scrolling("");
     main.outbox.listener_edge(Arc::from(TAP_EVENT), true);
@@ -1245,9 +1270,8 @@ fn a_dispatch_in_a_scrolling_pass_follows_the_marker() {
     decisions.push(InputDecision::Emit(EmitEvent {
         name: TAP_EVENT,
         target: scroller,
-        position: dom::Point2D::new(1.0, 1.0),
-        wheel: None,
-        touches: TouchPoints::new(),
+        detail: tap_detail(),
+        release: None,
     }));
     painter.execute_decisions(&mut decisions, Some(&frame), 0.5);
     assert!(matches!(main.commands.try_recv(), Ok(ToMain::Posted)));
@@ -1288,7 +1312,7 @@ fn a_vsync_follows_the_marker_of_its_pass() {
 /// applied them, so the acknowledgement implies the tap below.
 #[test]
 fn a_frame_post_is_fenced_behind_every_command_sent_before_it() {
-    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT, TouchPoints};
+    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
 
     let (mut painter, mut main, scroller) = scrolling("");
     main.outbox.listener_edge(Arc::from(TAP_EVENT), true);
@@ -1303,9 +1327,8 @@ fn a_frame_post_is_fenced_behind_every_command_sent_before_it() {
     decisions.push(InputDecision::Emit(EmitEvent {
         name: TAP_EVENT,
         target: scroller,
-        position: dom::Point2D::new(1.0, 1.0),
-        wheel: None,
-        touches: TouchPoints::new(),
+        detail: tap_detail(),
+        release: None,
     }));
     painter.execute_decisions(&mut decisions, Some(&frame), 0.5);
     let sent = main.seat.commands.sent();
@@ -1587,13 +1610,16 @@ fn a_resized_scroller_stays_on_the_page_the_painter_showed() {
     wheel(&mut painter, 30.0);
     wheel(&mut painter, 30.0);
     assert_eq!(shown(&painter, scroller), dom::Vector2D::new(0.0, 400.0));
+    // The wheel gesture's quiet interval ends: the container is at rest.
+    let frame = painter.frame().cloned().expect("a frame is adopted");
+    painter.scroll_intents.tick(&frame, 1.0);
     let _ = take(&main);
 
     document.set_inline_style(scroller, &paged_style("", 300));
     adopt(&mut painter, &main, &mut document);
     assert_eq!(shown(&painter, scroller), dom::Vector2D::new(0.0, 600.0));
     assert!(
-        !painter.scroll_intents.is_animating(),
+        !painter.scroll_intents.is_gliding(scroller),
         "a jump, not a glide"
     );
     painter.publish_scroll(0.0, None);
@@ -1741,4 +1767,464 @@ fn a_commit_moves_no_scroller_a_drag_or_a_glide_has() {
         rest % 250.0 == 0.0,
         "on a page of the last frame, got {rest}"
     );
+}
+
+/// A document holding one 200px column scroller of `content` px at the
+/// origin, with the scroller and its filler: a range of `content - 200`.
+fn auto_scrolled(content: u32) -> (LynxDocument, dom::NodeId, dom::NodeId) {
+    let mut document = document();
+    let root = document.document_element().id();
+    let scroller = document.create_element("view", ());
+    document.set_inline_style(
+        scroller,
+        "display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px",
+    );
+    document.append_child(root, scroller);
+    let filler = document.create_element("view", ());
+    document.set_inline_style(filler, &filler_style(content));
+    document.append_child(scroller, filler);
+    (document, scroller, filler)
+}
+
+fn filler_style(content: u32) -> String {
+    format!("flex-shrink:0;width:200px;height:{content}px")
+}
+
+/// Ticks the scroll intents over the painter's adopted frame `count` times,
+/// `hz` to the second, from `from`, and returns the clock it ended on.
+fn tick_at(painter: &mut Painter, from: f64, hz: f64, count: u32) -> f64 {
+    let frame = painter.frame().cloned().expect("a frame is adopted");
+    let mut now = from;
+    for _ in 0..count {
+        now += 1.0 / hz;
+        painter.scroll_intents.tick(&frame, now);
+    }
+    now
+}
+
+/// An auto-scroll moves its axis at its rate on the painter's clock, posts
+/// each step naming the change that started it, and ends on the edge it
+/// was to stop at, posted at rest; a container with none owes no frame.
+#[test]
+fn an_auto_scroll_moves_at_its_rate_and_ends_on_its_edge() {
+    let (mut document, scroller, _) = auto_scrolled(1000);
+    let (mut painter, main) = detached();
+    adopt(&mut painter, &main, &mut document);
+    let frame = painter.frame().cloned().expect("a frame is adopted");
+    assert!(!painter.scroll_intents.is_auto_scrolling(&frame));
+
+    document.auto_scroll(scroller, 600.0, false, true);
+    let serial = document
+        .pending_auto_scroll(scroller)
+        .expect("the change is pending")
+        .serial;
+    adopt(&mut painter, &main, &mut document);
+    let frame = painter.frame().cloned().expect("the new frame is adopted");
+    assert!(painter.scroll_intents.has_auto_scroll(scroller));
+    assert!(painter.scroll_intents.is_auto_scrolling(&frame));
+    assert!(
+        !painter.scroll_intents.is_animating(),
+        "no fling, bounce back or glide"
+    );
+    painter.publish_scroll(0.0, None);
+    let (entries, _) = take(&main);
+    assert_eq!(
+        entries,
+        [(
+            scroller,
+            ScrollEntry {
+                offset: dom::Vector2D::zero(),
+                at: 0.0,
+                rest: None,
+                request: Some(serial),
+            }
+        )],
+        "posted at once, unmoved, naming the change"
+    );
+
+    // The first tick is where the travel counts from; thirty more at 60 Hz
+    // are half a second, 300px.
+    let now = tick_at(&mut painter, 0.0, 60.0, 31);
+    let offset = shown(&painter, scroller).y;
+    assert!((offset - 300.0).abs() < 0.01, "got {offset}");
+    painter.publish_scroll(now, None);
+    let (entries, _) = take(&main);
+    assert_eq!(entries[0].1.request, Some(serial));
+    assert_eq!(entries[0].1.rest, None, "still moving");
+
+    let now = tick_at(&mut painter, now, 60.0, 60);
+    assert_eq!(
+        shown(&painter, scroller),
+        dom::Vector2D::new(0.0, 800.0),
+        "on the edge exactly"
+    );
+    assert!(!painter.scroll_intents.has_auto_scroll(scroller), "ended");
+    assert!(!painter.scroll_intents.is_auto_scrolling(&frame));
+    painter.publish_scroll(now, None);
+    let (entries, _) = take(&main);
+    assert_eq!(entries[0].1.rest, Some(dom::Vector2D::new(0.0, 800.0)));
+
+    // Back the other way, to the start edge.
+    document.auto_scroll(scroller, -1200.0, false, true);
+    adopt(&mut painter, &main, &mut document);
+    tick_at(&mut painter, now, 60.0, 60);
+    assert_eq!(shown(&painter, scroller), dom::Vector2D::zero());
+    assert!(!painter.scroll_intents.has_auto_scroll(scroller));
+}
+
+/// A write is at least [`AUTO_SCROLL_MIN_INTERVAL_SECONDS`] after the last
+/// and at least one physical pixel: a 120 Hz display writes every second
+/// frame, a slow rate once per pixel, and neither loses any travel.
+///
+/// [`AUTO_SCROLL_MIN_INTERVAL_SECONDS`]: super::inertia::AUTO_SCROLL_MIN_INTERVAL_SECONDS
+#[test]
+fn an_auto_scroll_writes_no_more_often_than_its_interval_and_a_pixel() {
+    let writes = |rate: f32, hz: f64, ticks: u32| {
+        let (mut document, scroller, _) = auto_scrolled(1000);
+        let (mut painter, main) = detached();
+        adopt(&mut painter, &main, &mut document);
+        document.auto_scroll(scroller, rate, false, true);
+        adopt(&mut painter, &main, &mut document);
+        let frame = painter.frame().cloned().expect("a frame is adopted");
+        let (mut written, mut last, mut now) = (0_u32, 0.0_f32, 0.0_f64);
+        for _ in 0..ticks {
+            now += 1.0 / hz;
+            painter.scroll_intents.tick(&frame, now);
+            let offset = shown(&painter, scroller).y;
+            if offset > last {
+                assert!(offset - last >= 1.0, "a step of {}", offset - last);
+                written += 1;
+                last = offset;
+            }
+            assert!(
+                painter.scroll_intents.is_auto_scrolling(&frame),
+                "a tick that writes nothing still owes the next frame"
+            );
+        }
+        (written, last)
+    };
+
+    // One second at 120 Hz: the first tick starts the count, and every
+    // second one after it writes 10px.
+    let (written, offset) = writes(600.0, 120.0, 121);
+    assert_eq!(written, 60);
+    assert!((offset - 600.0).abs() < 0.01, "got {offset}");
+
+    // One second at 60 Hz: every tick writes.
+    let (written, offset) = writes(600.0, 60.0, 61);
+    assert_eq!(written, 60);
+    assert!((offset - 600.0).abs() < 0.01, "got {offset}");
+
+    // Two seconds at 6px a second: one write per pixel, not per frame.
+    let (written, offset) = writes(6.0, 60.0, 121);
+    assert!((11..=12).contains(&written), "got {written}");
+    assert!((offset - 12.0).abs() < 1.01, "got {offset}");
+}
+
+/// Without `stop_at_edge` an auto-scroll stays at its edge, at rest and
+/// owing no frame, and goes on when a commit brings a longer range, from
+/// that commit and not from the time it waited. The instant scroll made in
+/// the same turn arrives with it, and the auto-scroll starts from there.
+#[test]
+fn an_auto_scroll_that_does_not_stop_waits_at_its_edge_for_a_longer_range() {
+    let (mut document, scroller, filler) = auto_scrolled(1000);
+    let (mut painter, main) = detached();
+    adopt(&mut painter, &main, &mut document);
+    // A wheel first, so the painter holds an offset of its own that the
+    // document's instant scroll has to replace.
+    wheel(&mut painter, 30.0);
+    let _ = take(&main);
+
+    document.auto_scroll(scroller, 600.0, false, false);
+    document.scroll_to_with(
+        scroller,
+        dom::Vector2D::new(0.0, 700.0),
+        dom::scroll::ScrollBehavior::Instant,
+    );
+    adopt(&mut painter, &main, &mut document);
+    assert_eq!(
+        shown(&painter, scroller),
+        dom::Vector2D::new(0.0, 700.0),
+        "the scroll request of the same turn was carried out"
+    );
+    assert!(
+        painter.scroll_intents.has_auto_scroll(scroller),
+        "and so was the older auto-scroll change"
+    );
+
+    let now = tick_at(&mut painter, 0.0, 60.0, 30);
+    let frame = painter.frame().cloned().expect("a frame is adopted");
+    assert_eq!(shown(&painter, scroller), dom::Vector2D::new(0.0, 800.0));
+    assert!(painter.scroll_intents.has_auto_scroll(scroller), "kept");
+    assert!(
+        !painter.scroll_intents.is_auto_scrolling(&frame),
+        "at its edge it owes no frame"
+    );
+    painter.publish_scroll(now, None);
+    let (entries, _) = take(&main);
+    assert_eq!(
+        entries[0].1.rest,
+        Some(dom::Vector2D::new(0.0, 800.0)),
+        "at rest on the edge"
+    );
+
+    // Ten seconds later the content grows by 200px.
+    document.set_inline_style(filler, &filler_style(1200));
+    adopt(&mut painter, &main, &mut document);
+    let grown = painter.frame().cloned().expect("the new frame is adopted");
+    assert!(painter.scroll_intents.is_auto_scrolling(&grown));
+    let now = tick_at(&mut painter, now + 10.0, 60.0, 1);
+    assert_eq!(
+        shown(&painter, scroller),
+        dom::Vector2D::new(0.0, 800.0),
+        "the wait is not travelled"
+    );
+    tick_at(&mut painter, now, 60.0, 6);
+    let offset = shown(&painter, scroller).y;
+    assert!((offset - 860.0).abs() < 0.01, "got {offset}");
+}
+
+/// A drag has the container while it holds it: the auto-scroll adds nothing
+/// and owes no frame, and after the release it goes on from where the
+/// finger left the container, the hold not travelled.
+#[test]
+fn an_auto_scroll_yields_to_a_drag_and_goes_on_after_it() {
+    use dom::input::PointerPhase::{Down, Move, Up};
+
+    let (mut document, scroller, _) = auto_scrolled(1000);
+    let (mut painter, main) = detached();
+    adopt(&mut painter, &main, &mut document);
+    document.auto_scroll(scroller, 600.0, false, true);
+    adopt(&mut painter, &main, &mut document);
+    let frame = painter.frame().cloned().expect("a frame is adopted");
+    let now = tick_at(&mut painter, 0.0, 60.0, 31);
+    assert!((shown(&painter, scroller).y - 300.0).abs() < 0.01);
+
+    painter.clock.pin(now);
+    touch(&mut painter, Down, 150.0);
+    touch(&mut painter, Move, 120.0);
+    let held = shown(&painter, scroller);
+    assert!(held.y > 310.0, "the finger moved it, got {held:?}");
+    assert!(painter.scroll_intents.is_held(scroller));
+    assert!(
+        !painter.scroll_intents.is_auto_scrolling(&frame),
+        "a held container owes no frame"
+    );
+    let now = tick_at(&mut painter, now, 60.0, 120);
+    assert_eq!(shown(&painter, scroller), held, "under the finger");
+
+    // Every step at one clock reading: no velocity to fling with.
+    painter.clock.pin(now);
+    touch(&mut painter, Up, 120.0);
+    assert!(!painter.scroll_intents.is_held(scroller));
+    assert!(
+        painter.scroll_intents.has_auto_scroll(scroller),
+        "not ended"
+    );
+    assert!(painter.scroll_intents.is_auto_scrolling(&frame));
+    let now = tick_at(&mut painter, now, 60.0, 1);
+    assert_eq!(shown(&painter, scroller), held, "the hold is not travelled");
+    tick_at(&mut painter, now, 60.0, 6);
+    let offset = shown(&painter, scroller).y;
+    assert!((offset - held.y - 60.0).abs() < 0.01, "got {offset}");
+}
+
+/// A scroll request moves an auto-scrolling container and does not end its
+/// auto-scroll: a smooth one glides first and the auto-scroll goes on from
+/// its landing. Only a change with no rate ends it, where it stands.
+#[test]
+fn a_scroll_request_does_not_end_an_auto_scroll_and_a_stop_does() {
+    let (mut document, scroller, _) = auto_scrolled(2000);
+    let (mut painter, main) = detached();
+    adopt(&mut painter, &main, &mut document);
+    document.auto_scroll(scroller, 60.0, false, true);
+    adopt(&mut painter, &main, &mut document);
+    let now = tick_at(&mut painter, 0.0, 60.0, 61);
+    assert!((shown(&painter, scroller).y - 60.0).abs() < 0.01);
+
+    document.scroll_to_with(
+        scroller,
+        dom::Vector2D::new(0.0, 500.0),
+        dom::scroll::ScrollBehavior::Smooth,
+    );
+    // Adopted at the clock the ticks run on, so the glide starts there.
+    main.outbox.publish_frame(document.commit());
+    painter.poll_link();
+    let frame = painter.frame().cloned().expect("a frame is adopted");
+    painter.scroll_intents.rebase(&frame, now);
+    assert!(painter.scroll_intents.is_gliding(scroller));
+    assert!(painter.scroll_intents.has_auto_scroll(scroller));
+    assert!(
+        !painter.scroll_intents.is_auto_scrolling(&frame),
+        "the glide has the container"
+    );
+    let mut now = now;
+    while painter.scroll_intents.is_gliding(scroller) {
+        now = tick_at(&mut painter, now, 60.0, 1);
+        assert!(
+            shown(&painter, scroller).y <= 500.0,
+            "never past the target"
+        );
+    }
+    assert_eq!(shown(&painter, scroller), dom::Vector2D::new(0.0, 500.0));
+    assert!(painter.scroll_intents.is_auto_scrolling(&frame));
+    let now = tick_at(&mut painter, now, 60.0, 60);
+    let offset = shown(&painter, scroller).y;
+    assert!((offset - 560.0).abs() < 1.01, "got {offset}");
+
+    document.auto_scroll(scroller, 0.0, false, true);
+    let stop = document
+        .pending_auto_scroll(scroller)
+        .expect("the stop is pending")
+        .serial;
+    adopt(&mut painter, &main, &mut document);
+    assert!(!painter.scroll_intents.has_auto_scroll(scroller));
+    let stopped = shown(&painter, scroller);
+    painter.publish_scroll(now, None);
+    let (entries, _) = take(&main);
+    let (_, entry) = entries
+        .into_iter()
+        .find(|(node, _)| *node == scroller)
+        .expect("the stop is posted");
+    assert_eq!(entry.request, Some(stop), "naming the stop");
+    assert_eq!(entry.rest, Some(stopped), "at rest where it stood");
+    tick_at(&mut painter, now, 60.0, 30);
+    assert_eq!(shown(&painter, scroller), stopped);
+}
+
+/// An auto-scrolling container is no container at rest: a commit does not
+/// snap it, and the at-rest rule applies once the auto-scroll has ended.
+#[test]
+fn a_commit_does_not_snap_an_auto_scrolling_container() {
+    let (mut document, scroller) = paged("");
+    let (mut painter, main) = detached();
+    adopt(&mut painter, &main, &mut document);
+    document.auto_scroll(scroller, 600.0, false, true);
+    adopt(&mut painter, &main, &mut document);
+    tick_at(&mut painter, 0.0, 60.0, 8);
+    let moving = shown(&painter, scroller);
+    assert!((moving.y - 70.0).abs() < 0.01, "got {moving:?}");
+
+    document.set_inline_style(scroller, &paged_style("opacity:0.5", 200));
+    adopt(&mut painter, &main, &mut document);
+    assert_eq!(shown(&painter, scroller), moving, "between two pages, kept");
+
+    document.auto_scroll(scroller, 0.0, false, true);
+    adopt(&mut painter, &main, &mut document);
+    assert_eq!(
+        shown(&painter, scroller),
+        dom::Vector2D::new(0.0, 0.0),
+        "stopped, it settles on the nearest page"
+    );
+}
+
+/// A request that yields to a pointer is not carried out while a drag holds
+/// its container, and is posted as handled all the same; once the finger is
+/// off, the next one is carried out like any other request.
+#[test]
+fn a_request_that_yields_to_a_pointer_is_dropped_under_a_finger() {
+    use dom::input::PointerPhase::{Down, Move, Up};
+    use dom::scroll::ScrollBehavior::{Instant, Smooth};
+
+    let (mut document, scroller, _) = auto_scrolled(1000);
+    let (mut painter, main) = detached();
+    adopt(&mut painter, &main, &mut document);
+    painter.clock.pin(0.0);
+    touch(&mut painter, Down, 150.0);
+    touch(&mut painter, Move, 120.0);
+    let held = shown(&painter, scroller);
+    assert!(held.y > 0.0 && painter.scroll_intents.is_held(scroller));
+    let _ = take(&main);
+
+    for behavior in [Smooth, Instant] {
+        assert!(document.scroll_to_yielding(scroller, dom::Vector2D::new(0.0, 400.0), behavior));
+        let serial = document
+            .pending_scroll_request(scroller)
+            .expect("the request is pending");
+        adopt(&mut painter, &main, &mut document);
+        assert_eq!(
+            shown(&painter, scroller),
+            held,
+            "{behavior:?}: under the finger"
+        );
+        assert!(!painter.scroll_intents.is_gliding(scroller), "{behavior:?}");
+        assert!(
+            painter.scroll_intents.is_held(scroller),
+            "{behavior:?}: still held"
+        );
+        painter.publish_scroll(0.0, None);
+        let (entries, _) = take(&main);
+        assert_eq!(
+            entries[0].1.request,
+            Some(serial),
+            "{behavior:?}: posted as handled"
+        );
+        assert_eq!(
+            entries[0].1.offset, held,
+            "{behavior:?}: where the finger has it"
+        );
+    }
+
+    // Every step at one clock reading: no velocity to fling with.
+    touch(&mut painter, Up, 120.0);
+    assert!(!painter.scroll_intents.is_held(scroller));
+    assert!(document.scroll_to_yielding(scroller, dom::Vector2D::new(0.0, 400.0), Instant));
+    adopt(&mut painter, &main, &mut document);
+    assert_eq!(
+        shown(&painter, scroller),
+        dom::Vector2D::new(0.0, 400.0),
+        "free, it is carried out"
+    );
+    assert!(document.scroll_to_yielding(scroller, dom::Vector2D::new(0.0, 600.0), Smooth));
+    adopt(&mut painter, &main, &mut document);
+    assert!(painter.scroll_intents.is_gliding(scroller), "and glides");
+}
+
+/// A wheel step posts its container moving, not at rest: the wheel gesture
+/// ends only once [`super::inertia::WHEEL_REST_SECONDS`] pass with no
+/// further step, and a step inside that interval restarts it. The quiet
+/// interval owes frames while it runs, and the tick that ends it posts the
+/// container at rest.
+#[test]
+fn a_wheel_rests_only_after_a_quiet_interval() {
+    use super::inertia::WHEEL_REST_SECONDS;
+
+    let (mut painter, main, scroller) = scrolling("");
+    let wheel = |painter: &mut Painter, at: f64| {
+        painter.clock.pin(at);
+        painter.dispatch_input(dom::input::InputEvent::wheel(
+            dom::Point2D::new(100.0, 100.0),
+            dom::Vector2D::new(0.0, 20.0),
+        ));
+    };
+    let rest_of = |main: &FarEnd| {
+        let (entries, _) = take(main);
+        entries
+            .iter()
+            .find(|(node, _)| *node == scroller)
+            .map(|(_, entry)| entry.rest)
+    };
+    let tick = |painter: &mut Painter, at: f64| {
+        let frame = painter.frame().cloned().expect("a frame is adopted");
+        painter.scroll_intents.tick(&frame, at);
+        painter.publish_scroll(at, None);
+    };
+
+    wheel(&mut painter, 0.0);
+    assert_eq!(rest_of(&main), Some(None), "a wheel step posts it moving");
+    assert!(painter.is_animating(), "the quiet interval owes frames");
+
+    wheel(&mut painter, 0.06);
+    assert_eq!(rest_of(&main), Some(None));
+    // 0.1 s after the first step but not after the second: still moving.
+    tick(&mut painter, 0.1);
+    assert_eq!(rest_of(&main), None, "nothing changed, nothing posted");
+
+    tick(&mut painter, 0.061 + WHEEL_REST_SECONDS);
+    assert_eq!(
+        rest_of(&main),
+        Some(Some(dom::Vector2D::new(0.0, 40.0))),
+        "the quiet interval ended the gesture at rest"
+    );
+    assert!(!painter.is_animating());
 }

@@ -84,7 +84,7 @@ impl<T> Document<T> {
                 ScrollLogicalPosition::Nearest,
                 Vector2D::zero(),
             ) {
-                self.scroll_to_with(container, position, ScrollBehavior::Instant);
+                self.request_scroll(container, position, ScrollBehavior::Instant, false, false);
                 requested = true;
             }
         }

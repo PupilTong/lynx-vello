@@ -7,7 +7,7 @@ use dom::stylo::properties::ComputedValues;
 use dom::stylo::servo_arc::Arc;
 use dom::stylo::values::computed::{Display, Overflow};
 
-use super::{ComponentEvents, LynxDocument, PageConfig, Viewport, new_document};
+use super::{Autoplays, ComponentEvents, LynxDocument, PageConfig, Viewport, new_document};
 
 /// A document on a phone-shaped viewport with the default page config.
 pub(in crate::main) fn document() -> LynxDocument {
@@ -25,8 +25,28 @@ pub(in crate::main) fn with_component_events(
 ) -> (LynxDocument, ComponentEvents) {
     let events = ComponentEvents::default();
     (
-        new_document(Viewport::new(393.0, 727.0), config, events.clone()),
+        new_document(
+            Viewport::new(393.0, 727.0),
+            config,
+            events.clone(),
+            Autoplays::default(),
+        ),
         events,
+    )
+}
+
+/// The default document, plus the autoplay timers its swipers keep — what
+/// the runtime holds the other end of.
+pub(in crate::main) fn with_autoplays() -> (LynxDocument, Autoplays) {
+    let autoplays = Autoplays::default();
+    (
+        new_document(
+            Viewport::new(393.0, 727.0),
+            PageConfig::default(),
+            ComponentEvents::default(),
+            autoplays.clone(),
+        ),
+        autoplays,
     )
 }
 

@@ -117,8 +117,10 @@
 //!
 //! ## Events
 //!
-//! A `tap` at the shadow content ([`dom::event::ElementEventKind::Tap`], at
-//! the hit node, heard in the bubble pass) becomes web-core's click handling
+//! A `tap` at the shadow content — the non-composed one the runtime fires at
+//! the hit node, heard at the shadow root's step in the bubble pass with that
+//! node as the target; the composed `tap` of the one dispatch, which reaches
+//! the host as itself, is ignored — becomes web-core's click handling
 //! (`#handleClick`, `XMarkdownAttributes.ts:620-651`), both events bubbling
 //! and composed:
 //!
@@ -152,8 +154,8 @@
 //! Not built, answering code 3 as the `text` component's unbuilt methods do
 //! (the kind has no method of the name):
 //!
-//! - `pauseAnimation` and `resumeAnimation`: the typewriter animation is deferred; it needs the
-//!   component timer infrastructure of PR #408.
+//! - `pauseAnimation` and `resumeAnimation`: the typewriter animation is deferred, to be built over
+//!   the document's component timers (`Autoplays`, PR #408), as a follow-up.
 //! - `getSelectedText` and `setTextSelection`: there is no text selection model.
 //!
 //! ## State
@@ -173,8 +175,8 @@
 //! - The typewriter animation — `animation-type`, `animation-velocity`, `animation-paused`,
 //!   `initial-animation-step`, `content-complete`, `typewriter-dynamic-height`,
 //!   `typewriter-height-transition-duration`, `animation-frame-rate`, `markdown-style`'s
-//!   `typewriterCursor`, and the `drawStart`, `drawEnd` and `animationStep` events: it needs a
-//!   component timer (PR #408).
+//!   `typewriterCursor`, and the `drawStart`, `drawEnd` and `animationStep` events: over the
+//!   document's component timers (`Autoplays`, PR #408), as a follow-up.
 //! - Truncation — `text-maxline`, the `overflow` event and `markdown-style`'s `truncation` marker:
 //!   a clamp across many paragraphs, which the per-paragraph `text-maxline` cannot express.
 //! - `markdown-effect` (web-core's text mask): no counterpart for `background-clip: text` here.
@@ -198,7 +200,7 @@ mod tests;
 
 use std::cell::RefCell;
 
-use dom::event::{ElementEvent, ElementEventKind, EventPhase};
+use dom::event::{ElementEvent, EventPhase};
 use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, ShadowRootMode};
 use rustc_hash::FxHashMap;
 
@@ -217,6 +219,10 @@ const CONTENT_RANGE_ATTRIBUTE: &str = "content-range";
 const CONTENT_ID_ATTRIBUTE: &str = "content-id";
 /// The JSON style object [`style`] translates.
 const MARKDOWN_STYLE_ATTRIBUTE: &str = "markdown-style";
+
+/// The gesture Lynx synthesizes at a release, which the component observes
+/// to hear a tap at its shadow content.
+const TAP_EVENT: &str = "tap";
 /// The root's id, and the part name web-core exports it under.
 const ROOT_ID: &str = "markdown-root";
 /// The root's class, which every [`style`] selector starts from.
@@ -489,7 +495,7 @@ impl CustomElement<()> for Markdown {
     }
 
     fn observed_events(&self) -> &'static [&'static str] {
-        &["tap"]
+        &[TAP_EVENT]
     }
 
     fn freed(&self, element: NodeId) {
@@ -548,8 +554,22 @@ impl CustomElement<()> for Markdown {
         self.put_state(element, state);
     }
 
-    fn handle_event(&self, document: &mut LynxDocument, element: NodeId, event: &mut ElementEvent) {
-        let ElementEventKind::Tap { x, y } = event.kind() else {
+    /// A `tap` at its own shadow content: the non-composed one the runtime
+    /// fires at the node the tap hit (`MainThreadRuntime::tap_shadow_content`),
+    /// heard at the shadow root's step with that node as the target, in its
+    /// bubble pass. The composed `tap` of the one dispatch reaches the host
+    /// as itself, `AtTarget` with the host as the target, and is ignored: it
+    /// no longer says which node was hit.
+    fn handle_event(
+        &self,
+        document: &mut LynxDocument,
+        element: NodeId,
+        event: &mut ElementEvent<'_>,
+    ) {
+        if event.type_name() != TAP_EVENT {
+            return;
+        }
+        let Some(dom::Point2D { x, y, .. }) = event.detail().position() else {
             return;
         };
         let target = event.target();
