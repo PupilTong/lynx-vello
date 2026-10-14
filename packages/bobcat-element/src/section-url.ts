@@ -1,13 +1,16 @@
 // The one URL rule a container's sections are named by, shared by both realms.
 //
 // A container — the page's own, or a lazy one `lynx.fetchBundle` installed —
-// answers its bodies and its stylesheets at URLs derived from its own: the
-// section name as a `.js` file under the container URL's path, and the named
-// stylesheet as `custom_section/<encoded name>.css` under it. `bobcat-source`
-// registers exactly these strings (`named_chunk_url` and `named_style_url` in
-// `crates/bobcat-source/src/page.rs`), so the rule lives in one module rather
-// than once per realm — MTS builds them for `__LoadLepusChunk`,
-// `lynx.loadScript` and `__LoadStyleSheet`, BTS for a lazy `bundleName`.
+// answers its bodies and its stylesheets at URLs derived from its own, every
+// one of them *under* the container URL's path with its `?#` suffix kept: a
+// named section as a `.js` file, a manifest path as the path it is, a named
+// stylesheet as `custom_section/<encoded name>.css`, and the page's own
+// StyleInfo as `style-info.css`. `bobcat-source` registers exactly these
+// strings (`named_chunk_url`, `bundle_path_url`, `named_style_url` and
+// `bundle_style_url` in `crates/bobcat-source`), so the rule
+// lives in one module rather than once per realm — MTS builds them for
+// `__LoadLepusChunk`, `lynx.loadScript` and `__LoadStyleSheet`, BTS for
+// `lynx.requireModule`, `lynx.loadScript` and `nativeApp.loadScript`.
 
 /**
  * One section name as `PageSource` percent-encodes it: `form_urlencoded`'s
@@ -48,4 +51,33 @@ export function sectionURL(name: string, bundleURL: string): string {
 export function styleSheetURL(key: string, bundleURL: string): string {
   const [path, suffix] = parts(bundleURL);
   return `${path.replace(/\/$/, "")}/custom_section/${encodedSection(key)}.css${suffix}`;
+}
+
+/**
+ * The resource URL one manifest path lives at: the container URL's path, then
+ * the bundle path as it is, the `?#` suffix kept.
+ *
+ * One leading `/` is stripped first, so `/app-service.js` and
+ * `app-service.js` name one URL, and no `.js` is appended: a manifest path
+ * already names its file, `.json` included, which is what tells the loader to
+ * parse it. A `?` or `#` inside the path is escaped, so it stays part of the
+ * path rather than starting the container's suffix; everything else is left
+ * for the URL parser, which escapes it the way `Url::set_path` does.
+ */
+export function bundlePathURL(path: string, bundleURL: string): string {
+  const [base, suffix] = parts(bundleURL);
+  const inside = (path.startsWith("/") ? path.slice(1) : path)
+    .replace(/[?#]/g, character => (character === "?" ? "%3F" : "%23"));
+  return `${base.replace(/\/$/, "")}/${inside}${suffix}`;
+}
+
+/**
+ * The resource URL a container's own StyleInfo lives at: the container URL's
+ * path, then `style-info.css`, the `?#` suffix kept. Only a page adopts it,
+ * as the view's listed author sheet; a lazy container's is registered and
+ * never asked for.
+ */
+export function bundleStyleSheetURL(bundleURL: string): string {
+  const [base, suffix] = parts(bundleURL);
+  return `${base.replace(/\/$/, "")}/style-info.css${suffix}`;
 }
