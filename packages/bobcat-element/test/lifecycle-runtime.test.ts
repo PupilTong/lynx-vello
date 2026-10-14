@@ -216,16 +216,16 @@ async function deliverToMain() {
 }
 
 describe("MTS/BTS lifecycle runtime", () => {
-  it("answers nativeApp.loadScript out of the body it loads beside the bundle", () => {
+  it("answers nativeApp.loadScript out of the body it loads under the bundle", () => {
     // All the boot script registers is where the container answered from.
-    // Every path of it is a load beside that URL: a body `PageSource`
+    // Every path of it is a load under that URL: a body `PageSource`
     // registered, whose module default-exported the `{init}` object a
     // `.lynx.bundle`'s expression evaluated to…
     registerBundle("https://cdn.test/app/x.web.bundle");
-    hostModules.set("https://cdn.test/app/section.js",
+    hostModules.set("https://cdn.test/app/x.web.bundle/section.js",
       {default: {init: ({tt}: {tt: unknown}) => ({app: tt})}});
     // …or a path no container carried, which is a plain CommonJS file.
-    hostFiles.set("https://cdn.test/app/external.js", "module.exports = {external: true};");
+    hostFiles.set("https://cdn.test/app/x.web.bundle/external.js", "module.exports = {external: true};");
 
     const loaded = bts.getNativeApp().loadScript("/section.js");
     expect(loaded.init({tt: bts.getApp()}).app).toBe(bts.getApp());
@@ -234,9 +234,9 @@ describe("MTS/BTS lifecycle runtime", () => {
     // `loadScript` feeds no `requireModule` cache, so the body is asked for
     // twice — one URL, one module in the realm, evaluated once.
     expect(moduleLoads).toEqual([
-      ["https://cdn.test/app/section.js", "module, exports"],
-      ["https://cdn.test/app/section.js", "module, exports"],
-      ["https://cdn.test/app/external.js", "module, exports"],
+      ["https://cdn.test/app/x.web.bundle/section.js", "module, exports"],
+      ["https://cdn.test/app/x.web.bundle/section.js", "module, exports"],
+      ["https://cdn.test/app/x.web.bundle/external.js", "module, exports"],
     ]);
   });
 

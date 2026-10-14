@@ -534,7 +534,7 @@ fn encoded(name: &str) -> String {
 
 /// `P/<encoded name>.js S`: a Lepus chunk or a custom section, one leading
 /// `/` stripped first — `sectionURL` in `section-url.ts`.
-pub(crate) fn named_chunk_url(container: &Url, name: &str) -> Url {
+fn named_chunk_url(container: &Url, name: &str) -> Url {
     under(container, &format!("{}.js", encoded(bare(name))))
 }
 
@@ -547,7 +547,7 @@ fn bundle_path_url(container: &Url, path: &str) -> Url {
 /// `P/custom_section/<encoded key>.css S`: a named stylesheet, so the
 /// compiler's `CSS` section is `custom_section/CSS.css` — `styleSheetURL` in
 /// `section-url.ts`.
-pub(crate) fn named_style_url(container: &Url, key: &str) -> Url {
+fn named_style_url(container: &Url, key: &str) -> Url {
     under(container, &format!("custom_section/{}.css", encoded(key)))
 }
 
