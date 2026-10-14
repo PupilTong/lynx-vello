@@ -4123,6 +4123,88 @@ fn card_url_uses_the_entry_response_url_before_requesting_styles() {
     });
 }
 
+/// A view that names a card URL names *it* as `__Card__`, rather than its
+/// entry's response URL: a container page's entry is one of the container's
+/// sections, and the container is what its chunks, its named stylesheets and
+/// its relative `new Worker` URLs hang off. The card URL is relative here, and
+/// `create_lynx_view` resolves it against the base like the entry.
+#[test]
+fn a_card_url_is_what_the_card_is_named_by() {
+    on_a_js_thread(|thread| async move {
+        let (context, workers) = group(&thread);
+        let mut harness = Harness::serving(
+            context,
+            workers,
+            ViewSources {
+                card_url: Some("cards/card.bundle".to_owned()),
+                ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+            },
+        );
+        harness
+            .until("the entry was not requested", |h| h.sources.len() == 1)
+            .await;
+        harness.answer_entry(
+            "app:///main.js",
+            r"
+            import { Worker } from 'bobcat-internal';
+            if (__Card__ !== 'app:///cards/card.bundle')
+                throw Error('the card is not the card URL: ' + __Card__);
+            __LoadStyleSheet('CSS', '__Card__');
+            globalThis.worker = new Worker('./worker.js');
+        ",
+        );
+        harness
+            .until("the stylesheet was not requested", |h| {
+                h.preloads.len() == 1
+            })
+            .await;
+        let request = harness.preloads.pop().unwrap();
+        assert!(
+            matches!(request, SourceRequest::StyleSheet(ref url)
+                if url == "app:///cards/card.bundle/custom_section/CSS.css"),
+            "{request:?}"
+        );
+        // The entry's own `Worker` and boot's BTS, in whichever order: the
+        // relative one is joined to the card URL, not to the entry's.
+        let mut started = Vec::new();
+        harness
+            .until("the entry never started its Worker", |h| {
+                while let Ok(WorkerCommand::Start(start)) = h.workers.try_recv() {
+                    started.push(start.url);
+                }
+                started.iter().any(|url| url.ends_with("worker.js"))
+            })
+            .await;
+        assert!(
+            started.contains(&"app:///cards/worker.js".to_owned()),
+            "{started:?}"
+        );
+        assert!(
+            !harness
+                .events
+                .iter()
+                .any(|event| event.is_fatal() || matches!(event, EngineEvent::ScriptRunError(_))),
+            "{:?}",
+            harness.events
+        );
+    });
+}
+
+/// A card URL that does not resolve against the base fails the view's
+/// construction, naming it, like an entry that does not.
+#[test]
+fn a_card_url_that_does_not_resolve_is_an_invalid_url() {
+    let mut sources = ViewSources {
+        card_url: Some("https://[".to_owned()),
+        ..ViewSources::new("app:///", "app:///main.js", SCREEN)
+    };
+    let error = resolve_startup_urls(&mut sources).expect_err("the card URL does not resolve");
+    assert!(
+        matches!(error, crate::EngineError::InvalidUrl { ref url, .. } if url == "https://["),
+        "{error:?}"
+    );
+}
+
 #[test]
 fn view_release_waits_for_js_dispose_before_terminating_its_bts() {
     on_a_js_thread(|thread| async move {
