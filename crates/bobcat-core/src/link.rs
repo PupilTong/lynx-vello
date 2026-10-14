@@ -789,6 +789,20 @@ impl ViewOutbox {
         });
     }
 
+    /// Publishes, once, the names the document's engine components observe
+    /// ([`dom::CustomElement::observed_events`]), so the painter routes them
+    /// whether or not the realm listens too. Never closed: a definition
+    /// observes its names for the document's whole life, and the realm's own
+    /// close edge for one of them is not forwarded
+    /// ([`listener_edge`](Self::listener_edge)'s caller filters it).
+    pub(crate) fn publish_observed_names(&self, names: impl IntoIterator<Item = &'static str>) {
+        self.frames.send_modify(|published| {
+            let mut listeners = published.listeners.as_ref().clone();
+            listeners.extend(names.into_iter().map(Arc::from));
+            published.listeners = Arc::new(listeners);
+        });
+    }
+
     pub(crate) fn begin_frame_serviced(&self, seq: u64) {
         self.frames.send_modify(|published| {
             published.begin_frame_serviced = published.begin_frame_serviced.max(seq);

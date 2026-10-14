@@ -254,8 +254,8 @@ impl<T> Document<T> {
     ///
     /// The queue is drained whether or not anything listens, because it is
     /// the record of one commit rather than a mailbox: a document that
-    /// defines no components pays the drain and one `is_empty` check per
-    /// change.
+    /// observes no `contentvisibilityautostatechange` pays the drain and one
+    /// set lookup per change.
     pub fn dispatch_content_visibility_changes(&mut self) {
         // Taken first, so a handler that renders — and queues changes of its
         // own — leaves them for the next drain instead of extending this

@@ -121,7 +121,7 @@ import { splitRecord } from "bobcat:record";
 // **The whole walk is this file's.** The host computes the event path while
 // it holds the document, releases it, and makes one call:
 // `__BobcatDispatchEvent(nodes, targets, name, bubbles, timestamp,
-// detailKind, ...detailNumbers)`, where `nodes` is the path in target-first
+// detailKind, ...detailValues)`, where `nodes` is the path in target-first
 // order as comma-joined decimal node ids and `targets` carries, position for
 // position, the shadow-retargeted target of that step. Two strings because
 // the boundary takes primitives and structured clones only, a clone can be
@@ -129,10 +129,11 @@ import { splitRecord } from "bobcat:record";
 // the same encoding `childElementIds` uses. Releasing the document before the
 // call is what lets a listener mutate the tree.
 //
-// Everything else is numbers, and the objects they describe are built here,
-// because their shape is JavaScript's. `timestamp` is the event's own, in
+// Everything else is primitives — numbers, and the strings a component's
+// detail is made of — and the objects they describe are built here, because
+// their shape is JavaScript's. `timestamp` is the event's own, in
 // milliseconds on the view's timeline. `detailKind` says which shape the
-// numbers behind it make, and is the only thing that branches: one kind per
+// values behind it make, and is the only thing that branches: one kind per
 // `detail` *shape*, never per event name, so one export carries every
 // producer the host has.
 //
@@ -153,6 +154,14 @@ import { splitRecord } from "bobcat:record";
 //   `exposure-id` (null when it has none) and `exposure-scene` (`""` when it
 //   has none), each under both of web-core's spellings. The target is live,
 //   because the host resolves it before it calls, so its attributes answer.
+// - `DETAIL_ID`, `DETAIL_URL_CONTENT`, `DETAIL_URL` — a component event whose
+//   detail is strings the component read when it queued the event: `{id}`;
+//   `{url, content, contentId}`; `{url, contentId}`. One string argument per
+//   key, in that order, and `undefined` for a key the component had no value
+//   for, which leaves the key out of the `detail` — the transport would carry
+//   an `undefined`-valued key as one, and web-core's `{id: undefined}` loses
+//   it once serialized. `<x-markdown>`'s `parseEnd`, `link` and `imageTap`
+//   are what these shapes are for.
 //
 // From there this file runs the standard's dispatch over that path: the
 // capture pass from the last entry to the first, the bubble pass from the
@@ -2660,10 +2669,12 @@ interface DispatchedEvent {
  * device position in viewport CSS px and — for `wheel` alone — the scroll
  * delta; an `<image>`'s `load` writes the bitmap's intrinsic size; its
  * `error` writes nothing, and the detail is `{}`; an element's `uiappear` or
- * `uidisappear` writes the five exposure keys. A key a kind does not write
- * is absent, not `undefined`-valued: the transport carries an
- * `undefined`-valued key as one. A listener may write into this object; it is
- * minted per dispatch, like the event that carries it.
+ * `uidisappear` writes the five exposure keys; a component event with a
+ * string detail writes its strings. A key a kind does not write — or a
+ * string the component had no value for — is absent, not `undefined`-valued:
+ * the transport carries an `undefined`-valued key as one. A listener may
+ * write into this object; it is minted per dispatch, like the event that
+ * carries it.
  */
 interface EventDetail extends Partial<ExposureDetail> {
   x?: number;
@@ -2672,7 +2683,14 @@ interface EventDetail extends Partial<ExposureDetail> {
   deltaY?: number;
   width?: number;
   height?: number;
+  id?: string;
+  url?: string;
+  content?: string;
+  contentId?: string;
 }
+
+/** The detail keys a component's strings are written under. */
+type TextDetailKey = "id" | "url" | "content" | "contentId";
 
 /**
  * web-core's `ExposureEventDetail` (`ExposureServices.ts:202-208`): an
@@ -2710,17 +2728,35 @@ function exposureDetail(
 
 /**
  * The detail kinds the host discriminates with, mirroring its own `DETAIL_*`
- * constants (`main/runtime/lib.rs`). One per shape the numbers make, so
+ * constants (`main/runtime/lib.rs`). One per shape the values make, so
  * nothing here branches on the event's name.
  */
 const DETAIL_POSITION = 0;
 const DETAIL_SIZE = 1;
 const DETAIL_EMPTY = 2;
 const DETAIL_EXPOSURE = 3;
+const DETAIL_ID = 4;
+const DETAIL_URL_CONTENT = 5;
+const DETAIL_URL = 6;
 
 /**
- * The `detail` object one kind's numbers make, for an event at `target`.
+ * Writes one of a component's strings into `detail` under `key`, or nothing
+ * when the host sent `undefined` for it: the component had no value, and the
+ * key is absent rather than `undefined`-valued.
+ */
+function withText(detail: EventDetail, key: TextDetailKey, value: unknown): EventDetail {
+  if (value !== undefined) {
+    detail[key] = String(value);
+  }
+  return detail;
+}
+
+/**
+ * The `detail` object one kind's values make, for an event at `target`.
  *
+ * `DETAIL_ID` spends one string, `{id}`; `DETAIL_URL_CONTENT` three,
+ * `{url, content, contentId}`; `DETAIL_URL` two, `{url, contentId}`. Only
+ * `id` and `contentId` can be absent.
  * `DETAIL_EMPTY` spends none and is web-core's `error` detail exactly.
  * `DETAIL_EXPOSURE` spends none either: it is web-core's exposure detail,
  * read off `target` itself — the event's own target, which the host resolved
@@ -2731,9 +2767,22 @@ const DETAIL_EXPOSURE = 3;
  * absent; whatever follows those four is the touch numbers, which
  * [`touchLists`] reads.
  */
-function detailOf(kind: number, numbers: unknown[], target: number): EventDetail {
+function detailOf(kind: number, values: unknown[], target: number): EventDetail {
   if (kind === DETAIL_EMPTY) {
     return {};
+  }
+  if (kind === DETAIL_ID) {
+    return withText({}, "id", values[0]);
+  }
+  if (kind === DETAIL_URL_CONTENT) {
+    return withText(
+      { url: String(values[0]), content: String(values[1]) },
+      "contentId",
+      values[2],
+    );
+  }
+  if (kind === DETAIL_URL) {
+    return withText({ url: String(values[0]) }, "contentId", values[1]);
   }
   if (kind === DETAIL_EXPOSURE) {
     return exposureDetail(
@@ -2743,12 +2792,12 @@ function detailOf(kind: number, numbers: unknown[], target: number): EventDetail
     );
   }
   if (kind === DETAIL_SIZE) {
-    return { width: Number(numbers[0]), height: Number(numbers[1]) };
+    return { width: Number(values[0]), height: Number(values[1]) };
   }
-  const detail: EventDetail = { x: Number(numbers[0]), y: Number(numbers[1]) };
-  if (numbers[2] !== undefined) {
-    detail.deltaX = Number(numbers[2]);
-    detail.deltaY = Number(numbers[3]);
+  const detail: EventDetail = { x: Number(values[0]), y: Number(values[1]) };
+  if (values[2] !== undefined) {
+    detail.deltaX = Number(values[2]);
+    detail.deltaY = Number(values[3]);
   }
   return detail;
 }
@@ -3083,8 +3132,8 @@ function handlerInPass(
  * handle and went with it, and this is the window between the handle
  * becoming unreachable and the cleanup that frees its element.
  *
- * The host passes the facts it owns as numbers and this file builds the
- * objects: the `detail` out of the kind it named and the numbers behind it,
+ * The host passes the facts it owns as primitives and this file builds the
+ * objects: the `detail` out of the kind it named and the values behind it,
  * and — for a position detail — the three touch lists out of the four numbers
  * per point that follow. An event with no touch points carries no such keys
  * at all.
@@ -3096,7 +3145,7 @@ function dispatchEvent(
   bubbles: unknown,
   timestamp: unknown,
   detailKind: unknown,
-  ...detailNumbers: unknown[]
+  ...detailValues: unknown[]
 ): undefined {
   const steps = pathSteps(pathIds, targetIds);
   const first = steps[0];
@@ -3111,7 +3160,7 @@ function dispatchEvent(
   // the time origin rather than `NaN`.
   const stamp = Number(timestamp ?? 0);
   const kind = Number(detailKind);
-  const detail = detailOf(kind, detailNumbers, targetNodeId);
+  const detail = detailOf(kind, detailValues, targetNodeId);
   const event: DispatchedEvent = {
     type: name,
     eventPhase: NONE,
@@ -3134,7 +3183,7 @@ function dispatchEvent(
   // position detail can have any: its first four numbers are the position and
   // the wheel delta, and the points follow them.
   const lists = kind === DETAIL_POSITION
-    ? touchLists(detailNumbers.slice(4))
+    ? touchLists(detailValues.slice(4))
     : undefined;
   if (lists !== undefined) {
     Object.assign(event, lists);

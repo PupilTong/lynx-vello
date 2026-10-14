@@ -1327,6 +1327,9 @@ const DETAIL_POSITION = 0;
 const DETAIL_SIZE = 1;
 const DETAIL_EMPTY = 2;
 const DETAIL_EXPOSURE = 3;
+const DETAIL_ID = 4;
+const DETAIL_URL_CONTENT = 5;
+const DETAIL_URL = 6;
 
 /**
  * What a test asks one dispatch's `detail` to be made of.
@@ -1349,15 +1352,23 @@ interface DispatchPayload {
   empty?: boolean;
   /** A `uiappear`/`uidisappear`: the `DETAIL_EXPOSURE` kind, no numbers. */
   exposure?: boolean;
+  /**
+   * A component's string detail: one of the three string kinds and its
+   * strings, `undefined` for one the component had no value for.
+   */
+  text?: { kind: number; values: (string | undefined)[] };
 }
 
 /**
- * The kind and the numbers behind it, as the host sends them. A tuple, so the
+ * The kind and the values behind it, as the host sends them. A tuple, so the
  * spread at the call site still fills the `detailKind` parameter.
  */
 function detailArguments(payload: DispatchPayload): [number, ...unknown[]] {
   if (payload.empty === true) {
     return [DETAIL_EMPTY];
+  }
+  if (payload.text !== undefined) {
+    return [payload.text.kind, ...payload.text.values];
   }
   if (payload.exposure === true) {
     return [DETAIL_EXPOSURE];
@@ -2590,6 +2601,40 @@ describe("the event detail", () => {
     const { inner } = tree();
 
     expect(detailOf(inner, "error", { empty: true })).toEqual({});
+  });
+
+  // A component's detail is strings, one argument per key, and a string the
+  // component had no value for is a key left out rather than an
+  // `undefined`-valued one.
+  it("builds a string detail per shape and leaves an absent string out", () => {
+    const { inner } = tree();
+
+    expect(
+      detailOf(inner, "parseend", { text: { kind: DETAIL_ID, values: ["doc-1"] } }),
+    ).toEqual({ id: "doc-1" });
+    const absent = detailOf(inner, "parseend", {
+      text: { kind: DETAIL_ID, values: [undefined] },
+    });
+    expect(Object.keys(absent)).toEqual([]);
+
+    const link = detailOf(inner, "link", {
+      text: { kind: DETAIL_URL_CONTENT, values: ["https://a.example/", "A", "doc-1"] },
+    });
+    expect(link).toEqual({ url: "https://a.example/", content: "A", contentId: "doc-1" });
+    const bare = detailOf(inner, "link", {
+      text: { kind: DETAIL_URL_CONTENT, values: ["", "", undefined] },
+    });
+    expect(Object.keys(bare)).toEqual(["url", "content"]);
+
+    expect(
+      detailOf(inner, "imagetap", {
+        text: { kind: DETAIL_URL, values: ["https://a.example/i.png", "doc-1"] },
+      }),
+    ).toEqual({ url: "https://a.example/i.png", contentId: "doc-1" });
+    const image = detailOf(inner, "imagetap", {
+      text: { kind: DETAIL_URL, values: ["https://a.example/i.png", undefined] },
+    });
+    expect(Object.keys(image)).toEqual(["url"]);
   });
 
   // web-core's `ExposureEventDetail` (`ExposureServices.ts:202-208`), read off

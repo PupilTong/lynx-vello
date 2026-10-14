@@ -72,12 +72,21 @@
 //! mutation method, and it is where a reaction this walk itself ever raises
 //! would drain. It costs two integer operations when nothing is queued.
 //!
+//! # Which names are walked
+//!
+//! A definition says which event types it handles, in
+//! [`CustomElement::observed_events`](crate::CustomElement::observed_events), the analogue of
+//! `observed_attributes`; [`Document::define`](crate::Document::define) unions them into one set
+//! for the document. A dispatch of a type no definition observes is one set lookup and returns
+//! before any path work, and there is no per-element registration: whether an element hears an
+//! event is its definition's answer.
+//!
 //! # Cost when nothing listens
 //!
-//! A document with no definitions returns before the path is built, so a
-//! dispatch costs one `is_empty` check. A document that *has* definitions
-//! pays the path — the same `SmallVec` walk a routed event pays — plus one
-//! load per step for the node's definition pointer.
+//! A type no definition observes costs one hash-set lookup, before the path
+//! is built. An observed type pays the path — the same `SmallVec` walk a
+//! routed event pays — plus one definition lookup per step and one call per
+//! defined element on the path.
 
 use crate::tree::document::{Document, NodeId};
 
@@ -115,7 +124,7 @@ impl EventPhase {
 /// component must hear adds a variant here, and every handler that does not
 /// match it keeps compiling — which is what keeps the hook one method rather
 /// than one method per event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum ElementEventKind {
     /// [css-contain-2 §4.4](https://drafts.csswg.org/css-contain-2/#content-visibility-auto-state-change-event):
@@ -131,6 +140,19 @@ pub enum ElementEventKind {
     /// `composed: false` — so it ends at the slot's shadow root, where the
     /// host's own handler hears it ([`Document::dispatch_element_event`]).
     SlotChange,
+    /// A tap the host's gesture recognition decided — Lynx's `tap`, which
+    /// is not a platform event: one short single-pointer press and release
+    /// that did not travel or scroll. The host fires it at the hit node with
+    /// `bubbles: true` and `composed: false`, so a tap inside a shadow tree
+    /// ends at the shadow root and the host's own handler hears which inner
+    /// node it hit ([`ElementEvent::target`]), as a web component hears a
+    /// `click` on `this.shadowRoot`. This crate fires it nowhere itself.
+    Tap {
+        /// Where the press was released, in viewport CSS px.
+        x: f32,
+        /// Where the press was released, in viewport CSS px.
+        y: f32,
+    },
 }
 
 impl ElementEventKind {
@@ -144,6 +166,7 @@ impl ElementEventKind {
         match self {
             Self::ContentVisibilityAutoStateChange { .. } => "contentvisibilityautostatechange",
             Self::SlotChange => "slotchange",
+            Self::Tap { .. } => "tap",
         }
     }
 }
@@ -227,10 +250,10 @@ impl<T> Document<T> {
     /// module's own doc has the walk, the per-step liveness re-check and the
     /// reaction boundary.
     ///
-    /// A target that is no longer live dispatches nothing — the rule a stale
-    /// path already follows — and so does a document that defines no
-    /// components at all, which is the check the whole call costs when
-    /// nobody can listen.
+    /// A name no definition observes
+    /// ([`CustomElement::observed_events`](crate::CustomElement::observed_events))
+    /// returns before anything else, and so does a target that is no longer
+    /// live, the rule a stale path already follows.
     pub fn dispatch_element_event(
         &mut self,
         target: NodeId,
@@ -238,7 +261,7 @@ impl<T> Document<T> {
         bubbles: bool,
         composed: bool,
     ) {
-        if !self.has_custom_definitions() || self.get(target).is_none() {
+        if !self.observes_event(kind.name()) || self.get(target).is_none() {
             return;
         }
         // Computed once, owning no borrow: every handler below takes the

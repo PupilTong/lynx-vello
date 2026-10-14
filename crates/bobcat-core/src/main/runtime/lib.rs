@@ -33,6 +33,7 @@ use std::sync::Arc;
 
 use dom::{MethodCall, MethodError, MethodOutcome, StylePool};
 use quickjs_rust_bridge::{HostArgument, HostValue};
+use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use tokio::sync::watch;
 
@@ -48,8 +49,8 @@ use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::exposure::{Exposure, is_exposure_attribute};
 use crate::main::record::write_record_field;
 use crate::main::tree::{
-    ComponentEvent, ComponentEvents, LynxDocument, PageConfig, invoke_base_method, is_svg,
-    new_document,
+    ComponentDetail, ComponentEvent, ComponentEvents, LynxDocument, PageConfig, invoke_base_method,
+    is_svg, new_document,
 };
 use crate::realm::policy::context_of;
 use crate::realm::{RealmCore, open_realm, string_argument};
@@ -75,9 +76,15 @@ const DISAPPEAR_EVENT: &str = "uidisappear";
 const LOAD_EVENT: &str = "load";
 const ERROR_EVENT: &str = "error";
 
+/// The gesture Lynx synthesizes at a release, the one routed event the
+/// engine's components hear at their shadow content first; see
+/// [`MainThreadRuntime::tap_shadow_content`].
+const TAP_EVENT: &str = "tap";
+
 /// What one dispatch's `detail` is made of, as it crosses the boundary: a
-/// discriminator and the numbers that kind spends. The object itself is built
-/// in the realm, because its shape is JavaScript's.
+/// discriminator and the primitives that kind spends — numbers, and for a
+/// component's detail strings. The object itself is built in the realm,
+/// because its shape is JavaScript's.
 ///
 /// One kind per detail *shape* rather than per event name. The realm reads the
 /// discriminator alone — nothing there branches on which event is being
@@ -97,6 +104,10 @@ enum EventDetail<'a> {
     /// attributes, which are the live element's because [`MainThreadRuntime::dispatch`]
     /// resolves the target before it calls the realm.
     Exposure,
+    /// A component event's strings, one kind per [`ComponentDetail`] shape.
+    /// Each string crosses as itself, and an absent one as `undefined`, which
+    /// the realm reads as a key to leave out.
+    Component(&'a ComponentDetail),
 }
 
 /// The discriminators [`EventDetail`] crosses as. Mirrored by the realm's own
@@ -105,6 +116,9 @@ const DETAIL_INPUT: f64 = 0.0;
 const DETAIL_SIZE: f64 = 1.0;
 const DETAIL_EMPTY: f64 = 2.0;
 const DETAIL_EXPOSURE: f64 = 3.0;
+const DETAIL_ID: f64 = 4.0;
+const DETAIL_URL_CONTENT: f64 = 5.0;
+const DETAIL_URL: f64 = 6.0;
 
 impl EventDetail<'_> {
     const fn kind(&self) -> f64 {
@@ -113,12 +127,20 @@ impl EventDetail<'_> {
             Self::Size { .. } => DETAIL_SIZE,
             Self::Empty => DETAIL_EMPTY,
             Self::Exposure => DETAIL_EXPOSURE,
+            Self::Component(ComponentDetail::Id { .. }) => DETAIL_ID,
+            Self::Component(ComponentDetail::UrlContent { .. }) => DETAIL_URL_CONTENT,
+            Self::Component(ComponentDetail::Url { .. }) => DETAIL_URL,
         }
     }
 
-    /// Appends the numbers this kind spends, in the order the realm reads
+    /// Appends the values this kind spends, in the order the realm reads
     /// them.
-    fn push_numbers<'a>(&'a self, arguments: &mut SmallVec<[HostArgument<'a>; 10]>) {
+    fn push_values<'a>(&'a self, arguments: &mut SmallVec<[HostArgument<'a>; 10]>) {
+        let text = |value: &'a Option<String>| {
+            value
+                .as_deref()
+                .map_or(HostArgument::Undefined, HostArgument::String)
+        };
         match *self {
             Self::Input(payload) => {
                 arguments.push(HostArgument::Number(f64::from(payload.position.x)));
@@ -147,6 +169,20 @@ impl EventDetail<'_> {
                 arguments.push(HostArgument::Number(height));
             }
             Self::Empty | Self::Exposure => {}
+            Self::Component(ComponentDetail::Id { id }) => arguments.push(text(id)),
+            Self::Component(ComponentDetail::UrlContent {
+                url,
+                content,
+                content_id,
+            }) => {
+                arguments.push(HostArgument::String(url));
+                arguments.push(HostArgument::String(content));
+                arguments.push(text(content_id));
+            }
+            Self::Component(ComponentDetail::Url { url, content_id }) => {
+                arguments.push(HostArgument::String(url));
+                arguments.push(text(content_id));
+            }
         }
     }
 }
@@ -427,6 +463,11 @@ struct DocumentSlot {
     exposure: Exposure,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
+    /// The event names the realm has a registration for anywhere, as its
+    /// global edges said: this thread's copy of the set the painter routes
+    /// against, less the names the document's components observe, which are
+    /// published once and never closed.
+    listened: FxHashSet<Arc<str>>,
     /// Where committed frames leave for the painting side.
     outbox: ViewOutbox,
 }
@@ -456,6 +497,7 @@ impl DocumentSlot {
             component_events: ComponentEvents::default(),
             exposure: Exposure::new(),
             removals: 0,
+            listened: FxHashSet::default(),
             outbox,
         }))
     }
@@ -520,8 +562,37 @@ impl DocumentSlot {
             }
             document
         })?;
+        // The components' own names are routed for the document's whole
+        // life, whether or not the realm listens too.
+        self.outbox
+            .publish_observed_names(document.observed_event_names());
         self.document = Some(document);
         Ok(())
+    }
+
+    /// One global edge of the realm's listener-name count: `available` for a
+    /// name's first registration anywhere, not for the removal of its last.
+    ///
+    /// Recorded here and forwarded to the painter, except for a name a
+    /// component observes: that one was published when the document was
+    /// built and stays open, so neither edge is forwarded.
+    fn listener_edge(&mut self, name: &str, available: bool) {
+        let observed = self
+            .document
+            .as_ref()
+            .is_some_and(|document| document.observes_event(name));
+        if available {
+            let name: Arc<str> = Arc::from(name);
+            self.listened.insert(Arc::clone(&name));
+            if !observed {
+                self.outbox.listener_edge(name, true);
+            }
+        } else {
+            self.listened.remove(name);
+            if !observed {
+                self.outbox.listener_edge(Arc::from(name), false);
+            }
+        }
     }
 
     /// An exposure attribute of the live element `node` was written or
@@ -899,7 +970,7 @@ impl MainThreadRuntime {
             None,
             ScriptSource::Main,
             |engine| {
-                install_bobcat(engine, &slot, &outbox, thread.clone())
+                install_bobcat(engine, &slot, thread.clone())
                     .map_err(MainThreadError::into_script_error)?;
                 style_sheets::install_styles(engine, &slot, &outbox, thread)
                     .map_err(MainThreadError::into_script_error)?;
@@ -1252,7 +1323,10 @@ impl MainThreadRuntime {
     /// is one non-bubbling dispatch at the element it belongs to, which is
     /// web-core's shape for an image's two events
     /// (`commonEventInitConfiguration.ts`: `bubbles: false`) and HTML's for a
-    /// dialog's `close` and `cancel`. An element freed between the event
+    /// dialog's `close` and `cancel`. A [`ComponentEvent::Detailed`] is the
+    /// exception when it says so: one that bubbles is dispatched bubbling and
+    /// composed, as web-core fires `<x-markdown>`'s `link`, `imageTap` and
+    /// `parseEnd` (`XMarkdownAttributes.ts:628-649, 993-999`). An element freed between the event
     /// forming and this call resolves to nothing, exactly as a routed input
     /// event at a freed target does.
     ///
@@ -1265,7 +1339,7 @@ impl MainThreadRuntime {
         let events = self.slot.borrow().component_events.take();
         let timestamp = self.timeline_milliseconds;
         let mut failures = Vec::new();
-        for event in events {
+        for event in &events {
             // [`EventDetail::Empty`] is the realm's `{}`, which is web-core's
             // `error` detail exactly, and the `Event` a dialog fires carries
             // nothing either; an `<image>`'s `load` carries the bitmap's
@@ -1277,7 +1351,12 @@ impl MainThreadRuntime {
             // after the commit that applied the natural size, because the
             // page posts this entry only once nothing is left uncommitted —
             // and 0x0 when the element has no box. It has no `error` at all.
-            let (target, name, detail) = match event {
+            //
+            // A detailed event carries the strings its component read when it
+            // queued it, borrowed from the queue for the call, and its own
+            // `bubbles`, which says `composed` as well: web-core fires each
+            // event of that kind with both flags or neither.
+            let (target, name, detail, bubbles) = match *event {
                 ComponentEvent::Image(dom::ImageOutcome::Loaded {
                     node,
                     width,
@@ -1296,22 +1375,28 @@ impl MainThreadRuntime {
                             (f64::from(width), f64::from(height))
                         }
                     };
-                    (node, LOAD_EVENT, EventDetail::Size { width, height })
+                    (node, LOAD_EVENT, EventDetail::Size { width, height }, false)
                 }
                 ComponentEvent::Image(dom::ImageOutcome::Failed { node }) => {
                     if is_svg(self.slot.borrow_mut().document_mut(), node) {
                         continue;
                     }
-                    (node, ERROR_EVENT, EventDetail::Empty)
+                    (node, ERROR_EVENT, EventDetail::Empty, false)
                 }
-                ComponentEvent::Plain { node, name } => (node, name, EventDetail::Empty),
+                ComponentEvent::Plain { node, name } => (node, name, EventDetail::Empty, false),
+                ComponentEvent::Detailed {
+                    node,
+                    name,
+                    bubbles,
+                    ref detail,
+                } => (node, name, EventDetail::Component(detail), bubbles),
             };
-            // Not composed either, as HTML and web-core fire every one of
-            // them: one queued at a UA shadow tree's node stays inside that
-            // tree.
-            if let Err(error) =
-                self.dispatch(js_runtime, target, name, false, false, timestamp, &detail)
-            {
+            // A non-bubbling one is not composed either, as HTML and web-core
+            // fire every one of them: one queued at a UA shadow tree's node
+            // stays inside that tree.
+            if let Err(error) = self.dispatch(
+                js_runtime, target, name, bubbles, bubbles, timestamp, &detail,
+            ) {
                 failures.push(error);
             }
         }
@@ -1343,6 +1428,10 @@ impl MainThreadRuntime {
         name: &str,
         payload: &InputEventPayload,
     ) -> Result<bool, MainThreadError> {
+        // The component whose UA shadow tree a tap hit hears it first.
+        if name == TAP_EVENT {
+            self.tap_shadow_content(target, payload.position);
+        }
         self.dispatch(
             js_runtime,
             target,
@@ -1450,7 +1539,7 @@ impl MainThreadRuntime {
         arguments.push(HostArgument::Boolean(bubbles));
         arguments.push(HostArgument::Number(timestamp));
         arguments.push(HostArgument::Number(detail.kind()));
-        detail.push_numbers(&mut arguments);
+        detail.push_values(&mut arguments);
 
         let called = self
             .core
@@ -1466,6 +1555,46 @@ impl MainThreadRuntime {
         // here, at the end of the dispatch.
         self.finish_batch(js_runtime, true)?;
         Ok(called)
+    }
+
+    /// Fires [`dom::event::ElementEventKind::Tap`] at `target` for the
+    /// engine's own components, when `target` is UA shadow content: the
+    /// component whose shadow tree it is hears which of its inner nodes was
+    /// tapped, as web-core's components listen for `click` on their own
+    /// shadow content (`XMarkdownAttributes.ts`, `#handleClick`).
+    /// [`Self::dispatch_input_event`] calls it before script hears the tap.
+    ///
+    /// Bubbling and **not composed**, so the walk ends at the shadow root,
+    /// whose step the host's `handle_event` hears with the inner node as
+    /// `event.target()` — once in the capture pass and once in the bubble
+    /// pass, as `slotchange` is heard, so a handler filters on one phase. A
+    /// defined element inside the same shadow tree, on the path, hears it as
+    /// well. A host hears nothing of a tap at its light-DOM content, which it
+    /// only displays, and an outer host nothing of one inside a nested
+    /// component's shadow tree.
+    ///
+    /// Nothing about it reaches script: script's own `tap` follows, composed,
+    /// starting at the host ([`Self::dispatch`]). A handler that stops
+    /// propagation stops this walk alone.
+    ///
+    /// A target outside every shadow tree returns after one walk up its
+    /// ancestors, before any path is built, which is the whole cost of a tap
+    /// at ordinary content.
+    fn tap_shadow_content(&mut self, target: dom::NodeId, position: dom::Point2D<f32>) {
+        let mut slot = self.slot.borrow_mut();
+        let document = slot.document_mut();
+        if document.shadow_root_of(target).is_none() {
+            return;
+        }
+        document.dispatch_element_event(
+            target,
+            dom::event::ElementEventKind::Tap {
+                x: position.x,
+                y: position.y,
+            },
+            true,
+            false,
+        );
     }
 
     /// [`Self::dispatch_input_event`] for a test that is about the dispatch
@@ -2135,11 +2264,10 @@ await Promise.resolve().then(() => __FlushElementTree());
 fn install_bobcat(
     engine: &mut ScriptEngine,
     handle: &Rc<RefCell<DocumentSlot>>,
-    outbox: &ViewOutbox,
     thread: crate::jobs::JsThreadHandle,
 ) -> Result<(), MainThreadError> {
     install_host_module(engine, handle, thread)?;
-    install_event_members(engine, outbox)
+    install_event_members(engine, handle)
 }
 
 fn install(
@@ -2376,16 +2504,17 @@ fn startup_strings(startup: &mut RealmStartup) -> [(&'static str, Option<String>
 /// global edges, the first registration for a name anywhere and the removal
 /// of its last. A name already open hears nothing, so the traffic is edges,
 /// never registrations, and the `Arc` each one allocates is rare enough to
-/// be free.
+/// be free. [`DocumentSlot::listener_edge`] keeps this thread's copy and
+/// forwards the edge.
 fn install_event_members(
     engine: &mut ScriptEngine,
-    outbox: &ViewOutbox,
+    handle: &Rc<RefCell<DocumentSlot>>,
 ) -> Result<(), MainThreadError> {
     for (member, available) in [("listenerNameOpened", true), ("listenerNameClosed", false)] {
-        let outbox = outbox.clone();
+        let tree = Rc::clone(handle);
         install(engine, member, 1, move |arguments| {
             let name = string_argument(member, arguments, 0)?;
-            outbox.listener_edge(Arc::from(name), available);
+            borrow_slot(member, &tree)?.listener_edge(name, available);
             Ok(HostValue::Undefined)
         })?;
     }

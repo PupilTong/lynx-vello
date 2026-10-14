@@ -307,6 +307,45 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     );
 }
 
+/// A name an engine component observes is published once, with the
+/// document, and the painter routes it from then on with no realm listener
+/// behind it: a `tap` crosses to the main thread for the component alone.
+#[test]
+fn a_name_a_component_observes_crosses_with_no_realm_listener() {
+    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT, TouchPoints};
+
+    let (mut painter, mut main) = detached();
+    let target = dom::NodeId::from_bits(2).expect("a well-formed packed handle");
+    let emit = |painter: &mut Painter| {
+        let mut decisions = InputDecisions::new();
+        decisions.push(InputDecision::Emit(EmitEvent {
+            name: TAP_EVENT,
+            target,
+            position: dom::Point2D::new(1.0, 1.0),
+            wheel: None,
+            touches: TouchPoints::new(),
+        }));
+        painter.execute_decisions(&mut decisions, None, 0.25);
+    };
+
+    emit(&mut painter);
+    assert!(
+        main.commands.try_recv().is_err(),
+        "nothing routes `tap` yet"
+    );
+
+    main.outbox.publish_observed_names([TAP_EVENT]);
+    painter.poll_link();
+    emit(&mut painter);
+    let Ok(ToMain::DispatchEvent {
+        name, target: sent, ..
+    }) = main.commands.try_recv()
+    else {
+        panic!("the observed name crosses as a dispatch command");
+    };
+    assert_eq!((name, sent), (TAP_EVENT, target));
+}
+
 /// The two payloads a plain pointer event does not have — the wheel delta and
 /// the touch points — cross as the values the router decided, in the order it
 /// decided them. The realm is the side that gives them a shape.

@@ -487,3 +487,115 @@ fn the_one_comparison_retargeting_rule_agrees_with_the_standards_predicate() {
     }
     assert!(checked > 80, "only {checked} paths compared");
 }
+
+// ---------------------------------------------------------------------------
+// The Rust walk: the observed-events gate
+// ---------------------------------------------------------------------------
+
+mod observed_events_gate {
+    use std::sync::{Arc, Mutex};
+
+    use super::super::{ElementEvent, ElementEventKind, EventPhase};
+    use crate::tree::document::tests::device;
+    use crate::{CustomElement, Document, NodeId};
+
+    type Log = Arc<Mutex<Vec<String>>>;
+
+    /// Records `type:phase` per delivery of the one type it observes.
+    struct Listener {
+        who: &'static str,
+        log: Log,
+    }
+
+    impl CustomElement<()> for Listener {
+        fn observed_events(&self) -> &'static [&'static str] {
+            &["tap"]
+        }
+
+        fn handle_event(
+            &self,
+            _document: &mut Document<()>,
+            _element: NodeId,
+            event: &mut ElementEvent,
+        ) {
+            let phase = match event.phase() {
+                EventPhase::Capturing => "capture",
+                EventPhase::AtTarget => "at-target",
+                EventPhase::Bubbling => "bubble",
+            };
+            self.log.lock().expect("never poisoned").push(format!(
+                "{}:{}:{phase}",
+                self.who,
+                event.kind().name()
+            ));
+        }
+    }
+
+    /// `page > outer(probe-outer) > inner(probe-inner)`, both listening.
+    fn page(log: &Log) -> (Document<()>, NodeId, NodeId) {
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        for (tag, who) in [("probe-outer", "outer"), ("probe-inner", "inner")] {
+            document.define(
+                tag,
+                Box::new(Listener {
+                    who,
+                    log: Arc::clone(log),
+                }),
+            );
+        }
+        let page = document.document_element().id();
+        let outer = document.create_element("probe-outer", ());
+        let inner = document.create_element("probe-inner", ());
+        document.append_child(page, outer);
+        document.append_child(outer, inner);
+        (document, outer, inner)
+    }
+
+    fn take(log: &Log) -> Vec<String> {
+        std::mem::take(&mut *log.lock().expect("never poisoned"))
+    }
+
+    #[test]
+    fn a_type_no_definition_observes_walks_nothing() {
+        let log = Log::default();
+        let (mut document, _outer, inner) = page(&log);
+        assert!(document.observes_event("tap"));
+        assert!(!document.observes_event("slotchange"));
+        assert_eq!(
+            document.observed_event_names().collect::<Vec<_>>(),
+            ["tap"],
+            "the union of the definitions' lists, each name once"
+        );
+
+        document.dispatch_element_event(inner, ElementEventKind::SlotChange, true, true);
+        assert!(
+            take(&log).is_empty(),
+            "a defined element on the path hears only what its definition observes"
+        );
+
+        document.dispatch_element_event(
+            inner,
+            ElementEventKind::Tap { x: 0.0, y: 0.0 },
+            true,
+            true,
+        );
+        assert_eq!(
+            take(&log),
+            [
+                "outer:tap:capture",
+                "inner:tap:at-target",
+                "outer:tap:bubble"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_document_with_no_observer_walks_nothing_for_slotchange() {
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        assert!(!document.observes_event("slotchange"));
+        assert_eq!(document.observed_event_names().count(), 0);
+        let page = document.document_element().id();
+        // Nothing to call and nothing to fail: the gate returns first.
+        document.dispatch_element_event(page, ElementEventKind::SlotChange, true, false);
+    }
+}

@@ -160,7 +160,7 @@ use dom::scroll::{
 };
 use dom::{CustomElement, MethodCall, MethodOutcome, Node, NodeId, ShadowRootMode};
 
-use super::LynxDocument;
+use super::{LynxDocument, SLOT_CHANGE};
 
 /// The container tag, web-core's registered spelling.
 pub(super) const REFRESH_VIEW_TAG: &str = "x-refresh-view";
@@ -238,6 +238,12 @@ pub(super) fn define(document: &mut LynxDocument) {
 struct RefreshView;
 
 impl CustomElement<()> for RefreshView {
+    /// Its own shadow tree's `slotchange`, which is how it learns that its
+    /// assigned children changed.
+    fn observed_events(&self) -> &'static [&'static str] {
+        &[SLOT_CHANGE]
+    }
+
     fn constructed(&self, document: &mut LynxDocument, element: NodeId) {
         let shadow = document.attach_shadow(element, ShadowRootMode::Open);
         document.add_shadow_stylesheet(shadow, SHADOW_RULES);

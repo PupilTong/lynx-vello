@@ -274,7 +274,7 @@ use dom::stylo::values::specified::box_::ScrollSnapAlignKeyword;
 use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, Node, NodeId, ShadowRootMode};
 use serde_json::Value;
 
-use super::{InvalidParams, LynxDocument, element_child, is_truthy};
+use super::{InvalidParams, LynxDocument, SLOT_CHANGE, element_child, is_truthy};
 
 /// The swiper tag, web-core's only spelling of it.
 pub(super) const SWIPER_TAG: &str = "x-swiper";
@@ -435,6 +435,12 @@ pub(super) fn define(document: &mut LynxDocument) {
 struct Swiper;
 
 impl CustomElement<()> for Swiper {
+    /// Its own shadow tree's `slotchange`, which is how it learns that its
+    /// assigned children changed.
+    fn observed_events(&self) -> &'static [&'static str] {
+        &[SLOT_CHANGE]
+    }
+
     fn constructed(&self, document: &mut LynxDocument, element: NodeId) {
         let shadow = document.attach_shadow(element, ShadowRootMode::Open);
         document.add_shadow_stylesheet(shadow, SHADOW_RULES);
