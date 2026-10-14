@@ -436,7 +436,7 @@ fn resources_config(page: &PageSource, timeout: Duration) -> ResourcesConfig {
         request_timeout: timeout,
         // Lazy bundles: a `lynx.fetchBundle` installs its sections through
         // this, and without one every fetch fails.
-        container_installer: Some(std::sync::Arc::new(bobcat_source::LazyBundleInstaller)),
+        container_installer: Some(std::sync::Arc::new(bobcat_source::BundleInstaller)),
         ..ResourcesConfig::default()
     }
 }

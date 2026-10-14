@@ -70,7 +70,7 @@ requests through the view's ResourceFetcher like any other import. An absent bac
 built-in runtime only. Browser PageConfig remains host-owned.
 
 Every card-body wrapper `bobcat-source` writes — `mts_entry_source`,
-`bts_module_source` and a lazy container's `main-thread` section — is one
+`bts_module_source` and a container's `main-thread`/`*__main-thread` section — is one
 physical line with the body's first line on it. An error in a body therefore
 reports the line it has in the container, and on any line after the first
 the column too. On the body's first line the column is offset by the
@@ -78,11 +78,61 @@ prefix's length, which for a minified body written on one line is every
 column it has.
 
 This XML path carries no binary template, so it has no `manifest` scripts. A
-binary template's are registered by `PageSource` as ES modules beside the
-input URL, and the BTS boot script it writes starts the card with
+binary template's are registered as ES modules *under* the container URL —
+`<U>/app-service.js` for `/app-service.js` — by `ContainerSources`, the one
+registration path every container takes (a page through `PageSource`, a
+`<frame>`'s main bundle, a fetched lazy bundle through `BundleInstaller`), and
+the BTS boot script it writes at `U#background-thread` starts the card with
 `lynx.requireModule('/app-service.js')` when the container carries that path,
 which initializes the `{init}` object the body answers with: Lynx Core's
 chunk initialization protocol, in `bobcat:lynx-modules`.
+
+## One container URL rule
+
+With `U` the container URL, `P` its path (one trailing `/` dropped) and `S`
+its `?#` suffix, `ContainerSources` (`crates/bobcat-source/src/container.rs`)
+registers, and `packages/bobcat-element/src/section-url.ts` builds:
+
+| What | URL | Body |
+| --- | --- | --- |
+| Lepus `root`, or the explicit native entry | `P/root.js S` | `mts_entry_source` |
+| Lepus chunk or string section `main-thread`/`*__main-thread` | `P/<enc name>.js S` | `MTS_CHUNK_PREAMBLE` + `export default ` + body |
+| any other Lepus chunk | `P/<enc name>.js S` | verbatim |
+| any other string custom section | `P/<enc name>.js S` | `.json` verbatim, else `bts_module_source` |
+| manifest path `p` | `P/<p> S`, no `.js`, `?`/`#` in `p` escaped | the same choice by name |
+| named stylesheet `k` | `P/custom_section/<enc k>.css S` | `PreparsedStyleSheet` |
+| non-empty page StyleInfo | `P/style-info.css S` | lowered `PreparsedStyleSheet` |
+| BTS boot (an entry and a non-empty manifest) | `U` with fragment `#background-thread` | boot text |
+
+`enc` is `form_urlencoded` with a space as `%20`, after one leading `/` is
+stripped. The entry is the Lepus chunk named `root`; a container without one
+has no entry. One URL with one text is one registration; two texts at one URL,
+or a stylesheet URL a script also reaches, is
+`SourceError::ConflictingSection`, and a URL that cannot be a base is
+`SourceError::OpaqueContainerUrl`. A page's view names `<U>/root.js` as its
+entry, `U` as its `card_url` (so `__Card__` is the container) and its
+`style-info.css` as its one listed sheet; a fetched container's StyleInfo is
+registered and never adopted. XML and ZIP keep their own `bobcat-memory://`
+URLs.
+
+Accepted consequences, each a change from the two paths this replaced:
+
+- A page's BTS bodies moved from *beside* its input URL to *under* it, so a
+  relative `requireModule('/x.js')` no longer reaches a host file beside the
+  template; an absolute URL still loads as it is.
+- A relative `new Worker` URL in a container page joins `U`, the card URL,
+  rather than the entry's URL.
+- A `.lynx.bundle` custom source section `n` is filed by the decoder as both a
+  section and the manifest path `/n`, so it is registered at `P/n.js` and at
+  `P/n`; a card that asks by both evaluates it twice.
+- Registering `U` again with new bytes replaces what the new container names
+  and leaves any URL only the old one had.
+- A page's non-root Lepus chunk named `*__main-thread` takes the
+  export-default section shape, so `__LoadLepusChunk` on it reports a
+  `SyntaxError`; a `.lynx.bundle`'s main-thread sources are sections, loaded
+  through `lynx.loadScript`.
+- A source-based `.lynx.bundle` loaded as a `<frame>` without an explicit
+  entry has no `root.js`, since nothing guesses one.
 
 ## API and dependencies
 
@@ -134,11 +184,11 @@ The native decoder normalizes boolean-only `enableQueryComponentSync` and
 `enableJSDataProcessor` fields before web configuration stringification, so a
 native string `"true"` cannot turn into an enabled flag after conversion.
 `PageSource` passes the JS-processor flag through `PageConfig.enable_js_data_processor`;
-see [data lifecycle](data-lifecycle-runtime.md). `PageSource` registers decoded
-named CSS at `<entry>/custom_section/<encoded name>.css` in the embedder's
-existing resource registry, and `LazyBundleInstaller`
-(`crates/bobcat-source/src/lazy_bundle.rs`) does the same under a fetched lazy
-container's URL. MTS requests those URLs through the ordinary stylesheet
+see [data lifecycle](data-lifecycle-runtime.md). `ContainerSources`
+(`crates/bobcat-source/src/container.rs`) registers decoded named CSS at
+`<container>/custom_section/<encoded name>.css` in the embedder's existing
+resource registry — for a page through `PageSource`, for a fetched lazy
+container through `BundleInstaller`. MTS requests those URLs through the ordinary stylesheet
 loader; see [named stylesheet loading](named-styles-runtime.md) and
 [worker resources](worker-resources-runtime.md) "Lazy containers".
 Source decoding executes no scripts and fetches no lazy bundles.

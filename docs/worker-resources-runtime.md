@@ -26,7 +26,8 @@ wants `postMessage` or `setTimeout` imports `bobcat:worker` or
 `bobcat:timers` itself. A URL that is an engine name, the BTS's `bobcat:bts` among them, is
 never requested: the realm's own loader loads it, or refuses it. A `Module` request
 arrives absolute: an import is normalized against its importer's response URL,
-a worker script is joined to the creating view's entry URL, and a synchronous
+a worker script is joined to the creating view's `__Card__` — a container
+page's container URL, otherwise its entry URL — and a synchronous
 load is resolved against the view's `ViewSources::base_url`, which the
 worker's `HostOutbox` carries. Transport, UTF-8 validation, and the final
 response URL belong to the fetcher. MTS does not route resource replies.
@@ -68,7 +69,7 @@ read-only `lynx-stack` checkout at `f47d3e6a56200bf07d58fc1656712878ea851a3d`.
 
 | Required API | Actual caller and observable result |
 | --- | --- |
-| `lynx.requireModule(path, bundleName)` | Generated entry loads an embedded module and synchronously receives its exports. `packages/webpack/template-webpack-plugin/src/LynxEncodePlugin.ts`. **Implemented**: one synchronous load of the URL the path names beside the registered template URL, whether or not the container carried it. |
+| `lynx.requireModule(path, bundleName)` | Generated entry loads an embedded module and synchronously receives its exports. `packages/webpack/template-webpack-plugin/src/LynxEncodePlugin.ts`. **Implemented**: one synchronous load of the URL the path names under the registered container URL — the path as it is, `<container>/<path>` — whether or not the container carried it. |
 | `lynx.requireModuleAsync(url, callback)` | Dynamic JS imports and generated JS chunk loading receive `(error, exports)`. `packages/react/runtime/src/core/lynx/dynamic-import.ts` and `packages/webpack/chunk-loading-webpack-plugin/src/runtime/javascript/chunk-loading.js`. |
 | `lynx.fetchBundle(url, {})` | Default asynchronous lazy loading calls the returned handler's `.then(callback)` and reads `code` and `url`. `packages/react/runtime/src/core/lynx/lazy-bundle.ts`. **Implemented**: one `SourceRequest::Fetch` — a plain fetch, which the fetcher may make a container of; the handle is native's `{wait, then}` object over one `bobcat:future` `Future`, not a Promise, and a URL the fetcher's `fetch_probe` already holds settles at once. |
 | `fetchBundle(...).wait(5)` | Only a lazy import explicitly using `mode: 'sync'` takes this path. Ordinary asynchronous lazy loading does not wait synchronously. Same lazy-bundle source. **Implemented**: a number of *seconds*, over `bobcat:future`'s `Future.wait`, which parks the job the way a `require` does. |
@@ -139,15 +140,18 @@ names and loads it, before the call returns. There is no table of bodies and no
 boot-time import. Nothing is registered as source text, and nothing hands a
 body to JavaScript.
 
-`PageSource` turns every body of a container — its manifest paths and its
-string custom sections — into an **ES module** and registers each with the
-embedder's resource system, beside the page's own input URL. The BTS boot
-script it writes registers that URL and starts the card, and carries nothing of
-the container's bodies — no name, no URL, no text:
+`ContainerSources` turns every body of a container — its manifest paths and
+its string custom sections — into an **ES module** and registers each with the
+embedder's resource system, *under* the container's own URL by the one rule
+`docs/source-architecture.md` "One container URL rule" tabulates; a page's
+container is registered through it by `PageSource`, a fetched one by
+`BundleInstaller`. The BTS boot script it writes, at
+`<container url>#background-thread`, registers that URL and starts the card,
+and carries nothing of the container's bodies — no name, no URL, no text:
 
 ```js
 import {lynx, __BobcatRegisterBundle} from 'bobcat:bts-runtime';
-__BobcatRegisterBundle("<template url>");
+__BobcatRegisterBundle("<container url>");
 lynx.requireModule('/app-service.js');
 ```
 
@@ -158,9 +162,9 @@ still-evaluating refusal above does not apply: a bundle body is never
 that asked for it or answered from the evaluation an earlier one already ran.
 The body's own `BTS_CHUNK_PREAMBLE` import of `bobcat:bts-runtime` links to
 the instance the realm already has, and a chunk a card's `init` reaches for is
-another such load. A native container's main-thread sections are not among the
-bodies, being Lepus chunks — a chunk is a plain script resource the MTS realm
-loads on demand, not a module anything imports.
+another such load. A container's `main-thread`/`*__main-thread` sections are
+not BTS bodies: they are MTS sections — the entry's binding list, then
+`export default <the body>` — which MTS's `lynx.loadScript` loads.
 
 **What a body becomes.** One physical line of preamble, so the body keeps its
 own line numbering; only a column on the body's first line is offset, by the
@@ -184,12 +188,19 @@ from `bobcat:bts-runtime`, the rest `undefined`. Then, by container:
   the loader reads a `.json` response as JSON by its own path, so there is
   nothing a module wrapper around it could be compiled as.
 
-**What a load answers.** The path is rooted first — native's own rooting
-(`js_app.cc` `App::LoadScript`), so a manifest path (`/app-service.js`) and a
-section name (`background`) are each reachable by either spelling, both naming
-one URL — and taken as a reference beside the registered template URL, so
-`/chunk.js` under `https://cdn.test/app/x.web.bundle` is
-`https://cdn.test/app/chunk.js`. Then, by what came back:
+**What a load answers.** One leading `/` is stripped first — native roots
+every path (`js_app.cc` `App::LoadScript`), so a manifest path
+(`/app-service.js`) and a section name (`background`) are each reachable by
+either spelling, both naming one URL — and the URL is built *under* the
+entry's container URL: `requireModule` and `nativeApp.loadScript` take a
+manifest path as the path it is (`bundlePathURL`), so `/chunk.js` of
+`https://cdn.test/app/x.web.bundle` is
+`https://cdn.test/app/x.web.bundle/chunk.js`, and `lynx.loadScript` takes a
+section name as an encoded `.js` file (`sectionURL`), so `background` is
+`https://cdn.test/app/x.web.bundle/background.js`. An absolute URL is loaded
+as it is. A relative path therefore no longer reaches a host file *beside*
+the template, as it did before every container shared this rule. Then, by
+what came back:
 
 - a **module**, which is what a registered body is: its `default` export, or the namespace itself
   when it has no `default` own property, which only a hand-written module has.
@@ -209,11 +220,12 @@ path, as in lynx-core: a value whose `init` threw is loaded and initialized
 again by the next call — the load answering from the module the realm has
 already evaluated, since a URL is one module per realm.
 
-With no template URL registered only an absolute path resolves, and a bundle
-path is a `TypeError` carrying the normalizer's message. An entry no
-`__BobcatRegisterBundle` named at all is a *lazy container's* `bundleName`,
-and its sections are named by the rule below rather than resolved beside
-anything.
+Which URL is the container is `containerURL(entry)`: the URL
+`__BobcatRegisterBundle` named for that entry, or — for an entry no
+`__BobcatRegisterBundle` named at all — the entry itself, a *lazy
+container's* `bundleName`, left as it is. The default entry with no URL
+registered names no container: only an absolute path loads, and a relative
+one is a `TypeError` naming the entry.
 
 `nativeApp.loadScript(sourceURL, entryName?)` on `lynx.getNativeApp()` is the
 same load, answering the `{init}` object web-core's
@@ -260,20 +272,23 @@ already has (`crates/bobcat-core/src/fetch.rs`).
 **The decode is the fetcher's.** Whether those bytes were a Lynx container
 whose sections should be registered is decided in
 `bobcat_resources::ContainerInstaller`, whose one implementation is
-`bobcat_source::LazyBundleInstaller`. It **sniffs first** — a native or a web
+`bobcat_source::BundleInstaller`, over the same `ContainerSources` a page is
+registered through. It **sniffs first** — a native or a web
 container's magic — and answers `Ok(false)` for anything else, which leaves
 the fetch a plain fetch that completed. A host that configures no installer
 still fetches; only a container that will not decode fails the request.
 
-**The section URL rule.** One rule, shared by the installer and both realms:
-a container at `<url>` answers its section `<name>` at
-`<url path>/<encoded name>.js`, keeping the container URL's `?#` suffix, and
-its named stylesheet `<key>` at `<url path>/custom_section/<encoded key>.css`
-— `<url path>/custom_section/CSS.css` for the compiler's `CSS` section. That is
-`named_chunk_url`/`named_style_url` in `crates/bobcat-source/src/page.rs` and
+**The section URL rule.** One rule, shared by every container — a page's
+own and a fetched one — and both realms: a container at `<url>` answers its
+section `<name>` at `<url path>/<encoded name>.js`, a manifest path `<p>` at
+`<url path>/<p>`, keeping the container URL's `?#` suffix, and its named
+stylesheet `<key>` at `<url path>/custom_section/<encoded key>.css` —
+`<url path>/custom_section/CSS.css` for the compiler's `CSS` section. That is
+`crates/bobcat-source/src/container.rs` and
 `packages/bobcat-element/src/section-url.ts` on the realm side, which MTS's
-`chunkURL`/`styleSheetURL` and BTS's `bodyUrl` both go through. One leading
-`/` is stripped first, so either spelling of a name is one URL. The realms
+`chunkURL`/`styleSheetURL` and BTS's `containerURL`-based loads all go
+through. One leading `/` is stripped first, so either spelling of a name is
+one URL. The realms
 write that URL as the container was named, rooted or relative, and load it
 through `loadModuleSync`, which resolves it against the view's
 `ViewSources::base_url` in Rust. The container's fetch — and so the URLs the
@@ -285,8 +300,10 @@ in this workspace does, the CLI and the server through `PageSource`'s input
 URL and the browser through `load_sources`. A
 `main-thread` section becomes an MTS module — `MTS_CHUNK_PREAMBLE`, the entry's
 own binding list, then `export default <the body>` — and everything else the
-BTS module `bts_module_source` already wrote. The container's *own* StyleInfo
-is not registered: native applies a lazy bundle's CSS only through
+BTS module `bts_module_source` already wrote. A container's `root`, when it
+has one, is registered at `root.js` as the entry's module, as a page's is.
+The container's *own* StyleInfo is registered too, at `style-info.css`, and
+never adopted: native applies a lazy bundle's CSS only through
 `__LoadStyleSheet('CSS')`.
 
 **What has been fetched is the fetcher's, and it answers through a probe.**

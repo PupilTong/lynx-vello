@@ -143,16 +143,18 @@ const engineContext = new EventTarget();
 const scope = globalThis as Record<string, unknown>;
 
 /**
- * The entry's response URL, as the view's fetcher answered it. It names this
- * page's own container for chunks and stylesheets, and is the base a
- * `new Worker` specifier resolves against.
+ * The card URL: the view's `ViewSources::card_url` — a container page's
+ * container URL, its entry being `<container>/root.js` — or else the entry's
+ * response URL, as the view's fetcher answered it. It names this page's own
+ * container for chunks and stylesheets, and is the base a `new Worker`
+ * specifier resolves against.
  */
 export let __Card__: string;
 
 /**
- * Names the entry: the host calls this with the entry's response URL before
- * completing the module boot imports it as, so `__Card__` is set before the
- * entry's body runs. Nothing calls it for a chunk.
+ * Names the card: the host calls this with the card URL before completing the
+ * module boot imports the entry as, so `__Card__` is set before the entry's
+ * body runs. Nothing calls it for a chunk.
  */
 export function __BobcatInitEntry(url: string): void {
   __Card__ = url;
@@ -164,8 +166,9 @@ function cardURL(bundleName: string): string {
 
 /**
  * The resource URL one named stylesheet of that container lives at, which is
- * the string `named_style_url` writes in `crates/bobcat-source/src/page.rs`.
- * `__Card__` names this page's own container.
+ * the string `named_style_url` writes in
+ * `crates/bobcat-source/src/container.rs`. `__Card__` names this page's own
+ * container.
  */
 function styleSheetURL(key: string, bundleName: string): string {
   return sectionStyleSheetURL(key, cardURL(bundleName));
@@ -174,7 +177,7 @@ function styleSheetURL(key: string, bundleName: string): string {
 /**
  * The resource URL one named Lepus chunk or custom section of that container
  * lives at, which is the string `named_chunk_url` writes in
- * `crates/bobcat-source/src/page.rs`.
+ * `crates/bobcat-source/src/container.rs`.
  */
 function chunkURL(name: string, bundleName: string): string {
   return sectionURL(name, cardURL(bundleName));
@@ -598,7 +601,7 @@ type ChunkBody = (...bindings: unknown[]) => unknown;
  * `__LoadLepusChunk`: load this page's chunk of that name and run it.
  *
  * The chunk is a script resource of its own, at the URL `chunkURL` builds and
- * `PageSource` registered it under, and it is loaded through the same
+ * `ContainerSources` registered it under, and it is loaded through the same
  * synchronous host loader a `require` uses — so the job this call runs in
  * parks until the host answers, and no other job of this realm runs meanwhile.
  * **Evaluated again on every call**, as native's `TemplateEntry` does: there
@@ -681,7 +684,7 @@ const bundleFetches = createBundleFetches({
  * container this realm has, evaluated once per realm.
  *
  * The load is the synchronous one a `require` is written over, of the URL the
- * section name builds beside the container's — the string `bobcat-source`
+ * section name builds under the container's — the string `bobcat-source`
  * registered it under. The three shapes it can answer are `bobcat:module`'s
  * own: an **ES module**, which is what a body a container carried is, whose
  * default export is what native's host would have kept as that script's

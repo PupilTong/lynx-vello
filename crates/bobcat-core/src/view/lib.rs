@@ -659,6 +659,16 @@ pub struct ViewSources {
     /// [`crate::MTS_CHUNK_PREAMBLE`] by `bobcat-source`; any other entry
     /// imports what it uses itself.
     pub entry: String,
+    /// The URL `__Card__` names: the container this view's entry came out
+    /// of, which every section, named stylesheet and Lepus chunk of the page
+    /// hangs under and every relative `new Worker` URL is joined to. Resolved
+    /// against [`Self::base_url`] like [`Self::entry`].
+    ///
+    /// `None` names the entry's response URL — what a raw entry or an XML
+    /// page has, whose entry *is* the page. A container page names its own
+    /// URL here, because its entry is one of its sections
+    /// (`<container>/root.js`) rather than the container itself.
+    pub card_url: Option<String>,
     /// Optional URL of the BTS application module the engine's `bobcat:bts`
     /// bootstrap imports, resolved against [`Self::base_url`] like
     /// [`Self::entry`]. The MTS realm posts it to the BTS in the BTS's first
@@ -714,6 +724,7 @@ impl ViewSources {
             fallback_fonts: Vec::new(),
             style_sheets: Vec::new(),
             entry: entry.into(),
+            card_url: None,
             background_entry: None,
             init_data: None,
             global_props: None,
@@ -1585,14 +1596,15 @@ fn request_startup_source<F: ResourceFetcher>(
     answer
 }
 
-/// Resolves a view's entry and BTS entry against its base URL, by URL rules,
-/// and replaces each with the serialization of the result. Returns the
-/// parsed base.
+/// Resolves a view's entry, BTS entry and card URL against its base URL, by
+/// URL rules, and replaces each with the serialization of the result. Returns
+/// the parsed base.
 ///
 /// Run in `create_lynx_view` before the fetcher is built, so a URL that does
 /// not resolve is a construction failure that requested nothing. Each
 /// [`EngineError::InvalidUrl`] names the string that failed: the base when
-/// it is not an absolute URL, otherwise the entry that does not resolve.
+/// it is not an absolute URL, otherwise the entry or card URL that does not
+/// resolve.
 pub(crate) fn resolve_startup_urls(sources: &mut ViewSources) -> Result<url::Url, EngineError> {
     let invalid = |url: &str, error: url::ParseError| EngineError::InvalidUrl {
         url: url.to_owned(),
@@ -1610,6 +1622,9 @@ pub(crate) fn resolve_startup_urls(sources: &mut ViewSources) -> Result<url::Url
     resolve(&mut sources.entry)?;
     if let Some(background_entry) = &mut sources.background_entry {
         resolve(background_entry)?;
+    }
+    if let Some(card_url) = &mut sources.card_url {
+        resolve(card_url)?;
     }
     Ok(base)
 }

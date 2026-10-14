@@ -395,6 +395,10 @@ pub(crate) struct RealmStartup {
     /// as `create_lynx_view` resolved it: always an absolute URL, in its
     /// WHATWG serialization. Boot imports the entry by this string.
     pub(crate) entry: String,
+    /// What `__Card__` names, [`ViewSources::card_url`](crate::ViewSources::card_url)
+    /// as `create_lynx_view` resolved it: the page's container URL, or `None`
+    /// for the entry's own response URL.
+    pub(crate) card: Option<String>,
     /// The BTS entry `bobcat:bts` imports, if the view named one: always an
     /// absolute URL `create_lynx_view` resolved, like [`Self::entry`]. Boot
     /// writes it into its own source and posts it to the BTS in the
@@ -430,6 +434,7 @@ impl Default for RealmStartup {
             // No entry: the seams that boot a realm opened from this name one
             // themselves.
             entry: String::new(),
+            card: None,
             background_entry: None,
             initial_processor: String::new(),
             init_data: None,
@@ -1037,6 +1042,10 @@ pub(crate) struct MainThreadRuntime {
     /// the same reason as [`Self::screen`], and read again by
     /// [`Self::complete_entry`] and [`Self::entry_module_name`].
     entry: String,
+    /// The URL [`Self::complete_entry`] names as `__Card__`, when the view
+    /// named one ([`RealmStartup::card`]); `None` names the entry's response
+    /// URL instead.
+    card: Option<String>,
     /// The BTS entry, which boot writes into its own module source and hands
     /// to the BTS in the `initialize` message. Held for the same reason as
     /// [`Self::screen`]; `None` is a view that named none.
@@ -1139,6 +1148,7 @@ impl MainThreadRuntime {
                 screen: startup.screen,
                 config,
                 entry: startup.entry,
+                card: startup.card,
                 background_entry: startup.background_entry,
             },
             incoming,
@@ -2292,8 +2302,8 @@ let data = lynx.__initData;
 // The entry, by the URL the view named it by. A task of the view's owner
 // completes this module from the answer the view asked for before this realm
 // opened, answered from the response URL the fetcher gave, so this import
-// asks the fetcher for nothing, and names that URL as `__Card__` before the
-// entry's body runs.
+// asks the fetcher for nothing, and names the card — the view's card URL, or
+// else that response URL — as `__Card__` before the entry's body runs.
 //
 // The entry is app code. What its evaluation throws is raised again as a
 // rejection nothing handles, which the checkpoint of this entry into the
@@ -2442,13 +2452,15 @@ await Promise.resolve().then(() => __FlushElementTree());
     /// import throws a `ReferenceError` when that line runs, which is the
     /// entry's own failure.
     ///
-    /// **The entry is named here.** Before the script is completed, the
-    /// response URL — the fetcher's, so a redirect is already applied — is
-    /// handed to `bobcat:runtime`'s `__BobcatInitEntry`, which makes it
-    /// `__Card__`: this page's own container URL for the body, for every chunk
-    /// and stylesheet it names by `__Card__`, and for the base URL a
-    /// `new Worker` specifier resolves against. A chunk is never named: it
-    /// would overwrite `__Card__` with its own URL.
+    /// **The card is named here.** Before the script is completed, the
+    /// view's card URL ([`ViewSources::card_url`](crate::ViewSources::card_url))
+    /// — or, for a view that named none, the response URL, the fetcher's, so
+    /// a redirect is already applied — is handed to `bobcat:runtime`'s
+    /// `__BobcatInitEntry`, which makes it `__Card__`: this page's own
+    /// container URL for the body, for every chunk and stylesheet it names by
+    /// `__Card__`, and for the base URL a `new Worker` specifier resolves
+    /// against. A chunk is never named: it would overwrite `__Card__` with its
+    /// own URL.
     ///
     /// Two failures, one inside the other. The outer one is the engine's own
     /// code — the entry's module name, and the call that names it — and fails
@@ -2489,7 +2501,7 @@ await Promise.resolve().then(() => __FlushElementTree());
                 js_runtime,
                 RUNTIME_MODULE_SPECIFIER,
                 "__BobcatInitEntry",
-                &[HostArgument::String(url)],
+                &[HostArgument::String(self.card.as_deref().unwrap_or(url))],
             )
             .map_err(starting)?;
         Ok(self

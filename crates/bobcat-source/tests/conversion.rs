@@ -26,10 +26,19 @@ const EMPTY_ROOT_LEPUS: &[u8] = &[
 ];
 
 fn web_page(native: &[u8], entry: &str) -> Vec<u8> {
+    web_page_renaming(native, &[(entry, "root")])
+}
+
+/// `native` converted to a web bundle, with each `(from, to)` Lepus chunk
+/// renamed — the entry to `root`, and any other to a name a `.web.bundle`
+/// compiler writes.
+fn web_page_renaming(native: &[u8], renames: &[(&str, &str)]) -> Vec<u8> {
     let mut bytes = convert(native).unwrap();
     let mut scripts = bobcat_source::web::decode(&bytes).unwrap().lepus_code;
-    let root = scripts.remove(entry).unwrap();
-    scripts.insert("root".to_owned(), root);
+    for (from, to) in renames {
+        let source = scripts.remove(*from).unwrap();
+        scripts.insert((*to).to_owned(), source);
+    }
     let mut payload = Vec::new();
     u32_value(&mut payload, scripts.len());
     for (name, source) in scripts {
@@ -669,6 +678,11 @@ fn legacy_lepus_is_rejected_as_bytecode() {
 /// A named Lepus chunk is a script resource of its own, registered verbatim
 /// and loaded on demand through the host, and `__LoadLepusChunk` runs it
 /// again on every call.
+///
+/// The chunk is a `.web.bundle`'s, named as a web compiler names one: a
+/// `.lynx.bundle` carries its main-thread sources as `*__main-thread` custom
+/// sections, which are MTS *sections* — the export-default module
+/// `lynx.loadScript` loads — rather than chunks.
 #[tokio::test]
 async fn named_lepus_chunks_load_and_run_on_every_call() {
     use std::sync::{Arc, mpsc};
@@ -690,8 +704,8 @@ async fn named_lepus_chunks_load_and_run_on_every_call() {
             r"
             if (globalThis.count !== undefined)
                 throw Error('a chunk ran before it was asked for');
-            if (!__LoadLepusChunk('chunk__main-thread', {})
-                || !__LoadLepusChunk('chunk__main-thread', {}))
+            if (!__LoadLepusChunk('chunk', {})
+                || !__LoadLepusChunk('chunk', {}))
                 throw Error('chunk missing');
             if (globalThis.count !== 2)
                 throw Error('a chunk runs on every call: ' + globalThis.count);
@@ -699,7 +713,7 @@ async fn named_lepus_chunks_load_and_run_on_every_call() {
                 throw Error('entry runtime/PAPI bindings lost');
             if (__LoadLepusChunk('missing', {}) || typeof chunkLocal !== 'undefined')
                 throw Error('chunk lookup or scope');
-            if (__LoadLepusChunk('chunk__main-thread', {dynamicComponentEntry: 'other'}))
+            if (__LoadLepusChunk('chunk', {dynamicComponentEntry: 'other'}))
                 throw Error('a foreign entry was answered');
         ",
         ),
@@ -713,9 +727,18 @@ async fn named_lepus_chunks_load_and_run_on_every_call() {
         ",
         ),
     ])]);
-    let input = "app:///chunks.lynx.bundle".parse().unwrap();
-    let page = bobcat_source::PageSource::from_native_bundle(&input, &native, "entry__main-thread")
-        .unwrap();
+    let input = "app:///chunks.web.bundle".parse().unwrap();
+    let page = bobcat_source::PageSource::from_bytes(
+        &input,
+        &web_page_renaming(
+            &native,
+            &[
+                ("entry__main-thread", "root"),
+                ("chunk__main-thread", "chunk"),
+            ],
+        ),
+    )
+    .unwrap();
     let (wake, events) = mpsc::channel();
     let group =
         bobcat_core::LynxGroup::new(Arc::new(Wake(wake)), bobcat_core::StyleThreads::Sequential)

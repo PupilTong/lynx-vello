@@ -205,8 +205,9 @@ QuickJS ESM graph — an MTS realm, on bobcat-main's runtime
     └──▶ await import("<entry URL>")    completed by the view's `load_entry`
           │                               task from the pre-issued answer
           └──▶ the entry, with import.meta.url = its response URL; before
-               completing it, the task calls __BobcatInitEntry(response URL),
-               which names __Card__
+               completing it, the task calls __BobcatInitEntry(card URL) —
+               ViewSources::card_url, else the response URL — which names
+               __Card__
           ├──▶ bobcat:runtime (packages/bobcat-element/src/main-thread-runtime.ts)
           │     ├── named compatibility exports + engine EventTarget
           │     ├──▶ bobcat:cross-thread-context (MTS getJSContext)
@@ -549,8 +550,9 @@ read as such by `load_entry` before any of it runs, and the embedder is told
 `StartupFailed` carrying the fetcher's own error; an answer that is not a
 script, or a script whose response URL is not an absolute URL, is
 `StartupFailed(LynxViewError::Script(..))` naming the URL. That response URL
-becomes `__Card__`, the base every `new Worker` URL is joined to, boot's
-`bobcat:bts` included. Neither completes the entry's module: the view has
+becomes `__Card__` — the base every `new Worker` URL is joined to, boot's
+`bobcat:bts` included — unless the view named a `ViewSources::card_url`, as a
+container page does with its container URL. Neither completes the entry's module: the view has
 ended. A sheet that fails to load,
 or that the fetcher answered with something other than a stylesheet, makes
 `__FlushElementTree` throw `loading stylesheet <url>: <reason>`: boot's own
@@ -1037,8 +1039,8 @@ carries its text, and `load_entry` carries the `LynxViewError` itself and
 makes the text of an answer of another kind a `Script` error. `load_entry`
 alone also refuses a script answered from a response URL that is not an
 absolute URL, as a `Script` error naming both URLs, because the entry's
-response URL becomes `__Card__`, the base every `new Worker` URL is joined
-to. A completion the fetcher dropped without answering is
+response URL becomes `__Card__` — the base every `new Worker` URL is joined
+to — for a view that named no `ViewSources::card_url`. A completion the fetcher dropped without answering is
 `unanswered_source()`'s failure, through `await_source`. `load_module` then
 enters the realm and completes the module under the name it was requested
 by: from the response URL, which becomes the module's `import.meta.url` and
@@ -1151,10 +1153,12 @@ entry it ran in if it does not catch it; `DocumentSlot` keeps that first
 failure and throws it again from boot's own flush, which fails the boot the
 same way.
 
-**Bundle paths.** The MTS realm and the BTS name a bundle's paths by
-different rules: the MTS realm names the page's own chunks under its entry's
-URL (`bobcat:section-url`), and the BTS resolves a path of a registered
-container beside that container's template URL (`bobcat:lynx-modules`).
+**Bundle paths.** The MTS realm and the BTS name a bundle's paths by one
+rule (`bobcat:section-url`): every body hangs under its container's URL — for
+the page, `__Card__`, its `ViewSources::card_url` — the MTS realm naming the
+page's own chunks there, and the BTS a path of a registered or lazy
+container (`bobcat:lynx-modules`). `bobcat-source`'s `ContainerSources`
+registers exactly those URLs, for a page and a fetched container alike.
 
 ### Workers, modules and the boot module
 
@@ -1213,8 +1217,9 @@ main realm: Worker message/error handler ◀── WorkerEvent { key, payload }
 The script URL is resolved in Rust, before anything is started: `createWorker`
 joins every specifier by URL rules — not import-specifier rules, so `worker.js`
 and `?v=2` are relative URLs, and an absolute URL such as `bobcat:bts` joins to
-itself — to the creating view's entry response URL, which the realm holds as
-`__Card__` and passes as the third argument; Rust does not keep it. A URL that
+itself — to the creating view's `__Card__`, its `ViewSources::card_url` (a
+container page's container URL) or else its entry response URL, which the
+realm passes as the third argument; Rust does not keep it. A URL that
 does not resolve allocates no key, sends no `Start` and requests nothing, and
 `new Worker` throws HTML's synchronous `SyntaxError`. There is one kind of
 worker. The BTS is the dedicated worker whose URL is `bobcat:bts`, and Rust
@@ -2714,8 +2719,10 @@ build that includes dev targets.
 
 ## Named stylesheets
 
-Boot initializes the JS runtime's `__Card__` with the entry response URL before
-importing the entry. JS resolves the card alias into a CSS resource URL.
+Boot initializes the JS runtime's `__Card__` with the card URL —
+`ViewSources::card_url`, which a container page sets to its container URL, or
+else the entry response URL — before importing the entry. JS resolves the card
+alias into a CSS resource URL under it.
 `__LoadStyleSheet` answers `null` for a URL the fetcher's
 `ResourceFetcher::style_sheet_probe` says it does not hold (a synchronous,
 registry-only check), and otherwise sends an optional

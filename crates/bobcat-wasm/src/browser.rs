@@ -395,7 +395,7 @@ impl BobcatRenderer {
                     // Lazy bundles: a `lynx.fetchBundle` installs its
                     // sections through this, and without one every fetch
                     // fails.
-                    container_installer: Some(Arc::new(bobcat_source::LazyBundleInstaller)),
+                    container_installer: Some(Arc::new(bobcat_source::BundleInstaller)),
                     ..ResourcesConfig::default()
                 },
                 {

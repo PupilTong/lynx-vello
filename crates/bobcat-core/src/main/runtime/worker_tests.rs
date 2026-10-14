@@ -3872,15 +3872,16 @@ fn generated_text(node: &dom::Node<()>) -> String {
 }
 
 /// Answers one manifest path of a native bundle, at the URL `PageSource`
-/// registers it under — beside the bundle's own URL — with the body served
-/// through the same adaptation `PageSource` applies at registration.
+/// registers it under — the path as it is, under the bundle's own URL — with
+/// the body served through the same adaptation `PageSource` applies at
+/// registration.
 ///
 /// The card asks for each of them itself: `lynx.requireModule` builds this
 /// URL and loads it synchronously, so a load is a worker job parked on this
 /// answer, in the order the card asks, not a boot-time import of every path.
 fn serve_bundle_path(pair: &mut Pair, template: &bobcat_source::web::WebTemplate, path: &str) {
     pair.serve_module(
-        &format!("app:///nested{path}"),
+        &format!("app:///nested/card.lynx.bundle{path}"),
         &bobcat_source::bts_module_source(
             bobcat_source::BundleTarget::Lynx,
             &template.manifest[path],

@@ -2550,7 +2550,8 @@ consequential choice about whether to follow the spec or the quirk.
   unaffected either way.
 - **A compiled bundle's bodies evaluate once per realm; native re-evaluates
   per call** — every body a *BTS* container carries beyond its entry script is
-  an ES module here (`PageSource`), and `lynx.requireModule`,
+  an ES module here (`ContainerSources`, registered under the container's
+  URL), and `lynx.requireModule`,
   `lynx.loadScript` and `nativeApp.loadScript` each `require` it by URL,
   synchronously, at the call that first asks for it. A URL is one module per
   realm, so a second call for the same path is answered from the evaluation
@@ -2653,8 +2654,12 @@ consequential choice about whether to follow the spec or the quirk.
   web-core pushes the container's StyleInfo during `loadExternalBundle` with
   the container's URL as its entry name, so each rule also carries
   `[l-e-name="<url>"]` (`web-core/ts/client/mainthread/LynxViewInstance.ts:181-192`,
-  rule 5 of `style_info_decoder.rs`). (Here the decision is the *installer's*, in
-  `bobcat-source`: `bobcat-core` never sees the container at all.) **Decision: native**, because the compiled card
+  rule 5 of `style_info_decoder.rs`). (Here the decision is `bobcat-source`'s:
+  `bobcat-core` never sees the container at all. `ContainerSources` — the one
+  registration path a page and a fetched container share,
+  `crates/bobcat-source/src/container.rs` — *registers* the StyleInfo at
+  `<bundle>/style-info.css` either way, and only a page's view lists it, so a
+  lazy container's is held and never adopted.) **Decision: native**, because the compiled card
   already makes that call and web-core's extra push would mount the same rules
   twice — and without that entry-name guard: css-id guards are synthesized
   here (`lower_style`), the `l-e-name` guard is not, and `__SetCSSId`

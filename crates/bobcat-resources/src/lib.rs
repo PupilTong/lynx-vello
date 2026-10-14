@@ -135,8 +135,9 @@ pub struct ResourcesConfig {
     /// document resolved it, and so does every script URL: an entry or a
     /// synchronous load resolved against the view's
     /// [`ViewSources::base_url`](bobcat_core::ViewSources::base_url), a
-    /// worker script against the entry's response URL and an import against
-    /// its importer's. This must be that same view base: a lazy container is
+    /// worker script against `__Card__` (the view's card URL, or else the
+    /// entry's response URL) and an import against its importer's. This must
+    /// be that same view base: a lazy container is
     /// fetched, and its sections registered, by this one, and each section is
     /// loaded synchronously by the view's.
     pub base_url: Option<Url>,
@@ -183,7 +184,8 @@ pub struct ResourcesConfig {
     /// `None`, the default, changes nothing about the fetch — it still
     /// completes, exactly as an image fetch does. A host that wants
     /// `lynx.fetchBundle` to install lazy bundles passes
-    /// `bobcat_source::LazyBundleInstaller`.
+    /// `bobcat_source::BundleInstaller`, which registers a fetched container
+    /// by the same `ContainerSources` path a page's own takes.
     pub container_installer: Option<Arc<dyn ContainerInstaller>>,
     /// This Worker's end of the channel whose other end the host's
     /// main-thread image decoder listens on (`js/image-decoder.ts` in the
@@ -822,7 +824,8 @@ impl Resources {
     /// [`ViewSources::base_url`](bobcat_core::ViewSources::base_url), which
     /// an entry or a synchronous load arrives resolved against. Every other
     /// script URL arrives absolute as well, a worker script resolved against
-    /// the entry's response URL and an import against its importer's, and so
+    /// `__Card__` (the view's card URL, or else the entry's response URL) and
+    /// an import against its importer's, and so
     /// does a font URL, as the document resolved it.
     #[must_use]
     pub fn base_url(&self) -> Option<Url> {

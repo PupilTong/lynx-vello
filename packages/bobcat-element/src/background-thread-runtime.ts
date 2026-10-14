@@ -479,14 +479,14 @@ export const clearInterval = lynx.clearInterval;
 export { requestAnimationFrame, cancelAnimationFrame };
 
 /**
- * One entry's bundle: the URL its template answered from, and nothing else.
+ * One entry's bundle: its container URL, and nothing else.
  *
- * Every body the container carried is a registered resource of its own, beside
- * that URL, and nothing is loaded here — `lynx.requireModule`,
- * `lynx.loadScript` and `nativeApp.loadScript` each build the URL their path
- * names and load it synchronously, as MTS's `__LoadLepusChunk` does. The
- * template URL is the base they resolve against: no URL means no base, and
- * then only an absolute path resolves.
+ * Every body the container carried is a registered resource of its own, under
+ * that URL by the one container rule (`section-url.ts`), and nothing is loaded
+ * here — `lynx.requireModule`, `lynx.loadScript` and `nativeApp.loadScript`
+ * each build the URL their path names under it and load it synchronously, as
+ * MTS's `__LoadLepusChunk` does. No URL means no container, and then only an
+ * absolute path loads.
  */
 export function __BobcatRegisterBundle(templateUrl?: string, entry?: string) {
   modules.registerTemplateUrl(templateUrl, entry);

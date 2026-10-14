@@ -95,7 +95,11 @@ fn selects_real_binary_bundle_through_the_shared_page_adapter() {
         .unwrap();
     assert_eq!(
         page.view_sources(SCREEN).entry,
-        "bobcat-memory://bundle/lepus-root.js"
+        "https://cdn.example/dist/main.web.bundle/root.js"
+    );
+    assert_eq!(
+        page.view_sources(SCREEN).card_url.as_deref(),
+        Some("https://cdn.example/dist/main.web.bundle")
     );
     assert!(!page.view_sources(SCREEN).style_sheets.is_empty());
 }

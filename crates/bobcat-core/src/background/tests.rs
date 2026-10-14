@@ -1504,12 +1504,12 @@ fn a_worker_requires_commonjs_and_json_against_its_own_response_url() {
 }
 
 /// The compiled-bundle loader over the same synchronous load: a bundle path is
-/// asked for beside the template URL the bundle was registered with, and the
+/// asked for under the container URL the bundle was registered with, and the
 /// exports of its body are what `requireModule` answers. Nothing is registered
 /// with the realm but that URL, so a path a container carried and one it did
 /// not are one mechanism.
 #[test]
-fn a_bts_bundle_requires_a_chunk_beside_its_template_url() {
+fn a_bts_bundle_requires_a_chunk_under_its_container_url() {
     let mut group = Group::new();
     group.start(
         r"import 'bobcat:worker'; import 'bobcat:timers';
@@ -1519,7 +1519,7 @@ fn a_bts_bundle_requires_a_chunk_beside_its_template_url() {
     ",
     );
     let (url, completion) = group.views[0].source();
-    assert_eq!(url, "https://cdn.test/app/chunk.js");
+    assert_eq!(url, "https://cdn.test/app/x.web.bundle/chunk.js");
     completion.complete(Ok(LoadedSource::Module {
         source: "module.exports = { answer: 42 };".to_owned(),
         url,
@@ -1527,7 +1527,7 @@ fn a_bts_bundle_requires_a_chunk_beside_its_template_url() {
     assert_eq!(
         group.message(0),
         wire(r#"{"answer":42}"#),
-        "a bundle path resolves against its template URL and answers its exports"
+        "a bundle path hangs under its container URL and answers its exports"
     );
 }
 
@@ -1552,7 +1552,7 @@ fn a_registered_bundle_body_answers_through_its_modules_default_export() {
     ",
     );
     let (url, completion) = group.views[0].source();
-    assert_eq!(url, "https://cdn.test/app/app-service.js");
+    assert_eq!(url, "https://cdn.test/app/x.web.bundle/app-service.js");
     completion.complete(Ok(LoadedSource::Module {
         source: format!(
             "{}export default {{init: ({{tt}}) => ({{\

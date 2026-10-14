@@ -1108,6 +1108,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         fallback_fonts: _,
         style_sheets: _,
         entry: _,
+        card_url,
         background_entry,
         init_data,
         initial_processor,
@@ -1138,6 +1139,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
                 sheets,
                 screen,
                 entry: entry_url,
+                card: card_url,
                 background_entry,
                 initial_processor,
                 init_data,
@@ -1303,9 +1305,10 @@ async fn load_entry(page: Rc<Page>, entry: StartupSource) {
 /// not, naming `url`, the URL the entry was requested by, and the response
 /// URL.
 ///
-/// It becomes `__Card__`, the base every `new Worker` URL is joined to by URL
-/// rules, and a join to a base that does not parse fails for every
-/// specifier, boot's own `bobcat:bts` included.
+/// It is the entry's `import.meta.url` and, for a view that named no
+/// [`ViewSources::card_url`], `__Card__`, the base every `new Worker` URL is
+/// joined to by URL rules — and a join to a base that does not parse fails
+/// for every specifier, boot's own `bobcat:bts` included.
 fn absolute_response(url: &str, response: String) -> Result<String, String> {
     match url::Url::parse(&response) {
         Ok(_) => Ok(response),

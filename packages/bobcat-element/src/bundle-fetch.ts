@@ -8,7 +8,9 @@
 // never what came back. Whether those bytes were a Lynx container whose
 // sections are now loadable is the fetcher's business
 // (`bobcat_resources::ContainerInstaller`, implemented by
-// `bobcat_source::LazyBundleInstaller`), settled before the fetch completes.
+// `bobcat_source::BundleInstaller`, which registers a fetched container
+// through the same `ContainerSources` a page's own goes through), settled
+// before the fetch completes.
 // Everything Lynx-shaped about a `fetchBundle` — the `{wait, then}` object,
 // the `{url, code, error_msg}` record, the `-2` timeout — lives here.
 //

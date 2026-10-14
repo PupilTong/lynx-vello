@@ -1,6 +1,7 @@
 import { EventTarget, installEventHandler } from "bobcat:event-target";
-// The entry's own response URL, which `__BobcatInitEntry` names before the
-// entry's body runs; a live binding, read at each construction.
+// The card URL — the view's card URL (a container page's container URL), or
+// else the entry's own response URL — which `__BobcatInitEntry` names before
+// the entry's body runs; a live binding, read at each construction.
 // `bobcat:runtime` imports this module for its type alone, so the import
 // below is no cycle.
 import { __Card__ } from "bobcat:runtime";
@@ -67,8 +68,9 @@ export class Worker extends EventTarget {
       throw new TypeError("Bobcat workers support only module scripts");
     }
     const name = options?.name === undefined ? "" : String(options.name);
-    // A relative URL resolves against the page's entry, as a browser's
-    // resolves against the document that constructs the worker: the host
+    // A relative URL resolves against the page's card — its container, or
+    // its entry where it has none — as a browser's resolves against the
+    // document that constructs the worker: the host
     // joins the two by URL rules and does not keep `__Card__`. One that
     // does not resolve is HTML's `SyntaxError`: the host answers `null` for
     // it rather than throwing, because every error a host member throws is

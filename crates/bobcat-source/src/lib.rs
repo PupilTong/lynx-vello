@@ -7,13 +7,18 @@
 #![forbid(unsafe_code)]
 
 mod archive;
+mod container;
 mod custom_style;
-mod lazy_bundle;
 mod lower_style;
 pub mod native;
 mod page;
 pub mod web;
 pub mod xml;
+// The compiled cards, for the unit tests that hold a page's registration up
+// against a fetch's. Run `pnpm --filter reactlynx-test-fixtures build` first.
+#[cfg(test)]
+#[path = "../../../packages/reactlynx-test-fixtures/fixtures.rs"]
+mod fixtures;
 pub use archive::*;
-pub use lazy_bundle::{LazyBundleInstaller, LazyBundleSources, lazy_bundle_sources};
+pub use container::{BundleInstaller, ContainerSources};
 pub use page::*;

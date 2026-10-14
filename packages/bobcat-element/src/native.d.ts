@@ -393,8 +393,9 @@ declare module "bobcat-internal:host" {
    * Starts one worker over the script `url` names and answers the key its
    * other members name it by.
    *
-   * The host joins `url` to `baseUrl` — the page entry's response URL, which
-   * the realm holds — by URL rules, and does not keep the base. A `url` that
+   * The host joins `url` to `baseUrl` — the realm's `__Card__`: the view's
+   * card URL (a container page's container URL), or else the page entry's
+   * response URL — by URL rules, and does not keep the base. A `url` that
    * does not resolve starts nothing and answers `null`.
    */
   export function createWorker(

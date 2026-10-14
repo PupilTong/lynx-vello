@@ -62,12 +62,18 @@ Neither boot scheduling nor local chunk loading changes that boundary.
 
 ## Named Lepus chunks
 
-`PageSource` registers every non-entry Lepus chunk with the embedder's
-resource system, **verbatim**, at a resource URL of its own —
-`<entry URL path>/<name>.js`, the chunk name percent-encoded the way a named
-stylesheet section's is (`named_chunk_url`), any `?`/`#` suffix of the entry
-URL kept. Nothing is prepended to it and nothing imports it. The root MTS
-script is the container's own text after one line of imports,
+`ContainerSources` registers every non-entry Lepus chunk of a page's
+container with the embedder's resource system, **verbatim**, at a resource URL
+of its own — `<container URL path>/<name>.js`, the chunk name percent-encoded
+the way a named stylesheet section's is (`named_chunk_url` in
+`crates/bobcat-source/src/container.rs`), any `?`/`#` suffix of the container
+URL kept. Nothing is prepended to it and nothing imports it. A chunk named
+`main-thread` or `*__main-thread` is the exception: it is an MTS *section*,
+registered as `MTS_CHUNK_PREAMBLE`, `export default ` and the body for
+`lynx.loadScript`, so `__LoadLepusChunk` on it reports a `SyntaxError` — a
+`.lynx.bundle`'s main-thread sources all have such names. The root MTS
+script, at `<container URL path>/root.js`, is the container's own text after
+one line of imports,
 `MTS_CHUNK_PREAMBLE`, which `bobcat-source` prefixes to every card body it
 registers for this realm, on the body's own first line: no import of a chunk,
 no registration call, no table.
@@ -114,9 +120,12 @@ task of the view completes that module from the pre-issued answer as the
 fetcher gave it, from the fetcher's response URL, so `import.meta.url` is the
 fetcher's answer, redirect included. Before it
 completes the module, `MainThreadRuntime::complete_entry` calls
-`bobcat:runtime`'s `__BobcatInitEntry` with that response URL, which names
-`__Card__` the entry's response URL before the entry body runs. Nothing calls
-it for a chunk, which would overwrite `__Card__` with its own URL.
+`bobcat:runtime`'s `__BobcatInitEntry` with the card URL — the view's
+`ViewSources::card_url`, which a container page sets to its container URL,
+or else that response URL — which names `__Card__` before the entry body
+runs, so `chunkURL` builds a chunk's URL under the container rather than
+under `root.js`. Nothing calls it for a chunk, which would overwrite
+`__Card__` with its own URL.
 
 Queued jobs remain the enclosing checkpoint's work: a job a chunk queues runs
 at the checkpoint the entry is already inside, not inside the load. ReactLynx's

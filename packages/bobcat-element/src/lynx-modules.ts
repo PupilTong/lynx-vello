@@ -1,5 +1,5 @@
 import { loadModuleSync, resolveModuleUrl } from "bobcat-internal:host";
-import { sectionURL } from "bobcat:section-url";
+import { bundlePathURL, sectionURL } from "bobcat:section-url";
 
 // The compiler factory ABI, and the one way a bundle path becomes a value.
 //
@@ -11,18 +11,19 @@ import { sectionURL } from "bobcat:section-url";
 // this realm.
 //
 // What is at that URL is `bobcat-source`'s business. A body a container
-// carried is an ES module it registered beside the input URL — the compiler's
-// `{init}` expression as a default export, a `CommonJS` file's
+// carried is an ES module it registered *under* the container's URL — the
+// compiler's `{init}` expression as a default export, a `CommonJS` file's
 // `module.exports` as one, a `.json` body as the value it is — so a `require`
 // of it answers that default export. A path no container carried is whatever
 // the host serves, normally a plain `CommonJS` file.
 //
-// A **lazy container** is the one other case, and it is the same mechanism
-// with a different URL rule: its `bundleName` is the string `lynx.fetchBundle`
-// was given, and its sections live *under* that URL rather than beside it —
-// the same rule `__LoadLepusChunk` and `__LoadStyleSheet` write on MTS. The
-// container itself is installed by `fetchBundle`; nothing here fetches one.
-// `requireModuleAsync` is still absent.
+// Every container is named by one rule, the page's own and a lazy one alike
+// (`section-url.ts`, `crates/bobcat-source/src/container.rs`): a manifest path
+// as the path it is under the container URL, a section name as an encoded
+// `.js` file under it. Only *which* URL is the container differs — the one
+// `__BobcatRegisterBundle` named for an entry, or a lazy container's
+// `bundleName` itself. The container is installed by whoever fetched it;
+// nothing here fetches one. `requireModuleAsync` is still absent.
 const DEFAULT_ENTRY = "__Card__";
 
 /** A specifier that carries its own scheme, and so needs no base at all. */
@@ -97,40 +98,40 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
   }
 
   /**
-   * The URL `path` names, which depends on *which container* `entry` is.
+   * The container URL `entry` names, or `undefined` for none.
    *
    * **A registered entry** — this page's own, or any other container whose
-   * template URL `__BobcatRegisterBundle` named — carries its bodies beside
-   * that template URL: `path` is a reference there, resolved by the
-   * normalizer an `import` resolves through, as `__LoadLepusChunk` builds a
-   * chunk's URL beside the root script's. The rooting is native's (`js_app.cc`
-   * `App::LoadScript`): a path that is neither an absolute URL nor rooted is
-   * rooted, so `chunk.js` and `/chunk.js` name one file, and a rooted path is
-   * a path *inside* a bundle rather than one at its origin. With no template
-   * URL registered at all the reference is its own base, which resolves an
-   * absolute URL and refuses everything else.
-   *
-   * **Any other entry is a lazy container's `bundleName`** — the string
-   * `lynx.fetchBundle` was given and echoed back — and its sections live
-   * *under* that URL: `sectionURL` writes exactly the string the installer
-   * registered them at (`named_chunk_url` in
-   * `crates/bobcat-source/src/page.rs`), which is also what MTS's `chunkURL`
-   * writes for the same container. Nothing is resolved here: the string stays
-   * as it is, rooted or relative. The host resolves the section's load
-   * against the view's base URL, the fetcher resolved the container's fetch
-   * against its own, and the embedder keeps the two bases equal, so both
-   * name one URL.
+   * URL `__BobcatRegisterBundle` named — is that URL. **Any other entry is a
+   * lazy container's `bundleName`** — the string `lynx.fetchBundle` was given
+   * and echoed back — and is its own container URL, left as it is, rooted or
+   * relative: the host resolves the load against the view's base URL, the
+   * fetcher resolved the container's fetch against its own, and the embedder
+   * keeps the two bases equal, so both name one URL. The default entry with
+   * no URL registered names no container at all.
    */
-  function bodyUrl(path: string, entry: string): string {
-    const template = templateUrls.get(entry);
-    if (template === undefined && entry !== DEFAULT_ENTRY) {
-      return sectionURL(path, entry);
+  function containerURL(entry: string): string | undefined {
+    return templateUrls.get(entry) ?? (entry === DEFAULT_ENTRY ? undefined : entry);
+  }
+  /** The container `entry` names, or a `TypeError` naming what needed one. */
+  function requireContainer(name: string, entry: string): string {
+    const container = containerURL(entry);
+    if (container === undefined) {
+      throw new TypeError(`cannot resolve '${name}': no container URL is registered for '${entry}'`);
     }
-    const specifier = ABSOLUTE_URL.test(path)
-      ? path : `.${path.startsWith("/") ? path : `/${path}`}`;
-    const base = template ?? templateUrls.get(DEFAULT_ENTRY) ?? specifier;
+    return container;
+  }
+  /**
+   * The URL one bundle path names: an absolute URL as it is, and anything
+   * else as a manifest path under `entry`'s container, the string
+   * `bundlePathURL` writes — one leading `/` stripped, so `chunk.js` and
+   * `/chunk.js` name one file, and a rooted path is a path *inside* the
+   * container rather than one at its origin (native's rooting, `js_app.cc`
+   * `App::LoadScript`).
+   */
+  function pathURL(path: string, entry: string): string {
+    if (!ABSOLUTE_URL.test(path)) return bundlePathURL(path, requireContainer(path, entry));
     try {
-      return resolveModuleUrl(base, specifier);
+      return resolveModuleUrl(path, path);
     } catch (error) {
       // Every host member reports a failure as an `InternalError`, so which
       // class a path this engine cannot resolve reaches author code as is this
@@ -166,14 +167,14 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
     };
   }
   /**
-   * One bundle path, loaded and run, as the factory of what it answers.
+   * One body, loaded and run, as the factory of what it answers.
    *
    * The load is the synchronous one a `require` is written over, of the URL
-   * the path names. How the source is read is Node's rule, the *response*
+   * its path or section name named. How the source is read is Node's rule, the *response*
    * URL's own extension first and the engine's syntax detection where that
    * says nothing, so three shapes come back:
    *
-   * - an **ES module**, which is what a body this container carried is: `PageSource` wrote it,
+   * - an **ES module**, which is what a body this container carried is: `ContainerSources` wrote it,
    *   and its default export is the value native's host would have kept as that script's
    *   completion value — the compiler's `{init}` object for a `.lynx.bundle` body,
    *   `module.exports` for a `.web.bundle` one, the parsed value for a `.json` one. A
@@ -186,8 +187,8 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
    * The load parks the job this call runs in. The text never becomes a value
    * here, and a URL is evaluated once per realm however often it is asked for.
    */
-  function loadBody(path: string, entry: string): () => ModuleValue {
-    const loaded = loadModuleSync(bodyUrl(path, entry), "module, exports");
+  function loadBody(url: string, entry: string): () => ModuleValue {
+    const loaded = loadModuleSync(url, "module, exports");
     if (loaded.kind === "json") return factoryOf(loaded.value, entry);
     if (loaded.kind === "module") {
       const namespace = loaded.value as {default?: ModuleValue};
@@ -218,7 +219,7 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
     _options?: {timeout?: number}): ModuleValue {
     const cached = cache.get(path);
     if (cached) return cached;
-    const factory = factories.get(path) ?? loadBody(path, entry);
+    const factory = factories.get(path) ?? loadBody(pathURL(path, entry), entry);
     // Both tables are written after the factory returned, as lynx-core writes
     // `_$factoryCache` only there (`app.ts` `loadScript`): a factory whose
     // `init` threw is not retained either, so the next call runs the whole
@@ -246,12 +247,13 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
    * which is the one every factory here is given.
    */
   function loadScriptInit(sourceURL: string, entry = DEFAULT_ENTRY) {
-    const factory = loadBody(sourceURL, entry);
+    const factory = loadBody(pathURL(sourceURL, entry), entry);
     return {init: (_inject?: ModuleValue): ModuleValue => factory()};
   }
   /**
    * `lynx.loadScript(key, {bundleName})`: one named custom section, answered
-   * once per entry.
+   * once per entry, from the section URL `sectionURL` writes under the
+   * entry's container.
    *
    * A section is loaded like any other body of its container and answers what
    * any other one does — the module's default export, initialized when that
@@ -266,18 +268,18 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
     const entry = options.bundleName ?? DEFAULT_ENTRY;
     const cacheKey = `${entry}:${key}`;
     if (sectionExports.has(cacheKey)) return sectionExports.get(cacheKey);
-    const value = loadBody(key, entry)();
+    const value = loadBody(sectionURL(key, requireContainer(key, entry)), entry)();
     sectionExports.set(cacheKey, value);
     return value;
   }
   /**
-   * One entry's template URL: where its container answered from, and so the
-   * base every bundle path of that entry resolves against.
+   * One entry's container URL, which every body of that entry hangs under.
    *
    * That is all a bundle is here — its bodies are registered resources the
    * boot script never touches, each loaded by the `requireModule`,
-   * `loadScript` or `loadScriptInit` that asks for it. No URL is no base: an
-   * entry registered without one resolves nothing but an absolute path.
+   * `loadScript` or `loadScriptInit` that asks for it. No URL is no
+   * container: the default entry registered without one loads nothing but an
+   * absolute path.
    */
   function registerTemplateUrl(url: string | undefined, entry = DEFAULT_ENTRY) {
     if (url !== undefined) templateUrls.set(entry, url);
