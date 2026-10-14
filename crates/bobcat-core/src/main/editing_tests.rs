@@ -140,8 +140,11 @@ fn mouse(phase: PointerPhase, x: f32, y: f32) -> InputEvent {
     InputEvent::pointer(Point2D::new(x, y), 1, PointerKind::Mouse, phase)
 }
 
+/// A `keydown` of `text`, which the key typed and the platform reports with
+/// it.
 fn key(text: &str) -> InputEvent {
     InputEvent::key(KeyPhase::Down, text, "", false, Modifiers::default())
+        .with_text(Some(text.into()))
 }
 
 /// Taps the host with a finger, which focuses it on the tap (the `click`),
@@ -316,6 +319,43 @@ fn a_keydown_types_into_the_focused_host_whatever_its_listener_does() {
     });
     let target = engine.probe_document(|tree| tree.focused()).flatten();
     assert_eq!(target, Some(node_id(HOST)));
+}
+
+/// A key the platform reports without its text — its input method delivers
+/// the text instead, as macOS's `insertText:` and a browser's `beforeinput`
+/// do — types nothing by its `keydown`; the host's commit of that text is
+/// the one insertion.
+#[test]
+fn a_keydown_without_text_types_nothing_and_the_commit_inserts_once() {
+    let mut engine = booted(&["keydown"], "");
+    let mut states = States::default();
+    focus_host(&mut engine, &mut states);
+
+    engine.dispatch_input(InputEvent::key(
+        KeyPhase::Down,
+        "y",
+        "KeyY",
+        false,
+        Modifiers::default(),
+    ));
+    engine
+        .view
+        .edit(Command::CommitText {
+            text: "y".to_owned(),
+            relative_cursor: 0,
+        })
+        .expect("a booted view takes edits");
+    engine.dispatch_input(key("z"));
+    wait_for_log(&mut engine, "keydown|keydown");
+    let typed = states.wait(&mut engine, "with the value yz", |state| {
+        state.value == "yz"
+    });
+    assert_eq!(typed.selection, 2..2);
+    assert!(
+        states.0.iter().all(|state| state.value != "yy"),
+        "the key without text inserted nothing: {:?}",
+        states.0
+    );
 }
 
 /// A finger's tap on a host nobody listens to the pointer events of

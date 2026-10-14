@@ -45,6 +45,25 @@ Continuing at 60 Hz.
 Run `bobcat --help` for all startup options and enter `help` at the prompt for
 all runtime commands.
 
+Editing a `contenteditable` host works in the window with the keyboard and the
+macOS input method, and in both modes from the prompt:
+
+```text
+(bobcat) tap 40 30
+(bobcat) key a a
+(bobcat) compose x
+(bobcat) commit y
+(bobcat) frame
+Rendered one frame.
+(bobcat) show text-input
+text-input: value="ay" selection=2..2 composition=none caret=…
+```
+
+`key KEY [TEXT]` sends a `keydown` (typing `TEXT`) and a `keyup`; `compose`
+and `commit` are the input method's composition and commit; a word may be
+double-quoted (`key " " " "`). `tests/fixtures/editable.lynx.xml` is a page
+with one editing host that logs its editing events to standard error.
+
 Headed mode is macOS-only today; it derives the device-pixel ratio from the
 window, while headless mode takes it from `--dpr` (default 1). Only
 screenshots read pixels back to the CPU; normal frames reuse the scene, Vello

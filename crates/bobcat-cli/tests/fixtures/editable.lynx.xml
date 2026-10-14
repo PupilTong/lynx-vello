@@ -1,0 +1,48 @@
+<lynx engine-version="4.2">
+<!--
+  One plain-text editing host for the editing commands of the CLI and the
+  macOS window's input method (docs/editable-text-design.md, E3). The host
+  fills the top of the page; every editing event it hears is logged to the
+  console, which bobcat prints to standard error as `[main] [log] ...`.
+-->
+<style><![CDATA[
+page { display: linear; background-color: #ffffff; }
+.editor {
+  width: 300px;
+  height: 48px;
+  margin: 8px;
+  padding: 4px;
+  border-width: 1px;
+  border-style: solid;
+  border-color: #888888;
+  font-size: 20px;
+  line-height: 24px;
+  color: #111111;
+}
+]]></style>
+<script thread="main"><![CDATA[
+lynx.getEngine().addEventListener('__RenderPage', function renderPage() {
+  const page = __CreatePage('card', 0);
+  const editor = __CreateView(0);
+  __SetClasses(editor, 'editor');
+  __SetAttribute(editor, 'contenteditable', 'true');
+  __AppendElement(page, editor);
+  globalThis.held = [page, editor];
+  const names = [
+    'focus', 'blur', 'keydown', 'beforeinput', 'input',
+    'compositionstart', 'compositionupdate', 'compositionend',
+  ];
+  for (const name of names) {
+    __AddEventListener(editor, name, function log(event) {
+      const parts = [event.type];
+      if (event.key !== undefined) parts.push(JSON.stringify(event.key));
+      if (event.inputType !== undefined) parts.push(event.inputType);
+      if (event.data !== undefined) parts.push(JSON.stringify(event.data));
+      console.log('editing: ' + parts.join(' '));
+    }, {});
+  }
+  __FlushElementTree();
+});
+]]></script>
+<script thread="background"><![CDATA[]]></script>
+</lynx>

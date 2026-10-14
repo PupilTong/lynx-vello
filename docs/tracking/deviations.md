@@ -1144,6 +1144,10 @@ consequential choice about whether to follow the spec or the quirk.
     text arrives through `LynxView::edit`, not as keys.
   - **No `keyCode`.** web-core forwards the deprecated numeric `keyCode` for
     parity with iOS/Android; this engine reports the W3C `key`/`code` only.
+  - **No `keydown` for a key the macOS input method consumed** (2026-10-14,
+    editable text E3). winit 0.30 sends no key event for a key that went to a
+    composition, where a browser sends `keydown` with `key = "Process"`; the
+    composition's events still fire (`docs/editable-text-design.md`).
   - **The macOS CLI maps winit's keys** through a table
     (`crates/bobcat-cli/src/cli/keys.rs`): winit's variant names are the UI
     Events values, except the Command key (`Meta`, `MetaLeft`/`MetaRight`)
