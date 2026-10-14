@@ -142,10 +142,14 @@ geometry query over `CommittedFrame` is the recorded follow-up if that matters.
 next frame post (E2 named it after `dom::editing::Command`, which it carries
 as it is, rather than `ime`/`ImeCommand`: the same call carries a host's own
 selection and editing commands). Keyboard keys travel as `InputKind::Key` (PR
-#407); main inserts a printable key's W3C `key` value as the key's **default
-action** when the `keydown` was not canceled and an editing host is focused.
-Keys the IME consumed arrive as `Edit` commands instead and the platform's
-`keydown` for them carries `key = "Process"`, matching browsers.
+#407) with the **text the key typed** (`text`, since E3), which main inserts
+as the key's **default action** when the `keydown` was not canceled and an
+editing host is focused — never the W3C `key` value. A host whose platform
+reports a key's text through its input method instead (a browser's
+`beforeinput`) sends the key with `text: None` and the text as one
+`CommitText`, so it is inserted once. Keys the IME consumed arrive as `Edit`
+commands; a browser's `keydown` for them carries `key = "Process"`, and
+winit's macOS backend sends no key event for them at all (E3).
 
 ## Series (one PR each, not stacked)
 
@@ -448,6 +452,143 @@ pointer/wheel/touch kind was renamed `DETAIL_POSITION` to match the realm's.
   reports `null` rather than its host.
 - **`LynxView::edit` before boot is refused** (`NotReady`), as the page
   updates are.
-- **A typed key's text is its W3C `key` value.** A host that knows the text a
-  key produced (winit's `KeyEvent.text`) sends it as `Command::Insert` and
-  lets the `keydown` carry `"Process"`, or relies on `key` (E3's choice).
+- **A typed key's text was its W3C `key` value.** E3 replaced that with the
+  text the host reports with the key (below).
+
+## E3: what was built
+
+The key-text contract in `dom` and `bobcat-core`, the macOS window's input
+method in `bobcat-cli` (`crates/bobcat-cli/src/cli/ime.rs`, `macos.rs`), and
+editing commands in the CLI prompt (`command.rs`, `headless.rs`).
+
+Public surface:
+
+- `dom::input::InputKind::Key::text: Option<Arc<str>>` and
+  `InputEvent::with_text`; `InputEvent::key` builds a key that typed nothing.
+- `dom::event::EventDetail::Key::text`, read by the engine alone: the realm's
+  `KeyboardEvent` is unchanged (`DETAIL_KEY` carries no text, W3C has no such
+  member).
+- `key_command(key, text, modifiers)`: the typed text is inserted when it is
+  some, non-empty, free of control characters, and ctrl and meta are not
+  held. The named-key check on `key` is gone; `key` still selects Enter,
+  Backspace, Delete, the arrows, Home/End and ctrl/meta-A.
+
+### What winit 0.30.13 sends on macOS
+
+Read from `src/platform_impl/macos/view.rs` in the winit crate:
+
+- **With the input method allowed, a plain printable key is one
+  `KeyboardInput` and no `Ime` event.** `keyDown:` calls
+  `interpretKeyEvents:` (lines 466-474), which calls `insertText:`; that
+  queues `Preedit("")` + `Commit` only while there is marked text (lines
+  411-415), so a key with no composition queues nothing there, and
+  `keyDown:` then queues the `KeyboardInput` (lines 479-497). Its
+  `KeyEvent.text` is the key's text (`event.rs` `create_key_event`, line 154:
+  the logical key's text on a press).
+- **A key the input method consumed queues no `KeyboardInput`**: a preedit or
+  a commit during that `keyDown:` suppresses it (lines 479-490), unless
+  `doCommandBySelector:` asked for the key (lines 420-438). `keyUp:` is also
+  suppressed while a preedit is open (lines 503-517).
+- **With the input method not allowed** `interpretKeyEvents:` is not called,
+  no `Preedit`/`Commit` can be queued, and the `KeyboardInput` carries the
+  text; the only `Ime` event is `Disabled`, when `set_ime_allowed(false)`
+  turns off an input method that had been composing (lines 880-896).
+- `KeyEvent.text` is `"\r"`, `"\t"`, `"\u{8}"` and `"\u{1b}"` for Enter,
+  Tab, Backspace and Escape (`keyboard.rs` `NamedKey::to_text`), so the
+  engine skips control characters.
+- `set_ime_purpose` does nothing on macOS (`window_delegate.rs` line 1570);
+  `set_ime_cursor_area` converts to logical points and is answered from
+  `firstRectForCharacterRange:` whatever range is asked (view.rs lines
+  376-390).
+
+So the macOS host passes `KeyEvent.text` as the key's `text` in every case
+(the brief's `None` while the input method is allowed would have typed
+nothing: no `Commit` follows a plain key), and a key's text cannot be
+inserted twice: whenever the input method produced text in a `keyDown:`,
+winit sends no `KeyboardInput` for it.
+
+### The empty preedit before a commit
+
+winit sends `Preedit("", None)` immediately before each `Commit` (both from
+one `insertText:`, lines 412-413), and also alone when a composition is
+emptied (`setMarkedText:` with an empty string, `unmarkText`). E1's empty
+`SetComposition` cancels the composition and removes its text, so forwarding
+the first kind would fire `compositionend` and delete the composition before
+the commit, and the commit would then insert at a plain caret. `ImeBridge`
+holds an empty preedit back: a `Commit` that follows drops it, and anything
+else — a non-empty preedit, `Disabled`, any non-`Ime` window event, or the
+end of the event-loop turn (`about_to_wait`) — sends the cancellation first.
+Both events of a commit come from one `keyDown:`, so the turn cannot end
+between them. An empty preedit while nothing is composed is never sent: with
+no composition the engine's empty `SetComposition` would delete a selected
+range. The resulting events for a dead key (Option-e, e) are
+`compositionstart`, `beforeinput`/`compositionupdate`/`input` of `´`, then
+`beforeinput`/`compositionupdate`/`input` of `é` and one `compositionend`.
+
+### The macOS host
+
+- `EngineEvent::TextInputStateChanged` (the newest of a turn) calls
+  `set_ime_allowed(state.host.is_some())`, and while a host is focused
+  `set_ime_cursor_area` with the first composition character's box, or the
+  caret when nothing is composed. The rectangles are passed as
+  `LogicalPosition`/`LogicalSize`: the view's CSS px are the window's logical
+  points (its viewport is the physical size divided by the scale factor), and
+  winit converts whatever it is given to logical points itself.
+- `WindowEvent::Ime`: a non-empty `Preedit(text, cursor)` is
+  `SetComposition { text, selection }`, winit's byte cursor converted to
+  UTF-16 units (a hidden cursor is a caret at the end); `Commit(text)` is
+  `CommitText { text, relative_cursor: 0 }`; `Disabled` during a composition
+  is `FinishComposition { keep_selection: false }`; `Enabled` sends nothing.
+  A focus that moves to another host or to none forgets the composition.
+- Modifiers: Option is `alt`, Command `meta`, Control `ctrl`, which is what
+  `key_command` expects of macOS (Option-arrow by word, Command-arrow to the
+  line edge or the value edge, Option-Backspace by word).
+- The prompt has the headless commands below too.
+
+### The CLI's editing commands
+
+`tap X Y` (a finger down and up at viewport CSS px), `key KEY [TEXT]`
+(`keydown` with `TEXT` as its text, then `keyup`), `compose TEXT [START END]`
+(`SetComposition`, UTF-16 selection, default a caret at the end),
+`commit TEXT` (`CommitText`), and `show text-input`, which prints the last
+published state as one `text-input: value=… selection=… composition=…
+caret=…` line (`text-input: none` when nothing editable is focused); a word
+may be double-quoted to hold spaces or be empty. All five wait for the
+first script commit, as `frame` does. `crates/bobcat-cli/tests/fixtures/
+editable.lynx.xml` is a page with one host that logs every editing event to
+the console; `headless_cli.rs`
+`the_editing_commands_type_compose_and_commit_into_a_host` drives it (tap,
+type `ab`, compose `x`, commit `y`) and checks the states (`abx` with
+composition `2..3`, then `aby`) and the event order.
+
+### Limitations
+
+- **The browser embedder types nothing by keys until E4.** `bobcat-wasm`
+  builds its keys with `InputEvent::key`, whose `text` is `None`; E4's
+  `<textarea>` proxy sends the text as input-method commands.
+- **Candidate-window placement uses committed geometry**, so it lags a
+  relayout or a scroll by one published state, and winit answers
+  `firstRectForCharacterRange:` with the one rectangle for every range
+  asked, so a candidate window for a later character of a long composition
+  sits at its first.
+- **An engine-side end of a composition is not told to the input method.**
+  When the engine ends a composition the host did not (a click elsewhere in
+  the same host, a script's write), the input method keeps its marked text;
+  winit 0.30 has no call to discard it short of `set_ime_allowed(false)`,
+  which only a focus change makes here. Chromium calls `unmarkText`
+  in that case.
+- **`unmarkText` cancels.** winit reports `unmarkText` and an emptied
+  composition alike, as an empty preedit, so both remove the composed text;
+  Chromium finishes (keeps) the composition on `unmarkText`.
+- **No `keydown` for a key the input method consumed.** winit sends none,
+  where a browser sends `keydown` with `key = "Process"`.
+- **winit drops a command key that commits.** A key that both commits a
+  composition and then asks for a command (Korean input committing with an
+  arrow or Enter) loses the command: `doCommandBySelector:` returns early
+  after a commit (lines 426-428). That is winit's choice, not this host's.
+- **Ctrl-A selects all on macOS**, as `key_command` does on every platform,
+  where Cocoa's text system moves to the line start; Command-Backspace does
+  nothing rather than deleting to the line start. No per-platform bindings,
+  as E2 recorded.
+- **`set_ime_purpose` is not called**: winit's macOS backend ignores it, so
+  a password host still gets the input method.

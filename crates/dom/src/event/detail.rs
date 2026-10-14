@@ -91,13 +91,19 @@ pub enum EventDetail {
         points: TouchPoints,
     },
     /// A key event (`keydown`, `keyup`): W3C UI Events' `key` and `code`
-    /// strings, whether it is an auto-repeat, and the modifiers held. Shared
-    /// behind `Arc`s, so carrying one is never an allocation.
+    /// strings, whether it is an auto-repeat, the modifiers held, and the
+    /// text the key typed ([`InputKind::Key`](crate::input::InputKind::Key)'s
+    /// `text`). Shared behind `Arc`s, so carrying one is never an
+    /// allocation.
     Key {
         key: Arc<str>,
         code: Arc<str>,
         repeat: bool,
         modifiers: Modifiers,
+        /// The text the key typed, which the `keydown`'s editing default
+        /// action inserts. Read by the engine alone: W3C's `KeyboardEvent`
+        /// has no such member, so it never crosses into a realm.
+        text: Option<Arc<str>>,
     },
     /// `beforeinput` or `input` (Input Events Level 2): `InputEvent.inputType`,
     /// `data` (`None` for the deletions and `insertLineBreak`) and

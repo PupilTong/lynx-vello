@@ -432,6 +432,7 @@ impl GestureRouter {
                 ref code,
                 repeat,
                 modifiers,
+                ref text,
             } => {
                 let Some(name) = key_event_name(phase) else {
                     return;
@@ -448,6 +449,7 @@ impl GestureRouter {
                         code: code.clone(),
                         repeat,
                         modifiers,
+                        text: text.clone(),
                     },
                 ));
             }
@@ -1065,7 +1067,7 @@ mod tests {
         };
         // Routing hit nothing: a key event is never hit-tested.
         harness.feed_routed(
-            InputEvent::key(KeyPhase::Down, "A", "KeyA", false, shift),
+            InputEvent::key(KeyPhase::Down, "A", "KeyA", false, shift).with_text(Some("A".into())),
             None,
             0.0,
         );
@@ -1092,6 +1094,7 @@ mod tests {
                 code: "KeyA".into(),
                 repeat: false,
                 modifiers: shift,
+                text: Some("A".into()),
             }
         );
         assert!(!harness.router.needs_frame(), "a key arms nothing");

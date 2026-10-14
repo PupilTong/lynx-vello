@@ -312,11 +312,13 @@ fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut Arguments<'a>) {
             }));
             return;
         }
+        // The typed `text` stays here: `KeyboardEvent` has no such member.
         EventDetail::Key {
             key,
             code,
             repeat,
             modifiers,
+            text: _,
         } => {
             let mut bits = 0;
             for (held, bit) in [
