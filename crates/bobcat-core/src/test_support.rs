@@ -27,6 +27,12 @@ use crate::view::{
     ViewSources,
 };
 
+/// The compiled `ReactLynx` cards, built by `pnpm --filter
+/// reactlynx-test-fixtures build`: one module for every test in the crate
+/// that boots one, since the registry embeds every bundle.
+#[path = "../../../packages/reactlynx-test-fixtures/fixtures.rs"]
+pub(crate) mod fixtures;
+
 /// How long a test waits on work that should already be happening.
 ///
 /// A hang detector rather than a performance assertion: the first document a
@@ -60,6 +66,9 @@ pub(crate) struct InlineFetcher {
     /// The script served for [`BACKGROUND_ENTRY`], when the view names one:
     /// a plain module, served as it was given.
     background: Option<String>,
+    /// Every other module this host serves, by URL, each served as it was
+    /// given: what a compiled card's BTS asks for by bundle path.
+    modules: FxHashMap<String, String>,
     sheets: FxHashMap<String, TestSheet>,
     /// The faces this host serves an `@font-face` `src` from, by URL. A URL
     /// that is not in here fails, which is how a test drives the fall-through
@@ -94,6 +103,12 @@ impl ResourceFetcher for InlineFetcher {
                 }),
                 None => Err(missing(&url)),
             },
+            SourceRequest::Module(url) if self.modules.contains_key(&url) => {
+                Ok(LoadedSource::Module {
+                    source: self.modules[&url].clone(),
+                    url,
+                })
+            }
             SourceRequest::StyleSheet(url) => match self.sheets.get(&url) {
                 Some(TestSheet::Text(css)) => Ok(LoadedSource::StyleSheet(StyleSheetSource::Text(
                     css.clone(),
@@ -107,8 +122,8 @@ impl ResourceFetcher for InlineFetcher {
                 || Err(missing(&url)),
                 |blob| Ok(LoadedSource::Font(blob.clone())),
             ),
-            // This double serves no module but the two entries, and no plain
-            // fetch.
+            // This double serves no module but the two entries and the ones
+            // it was given, and no plain fetch.
             SourceRequest::Module(url) | SourceRequest::Fetch { url } => Err(missing(&url)),
         };
         completion.complete(answer);
@@ -194,8 +209,13 @@ enum TestTarget {
 pub(crate) struct TestViewSpec {
     entry: String,
     background: Option<String>,
+    modules: Vec<(String, String)>,
+    config: crate::main::tree::PageConfig,
     sheets: Vec<(String, TestSheet)>,
     fonts: Vec<(String, dom::FontBlob)>,
+    /// A face the view registers at construction and its family, the page's
+    /// default font.
+    default_font: Option<(String, dom::FontBlob)>,
     target: TestTarget,
     width: f32,
     height: f32,
@@ -212,8 +232,11 @@ impl TestViewSpec {
         Self {
             entry: entry.to_owned(),
             background: None,
+            modules: Vec::new(),
+            config: crate::main::tree::PageConfig::default(),
             sheets: Vec::new(),
             fonts: Vec::new(),
+            default_font: None,
             target: TestTarget::None,
             width: 393.0,
             height: 727.0,
@@ -229,10 +252,34 @@ impl TestViewSpec {
         self
     }
 
+    /// One more module this host serves at `url`, as it is given: a body a
+    /// compiled card's BTS loads by bundle path, beside the base URL
+    /// `app:///`.
+    pub(crate) fn with_module(mut self, url: &str, source: &str) -> Self {
+        self.modules.push((url.to_owned(), source.to_owned()));
+        self
+    }
+
+    /// The page configuration the view is built with, as a bundle's own
+    /// switches give it.
+    pub(crate) const fn with_config(mut self, config: crate::main::tree::PageConfig) -> Self {
+        self.config = config;
+        self
+    }
+
     /// One face this host serves, at the URL an `@font-face` `src` names.
     pub(crate) fn with_font(mut self, url: &str, bytes: &'static [u8]) -> Self {
         self.fonts
             .push((url.to_owned(), dom::FontBlob::from_static(bytes)));
+        self
+    }
+
+    /// A face the view registers at construction, as an embedder's
+    /// `ViewSources::fonts` does, and `family`, its name, as the page's
+    /// default font: text no author rule gives a family shapes with it, and
+    /// not with whatever the machine has.
+    pub(crate) fn with_default_font(mut self, family: &str, bytes: &'static [u8]) -> Self {
+        self.default_font = Some((family.to_owned(), dom::FontBlob::from_static(bytes)));
         self
     }
 
@@ -293,13 +340,23 @@ impl TestViewSpec {
         let Self {
             entry,
             background,
+            modules,
+            config,
             sheets,
             fonts,
+            default_font,
             target,
             width,
             height,
         } = self;
+        let (default_font_family, registered) = default_font
+            .map_or((None, Vec::new()), |(family, blob)| {
+                (Some(family), vec![blob])
+            });
         let sources = ViewSources {
+            config,
+            fonts: registered,
+            default_font_family,
             style_sheets: sheets.iter().map(|(url, _)| url.clone()).collect(),
             background_entry: background.as_ref().map(|_| BACKGROUND_ENTRY.to_owned()),
             ..ViewSources::new(
@@ -311,6 +368,7 @@ impl TestViewSpec {
         let fetcher = Rc::new(InlineFetcher {
             entry: crate::main::runtime::card_entry(&entry),
             background,
+            modules: modules.into_iter().collect(),
             sheets: sheets.into_iter().collect(),
             fonts: fonts.into_iter().collect(),
         });
