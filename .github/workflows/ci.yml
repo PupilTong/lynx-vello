@@ -184,8 +184,8 @@ jobs:
           wasm-pack test --node crates/bobcat-source
           --test decode_web_bundle --test zip_source --locked -Z build-std=std,panic_abort
 
-      - name: Verify shared-memory and npm artifacts
-        run: pnpm --filter bobcat-wasm verify
+      - name: Test the bobcat-wasm package scripts
+        run: pnpm --filter bobcat-wasm test
 
       - name: Build the Explorer homepage for the Canvas tab
         run: pnpm --filter @explorer/homepage build
