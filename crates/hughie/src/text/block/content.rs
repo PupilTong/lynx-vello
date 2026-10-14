@@ -67,6 +67,13 @@ pub(in crate::text::block) struct NormalizedBlock {
     pub(in crate::text::block) ranges: Vec<StyledRange>,
     pub(in crate::text::block) boxes: Vec<BoxAt>,
     pub(in crate::text::block) map: SourceMap,
+    /// Each input item's source units, indexed like the input slice.
+    ///
+    /// Every source character counts on arrival, whatever collapsing later
+    /// makes of it, so these are contiguous, cover `0..map.source_len()`, and
+    /// a run's span is its whole pre-collapse text even where none of it
+    /// survived; a box's is its one unit.
+    pub(in crate::text::block) item_units: Vec<Range<u32>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,14 +261,17 @@ pub(in crate::text::block) fn normalize(items: &[InlineItem<'_>]) -> NormalizedB
         after_preserved_break: false,
     };
 
+    let mut item_units = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
         let item_index = u32::try_from(index).expect("item count fits u32");
+        let start = state.units;
         match item {
             InlineItem::Run(run) => state.consume_run(run, item_index),
             InlineItem::Box(_) => state.consume_box(item_index),
         }
+        item_units.push(start..state.units);
     }
-    state.finish()
+    state.finish(item_units)
 }
 
 impl Normalizer {
@@ -463,7 +473,7 @@ impl Normalizer {
         u32::try_from(self.text.len()).expect("normalized text fits u32")
     }
 
-    fn finish(mut self) -> NormalizedBlock {
+    fn finish(mut self, item_units: Vec<Range<u32>>) -> NormalizedBlock {
         if let Some(pending) = self.pending.take() {
             let content_seen = !self.text.is_empty() || !self.boxes.is_empty();
             if content_seen && pending.kind != PendingKind::Suppressed {
@@ -499,6 +509,7 @@ impl Normalizer {
                 segments: self.segments,
                 source_len: self.units,
             },
+            item_units,
         }
     }
 }
@@ -641,6 +652,24 @@ mod tests {
 
         let kept = normalize(&[run(&style, "a\nb")]);
         assert_eq!(kept.text, "a b");
+    }
+
+    #[test]
+    fn item_units_count_every_source_unit_whatever_collapsing_keeps() {
+        let style = RunStyle::default();
+        let items = [
+            run(&style, "a \n"),
+            atom(7),
+            run(&style, "  "),
+            run(&style, "b\u{1F600}"),
+        ];
+        let block = normalize(&items);
+        assert_eq!(block.text, "a  b\u{1F600}");
+        // 'a' and the collapsed " \n"; the box; two spaces collapsed into
+        // nothing; 'b' and a surrogate pair.
+        assert_eq!(block.item_units, [0..3, 3..4, 4..6, 6..9]);
+        assert_eq!(block.map.source_len(), 9);
+        assert!(normalize(&[]).item_units.is_empty());
     }
 
     #[test]

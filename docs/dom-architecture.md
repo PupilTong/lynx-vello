@@ -958,6 +958,14 @@ text children's measurement caches and retained artifacts, because text nodes
 have no Stylo damage record of their own. Parley is unconditional and there is
 no arbitrary payload callback.
 
+The committed paragraph answers geometry queries in its own source UTF-16
+units without running a pass: `text_range_boxes` (a range to per-line boxes),
+its inverse `text_index_at_point` (a point to the unit drawn there, `None` off
+content), `inline_source_range` (the units a nested scope or atom
+contributes, from the item-to-node table through the same flat-ancestor walk
+the painter's inline backgrounds use), and `paragraph_of` (the establishing
+element whose flatten walk reaches a node).
+
 ## The vendored stylo fork
 
 `dom` relies on the vendored stylo fork (`vendor/stylo`, tracking the canonical
