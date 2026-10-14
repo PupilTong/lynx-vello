@@ -662,6 +662,88 @@ impl<T> Document<T> {
         )
     }
 
+    /// The source offset of the cluster under `point` in the paragraph
+    /// `paragraph` establishes, from the last committed layout.
+    ///
+    /// Offsets and coordinates are [`Self::text_range_boxes`]'s: source
+    /// UTF-16 units with an inline image or view counting one, in the
+    /// paragraph's own space whose origin is the element's content-box
+    /// top-left. The inverse of that query over one unit — a point inside
+    /// `text_range_boxes(paragraph, u, u + 1)` answers `u` — so a line owns
+    /// its whole line box, leading included, and an atomic box answers its
+    /// unit across its placed margin box. A cluster answers its first unit,
+    /// so a surrogate pair or a multi-character grapheme is one hit, and a
+    /// collapsed whitespace run answers the first unit it collapsed.
+    ///
+    /// `None` on a point that hits no content, as native Lynx's text hit
+    /// test answers the paragraph itself there rather than a character:
+    /// above the first line or below the last, before a line's first cluster
+    /// or past its last, on the whitespace hanging at a soft wrap or a
+    /// preserved newline, and on the truncation marker or the
+    /// `inline-truncation` content drawn at a cut, neither of which is
+    /// source text. It does not snap to the nearest position the way a caret
+    /// query does; it answers what was hit.
+    ///
+    /// `None` too when `paragraph` establishes no committed paragraph.
+    /// Nothing here runs a pass, so the answer is the last one's.
+    #[must_use]
+    pub fn text_index_at_point(
+        &self,
+        paragraph: crate::NodeId,
+        point: Point2D<f32>,
+    ) -> Option<usize> {
+        let unit = self
+            .text_block(paragraph)?
+            .index_at_point(hughie::geometry::Point::new(point.x, point.y))?;
+        usize::try_from(unit).ok()
+    }
+
+    /// The source range `element` contributes to the paragraph it is inline
+    /// content of, from the last committed layout.
+    ///
+    /// Units are [`Self::text_range_boxes`]'s. A nested `-lynx-text` scope
+    /// answers its own text together with every scope and atom nested in it,
+    /// which is one contiguous range because the paragraph is flattened in
+    /// tree order; an atomic inline box answers its one unit. A run's units
+    /// are its source text *before* whitespace collapsing, so a scope that
+    /// holds only collapsible whitespace still owns the units it was written
+    /// with. The range is a property of the content, not of the line break:
+    /// text a truncation cut hides keeps its range.
+    ///
+    /// `None` when `element` is no element, is the paragraph's own root,
+    /// is not inline content of a committed paragraph ([`Self::paragraph_of`]
+    /// answers which), or contributes nothing — an empty scope, or anything
+    /// in the `inline-truncation` content, which is no source text. Nothing
+    /// here runs a pass.
+    #[must_use]
+    pub fn inline_source_range(&self, element: crate::NodeId) -> Option<core::ops::Range<usize>> {
+        let slot = self.slot(element)?;
+        let units = text_block::inline_source_range(self.arenas(), self.layout_state(), slot)?;
+        Some(usize::try_from(units.start).ok()?..usize::try_from(units.end).ok()?)
+    }
+
+    /// The element establishing the committed paragraph whose content `node`
+    /// is: `node` itself when it establishes one, else the nearest
+    /// `display: -lynx-text` ancestor whose last committed layout flattened
+    /// `node` into its paragraph.
+    ///
+    /// The paragraph [`Self::text_index_at_point`] and
+    /// [`Self::text_range_boxes`] are asked about. A node is content when
+    /// the flatten walk reaches it: a text node, a nested `-lynx-text` scope
+    /// or `contents` wrapper, or an in-flow atomic inline box, reached only
+    /// through scopes and wrappers. `None` for anything else — a node inside
+    /// an atomic box's own subtree with no paragraph of its own nearer to it,
+    /// a `display: none` or absolutely positioned element and what is under
+    /// it, the children a generated-content list replaced — and when no
+    /// committed paragraph is above `node` at all. A node in the
+    /// `inline-truncation` content answers the paragraph it truncates.
+    /// Nothing here runs a pass.
+    #[must_use]
+    pub fn paragraph_of(&self, node: crate::NodeId) -> Option<crate::NodeId> {
+        let slot = self.slot(node)?;
+        text_block::paragraph_of(self.arenas(), self.layout_state(), slot)
+    }
+
     /// The nodes behind `id`'s paragraph items, indexed the way
     /// [`SourceItem::Content`](hughie::text::block::SourceItem) indexes them.
     ///
