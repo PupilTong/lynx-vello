@@ -1989,7 +1989,10 @@ a repeat) and `listenerClosed(node, name)`, from `element-papi.ts`'s
 `reconcile` only; a freed node's rows leave in the document's free path, so a
 collected handle tells the host nothing.
 What crosses back is each realm's answer, `event.defaultPrevented`
-(`preventDefault()` sets it on a cancelable event alone), which
+(`preventDefault()` sets it on a cancelable event alone; it is a read-only
+getter over a flag local to the dispatch, as `stopPropagation`'s are, so no
+member of the event captures the event itself and it is freed when the
+dispatch ends rather than by the cycle collector), which
 `MainThreadRuntime::dispatch` ORs over the realms it called into
 `Dispatched { delivered, default_prevented }` (a realm whose call threw
 counts as not canceled): the editing default actions read it

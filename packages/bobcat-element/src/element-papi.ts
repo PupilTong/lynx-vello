@@ -2871,8 +2871,10 @@ interface DispatchedEvent {
   stopImmediatePropagation: () => void;
   // DOM's cancellation: `preventDefault()` sets `defaultPrevented` when the
   // event is `cancelable`, and the dispatch answers it to the host.
+  // `defaultPrevented` is read-only, as DOM's is: a getter over the
+  // dispatch's own flag.
   cancelable: boolean;
-  defaultPrevented: boolean;
+  readonly defaultPrevented: boolean;
   preventDefault: () => void;
   // The three lists only a touch event carries. Absent — not
   // `undefined`-valued — on every other event, because the transport carries
@@ -3582,6 +3584,13 @@ function dispatchEvent(
   const name = String(eventName).toLowerCase();
   let stopped = false;
   let immediate = false;
+  // The canceled flag lives here, beside the two stop flags, and the event
+  // reads it through a getter: a `preventDefault` that wrote
+  // `event.defaultPrevented` would capture `event`, which holds that
+  // closure, and the cycle would keep every dispatched event alive until
+  // the cycle collector ran instead of freeing it when the dispatch ends.
+  const isCancelable = cancelable === true;
+  let prevented = false;
   // No node yet for a dispatch with no step held: its first delivery names
   // one.
   let targetNodeId = first?.target ?? NaN;
@@ -3613,11 +3622,13 @@ function dispatchEvent(
       stopped = true;
       immediate = true;
     },
-    cancelable: cancelable === true,
-    defaultPrevented: false,
+    cancelable: isCancelable,
+    get defaultPrevented() {
+      return prevented;
+    },
     preventDefault: () => {
-      if (event.cancelable) {
-        event.defaultPrevented = true;
+      if (isCancelable) {
+        prevented = true;
       }
     },
   };
@@ -3794,7 +3805,7 @@ function dispatchEvent(
     event.eventPhase = NONE;
     event.currentTarget = null;
   }
-  return event.defaultPrevented;
+  return prevented;
 }
 
 export function __AddEventListener(
