@@ -19,7 +19,9 @@
 //!   [`TextBlock::layout`] call.
 //! - **Re-break** — a new width, or [`TextBlock::set_box_size`], re-breaks the retained shaped
 //!   layout in place through `inline_boxes_mut`; shaping is not re-run. A repeated `layout` at
-//!   unchanged inputs is a no-op.
+//!   unchanged inputs is a no-op. The one exception is a paragraph with preserved tabs
+//!   (`white-space-collapse: preserve`): a break that moves a tab to a different place on its line
+//!   moves its tab stop, which re-shapes (`tab`).
 //! - **Re-shape (bounded)** — a truncating layout builds one extra display layout over the visible
 //!   prefix plus the tail; the inline-truncation content's own width is shaped once and cached.
 //! - **Rebuild** — changed text or styles mean a new [`TextBlock`]; there is no in-place path,
@@ -30,6 +32,7 @@ mod position;
 mod range;
 mod shape;
 pub(in crate::text) mod style;
+mod tab;
 mod truncate;
 
 use core::fmt;
@@ -45,7 +48,7 @@ use shape::{NaturalLine, ShapeSpan};
 use style::resolve_alignment;
 pub use style::{
     BlockStyle, Direction, LineHeight, RunStyle, TextAlign, TextIndent, TextOverflow, TextWrap,
-    VerticalAlign, WordBreak,
+    VerticalAlign, WhiteSpaceCollapse, WordBreak,
 };
 use truncate::{CutPlan, OverflowCut, Tail};
 
@@ -112,10 +115,19 @@ enum OwnedItem {
 struct Flow {
     items: Vec<OwnedItem>,
     block: NormalizedBlock,
+    /// The extra letter-spacing each preserved tab's space is shaped with,
+    /// indexed like `block.tabs`. Zero — one plain space — until the tab pass
+    /// settles it (`tab::resolve`).
+    tab_spacing: Vec<f32>,
+    /// Each preserved tab's `0.5ch`, the shortest shift it takes; indexed
+    /// like `block.tabs`. Measured once, for the content flow only.
+    tab_min: Vec<f32>,
 }
 
 impl Flow {
     fn build(items: &[InlineItem<'_>]) -> Self {
+        let block = normalize(items);
+        let tabs = block.tabs.len();
         Self {
             items: items
                 .iter()
@@ -124,8 +136,16 @@ impl Flow {
                     InlineItem::Box(spec) => OwnedItem::Box(*spec),
                 })
                 .collect(),
-            block: normalize(items),
+            block,
+            tab_spacing: vec![0.0; tabs],
+            tab_min: vec![0.0; tabs],
         }
+    }
+
+    /// The run item holding byte `byte` of the normalized text.
+    fn item_at(&self, byte: u32) -> u32 {
+        let ranges = &self.block.ranges;
+        ranges[ranges.partition_point(|range| range.bytes.end <= byte)].item
     }
 
     fn run_style(&self, item: u32) -> &RunStyle {
@@ -143,17 +163,39 @@ impl Flow {
     }
 
     /// The shaper spans for this flow, offset into a combined display string.
+    ///
+    /// One span per styled range, except that every preserved tab's space is
+    /// a span of its own carrying its tab spacing — the only way to give one
+    /// cluster an advance of its own in parley.
     fn spans(&self, byte_offset: u32, source: fn(u32) -> SourceItem) -> Vec<ShapeSpan<'_>> {
-        self.block
-            .ranges
-            .iter()
-            .map(|range| ShapeSpan {
-                bytes: (range.bytes.start + byte_offset) as usize
-                    ..(range.bytes.end + byte_offset) as usize,
-                style: self.run_style(range.item),
-                source: source(range.item),
-            })
-            .collect()
+        let tabs = &self.block.tabs;
+        let mut spans = Vec::with_capacity(self.block.ranges.len() + 2 * tabs.len());
+        let mut push = |bytes: core::ops::Range<u32>, item: u32, extra_spacing: f32| {
+            spans.push(ShapeSpan {
+                bytes: (bytes.start + byte_offset) as usize..(bytes.end + byte_offset) as usize,
+                style: self.run_style(item),
+                source: source(item),
+                extra_spacing,
+            });
+        };
+        let mut next_tab = 0;
+        for range in &self.block.ranges {
+            let mut start = range.bytes.start;
+            while let Some(&tab) = tabs.get(next_tab)
+                && tab < range.bytes.end
+            {
+                if start < tab {
+                    push(start..tab, range.item, 0.0);
+                }
+                push(tab..tab + 1, range.item, self.tab_spacing[next_tab]);
+                start = tab + 1;
+                next_tab += 1;
+            }
+            if start < range.bytes.end {
+                push(start..range.bytes.end, range.item, 0.0);
+            }
+        }
+        spans
     }
 }
 
@@ -314,7 +356,8 @@ impl TextBlock {
         items: &[InlineItem<'_>],
         truncation: Option<&[InlineItem<'_>]>,
     ) -> Self {
-        let flow = Flow::build(items);
+        let mut flow = Flow::build(items);
+        flow.tab_min = tab_minimums(context, &block_style, &flow);
         let truncation = truncation.map(|items| TruncationFlow {
             flow: Flow::build(items),
             natural_width: None,
@@ -605,14 +648,33 @@ impl TextBlock {
         }
 
         let indent = constraint.indent;
-        self.natural
-            .set_text_indent(indent, IndentOptions::default());
-
-        shape::break_clamped(
-            &mut self.natural,
-            width,
-            self.style.max_lines.map(NonZeroU32::get),
-        );
+        let mut tab_rounds = 0;
+        loop {
+            self.natural
+                .set_text_indent(indent, IndentOptions::default());
+            shape::break_clamped(
+                &mut self.natural,
+                width,
+                self.style.max_lines.map(NonZeroU32::get),
+            );
+            if tab_rounds == tab::MAX_ROUNDS {
+                break;
+            }
+            // Empty-checked first thing: a paragraph without preserved tabs
+            // leaves here on its first break.
+            let Some(spacing) = tab::resolve(
+                &self.natural,
+                &self.content.block.tabs,
+                &self.content.tab_spacing,
+                &self.content.tab_min,
+                indent,
+            ) else {
+                break;
+            };
+            self.content.tab_spacing = spacing;
+            self.reshape_natural(context);
+            tab_rounds += 1;
+        }
         // Content widths are read off the just-unjustified, pre-alignment
         // layout, with the current box sizes written in.
         let content_widths = self.natural.calculate_content_widths();
@@ -889,6 +951,22 @@ impl TextBlock {
         })
     }
 
+    /// Shapes the natural layout again, at the content's current tab
+    /// spacing and box sizes. Only the tab pass needs this: nothing else a
+    /// layout changes is a shaping input.
+    fn reshape_natural(&mut self, context: &mut TextContext) {
+        let spans = self.content.spans(0, SourceItem::Content);
+        let boxes = parley_boxes(&self.content, 0, 0);
+        self.natural = shape::shape(
+            context,
+            &self.style,
+            &self.content.block.text,
+            &spans,
+            boxes,
+            &mut self.natural_sources,
+        );
+    }
+
     /// Shapes the three-dot marker in one run's style and caches its advance.
     fn measure_dots(&mut self, context: &mut TextContext, item: u32) -> f32 {
         if let Some((cached, width)) = self.dots_width
@@ -901,6 +979,7 @@ impl TextBlock {
                 bytes: 0..DOTS.len(),
                 style: self.content.run_style(item),
                 source: SourceItem::Ellipsis { item },
+                extra_spacing: 0.0,
             }];
             let mut sources = Vec::new();
             let mut probe =
@@ -955,17 +1034,13 @@ impl TextBlock {
         let mut text = String::with_capacity(cut + 16);
         text.push_str(&self.content.block.text[..cut]);
 
-        let mut spans: Vec<ShapeSpan<'_>> = Vec::new();
-        for range in &self.content.block.ranges {
-            if range.bytes.start >= plan.cut_byte {
-                break;
-            }
-            spans.push(ShapeSpan {
-                bytes: range.bytes.start as usize..range.bytes.end.min(plan.cut_byte) as usize,
-                style: self.content.run_style(range.item),
-                source: SourceItem::Content(range.item),
-            });
-        }
+        // The content's own spans, tab spacing included, clipped at the cut:
+        // the visible prefix breaks exactly as it did in the natural layout.
+        let mut spans: Vec<ShapeSpan<'_>> = self.content.spans(0, SourceItem::Content);
+        spans.retain_mut(|span| {
+            span.bytes.end = span.bytes.end.min(cut);
+            span.bytes.start < cut
+        });
         let mut slots = Vec::new();
         let mut boxes = Vec::new();
         for entry in &self.content.block.boxes {
@@ -989,6 +1064,7 @@ impl TextBlock {
                     bytes: start..text.len(),
                     style: self.content.run_style(item),
                     source: SourceItem::Ellipsis { item },
+                    extra_spacing: 0.0,
                 });
             }
             Tail::Truncation => {
@@ -1128,6 +1204,39 @@ impl TextBlock {
             .as_ref()
             .expect("a TextBlock is read after layout()")
     }
+}
+
+/// Each preserved tab's `0.5ch` — half the advance of `0` in the tab's own
+/// run, without its letter-spacing (`ch` is a font metric).
+///
+/// One shaping per distinct run item holding a tab, at construction: `ch`
+/// never changes without a rebuild, and a paragraph without preserved tabs
+/// shapes nothing here.
+fn tab_minimums(context: &mut TextContext, block: &BlockStyle, flow: &Flow) -> Vec<f32> {
+    const ZERO: &str = "0";
+    let mut measured: Vec<(u32, f32)> = Vec::new();
+    flow.block
+        .tabs
+        .iter()
+        .map(|&byte| {
+            let item = flow.item_at(byte);
+            if let Some(&(_, half)) = measured.iter().find(|(seen, _)| *seen == item) {
+                return half;
+            }
+            let style = flow.run_style(item);
+            let spans = [ShapeSpan {
+                bytes: 0..ZERO.len(),
+                style,
+                source: SourceItem::Content(item),
+                extra_spacing: -style.letter_spacing,
+            }];
+            let mut probe = shape::shape(context, block, ZERO, &spans, Vec::new(), &mut Vec::new());
+            probe.break_all_lines(None);
+            let half = probe.width() * 0.5;
+            measured.push((item, half));
+            half
+        })
+        .collect()
 }
 
 /// The parley boxes of one flow, sized from the current specs and carrying
@@ -1281,7 +1390,7 @@ mod tests {
             InlineItem::Run(TextRunItem {
                 text: "aaaa aaaa",
                 style: &style,
-                preserve_newlines: false,
+                white_space: WhiteSpaceCollapse::Collapse,
             }),
             InlineItem::Box(InlineBoxSpec {
                 id: 1,
@@ -1318,13 +1427,13 @@ mod tests {
         let items = [InlineItem::Run(TextRunItem {
             text: "aaaa aaaa aaaa",
             style: &style,
-            preserve_newlines: false,
+            white_space: WhiteSpaceCollapse::Collapse,
         })];
         let tail_style = ahem_style();
         let tail = [InlineItem::Run(TextRunItem {
             text: "XX",
             style: &tail_style,
-            preserve_newlines: false,
+            white_space: WhiteSpaceCollapse::Collapse,
         })];
         let block_style = BlockStyle {
             max_lines: core::num::NonZeroU32::new(2),
@@ -1353,6 +1462,49 @@ mod tests {
             context.shape_count(),
             4,
             "a new width rebuilds the display; the content width stays cached",
+        );
+    }
+
+    #[test]
+    fn preserved_tabs_reshape_only_when_a_break_moves_their_stop() {
+        let mut context = text_context();
+        let style = ahem_style();
+        let items = [InlineItem::Run(TextRunItem {
+            text: "a\tb\tc\n\td",
+            style: &style,
+            white_space: WhiteSpaceCollapse::Preserve,
+        })];
+        let nowrap = BlockStyle {
+            text_wrap: TextWrap::NoWrap,
+            ..BlockStyle::default()
+        };
+        let mut block = TextBlock::new(&mut context, nowrap, &items, None);
+        assert_eq!(
+            context.shape_count(),
+            2,
+            "the paragraph, and one `0` for the run holding the tabs",
+        );
+
+        block.commit(&mut context, BlockConstraint::new(Some(50.0), 0.0));
+        assert_eq!(
+            context.shape_count(),
+            3,
+            "one re-shape settles every tab of an unwrapped paragraph",
+        );
+        block.commit(&mut context, BlockConstraint::new(Some(500.0), 0.0));
+        block.commit(&mut context, BlockConstraint::new(None, 0.0));
+        assert_eq!(
+            context.shape_count(),
+            3,
+            "under nowrap no width moves a tab: the stops hold",
+        );
+        assert_eq!(block.break_count(), 3);
+
+        block.commit(&mut context, BlockConstraint::new(None, 10.0));
+        assert_eq!(
+            context.shape_count(),
+            4,
+            "an indent moves the first line's tabs",
         );
     }
 }

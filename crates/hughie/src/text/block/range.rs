@@ -259,7 +259,7 @@ mod tests {
     use super::super::tests::{ahem_style, text_context};
     use super::super::{
         BlockConstraint, BlockStyle, InlineBoxSpec, InlineItem, RunStyle, TextBlock, TextOverflow,
-        TextRunItem, VerticalAlign,
+        TextRunItem, VerticalAlign, WhiteSpaceCollapse,
     };
     use crate::geometry::{Point, Rect, Size};
 
@@ -267,7 +267,7 @@ mod tests {
         InlineItem::Run(TextRunItem {
             text,
             style,
-            preserve_newlines: false,
+            white_space: WhiteSpaceCollapse::Collapse,
         })
     }
 
