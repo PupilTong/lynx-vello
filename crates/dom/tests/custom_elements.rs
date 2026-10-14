@@ -40,6 +40,9 @@ struct Probe {
     on_connected: Option<Action>,
     on_disconnected: Option<ReadAction>,
     on_attribute: Option<Action>,
+    /// Whether [`CustomElement::freed`] is logged, which only the tests about
+    /// it ask for.
+    records_freed: bool,
 }
 
 impl Probe {
@@ -52,7 +55,13 @@ impl Probe {
             on_connected: None,
             on_disconnected: None,
             on_attribute: None,
+            records_freed: false,
         }
+    }
+
+    fn recording_freed(mut self) -> Self {
+        self.records_freed = true;
+        self
     }
 
     fn observing(mut self, names: &[&str]) -> Self {
@@ -129,6 +138,12 @@ impl CustomElement<()> for Probe {
         ));
         if let Some(action) = &self.on_attribute {
             action(document, element);
+        }
+    }
+
+    fn freed(&self, element: NodeId) {
+        if self.records_freed {
+            self.record(&format!("freed#{element}"));
         }
     }
 }
@@ -527,6 +542,69 @@ fn drop_subtree_delivers_disconnect_while_the_subtree_is_still_readable() {
         doc.dom.get(element).is_none(),
         "and freed immediately after"
     );
+}
+
+/// `freed` is the definition's last word on an id: once per defined element
+/// the free takes, a host and the defined element in its shadow tree alike,
+/// after the disconnect; never for a removal that keeps the node, nor for a
+/// child `drop_element` leaves allocated.
+#[test]
+fn freed_fires_once_per_defined_element_the_free_takes() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    define(&mut doc, Probe::new("x-host", &log).recording_freed());
+    define(&mut doc, Probe::new("x-item", &log).recording_freed());
+    let host = doc.el(root, "x-host");
+    let shadow = doc.dom.attach_shadow(host, ShadowRootMode::Open);
+    let inside = doc.el(shadow, "x-item");
+    let light = doc.el(host, "x-item");
+    let _ = take(&log);
+
+    doc.dom.remove_element(host);
+    let removed = take(&log);
+    assert!(
+        removed.iter().all(|entry| !entry.contains("freed")),
+        "a removal keeps the nodes: {removed:?}"
+    );
+    doc.dom.append_child(root, host);
+    let _ = take(&log);
+
+    doc.dom.drop_subtree(host);
+    let mut freed: Vec<String> = take(&log)
+        .into_iter()
+        .filter(|entry| entry.contains("freed"))
+        .collect();
+    freed.sort();
+    let mut expected = vec![
+        format!("x-host:freed#{host}"),
+        format!("x-item:freed#{inside}"),
+        format!("x-item:freed#{light}"),
+    ];
+    expected.sort();
+    assert_eq!(freed, expected);
+    assert!(doc.dom.get(host).is_none() && doc.dom.get(inside).is_none());
+
+    // `drop_element` frees the host and its shadow tree; its light child
+    // survives, unlinked, and is not told.
+    let host = doc.el(root, "x-host");
+    let shadow = doc.dom.attach_shadow(host, ShadowRootMode::Open);
+    let inside = doc.el(shadow, "x-item");
+    let light = doc.el(host, "x-item");
+    let _ = take(&log);
+    doc.dom.drop_element(host);
+    let mut freed: Vec<String> = take(&log)
+        .into_iter()
+        .filter(|entry| entry.contains("freed"))
+        .collect();
+    freed.sort();
+    let mut expected = vec![
+        format!("x-host:freed#{host}"),
+        format!("x-item:freed#{inside}"),
+    ];
+    expected.sort();
+    assert_eq!(freed, expected);
+    assert!(doc.dom.get(light).is_some());
 }
 
 #[test]

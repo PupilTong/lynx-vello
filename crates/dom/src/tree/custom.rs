@@ -179,6 +179,21 @@ pub trait CustomElement<T> {
         let _ = (document, element, name, old, new);
     }
 
+    /// `element` is being freed: its [`NodeId`] is retired, never to be
+    /// reissued, and its node dropped. The last chance for a definition to
+    /// drop state it keys by that id.
+    ///
+    /// Not a lifecycle reaction, and not `disconnected_callback`, which a
+    /// removal that keeps the node also raises: it is called inline, once
+    /// per element of this definition, from the free itself — for each
+    /// defined element of a freed subtree, its shadow trees included, as each
+    /// node of it is freed. There is no document access, because the node is
+    /// half gone (out of the arenas, its subtree partly freed) and nothing
+    /// may run against the tree mid-free; the id is all a handler gets.
+    fn freed(&self, element: NodeId) {
+        let _ = element;
+    }
+
     /// One event reaching this element, on the standard's path, for a type
     /// this definition names in [`Self::observed_events`].
     ///
@@ -897,6 +912,21 @@ impl<T> Document<T> {
                 new,
             },
         );
+    }
+
+    /// Tells `element`'s definition, if it has one, that the element is
+    /// freed ([`CustomElement::freed`]). Called by the free of every node,
+    /// after the node left the arenas, with the definition it had.
+    pub(crate) fn note_custom_element_freed(
+        &self,
+        element: NodeId,
+        definition: Option<DefinitionId>,
+    ) {
+        if let Some(definition) = definition {
+            self.custom_elements.definitions[definition.index()]
+                .handler
+                .freed(element);
+        }
     }
 
     pub(crate) fn forget_reactions(&mut self, element: NodeId) {

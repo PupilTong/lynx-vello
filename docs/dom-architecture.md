@@ -205,7 +205,10 @@ die, or free the node its caller still holds. A callback that *can* mutate may
 detach any node but may not *free* one the calling mutation still holds:
 `create_element` and the constructor call pin that id, and
 `drop_element`/`drop_subtree` refuse to free a pinned node, since freeing
-retires the id permanently.
+retires the id permanently. `freed(element)` is not a reaction: the free of
+each node calls it inline for a defined element, its shadow trees' included,
+with the id alone (the node is half gone), as the one place a definition drops
+state it keys by that id; a removal that keeps the node never calls it.
 
 ## Style engine and invalidation
 

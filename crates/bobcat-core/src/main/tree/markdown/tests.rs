@@ -550,6 +550,10 @@ fn parse_end_is_queued_per_render_with_the_content_id() {
 /// 15 and a browser's `textContent` give for the same content (computed
 /// under Node with jsdom, web-core's pipeline).
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one table of contents against their web-core textContent"
+)]
 fn get_parse_result_counts_offsets_in_web_cores_text_content() {
     let (mut document, _events, element) = rendered(BASIC);
     assert_eq!(
@@ -637,6 +641,54 @@ fn get_parse_result_counts_offsets_in_web_cores_text_content() {
     assert_eq!(
         parse_result(&mut document, element, &["H1", "li", "ul"]),
         ["id=", "H1:[3,4]", "li:[1,5][6,7]", "ul:[0,8]"]
+    );
+
+    // Raw HTML blocks, through web-core's raw-HTML policy and DOMPurify: a
+    // kept block's last line break is a text node after its elements, a
+    // refused block's is part of its text, and the last block of the
+    // content has none.
+    let (mut document, _events, element) = rendered(
+        "### Hello <span class=\"mark-red other\" style=\"color: red\" onclick=\"noop()\">World</span>\n\n<p class=\"mark-help\" style=\"font-size: 12px\">Paragraph</p>\n\n<div class=\"not-allowed\">Not allowed</div>",
+    );
+    assert_eq!(
+        rendered_text(&mut document, element),
+        "Hello World\nParagraph\n<div class=\"not-allowed\">Not allowed</div>"
+    );
+    assert_eq!(
+        parse_result(&mut document, element, &["span", "p", "h3"]),
+        ["id=", "span:[6,11]", "p:[12,21]", "h3:[0,11]"]
+    );
+
+    let (mut document, _events, element) = rendered(
+        "<p class=\"a\">one</p>\n<p>two</p>\n\nafter\n\n<div class=\"no\">x</div>\n\n<p>end</p>",
+    );
+    assert_eq!(
+        rendered_text(&mut document, element),
+        "one\ntwo\nafter\n<div class=\"no\">x</div>\nend"
+    );
+    assert_eq!(
+        parse_result(&mut document, element, &["p"]),
+        ["id=", "p:[0,3][4,7][8,13][38,41]"]
+    );
+    // The line break between the two raw paragraphs lays out nothing: the
+    // second sits under the first's 0.75em margin, as with none.
+    let paragraphs = all(&document, element, "p");
+    assert_eq!(rect(&document, paragraphs[1]).1, 22.0);
+
+    let (mut document, _events, element) = rendered("- <p>in</p>\n\n> <p>q</p>\n> tail");
+    assert_eq!(
+        rendered_text(&mut document, element),
+        "\n\nin\n\n\n\nq\ntail\n"
+    );
+    assert_eq!(
+        parse_result(&mut document, element, &["p", "li", "ul", "blockquote"]),
+        [
+            "id=",
+            "p:[2,4][8,9]",
+            "li:[1,5]",
+            "ul:[0,6]",
+            "blockquote:[7,14]"
+        ]
     );
 
     let (mut document, _events, element) =
@@ -907,4 +959,26 @@ fn a_code_block_keeps_its_lines_without_wrapping() {
         .expect("the second line");
     assert_eq!(boxes.len(), 1);
     assert_eq!(boxes[0].size.width, 10.0);
+}
+
+/// The definition's entry for a host goes with the host's free — the
+/// runtime frees a collected element with `drop_element` — and not with a
+/// removal, after which the element can come back.
+#[test]
+fn a_freed_host_drops_its_state() {
+    let (mut document, _events, element) = rendered("one");
+    let other = child(&mut document, X_MARKDOWN_TAG, "");
+    let count = |document: &mut LynxDocument| {
+        fields(&invoke(document, other, super::STATE_COUNT_METHOD, "{}")).remove(0)
+    };
+    assert_eq!(count(&mut document), "2");
+    document.remove_element(element);
+    assert_eq!(
+        count(&mut document),
+        "2",
+        "a removed element keeps its state"
+    );
+    document.drop_element(element);
+    assert!(document.get(element).is_none());
+    assert_eq!(count(&mut document), "1");
 }

@@ -2212,10 +2212,7 @@ consequential choice about whether to follow the spec or the quirk.
     `getTextBoundingRect` and `getCharIndexByPoint` count in the shadow
     root's `textContent`, including the `"\n"` text nodes markdown-it writes
     between block tags (counted, not built: they render nothing). Native's
-    `getParseResult` answers source ranges instead. One line break is not
-    counted: the one an HTML block's content ends with, which the parser
-    drops, so offsets after a raw `<p>`/`<span>` block are one unit earlier
-    than web-core's.
+    `getParseResult` answers source ranges instead.
   - *`getTextBoundingRect` answers per-line `boxes` too*, the `text`
     component's record, where web-core answers `{boundingRect}` of a DOM
     range. With neither `start` nor `end` web-core measures the selection;

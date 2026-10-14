@@ -133,6 +133,12 @@
 //!
 //! A tap on anything else queues nothing.
 //!
+//! A known cost: `observed_events` is per definition, so with the component
+//! in every document the painter forwards every `tap` to the main thread,
+//! one message per gesture, on pages with no markdown and no tap listener
+//! too. Accepted for a user-rate event; observing per instance is the
+//! follow-up.
+//!
 //! ## UI methods
 //!
 //! [`Markdown::invoke`], each in [`methods`]: `getContent`, `getImages`,
@@ -156,11 +162,9 @@
 //! from, the elements each top-level block built, the `content-range` in
 //! force (an invalid value keeps the previous one, `_handleContentRange`,
 //! `XMarkdownAttributes.ts:1255-1282`) and the line breaks [`build`] recorded
-//! — keyed by the host's [`NodeId`], which `dom` never reissues. `dom` has no
-//! callback for an element being freed, and `disconnected_callback` is not
-//! that (a removed element can come back), so the entries of freed hosts are
-//! dropped when the next markdown element is constructed: a stale entry
-//! answers nothing, since no live element has its id.
+//! — keyed by the host's [`NodeId`], which `dom` never reissues. The entry
+//! goes when the host is freed ([`dom::CustomElement::freed`]), not when it
+//! is disconnected: a removed element can come back with its shadow tree.
 //!
 //! # Deferred
 //!
@@ -223,6 +227,9 @@ const MARKDOWN_STYLE_SHEET: usize = 1;
 /// test's answers.
 #[cfg(test)]
 const RENDERED_TEXT_METHOD: &str = "renderedText";
+/// A method the tests count the definition's per-element entries through.
+#[cfg(test)]
+const STATE_COUNT_METHOD: &str = "stateCount";
 
 /// The host's own rules, from `x-markdown.css`, for both tags.
 pub(super) const UA_RULES: &str = "\
@@ -483,11 +490,11 @@ impl CustomElement<()> for Markdown {
         &["tap"]
     }
 
+    fn freed(&self, element: NodeId) {
+        self.states.borrow_mut().remove(&element);
+    }
+
     fn constructed(&self, document: &mut LynxDocument, element: NodeId) {
-        // Freed hosts' entries go here; see "State" in the module docs.
-        self.states
-            .borrow_mut()
-            .retain(|host, _| document.get(*host).is_some());
         let shadow = document.attach_shadow(element, ShadowRootMode::Open);
         document.add_shadow_stylesheet(shadow, SHADOW_RULES);
         document.add_shadow_stylesheet(shadow, "");
@@ -573,6 +580,12 @@ impl CustomElement<()> for Markdown {
             }
             ("getCharIndexByPoint", Some(root)) => {
                 methods::get_char_index_by_point(document, element, root, newlines, call.params)
+            }
+            #[cfg(test)]
+            (STATE_COUNT_METHOD, _) => {
+                let mut record = String::new();
+                crate::main::record::write_record_field(&mut record, &states.len().to_string());
+                Ok(Some(record))
             }
             #[cfg(test)]
             (RENDERED_TEXT_METHOD, Some(root)) => {

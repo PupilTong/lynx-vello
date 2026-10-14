@@ -2882,7 +2882,9 @@ Rulings and limits to know before touching it:
   recognizer; `InputEvent::default_prevented` is the embedder's seam.
 - Custom elements are user-agent components only, `define` must precede any
   element with its tag, reactions are queued rather than called inline,
-  `disconnected_callback` takes a shared `&Document`, and `slotchange` fires at
+  `disconnected_callback` takes a shared `&Document`, `freed` (the id alone,
+  called inline from the free of each defined node) is where a definition drops
+  state it keys by `NodeId`, and `slotchange` fires at
   the drain boundary (no microtask checkpoint here) to the host, whose
   `handle_event` hears the shadow root a non-composed path ends at.
 - Attribute-derived style enters through `Document::set_presentational_hint` at

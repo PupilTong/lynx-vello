@@ -96,6 +96,13 @@
 //! and `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;` and `&nbsp;` only (see
 //! [`decode_entities`]).
 //!
+//! markdown-it keeps an HTML block's last line break in its content, and the
+//! browser keeps it as text: inside a `<p>` left open, at the end of a
+//! refused block's text, and otherwise a text node after the block's
+//! elements. So is the white space outside every element and run of content
+//! between them. Those text nodes are [`Block::HtmlSpace`], which render
+//! nothing and are part of `textContent`.
+//!
 //! # Offsets
 //!
 //! Every node carries its source range as UTF-16 code-unit offsets into the
@@ -213,6 +220,11 @@ pub(super) enum Block {
         children: Vec<Inline>,
         range: SourceRange,
     },
+    /// White space an HTML block holds in its container outside every
+    /// element and every run of content — the line break its last line ends
+    /// with, the line breaks between two of its `<p>`s: a text node of the
+    /// container, which renders nothing and is part of its `textContent`.
+    HtmlSpace { text: String, range: SourceRange },
     /// `<table>` with a `<thead>` holding `head` in one `<tr>` of `<th>`,
     /// and a `<tbody>` of `<tr>`s of `<td>` only when `body` is not empty.
     /// Every cell of column `i` carries `style="text-align:<a>"` when
@@ -340,6 +352,7 @@ impl Block {
             | Block::Code { range, .. }
             | Block::HtmlParagraph { range, .. }
             | Block::Inlines { range, .. }
+            | Block::HtmlSpace { range, .. }
             | Block::Table { range, .. }
             | Block::ThematicBreak { range } => range,
         }
@@ -369,7 +382,9 @@ impl Block {
                     item.append_text_content(text);
                 }
             }
-            Block::Code { text: code, .. } => text.push_str(code),
+            Block::Code { text: code, .. } | Block::HtmlSpace { text: code, .. } => {
+                text.push_str(code);
+            }
             Block::Table { head, body, .. } => {
                 head.append_text_content(text);
                 for row in body {
@@ -1530,15 +1545,26 @@ impl<'s> Builder<'s> {
 
     /// One HTML block: its blocks, built by [`HtmlTree`].
     fn html_block(&mut self, fragment: &str, segments: &SegmentMap, range: &Range<usize>) {
-        // markdown-it's block keeps its last line break; it renders as
-        // nothing, so it is not text here.
+        // markdown-it's block keeps its last line break (`getLines(..., true)`,
+        // with line endings normalized to `\n`), and the browser keeps it as
+        // text after the block's elements, or inside a `<p>` left open: it
+        // renders as nothing, but it is part of `textContent`.
+        let whole = fragment.len();
         let fragment = fragment.trim_end_matches(['\n', '\r']);
+        let line_break = (fragment.len() < whole).then_some(fragment.len()..whole);
         let Some(tokens) = sanitize(fragment) else {
             if !fragment.is_empty() {
-                let text_range = self.units.range(&segments.range(&(0..fragment.len())));
+                let end = line_break
+                    .as_ref()
+                    .map_or(fragment.len(), |range| range.end);
+                let text_range = self.units.range(&segments.range(&(0..end)));
+                let mut text = fragment.to_owned();
+                if line_break.is_some() {
+                    text.push('\n');
+                }
                 self.push_block(Block::Inlines {
                     children: vec![Inline::Text {
-                        text: fragment.to_owned(),
+                        text,
                         range: text_range,
                     }],
                     range: self.units.range(range),
@@ -1565,6 +1591,9 @@ impl<'s> Builder<'s> {
                 HtmlToken::Close { element, range } => tree.close(element, range),
                 HtmlToken::Text { range } => tree.text(range),
             }
+        }
+        if let Some(line_break) = line_break {
+            tree.line_break(&line_break);
         }
         for block in tree.finish() {
             self.push_block(block);
@@ -1710,9 +1739,19 @@ impl HtmlTree<'_> {
         if text.is_empty() {
             return;
         }
+        self.push_text(text, &range);
+    }
+
+    /// The block's trailing line break, at `range` past the end of the
+    /// trimmed fragment: `"\n"` whatever the source's line ending.
+    fn line_break(&mut self, range: &Range<usize>) {
+        self.push_text("\n".to_owned(), range);
+    }
+
+    fn push_text(&mut self, text: String, range: &Range<usize>) {
         let inline = Inline::Text {
             text,
-            range: self.range(&range),
+            range: self.range(range),
         };
         match self.open.last_mut() {
             Some(element) => push_merged(&mut element.children, inline),
@@ -1811,22 +1850,37 @@ impl HtmlTree<'_> {
         }
     }
 
-    /// Places the loose run as a block, without the white space text at its
-    /// ends, which a browser renders as nothing beside a block.
+    /// Places the loose run as a block. The white space text at its ends,
+    /// which a browser renders as nothing beside a block, is
+    /// [`Block::HtmlSpace`] on either side of it rather than content.
     fn flush_loose(&mut self) {
         let mut loose = std::mem::take(&mut self.loose);
         let is_blank = |inline: &Inline| matches!(inline, Inline::Text { text, .. } if text.chars().all(is_html_space));
+        let mut trailing = Vec::new();
         while loose.last().is_some_and(is_blank) {
-            loose.pop();
+            trailing.extend(loose.pop());
         }
         let leading = loose.iter().take_while(|inline| is_blank(inline)).count();
-        loose.drain(..leading);
+        let spaces: Vec<Inline> = loose.drain(..leading).collect();
+        for inline in spaces {
+            self.push_space(inline);
+        }
         if let (Some(first), Some(last)) = (loose.first(), loose.last()) {
             let range = first.range().start..last.range().end;
             self.blocks.push(Block::Inlines {
                 children: loose,
                 range,
             });
+        }
+        for inline in trailing.into_iter().rev() {
+            self.push_space(inline);
+        }
+    }
+
+    /// One white-space text of the loose run as a [`Block::HtmlSpace`].
+    fn push_space(&mut self, inline: Inline) {
+        if let Inline::Text { text, range } = inline {
+            self.blocks.push(Block::HtmlSpace { text, range });
         }
     }
 
@@ -2536,9 +2590,10 @@ mod tests {
     }
 
     /// `html-tags.html`: the span keeps only its class, the `<p>` block
-    /// becomes a paragraph with its class, and the `<div>` block is its own
-    /// text (`tests/x-markdown.spec.ts`, "should only allow span and p html
-    /// tags in markdown content").
+    /// becomes a paragraph with its class followed by the block's last line
+    /// break, and the `<div>` block is its own text, with no line break at
+    /// the end of the content (`tests/x-markdown.spec.ts`, "should only allow
+    /// span and p html tags in markdown content").
     #[test]
     fn html_tags_fixture() {
         let content = "### Hello <span class=\"mark-red other\" style=\"color: red\" onclick=\"noop()\">World</span>\n\n<p class=\"mark-help\" style=\"font-size: 12px\">Paragraph</p>\n\n<div class=\"not-allowed\">Not allowed</div>";
@@ -2551,6 +2606,10 @@ mod tests {
                 classes,
                 children: paragraph,
                 range,
+            },
+            Block::HtmlSpace {
+                text: line_break,
+                range: break_range,
             },
             Block::Inlines {
                 children: refused, ..
@@ -2584,10 +2643,27 @@ mod tests {
             at(content, range),
             "<p class=\"mark-help\" style=\"font-size: 12px\">Paragraph</p>"
         );
+        assert_eq!(line_break, "\n");
+        assert_eq!(at(content, break_range), "\n");
+        assert_eq!(break_range.start, range.end);
         assert_eq!(
             append(refused),
             "<div class=\"not-allowed\">Not allowed</div>"
         );
+        // A refused block keeps its line break in its text, and a `<p>` left
+        // open holds it.
+        let document = parse("<div>x</div>\n\n<p>open\r\n", None);
+        let [
+            Block::Inlines {
+                children: refused, ..
+            },
+            Block::HtmlParagraph { children, .. },
+        ] = &document.blocks[..]
+        else {
+            panic!("{document:#?}");
+        };
+        assert_eq!(append(refused), "<div>x</div>\n");
+        assert_eq!(append(children), "open\n");
     }
 
     /// The spec's "should return full text ranges for nested markdown tags"
@@ -2651,10 +2727,17 @@ mod tests {
             "<span class=\"x  y!\">\nfoo *bar* &amp; &#x41;\n</span>\n\nnext",
             None,
         );
-        let [Block::Inlines { children, .. }, Block::Paragraph { .. }] = &document.blocks[..]
+        let [
+            Block::Inlines { children, .. },
+            Block::HtmlSpace {
+                text: line_break, ..
+            },
+            Block::Paragraph { .. },
+        ] = &document.blocks[..]
         else {
             panic!("{document:#?}");
         };
+        assert_eq!(line_break, "\n");
         let [
             Inline::Html {
                 classes, children, ..

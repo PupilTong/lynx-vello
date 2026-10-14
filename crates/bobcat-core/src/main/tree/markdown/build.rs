@@ -40,12 +40,11 @@
 //! is [`AFTER_CLOSE`] only and never [`BEFORE_OPEN`]. A soft break is a `"\n"` text node and a hard
 //! break `<br>\n`; both are real text nodes here, inside their paragraph.
 //!
-//! One line break is not counted: the one an HTML block's last line ends
-//! with, which markdown-it keeps in the block's content and the browser keeps
-//! as a text node after the block's elements. [`super::parse`] drops it with the
-//! block's trailing line break (`html_block`), so a raw `<p>` block's element
-//! range and everything after it in the same content is one unit earlier
-//! than web-core's.
+//! An HTML block is written as it is: its content, kept and sanitized,
+//! ends with its last line's line break, which the browser keeps as a text
+//! node after the block's elements. [`super::parse`] keeps that text, and the
+//! white space between the block's `<p>`s, as
+//! [`super::parse::Block::HtmlSpace`], which is a text node here too.
 
 use dom::NodeId;
 use rustc_hash::FxHashMap;
@@ -171,6 +170,14 @@ impl Builder<'_> {
                 let line = self.element(parent, LINE_TAG, 0);
                 self.inlines(line, children);
                 line
+            }
+            // A text node of the container, as in the browser's tree: it
+            // lays out nothing outside a paragraph, and is counted in the
+            // rendered text.
+            Block::HtmlSpace { text, .. } => {
+                let node = self.document.create_text_node(text.as_str(), ());
+                self.document.append_child(parent, node);
+                node
             }
             Block::Table {
                 alignments,
