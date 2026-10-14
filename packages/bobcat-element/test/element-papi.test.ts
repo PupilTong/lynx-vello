@@ -1224,6 +1224,45 @@ describe("__SetAttribute", () => {
     }
   });
 
+  it("writes a markdown's structured markdown-style as JSON text, as web-core's property does", () => {
+    // web-core assigns a non-primitive value to `x-markdown`'s
+    // `markdown-style`/`markdownStyle` property, whose setter writes its JSON
+    // text to the `markdown-style` attribute; `content-range` has no
+    // property, so an array there is `String(value)`, the "start,end" form.
+    const style = {link: {color: "ff0000"}, inlineCode: {color: "0000ff"}};
+    const json = JSON.stringify(style);
+    for (const tag of ["x-markdown", "markdown"]) {
+      const markdown = __CreateElement(tag, 0);
+      mock.calls.length = 0;
+      __SetAttribute(markdown, "markdown-style", style);
+      __SetAttribute(markdown, "markdownStyle", style);
+      __SetAttribute(markdown, "markdown-style", json);
+      __SetAttribute(markdown, "content-range", [0, 10]);
+      __SetAttribute(markdown, "content-id", "case-1");
+      expect(mock.named("setAttribute").map(call => call.slice(2)), tag).toEqual([
+        ["markdown-style", json],
+        ["markdown-style", json],
+        ["markdown-style", json],
+        ["content-range", "0,10"],
+        ["content-id", "case-1"],
+      ]);
+      expect(elementModule.__GetAttributeByName(markdown, "markdown-style"), tag)
+        .toEqual(json);
+    }
+    // Any other element has no such property: the object is its string.
+    const view = __CreateView(0);
+    mock.calls.length = 0;
+    __SetAttribute(view, "markdown-style", style);
+    expect(mock.named("setAttribute").map(call => call.slice(2))).toEqual([
+      ["markdown-style", "[object Object]"],
+    ]);
+    // A value the property's `JSON.stringify` refuses throws, as there.
+    const cyclic: {self: unknown} = {self: null};
+    cyclic.self = cyclic;
+    expect(() => __SetAttribute(__CreateElement("x-markdown", 0), "markdown-style", cyclic))
+      .toThrow(TypeError);
+  });
+
   it("removes the attribute for null and undefined", () => {
     const view = __CreateView(0);
     for (const absent of [null, undefined]) {

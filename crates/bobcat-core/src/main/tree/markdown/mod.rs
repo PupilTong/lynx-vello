@@ -187,6 +187,8 @@
 //! [`NodeId`]: dom::NodeId
 
 mod build;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod card_tests;
 mod methods;
 pub(super) mod parse;
 mod rendered;

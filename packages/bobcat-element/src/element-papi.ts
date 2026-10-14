@@ -1681,12 +1681,58 @@ function updateListInfo(list: unknown, operations: unknown): undefined {
 }
 
 /**
+ * The structured properties of web-core's custom elements, by tag: each
+ * property name a non-primitive value is assigned to rather than stringified,
+ * mapped to the attribute that property writes the value's JSON text to.
+ *
+ * web-core's `setElementPropertyOrAttribute`
+ * (`web-core/ts/client/mainthread/utils/setElementPropertyOrAttribute.ts:15-24`)
+ * assigns a value that is not a string, number or boolean to the element's
+ * property of that name when the element has one, and writes `String(value)`
+ * to the attribute otherwise. Of the web elements, only `x-markdown` has such
+ * a property for a structured value: its `markdown-style` and
+ * `markdownStyle` setters write `JSON.stringify(value)` to the
+ * `markdown-style` attribute (`web-elements/src/elements/XMarkdown/XMarkdown.ts:220-243`,
+ * `serializeMarkdownStyle` in `XMarkdownAttributes.ts:467-472`). Its
+ * `content-range` has no property, so an array there is stringified as any
+ * other value is: `[0, 10]` becomes `"0,10"`, the `"start,end"` form its
+ * attribute handler reads (`XMarkdownAttributes.ts:1255-1282`).
+ *
+ * `markdown`, native's tag for the same component, which web-core does not
+ * register, has the same properties: native hands its component the object
+ * itself, and the one component behind both tags here reads JSON text.
+ */
+const STRUCTURED_PROPERTIES: ReadonlyMap<string, ReadonlyMap<string, string>> = (() => {
+  const markdown = new Map([
+    ["markdown-style", "markdown-style"],
+    ["markdownStyle", "markdown-style"],
+  ]);
+  return new Map([["x-markdown", markdown], ["markdown", markdown]]);
+})();
+
+/**
+ * Every name some tag has a structured property by: only a write under one
+ * of these asks the host for the element's tag.
+ */
+const STRUCTURED_PROPERTY_NAMES: ReadonlySet<string> = new Set(
+  [...STRUCTURED_PROPERTIES.values()].flatMap(properties => [...properties.keys()]),
+);
+
+/**
  * `null`/`undefined` removes; anything else is stringified, which is what
  * web-core's `setElementPropertyOrAttribute` does for every name that is not
  * a live property of its HTML stand-in element. `id`, `class`, and `style`
  * reach their specialized DOM paths inside the native `setAttribute` export.
  * A separate typed copy serves the Lynx fields() API. Functions remain local;
  * cross-thread readback uses the Worker transport's structured-clone semantics.
+ *
+ * The exception is a value that is not a string, number or boolean under one
+ * of the [`STRUCTURED_PROPERTIES`] of the element's tag —
+ * `markdown-style={{link: {color: 'ff0000'}}}` on an `x-markdown` — which is
+ * written as its JSON text, to the attribute that property reflects to, as
+ * web-core's property setter writes it: `String(JSON.stringify(value))`, so a
+ * value JSON has no text for is `"undefined"` and one it refuses (a cycle, a
+ * BigInt) throws, as there.
  *
  * `update-list-info` is the one name that is not an attribute at all: it is
  * the list data protocol's one command, and it goes to [`updateListInfo`]
@@ -1702,14 +1748,25 @@ export function __SetAttribute(
   }
   const nodeId = nodeIdOf(element);
   const values = valuesOf(element, attributeValuesSymbol);
-  const key = String(name);
+  let key = String(name);
   if (value === null || value === undefined) {
     removeAttribute(nodeId, key);
     values.delete(key);
-  } else {
-    setAttribute(nodeId, key, String(value));
-    values.set(key, copyElementValue(value));
+    return undefined;
   }
+  let text: string | undefined;
+  if (
+    typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean"
+    && STRUCTURED_PROPERTY_NAMES.has(key)
+  ) {
+    const attribute = STRUCTURED_PROPERTIES.get(tagName(nodeId))?.get(key);
+    if (attribute !== undefined) {
+      key = attribute;
+      text = String(JSON.stringify(value));
+    }
+  }
+  setAttribute(nodeId, key, text ?? String(value));
+  values.set(key, copyElementValue(value));
   return undefined;
 }
 
