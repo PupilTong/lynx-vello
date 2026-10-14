@@ -364,8 +364,8 @@ struct State {
     /// The `#markdown-root` element.
     root: Option<NodeId>,
     /// The parse the root's children were built from.
-    document: parse::Document,
-    /// The root's children, one per top-level block of [`Self::document`].
+    tree: parse::MarkdownTree,
+    /// The root's children, one per top-level block of [`Self::tree`].
     elements: Vec<NodeId>,
     /// The `content-range` in force.
     range: Option<(usize, usize)>,
@@ -406,12 +406,12 @@ impl Markdown {
             .unwrap_or_default()
             .to_owned();
         let parsed = if content.is_empty() {
-            parse::Document::default()
+            parse::MarkdownTree::default()
         } else {
             parse::parse(&content, state.range)
         };
         let kept = state
-            .document
+            .tree
             .blocks
             .iter()
             .zip(&parsed.blocks)
@@ -432,7 +432,7 @@ impl Markdown {
             let built = builder.block(root, block, 0, false);
             state.elements.push(built);
         }
-        state.document = parsed;
+        state.tree = parsed;
         if !content.is_empty() {
             self.events.queue_detailed(
                 element,

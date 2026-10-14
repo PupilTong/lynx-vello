@@ -1,5 +1,5 @@
 //! `<markdown>`'s source parser: the `content` attribute, read the way
-//! web-core reads it, into an owned [`Document`] the component turns into
+//! web-core reads it, into an owned [`MarkdownTree`] the component turns into
 //! shadow-tree elements.
 //!
 //! # What web-core does
@@ -109,7 +109,7 @@
 //! full `content` string — JavaScript string indices, the unit web-core's
 //! `content-range` slices by (`:727`, `:740`) — even when only a
 //! `content-range` slice was parsed. [`Inline::append_text_content`] and its
-//! block and document counterparts give the text each node renders, which is
+//! block and tree counterparts give the text each node renders, which is
 //! the node's `textContent` in web-core's shadow tree, with one difference:
 //! web-core's tree also holds the `"\n"` text nodes markdown-it's renderer
 //! writes between block tags (`</p>\n<p>`, `<li>\n<p>` in a loose list),
@@ -142,9 +142,10 @@ pub(super) const MAX_NESTING: usize = 100;
 /// (`preprocessInlineView`, `XMarkdownAttributes.ts:379-383`).
 const INLINE_VIEW_SCHEME: &str = "inlineview://";
 
-/// One parse of the `content` attribute.
+/// One parse of the `content` attribute: the blocks the component builds
+/// its shadow tree from. Not a DOM document.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct Document {
+pub(super) struct MarkdownTree {
     pub(super) blocks: Vec<Block>,
 }
 
@@ -155,8 +156,8 @@ pub(super) struct Document {
         reason = "the component counts rendered text off its shadow tree; this module's tests check the parse's"
     )
 )]
-impl Document {
-    /// The text the whole document renders, in tree order.
+impl MarkdownTree {
+    /// The text the whole tree renders, in tree order.
     pub(super) fn text_content(&self) -> String {
         let mut text = String::new();
         for block in &self.blocks {
@@ -468,7 +469,7 @@ fn append_inlines(inlines: &[Inline], text: &mut String) {
 /// Parses `content`, or the part of it `range` names in UTF-16 code units
 /// (`content-range`, sliced as [`slice_utf16`] slices). Ranges in the result
 /// count from the start of the whole `content` either way.
-pub(super) fn parse(content: &str, range: Option<(usize, usize)>) -> Document {
+pub(super) fn parse(content: &str, range: Option<(usize, usize)>) -> MarkdownTree {
     let (source, base) = match range {
         Some((start, end)) => slice_utf16(content, start, end),
         None => (content, 0),
@@ -894,7 +895,7 @@ impl<'s> Builder<'s> {
         }
     }
 
-    fn finish(mut self) -> Document {
+    fn finish(mut self) -> MarkdownTree {
         self.flush_text();
         while self.stack.len() > 1 {
             self.close_top();
@@ -906,11 +907,11 @@ impl<'s> Builder<'s> {
             ..
         }) = self.stack.pop()
         else {
-            return Document::default();
+            return MarkdownTree::default();
         };
         let mut blocks = blocks;
         push_loose(&mut blocks, loose, &range, &self.units);
-        Document { blocks }
+        MarkdownTree { blocks }
     }
 
     fn event(&mut self, event: Event<'_>, range: Range<usize>) {
@@ -2458,8 +2459,8 @@ mod tests {
         String::from_utf16_lossy(&units[range.clone()])
     }
 
-    fn paragraph(document: &Document) -> &[Inline] {
-        match &document.blocks[..] {
+    fn paragraph(tree: &MarkdownTree) -> &[Inline] {
+        match &tree.blocks[..] {
             [Block::Paragraph { children, .. }] => children,
             blocks => panic!("not one paragraph: {blocks:#?}"),
         }
@@ -2470,9 +2471,9 @@ mod tests {
     #[test]
     fn basic_fixture() {
         let content = "# Title\n\nthis is **bold** and *italic*.\n\n- item 1\n- item 2\n\ninline code: `code`.\n\n```\nblock code\n```";
-        let document = parse(content, None);
-        let [heading, emphasis, list, code, block] = &document.blocks[..] else {
-            panic!("{document:#?}");
+        let tree = parse(content, None);
+        let [heading, emphasis, list, code, block] = &tree.blocks[..] else {
+            panic!("{tree:#?}");
         };
         let Block::Heading {
             level: 1,
@@ -2530,12 +2531,12 @@ mod tests {
             }
         );
         assert_eq!(
-            document.text_content(),
+            tree.text_content(),
             "Titlethis is bold and italic.item 1item 2inline code: code.block code\n"
         );
         // pulldown-cmark's list range runs over the blank line after it.
         assert_eq!(
-            at(content, document.blocks[2].range()),
+            at(content, tree.blocks[2].range()),
             "- item 1\n- item 2\n\n"
         );
     }
@@ -2544,7 +2545,7 @@ mod tests {
     #[test]
     fn table_fixture() {
         let content = "\n| A | B |\n| - | - |\n| 1 | 2 |\n";
-        let document = parse(content, None);
+        let tree = parse(content, None);
         let [
             Block::Table {
                 alignments,
@@ -2552,9 +2553,9 @@ mod tests {
                 body,
                 ..
             },
-        ] = &document.blocks[..]
+        ] = &tree.blocks[..]
         else {
-            panic!("{document:#?}");
+            panic!("{tree:#?}");
         };
         assert_eq!(alignments[..], [Alignment::None, Alignment::None]);
         let cells = |row: &TableRow| {
@@ -2597,7 +2598,7 @@ mod tests {
     #[test]
     fn html_tags_fixture() {
         let content = "### Hello <span class=\"mark-red other\" style=\"color: red\" onclick=\"noop()\">World</span>\n\n<p class=\"mark-help\" style=\"font-size: 12px\">Paragraph</p>\n\n<div class=\"not-allowed\">Not allowed</div>";
-        let document = parse(content, None);
+        let tree = parse(content, None);
         let [
             Block::Heading {
                 level: 3, children, ..
@@ -2614,9 +2615,9 @@ mod tests {
             Block::Inlines {
                 children: refused, ..
             },
-        ] = &document.blocks[..]
+        ] = &tree.blocks[..]
         else {
-            panic!("{document:#?}");
+            panic!("{tree:#?}");
         };
         let [
             Inline::Text { text: hello, .. },
@@ -2652,15 +2653,15 @@ mod tests {
         );
         // A refused block keeps its line break in its text, and a `<p>` left
         // open holds it.
-        let document = parse("<div>x</div>\n\n<p>open\r\n", None);
+        let tree = parse("<div>x</div>\n\n<p>open\r\n", None);
         let [
             Block::Inlines {
                 children: refused, ..
             },
             Block::HtmlParagraph { children, .. },
-        ] = &document.blocks[..]
+        ] = &tree.blocks[..]
         else {
-            panic!("{document:#?}");
+            panic!("{tree:#?}");
         };
         assert_eq!(append(refused), "<div>x</div>\n");
         assert_eq!(append(children), "open\n");
@@ -2670,12 +2671,12 @@ mod tests {
     /// content: both paragraphs, the `strong` and the class-less `span`.
     #[test]
     fn nested_tags() {
-        let document = parse(
+        let tree = parse(
             "Hello <span>nested only</span>\n\nHello **bold** tail",
             None,
         );
-        let [first, second] = &document.blocks[..] else {
-            panic!("{document:#?}")
+        let [first, second] = &tree.blocks[..] else {
+            panic!("{tree:#?}")
         };
         assert_eq!(first.text_content(), "Hello nested only");
         assert_eq!(second.text_content(), "Hello bold tail");
@@ -2691,16 +2692,16 @@ mod tests {
     fn html_pairing() {
         // An inline tag left open closes with its construct; a later end tag
         // naming nothing open is ignored.
-        let document = parse("*a <span>b* c</span>", None);
-        let [Inline::Emphasis { children, .. }, Inline::Text { text, .. }] = paragraph(&document)
+        let tree = parse("*a <span>b* c</span>", None);
+        let [Inline::Emphasis { children, .. }, Inline::Text { text, .. }] = paragraph(&tree)
         else {
-            panic!("{document:#?}");
+            panic!("{tree:#?}");
         };
         assert!(matches!(&children[1], Inline::Html { children, .. } if append(children) == "b"));
         assert_eq!(text, " c");
         // `</span>` inside a `p` inside a `span` is ignored; `<p>` closes
         // an open `p`; a stray `</p>` is an empty `p`.
-        let document = parse("<p class=a>one <span>two<p>three</span> four</p></p>", None);
+        let tree = parse("<p class=a>one <span>two<p>three</span> four</p></p>", None);
         let [
             Block::HtmlParagraph {
                 classes,
@@ -2708,22 +2709,22 @@ mod tests {
                 ..
             },
             Block::HtmlParagraph {
-                children: three, ..
+                children: third, ..
             },
             Block::HtmlParagraph {
                 children: empty, ..
             },
-        ] = &document.blocks[..]
+        ] = &tree.blocks[..]
         else {
-            panic!("{document:#?}");
+            panic!("{tree:#?}");
         };
         assert_eq!(classes[..], ["a"]);
         assert_eq!(append(one), "one two");
-        assert_eq!(append(three), "three four");
+        assert_eq!(append(third), "three four");
         assert!(empty.is_empty());
         // A `span` alone on its line is an HTML block: inline content with
         // no paragraph, its text raw HTML (no emphasis), references decoded.
-        let document = parse(
+        let tree = parse(
             "<span class=\"x  y!\">\nfoo *bar* &amp; &#x41;\n</span>\n\nnext",
             None,
         );
@@ -2733,9 +2734,9 @@ mod tests {
                 text: line_break, ..
             },
             Block::Paragraph { .. },
-        ] = &document.blocks[..]
+        ] = &tree.blocks[..]
         else {
-            panic!("{document:#?}");
+            panic!("{tree:#?}");
         };
         assert_eq!(line_break, "\n");
         let [
@@ -2749,11 +2750,8 @@ mod tests {
         assert_eq!(classes[..], ["x"]);
         assert_eq!(append(children), "\nfoo *bar* & A\n");
         // A comment refuses the fragment.
-        let document = parse("a <!-- x --> b", None);
-        assert_eq!(
-            paragraph(&document)[..],
-            [text_node("a <!-- x --> b", 0..14)]
-        );
+        let tree = parse("a <!-- x --> b", None);
+        assert_eq!(paragraph(&tree)[..], [text_node("a <!-- x --> b", 0..14)]);
     }
 
     #[test]
@@ -2777,40 +2775,38 @@ mod tests {
     #[test]
     fn inline_view_fixture() {
         let content = "inline view here ![](inlineview://badge) next";
-        let document = parse(content, None);
+        let tree = parse(content, None);
         let [
             Inline::Text { .. },
             Inline::InlineView { id, range },
             Inline::Text { .. },
-        ] = paragraph(&document)
+        ] = paragraph(&tree)
         else {
-            panic!("{document:#?}");
+            panic!("{tree:#?}");
         };
         assert_eq!(id, "badge");
         assert_eq!(at(content, range), "![](inlineview://badge)");
-        assert_eq!(document.text_content(), "inline view here  next");
+        assert_eq!(tree.text_content(), "inline view here  next");
         // `inlineview-class.html`.
-        let document = parse("![](inlineview://content-view)", None);
+        let tree = parse("![](inlineview://content-view)", None);
         assert!(
-            matches!(paragraph(&document), [Inline::InlineView { id, .. }] if id == "content-view")
+            matches!(paragraph(&tree), [Inline::InlineView { id, .. }] if id == "content-view")
         );
         // An empty id is an image.
-        let document = parse("![](inlineview://)", None);
-        assert!(
-            matches!(paragraph(&document), [Inline::Image { src, .. }] if src == "inlineview://")
-        );
+        let tree = parse("![](inlineview://)", None);
+        assert!(matches!(paragraph(&tree), [Inline::Image { src, .. }] if src == "inlineview://"));
     }
 
     #[test]
     fn image() {
-        let document = parse("![a `c` <span>b</span> *e*](x.png \"t\")", None);
+        let tree = parse("![a `c` <span>b</span> *e*](x.png \"t\")", None);
         let [
             Inline::Image {
                 src, alt, title, ..
             },
-        ] = paragraph(&document)
+        ] = paragraph(&tree)
         else {
-            panic!("{document:#?}")
+            panic!("{tree:#?}")
         };
         assert_eq!(src, "x.png");
         assert_eq!(alt, "a c <span>b</span> e");
@@ -2822,8 +2818,8 @@ mod tests {
     #[test]
     fn autolinks() {
         let content = "see https://example.com and www.example.com, example.com, a@b.com, mailto:c@d.com ftp://f.org/x HTTP://X.COM/a";
-        let document = parse(content, None);
-        let links: Vec<(&str, String, String)> = paragraph(&document)
+        let tree = parse(content, None);
+        let links: Vec<(&str, String, String)> = paragraph(&tree)
             .iter()
             .filter_map(|inline| match inline {
                 Inline::Link {
@@ -2850,8 +2846,8 @@ mod tests {
         }
         // Trailing punctuation and balanced parentheses.
         let content = "(https://en.wikipedia.org/wiki/Link_(Zelda)) and https://a.com/x.";
-        let document = parse(content, None);
-        let hrefs: Vec<&str> = paragraph(&document)
+        let tree = parse(content, None);
+        let hrefs: Vec<&str> = paragraph(&tree)
             .iter()
             .filter_map(|inline| match inline {
                 Inline::Link { href, .. } => Some(href.as_str()),
@@ -2866,18 +2862,18 @@ mod tests {
             ]
         );
         // Not inside a link, a code span, or a raw `<a>`.
-        let document = parse(
+        let tree = parse(
             "[http://a.com](http://b.com) `http://c.com` <a href=x>http://d.com</a>",
             None,
         );
-        let links = paragraph(&document)
+        let links = paragraph(&tree)
             .iter()
             .filter(|inline| matches!(inline, Inline::Link { .. }))
             .count();
         assert_eq!(links, 1);
         // A percent-encoded link shows decoded, except for reserved bytes.
-        let document = parse("http://bar.com/%E4%BD%A0%2F <https://q.com/%20x>", None);
-        let shown: Vec<String> = paragraph(&document)
+        let tree = parse("http://bar.com/%E4%BD%A0%2F <https://q.com/%20x>", None);
+        let shown: Vec<String> = paragraph(&tree)
             .iter()
             .filter_map(|inline| match inline {
                 Inline::Link { children, .. } => Some(append(children)),
@@ -2889,11 +2885,11 @@ mod tests {
 
     #[test]
     fn link_destinations() {
-        let document = parse(
+        let tree = parse(
             "[ok](<a b> \"t\") [x](javascript:alert(1)) [*y*](vbscript:z) ![i](data:image/png;base64,AA)",
             None,
         );
-        let inlines = paragraph(&document);
+        let inlines = paragraph(&tree);
         assert!(
             matches!(&inlines[0], Inline::Link { href, title, .. } if href == "a%20b" && title.as_deref() == Some("t"))
         );
@@ -2912,23 +2908,20 @@ mod tests {
             "http://%E4%BE%8B%E5%AD%90.com/%C3%A4"
         );
         assert_eq!(normalize_link_text("%C3%A4%2f%zz%E4"), "ä%2F%zz\u{fffd}");
-        let document = parse("<javascript:q>", None);
-        assert_eq!(
-            paragraph(&document)[..],
-            [text_node("<javascript:q>", 0..14)]
-        );
+        let tree = parse("<javascript:q>", None);
+        assert_eq!(paragraph(&tree)[..], [text_node("<javascript:q>", 0..14)]);
     }
 
     #[test]
     fn strikethrough() {
         let content = "~~gone~~ and ~kept~";
-        let document = parse(content, None);
+        let tree = parse(content, None);
         let [
             Inline::Strikethrough { children, range },
             Inline::Text { text, range: rest },
-        ] = paragraph(&document)
+        ] = paragraph(&tree)
         else {
-            panic!("{document:#?}");
+            panic!("{tree:#?}");
         };
         assert_eq!(append(children), "gone");
         assert_eq!(at(content, range), "~~gone~~");
@@ -2940,16 +2933,16 @@ mod tests {
     #[test]
     fn utf16_ranges() {
         let content = "😀 é **b**\n\n中文 *c*";
-        let document = parse(content, None);
+        let tree = parse(content, None);
         let [
             Block::Paragraph { children, .. },
             Block::Paragraph {
                 children: second,
                 range,
             },
-        ] = &document.blocks[..]
+        ] = &tree.blocks[..]
         else {
-            panic!("{document:#?}");
+            panic!("{tree:#?}");
         };
         assert_eq!(children[0], text_node("😀 é ", 0..5));
         assert_eq!(*children[1].range(), 5..10);
@@ -2961,13 +2954,13 @@ mod tests {
     #[test]
     fn content_range() {
         let content = "# A\n\nhello **world**";
-        let document = parse(content, Some((5, 20)));
+        let tree = parse(content, Some((5, 20)));
         let [
             Inline::Text { range: hello, .. },
             Inline::Strong { range, .. },
-        ] = paragraph(&document)
+        ] = paragraph(&tree)
         else {
-            panic!("{document:#?}");
+            panic!("{tree:#?}");
         };
         assert_eq!(*hello, 5..11);
         assert_eq!(at(content, range), "**world**");
@@ -3023,11 +3016,11 @@ mod tests {
 
     #[test]
     fn breaks_and_code() {
-        let document = parse("a  \nb\\\nc\nd", None);
-        assert_eq!(document.text_content(), "a\nb\nc\nd");
-        assert!(matches!(paragraph(&document)[1], Inline::HardBreak { .. }));
-        assert!(matches!(paragraph(&document)[5], Inline::SoftBreak { .. }));
-        let document = parse("```js extra\ncode\n```\n\n    indented\n\n---", None);
+        let tree = parse("a  \nb\\\nc\nd", None);
+        assert_eq!(tree.text_content(), "a\nb\nc\nd");
+        assert!(matches!(paragraph(&tree)[1], Inline::HardBreak { .. }));
+        assert!(matches!(paragraph(&tree)[5], Inline::SoftBreak { .. }));
+        let tree = parse("```js extra\ncode\n```\n\n    indented\n\n---", None);
         let [
             Block::Code {
                 language,
@@ -3040,15 +3033,15 @@ mod tests {
                 ..
             },
             Block::ThematicBreak { .. },
-        ] = &document.blocks[..]
+        ] = &tree.blocks[..]
         else {
-            panic!("{document:#?}");
+            panic!("{tree:#?}");
         };
         assert_eq!(language.as_deref(), Some("js"));
         assert_eq!(fenced, "code\n");
         assert_eq!(*none, None);
         assert_eq!(indented, "indented\n");
-        let document = parse("3. a\n4. b\n\n5. c\n\n> q\n> - r", None);
+        let tree = parse("3. a\n4. b\n\n5. c\n\n> q\n> - r", None);
         let [
             Block::List {
                 start: Some(3),
@@ -3056,9 +3049,9 @@ mod tests {
                 ..
             },
             Block::Quote { children, .. },
-        ] = &document.blocks[..]
+        ] = &tree.blocks[..]
         else {
-            panic!("{document:#?}");
+            panic!("{tree:#?}");
         };
         // A loose list's items hold paragraphs.
         assert!(matches!(&items[0].children[..], [Block::Paragraph { .. }]));
@@ -3083,8 +3076,8 @@ mod tests {
                 .unwrap_or(0)
         }
         let quotes = format!("{} x", ">".repeat(5000));
-        let document = parse(&quotes, None);
-        assert!(depth(&document.blocks) <= MAX_NESTING);
+        let tree = parse(&quotes, None);
+        assert!(depth(&tree.blocks) <= MAX_NESTING);
         let spans = "<span>".repeat(5000);
         let _ = parse(&spans, None);
         let _ = parse(&format!("a {}b", "<span>".repeat(5000)), None);
