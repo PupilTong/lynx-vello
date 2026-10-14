@@ -26,6 +26,11 @@ wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
 web-sys = { workspace = true, features = ["MessagePort", "OffscreenCanvas"] }
 
+# `src/text_input.rs` is the browser seam's pure half: its native tests are
+# the one native build of this crate that links the engine.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+bobcat-core = { workspace = true }
+
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = [
     "-Oz",

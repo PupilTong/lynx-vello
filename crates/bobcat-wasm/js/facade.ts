@@ -1,5 +1,8 @@
 import { ImageDecoder } from './image-decoder.ts'
+import { TextInputProxy, keyFields } from './text-input.ts'
 import type {
+  EditCommand,
+  EditMessage,
   InitMessage,
   KeyFields,
   KeyMessage,
@@ -12,6 +15,7 @@ import type {
   PointerPhase,
   RenderWorkerMessage,
   RequestFields,
+  TextInputFields,
   WheelFields,
   WheelMessage,
 } from './protocol.d.ts'
@@ -27,10 +31,6 @@ const POINTER_PHASE_DOWN = 0
 const POINTER_PHASE_MOVE = 1
 const POINTER_PHASE_UP = 2
 const POINTER_PHASE_CANCEL = 3
-const MODIFIER_ALT = 1
-const MODIFIER_CTRL = 2
-const MODIFIER_META = 4
-const MODIFIER_SHIFT = 8
 const WHEEL_DELTA_MODE_LINE = 1
 const WHEEL_DELTA_MODE_PAGE = 2
 // This embedder's policy for the browser's abstract line unit, matching the
@@ -321,6 +321,8 @@ class CanvasPointerInput {
   #canvas: HTMLCanvasElement
   #disposed = false
   #height: number
+  #holdsTextFocus: () => boolean
+  #onRelease: (touch: boolean) => void
   #previousTouchAction: string
   #send: (values: PointerFields) => void
   #sendKey: (values: KeyFields) => void
@@ -334,9 +336,13 @@ class CanvasPointerInput {
     send: (values: PointerFields) => void,
     sendWheel: (values: WheelFields) => void,
     sendKey: (values: KeyFields) => void,
+    onRelease: (touch: boolean) => void,
+    holdsTextFocus: () => boolean,
   ) {
     this.#canvas = canvas
     this.#height = height
+    this.#holdsTextFocus = holdsTextFocus
+    this.#onRelease = onRelease
     this.#previousTouchAction = canvas.style.touchAction
     this.#send = send
     this.#sendKey = sendKey
@@ -358,6 +364,18 @@ class CanvasPointerInput {
     // `tabindex` the embedding page decides on; nothing is prevented.
     canvas.addEventListener('keydown', this.#onKey)
     canvas.addEventListener('keyup', this.#onKey)
+    // While the text proxy holds focus, a press on the canvas must not move
+    // it (and close a soft keyboard): the engine decides whether the press
+    // blurs its host, and the proxy follows the state it publishes.
+    canvas.addEventListener('mousedown', this.#onMouseDown)
+  }
+
+  get width(): number {
+    return this.#width
+  }
+
+  get height(): number {
+    return this.#height
   }
 
   resize(width: number, height: number): void {
@@ -401,6 +419,7 @@ class CanvasPointerInput {
     this.#canvas.removeEventListener('wheel', this.#onWheel)
     this.#canvas.removeEventListener('keydown', this.#onKey)
     this.#canvas.removeEventListener('keyup', this.#onKey)
+    this.#canvas.removeEventListener('mousedown', this.#onMouseDown)
     this.reset()
     this.#canvas.style.touchAction = this.#previousTouchAction
   }
@@ -455,7 +474,18 @@ class CanvasPointerInput {
   }
 
   #onPointerUp = (event: PointerEvent) => {
+    const active = this.#active.get(event.pointerId)
     this.#finish(event, POINTER_PHASE_UP)
+    // Inside the gesture, where a focus raises a soft keyboard.
+    if (active !== undefined && !this.#disposed) {
+      this.#onRelease(active.device !== POINTER_DEVICE_MOUSE)
+    }
+  }
+
+  #onMouseDown = (event: MouseEvent) => {
+    if (!this.#disposed && this.#holdsTextFocus()) {
+      event.preventDefault()
+    }
   }
 
   #onPointerCancel = (event: PointerEvent) => {
@@ -479,21 +509,16 @@ class CanvasPointerInput {
     }
   }
 
-  /** The browser's own W3C `key` and `code`, passed through unchanged. */
+  /**
+   * The browser's own W3C `key` and `code`, passed through unchanged. Only
+   * keys the canvas itself has focus for come here; while the engine has an
+   * editing host focused, the text proxy has focus and sends its own.
+   */
   #onKey = (event: KeyboardEvent) => {
     if (this.#disposed) {
       return
     }
-    this.#sendKey({
-      code: event.code,
-      down: event.type === 'keydown',
-      key: event.key,
-      modifiers: (event.altKey ? MODIFIER_ALT : 0) |
-        (event.ctrlKey ? MODIFIER_CTRL : 0) |
-        (event.metaKey ? MODIFIER_META : 0) |
-        (event.shiftKey ? MODIFIER_SHIFT : 0),
-      repeat: event.repeat,
-    })
+    this.#sendKey(keyFields(event))
   }
 
   #onWheel = (event: WheelEvent) => {
@@ -657,6 +682,8 @@ class RenderWorkerClient {
   #readySettled = false
   #worker: Worker
   #onFrameRate: BobcatCanvasOptions['onFrameRate']
+  /** The canvas's text proxy, once the canvas exists. */
+  onTextInput: ((state: TextInputFields) => void) | undefined
 
   constructor(worker: Worker, modules: NativeModules, onFrameRate: BobcatCanvasOptions['onFrameRate']) {
     this.#onFrameRate = onFrameRate
@@ -715,6 +742,10 @@ class RenderWorkerClient {
       } catch (error) {
         console.error('Bobcat frame rate callback threw', error)
       }
+      return
+    }
+    if (message?.type === 'bobcat-text-input') {
+      this.onTextInput?.(message)
       return
     }
     if (message?.type === 'bobcat-ready') {
@@ -821,6 +852,20 @@ class RenderWorkerClient {
     }
   }
 
+  dispatchEdit(command: EditCommand): void {
+    if (this.#fatalError !== undefined) {
+      return
+    }
+    try {
+      this.#worker.postMessage({
+        type: 'bobcat-edit',
+        command,
+      } satisfies EditMessage)
+    } catch (error) {
+      this.#fail(error)
+    }
+  }
+
   dispatchWheel(values: WheelFields): void {
     if (this.#fatalError !== undefined) {
       return
@@ -876,6 +921,11 @@ export default function init(): Promise<void> {
  * canvas, its `wheel` events, and its `keydown`/`keyup` events while it has
  * focus (give it a `tabindex` for that), are captured and forwarded to the
  * native input router automatically.
+ *
+ * While the page has a `contenteditable` host focused, a hidden `<textarea>`
+ * appended to the canvas's document body has keyboard focus instead: its
+ * keys, its `beforeinput` and its input method's compositions are the
+ * host's text (`text-input.ts`).
  */
 export class BobcatCanvas {
   #client: RenderWorkerClient
@@ -883,6 +933,7 @@ export class BobcatCanvas {
   #disposed = false
   #fatalError: Error | undefined
   #pointerInput: CanvasPointerInput
+  #textInput: TextInputProxy
   #unsubscribeFatal: () => void
 
   onerror: ((error: Error) => void) | null = null
@@ -896,17 +947,43 @@ export class BobcatCanvas {
   ) {
     this.#client = client
     this.#decoder = decoder
-    this.#pointerInput = new CanvasPointerInput(
+    const pointerInput = new CanvasPointerInput(
       canvas,
       width,
       height,
       (values) => client.dispatchPointer(values),
       (values) => client.dispatchWheel(values),
       (values) => client.dispatchKey(values),
+      (touch) => this.#textInput.gesture(touch),
+      () => this.#textInput.holdsFocus,
     )
+    this.#pointerInput = pointerInput
+    this.#textInput = new TextInputProxy({
+      canvasBounds: () => canvas.getBoundingClientRect(),
+      createTextarea: () => {
+        const textarea = canvas.ownerDocument.createElement('textarea')
+        canvas.ownerDocument.body.append(textarea)
+        return textarea
+      },
+      // Only a canvas the embedding page made focusable takes keys of its
+      // own; any other leaves focus where the textarea's blur puts it.
+      focusCanvas: () => {
+        if (canvas.tabIndex >= 0) {
+          canvas.focus({ preventScroll: true })
+        }
+      },
+      sendEdit: (command) => client.dispatchEdit(command),
+      sendKey: (values) => client.dispatchKey(values),
+      viewport: () => ({
+        height: pointerInput.height,
+        width: pointerInput.width,
+      }),
+    })
+    client.onTextInput = (state) => this.#textInput.update(state)
     this.#unsubscribeFatal = client.subscribeFatal((error) => {
       this.#fatalError = error
       this.#pointerInput.dispose()
+      this.#textInput.dispose()
       this.#decoder.close()
       if (typeof this.onerror === 'function') {
         this.onerror(error)
@@ -1045,6 +1122,7 @@ export class BobcatCanvas {
       throw new TypeError('BobcatCanvas.load styleSheetUrls must be an array')
     }
     this.#pointerInput.reset()
+    this.#textInput.reset()
     await this.#request('load', {
       ...globalPropsFields(options),
       styleSheetUrls: styleSheetUrls.map(documentUrl),
@@ -1066,6 +1144,7 @@ export class BobcatCanvas {
    */
   async loadLynxXml(url: string | URL, options: LoadOptions = {}): Promise<void> {
     this.#pointerInput.reset()
+    this.#textInput.reset()
     await this.#request('loadLynxXml', {
       ...globalPropsFields(options),
       url: documentUrl(url),
@@ -1080,6 +1159,7 @@ export class BobcatCanvas {
    */
   async loadTemplate(url: string | URL, options: LoadOptions = {}): Promise<void> {
     this.#pointerInput.reset()
+    this.#textInput.reset()
     await this.#request('loadTemplate', {
       ...globalPropsFields(options),
       url: documentUrl(url),
@@ -1105,6 +1185,7 @@ export class BobcatCanvas {
       throw new RangeError('ZIP exceeds the 64 MiB compressed size limit')
     }
     this.#pointerInput.reset()
+    this.#textInput.reset()
     await this.#request('loadZip', {
       ...globalPropsFields(options),
       bytes: new Uint8Array(data),
@@ -1151,6 +1232,7 @@ export class BobcatCanvas {
     // map before posting resize means a following pointer is expressed in the
     // viewport the Worker will install before it dispatches that pointer.
     this.#pointerInput.resize(width, height)
+    this.#textInput.reposition()
     await this.#request('resize', { devicePixelRatio, height, width })
   }
 
@@ -1161,6 +1243,7 @@ export class BobcatCanvas {
     }
     this.#disposed = true
     this.#pointerInput.dispose()
+    this.#textInput.dispose()
     try {
       if (this.#fatalError === undefined) {
         await this.#client.request('dispose')

@@ -174,6 +174,11 @@ pub(crate) enum ToMain {
     /// change, and drops a change whose cancelable `beforeinput` was
     /// canceled.
     Edit(dom::editing::Command),
+    /// Where the view's typed text comes from, from
+    /// [`LynxView::set_text_input_source`](crate::LynxView::set_text_input_source):
+    /// what a `keydown`'s editing default action does from the next key on.
+    /// Counted and ordered like [`Self::Edit`].
+    TextInputSource(crate::editing::TextInputSource),
     /// The view's [`ScrollMailbox`] holds something to take: scroll offsets,
     /// a frame post, or both. Queued once per take, however many passes the
     /// painter posts meanwhile.

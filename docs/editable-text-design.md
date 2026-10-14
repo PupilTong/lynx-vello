@@ -147,7 +147,10 @@ as the key's **default action** when the `keydown` was not canceled and an
 editing host is focused — never the W3C `key` value. A host whose platform
 reports a key's text through its input method instead (a browser's
 `beforeinput`) sends the key with `text: None` and the text as one
-`CommitText`, so it is inserted once. Keys the IME consumed arrive as `Edit`
+`CommitText`, so it is inserted once. A host whose platform reports deletions
+and line breaks that way too sets the view's
+`TextInputSource::Commands` (E4), after which a `keydown` only moves the
+selection and selects all. Keys the IME consumed arrive as `Edit`
 commands; a browser's `keydown` for them carries `key = "Process"`, and
 winit's macOS backend sends no key event for them at all (E3).
 
@@ -158,7 +161,7 @@ winit's macOS backend sends no key event for them at all (E3).
 | **E1** | dom, bobcat-core (UA sheet) | editing host, focus model, selection/caret/composition state, commands, caret + selection + composition painting, `TextInputState`, unit tests + goldens | — |
 | **E2** | bobcat-core, bobcat-element (dom: two small additions) | `ToMain::Edit`, `LynxView::edit`, `ViewNotice::TextInputState` → `EngineEvent::TextInputStateChanged`, standard events into the realm (`EventDetail::{Input, Composition, Focus}` with string data), `preventDefault`/`defaultPrevented` across the dispatch, pointer → caret placement and keyboard default actions on the main thread | E1, #407 |
 | **E3** | bobcat-cli (macOS) | winit `Ime` → commands, `set_ime_allowed` / `set_ime_cursor_area` from the state, `KeyEvent.text` insertion, headless driver | E2 |
-| **E4** | bobcat-wasm | hidden `<textarea>` proxy in `facade.ts` (`beforeinput`/`composition*` → messages → `LynxView::ime`), keyboard focus, `EditContext` where available | E2 |
+| **E4** | bobcat-wasm (bobcat-core: the text-source flag) | hidden `<textarea>` proxy in the facade (`beforeinput`/`composition*` → `bobcat-edit` → `LynxView::edit`), keyboard focus, `TextInputState` → `bobcat-text-input`; `EditContext` recorded as the follow-up | E2 |
 | **E5** | bobcat-core (components), bobcat-element | `x-input` / `x-textarea`: UA shadow tree with a plain-text editing host, attributes (`value`, `placeholder`, `type`, `maxlength`, `confirm-type`, `disabled`, `readonly`, `input-filter`, `send-composing-input`), `lynxinput`/`confirm`/`selection`/`focus`/`blur` in web-core's shape, methods (`setValue`, `getValue`, `focus`, `blur`, `setSelectionRange`, `select`) | E2 |
 
 Deferred after E5, in the order the survey ranks them: clipboard (needs a host
@@ -592,3 +595,158 @@ composition `2..3`, then `aby`) and the event order.
   as E2 recorded.
 - **`set_ime_purpose` is not called**: winit's macOS backend ignores it, so
   a password host still gets the input method.
+
+## E4: what was built
+
+The browser host: `crates/bobcat-wasm/js/text-input.ts` (the proxy and its
+pure mapping), its wiring in `js/facade.ts` and `js/render-worker.ts`, the
+messages in `js/protocol.d.ts`, `BobcatRenderer::edit` and the state
+forwarding in `src/browser.rs`, the flat-call reader in `src/text_input.rs`,
+and one core addition, the text-source flag.
+
+Public surface:
+
+- `bobcat_core::editing::TextInputSource::{Keys, Commands}` (default
+  `Keys`), `LynxView::set_text_input_source(source) -> Result<(),
+  EngineError>`, carried as a counted `ToMain::TextInputSource`. Unlike
+  `edit` it is taken before boot: it is a setting of the view's main thread,
+  queued like every command, so a key routed after the call is decided by
+  it. `NotReady` only once the view has ended.
+- `bobcat_core::editing::Rect` (re-export of `dom::Rect`, the type of
+  `TextInputState`'s geometry).
+- Facade → Render Worker `bobcat-edit { command: EditCommand }`; Render
+  Worker → facade `bobcat-text-input` (`TextInputFields`: `host`,
+  `inputType`, `inputMode`, `enterKeyHint`, `value`, `selectionStart`/`End`,
+  `composition` `{start, end}` or `null`, `caret`, `editableBounds`,
+  `compositionBounds`, CSS px and UTF-16 units). `BobcatRenderer.create`
+  takes a `postTextInputState` function after `onNativeModuleCall`, and
+  `BobcatRenderer.edit(kind, text, first, second)` is the flat seam the
+  Render Worker turns an `EditCommand` into.
+
+### The text-source flag
+
+`key_command` took the typed text from the key (E3), and Backspace, Delete
+and Enter were the `keydown`'s default actions whatever the text. A browser
+reports the same Backspace twice: as the `keydown` and as the textarea's
+`beforeinput` `deleteContentBackward` — and on Android a soft keyboard's
+deletion often arrives as the `beforeinput` alone, with a `keydown` of
+`"Unidentified"` or none. So the deletion has to come from one path, and
+only the `beforeinput` path sees every deletion. With
+`TextInputSource::Commands`, `key_command` answers only movement (the
+arrows, Home, End, with their modifiers) and ctrl/meta-A; text, Enter,
+Backspace and Delete are `None`, and the proxy's commands do them. The
+browser host sets it on every view it builds, right after
+`create_lynx_view`, before the painter is attached. `Keys` stays the default,
+so the macOS host and the headless driver are unchanged.
+
+### The proxy
+
+- **Lifetime and placement.** One `<textarea>`, made the first time a state
+  says a host is focused and appended to the canvas's document body;
+  `position: fixed`, `opacity: 0`, `pointer-events: none`, `font-size: 16px`
+  (iOS Safari zooms a page that focuses a smaller field), `white-space: pre`,
+  `autocapitalize`/`autocomplete`/`autocorrect` off, `spellcheck=false`,
+  `tabindex=-1`. It sits over the caret, mapped from viewport CSS px through
+  the canvas's client box, 1 px wide and a caret tall, and follows a scroll
+  (a capturing `scroll` listener on the document) and `BobcatCanvas.resize`.
+  `inputmode` is the host's, or the one its input type implies (`email`,
+  `search`, `tel`, `url`; `number` → `decimal`); `enterkeyhint` is the
+  host's.
+- **Mirroring.** Each state writes the value and the selection when they
+  differ — except while a composition is open, when writing either would end
+  it in the browser. A state with `host: false` blurs and hides the
+  textarea and, when the textarea had focus and the canvas is focusable (a
+  `tabindex`), focuses the canvas.
+- **`beforeinput` outside a composition** is always prevented, so the
+  textarea never holds text the engine does not, and maps to one command:
+  `insertText` and `insertFromPaste` (its `data`, or its `dataTransfer`'s
+  plain text) → `insert`; `insertLineBreak`, `insertParagraph` →
+  `insertLineBreak`; `deleteContentBackward`/`Forward`,
+  `deleteWordBackward`/`Forward` → the deletions; `deleteByCut` →
+  `deleteBackward` when the textarea selects anything. Everything else
+  (`historyUndo`, `insertReplacementText`, drops, line deletions,
+  transposition) is prevented and dropped.
+- **Compositions.** `compositionstart` records where the composition begins
+  (the textarea's selection start). A `compositionupdate` fires before the
+  browser changes the textarea, so its text is held and sent as
+  `setComposition` at the `input` that follows, with the textarea's
+  selection there relative to the composition's start (clamped into it); an
+  update equal to the last one sent is not sent again. `compositionend`
+  whose text is the composition last sent — Chromium's commit is a final
+  update, its `input`, then the end — is `finishComposition`, so the realm
+  sees `compositionend` alone, as on a native page; any other text (a
+  commit that differs from the last update, an update whose `input` never
+  came) is `commitText { text: data, relativeCursor: 0 }`, and empty text
+  cancels. A `beforeinput` during a composition is left alone: Input Events
+  Level 2 makes it non-cancelable.
+- **Keys.** The textarea's `keydown`/`keyup` go out as `bobcat-key`, with no
+  text; a key the input method is composing with (`isComposing`, or
+  `keyCode` 229) goes as `key: 'Process'`, as Chromium already reports it,
+  so a Safari or Firefox arrow inside a composition does not also move the
+  engine's caret. The textarea's own handling of a key the engine moves for
+  (arrows, Home, End, ctrl/meta-A) is prevented, so its selection does not
+  drift; a page listener that cancels that key in the engine leaves both
+  where they were.
+- **Focus.** A state that newly says a host is focused focuses the textarea
+  at once. That raises the keyboard on a desktop and, within the tap's
+  transient activation, on Chrome for Android, but iOS Safari raises it only
+  for a focus inside the gesture's own handler — which the engine's decision
+  never is. So the facade's canvas `pointerup` asks the proxy too: it
+  focuses the textarea when a host is focused and the textarea is not (the
+  user tabbed away and pressed the canvas again), and once per focus the
+  engine gave, for a touch or a pen, blurs and refocuses it inside the
+  gesture. A later state does not take focus back. While the textarea has
+  focus, the canvas's `mousedown` is prevented, so a press keeps it (and a
+  soft keyboard) and the engine alone decides whether the press blurs its
+  host.
+- **Focus leaving the proxy** (Tab, another control) leaves the engine's
+  focus as it is, as a browser keeps a document's focused element when the
+  window loses focus; a composition the browser left open is sent as
+  `finishComposition { keepSelection: false }`. Browsers usually end it
+  themselves first, with a `compositionend`, which is committed instead.
+- **The engine's blur** forgets the open composition before blurring the
+  textarea, so a `compositionend` the browser fires on that blur is not
+  committed into whatever the engine focuses next.
+- **Render Worker.** `bobcat-edit` goes through the same ordered queue as
+  `bobcat-key` and pointer input, so a `keydown` posted before it reaches the
+  engine first. `BobcatRenderer::edit` reads the flat call back into a
+  `Command` (`src/text_input.rs`) and drops it while the view refuses edits
+  (`NotReady`: before boot, after the end); a call the protocol does not
+  describe is an error, which the Worker reports as fatal like any other
+  facade bug. `pump` forwards only the newest state of a turn.
+
+### Limitations
+
+- **Chrome for Android and Gboard.** Composition events there are not a
+  reliable account of the edit: Gboard composes every word, re-opens a
+  composition over existing text (`setComposingRegion`) when the caret
+  enters a word, and reports some deletions only as the textarea's changed
+  value. CodeMirror 6 and Monaco both diff the textarea instead. E4 maps the
+  events as above; a composition re-opened over committed text is sent as a
+  new composition at the caret and duplicates that word. The recorded
+  follow-up is the `EditContext` API (`window.EditContext`, Chrome 121+),
+  which reports text updates as ranges against a text model the page owns
+  and takes the selection and character bounds from it — exactly
+  `TextInputState` — with the textarea kept for the other browsers. No
+  feature detection is shipped.
+- **The first tap on iOS Safari focuses the host without the keyboard**; the
+  next tap raises it (above).
+- **A canceled `keydown` does not stop the proxy's edit.** The textarea's
+  `beforeinput` has already fired by the time the engine dispatches the
+  `keydown`, so a page that cancels Backspace's `keydown` still deletes; it
+  can cancel the engine's `beforeinput` instead. A native browser stops
+  both.
+- **`deleteByCut` reaches the realm as `deleteContentBackward`**, and copy
+  and cut work only because the textarea's selection mirrors the engine's.
+  Undo, redo and drag-and-drop do nothing.
+- **Candidate-window placement is approximate**: the textarea's font is not
+  the host's, so a long composition's candidate window drifts from the
+  engine's composed text; and it is committed geometry (E3).
+- **An engine-side end of a composition is not told to the browser**, as on
+  macOS (E3): a click elsewhere in the same host leaves the browser's
+  composition open, and its later `compositionend` is committed when its
+  text differs from the last update sent.
+- **A password host is a plain textarea**: `inputType` crosses but a
+  `<textarea>` has no password mode, so the keyboard may learn and suggest.
+- **The proxy has no accessible name** and is not announced as the host;
+  accessibility of editing hosts is not built.

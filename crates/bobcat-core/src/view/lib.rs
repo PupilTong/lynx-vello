@@ -1306,6 +1306,38 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
             .map_err(|_| EngineError::NotReady)
     }
 
+    /// Says where this view's typed text, deletions and line breaks come
+    /// from, and so what a `keydown`'s editing default action does at a
+    /// focused editing host from the next key on
+    /// ([`TextInputSource`](crate::editing::TextInputSource)). A view starts
+    /// at [`TextInputSource::Keys`](crate::editing::TextInputSource::Keys); a
+    /// host that owns a platform text proxy and forwards its input events as
+    /// [`Self::edit`] commands — the browser host — sets
+    /// [`TextInputSource::Commands`](crate::editing::TextInputSource::Commands)
+    /// right after it builds the view.
+    ///
+    /// Unlike [`Self::edit`] this is taken before boot as well: it is a
+    /// setting of the view's main thread, not an operation on a document, and
+    /// it is queued like every command, so a key the painter routes after
+    /// this call is decided by it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::NotReady`] once the view has ended; nothing is
+    /// queued.
+    pub fn set_text_input_source(
+        &self,
+        source: crate::editing::TextInputSource,
+    ) -> Result<(), EngineError> {
+        if self.cancel.is_cancelled() {
+            return Err(EngineError::NotReady);
+        }
+        self.seat
+            .commands
+            .send(ToMain::TextInputSource(source))
+            .map_err(|_| EngineError::NotReady)
+    }
+
     fn send_page_update(&self, update: crate::link::PageUpdate) -> Result<(), EngineError> {
         if !self.is_ready() {
             return Err(EngineError::NotReady);

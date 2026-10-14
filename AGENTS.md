@@ -1925,7 +1925,11 @@ the rest. A routed `keydown`/`keyup` is delivered at `Document::focused()`
 when there is one, and a `keydown` nobody canceled runs the keyboard's editing
 command (`key_command`), which inserts the text the key typed
 (`InputKind::Key`'s `text`, carried in `EventDetail::Key` and never crossing
-into the realm), not its `key`; a mouse's primary `pointerdown`, or a finger's or
+into the realm), not its `key` — unless the host set the view to
+`editing::TextInputSource::Commands` (`LynxView::set_text_input_source`,
+`ToMain::TextInputSource`; the browser host does, since its `<textarea>`
+proxy sends every insertion, deletion and line break as an edit), when a
+`keydown` only moves the selection and selects all; a mouse's primary `pointerdown`, or a finger's or
 pen's tap (the `click`), nobody canceled inside an editing host focuses it
 (dispatching `focus`/`focusin`, and `blur`/`focusout` at the host that lost
 it — drained from `dom` right after the press) and places the caret, a second
@@ -2856,6 +2860,26 @@ reported truthfully by the facade and fed to the engine as
 `PointerKind::Mouse` by `dispatchPointer`, as the macOS host does, and a
 primary-button drag still scrolls: the engine's drag recognizer latches every
 pointer kind, a mouse included (user ruling 2026-10-13). Hover moves and secondary mouse buttons do not cross the boundary.
+
+**Text input goes through a hidden `<textarea>`** (`js/text-input.ts`,
+`docs/editable-text-design.md` E4). `BobcatRenderer::pump` hands the newest
+`EngineEvent::TextInputStateChanged` of a turn to the Render Worker's
+`postTextInputState` (the last `BobcatRenderer::create` argument) as one
+plain object, posted as `bobcat-text-input`; a load that replaces a view with
+a host focused posts one with `host: false`. The facade keeps one transparent,
+`position: fixed` `<textarea>` at the engine's caret, focused while a host is
+focused, holding its value and selection (never written during a
+composition). Every `beforeinput` outside a composition is prevented and sent
+as a `bobcat-edit` (`insertText`/`insertFromPaste` → `insert`, the line
+breaks, the deletions, `deleteByCut` → `deleteBackward`); a composition is
+`setComposition` per update, read at the `input` after it, and at its end a
+`finishComposition` (the end's text is the last update's) or a `commitText`. `BobcatRenderer::edit` reads the flat call back into
+`dom::editing::Command` (`src/text_input.rs`, natively tested) and drops it
+while the view cannot take edits. Every view is set to
+`TextInputSource::Commands`, so a key carries no text and its `keydown` only
+moves and selects all; the facade prevents the textarea's own handling of
+those keys and sends a key the input method is composing with as
+`'Process'`.
 
 **Host `NativeModules` and `globalProps` are the page's, not the Worker's.**
 `BobcatCanvas.create` takes an optional
