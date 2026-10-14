@@ -2024,6 +2024,11 @@ function invokeUIMethod(handle: Handle, method: string, params: unknown): Invoke
  *   the tag count, and per tag its name, its range count and two numbers
  *   per range.
  * - `getCharIndexByPoint`, a `markdown`'s: `{index}`.
+ * - `getValue`, an `x-input`'s and an `x-textarea`'s: `{value,
+ *   selectionStart, selectionEnd, isComposing}`, the typings' members, plus
+ *   `selectionBegin`, web-core's name for the start (`XInput.ts`), so a
+ *   card written against either reads it. The host writes the value, the
+ *   two UTF-16 offsets and `1` or `0` for composing.
  *
  * A method without an arm gets the fields themselves.
  */
@@ -2110,6 +2115,17 @@ function decodeMethodData(handle: Handle, method: string, fields: string[]): unk
     }
     case "getCharIndexByPoint":
       return { index: Number(fields[0]) };
+    case "getValue": {
+      const [value = "", start = "0", end = "0", composing = "0"] = fields;
+      const selectionStart = Number(start);
+      return {
+        value,
+        selectionStart,
+        selectionEnd: Number(end),
+        isComposing: composing === "1",
+        selectionBegin: selectionStart,
+      };
+    }
     default:
       return fields;
   }

@@ -13,8 +13,8 @@
 //! flow through `attr()`; boolean flags use attribute selectors. Only `image`,
 //! `svg`, `blur_view`, `swiper`, `refresh_view`, `viewpager`,
 //! `scroll_container`, `list`, `scroll_coordinator`, `dialog`, `overlay`,
-//! `markdown` and `frame` need components: for image resources (an `svg`'s `content` as a document
-//! handed to the host as its bytes), blur hints,
+//! `markdown`, `frame` and `text_field` need components: for image resources (an `svg`'s `content`
+//! as a document handed to the host as its bytes), blur hints,
 //! the swiper's UA shadow tree, item count and `scrollTo` UI method, the
 //! refresh view's UA shadow tree, its header and footer slot assignment and
 //! its `finishRefresh`, `finishLoadMore` and `autoStartRefresh` UI methods
@@ -32,7 +32,9 @@
 //! `getCharIndexByPoint` UI methods ([`markdown`]), and the frame's open
 //! shadow root with the nested page in it, and the
 //! `connected`/`disconnected` signals its card's lifecycle follows
-//! ([`frame`]). A component's UI methods are its
+//! ([`frame`]), and the text fields' UA shadow tree around one editing
+//! host, their attributes, events and UI methods ([`text_field`]). A
+//! component's UI methods are its
 //! [`dom::CustomElement::invoke`], which the runtime's `callElementMethod`
 //! reaches through [`dom::Document::invoke_element_method`]. The methods
 //! every element has whatever its kind, which `callElementMethod` runs when
@@ -65,6 +67,7 @@ pub(crate) mod swiper;
 #[cfg(test)]
 pub(super) mod test_support;
 mod text;
+pub(crate) mod text_field;
 mod ua_sheet;
 mod viewpager;
 #[cfg(test)]
@@ -79,6 +82,7 @@ pub(crate) use self::base_methods::invoke_base_method;
 pub(crate) use self::frame::{MAX_FRAME_DEPTH, frame_depth, nested_page};
 pub(crate) use self::svg::is_svg;
 pub(crate) use self::swiper::Autoplays;
+pub(crate) use self::text_field::focus_delegate;
 pub use self::ua_sheet::PageConfig;
 pub(crate) use crate::view::Viewport;
 
@@ -124,6 +128,7 @@ pub(crate) fn new_document(
     // After `image`: every image a markdown element renders is one.
     markdown::define(&mut document, events.clone());
     dialog::define(&mut document, events.clone());
+    text_field::define(&mut document, events.clone());
     // After `dialog`: every overlay builds one in its shadow tree.
     overlay::define(&mut document, events.clone());
     frame::define(&mut document, events);
@@ -187,6 +192,24 @@ pub(super) fn element_children(
         .filter(|child| document.get(*child).is_some_and(dom::Node::is_element))
 }
 
+/// What an `x-input`'s or `x-textarea`'s event carries, read when the
+/// component queued it ([`text_field`]); the runtime makes each field one
+/// extra of the Lynx `detail`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TextFieldDetail {
+    /// `{value}`: `focus`, `blur` and `confirm`.
+    Value(String),
+    /// `input`: `{value, textLength, cursor, isComposing, selectionStart,
+    /// selectionEnd}`, offsets and length in UTF-16 units.
+    Input {
+        value: String,
+        selection: std::ops::Range<u32>,
+        is_composing: bool,
+    },
+    /// `selection`: `{selectionStart, selectionEnd}`.
+    Selection(std::ops::Range<u32>),
+}
+
 /// One event a component owes script, at the element the component belongs
 /// to. None of them bubbles; a [`ComponentEvent::Detailed`] alone is
 /// composed. A [`ComponentEvent::Frame`] is the one that script does not
@@ -233,6 +256,13 @@ pub(crate) enum ComponentEvent {
     /// `bobcat:frame`, which loads the frame's card on a connection and
     /// disposes of it on a disconnection.
     Frame { node: NodeId, connected: bool },
+    /// An `x-input`'s or `x-textarea`'s `input`, `confirm`, `selection`,
+    /// `focus` or `blur`, with the detail it carries ([`text_field`]).
+    TextField {
+        node: NodeId,
+        name: &'static str,
+        detail: TextFieldDetail,
+    },
 }
 
 /// The `detail` of a [`ComponentEvent::Detailed`]: one variant per *shape*
@@ -335,6 +365,18 @@ impl ComponentEvents {
         self.0
             .borrow_mut()
             .push(ComponentEvent::Frame { node, connected });
+    }
+
+    /// Queues an `x-input`'s or `x-textarea`'s event at `node`.
+    pub(crate) fn queue_text_field(
+        &self,
+        node: NodeId,
+        name: &'static str,
+        detail: TextFieldDetail,
+    ) {
+        self.0
+            .borrow_mut()
+            .push(ComponentEvent::TextField { node, name, detail });
     }
 
     /// Takes everything queued since the last drain.

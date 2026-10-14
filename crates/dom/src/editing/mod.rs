@@ -17,10 +17,10 @@
 //! `"false"` (ASCII case-insensitive) is an editing host
 //! ([`Document::is_editing_host`]). `"true"`, `""` and `"plaintext-only"` all
 //! mean plain-text editing here. The embedder's UA sheet lays a host out as
-//! one paragraph (`display: -lynx-text; white-space: pre-wrap`), so its text
-//! nodes are runs of one parley layout and `white-space-collapse: preserve`
-//! keeps that layout's text byte for byte the host's **value**: the
-//! concatenation of the host's direct text-node children.
+//! one paragraph (`display: -lynx-text; white-space-collapse: preserve`,
+//! wrapping left to the cascade), so its text nodes are runs of one parley
+//! layout and `white-space-collapse: preserve` keeps that layout's text byte for byte the host's
+//! **value**: the concatenation of the host's direct text-node children.
 //!
 //! The first edit that changes the value normalizes the host to exactly one
 //! text node: the first text child takes the whole new value and the others
@@ -53,7 +53,7 @@
 //!
 //! The paragraph's byte offsets are value offsets only while it shows the
 //! value byte for byte (a carriage return shaped as a space aside). The UA
-//! rule's `!important` `pre-wrap` keeps it so for a plain-text host, but
+//! rule's `!important` `white-space-collapse: preserve` keeps it so for a plain-text host, but
 //! generated `content` or a `text-maxline`/`text-maxlength` cut can still
 //! make it show something else. Then every command that changes the value
 //! or reads the layout is refused; `SetSelection` and `SelectAll`, which
@@ -348,6 +348,15 @@ impl<T> Document<T> {
         };
         self.unfocus(previous, None);
         true
+    }
+
+    /// Whether focus events are queued and not taken yet: one length read,
+    /// for an embedder that dispatches them from a turn of its own when
+    /// something other than its own input handling moved the focus (an
+    /// element method's `focus()` or `blur()`).
+    #[must_use]
+    pub fn has_focus_events(&self) -> bool {
+        !self.editing.events.is_empty()
     }
 
     /// Takes the focus events queued since the last call, in the order they

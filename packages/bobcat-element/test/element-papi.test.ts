@@ -2856,6 +2856,34 @@ describe("the event detail", () => {
     expect(Object.keys(bare)).toEqual(["url", "content"]);
   });
 
+  // An `x-input`'s `input`: a string extra crosses as itself, beside the
+  // numbers and the boolean, in the host's order.
+  it("makes string extras part of the detail", () => {
+    const { inner } = tree();
+
+    const detail = detailOf(inner, "input", {
+      extras: [
+        ["value", "a,b:c"],
+        ["textLength", 5],
+        ["cursor", 5],
+        ["isComposing", false],
+        ["selectionStart", 5],
+        ["selectionEnd", 5],
+      ],
+    });
+    expect(detail).toStrictEqual({
+      value: "a,b:c",
+      textLength: 5,
+      cursor: 5,
+      isComposing: false,
+      selectionStart: 5,
+      selectionEnd: 5,
+    });
+    expect(Object.keys(detail)).toEqual([
+      "value", "textLength", "cursor", "isComposing", "selectionStart", "selectionEnd",
+    ]);
+  });
+
   // web-core's `error` detail exactly: no keys, and no numbers spent to say
   // so.
   it("builds an empty detail out of the kind that spends no numbers", () => {
@@ -4363,9 +4391,9 @@ describe("__InvokeUIMethod", () => {
     mock.answerElementMethod = () => "1:0" + "3:a,b" + "0:" + "2:\u{1F600}";
     const callback = rstest.fn();
 
-    __InvokeUIMethod(view, "getValue", {}, callback);
+    __InvokeUIMethod(view, "getDetail", {}, callback);
 
-    // `getValue` has no decoder arm, so the fields arrive as they were
+    // `getDetail` has no decoder arm, so the fields arrive as they were
     // written.
     expect(callback.mock.calls[0]?.[0]).toStrictEqual({
       code: 0,
@@ -4418,6 +4446,24 @@ describe("__InvokeUIMethod", () => {
       ],
     });
     expect(answers[2]).toStrictEqual({ code: 0, data: [] });
+  });
+
+  it("builds an input's getValue data with web-core's selectionBegin beside the typings' members", () => {
+    const input = __CreateElement("x-input", 0);
+    const answers: unknown[] = [];
+    mock.answerElementMethod = () => "1:0" + "5:h:llo" + "1:1" + "1:3" + "1:1";
+    __InvokeUIMethod(input, "getValue", {}, (result: unknown) => answers.push(result));
+    mock.answerElementMethod = () => "1:0" + "0:" + "1:0" + "1:0" + "1:0";
+    __InvokeUIMethod(input, "getValue", {}, (result: unknown) => answers.push(result));
+
+    expect(answers[0]).toStrictEqual({
+      code: 0,
+      data: { value: "h:llo", selectionStart: 1, selectionEnd: 3, isComposing: true, selectionBegin: 1 },
+    });
+    expect(answers[1]).toStrictEqual({
+      code: 0,
+      data: { value: "", selectionStart: 0, selectionEnd: 0, isComposing: false, selectionBegin: 0 },
+    });
   });
 
   it("builds a text's getTextBoundingRect data with the union of its boxes", () => {
