@@ -913,6 +913,7 @@ impl<T> Document<T> {
         if node.is_shadow_root() {
             self.shadow_roots -= 1;
         }
+        self.note_freed_editing_host(&node);
         self.layout.remove(slot);
         self.forget_reactions(id);
         // Every free comes through here, one node at a time, so a defined

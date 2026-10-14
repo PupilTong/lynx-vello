@@ -236,6 +236,16 @@ pub(crate) struct EditingState {
     pub(crate) session: Option<Session>,
     /// Focus events not yet taken by the embedder.
     events: Vec<FocusEvent>,
+    /// How many elements of this document, connected or not, are editing
+    /// hosts ([`Document::has_editing_hosts`]). Kept by the attribute setters
+    /// and by [`Document::free_node`], the two places the answer can change.
+    hosts: usize,
+}
+
+/// Whether an attribute value makes its element an editing host: present
+/// and not an ASCII case-insensitive match for `"false"`.
+fn makes_host(value: Option<&str>) -> bool {
+    value.is_some_and(|value| !value.eq_ignore_ascii_case("false"))
 }
 
 impl<T> Document<T> {
@@ -244,10 +254,48 @@ impl<T> Document<T> {
     /// `"false"`.
     #[must_use]
     pub fn is_editing_host(&self, node: NodeId) -> bool {
-        self.get(node)
-            .filter(|node| node.is_element())
-            .and_then(|node| node.attribute(CONTENTEDITABLE))
-            .is_some_and(|value| !value.eq_ignore_ascii_case("false"))
+        makes_host(
+            self.get(node)
+                .filter(|node| node.is_element())
+                .and_then(|node| node.attribute(CONTENTEDITABLE)),
+        )
+    }
+
+    /// Whether any element of this document is an editing host, connected
+    /// or not: one counter read. An embedder that does work only for
+    /// documents that can be edited — routing pointer and key events to the
+    /// editing default actions — asks this rather than walking the tree.
+    ///
+    /// A detached host still counts until it is freed, because it can be
+    /// inserted again without any attribute changing.
+    #[must_use]
+    pub const fn has_editing_hosts(&self) -> bool {
+        self.editing.hosts > 0
+    }
+
+    /// Records that `node`'s `contenteditable` attribute is about to change
+    /// from what it is now to `value` (`None` for a removal), keeping
+    /// [`Self::has_editing_hosts`]'s count. Called by the attribute setters
+    /// before they write.
+    pub(crate) fn note_contenteditable_change(&mut self, node: NodeId, value: Option<&str>) {
+        let was = self.is_editing_host(node);
+        let is = makes_host(value);
+        if is && !was {
+            self.editing.hosts += 1;
+        } else if was && !is {
+            self.editing.hosts -= 1;
+        }
+    }
+
+    /// Records that a node being freed leaves the count if it was a host.
+    /// One comparison for a document that has none.
+    pub(crate) fn note_freed_editing_host(&mut self, node: &crate::Node<T>) {
+        if self.editing.hosts > 0
+            && node.is_element()
+            && makes_host(node.attribute(CONTENTEDITABLE))
+        {
+            self.editing.hosts -= 1;
+        }
     }
 
     /// The focused element, if any.
