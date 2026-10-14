@@ -51,6 +51,16 @@
 //! until the next layout pass rebuilds the parley selection from them. The
 //! composition is a byte range into the value, kept beside the selection.
 //!
+//! The paragraph's byte offsets are value offsets only while it shows the
+//! value byte for byte (a carriage return shaped as a space aside). The UA
+//! rule's `!important` `pre-wrap` keeps it so for a plain-text host, but
+//! generated `content` or a `text-maxline`/`text-maxlength` cut can still
+//! make it show something else. Then every command that changes the value
+//! or reads the layout is refused; `SetSelection` and `SelectAll`, which
+//! work on value offsets alone, still apply. A value change this session
+//! made and no layout pass has shown yet is not such a difference: its
+//! selection is held as value offsets until the pass.
+//!
 //! Commands that read the layout — pointer placement, caret movement,
 //! cluster and word deletion — run a layout pass first
 //! ([`Document::layout`]), as an editor must before it measures. Commands
@@ -73,6 +83,22 @@ pub(crate) use self::input_state::{CARET_WIDTH, caret_box, empty_line_height};
 pub use self::input_state::{EnterKeyHint, InputMode, InputType, TextInputState};
 use crate::Document;
 use crate::tree::document::NodeId;
+
+/// Whether a paragraph's text shows `value` byte for byte, a tab or a
+/// carriage return in the value counting as the space the paragraph emits
+/// for it (CSS Text 3 §4.1.1; `hughie::text::block::WhiteSpaceCollapse`).
+///
+/// Only then are the paragraph's byte offsets — parley's cursors — offsets
+/// into the value.
+pub(crate) fn paragraph_shows(paragraph: &str, value: &str) -> bool {
+    paragraph.len() == value.len()
+        && paragraph
+            .bytes()
+            .zip(value.bytes())
+            .all(|(shown, written)| {
+                shown == written || (matches!(written, b'\t' | b'\r') && shown == b' ')
+            })
+}
 
 /// The attribute that makes an element an editing host.
 const CONTENTEDITABLE: &str = "contenteditable";
@@ -156,6 +182,10 @@ pub(crate) struct Session {
     pub(crate) selection: Selection,
     /// Set by a change the committed layout does not show yet.
     pub(crate) pending: Option<ByteSelection>,
+    /// Whether a value change this session committed has not been laid out
+    /// yet. While it is set the committed paragraph is stale rather than
+    /// different, and the selection is held as value offsets in `pending`.
+    pub(crate) awaiting_layout: bool,
     /// The IME composition, as a byte range into the value.
     pub(crate) composition: Option<Range<usize>>,
 }
@@ -168,6 +198,7 @@ impl Session {
             // A host focused by script places its caret at the start, as
             // browsers do for `element.focus()` on a `contenteditable`.
             pending: Some(ByteSelection::collapsed(0, Affinity::Downstream)),
+            awaiting_layout: false,
             composition: None,
         }
     }
@@ -344,6 +375,14 @@ impl<T> Document<T> {
         value
     }
 
+    /// Whether `host`'s committed paragraph shows `value` byte for byte, with
+    /// no truncation cut replacing its tail: the condition for reading the
+    /// paragraph's offsets as value offsets.
+    pub(crate) fn paragraph_shows_value(&self, host: NodeId, value: &str) -> bool {
+        self.text_block(host)
+            .is_some_and(|block| !block.truncated() && paragraph_shows(block.text(), value))
+    }
+
     /// Whether every child of `host` is a text node — the condition for
     /// commands that change its value.
     pub(crate) fn host_is_plain_text(&self, host: NodeId) -> bool {
@@ -381,6 +420,7 @@ impl<T> Document<T> {
             .expect("a focused element has a session");
         session.selection = selection;
         session.pending = None;
+        session.awaiting_layout = false;
         if let Some(composition) = &session.composition
             && (composition.end > value_len || composition.start >= composition.end)
         {

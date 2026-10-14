@@ -1574,3 +1574,32 @@ fn the_strut_is_the_root_inline_box_every_line_starts_with() {
     let block = laid_out(&mut context, BlockStyle::default(), &items, None, None);
     assert_close(block.lines()[0].height, 6.0);
 }
+
+/// `white-space: pre-wrap`: spaces are kept, a space before a newline does
+/// not swallow the newline's forced break (the Chromium override trap in
+/// `shape.rs`), and a carriage return is a space (CSS Text 3 §4.1.1), so
+/// `"a\r\nb"` is two lines, the first one square wide once its hanging
+/// space is set aside.
+#[test]
+fn preserved_runs_keep_spaces_and_their_forced_breaks() {
+    let mut context = text_context();
+    let style = ahem_style();
+    for (text, width, lines) in [
+        ("a  b", 40.0, 1),
+        ("a\nb", 10.0, 2),
+        ("a \nb", 10.0, 2),
+        ("a\r\nb", 10.0, 2),
+        ("a\rb", 30.0, 1),
+    ] {
+        let block = laid_out(
+            &mut context,
+            BlockStyle::default(),
+            &[pre(&style, text)],
+            None,
+            Some(200.0),
+        );
+        assert_eq!(block.lines().len(), lines, "{text:?}");
+        assert_close(block.size().width, width);
+        assert_eq!(block.text().len(), text.len(), "{text:?}");
+    }
+}

@@ -50,7 +50,9 @@ pub enum Command {
     /// active, the selection — with `text` and makes it the composition.
     /// `selection` is the selection afterwards, in UTF-16 units relative to
     /// the start of `text`. Empty `text` cancels an active composition,
-    /// removing its text.
+    /// removing its text; with no composition it deletes a range selection
+    /// (`deleteContentBackward`, no composition event) and places the
+    /// selection relative to where the range began, as Blink does.
     SetComposition {
         text: String,
         selection: Range<usize>,
@@ -229,9 +231,10 @@ const DELETE_WORD_FORWARD: &str = "deleteWordForward";
 pub struct EditOutcome {
     /// Whether the command was carried out. `false` when nothing is focused,
     /// when the command had nothing to act on, and when it was refused: a
-    /// value change on a read-only host (one with an element child), a
-    /// surrogate pair split, or a commit whose value moved after it was
-    /// prepared.
+    /// value change on a read-only host (one with an element child), any
+    /// command but `SetSelection` and `SelectAll` over a paragraph that does
+    /// not show the value, a surrogate pair split, or a commit whose value
+    /// moved after it was prepared.
     pub applied: bool,
     /// The events the embedder dispatches at the host, in order. The value
     /// changed between the last `beforeinput` and the first `input`.
@@ -463,10 +466,19 @@ impl<T: Sync> Document<T> {
             self.layout();
         }
         let host = self.focused()?;
+        let value = self.host_value(host);
+        let session = self.editing.session.clone()?;
+        // Whether the selection's offsets are value offsets: the paragraph
+        // shows the value, or it is only stale behind this session's own
+        // change, whose selection is held as value offsets.
+        let trusted = session.awaiting_layout || self.paragraph_shows_value(host, &value);
+        if !trusted && !matches!(command, Command::SetSelection { .. } | Command::SelectAll) {
+            return None;
+        }
         let context = Context {
             host,
-            value: self.host_value(host),
-            session: self.editing.session.clone()?,
+            value,
+            session,
             writable: self.host_is_plain_text(host),
         };
         match command {
@@ -571,6 +583,9 @@ impl<T: Sync> Document<T> {
             .session
             .as_mut()
             .expect("the focused host has a session");
+        if !edit.changes.is_empty() {
+            session.awaiting_layout = true;
+        }
         match edit.selection {
             SelectionAfter::Bytes(bytes) => session.pending = Some(bytes),
             SelectionAfter::Layout(selection) => {
@@ -627,14 +642,17 @@ impl<T: Sync> Document<T> {
     }
 
     /// The host's committed display layout, provided it shows the value byte
-    /// for byte: the paragraph's text is the value, and no truncation cut
-    /// replaced its tail with a marker.
+    /// for byte ([`Document::paragraph_shows_value`]).
     fn layout_of_value(
         &self,
         context: &Context,
     ) -> Option<&parley::Layout<crate::layout::TextBrush>> {
-        let block = self.text_block(context.host)?;
-        (block.text() == context.value && !block.truncated()).then(|| block.display())
+        self.paragraph_shows_value(context.host, &context.value)
+            .then(|| {
+                self.text_block(context.host)
+                    .map(hughie::text::block::TextBlock::display)
+            })
+            .flatten()
     }
 
     /// The origin of the host's paragraph in its border box.
@@ -776,8 +794,10 @@ fn set_composition(context: Context, text: &str, selection: &Range<usize>) -> Op
     }
     let composition = context.composition();
     if text.is_empty() {
+        let Some(range) = composition else {
+            return delete_selection_for_empty_composition(context, selection);
+        };
         // Cancelling: the composition's text goes, and the composition ends.
-        let range = composition?;
         let mut events = vec![
             EditEvent::input(
                 EditEventKind::BeforeInput,
@@ -835,6 +855,34 @@ fn set_composition(context: Context, text: &str, selection: &Range<usize>) -> Op
         Some(start..start + text.len()),
         events,
     ))
+}
+
+/// `SetComposition` with empty text and no composition, Blink's third
+/// case (`InputMethodController::SetComposition`, for IMEs such as
+/// IBus-Anthy): a range selection is deleted with no composition event, by
+/// `DeleteSelection`'s `beforeinput`/`input` pair of `deleteContentBackward`
+/// (`TypingCommand::GetInputType` for `kDeleteSelection`), and the selection
+/// is then set `selection` UTF-16 units from where the deleted range began,
+/// as `SetEditableSelectionOffsets` does. A collapsed selection changes
+/// nothing.
+fn delete_selection_for_empty_composition(
+    context: Context,
+    selection: &Range<usize>,
+) -> Option<PreparedEdit> {
+    let range = context.selection().range();
+    if range.is_empty() {
+        return None;
+    }
+    let value = apply_changes(&context.value, &[(range.clone(), String::new())]);
+    let start = unit_of_byte(&context.value, range.start);
+    let place = |offset: usize| byte_of_unit_floor(&value, start.saturating_add(offset));
+    let after = ByteSelection {
+        anchor: place(selection.start),
+        focus: place(selection.end),
+        affinity: Affinity::Downstream,
+    };
+    let events = input_pair(DELETE_CONTENT_BACKWARD, None, false);
+    Some(context.replace(range, "", after, None, events))
 }
 
 fn commit_text(context: Context, text: &str, relative_cursor: i32) -> Option<PreparedEdit> {

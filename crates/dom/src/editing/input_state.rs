@@ -7,6 +7,11 @@
 //! publishes it whenever it differs from the last one it published
 //! (`PartialEq`), and answers every synchronous platform query from it.
 //!
+//! Offsets are value offsets. While the focused host's paragraph does not
+//! show its value (generated `content`, a truncation cut) and the selection
+//! is one placed in that paragraph, the selection is reported collapsed at
+//! the value's end ([`crate::editing`]).
+//!
 //! Geometry is viewport CSS px from the last committed layout, walked the way
 //! [`Document::bounding_client_rect`] walks it: sticky offsets and scroll
 //! offsets are applied, transforms are not.
@@ -210,8 +215,14 @@ impl<T> Document<T> {
             return TextInputState::default();
         };
         let value = self.host_value(host);
-        let bytes = session.bytes();
-        let range = bytes.range();
+        // A parley selection over a paragraph that does not show the value
+        // has no offsets in the value: it is reported collapsed at the
+        // value's end rather than as offsets into some other text.
+        let range = if session.pending.is_some() || self.paragraph_shows_value(host, &value) {
+            session.bytes().range()
+        } else {
+            value.len()..value.len()
+        };
         let to_units = |byte: usize| u32::try_from(unit_of_byte(&value, byte)).unwrap_or(u32::MAX);
         let selection = to_units(range.start)..to_units(range.end);
         let composition = session

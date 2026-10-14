@@ -11,7 +11,7 @@ use crate::{FontBlob, Point2D, Rect, Size2D, StylesheetOrigin};
 
 /// The embedder's UA rule for an editing host, as `bobcat-core` writes it.
 const HOST_RULE: &str = "[contenteditable]:not([contenteditable=\"false\" i]) \
-                         { display: -lynx-text !important; white-space: pre-wrap; }";
+                         { display: -lynx-text !important; white-space: pre-wrap !important; }";
 
 /// A value with a surrogate pair, a CJK character, a hard break and a
 /// combining mark: `a b 😀 中 \n c d e ◌́`, bytes 0..15, UTF-16 units 0..10.
@@ -114,9 +114,9 @@ fn contenteditable_values_decide_the_editing_host() {
 #[test]
 fn the_ua_rule_lays_a_host_out_as_one_preserving_paragraph() {
     let mut doc = document();
-    // Author `!important` loses to the UA's.
+    // Author `!important` loses to the UA's, for both declarations.
     doc.add_stylesheet(
-        "view { display: flex !important; }",
+        "view { display: flex !important; white-space: normal !important; }",
         StylesheetOrigin::Author,
     );
     let page = doc.document_element().id();
@@ -795,5 +795,111 @@ fn an_empty_host_shows_a_caret_one_line_tall() {
     assert_eq!(
         state(&doc).caret,
         rect(origin.x + 5.0, origin.y + 3.0, 1.0, 10.0)
+    );
+}
+
+#[test]
+fn a_paragraph_that_does_not_show_the_value_refuses_edits_but_takes_selections() {
+    let (mut doc, host) = host_with(&["ab"], 200.0);
+    doc.add_stylesheet(
+        "view.generated { content: 'XYZ'; }",
+        StylesheetOrigin::Author,
+    );
+    doc.add_class(host, "generated");
+    doc.layout();
+    assert!(!doc.paragraph_shows_value(host, "ab"));
+    // The selection was placed in the paragraph; it has no value offsets.
+    assert_eq!(selection(&doc), 2..2, "collapsed at the value's end");
+    for command in [
+        Command::Insert("x".to_owned()),
+        Command::DeleteBackward,
+        Command::CommitText {
+            text: "x".to_owned(),
+            relative_cursor: 0,
+        },
+        Command::SetComposition {
+            text: "x".to_owned(),
+            selection: 0..0,
+        },
+        Command::DeleteSurrounding {
+            before: 1,
+            after: 0,
+        },
+        Command::Move {
+            granularity: Granularity::Character,
+            direction: Direction::Forward,
+            extend: false,
+        },
+        Command::SelectFromPoint {
+            point: Point2D::new(8.0, 5.0),
+            extend: false,
+        },
+    ] {
+        assert!(!doc.apply_editing(command.clone()).applied, "{command:?}");
+    }
+    assert_eq!(value(&doc), "ab");
+    assert!(doc.apply_editing(Command::SelectAll).applied);
+    assert_eq!(selection(&doc), 0..2);
+    assert!(
+        doc.apply_editing(Command::SetSelection { range: 1..1 })
+            .applied
+    );
+    assert_eq!(selection(&doc), 1..1);
+}
+
+#[test]
+fn a_tab_is_shown_as_a_space_and_edits_stay_aligned() {
+    let (mut doc, host) = host_with(&["a\tb"], 200.0);
+    assert!(doc.paragraph_shows_value(host, "a\tb"));
+    select(&mut doc, 3..3);
+    assert!(doc.apply_editing(Command::Insert("c".to_owned())).applied);
+    assert_eq!(value(&doc), "a\tbc");
+    assert!(doc.apply_editing(Command::DeleteBackward).applied);
+    assert_eq!(value(&doc), "a\tb");
+    assert_eq!(selection(&doc), 3..3);
+}
+
+#[test]
+fn a_carriage_return_is_shaped_as_a_space_and_edits_stay_aligned() {
+    let (mut doc, host) = host_with(&["a\r\nb"], 200.0);
+    assert!(doc.paragraph_shows_value(host, "a\r\nb"));
+    // Two lines: "a" plus the CR's space (hanging), then "b".
+    let size = doc.text_block_size(host).unwrap();
+    assert_eq!((size.width, size.height), (10.0, 20.0));
+    select(&mut doc, 4..4);
+    assert!(doc.apply_editing(Command::Insert("c".to_owned())).applied);
+    assert_eq!(value(&doc), "a\r\nbc");
+    assert!(doc.apply_editing(Command::DeleteBackward).applied);
+    assert_eq!(value(&doc), "a\r\nb");
+    assert_eq!(selection(&doc), 4..4);
+}
+
+#[test]
+fn an_empty_composition_outside_a_composition_deletes_the_selection() {
+    let (mut doc, _) = host_with(&["abcd"], 200.0);
+    select(&mut doc, 1..3);
+    let outcome = doc.apply_editing(Command::SetComposition {
+        text: String::new(),
+        selection: 0..0,
+    });
+    // Blink's third case: no composition event, `DeleteSelection`'s pair.
+    assert_eq!(
+        kinds(&outcome),
+        [
+            ("beforeinput", "deleteContentBackward", None, false),
+            ("input", "deleteContentBackward", None, false),
+        ]
+    );
+    assert!(outcome.events[0].cancelable());
+    assert_eq!(value(&doc), "ad");
+    assert_eq!(selection(&doc), 1..1);
+    assert_eq!(state(&doc).composition, None);
+    // A collapsed selection: nothing to delete.
+    assert!(
+        !doc.apply_editing(Command::SetComposition {
+            text: String::new(),
+            selection: 0..0,
+        })
+        .applied
     );
 }

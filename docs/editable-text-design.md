@@ -71,9 +71,9 @@ every synchronous OS query from it with no wait.
   `"plaintext-only"` are all treated as plain-text editing in this series;
   rich-text editing of nested inline elements is deferred.
 - The UA sheet lays an editing host out as one paragraph:
-  `[contenteditable]:not([contenteditable="false" i]) { display: -lynx-text !important; white-space: pre-wrap; }`
+  `[contenteditable]:not([contenteditable="false" i]) { display: -lynx-text !important; white-space: pre-wrap !important; }`
   (`!important` follows the `text { display: -lynx-text !important }`
-  precedent). A `<view contenteditable>` therefore becomes a text block whose
+  precedent; `white-space` is `!important` too, see E1). A `<view contenteditable>` therefore becomes a text block whose
   text-node children are its runs, which is exactly what `<div contenteditable>`
   holds in a browser for plain text.
 - Content model in this series: the host's text is the concatenation of its
@@ -260,7 +260,28 @@ Public surface:
   which landed with `<markdown>`): every white-space character is kept, each
   space, tab and carriage return as one space of its own, so the paragraph's
   text has the value's bytes at the value's offsets, with a tab or carriage
-  return shown as a space.
+  return shown as a space; `dom` compares a value's `\t` and `\r` as equal
+  to the paragraph's space.
+- **The UA rule's `white-space` is `!important`.** An author
+  `white-space: normal` on a host would collapse `"a  b"` to `"a b"`, after
+  which every parley offset past the collapse is one byte off the value.
+- **A paragraph that does not show the value is read-only.**
+  `prepare_editing` asks once whether the committed paragraph shows the value
+  byte for byte, untruncated (`Document::paragraph_shows_value`). When it
+  does not — generated `content`, a `text-maxline`/`text-maxlength` cut — and
+  the session is not merely waiting for the layout of its own last change,
+  every command is refused except `SetSelection` and `SelectAll`, which work
+  on value offsets alone. `text_input_state` reports a parley selection over
+  such a paragraph collapsed at the value's end rather than as offsets into
+  other text.
+- **`SetComposition` with empty text and no composition** deletes a range
+  selection, as Blink's third case in `InputMethodController::SetComposition`
+  does (for IMEs such as IBus-Anthy): no composition event, one
+  `beforeinput`/`input` pair of `deleteContentBackward` (Blink's
+  `DeleteSelection` and `TypingCommand::GetInputType` for
+  `kDeleteSelection`), then the selection placed `selection` UTF-16 units from
+  where the deleted range began (`SetEditableSelectionOffsets`). A collapsed
+  selection changes nothing.
 
 ### Limitations
 
@@ -270,11 +291,9 @@ Public surface:
 - **Read-only hosts.** A host with an element child refuses every
   value-changing command. A nested `contenteditable` inside a host is
   flattened into the outer paragraph and has no paragraph of its own.
-- **Desynchronized paragraphs.** The cluster and word deletions require the
-  committed paragraph text to equal the value; an author `white-space` that
-  collapses, generated `content`, or a `text-maxline`/`text-maxlength`
-  truncation breaks that, and those deletions are refused. Selection offsets
-  over such a paragraph may not match the value.
+- **Hosts whose paragraph shows other text are read-only.** Generated
+  `content` and a `text-maxline`/`text-maxlength` cut leave only
+  `SetSelection` and `SelectAll` working (see above).
 - **Clusters are parley's.** Cluster deletion and movement follow parley's
   shaping clusters, which depend on the font: with a face that lacks a
   combining mark, `e` and U+0301 can be separate clusters.
