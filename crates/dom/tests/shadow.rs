@@ -544,6 +544,55 @@ fn a_class_change_inside_a_shadow_tree_restyles_against_its_scoped_rules() {
     assert_eq!(harness.doc.value(inside, "width"), "auto");
 }
 
+/// A sheet a component rewrites keeps its place among the tree's sheets:
+/// the replacement still loses to a later sheet on equal specificity and
+/// still beats an earlier one, and the old text stops applying.
+#[test]
+fn a_replaced_shadow_stylesheet_keeps_its_place_in_the_order() {
+    let mut harness = Harness::new();
+    let inside = harness.shadow_el(harness.shadow, "target");
+    let shadow = harness.shadow;
+    harness
+        .doc
+        .dom
+        .add_shadow_stylesheet(shadow, "target { width: 5px; height: 5px; }");
+    harness
+        .doc
+        .dom
+        .add_shadow_stylesheet(shadow, "target { width: 7px; }");
+    harness
+        .doc
+        .dom
+        .add_shadow_stylesheet(shadow, "target { min-width: 1px; }");
+    harness.doc.flush();
+    assert_eq!(harness.doc.value(inside, "width"), "7px");
+
+    harness
+        .doc
+        .dom
+        .replace_shadow_stylesheet(shadow, 1, "target { height: 9px; min-width: 3px; }");
+    harness.doc.flush();
+    assert_eq!(
+        harness.doc.value(inside, "width"),
+        "5px",
+        "the replaced text no longer applies"
+    );
+    assert_eq!(
+        harness.doc.value(inside, "height"),
+        "9px",
+        "the replacement still cascades after the sheet before it"
+    );
+    assert_eq!(
+        harness.doc.value(inside, "min-width"),
+        "1px",
+        "and before the sheet after it"
+    );
+
+    harness.doc.dom.replace_shadow_stylesheet(shadow, 1, "");
+    harness.doc.flush();
+    assert_eq!(harness.doc.value(inside, "height"), "5px");
+}
+
 #[test]
 fn a_class_change_on_the_host_restyles_the_shadow_tree_through_host() {
     let mut harness = Harness::new();

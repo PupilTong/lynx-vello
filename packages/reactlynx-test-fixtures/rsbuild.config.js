@@ -39,7 +39,7 @@ export default defineConfig(({ env }) => {
           'basic-performance-large-css', 'basic-mts-run-on-main-thread', 'basic-mts-run-on-background',
           'react-scroll-timeline', 'react-viewpager', 'react-scroll-coordinator', 'react-swiper',
           'react-swiper-scroll-to', 'react-refresh-view', 'react-dialog', 'react-overlay',
-          'react-overlay-pass-through', 'react-svg', 'css-custom-sections']
+          'react-overlay-pass-through', 'react-svg', 'react-markdown', 'css-custom-sections']
           .map(fixture => [`web-${fixture}`, {
             source: { entry: { [fixture]: fixture === 'react-bts-query'
               ? `./src/${fixture}.jsx` : `./src/${fixture}/index.jsx` } },

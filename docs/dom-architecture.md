@@ -110,8 +110,10 @@ inherit through, and what layout, paint and hit testing walk; it is reached
 exclusively through `Node::flat_children`/`flat_parent_id`, both returning
 arena slices so every consumer keeps its `&[NodeId]` iteration. Each shadow
 root owns an `AuthorStyles<DocumentStyleSheet>` whose scoped `CascadeData`
-(`Document::add_shadow_stylesheet`) replaces the document's author rules inside
-that tree; `::slotted()` and `::part()`/`exportparts` work off the same data.
+(`Document::add_shadow_stylesheet`; `Document::replace_shadow_stylesheet`
+swaps one sheet's text in its place in their order, as rewriting a shadow
+`<style>` does) replaces the document's author rules inside that tree;
+`::slotted()` and `::part()`/`exportparts` work off the same data.
 Slot assignment is eager — every mutation that can change it (host child list,
 shadow-tree slot set, `slot`/`name` attribute) resolves the affected tree in
 the same call, gated on a live-shadow-root counter so a document with none pays
@@ -203,7 +205,10 @@ die, or free the node its caller still holds. A callback that *can* mutate may
 detach any node but may not *free* one the calling mutation still holds:
 `create_element` and the constructor call pin that id, and
 `drop_element`/`drop_subtree` refuse to free a pinned node, since freeing
-retires the id permanently.
+retires the id permanently. `freed(element)` is not a reaction: the free of
+each node calls it inline for a defined element, its shadow trees' included,
+with the id alone (the node is half gone), as the one place a definition drops
+state it keys by that id; a removal that keeps the node never calls it.
 
 ## Style engine and invalidation
 
@@ -945,13 +950,25 @@ delivers nothing, since its host follows it as itself. For a non-bubbling
 event that step is in the capture pass only, so a handler that keeps only
 bubble-phase deliveries never sees one. A definition names the types it
 handles in `CustomElement::observed_events`; `define` unions them into one
-set, and a type nothing observes costs one set lookup and builds no path. The
+set, and a type nothing observes costs one set lookup and builds no path.
+Which of those names have an instance is tracked beside it: the registry
+counts the elements of each definition (counted where an element is given its
+definition, uncounted where it is freed) and, per name, the definitions with
+an element alive, and `Document::take_observed_name_edges` hands out the
+names whose liveness changed since the last call — the input a host's router
+is fed per instance, while the walk's gate (`observes_event`) stays per
+definition. The
 engine-only types are css-contain-2 §4.4's
 `contentvisibilityautostatechange` (`EventDetail::ContentVisibility {
 skipped }`), which `Document::dispatch_content_visibility_changes` fires from
 the queue the relevance pass filled — `bubbles`, not composed, not cancelable,
 and never reaching a realm — and DOM's `slotchange`, fired by the slot
-assignment paths above.
+assignment paths above. One routed event is also dispatched this way:
+`bobcat-core` fires a non-composed `tap` (`EventDetail::Pointer`) at a tap's
+hit node, before its one dispatch of the same `tap`, when that node is UA
+shadow content — the composed `tap` of the one dispatch reaches the host
+retargeted to itself, so only the non-composed one, ending at the shadow
+root, tells the host's component which inner node was tapped.
 
 ## Text
 
@@ -967,6 +984,14 @@ the explicit copying fallback. Relayout damage on an element evicts its direct
 text children's measurement caches and retained artifacts, because text nodes
 have no Stylo damage record of their own. Parley is unconditional and there is
 no arbitrary payload callback.
+
+The committed paragraph answers geometry queries in its own source UTF-16
+units without running a pass: `text_range_boxes` (a range to per-line boxes),
+its inverse `text_index_at_point` (a point to the unit drawn there, `None` off
+content), `inline_source_range` (the units a nested scope or atom
+contributes, from the item-to-node table through the same flat-ancestor walk
+the painter's inline backgrounds use), and `paragraph_of` (the establishing
+element whose flatten walk reaches a node).
 
 ## The vendored stylo fork
 

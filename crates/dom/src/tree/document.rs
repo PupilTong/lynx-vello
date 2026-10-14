@@ -908,6 +908,9 @@ impl<T> Document<T> {
         }
         self.layout.remove(slot);
         self.forget_reactions(id);
+        // Every free comes through here, one node at a time, so a defined
+        // element in a freed subtree or in a freed shadow tree is told once.
+        self.note_custom_element_freed(id, node.custom_definition);
         (node, payload)
     }
 

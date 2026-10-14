@@ -14,10 +14,17 @@
 //! pending whitespace and resets the after-break state, the way parley's tree
 //! builder treats an inline box). The nontrivial segment-break predicate is
 //! shared, not copied.
+//!
+//! `white-space-collapse` is per run. Under `preserve` nothing collapses:
+//! every space, tab and carriage return emits one byte and every segment
+//! break is a preserved break, so the only thing the mode changes is which
+//! source units survive — never how they are counted. A preserved tab is
+//! emitted as a space and listed in [`NormalizedBlock::tabs`]; its advance is
+//! the tab stop's business (`super::tab`), not the glyph's.
 
 use core::ops::Range;
 
-use super::style::{RunStyle, VerticalAlign};
+use super::style::{RunStyle, VerticalAlign, WhiteSpaceCollapse};
 use crate::geometry::Size;
 
 /// One flattened paragraph item, in source order.
@@ -33,10 +40,10 @@ pub enum InlineItem<'src> {
 pub struct TextRunItem<'src> {
     pub text: &'src str,
     pub style: &'src RunStyle,
-    /// Lynx raw-text keeps literal newlines (`white-space-collapse:
-    /// preserve-breaks` on the web target); the host sets this for
-    /// raw-text-backed runs.
-    pub preserve_newlines: bool,
+    /// The run's computed `white-space-collapse`. Lynx raw-text keeps
+    /// literal newlines (`preserve-breaks` on the web target); a `pre`
+    /// block preserves everything.
+    pub white_space: WhiteSpaceCollapse,
 }
 
 /// One atomic inline — a Lynx inline image or inline view.
@@ -67,6 +74,17 @@ pub(in crate::text::block) struct NormalizedBlock {
     pub(in crate::text::block) ranges: Vec<StyledRange>,
     pub(in crate::text::block) boxes: Vec<BoxAt>,
     pub(in crate::text::block) map: SourceMap,
+    /// Each input item's source units, indexed like the input slice.
+    ///
+    /// Every source character counts on arrival, whatever collapsing later
+    /// makes of it, so these are contiguous, cover `0..map.source_len()`, and
+    /// a run's span is its whole pre-collapse text even where none of it
+    /// survived; a box's is its one unit.
+    pub(in crate::text::block) item_units: Vec<Range<u32>>,
+    /// The byte of every preserved tab, ascending. Each is one space in
+    /// `text`, a cluster of its own, whose advance the block widens to the
+    /// next tab stop at break time.
+    pub(in crate::text::block) tabs: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,8 +124,9 @@ struct Range2 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SegmentKind {
-    /// Every emitted char equals its source char; intra-segment offsets are
-    /// recomputed from the normalized text.
+    /// Every emitted char stands for one source char of the same UTF-16
+    /// length — itself, or a space for a preserved tab or carriage return —
+    /// so intra-segment offsets are recomputed from the normalized text.
     Verbatim,
     /// A whitespace span: several source units emitting zero or one byte.
     Collapsed,
@@ -165,6 +184,38 @@ impl SourceMap {
             }
         }
         result
+    }
+
+    /// The end of `text[start..end]` with its trailing newlines and
+    /// *collapsible* spaces dropped — the line-end whitespace that belongs to
+    /// no line's content. A preserved space is content and stops the walk,
+    /// wherever it sits.
+    pub(in crate::text::block) fn visible_end(&self, text: &str, start: u32, end: u32) -> u32 {
+        let mut visible = end;
+        for (offset, character) in text[start as usize..end as usize].char_indices().rev() {
+            let byte = start + u32::try_from(offset).expect("text fits u32");
+            let trailing = match character {
+                '\n' => true,
+                ' ' => self.is_collapsed_byte(byte),
+                _ => false,
+            };
+            if !trailing {
+                break;
+            }
+            visible = byte;
+        }
+        visible
+    }
+
+    /// Whether the byte is the one space a collapsed whitespace span emitted.
+    fn is_collapsed_byte(&self, byte: u32) -> bool {
+        let index = self
+            .segments
+            .partition_point(|segment| segment.norm.end <= byte);
+        self.segments[index..]
+            .iter()
+            .take_while(|segment| segment.norm.start <= byte)
+            .any(|segment| segment.kind == SegmentKind::Collapsed && segment.norm.start == byte)
     }
 
     /// Normalized byte of a source cut, or `None` when the cut lies at or
@@ -236,6 +287,7 @@ struct Normalizer {
     units: u32,
     pending: Option<Pending>,
     after_preserved_break: bool,
+    tabs: Vec<u32>,
 }
 
 /// The sentinel handed to the segment-break predicate when the next content
@@ -252,24 +304,31 @@ pub(in crate::text::block) fn normalize(items: &[InlineItem<'_>]) -> NormalizedB
         units: 0,
         pending: None,
         after_preserved_break: false,
+        tabs: Vec::new(),
     };
 
+    let mut item_units = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
         let item_index = u32::try_from(index).expect("item count fits u32");
+        let start = state.units;
         match item {
             InlineItem::Run(run) => state.consume_run(run, item_index),
             InlineItem::Box(_) => state.consume_box(item_index),
         }
+        item_units.push(start..state.units);
     }
-    state.finish()
+    state.finish(item_units)
 }
 
 impl Normalizer {
     fn consume_run(&mut self, run: &TextRunItem<'_>, item: u32) {
+        let preserve_breaks = run.white_space != WhiteSpaceCollapse::Collapse;
+        let preserve_spaces = run.white_space == WhiteSpaceCollapse::Preserve;
         for character in run.text.chars() {
             match character {
-                '\n' if run.preserve_newlines => self.preserved_break(character, item),
+                '\n' if preserve_breaks => self.preserved_break(character, item),
                 '\n' => self.queue_segment_break(item),
+                ' ' | '\t' | '\r' if preserve_spaces => self.preserved_space(character, item),
                 ' ' | '\t' | '\r' => self.queue_space(character, item),
                 _ => {
                     self.flush_pending(character);
@@ -333,6 +392,23 @@ impl Normalizer {
             }
         }
         self.units += 1;
+    }
+
+    /// A preserved space, tab or carriage return is content: it resolves any
+    /// collapsible span still open before it (a neighbouring run's), then
+    /// emits one space for its one source unit. css-text-3 §4
+    /// (`#white-space-processing`) treats a carriage return as a space in all
+    /// respects; a tab is recorded for the tab-stop pass. Unlike a collapsible
+    /// space it is never suppressed after a preserved break — that is the
+    /// indentation a `pre` block keeps.
+    fn preserved_space(&mut self, character: char, item: u32) {
+        debug_assert_eq!(character.len_utf16(), 1);
+        self.flush_pending(' ');
+        if character == '\t' {
+            self.tabs.push(self.byte_len());
+        }
+        self.emit_verbatim(' ', item);
+        self.after_preserved_break = false;
     }
 
     /// A preserved newline drops the open whitespace span and emits itself.
@@ -401,6 +477,7 @@ impl Normalizer {
         });
     }
 
+    /// Emits `character` for one source character of the same UTF-16 length.
     fn emit_verbatim(&mut self, character: char, item: u32) {
         let start = self.byte_len();
         self.text.push(character);
@@ -463,7 +540,7 @@ impl Normalizer {
         u32::try_from(self.text.len()).expect("normalized text fits u32")
     }
 
-    fn finish(mut self) -> NormalizedBlock {
+    fn finish(mut self, item_units: Vec<Range<u32>>) -> NormalizedBlock {
         if let Some(pending) = self.pending.take() {
             let content_seen = !self.text.is_empty() || !self.boxes.is_empty();
             if content_seen && pending.kind != PendingKind::Suppressed {
@@ -499,6 +576,8 @@ impl Normalizer {
                 segments: self.segments,
                 source_len: self.units,
             },
+            item_units,
+            tabs: self.tabs,
         }
     }
 }
@@ -543,7 +622,7 @@ mod tests {
         InlineItem::Run(TextRunItem {
             text,
             style,
-            preserve_newlines: false,
+            white_space: WhiteSpaceCollapse::Collapse,
         })
     }
 
@@ -551,7 +630,15 @@ mod tests {
         InlineItem::Run(TextRunItem {
             text,
             style,
-            preserve_newlines: true,
+            white_space: WhiteSpaceCollapse::PreserveBreaks,
+        })
+    }
+
+    fn pre<'src>(style: &'src RunStyle, text: &'src str) -> InlineItem<'src> {
+        InlineItem::Run(TextRunItem {
+            text,
+            style,
+            white_space: WhiteSpaceCollapse::Preserve,
         })
     }
 
@@ -641,6 +728,24 @@ mod tests {
 
         let kept = normalize(&[run(&style, "a\nb")]);
         assert_eq!(kept.text, "a b");
+    }
+
+    #[test]
+    fn item_units_count_every_source_unit_whatever_collapsing_keeps() {
+        let style = RunStyle::default();
+        let items = [
+            run(&style, "a \n"),
+            atom(7),
+            run(&style, "  "),
+            run(&style, "b\u{1F600}"),
+        ];
+        let block = normalize(&items);
+        assert_eq!(block.text, "a  b\u{1F600}");
+        // 'a' and the collapsed " \n"; the box; two spaces collapsed into
+        // nothing; 'b' and a surrogate pair.
+        assert_eq!(block.item_units, [0..3, 3..4, 4..6, 6..9]);
+        assert_eq!(block.map.source_len(), 9);
+        assert!(normalize(&[]).item_units.is_empty());
     }
 
     #[test]
@@ -779,6 +884,82 @@ mod tests {
 
         let east_asian = normalize(&[run(&style, "\u{4f60}\n\u{597d}")]);
         assert_eq!(east_asian.map.unit_before(&east_asian.text, 3), 2);
+    }
+
+    #[test]
+    fn preserve_keeps_every_space_tab_and_break_as_its_own_unit() {
+        let style = RunStyle::default();
+        let block = normalize(&[pre(&style, "  a\t b\r\n  c ")]);
+
+        // Nothing collapses: the tab and the carriage return each emit one
+        // space, the newline is a preserved break, and the indentation after
+        // it survives.
+        assert_eq!(block.text, "  a  b \n  c ");
+        assert_eq!(block.tabs, [3]);
+        assert_eq!(block.map.source_len(), 12);
+        assert_eq!(block.item_units.first(), Some(&(0..12)));
+        // One byte per unit, both ways, across the whole run.
+        for unit in 0..12 {
+            assert_eq!(block.map.unit_to_byte(&block.text, unit), Some(unit));
+            assert_eq!(block.map.byte_to_unit(&block.text, unit), unit);
+        }
+        assert_eq!(block.map.unit_before(&block.text, 12), 12);
+        // A line's visible end drops its newline but keeps a preserved space
+        // in front of it, and a trailing preserved space is content too.
+        assert_eq!(block.map.visible_end(&block.text, 0, 8), 7);
+        assert_eq!(block.map.visible_end(&block.text, 8, 12), 12);
+    }
+
+    #[test]
+    fn preserving_changes_what_survives_never_how_units_are_counted() {
+        let style = RunStyle::default();
+        let source = ["a \t\n", "  b\r\n\n c"];
+        let collapsed = normalize(&[run(&style, source[0]), run(&style, source[1])]);
+        let breaks = normalize(&[raw(&style, source[0]), raw(&style, source[1])]);
+        let preserved = normalize(&[pre(&style, source[0]), pre(&style, source[1])]);
+
+        assert_eq!(collapsed.text, "a b c");
+        assert_eq!(breaks.text, "a\nb\n\nc");
+        assert_eq!(preserved.text, "a  \n  b \n\n c");
+        assert!(collapsed.tabs.is_empty() && breaks.tabs.is_empty());
+        assert_eq!(preserved.tabs, [2]);
+        for block in [&collapsed, &breaks, &preserved] {
+            assert_eq!(block.item_units, [0..4, 4..12]);
+            assert_eq!(block.map.source_len(), 12);
+            // `c` is unit 11 in every mode.
+            let byte = block.map.unit_to_byte(&block.text, 11).expect("in range");
+            assert_eq!(&block.text[byte as usize..], "c");
+        }
+    }
+
+    #[test]
+    fn preserved_and_collapsible_whitespace_meet_at_run_boundaries() {
+        let style = RunStyle::default();
+        // A collapsible space before a preserved one is not collapsed by it:
+        // only a collapsible space following another collapsible one is.
+        let before = normalize(&[run(&style, "a  "), pre(&style, "  b")]);
+        assert_eq!(before.text, "a   b");
+        assert_eq!(before.item_units, [0..3, 3..6]);
+        assert_eq!(before.map.byte_to_unit(&before.text, 1), 1);
+        assert_eq!(before.map.byte_to_unit(&before.text, 2), 3);
+
+        // And one after a preserved space opens a span of its own.
+        let after = normalize(&[pre(&style, "a  "), run(&style, "  b")]);
+        assert_eq!(after.text, "a   b");
+
+        // Only the collapsed trailing space is line-end whitespace.
+        let trailing = normalize(&[pre(&style, "a "), run(&style, "  ")]);
+        assert_eq!(trailing.text, "a  ");
+        assert_eq!(trailing.map.visible_end(&trailing.text, 0, 3), 2);
+        let collapsed = normalize(&[run(&style, "a  ")]);
+        assert_eq!(collapsed.map.visible_end(&collapsed.text, 0, 2), 1);
+    }
+
+    #[test]
+    fn preserve_breaks_still_drops_the_whitespace_around_its_breaks() {
+        let style = RunStyle::default();
+        assert_eq!(normalize(&[raw(&style, "a  \n    b")]).text, "a\nb");
+        assert_eq!(normalize(&[pre(&style, "a  \n    b")]).text, "a  \n    b");
     }
 
     #[test]

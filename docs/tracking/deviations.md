@@ -2347,6 +2347,117 @@ consequential choice about whether to follow the spec or the quirk.
     fires `showoverlay` for every write of a showing value (`"true"` to
     `""`); here a rewrite that keeps the overlay shown fires nothing.
 
+- **`markdown` / `x-markdown` (2026-10-14)** — Lynx-only (bucket 2): native
+  registers `markdown`, web-core `x-markdown`; both are defined, on one
+  component (`bobcat-core`'s `tree::markdown`). web-core's structure is
+  followed — a UA shadow tree whose `#markdown-root` holds the elements
+  markdown-it renders — and where it cannot be, or where web-core, native and
+  the typings disagree:
+  - *The shadow tree is HTML-named elements over `-lynx-text` paragraphs.*
+    The elements are markdown-it's (`p`, `h1`-`h6`, `ul`/`ol`/`li`,
+    `blockquote`, `pre > code`, `table`, `a`, `strong`, …) so
+    `markdown-style`'s selectors match as in web-core, but there is no block
+    or inline flow: every text holder is a `display: -lynx-text` paragraph,
+    every inline element a nested run, every block container a column flex
+    box. Margins between blocks therefore add up where a browser collapses
+    them (a heading after a paragraph is 0.75em + 0.8em apart, not 0.8em).
+    Two element kinds are the engine's own: a line holder for text
+    markdown-it writes straight into a container (a tight list item's text),
+    and a list marker.
+  - *List markers and tables are approximations.* A marker is an element
+    holding `•`/`◦`/`▪` (by list depth, the browser's `disc`/`circle`/
+    `square`) or `N.`, absolutely placed at the item's start edge in the
+    list's 40px padding, where a browser draws an outside `::marker`. A table
+    is a grid of `auto` columns with `thead`/`tbody`/`tr` as `display:
+    contents`, the browser's 2px `border-spacing` as gap and padding; it does
+    not size rows and columns by the table algorithm.
+  - *`pre` scrolls with `overflow-x: scroll; overflow-y: hidden`* for
+    web-core's `overflow: auto` (no `auto` here), and its code paragraph is
+    HTML's `pre`: `white-space-collapse: preserve` (spaces, tabs to 8-column
+    stops, line breaks) with `text-wrap-mode: nowrap`. The `preserve` mode
+    landed with this component ([css-text.md](css-text.md)); `tab-size` is
+    not a property here, so the stop is 8.
+  - *An image is an atomic box in its line* (the engine's `image` with
+    `auto-size`), where web-core makes its `<img>` `display: block`: text
+    beside an image in one paragraph shares its line.
+  - *Rendering reparses and keeps the equal prefix.* Every `content` or
+    `content-range` change renders synchronously, reparses the whole content
+    and keeps the elements of the leading top-level blocks equal to the
+    previous parse's. web-core appends a chunk up to the last line break and
+    flushes the rest on a timer (`#appendIncrementally`,
+    `XMarkdownAttributes.ts:759-782`); here the block an append changes is
+    rebuilt, and markup an append completes restyles what came before it, as
+    a full render does. `parseEnd` is queued after every render of
+    non-empty content; web-core skips it for an append ending in a line
+    break.
+  - *`getContent`'s `end` is inclusive* (web-core, `XMarkdown.ts:240-246`:
+    `end` defaults to the last unit, the slice is `[start, end + 1)`, and
+    `end < start` is the empty string). Native's `end` is exclusive and
+    `start >= end` is code 4 (`LynxUIMarkdown.m:105-134`).
+  - *`getImages` answers `{images}` and `getParseResult` `{id, result}`* —
+    the typings' and native's shapes; web-core answers the bare array and
+    the bare map. `id` is the `content-id`, `""` without one (native).
+  - *Offsets are web-core's rendered-text offsets.* `getParseResult`,
+    `getTextBoundingRect` and `getCharIndexByPoint` count in the shadow
+    root's `textContent`, including the `"\n"` text nodes markdown-it writes
+    between block tags (counted, not built: they render nothing). Native's
+    `getParseResult` answers source ranges instead.
+  - *`getTextBoundingRect` answers per-line `boxes` too*, the `text`
+    component's record, where web-core answers `{boundingRect}` of a DOM
+    range. With neither `start` nor `end` web-core measures the selection;
+    there is no selection model, so that is code 8.
+  - *`getCharIndexByPoint` is native's* (web-core has none): `x`/`y`
+    relative to the element's border box, the rendered-text index (or, with
+    `indexType: "source"`, the source offset web-core's greedy prefix walk
+    matches it at); nothing under the point is code 8, native's 1.
+  - *`link`, `imageTap` and `parseEnd` do not bubble and are composed*
+    (user ruling 2026-10-14). Not bubbling is native's: a component's custom
+    event is dispatched with `bubbles_ = false, composed_ = false` on the
+    legacy path (`lynx/core/renderer/events/touch_event_handler.cc:399-403`)
+    and as an `event::CustomEvent` whose defaults are `Bubbles::kNo`,
+    `ComposedMode::kScoped` on the refactored one (`:388-394`,
+    `lynx/core/event/custom_event.h:17-23`), so only a `bindlink` on the
+    element itself hears it, never an ancestor's nor `global-bindEvent`.
+    Composed departs from native's flag so that script's `target` is the
+    markdown element itself. web-core fires all three
+    `bubbles: true, composed: true` (`XMarkdownAttributes.ts:627-643,
+    994-995`), which no ReactLynx handler can observe there, because its
+    events are misnamed (next bullet). `link` and `imageTap` come from a
+    `tap`: a paragraph's runs have no box, so the anchor under a tap is
+    found from the character it hits.
+  - *The events are named `link`, `imageTap` and `parseEnd`*, native's names
+    (`LynxMarkdownEventDispatcher.m`), so a compiled card's `bindlink`,
+    `bindimageTap` and `bindparseEnd` handlers run. web-core's `XMarkdown`
+    dispatches DOM events named `bindlink`, `bindimageTap` and
+    `bindparseEnd` (`XMarkdownAttributes.ts:627-643, 994-995`) while its
+    element API listens for the lowercased name without the prefix
+    (`event_apis.rs:33`, `WASMJSBinding.ts:262-280`), so under web-core a
+    ReactLynx handler for them never fires and only a direct
+    `addEventListener('bindlink')` hears them (its own fixture,
+    `tests/fixtures/x-markdown/events.html`). Read from the code, not run;
+    a web-core defect this engine does not copy.
+  - *Links follow markdown-it 15 as web-core configures it*:
+    `www.example.com` and `example.com` are not autolinked (linkify-it's
+    `fuzzyLink` is off there; verified against markdown-it), `https://`,
+    `ftp://` and e-mail addresses are; `javascript:`, `vbscript:`, `file:`
+    and non-image `data:` destinations are refused and stay text. Not
+    replicated: scheme-relative `//host` autolinks (markdown-it links them),
+    and punycode for non-ASCII hosts (an `href` keeps the host
+    percent-encoded).
+  - *Deferred* (no reference behavior is approximated): the typewriter
+    animation and its attributes, events and the `typewriterCursor` style
+    (over the document's component timers, `Autoplays`, PR #408, as a
+    follow-up); `text-maxline`, `overflow` and the `truncation` marker;
+    `markdown-effect`; selection (`text-selection`, `getSelectedText`,
+    `setTextSelection`, `selectionchange`); `childrenexpose`/
+    `exposure-tags`; the native-only `allow-break-around-punctuation`,
+    `image-downsampling`, `text-mark-attachments` and `markdown-max-height`.
+    `pauseAnimation`, `resumeAnimation`, `getSelectedText` and
+    `setTextSelection` answer code 3.
+  - *The host is a border box that clips*, the box block every container
+    tag gets, with `x-markdown.css`'s column display; web-core's host is in
+    no such block.
+
 ## JS runtime & APIs (see [js-runtime.md](js-runtime.md), [accessibility.md](accessibility.md))
 
 - **`ShadowRealm` children have no animation frames, and report under their

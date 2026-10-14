@@ -13,7 +13,8 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::Doc;
-use dom::event::{ElementEvent, EventPhase};
+use dom::event::{ElementEvent, EventDetail, EventPhase};
+use dom::input::PointerKind;
 use dom::{
     CustomElement, Document, MethodCall, MethodError, MethodOutcome, NodeId, ShadowRootMode,
 };
@@ -40,6 +41,9 @@ struct Probe {
     on_connected: Option<Action>,
     on_disconnected: Option<ReadAction>,
     on_attribute: Option<Action>,
+    /// Whether [`CustomElement::freed`] is logged, which only the tests about
+    /// it ask for.
+    records_freed: bool,
 }
 
 impl Probe {
@@ -52,7 +56,13 @@ impl Probe {
             on_connected: None,
             on_disconnected: None,
             on_attribute: None,
+            records_freed: false,
         }
+    }
+
+    fn recording_freed(mut self) -> Self {
+        self.records_freed = true;
+        self
     }
 
     fn observing(mut self, names: &[&str]) -> Self {
@@ -129,6 +139,12 @@ impl CustomElement<()> for Probe {
         ));
         if let Some(action) = &self.on_attribute {
             action(document, element);
+        }
+    }
+
+    fn freed(&self, element: NodeId) {
+        if self.records_freed {
+            self.record(&format!("freed#{element}"));
         }
     }
 }
@@ -527,6 +543,69 @@ fn drop_subtree_delivers_disconnect_while_the_subtree_is_still_readable() {
         doc.dom.get(element).is_none(),
         "and freed immediately after"
     );
+}
+
+/// `freed` is the definition's last word on an id: once per defined element
+/// the free takes, a host and the defined element in its shadow tree alike,
+/// after the disconnect; never for a removal that keeps the node, nor for a
+/// child `drop_element` leaves allocated.
+#[test]
+fn freed_fires_once_per_defined_element_the_free_takes() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    define(&mut doc, Probe::new("x-host", &log).recording_freed());
+    define(&mut doc, Probe::new("x-item", &log).recording_freed());
+    let host = doc.el(root, "x-host");
+    let shadow = doc.dom.attach_shadow(host, ShadowRootMode::Open);
+    let inside = doc.el(shadow, "x-item");
+    let light = doc.el(host, "x-item");
+    let _ = take(&log);
+
+    doc.dom.remove_element(host);
+    let removed = take(&log);
+    assert!(
+        removed.iter().all(|entry| !entry.contains("freed")),
+        "a removal keeps the nodes: {removed:?}"
+    );
+    doc.dom.append_child(root, host);
+    let _ = take(&log);
+
+    doc.dom.drop_subtree(host);
+    let mut freed: Vec<String> = take(&log)
+        .into_iter()
+        .filter(|entry| entry.contains("freed"))
+        .collect();
+    freed.sort();
+    let mut expected = vec![
+        format!("x-host:freed#{host}"),
+        format!("x-item:freed#{inside}"),
+        format!("x-item:freed#{light}"),
+    ];
+    expected.sort();
+    assert_eq!(freed, expected);
+    assert!(doc.dom.get(host).is_none() && doc.dom.get(inside).is_none());
+
+    // `drop_element` frees the host and its shadow tree; its light child
+    // survives, unlinked, and is not told.
+    let host = doc.el(root, "x-host");
+    let shadow = doc.dom.attach_shadow(host, ShadowRootMode::Open);
+    let inside = doc.el(shadow, "x-item");
+    let light = doc.el(host, "x-item");
+    let _ = take(&log);
+    doc.dom.drop_element(host);
+    let mut freed: Vec<String> = take(&log)
+        .into_iter()
+        .filter(|entry| entry.contains("freed"))
+        .collect();
+    freed.sort();
+    let mut expected = vec![
+        format!("x-host:freed#{host}"),
+        format!("x-item:freed#{inside}"),
+    ];
+    expected.sort();
+    assert_eq!(freed, expected);
+    assert!(doc.dom.get(light).is_some());
 }
 
 #[test]
@@ -1336,6 +1415,181 @@ fn slotchange_does_not_leave_a_nested_components_shadow_tree() {
 
     doc.el(outer, "view");
     assert_eq!(take(&log), slotchange("outer", "default", 1));
+}
+
+// ---------------------------------------------------------------------------
+// A tap the host fires, heard by the component whose shadow tree it hit
+// ---------------------------------------------------------------------------
+
+/// A component whose constructor builds `<frame><a/><slot/></frame>` in its
+/// shadow tree, with an `inner` component after the slot when one is named,
+/// and that records every tap it hears as `who:phase:target-tag:x,y`.
+struct TapHost {
+    who: &'static str,
+    log: Log,
+    inner: Option<&'static str>,
+}
+
+impl CustomElement<()> for TapHost {
+    fn observed_events(&self) -> &'static [&'static str] {
+        &["tap"]
+    }
+
+    fn constructed(&self, document: &mut Document<()>, element: NodeId) {
+        let shadow = document.attach_shadow(element, ShadowRootMode::Open);
+        let frame = document.create_element("frame", ());
+        document.append_child(shadow, frame);
+        for tag in ["a", "slot"].into_iter().chain(self.inner) {
+            let child = document.create_element(tag, ());
+            document.append_child(frame, child);
+        }
+    }
+
+    fn handle_event(
+        &self,
+        document: &mut Document<()>,
+        element: NodeId,
+        event: &mut ElementEvent<'_>,
+    ) {
+        assert_eq!(event.type_name(), "tap", "the only type it observes");
+        let Some(position) = event.detail().position() else {
+            panic!("a tap carries a position: {:?}", event.detail());
+        };
+        let (x, y) = (position.x, position.y);
+        assert_eq!(event.current_target(), element);
+        let phase = match event.phase() {
+            EventPhase::Capturing => "capture",
+            EventPhase::AtTarget => "at-target",
+            EventPhase::Bubbling => "bubble",
+        };
+        let tag = document
+            .get(event.target())
+            .and_then(|node| node.tag_name())
+            .unwrap_or("?")
+            .to_owned();
+        self.log
+            .lock()
+            .expect("the log is never poisoned")
+            .push(format!("{}:{phase}:{tag}:{x},{y}", self.who));
+    }
+}
+
+/// The one shadow-tree child of `host`'s `<frame>` with tag `tag`.
+fn shadow_child(doc: &Doc, host: NodeId, tag: &str) -> NodeId {
+    let shadow = doc
+        .dom
+        .shadow_root(host)
+        .expect("the constructor attached one");
+    let frame = doc.dom.get(shadow).unwrap().child_ids()[0];
+    doc.dom
+        .get(frame)
+        .unwrap()
+        .child_ids()
+        .iter()
+        .copied()
+        .find(|&child| doc.dom.get(child).and_then(|node| node.tag_name()) == Some(tag))
+        .expect("the constructor built it")
+}
+
+/// The non-composed `tap` a host fires at the node a tap hit, with the
+/// pointer detail its gesture recognizer gives one.
+fn tap(doc: &mut Doc, target: NodeId) {
+    let detail = EventDetail::Pointer {
+        position: dom::Point2D::new(3.0, 4.5),
+        id: 1,
+        device: PointerKind::Touch,
+        button: 0,
+        buttons: 0,
+    };
+    doc.dom
+        .dispatch_element_event(target, "tap", &detail, true, false, 0.0);
+}
+
+#[test]
+fn a_non_composed_tap_inside_a_shadow_tree_reaches_the_host_with_the_inner_target() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    doc.dom.define(
+        "x-tap",
+        Box::new(TapHost {
+            who: "host",
+            log: Arc::clone(&log),
+            inner: None,
+        }),
+    );
+    let host = doc.el(root, "x-tap");
+    let link = shadow_child(&doc, host, "a");
+
+    tap(&mut doc, link);
+    assert_eq!(
+        take(&log),
+        ["host:capture:a:3,4.5", "host:bubble:a:3,4.5"],
+        "the shadow root's step, in both passes, with the node the tap hit as the target"
+    );
+
+    // A light child is in the document's tree, so `composed: false` ends
+    // nothing short of the document: the host is an ancestor on the path and
+    // hears the tap as itself, the light child as the target. Keeping a host
+    // from hearing taps at content it merely displays is the firing side's
+    // choice of target (`bobcat-core` fires at shadow content alone).
+    let slotted = doc.el(host, "view");
+    tap(&mut doc, slotted);
+    assert_eq!(
+        take(&log),
+        ["host:capture:view:3,4.5", "host:bubble:view:3,4.5"]
+    );
+}
+
+#[test]
+fn a_tap_inside_a_nested_components_shadow_tree_stays_there() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    doc.dom.define(
+        "x-inner",
+        Box::new(TapHost {
+            who: "inner",
+            log: Arc::clone(&log),
+            inner: None,
+        }),
+    );
+    doc.dom.define(
+        "x-outer",
+        Box::new(TapHost {
+            who: "outer",
+            log: Arc::clone(&log),
+            inner: Some("x-inner"),
+        }),
+    );
+    let outer = doc.el(root, "x-outer");
+    let inner = shadow_child(&doc, outer, "x-inner");
+
+    let inner_link = shadow_child(&doc, inner, "a");
+    tap(&mut doc, inner_link);
+    assert_eq!(
+        take(&log),
+        ["inner:capture:a:3,4.5", "inner:bubble:a:3,4.5"],
+        "composed: false — the outer host, past the inner shadow root, hears nothing"
+    );
+
+    let outer_link = shadow_child(&doc, outer, "a");
+    tap(&mut doc, outer_link);
+    assert_eq!(
+        take(&log),
+        ["outer:capture:a:3,4.5", "outer:bubble:a:3,4.5"]
+    );
+
+    tap(&mut doc, inner);
+    assert_eq!(
+        take(&log),
+        [
+            "outer:capture:x-inner:3,4.5",
+            "inner:at-target:x-inner:3,4.5",
+            "outer:bubble:x-inner:3,4.5",
+        ],
+        "a defined element inside the outer shadow tree is on the path as itself"
+    );
 }
 
 /// A `slotchange` handler that mutates: what it signals fires after the

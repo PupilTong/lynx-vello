@@ -6,7 +6,10 @@
 
 use core::ops::Range;
 
-use parley::{CHROMIUM_LINE_BREAK_OVERRIDE, InlineBox, Layout, PositionedLayoutItem};
+use parley::{
+    CHROMIUM_LINE_BREAK_OVERRIDE, InlineBox, Layout, LineBreakContext, LineBreakOverrideFn,
+    PositionedLayoutItem,
+};
 
 use super::SourceItem;
 use super::content::SourceMap;
@@ -19,6 +22,11 @@ pub(in crate::text::block) struct ShapeSpan<'block> {
     pub(in crate::text::block) bytes: Range<usize>,
     pub(in crate::text::block) style: &'block RunStyle,
     pub(in crate::text::block) source: SourceItem,
+    /// Added to the run's `letter-spacing` for this span alone. Zero except
+    /// on a preserved tab's one-space span, where it widens the space to the
+    /// tab stop (`super::tab`), and on the `0` the tab pass measures `ch`
+    /// from, where it cancels the run's spacing.
+    pub(in crate::text::block) extra_spacing: f32,
 }
 
 /// Shapes one paragraph. `sources` receives the parley style-index → source
@@ -52,14 +60,18 @@ pub(in crate::text::block) fn shape(
     // visible space — the case `should_remove_segment_break` exists to delete.
     // Moving to `TreeBuilder` would collapse this text a second time under
     // those weaker rules, and the symptom would be stray spaces in East Asian
-    // text rather than an error.
+    // text rather than an error. Parley's `WhiteSpaceCollapse::Preserve` is
+    // the identity on the text, which is what this builder already is, so
+    // `white-space-collapse: preserve` needs nothing from parley beyond it:
+    // the normalizer keeps every space, and the tab stops are `super::tab`'s.
     let mut builder = layout_context.style_run_builder(font_context, text, 1.0, false);
     if block.word_break != WordBreak::BreakAll {
-        builder.set_line_break_override(Some(CHROMIUM_LINE_BREAK_OVERRIDE));
+        builder.set_line_break_override(Some(LINE_BREAK_OVERRIDE));
     }
     builder.reserve(spans.len(), spans.len());
     for span in spans {
-        let style = super::style::parley_style(span.style, block);
+        let mut style = super::style::parley_style(span.style, block);
+        style.letter_spacing += span.extra_spacing;
         let index = builder.push_style(style);
         debug_assert_eq!(usize::from(index), sources.len());
         sources.push(span.source);
@@ -70,6 +82,31 @@ pub(in crate::text::block) fn shape(
         builder.push_inline_box(inline_box);
     }
     builder.build(text)
+}
+
+/// Parley's Chromium override, minus the opportunity it forces in front of a
+/// hard line break.
+///
+/// The Chromium rule it carries — a soft wrap opportunity after every space
+/// sequence — fires for a space followed by `\n` as well, which UAX #14 LB6
+/// forbids (`× BK`, `× LF`, …). Parley's breaker tests "is this a wrap
+/// opportunity" before "is this a newline", so a newline that carries a wrap
+/// opportunity never forces its break under `text-wrap-mode: wrap`, and
+/// `"a \nb"` lays out as one line. Normalized text only has a space directly
+/// before a newline when that space is preserved (`white-space-collapse:
+/// preserve`), or when an atomic box flushed it out in front of a preserved
+/// break; deferring those pairs to the default analysis puts the break back.
+static LINE_BREAK_OVERRIDE: &LineBreakOverrideFn =
+    &(line_break_override as fn(LineBreakContext) -> Option<bool>);
+
+fn line_break_override(context: LineBreakContext) -> Option<bool> {
+    if matches!(
+        context.after,
+        '\n' | '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    ) {
+        return None;
+    }
+    CHROMIUM_LINE_BREAK_OVERRIDE(context)
 }
 
 /// Breaks lines at `width`, committing at most `max_lines` of them.
@@ -120,7 +157,8 @@ pub(in crate::text::block) fn is_blank_line(line: &parley::Line<'_, TextBrush>) 
 pub(in crate::text::block) struct NaturalLine {
     pub(in crate::text::block) start_unit: u32,
     /// End of the line's visible content — trailing collapsed whitespace
-    /// excluded, matching the web reference's rect-derived line ranges. This
+    /// excluded, matching the web reference's rect-derived line ranges, and
+    /// trailing *preserved* spaces kept, because they are content. This
     /// is the basis for the reported range, the ellipsis arithmetic, and the
     /// dots back-off.
     pub(in crate::text::block) end_unit: u32,
@@ -186,13 +224,9 @@ pub(in crate::text::block) fn capture_lines(
         let (start_byte, end_byte) = if has_text {
             let start = u32::try_from(range.start).expect("text fits u32");
             let end = u32::try_from(range.end).expect("text fits u32");
-            let visible_end = start
-                + u32::try_from(
-                    text[range.start..range.end]
-                        .trim_end_matches([' ', '\n'])
-                        .len(),
-                )
-                .expect("text fits u32");
+            // Only collapsible whitespace and the break itself trail outside
+            // the line's content; a preserved space is content.
+            let visible_end = map.visible_end(text, start, end);
             start_unit = start_unit.min(map.byte_to_unit(text, start));
             // End offsets go through the end-sided lookup: a box sharing the
             // end byte belongs to a later line unless the items walk above

@@ -1679,18 +1679,19 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
                   globalThis.listener = () => {};
                   // Two handles on one name, and on one of them a second
                   // registration of another kind entirely: still one name.
-                  __AddEventListener(outer, 'tap', globalThis.listener, {});
-                  __AddEventListener(inner, 'tap', globalThis.listener, { capture: true });
-                  __AddEvent(inner, 'bindEvent', 'tap', '3:0:bindtap');
+                  __AddEventListener(outer, 'longpress', globalThis.listener, {});
+                  __AddEventListener(inner, 'longpress', globalThis.listener, { capture: true });
+                  __AddEvent(inner, 'bindEvent', 'longpress', '3:0:bindlongpress');
                   __AddEvent(outer, 'global-bindEvent', 'swipe', '3:0:swipe');
                 };
                 ",
             "app:///edges.js",
         )
         .expect("main-thread script");
-    // `slotchange` is the swiper's and the refresh view's, published once
-    // when the document was built and never closed.
-    assert_eq!(names.names(), ["slotchange", "swipe", "tap"]);
+    // Nothing of the components': `slotchange` (the swiper's and the refresh
+    // view's) and `tap` (the markdown component's) are routed only while an
+    // element of theirs exists, and this page has none.
+    assert_eq!(names.names(), ["longpress", "swipe"]);
 
     runtime
         .evaluate_module(
@@ -1699,15 +1700,15 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
                 import { __AddEvent, __RemoveEventListener } from 'bobcat:element';
                 const [, outer, inner] = globalThis.held;
                 // `inner` still has its `__AddEvent` handler, and `outer`
-                // still has its closure, so neither of these closes `tap`.
-                __RemoveEventListener(inner, 'tap', globalThis.listener, { capture: true });
+                // still has its closure, so neither of these closes `longpress`.
+                __RemoveEventListener(inner, 'longpress', globalThis.listener, { capture: true });
                 __AddEvent(outer, 'global-bindEvent', 'swipe', null);
                 ",
             "app:///partial.mjs",
             "unregistering",
         )
         .expect("unregistration");
-    assert_eq!(names.names(), ["slotchange", "tap"]);
+    assert_eq!(names.names(), ["longpress"]);
 
     runtime
         .evaluate_module(
@@ -1715,21 +1716,17 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
             r"
                 import { __AddEvent, __RemoveEventListener } from 'bobcat:element';
                 const [, outer, inner] = globalThis.held;
-                __AddEvent(inner, 'bindEvent', 'tap', null);
-                __RemoveEventListener(outer, 'tap', globalThis.listener, {});
+                __AddEvent(inner, 'bindEvent', 'longpress', null);
+                __RemoveEventListener(outer, 'longpress', globalThis.listener, {});
                 ",
             "app:///last.mjs",
             "unregistering",
         )
         .expect("unregistration");
-    assert_eq!(
-        names.names(),
-        ["slotchange"],
-        "the last registration closes it; a component's name stays open"
-    );
+    assert!(names.names().is_empty(), "the last registration closes it");
 
-    // The realm's own edges for a component's name are not forwarded: its
-    // last removal does not close what the component still observes.
+    // A name a component observes, with no element of it alive, is the
+    // realm's like any other: its last removal closes it.
     runtime
         .evaluate_module(
             &mut js_runtime,
@@ -1743,7 +1740,8 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
             "registering a component's name",
         )
         .expect("registration");
-    assert_eq!(names.names(), ["slotchange"]);
+    runtime.commit_if_dirty();
+    assert!(names.names().is_empty());
 }
 
 /// The replica is what the painting side filters against, so a
@@ -1762,13 +1760,13 @@ fn registering_a_listener_publishes_its_name_to_the_painting_side() {
                   __AppendElement(page, view);
                   globalThis.held = [page, view];
                   globalThis.listener = () => {};
-                  __AddEventListener(view, 'tap', globalThis.listener, {});
+                  __AddEventListener(view, 'longpress', globalThis.listener, {});
                 };
                 ",
             "app:///publish.js",
         )
         .expect("main-thread script");
-    assert!(names.contains("tap"));
+    assert!(names.contains("longpress"));
     assert!(!names.contains("scroll"));
 
     // A second module rather than a second entry: the point is a later
@@ -1780,14 +1778,14 @@ fn registering_a_listener_publishes_its_name_to_the_painting_side() {
             &mut js_runtime,
             r"
                 import { __RemoveEventListener } from 'bobcat:element';
-                __RemoveEventListener(globalThis.held[1], 'tap', globalThis.listener, {});
+                __RemoveEventListener(globalThis.held[1], 'longpress', globalThis.listener, {});
                 ",
             "app:///unpublish.mjs",
             "unpublishing",
         )
         .expect("unregistration");
     assert!(
-        !names.contains("tap"),
+        !names.contains("longpress"),
         "the last listener for a name unpublishes it"
     );
 }
@@ -2061,9 +2059,10 @@ fn adopted_offsets_queue_scroll_events_only_for_a_name_something_hears() {
 /// The painter's name set follows the realm's edges with two adjustments:
 /// a `dblclick` registration opens `click` there too (the `dblclick` is
 /// decided from the `click`s the painter sends) and closing it closes
-/// `click` only when `click` is not listened for itself; and a name a
-/// component observes (`slotchange`) stays open whatever the realm's edges
-/// for it say, where an unobserved name's close closes it.
+/// `click` only when `click` is not listened for itself; and a name an
+/// element alive observes (the page's `x-swiper`'s `slotchange`) stays open
+/// whatever the realm's edges for it say, where an unobserved name's close
+/// closes it. `tap`, which no element here observes, is not there at all.
 #[test]
 fn the_painter_names_pair_click_with_dblclick_and_keep_observed_names() {
     let (mut js_runtime, mut runtime, _elements, mut names) =
@@ -2074,6 +2073,7 @@ fn the_painter_names_pair_click_with_dblclick_and_keep_observed_names() {
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
+                  __AppendElement(page, __CreateElement('x-swiper', 0));
                   globalThis.held = [page];
                 };
                 globalThis.listener = () => {};
@@ -3630,6 +3630,72 @@ fn a_foldview_answers_set_fold_expanded_through_both_invoke_paths() {
     }
 }
 
+/// An `<x-markdown>`'s UI methods through `__InvokeUIMethod`, each answer
+/// built by `element-papi.ts` from the record the component writes:
+/// `getContent`'s `{content}` with web-core's inclusive `end`, `getImages`'
+/// and `getParseResult`'s typings shapes, `getTextBoundingRect`'s
+/// `{boundingRect, boxes}` and `getCharIndexByPoint`'s `{index}` over the
+/// rendered text, and code 4 for `getParseResult` without tags. A 10px Ahem
+/// paragraph at the page's origin.
+#[test]
+fn a_markdown_answers_its_ui_methods_through_invoke() {
+    let (mut js_runtime, mut runtime, _elements) = text_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const markdown = __CreateElement('x-markdown', 0);
+                  __SetInlineStyles(markdown, 'font-family:Ahem;font-size:10px;width:300px');
+                  __SetAttribute(markdown, 'content-id', 'doc-1');
+                  __SetAttribute(markdown, 'content', 'see [docs](https://a.test/) ![i](x.png)');
+                  __AppendElement(page, markdown);
+                  globalThis.held = [page, markdown];
+                };
+                ",
+            "app:///markdown-methods.js",
+        )
+        .expect("main-thread script");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __FlushElementTree, __InvokeUIMethod } from 'bobcat:element';
+                __FlushElementTree();
+                const call = (method, params) => {
+                  let answer;
+                  __InvokeUIMethod(held[1], method, params, result => { answer = result; });
+                  return answer;
+                };
+                const expectAnswer = (answer, code, data) => {
+                  if (answer.code !== code || JSON.stringify(answer.data) !== JSON.stringify(data)) {
+                    throw new Error('expected ' + JSON.stringify({code, data}) + ', got ' +
+                                    JSON.stringify(answer));
+                  }
+                };
+                expectAnswer(call('getContent', {start: 4, end: 9}), 0, {content: '[docs]'});
+                expectAnswer(call('getImages', {}), 0, {images: ['x.png']});
+                expectAnswer(call('getParseResult', {tags: ['a', 'img']}), 0, {
+                  id: 'doc-1',
+                  result: {a: [{start: 4, end: 8}], img: [{start: 0, end: 0}]},
+                });
+                expectAnswer(call('getParseResult', {}), 4, undefined);
+                // 'docs' is rendered 4..8, 40px into the line.
+                const box = {left: 40, top: 0, right: 80, bottom: 14, width: 40, height: 14};
+                expectAnswer(call('getTextBoundingRect', {start: 4, end: 8}), 0,
+                             {boundingRect: box, boxes: [box]});
+                expectAnswer(call('getCharIndexByPoint', {x: 45, y: 5}), 0, {index: 4});
+                expectAnswer(call('getCharIndexByPoint', {x: 45, y: 5, indexType: 'source'}), 0,
+                             {index: 5});
+                expectAnswer(call('getSelectedText', {}), 3, undefined);
+                ",
+            "app:///markdown-method-calls.js",
+            "markdown methods",
+        )
+        .expect("the markdown's methods answer as expected");
+}
+
 /// `getTextBoundingRect` on a `text`, through `__InvokeUIMethod` and the
 /// selector-query `invoke`: a 10px Ahem paragraph at (20, 30) with 5px of
 /// padding answers its range's box in viewport CSS px, from the content
@@ -4452,6 +4518,637 @@ fn an_overlay_shows_and_dismisses_through_set_attribute() {
         &mut js_runtime,
         &mut runtime,
         "page-capture:2:dismissoverlay:{}|overlay:4:dismissoverlay:{}",
+    );
+}
+
+/// A component event with a string detail, queued from inside a scope as a
+/// component's own callback queues one, is delivered from an entry of its
+/// own at the element, not bubbling and composed, with the detail built in the realm from
+/// one string argument per key: `{id}`, `{url, content, contentId}` and
+/// `{url, contentId}`, the shapes `<x-markdown>`'s `parseEnd`, `link` and
+/// `imageTap` carry. A string the component had no value for is a key the
+/// detail leaves out, so it does not reach the `JSON.stringify` below even
+/// as `undefined`.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario: every shape, with and without its optional key"
+)]
+fn a_component_event_with_a_string_detail_reaches_script_built_per_shape() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const outer = __CreateView(0);
+                  const markdown = __CreateView(0);
+                  const aside = __CreateView(0);
+                  __AppendElement(page, outer);
+                  __AppendElement(outer, markdown);
+                  __AppendElement(page, aside);
+                  globalThis.held = [page, outer, markdown, aside];
+                  const note = (label) => ({
+                    type: 'worklet',
+                    value: {
+                      body: (event) =>
+                        seen.push(
+                          label + ':' + event.currentTarget.uid + ':' + event.type + ':' +
+                          JSON.stringify(event.detail) + ':' +
+                          Object.keys(event.detail).join(','),
+                        ),
+                    },
+                  });
+                  for (const name of ['parseEnd', 'link', 'imageTap']) {
+                    __AddEvent(markdown, 'bindEvent', name, note('markdown'));
+                    __AddEvent(outer, 'bindEvent', name, note('outer'));
+                    __AddEvent(aside, 'global-bindEvent', name, note('aside-global'));
+                  }
+                };
+                ",
+            "app:///string-details.js",
+        )
+        .expect("main-thread script");
+    let markdown = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let outer = tree.get(page).expect("the page").child_ids()[0];
+        tree.get(outer).expect("the outer view").child_ids()[0]
+    };
+    let text = |value: &str| Some(value.to_owned());
+    let image = "https://lynxjs.org/a.png".to_owned();
+    for (name, detail) in [
+        ("parseEnd", ComponentDetail::Id { id: text("doc-1") }),
+        ("parseEnd", ComponentDetail::Id { id: None }),
+        (
+            "link",
+            ComponentDetail::UrlContent {
+                url: "https://lynxjs.org/".to_owned(),
+                content: "Lynx \u{201c}docs\u{201d}".to_owned(),
+                content_id: text("doc-1"),
+            },
+        ),
+        (
+            "link",
+            ComponentDetail::UrlContent {
+                url: String::new(),
+                content: String::new(),
+                content_id: None,
+            },
+        ),
+        (
+            "imageTap",
+            ComponentDetail::Url {
+                url: image.clone(),
+                content_id: text(""),
+            },
+        ),
+        (
+            "imageTap",
+            ComponentDetail::Url {
+                url: image,
+                content_id: None,
+            },
+        ),
+    ] {
+        runtime
+            .slot
+            .borrow()
+            .component_events
+            .queue_detailed(markdown, name, detail);
+    }
+    assert!(runtime.has_component_events());
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    assert!(!runtime.has_component_events());
+    // Not bubbling (native's custom events): the bind pass runs at the
+    // element alone, so the outer view's handlers never run, and there is no
+    // `global-bindEvent` pass.
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        &[
+            r#"markdown:4:parseend:{"id":"doc-1"}:id"#,
+            "markdown:4:parseend:{}:",
+            "markdown:4:link:{\"url\":\"https://lynxjs.org/\",\"content\":\"Lynx \u{201c}docs\u{201d}\",\"contentId\":\"doc-1\"}:url,content,contentId",
+            r#"markdown:4:link:{"url":"","content":""}:url,content"#,
+            r#"markdown:4:imagetap:{"url":"https://lynxjs.org/a.png","contentId":""}:url,contentId"#,
+            r#"markdown:4:imagetap:{"url":"https://lynxjs.org/a.png"}:url"#,
+        ]
+        .join("|"),
+    );
+
+    // A `link` as `<x-markdown>` queues it, and a `Plain` event of the same
+    // name: neither reaches the outer view's `bindEvent` or the
+    // `global-bindEvent` pass, the detailed one is heard first and carries its
+    // strings.
+    {
+        let slot = runtime.slot.borrow();
+        slot.component_events.queue_detailed(
+            markdown,
+            "link",
+            ComponentDetail::UrlContent {
+                url: "https://lynxjs.org/".to_owned(),
+                content: "Lynx".to_owned(),
+                content_id: None,
+            },
+        );
+        slot.component_events.queue(markdown, "link");
+    }
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        &[
+            r#"markdown:4:link:{"url":"https://lynxjs.org/","content":"Lynx"}:url,content"#,
+            "markdown:4:link:{}:",
+        ]
+        .join("|"),
+    );
+}
+
+/// What [`TapProbe`] heard, one entry per delivery.
+type TapLog = Rc<RefCell<Vec<String>>>;
+
+/// A test component that builds `<view><text/></view>` in its shadow tree,
+/// as a UA component builds its content, and records every `tap` it hears
+/// as `phase:target-tag:x,y`. For a bubble-pass delivery whose target is its
+/// own shadow content — the one the markdown component acts on — it also
+/// writes the tapped tag to its own `heard` attribute, which script's `tap`
+/// listener reads to see that the component heard the tap first.
+struct TapProbe {
+    log: TapLog,
+}
+
+impl dom::CustomElement<()> for TapProbe {
+    fn observed_events(&self) -> &'static [&'static str] {
+        &["tap"]
+    }
+
+    fn constructed(&self, document: &mut LynxDocument, element: dom::NodeId) {
+        let shadow = document.attach_shadow(element, dom::ShadowRootMode::Open);
+        let frame = document.create_element("view", ());
+        document.append_child(shadow, frame);
+        let text = document.create_element("text", ());
+        document.append_child(frame, text);
+    }
+
+    fn handle_event(
+        &self,
+        document: &mut LynxDocument,
+        element: dom::NodeId,
+        event: &mut dom::event::ElementEvent<'_>,
+    ) {
+        assert_eq!(event.type_name(), "tap", "the only type it observes");
+        let Some(position) = event.detail().position() else {
+            panic!("a tap carries a position: {:?}", event.detail());
+        };
+        let (x, y) = (position.x, position.y);
+        let phase = match event.phase() {
+            dom::event::EventPhase::Capturing => "capture",
+            dom::event::EventPhase::AtTarget => "at-target",
+            dom::event::EventPhase::Bubbling => "bubble",
+        };
+        let tag = document
+            .get(event.target())
+            .and_then(dom::Node::tag_name)
+            .unwrap_or("?")
+            .to_owned();
+        if event.phase() == dom::event::EventPhase::Bubbling
+            && document.shadow_root_of(event.target()) == document.shadow_root(element)
+        {
+            document.set_attribute(element, "heard", &tag);
+        }
+        self.log.borrow_mut().push(format!("{phase}:{tag}:{x},{y}"));
+    }
+}
+
+/// A `tap` the gesture path delivers at a component's UA shadow content is
+/// heard first by that component, through `dom`'s walk, with the shadow node
+/// it hit as the target and the gesture's position; script's `tap` follows,
+/// starting at the host, retargeted, and sees what the component did; the
+/// same dispatch's Rust walk hands the component that composed `tap` too, at
+/// the host as itself. A tap at the host's light child fires no
+/// non-composed `tap`: the component hears only the composed one, as an
+/// ancestor of a target outside its shadow tree.
+#[test]
+fn a_tap_at_shadow_content_is_heard_by_its_component_before_script() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.renderPage = function () {
+                  globalThis.held = [__CreatePage('card', 0)];
+                };
+                ",
+            "app:///tap-probe.js",
+        )
+        .expect("main-thread script");
+    let log = TapLog::default();
+    runtime.with_document(|document| {
+        document.define(
+            "x-tap-probe",
+            Box::new(TapProbe {
+                log: Rc::clone(&log),
+            }),
+        );
+    });
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import {
+                  __AddEventListener, __AppendElement, __CreateElement, __CreateView,
+                  __GetAttributeByName,
+                } from 'bobcat:element';
+                const [page] = held;
+                const probe = __CreateElement('x-tap-probe', 0);
+                const light = __CreateView(0);
+                __AppendElement(page, probe);
+                __AppendElement(probe, light);
+                held.push(probe, light);
+                __AddEventListener(probe, 'tap', (event) => {
+                  seen.push(
+                    'script:' + event.currentTarget.uid + ':' + event.target.uid + ':' +
+                    __GetAttributeByName(probe, 'heard') + ':' + event.detail.x,
+                  );
+                }, {});
+                ",
+            "app:///tap-probe-tree.js",
+            "tree",
+        )
+        .expect("the probe tree");
+    let (probe, light, text) = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let probe = tree.get(page).expect("the page").child_ids()[0];
+        let light = tree.get(probe).expect("the probe").child_ids()[0];
+        let shadow = tree.shadow_root(probe).expect("the probe's shadow root");
+        let frame = tree.get(shadow).expect("the shadow root").child_ids()[0];
+        let text = tree.get(frame).expect("the shadow view").child_ids()[0];
+        (probe, light, text)
+    };
+
+    runtime
+        .dispatch_for_test(&mut js_runtime, text, &tap(), event_point())
+        .expect("the tap at shadow content");
+    assert_eq!(
+        std::mem::take(&mut *log.borrow_mut()),
+        [
+            "capture:text:12,30",
+            "bubble:text:12,30",
+            "at-target:x-tap-probe:12,30"
+        ],
+        "the non-composed tap's shadow-root step, in both passes, with the inner \
+         node; then the one dispatch's composed tap at the host as itself"
+    );
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        &format!("script:{0}:{0}:text:12", probe.to_bits()),
+    );
+
+    runtime
+        .dispatch_for_test(&mut js_runtime, light, &tap(), event_point())
+        .expect("the tap at light content");
+    assert_eq!(
+        std::mem::take(&mut *log.borrow_mut()),
+        ["capture:view:12,30", "bubble:view:12,30"],
+        "a light child's tap fires no non-composed tap; the composed one reaches \
+         the host as an ancestor, its target outside the host's shadow tree"
+    );
+    // `heard` is still the earlier tap's.
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        &format!("script:{}:{}:text:12", probe.to_bits(), light.to_bits()),
+    );
+}
+
+/// An `<x-markdown>` a script creates renders its `content` in its UA shadow
+/// tree, and a `tap` the gesture path delivers at the paragraph holding a
+/// link — the node the hit lands on, a paragraph's runs having no box of
+/// their own — reaches the script as `link`, with web-core's
+/// `{url, content, contentId}` detail, from an entry of its own. The
+/// component hears the tap with no `tap` listener in the realm.
+#[test]
+fn a_tap_on_markdown_link_text_reaches_script_as_link() {
+    let (mut js_runtime, mut runtime, elements) = text_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const markdown = __CreateElement('x-markdown', 0);
+                  __SetInlineStyles(markdown, 'font-family:Ahem;font-size:10px;width:300px');
+                  __SetAttribute(markdown, 'content-id', 'doc-1');
+                  __SetAttribute(markdown, 'content', 'see [docs](https://lynxjs.org/) now');
+                  __AppendElement(page, markdown);
+                  __AddEvent(markdown, 'bindEvent', 'link', {
+                    type: 'worklet',
+                    value: {
+                      body: (event) => seen.push(
+                        event.type + ':' + event.currentTarget.uid + ':' +
+                        JSON.stringify(event.detail),
+                      ),
+                    },
+                  });
+                  globalThis.held = [page, markdown];
+                };
+                ",
+            "app:///markdown-link.js",
+        )
+        .expect("main-thread script");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __FlushElementTree } from 'bobcat:element';
+                __FlushElementTree();
+                ",
+            "app:///markdown-link-flush.js",
+            "flush",
+        )
+        .expect("the flush");
+    // The render's `parseEnd`, which nothing here listens for.
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    let (markdown, paragraph) = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let markdown = tree.get(page).expect("the page").child_ids()[0];
+        let shadow = tree
+            .shadow_root(markdown)
+            .expect("the markdown's shadow root");
+        let root = tree.get(shadow).expect("the shadow root").child_ids()[0];
+        let paragraph = tree.get(root).expect("the markdown root").child_ids()[0];
+        assert_eq!(tree.get(paragraph).and_then(dom::Node::tag_name), Some("p"));
+        (markdown, paragraph)
+    };
+
+    // "see " is four 10px Ahem glyphs: the link's text starts at x = 40.
+    runtime
+        .dispatch_for_test(
+            &mut js_runtime,
+            paragraph,
+            &tap(),
+            dom::Point2D::new(45.0, 5.0),
+        )
+        .expect("the tap on the link text");
+    expect_seen(&mut js_runtime, &mut runtime, "");
+    assert!(
+        runtime.has_component_events(),
+        "owed to an entry of its own"
+    );
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        &format!(
+            r#"link:{}:{{"url":"https://lynxjs.org/","content":"docs","contentId":"doc-1"}}"#,
+            markdown.to_bits()
+        ),
+    );
+
+    // Plain text owes nothing.
+    runtime
+        .dispatch_for_test(
+            &mut js_runtime,
+            paragraph,
+            &tap(),
+            dom::Point2D::new(5.0, 5.0),
+        )
+        .expect("the tap on plain text");
+    assert!(!runtime.has_component_events());
+}
+
+/// A name a component observes is in the painter's name set with no realm
+/// listener anywhere once an element of it exists — `tap`, for a probe
+/// component defined after the build, whose element's creation opens it at
+/// the next commit — so the painter sends the gesture's `tap` and the
+/// component hears it. Before that element, the document's own markdown
+/// definition opens nothing. A script that listens for the name and then
+/// stops does not close what the element still observes.
+#[test]
+fn a_tap_a_component_observes_is_routed_with_no_script_listener() {
+    let (mut js_runtime, mut runtime, elements, mut names) =
+        runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  globalThis.held = [__CreatePage('card', 0)];
+                  globalThis.listener = () => {};
+                };
+                ",
+            "app:///observed-tap.js",
+        )
+        .expect("main-thread script");
+    assert!(
+        !names.contains("tap"),
+        "the markdown definition alone, with no element of it, routes nothing"
+    );
+
+    let log = TapLog::default();
+    elements.tree().define(
+        "x-tap-probe",
+        Box::new(TapProbe {
+            log: Rc::clone(&log),
+        }),
+    );
+    assert!(elements.tree().observes_event("tap"));
+    runtime.commit_if_dirty();
+    assert!(!names.contains("tap"), "a definition opens nothing");
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __AppendElement, __CreateElement } from 'bobcat:element';
+                const [page] = held;
+                const probe = __CreateElement('x-tap-probe', 0);
+                __AppendElement(page, probe);
+                held.push(probe);
+                ",
+            "app:///observed-tap-tree.js",
+            "tree",
+        )
+        .expect("the probe tree");
+    assert!(
+        !names.contains("tap"),
+        "an element's names cross where the entry's commit does"
+    );
+    runtime.commit_if_dirty();
+    assert!(names.contains("tap"), "the probe element opens `tap`");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __AddEventListener, __RemoveEventListener } from 'bobcat:element';
+                const [, probe] = held;
+                __AddEventListener(probe, 'tap', globalThis.listener, {});
+                __RemoveEventListener(probe, 'tap', globalThis.listener, {});
+                ",
+            "app:///observed-tap-listener.js",
+            "listening",
+        )
+        .expect("the listener");
+    assert!(
+        names.contains("tap"),
+        "the realm's last removal does not close an element's name"
+    );
+
+    let text = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let probe = tree.get(page).expect("the page").child_ids()[0];
+        let shadow = tree.shadow_root(probe).expect("the probe's shadow root");
+        let frame = tree.get(shadow).expect("the shadow root").child_ids()[0];
+        tree.get(frame).expect("the shadow view").child_ids()[0]
+    };
+    runtime
+        .dispatch_for_test(&mut js_runtime, text, &tap(), event_point())
+        .expect("a tap no script listens for is no error");
+    assert_eq!(
+        *log.borrow(),
+        [
+            "capture:text:12,30",
+            "bubble:text:12,30",
+            "at-target:x-tap-probe:12,30"
+        ]
+    );
+}
+
+/// `tap` is in the painter's name set while an `x-markdown` element exists,
+/// not because the document defines the component: creating one opens it at
+/// the next commit, a script `tap` listener added and removed meanwhile does
+/// not close it, freeing one of two markdowns (by collection, the only
+/// release path) closes nothing, and freeing the last closes it unless
+/// script still listens — in which case the script's last removal does.
+#[test]
+fn a_markdown_element_routes_tap_while_it_exists() {
+    let (mut js_runtime, mut runtime, elements, mut names) =
+        runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  globalThis.held = [__CreatePage('card', 0)];
+                  globalThis.listener = () => {};
+                };
+                ",
+            "app:///markdown-tap.js",
+        )
+        .expect("main-thread script");
+    assert!(!names.contains("tap"), "no markdown, no `tap`");
+    let mut step = |runtime: &mut MainThreadRuntime, source: &str| {
+        let source = format!(
+            "import {{
+               __AddEventListener, __AppendElement, __CreateElement, __RemoveElement,
+               __RemoveEventListener,
+             }} from 'bobcat:element';
+             // A function's scope, not the module's, which outlives the
+             // evaluation and would keep every element it names.
+             (() => {{
+               const [page] = globalThis.held;
+               {source}
+             }})();"
+        );
+        runtime
+            .evaluate_module(&mut js_runtime, &source, "app:///step.mjs", "a step")
+            .expect("the step runs");
+        runtime
+            .collect_garbage(&mut js_runtime)
+            .expect("collection");
+        // What the entry's epilogue does before its commit crosses.
+        runtime.commit_if_dirty();
+    };
+
+    step(
+        &mut runtime,
+        "const first = __CreateElement('x-markdown', 0);
+         const second = __CreateElement('x-markdown', 0);
+         __AppendElement(page, first);
+         __AppendElement(page, second);
+         globalThis.held.push(first, second);",
+    );
+    let (first, second) = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let children = tree.get(page).expect("the page").child_ids();
+        (children[0], children[1])
+    };
+    let freed = |node: dom::NodeId| elements.tree().get(node).is_none();
+    assert!(names.contains("tap"), "a markdown element opens `tap`");
+
+    step(
+        &mut runtime,
+        "__AddEventListener(page, 'tap', globalThis.listener, {});
+         __RemoveEventListener(page, 'tap', globalThis.listener, {});",
+    );
+    assert!(
+        names.contains("tap"),
+        "the realm's last removal does not close what a markdown observes"
+    );
+
+    step(
+        &mut runtime,
+        "__RemoveElement(page, globalThis.held[1]);
+         globalThis.held.splice(1, 1);",
+    );
+    assert!(freed(first), "the first markdown is collected");
+    assert!(!freed(second));
+    assert!(
+        names.contains("tap"),
+        "the second markdown still observes it"
+    );
+
+    step(
+        &mut runtime,
+        "__AddEventListener(page, 'tap', globalThis.listener, {});
+         __RemoveElement(page, globalThis.held.pop());",
+    );
+    assert!(freed(second), "the second markdown is collected");
+    assert!(names.contains("tap"), "script still listens");
+    step(
+        &mut runtime,
+        "__RemoveEventListener(page, 'tap', globalThis.listener, {});",
+    );
+    assert!(!names.contains("tap"), "neither side wants it");
+
+    step(
+        &mut runtime,
+        "globalThis.held.push(__CreateElement('x-markdown', 0));",
+    );
+    assert!(names.contains("tap"), "a new markdown opens it again");
+    step(&mut runtime, "globalThis.held.pop();");
+    assert!(
+        !names.contains("tap"),
+        "freeing the last markdown closes it"
     );
 }
 

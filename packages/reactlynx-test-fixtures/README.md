@@ -20,7 +20,7 @@ Both commands set `NODE_ENV` explicitly so the fixture matrix and compiler
 use the same mode.
 
 The default build produces eight native production pages, three native development
-variants and seventeen web pages. Each native environment has its own
+variants and eighteen web pages. Each native environment has its own
 compilation, so its lazy chunks cannot be shared with another test page.
 
 | Environment | Fixture behavior |
@@ -46,6 +46,7 @@ compilation, so its lazy chunks cannot be shared with another test page.
 | `web-react-overlay` | A red page whose tap sets `visible` on an `<overlay>` carrying an author `display: flex` and a translucent green background, neither of which may show: its one child, a yellow 200px panel at the viewport's top-left, paints above the page and turns magenta on `bindshowoverlay`, which also turns the page orange; a tap on its green `#close` (`catchtap`) clears `visible`, and `binddismissoverlay` turns the page blue |
 | `web-react-overlay-pass-through` | A red page with a blue 60px `#below` square at its bottom-right; a tap sets `visible` on an `events-pass-through` `<overlay>` whose one child is a yellow 120px panel at the top-left. `#below` counts its taps by colour (cyan after one with `showoverlay` seen, magenta after two), so a second tap reaches it only through the pass-through overlay |
 | `web-react-svg` | A white 240px page in bands: two `<svg content={...}>`s sized by CSS (a `<linearGradient>` fill through `url(#fade)` with a green band and a yellow `<path>` triangle, and a blue card with centred white `<text>`); an unsized `<svg src>` of a bundled `shape.svg` at its natural 80 by 40; `<image mode="aspectFit">` of the same `shape.svg` letterboxed on magenta; a `<view>` tiling `tile.svg` with `background-repeat: repeat`. No `<svg>` has children. Both assets are inlined as `data:` URLs; `crates/bobcat-source/tests/reactlynx_runtime.rs` samples the pixels |
+| `web-react-markdown` | An `<x-markdown>` (web-core's tag) rendering web-core's `basic.html` content followed by a `[link]` paragraph and a `data:` PNG image, with a structured `markdown-style={{link: …, inlineCode: …}}`, `content-id="case-1"` and `bindlink`/`bindparseEnd`/`bindimageTap`; a sibling `<markdown>` (native's tag) with plain content; a mount effect whose selector query `invoke`s `getContent`. The background thread logs each event as `markdown-card <name> <detail JSON>`, and `#status` names them. No stylesheet, every style inline. `crates/bobcat-core/src/main/tree/markdown/card_tests.rs` reads its shadow tree and taps the link |
 | `web-css-custom-sections` | A 100px red `.page` card whose bundle also carries two `encoding: 'CSS'` custom sections, `CSS` (`CSS.css`) and `A &/中` (`named.css`). No ReactLynx build writes such a web card today (a lazy bundle's CSS goes into its `StyleInfo` on the web target), so `scripts/css-custom-sections.ts` adds them through the template plugin's public `beforeEncode` hook; `@lynx-js/web-core/encode` then writes them as the `CustomSectionsStyleInfo` section (label 7, lynx-stack#4138). Decoded by `crates/bobcat-source/tests/decode_web_bundle.rs` |
 
 Development builds select `lynx-react-reload`, `lynx-react-global-props` and

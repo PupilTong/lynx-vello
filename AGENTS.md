@@ -1712,8 +1712,10 @@ definition lists the type in `CustomElement::observed_events` hears it first;
 a component's `stop_propagation` ends that walk only. What the event carries
 is `dom::event::EventDetail` (one variant per payload shape), which the router
 fills in, `ToMain::DispatchEvent` carries, the Rust walk lends out and
-`encode_detail` turns into the realm's numbers. The names components observe
-are published to the painter's name set once per document and never closed.
+`encode_detail` turns into the realm's numbers. A name a component observes is
+in the painter's name set while an element of that component exists, beside
+the realm's own names: `dom`'s `Document::take_observed_name_edges` reports
+its 0↔1 edges, drained before each commit is published.
 CSSOM-View's `scroll` and `scrollend` are decided on this thread, never on
 the painter: `adopt_scroll_offsets` queues a `scroll` per container a post
 moved and a `scrollend` when a post names it at rest after it scrolled, and a
@@ -1927,7 +1929,23 @@ top-left, and hide every other child with one `!important`; the shadow sheet
 makes a pass-through dialog `pointer-events: none` (its popover `::backdrop`
 already is); non-bubbling `showoverlay`/`dismissoverlay` at the host on the
 same `ComponentEvents` queue, on transitions only, while the dialog's own
-`close`, not composed, stays in its shadow tree; no UI method), and
+`close`, not composed, stays in its shadow tree; no UI method),
+`tree::markdown` (`markdown`/`x-markdown`, web-core's `x-markdown`: a
+component that renders `content` into a UA shadow tree
+`div#markdown-root.markdown-body[part=root]` of markdown-it's HTML-named
+elements — `parse.rs` replicates markdown-it 15 as web-core configures it
+over `pulldown-cmark` and `linkify`, `style.rs` turns `markdown-style` into
+a second shadow sheet the component replaces in place with
+`Document::replace_shadow_stylesheet`, `build.rs` builds the elements,
+paragraphs as `-lynx-text`, blocks as column flex boxes, list markers as
+absolutely placed glyph elements, tables as grids; a render reparses and
+keeps the elements of the equal prefix of top-level blocks; bubbling
+`parseEnd` per render, and `link`/`imageTap` from a `tap` it observes at its
+shadow content, the anchor found from the character the tap hits; UI
+methods `getContent`, `getImages`, `getParseResult`, `getTextBoundingRect`
+and `getCharIndexByPoint` in web-core's rendered-text offsets, which
+`rendered.rs` counts with markdown-it's line breaks between block tags; the
+typewriter, truncation and selection are deferred), and
 `tree::blur_view` (`blur-radius` reflected into a
 `backdrop-filter: blur()` presentational hint, under both the native tag
 `blur-view` and web-core's `x-blur-view`, as a CSS length rather than
@@ -1939,8 +1957,9 @@ describe. Attribute policy stays in each tag's module. Numeric text and list
 attributes use UA `attr()` declarations and registered custom properties;
 `tail-color-convert` uses an attribute selector. Only image resources, blur
 hints, the swiper's item count, the refresh view's slot
-assignment, the dialog's `:open`/`:modal` state, and the overlay's shadow
-tree, its dialog's top-layer membership and its events need
+assignment, the dialog's `:open`/`:modal` state, the overlay's shadow
+tree, its dialog's top-layer membership and its events, and the markdown
+element's shadow tree, its rendering and its events need
 `dom::CustomElement` callbacks. Runtime attribute members perform
 DOM mutations; Stylo tracks attribute dependencies and recascades on changes.
 HTML's own rules — the dialog's, the popover's and the display `dialog` maps
@@ -2980,7 +2999,9 @@ Rulings and limits to know before touching it:
   recognizer; `InputEvent::default_prevented` is the embedder's seam.
 - Custom elements are user-agent components only, `define` must precede any
   element with its tag, reactions are queued rather than called inline,
-  `disconnected_callback` takes a shared `&Document`, and `slotchange` fires at
+  `disconnected_callback` takes a shared `&Document`, `freed` (the id alone,
+  called inline from the free of each defined node) is where a definition drops
+  state it keys by `NodeId`, and `slotchange` fires at
   the drain boundary (no microtask checkpoint here) to the host, whose
   `handle_event` hears the shadow root a non-composed path ends at.
 - Attribute-derived style enters through `Document::set_presentational_hint` at

@@ -410,6 +410,63 @@ async fn raw_text_reaches_the_private_painter_as_glyphs() {
     screenshots().assert_matches(&["raw-text-runs"], &captured(&mut painter));
 }
 
+/// Requirement: an `<x-markdown>` written through the Element PAPI renders
+/// its `content` in its UA shadow tree: web-core's `basic.html` fixture (a
+/// heading, bold and italic runs, a list with its markers, inline code and a
+/// code block on its grey panel) with a link in the template's blue and a
+/// two-column table after it, and a `markdown-style` that recolours the
+/// inline code.
+#[tokio::test]
+async fn markdown_renders_its_content_in_its_shadow_tree() {
+    const ROBOTO: &[u8] = include_bytes!("../../hughie/tests/fixtures/Roboto-Regular.ttf");
+    const SOURCE: &str = r"
+globalThis.renderPage = function renderPage() {
+  const page = __CreatePage('card', 0);
+  __SetInlineStyles(
+    page,
+    'background-color:#ffffff;padding:16px;font-family:Roboto;color:#111827',
+  );
+  const markdown = __CreateElement('x-markdown', 0);
+  __SetInlineStyles(markdown, 'font-size:14px');
+  // The registered face for the code too: the template's monospace stack
+  // would reach whichever system font the machine has.
+  __SetAttribute(
+    markdown,
+    'markdown-style',
+    JSON.stringify({
+      inlineCode: { fontFamily: 'Roboto', color: 'b91c1c' },
+      codeBlock: { fontFamily: 'Roboto' },
+    }),
+  );
+  __SetAttribute(
+    markdown,
+    'content',
+    '# Title\n\nthis is **bold** and *italic*, with a [link](https://lynxjs.org/).\n\n'
+      + '- item 1\n- item 2\n\ninline code: `code`.\n\n```\nblock code\n```\n\n'
+      + '| Name | Value |\n| - | :-: |\n| one | 1 |\n| two | 2 |\n',
+  );
+  __AppendElement(page, markdown);
+};
+";
+    let (mut view, mut painter) = solo_view(
+        Arc::new(NoWakeup),
+        320.0,
+        400.0,
+        1.0,
+        DrawTarget::Offscreen,
+        fetcher(SOURCE.as_bytes()),
+        ViewSources {
+            fonts: vec![FontBlob::from_static(ROBOTO)],
+            default_font_family: Some("Roboto".to_owned()),
+            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN)
+        },
+    )
+    .await
+    .expect("view");
+    wait_for_script(&mut view).expect("script execution");
+    screenshots().assert_matches(&["markdown-card"], &captured(&mut painter));
+}
+
 /// Both layout and glyph painting must lose the second line. At DPR 2 the
 /// same 21px line height makes the two boxes 84 and 42 device pixels tall.
 #[tokio::test]

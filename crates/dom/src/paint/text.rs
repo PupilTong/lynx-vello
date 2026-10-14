@@ -309,25 +309,20 @@ fn box_source(
 ///
 /// Outermost first is the paint order css-backgrounds-3 wants: an inner
 /// scope's background covers its ancestor's.
+///
+/// The scopes come from [`inline_scopes`](crate::layout::text_block::inline_scopes),
+/// the same walk `Document::inline_source_range` answers from, so the
+/// element a background fragment paints for is the element that owns those
+/// source units.
 fn background_chain<T>(
     document: &crate::Document<T>,
     node: crate::NodeId,
     element: crate::NodeId,
 ) -> BackgroundChain {
-    let mut chain = BackgroundChain::new();
-    let mut current = Some(node);
-    while let Some(id) = current {
-        if id == element {
-            break;
-        }
-        let Some(dom_node) = document.get(id) else {
-            break;
-        };
-        if document.paint_style(id).is_some_and(paints_background) {
-            chain.push(id);
-        }
-        current = dom_node.flat_parent_id();
-    }
+    let mut chain: BackgroundChain =
+        crate::layout::text_block::inline_scopes(document.arenas(), node, element)
+            .filter(|&id| document.paint_style(id).is_some_and(paints_background))
+            .collect();
     chain.reverse();
     chain
 }

@@ -29,7 +29,7 @@ use hughie::style::{CoreStyle, PositionProperty};
 use hughie::text::TextContext;
 use hughie::text::block::{
     BlockConstraint, BlockStyle, InlineBoxSpec, InlineItem, RunStyle, TextBlock, TextRunItem,
-    VerticalAlign,
+    VerticalAlign, WhiteSpaceCollapse,
 };
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{Content, ContentItem};
@@ -84,6 +84,111 @@ impl TextBlockStore {
     }
 }
 
+/// `node` and its flat ancestors below `paragraph`, innermost first.
+///
+/// The one walk that says which inline scopes a paragraph item sits in: an
+/// item's node is the element whose style its run carries (or the atom
+/// itself), and every scope that encloses it lies on this chain. The painter
+/// reads it for inline backgrounds, the source-range query for which items an
+/// element owns, so the two can never disagree about what is inside what.
+pub(crate) fn inline_scopes<T>(
+    tree: &TreeArenas<T>,
+    node: NodeId,
+    paragraph: NodeId,
+) -> impl Iterator<Item = NodeId> + '_ {
+    std::iter::successors(Some(node), |&id| tree.get(id)?.flat_parent_id())
+        .take_while(move |&id| id != paragraph && tree.get(id).is_some())
+}
+
+/// The element establishing the committed paragraph whose content `node` is
+/// — `node` itself when it establishes one.
+///
+/// Walks up by the flatten walk's own rules ([`collect_content`]), so a node
+/// answers exactly when that walk would reach it: through text nodes, nested
+/// `-lynx-text` scopes and `contents` wrappers, with `node` itself also
+/// allowed to be an in-flow atom. Anything the walk never enters answers
+/// `None`: a node inside an atom's own subtree (unless a paragraph nearer to
+/// it is found first), a `display: none` or out-of-flow element and what is
+/// under it, and the children a generated-content list replaced. A node in
+/// the `inline-truncation` content answers the paragraph it truncates.
+pub(crate) fn paragraph_of<T>(
+    tree: &TreeArenas<T>,
+    state: &DocumentLayoutState,
+    node: NodeSlot,
+) -> Option<NodeSlot> {
+    let mut current = node;
+    loop {
+        let here = tree.at(current);
+        if here.is_element() {
+            if state
+                .text_block(current)
+                .and_then(TextBlockStore::committed)
+                .is_some()
+            {
+                // A replacing root shows none of its children.
+                return (current == node || generated_content(here).is_none()).then_some(current);
+            }
+            let view = StyleView::try_of(here)?;
+            if out_of_flow(view.position()) {
+                return None;
+            }
+            match display_mode(view.display()) {
+                DisplayMode::Text | DisplayMode::Contents => {
+                    if current != node && generated_content(here).is_some() {
+                        return None;
+                    }
+                }
+                DisplayMode::None => return None,
+                // An atom is one item of the paragraph above it; what is
+                // inside it is not.
+                _ if current == node => {}
+                _ => return None,
+            }
+        } else if !here.is_text_node() {
+            return None;
+        }
+        current = here
+            .flat_parent()
+            .and_then(|parent| tree.slot(parent.id()))?;
+    }
+}
+
+/// The source units `element` contributes to the committed paragraph it is
+/// inline content of: the union of its items' and its descendants'.
+///
+/// `None` for a text node (a run is attributed to the element whose style it
+/// carries, not to its node), for the paragraph's own root, outside a
+/// committed paragraph, and for an element that contributes no item — an
+/// empty scope, or one inside the truncation content, which is no source
+/// text.
+pub(crate) fn inline_source_range<T>(
+    tree: &TreeArenas<T>,
+    state: &DocumentLayoutState,
+    element: NodeSlot,
+) -> Option<core::ops::Range<u32>> {
+    if !tree.at(element).is_element() {
+        return None;
+    }
+    let paragraph = paragraph_of(tree, state, element)?;
+    if paragraph == element {
+        return None;
+    }
+    let store = state.text_block(paragraph)?;
+    let block = store.committed()?;
+    let mut range: Option<core::ops::Range<u32>> = None;
+    for (item, &source) in store.source_ids.iter().enumerate() {
+        if !inline_scopes(tree, source, paragraph).any(|scope| scope == element) {
+            continue;
+        }
+        let units = block.item_source_range(u32::try_from(item).ok()?)?;
+        range = Some(match range {
+            Some(seen) => seen.start.min(units.start)..seen.end.max(units.end),
+            None => units,
+        });
+    }
+    range
+}
+
 /// One flattened item and the node behind it, before ownership is taken.
 struct Collected {
     item: OwnedItem,
@@ -94,7 +199,7 @@ enum OwnedItem {
     Run {
         text: String,
         style: RunStyle,
-        preserve_newlines: bool,
+        white_space: WhiteSpaceCollapse,
     },
     Atom {
         vertical_align: VerticalAlign,
@@ -219,7 +324,7 @@ fn collect_content<T>(
                 item: OwnedItem::Run {
                     text: text.to_owned(),
                     style: RunStyle::from_run_style(&run),
-                    preserve_newlines: preserves_newlines(node),
+                    white_space: run_white_space(node),
                 },
                 // The *element* the run's style came from, not the text node:
                 // a text node carries no computed style, so it could never
@@ -324,7 +429,7 @@ fn collect_generated<T>(tree: &TreeArenas<T>, slot: NodeSlot, out: &mut Vec<Coll
             item: OwnedItem::Run {
                 text,
                 style: RunStyle::from_run_style(&TextRunView::from_values(style)),
-                preserve_newlines: style_preserves_newlines(style),
+                white_space: style_white_space(style),
             },
             source: slot,
         });
@@ -332,18 +437,26 @@ fn collect_generated<T>(tree: &TreeArenas<T>, slot: NodeSlot, out: &mut Vec<Coll
     true
 }
 
-/// Whether a run keeps the literal newlines in its source.
+/// Which of its whitespace a run keeps.
 ///
-/// The one place Lynx preserves one: a carrier's UA rule sets
-/// `white-space-collapse: preserve-breaks`, which inherits into text runs.
-/// Read from computed style, so no tag is named.
-fn preserves_newlines<T>(node: &Node<T>) -> bool {
-    style_preserves_newlines(inline_style_of(node))
+/// Read from computed style, so no tag is named: a raw-text carrier's UA
+/// rule sets `white-space-collapse: preserve-breaks`, an author's `pre` or
+/// `white-space: pre` sets `preserve`, and either inherits into text runs.
+fn run_white_space<T>(node: &Node<T>) -> WhiteSpaceCollapse {
+    style_white_space(inline_style_of(node))
 }
 
-fn style_preserves_newlines(style: &ComputedValues) -> bool {
+/// The paragraph's three modes over the fork's four keywords.
+/// `break-spaces` stays collapsed, as it always has been here: it would need
+/// a wrap opportunity after every preserved space and spaces that never
+/// hang, neither of which the paragraph models.
+fn style_white_space(style: &ComputedValues) -> WhiteSpaceCollapse {
     use stylo::computed_values::white_space_collapse::T as Collapse;
-    *style.get_inherited_text().get_white_space_collapse() == Collapse::PreserveBreaks
+    match *style.get_inherited_text().get_white_space_collapse() {
+        Collapse::Preserve => WhiteSpaceCollapse::Preserve,
+        Collapse::PreserveBreaks => WhiteSpaceCollapse::PreserveBreaks,
+        Collapse::Collapse | Collapse::BreakSpaces => WhiteSpaceCollapse::Collapse,
+    }
 }
 
 /// A cheap structural identity of the flattened content.
@@ -363,13 +476,11 @@ fn fingerprint(flat: &Flattened) -> u64 {
             entry.source.hash(&mut hasher);
             match &entry.item {
                 OwnedItem::Run {
-                    text,
-                    preserve_newlines,
-                    ..
+                    text, white_space, ..
                 } => {
                     0_u8.hash(&mut hasher);
                     text.hash(&mut hasher);
-                    preserve_newlines.hash(&mut hasher);
+                    white_space.hash(&mut hasher);
                 }
                 OwnedItem::Atom { .. } => 1_u8.hash(&mut hasher),
             }
@@ -390,11 +501,11 @@ fn as_items(collected: &[Collected], id_offset: usize) -> Vec<InlineItem<'_>> {
             OwnedItem::Run {
                 text,
                 style,
-                preserve_newlines,
+                white_space,
             } => InlineItem::Run(TextRunItem {
                 text,
                 style,
-                preserve_newlines: *preserve_newlines,
+                white_space: *white_space,
             }),
             OwnedItem::Atom { vertical_align } => InlineItem::Box(InlineBoxSpec {
                 // The item index is the box id, so one table answers for
@@ -1266,5 +1377,361 @@ mod range_box_tests {
             doc.text_range_boxes(doc.document_element().id(), 0, 0),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod hit_tests {
+    use euclid::default::Point2D;
+
+    use crate::{Document, FontBlob, NodeId, StylesheetOrigin};
+
+    /// A 10px Ahem paragraph, `text`, styled by `inline`, under the page.
+    fn paragraph(inline: &str) -> (Document<()>, NodeId) {
+        let mut doc = Document::new(crate::tree::document::tests::device(), "page", ());
+        doc.register_fonts(FontBlob::from_static(include_bytes!(
+            "../../../hughie/tests/fixtures/Ahem.ttf"
+        )));
+        doc.add_stylesheet(
+            "page { display: flex; align-items: flex-start; } \
+             text { display: -lynx-text; font-family: Ahem; font-size: 10px; } \
+             a, strong, span { display: -lynx-text; } \
+             view { display: flex; }",
+            StylesheetOrigin::Author,
+        );
+        let text = doc.create_element("text", ());
+        doc.set_inline_style(text, inline);
+        doc.append_child(doc.document_element().id(), text);
+        (doc, text)
+    }
+
+    fn append_text(doc: &mut Document<()>, parent: NodeId, text: &str) -> NodeId {
+        let node = doc.create_text_node(text, ());
+        doc.append_child(parent, node);
+        node
+    }
+
+    fn append_element(doc: &mut Document<()>, parent: NodeId, tag: &str) -> NodeId {
+        let element = doc.create_element(tag, ());
+        doc.append_child(parent, element);
+        element
+    }
+
+    fn at(doc: &Document<()>, text: NodeId, x: f32, y: f32) -> Option<usize> {
+        doc.text_index_at_point(text, Point2D::new(x, y))
+    }
+
+    #[test]
+    fn a_point_answers_the_source_offset_of_the_cluster_under_it() {
+        // "abc " then a nested "def": at 35px the second line is the nested
+        // run's. The padding and border move the box, not the paragraph's
+        // own space.
+        let (mut doc, text) = paragraph("width: 35px; padding: 5px; border: 2px solid;");
+        append_text(&mut doc, text, "abc ");
+        let nested = append_element(&mut doc, text, "span");
+        append_text(&mut doc, nested, "def");
+        assert_eq!(at(&doc, text, 0.0, 0.0), None, "no pass has run");
+        doc.layout();
+
+        assert_eq!(at(&doc, text, 0.0, 0.0), Some(0), "the first glyph");
+        assert_eq!(
+            at(&doc, text, 29.9, 9.9),
+            Some(2),
+            "the first line's last glyph"
+        );
+        assert_eq!(
+            at(&doc, text, 32.0, 5.0),
+            None,
+            "the space the soft wrap left hanging"
+        );
+        assert_eq!(at(&doc, text, 34.9, 5.0), None, "past the line's end");
+        assert_eq!(
+            at(&doc, text, 0.0, 10.0),
+            Some(4),
+            "the wrapped line, in the nested run"
+        );
+        assert_eq!(at(&doc, text, 25.0, 15.0), Some(6));
+        assert_eq!(at(&doc, text, 30.0, 15.0), None, "past the last glyph");
+        assert_eq!(at(&doc, text, 5.0, -0.1), None, "above the paragraph");
+        assert_eq!(at(&doc, text, 5.0, 20.0), None, "below the last line");
+        assert_eq!(
+            at(&doc, nested, 0.0, 10.0),
+            None,
+            "a nested scope is content of its paragraph, not one of its own"
+        );
+        assert_eq!(at(&doc, doc.document_element().id(), 0.0, 0.0), None);
+
+        // The answer agrees with the range query it inverts.
+        let hit = at(&doc, text, 15.0, 15.0).expect("on `e`");
+        let unit = u32::try_from(hit).unwrap();
+        let boxes = doc.text_range_boxes(text, unit, unit + 1).unwrap();
+        assert!(boxes[0].contains(Point2D::new(15.0, 15.0)));
+    }
+
+    #[test]
+    fn the_leading_between_two_lines_is_the_upper_lines() {
+        let (mut doc, text) = paragraph("width: 35px; line-height: 20px;");
+        append_text(&mut doc, text, "abc def");
+        doc.layout();
+        // Each 20px line box holds a 10px glyph row in its middle.
+        assert_eq!(at(&doc, text, 5.0, 2.0), Some(0), "the leading above");
+        assert_eq!(at(&doc, text, 5.0, 19.9), Some(0), "the leading below");
+        assert_eq!(at(&doc, text, 5.0, 20.0), Some(4), "the next line's top");
+        assert_eq!(at(&doc, text, 5.0, 40.0), None);
+    }
+
+    #[test]
+    fn a_point_on_an_atomic_inline_answers_its_one_unit() {
+        let (mut doc, text) = paragraph("");
+        append_text(&mut doc, text, "ab");
+        let atom = append_element(&mut doc, text, "view");
+        doc.set_inline_style(atom, "width: 20px; height: 10px;");
+        append_text(&mut doc, text, "cd");
+        doc.layout();
+        assert_eq!(at(&doc, text, 19.9, 5.0), Some(1));
+        assert_eq!(at(&doc, text, 20.0, 5.0), Some(2), "the atom's left edge");
+        assert_eq!(at(&doc, text, 39.9, 5.0), Some(2));
+        assert_eq!(at(&doc, text, 40.0, 5.0), Some(3));
+        assert_eq!(doc.inline_source_range(atom), Some(2..3));
+    }
+
+    #[test]
+    fn an_inline_element_answers_the_source_range_of_its_subtree() {
+        // "ab" <a>"cd" <strong>"ef"</strong> <view/></a> "g" <view/> "h"
+        let (mut doc, text) = paragraph("");
+        let plain = append_text(&mut doc, text, "ab");
+        let link = append_element(&mut doc, text, "a");
+        append_text(&mut doc, link, "cd");
+        let strong = append_element(&mut doc, link, "strong");
+        append_text(&mut doc, strong, "ef");
+        let inner_atom = append_element(&mut doc, link, "view");
+        doc.set_inline_style(inner_atom, "width: 10px; height: 10px;");
+        append_text(&mut doc, text, "g");
+        let atom = append_element(&mut doc, text, "view");
+        doc.set_inline_style(atom, "width: 10px; height: 10px;");
+        // A box inside the atom: not this paragraph's content, and no
+        // paragraph of its own (a `span` there would establish one).
+        let in_atom = append_element(&mut doc, atom, "view");
+        doc.set_inline_style(in_atom, "width: 5px; height: 5px;");
+        let empty = append_element(&mut doc, text, "span");
+        append_text(&mut doc, text, "h");
+        assert_eq!(doc.inline_source_range(link), None, "no pass has run");
+        assert_eq!(doc.paragraph_of(link), None, "no pass has run");
+        doc.layout();
+
+        assert_eq!(doc.inline_source_range(strong), Some(4..6), "a plain run");
+        assert_eq!(
+            doc.inline_source_range(link),
+            Some(2..7),
+            "its own text, the nested run and the nested atom"
+        );
+        assert_eq!(doc.inline_source_range(inner_atom), Some(6..7));
+        assert_eq!(doc.inline_source_range(atom), Some(8..9));
+        assert_eq!(doc.inline_source_range(empty), None, "contributes nothing");
+        assert_eq!(doc.inline_source_range(in_atom), None, "inside an atom");
+        assert_eq!(doc.inline_source_range(text), None, "the paragraph itself");
+        assert_eq!(doc.inline_source_range(plain), None, "a text node");
+
+        for node in [text, plain, link, strong, inner_atom, atom, empty] {
+            assert_eq!(doc.paragraph_of(node), Some(text), "{node:?}");
+        }
+        assert_eq!(doc.paragraph_of(in_atom), None, "an atom's own subtree");
+        assert_eq!(doc.paragraph_of(doc.document_element().id()), None);
+
+        // Tap to element: the hit offset falls in the innermost range.
+        let hit = at(&doc, text, 55.0, 5.0).expect("on `f`");
+        assert_eq!(hit, 5);
+        assert!(doc.inline_source_range(strong).unwrap().contains(&hit));
+    }
+
+    #[test]
+    fn an_atom_with_a_paragraph_of_its_own_answers_that_one() {
+        let (mut doc, text) = paragraph("");
+        append_text(&mut doc, text, "ab");
+        let atom = append_element(&mut doc, text, "view");
+        let inner = append_element(&mut doc, atom, "text");
+        let run = append_text(&mut doc, inner, "c");
+        let out_of_flow = append_element(&mut doc, text, "view");
+        doc.set_inline_style(
+            out_of_flow,
+            "position: absolute; width: 10px; height: 10px;",
+        );
+        doc.layout();
+        assert_eq!(doc.paragraph_of(atom), Some(text));
+        assert_eq!(doc.paragraph_of(inner), Some(inner));
+        assert_eq!(doc.paragraph_of(run), Some(inner));
+        assert_eq!(doc.paragraph_of(out_of_flow), None, "not inline content");
+        assert_eq!(doc.inline_source_range(atom), Some(2..3));
+        assert_eq!(at(&doc, inner, 5.0, 5.0), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod preserve_tests {
+    use euclid::default::{Point2D, Rect, Size2D};
+
+    use crate::{Document, FontBlob, NodeId, StylesheetOrigin};
+
+    /// A 10px Ahem paragraph holding `content`, styled by `inline`. Every
+    /// Ahem glyph, the space included, advances 10px.
+    fn paragraph(inline: &str, content: &str) -> (Document<()>, NodeId) {
+        let mut doc = Document::new(crate::tree::document::tests::device(), "page", ());
+        doc.register_fonts(FontBlob::from_static(include_bytes!(
+            "../../../hughie/tests/fixtures/Ahem.ttf"
+        )));
+        doc.add_stylesheet(
+            "page { display: flex; align-items: flex-start; } \
+             text { display: -lynx-text; font-family: Ahem; font-size: 10px; } \
+             span { display: -lynx-text; } \
+             .pre { white-space-collapse: preserve; }",
+            StylesheetOrigin::Author,
+        );
+        let text = doc.create_element("text", ());
+        doc.set_inline_style(text, inline);
+        doc.append_child(doc.document_element().id(), text);
+        let run = doc.create_text_node(content, ());
+        doc.append_child(text, run);
+        doc.layout();
+        (doc, text)
+    }
+
+    fn glyph(left: f32, top: f32, width: f32) -> Rect<f32> {
+        Rect::new(Point2D::new(left, top), Size2D::new(width, 10.0))
+    }
+
+    #[test]
+    fn preserved_indentation_is_four_advances_in() {
+        let (doc, text) = paragraph(
+            "white-space-collapse: preserve; text-wrap-mode: nowrap;",
+            "    x",
+        );
+        assert_eq!(
+            doc.text_range_boxes(text, 4, 5),
+            Some(vec![glyph(40.0, 0.0, 10.0)])
+        );
+        assert!((doc.text_block_size(text).unwrap().width - 50.0).abs() < 0.001);
+        // A preserved space is a cluster of its own: both queries answer it.
+        assert_eq!(
+            doc.text_range_boxes(text, 1, 2),
+            Some(vec![glyph(10.0, 0.0, 10.0)])
+        );
+        assert_eq!(
+            doc.text_range_boxes(text, 0, 4),
+            Some(vec![glyph(0.0, 0.0, 40.0)])
+        );
+        assert_eq!(
+            doc.text_index_at_point(text, Point2D::new(15.0, 5.0)),
+            Some(1)
+        );
+        assert_eq!(
+            doc.text_index_at_point(text, Point2D::new(39.9, 5.0)),
+            Some(3)
+        );
+
+        // `white-space: pre` is the same pair through the shorthand.
+        let (doc, text) = paragraph("white-space: pre;", "    x");
+        assert_eq!(
+            doc.text_range_boxes(text, 4, 5),
+            Some(vec![glyph(40.0, 0.0, 10.0)])
+        );
+
+        // Collapsed, the run of spaces is one space wide.
+        let (doc, text) = paragraph("", "    x");
+        assert_eq!(
+            doc.text_range_boxes(text, 4, 5),
+            Some(vec![glyph(10.0, 0.0, 10.0)])
+        );
+    }
+
+    #[test]
+    fn a_tab_lands_on_column_eight_and_each_break_restarts_the_columns() {
+        let (doc, text) = paragraph("white-space: pre;", "abc\tx\n\ty");
+        // `abc` ends at 30; the tab shifts to the stop at 8 spaces.
+        assert_eq!(
+            doc.text_range_boxes(text, 3, 4),
+            Some(vec![glyph(30.0, 0.0, 50.0)])
+        );
+        assert_eq!(
+            doc.text_range_boxes(text, 4, 5),
+            Some(vec![glyph(80.0, 0.0, 10.0)])
+        );
+        assert_eq!(
+            doc.text_range_boxes(text, 7, 8),
+            Some(vec![glyph(80.0, 10.0, 10.0)])
+        );
+        assert_eq!(
+            doc.text_index_at_point(text, Point2D::new(50.0, 5.0)),
+            Some(3)
+        );
+        assert_eq!(
+            doc.text_index_at_point(text, Point2D::new(10.0, 15.0)),
+            Some(6)
+        );
+    }
+
+    #[test]
+    fn preserve_breaks_still_collapses_the_spaces_around_a_break() {
+        let (doc, text) = paragraph("white-space-collapse: preserve-breaks;", "  a\n  b");
+        assert_eq!(
+            doc.text_range_boxes(text, 6, 7),
+            Some(vec![glyph(0.0, 10.0, 10.0)])
+        );
+    }
+
+    #[test]
+    fn preserve_inherits_into_a_nested_scope_alone() {
+        let mut doc = Document::new(crate::tree::document::tests::device(), "page", ());
+        doc.register_fonts(FontBlob::from_static(include_bytes!(
+            "../../../hughie/tests/fixtures/Ahem.ttf"
+        )));
+        doc.add_stylesheet(
+            "page { display: flex; align-items: flex-start; } \
+             text { display: -lynx-text; font-family: Ahem; font-size: 10px; } \
+             span { display: -lynx-text; } \
+             .pre { white-space-collapse: preserve; }",
+            StylesheetOrigin::Author,
+        );
+        let text = doc.create_element("text", ());
+        doc.append_child(doc.document_element().id(), text);
+        let before = doc.create_text_node("a  ", ());
+        doc.append_child(text, before);
+        let code = doc.create_element("span", ());
+        doc.add_class(code, "pre");
+        doc.append_child(text, code);
+        let inner = doc.create_text_node("  b", ());
+        doc.append_child(code, inner);
+        doc.layout();
+        // `a`, the collapsed pair as one space, then two preserved spaces:
+        // the collapsible space is kept by the preserved one after it.
+        assert_eq!(
+            doc.text_range_boxes(text, 5, 6),
+            Some(vec![glyph(40.0, 0.0, 10.0)])
+        );
+
+        // Turning the mode off rebuilds the paragraph.
+        doc.remove_class(code, "pre");
+        doc.layout();
+        assert_eq!(
+            doc.text_range_boxes(text, 5, 6),
+            Some(vec![glyph(20.0, 0.0, 10.0)])
+        );
+    }
+
+    #[test]
+    fn the_keywords_the_paragraph_does_not_model_stay_collapsed() {
+        // `break-spaces` parses and is read as `collapse`; `preserve-spaces`
+        // and `discard` do not parse in the fork, leaving the initial value.
+        for inline in [
+            "white-space-collapse: break-spaces;",
+            "white-space-collapse: preserve-spaces;",
+            "white-space-collapse: discard;",
+        ] {
+            let (doc, text) = paragraph(inline, "    x");
+            assert_eq!(
+                doc.text_range_boxes(text, 4, 5),
+                Some(vec![glyph(10.0, 0.0, 10.0)]),
+                "{inline}",
+            );
+        }
     }
 }

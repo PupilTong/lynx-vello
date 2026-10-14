@@ -139,8 +139,10 @@ import { splitRecord } from "bobcat:record";
 // crosses as **extras**: `extraCount` name/value pairs, which become the
 // Lynx `detail` whenever there are any — an `<image>` `load`'s
 // `{width, height}`, a `scroll`'s `scrollTop`, `scrollLeft`, `scrollHeight`,
-// `scrollWidth`, `deltaX`, `deltaY` and `isDragging`. No rule here knows an
-// extra's name. With no extras, the `detail` is this file's default shaping
+// `scrollWidth`, `deltaX`, `deltaY` and `isDragging`, an `<x-markdown>`
+// `link`'s `url`, `content` and `contentId` (strings; a key the component had
+// no value for is not sent, so the `detail` has no such key). No rule here
+// knows an extra's name. With no extras, the `detail` is this file's default shaping
 // of the payload: `{x, y}` for a pointer or touch event, `{}` for a wheel
 // (native's), the exposure object for `uiappear`/`uidisappear`, `{}`
 // otherwise. The Lynx-only events (`tap`, `longpress`, `uiappear`, the
@@ -1692,12 +1694,58 @@ function updateListInfo(list: unknown, operations: unknown): undefined {
 }
 
 /**
+ * The structured properties of web-core's custom elements, by tag: each
+ * property name a non-primitive value is assigned to rather than stringified,
+ * mapped to the attribute that property writes the value's JSON text to.
+ *
+ * web-core's `setElementPropertyOrAttribute`
+ * (`web-core/ts/client/mainthread/utils/setElementPropertyOrAttribute.ts:15-24`)
+ * assigns a value that is not a string, number or boolean to the element's
+ * property of that name when the element has one, and writes `String(value)`
+ * to the attribute otherwise. Of the web elements, only `x-markdown` has such
+ * a property for a structured value: its `markdown-style` and
+ * `markdownStyle` setters write `JSON.stringify(value)` to the
+ * `markdown-style` attribute (`web-elements/src/elements/XMarkdown/XMarkdown.ts:220-243`,
+ * `serializeMarkdownStyle` in `XMarkdownAttributes.ts:467-472`). Its
+ * `content-range` has no property, so an array there is stringified as any
+ * other value is: `[0, 10]` becomes `"0,10"`, the `"start,end"` form its
+ * attribute handler reads (`XMarkdownAttributes.ts:1255-1282`).
+ *
+ * `markdown`, native's tag for the same component, which web-core does not
+ * register, has the same properties: native hands its component the object
+ * itself, and the one component behind both tags here reads JSON text.
+ */
+const STRUCTURED_PROPERTIES: ReadonlyMap<string, ReadonlyMap<string, string>> = (() => {
+  const markdown = new Map([
+    ["markdown-style", "markdown-style"],
+    ["markdownStyle", "markdown-style"],
+  ]);
+  return new Map([["x-markdown", markdown], ["markdown", markdown]]);
+})();
+
+/**
+ * Every name some tag has a structured property by: only a write under one
+ * of these asks the host for the element's tag.
+ */
+const STRUCTURED_PROPERTY_NAMES: ReadonlySet<string> = new Set(
+  [...STRUCTURED_PROPERTIES.values()].flatMap(properties => [...properties.keys()]),
+);
+
+/**
  * `null`/`undefined` removes; anything else is stringified, which is what
  * web-core's `setElementPropertyOrAttribute` does for every name that is not
  * a live property of its HTML stand-in element. `id`, `class`, and `style`
  * reach their specialized DOM paths inside the native `setAttribute` export.
  * A separate typed copy serves the Lynx fields() API. Functions remain local;
  * cross-thread readback uses the Worker transport's structured-clone semantics.
+ *
+ * The exception is a value that is not a string, number or boolean under one
+ * of the [`STRUCTURED_PROPERTIES`] of the element's tag —
+ * `markdown-style={{link: {color: 'ff0000'}}}` on an `x-markdown` — which is
+ * written as its JSON text, to the attribute that property reflects to, as
+ * web-core's property setter writes it: `String(JSON.stringify(value))`, so a
+ * value JSON has no text for is `"undefined"` and one it refuses (a cycle, a
+ * BigInt) throws, as there.
  *
  * `update-list-info` is the one name that is not an attribute at all: it is
  * the list data protocol's one command, and it goes to [`updateListInfo`]
@@ -1713,14 +1761,25 @@ export function __SetAttribute(
   }
   const nodeId = nodeIdOf(element);
   const values = valuesOf(element, attributeValuesSymbol);
-  const key = String(name);
+  let key = String(name);
   if (value === null || value === undefined) {
     removeAttribute(nodeId, key);
     values.delete(key);
-  } else {
-    setAttribute(nodeId, key, String(value));
-    values.set(key, copyElementValue(value));
+    return undefined;
   }
+  let text: string | undefined;
+  if (
+    typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean"
+    && STRUCTURED_PROPERTY_NAMES.has(key)
+  ) {
+    const attribute = STRUCTURED_PROPERTIES.get(tagName(nodeId))?.get(key);
+    if (attribute !== undefined) {
+      key = attribute;
+      text = String(JSON.stringify(value));
+    }
+  }
+  setAttribute(nodeId, key, text ?? String(value));
+  values.set(key, copyElementValue(value));
   return undefined;
 }
 
@@ -1819,7 +1878,17 @@ function invokeUIMethod(handle: Handle, method: string, params: unknown): Invoke
  *   range shows content on; `boundingRect` is their union, built here as
  *   iOS's `CGRectUnion` builds it (`LynxUIText.m:867-887`), so one box is
  *   its own union. No `id` or `dataset` rides along: the natives send only
- *   the two keys.
+ *   the two keys. A `markdown`'s answers in the same record and shape, its
+ *   offsets the rendered text's.
+ * - `getContent`, a `markdown`'s: `{content}`, one string field.
+ * - `getImages`, a `markdown`'s: `{images}`, the typings' shape (web-core
+ *   answers the bare array). The host writes the count and then each URL.
+ * - `getParseResult`, a `markdown`'s: `{id, result}`, the typings' and
+ *   native's shape (web-core answers the bare map), `result` an object from
+ *   each tag name asked to its `{start, end}` ranges. The host writes `id`,
+ *   the tag count, and per tag its name, its range count and two numbers
+ *   per range.
+ * - `getCharIndexByPoint`, a `markdown`'s: `{index}`.
  *
  * A method without an arm gets the fields themselves.
  */
@@ -1879,6 +1948,33 @@ function decodeMethodData(handle: Handle, method: string, fields: string[]): unk
       }
       return { boundingRect: { ...boundingRect }, boxes };
     }
+    case "getContent":
+      return { content: fields[0] ?? "" };
+    case "getImages": {
+      const count = Number(fields[0] ?? 0);
+      return { images: fields.slice(1, 1 + count) };
+    }
+    case "getParseResult": {
+      const id = fields[0] ?? "";
+      const count = Number(fields[1] ?? 0);
+      const result: Record<string, { start: number; end: number }[]> = {};
+      let at = 2;
+      for (let tag = 0; tag < count; tag++) {
+        const name = fields[at] ?? "";
+        const ranges = Number(fields[at + 1] ?? 0);
+        const list = [];
+        for (let range = 0; range < ranges; range++) {
+          const start = Number(fields[at + 2 + range * 2]);
+          const end = Number(fields[at + 3 + range * 2]);
+          list.push({ start, end });
+        }
+        result[name] = list;
+        at += 2 + ranges * 2;
+      }
+      return { id, result };
+    }
+    case "getCharIndexByPoint":
+      return { index: Number(fields[0]) };
     default:
       return fields;
   }

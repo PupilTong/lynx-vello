@@ -3714,8 +3714,7 @@ fn mts_animation_frames_continue_while_a_bts_callback_is_busy() {
     );
 }
 
-#[path = "../../../../../packages/reactlynx-test-fixtures/fixtures.rs"]
-mod fixtures;
+use crate::test_support::fixtures;
 
 #[test]
 fn releasing_a_view_unmounts_the_real_native_react_tree() {

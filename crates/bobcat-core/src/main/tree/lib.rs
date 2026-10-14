@@ -12,8 +12,8 @@
 //! Each tag owns its UA rules and tests. Numeric text and list attributes
 //! flow through `attr()`; boolean flags use attribute selectors. Only `image`,
 //! `svg`, `blur_view`, `swiper`, `refresh_view`, `viewpager`,
-//! `scroll_container`, `list`, `scroll_coordinator`, `dialog` and `overlay`
-//! need components: for image resources (an `svg`'s `content` as a document
+//! `scroll_container`, `list`, `scroll_coordinator`, `dialog`, `overlay` and
+//! `markdown` need components: for image resources (an `svg`'s `content` as a document
 //! handed to the host as its bytes), blur hints,
 //! the swiper's UA shadow tree, item count and `scrollTo` UI method, the
 //! refresh view's UA shadow tree, its header and footer slot assignment and
@@ -24,9 +24,12 @@
 //! `getVisibleCells` UI methods ([`list`]), the scroll coordinator's
 //! `setFoldExpanded` UI method ([`scroll_coordinator`]), the dialog's
 //! `:open`/`:modal` state, top-layer membership and four UI methods
-//! ([`dialog`]), and the overlay's UA shadow tree, the top-layer membership of
+//! ([`dialog`]), the overlay's UA shadow tree, the top-layer membership of
 //! the `dialog` in it, and its `showoverlay` and `dismissoverlay` events
-//! ([`overlay`]). A component's UI methods are its
+//! ([`overlay`]), and the markdown element's UA shadow tree rendered from its
+//! `content`, its `parseEnd`, `link` and `imageTap` events and its
+//! `getContent`, `getImages`, `getParseResult`, `getTextBoundingRect` and
+//! `getCharIndexByPoint` UI methods ([`markdown`]). A component's UI methods are its
 //! [`dom::CustomElement::invoke`], which the runtime's `callElementMethod`
 //! reaches through [`dom::Document::invoke_element_method`]. The methods
 //! every element has whatever its kind, which `callElementMethod` runs when
@@ -44,6 +47,7 @@ mod blur_view;
 pub(crate) mod dialog;
 mod image;
 mod list;
+mod markdown;
 mod overlay;
 mod popover;
 pub(crate) mod raw_text;
@@ -88,8 +92,9 @@ pub(super) const SLOT_CHANGE: &str = "slotchange";
 ///
 /// `events` is the queue the `image` and `svg` components leave a source that
 /// settled at its bind in, the `dialog` component the `close` and `cancel` its
-/// methods queue, and the `overlay` component its `showoverlay` and
-/// `dismissoverlay`, for the runtime to dispatch once it is out of the
+/// methods queue, the `overlay` component its `showoverlay` and
+/// `dismissoverlay`, and the `markdown` component its `parseEnd`, `link` and
+/// `imageTap`, for the runtime to dispatch once it is out of the
 /// JavaScript call that caused them. `autoplays` is where the `x-swiper`
 /// component keeps its autoplay timers, for the runtime to wait out and run.
 #[must_use]
@@ -110,6 +115,8 @@ pub(crate) fn new_document(
     list::define(&mut document);
     scroll_coordinator::define(&mut document);
     text::define(&mut document);
+    // After `image`: every image a markdown element renders is one.
+    markdown::define(&mut document, events.clone());
     dialog::define(&mut document, events.clone());
     // After `dialog`: every overlay builds one in its shadow tree.
     overlay::define(&mut document, events);
@@ -173,9 +180,10 @@ pub(super) fn element_children(
         .filter(|child| document.get(*child).is_some_and(dom::Node::is_element))
 }
 
-/// One event a component owes script: always non-bubbling, at the element
-/// the component belongs to.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// One event a component owes script, at the element the component belongs
+/// to. None of them bubbles; a [`ComponentEvent::Detailed`] alone is
+/// composed.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ComponentEvent {
     /// An `<image>`'s or `<svg>`'s own source settled: `load`, which carries
     /// an `<image>`'s intrinsic size and an `<svg>`'s layout size, or `error`,
@@ -194,6 +202,58 @@ pub(crate) enum ComponentEvent {
         name: &'static str,
         delta: dom::Vector2D<f32>,
     },
+    /// An event whose detail is made of strings the component read when it
+    /// queued the event, named by that component. [`ComponentDetail`] is the
+    /// detail's shape.
+    ///
+    /// Dispatched not bubbling and composed (ruled 2026-10-14). Not bubbling
+    /// is native's: Lynx fires `<markdown>`'s `link`, `imageTap` and
+    /// `parseEnd` as custom events that do not bubble
+    /// (`lynx/core/renderer/events/touch_event_handler.cc:388-403`,
+    /// `lynx/core/event/custom_event.h:17-23`), so only a `bindEvent` on the
+    /// element itself hears one, never an ancestor's nor the
+    /// `global-bindEvent` pass. Composed is so that an event queued at a node
+    /// of a UA shadow tree retargets to the host for script, whose `target`
+    /// is then the component's element.
+    Detailed {
+        node: NodeId,
+        name: &'static str,
+        detail: ComponentDetail,
+    },
+}
+
+/// The `detail` of a [`ComponentEvent::Detailed`]: one variant per *shape*
+/// the realm builds, never per event name, so two events whose details have
+/// the same keys share one.
+///
+/// Owned, because the event outlives the call that queued it: the component
+/// reads its attributes or its content at that moment, and the runtime
+/// delivers from an entry of its own. The event itself is `EventDetail::None`
+/// on the kernel's side; each string crosses as one entry of the extras
+/// channel (`"id"`, `"url"`, `"content"`, `"contentId"`), from which the
+/// realm's Lynx layer builds the `detail` object, so no JSON is written or
+/// parsed. A `None` pushes no entry, and the key is absent from the object —
+/// neither `undefined`-valued nor `""`: web-core's `{id: undefined}` loses
+/// that key when it is serialized, and the transport here would carry an
+/// `undefined`-valued key as one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ComponentDetail {
+    /// `{id}`: a content id, such as the `content-id` attribute an
+    /// `<x-markdown>`'s `parseEnd` reports.
+    Id { id: Option<String> },
+    /// `{url, content, contentId}`: a link and its text, such as the `<a>` an
+    /// `<x-markdown>`'s `link` reports.
+    UrlContent {
+        url: String,
+        content: String,
+        content_id: Option<String>,
+    },
+    /// `{url, contentId}`: a resource, such as the `<img>` an
+    /// `<x-markdown>`'s `imageTap` reports.
+    Url {
+        url: String,
+        content_id: Option<String>,
+    },
 }
 
 /// The events this document's components have produced and not delivered
@@ -203,7 +263,8 @@ pub(crate) enum ComponentEvent {
 /// the document: the `image` component, which is inside it and reaches nothing
 /// else; the runtime's own image report path, which is outside it; the
 /// `dialog` component's UI methods; and the `overlay` component, inside the
-/// document like `image`.
+/// document like `image`, as is any component that queues a
+/// [`ComponentEvent::Detailed`].
 /// Each holds a clone of this one queue, and the runtime drains it in an entry
 /// of its own, posted by the epilogue of the entry that filled it
 /// (`docs/runtime-architecture.md` has the entry boundary,
@@ -246,6 +307,14 @@ impl ComponentEvents {
         self.0
             .borrow_mut()
             .push(ComponentEvent::Scroll { node, name, delta });
+    }
+
+    /// Queues an event at `node` whose detail is `detail`'s strings: not
+    /// bubbling, composed ([`ComponentEvent::Detailed`]).
+    pub(crate) fn queue_detailed(&self, node: NodeId, name: &'static str, detail: ComponentDetail) {
+        self.0
+            .borrow_mut()
+            .push(ComponentEvent::Detailed { node, name, detail });
     }
 
     /// Takes everything queued since the last drain.
