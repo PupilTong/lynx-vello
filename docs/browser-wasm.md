@@ -472,7 +472,7 @@ creates the nested module Worker directly. Core selects
 
 ## Build and isolation
 
-Build and verify the browser package with:
+Build the browser package with:
 
 ```sh
 pnpm --filter bobcat-wasm build
@@ -497,14 +497,7 @@ and tail calls. Generated glue and Wasm live under
 entries are TypeScript in `crates/bobcat-wasm/js/`; after wasm-pack the build
 emits them with TypeScript 7 into `dist/`, the facade's declarations included
 — after, because the Workers are typed against the glue it generates. Neither
-directory is checked in. The verification script
-checks that optimization removed the debugging name section while preserving
-`target_features`, shared imported/exported memory, the Worker-only Wasm
-import, the facade's four page and font declarations and their dispatches, that
-a load registers a page's sources before building the view, that the facade
-validates the host's module table and answers calls with single-shot callbacks
-while the Render Worker queues those answers on its request queue, and the
-absence of the private input methods and the removed direct DOM API.
+directory is checked in.
 
 The `wasm32` target disables Parley's `complex-scripts` feature, while native
 targets retain it. This keeps grapheme segmentation, shaping, and ordinary
