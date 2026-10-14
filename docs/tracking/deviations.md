@@ -2224,6 +2224,17 @@ consequential choice about whether to follow the spec or the quirk.
   - *`link` and `imageTap` bubble and are composed* (web-core's
     `bubbles: true, composed: true`), from a `tap`: a paragraph's runs have
     no box, so the anchor under a tap is found from the character it hits.
+  - *The events are named `link`, `imageTap` and `parseEnd`*, native's names
+    (`LynxMarkdownEventDispatcher.m`), so a compiled card's `bindlink`,
+    `bindimageTap` and `bindparseEnd` handlers run. web-core's `XMarkdown`
+    dispatches DOM events named `bindlink`, `bindimageTap` and
+    `bindparseEnd` (`XMarkdownAttributes.ts:627-643, 994-995`) while its
+    element API listens for the lowercased name without the prefix
+    (`event_apis.rs:33`, `WASMJSBinding.ts:262-280`), so under web-core a
+    ReactLynx handler for them never fires and only a direct
+    `addEventListener('bindlink')` hears them (its own fixture,
+    `tests/fixtures/x-markdown/events.html`). Read from the code, not run;
+    a web-core defect this engine does not copy.
   - *Links follow markdown-it 15 as web-core configures it*:
     `www.example.com` and `example.com` are not autolinked (linkify-it's
     `fuzzyLink` is off there; verified against markdown-it), `https://`,
