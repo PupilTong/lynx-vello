@@ -5140,26 +5140,24 @@ globalThis.updatePage = () => {{
     });
 }
 
-/// A frame's child goes with its frame: the epilogue of the entry that
-/// released the frame frees the child it retired, though the page still
-/// holds its `ShadowRealm`.
+/// A closed child goes in the epilogue of the entry that closed it, though
+/// the page still holds its `ShadowRealm` and the wrapped function it
+/// called.
 #[test]
-fn a_released_frames_child_is_freed_by_the_releasing_entrys_epilogue() {
+fn a_closed_child_is_freed_by_the_closing_entrys_epilogue() {
     on_a_js_thread(|thread| async move {
         let (context, _workers) = group(&thread);
         let mut owned = OwnedPage::new(context);
         owned
             .boot(&format!(
                 "{ONE_BOX}
-import {{ releaseFrame }} from 'bobcat-internal:host';
-const frame = __CreateElement('frame', 0);
-globalThis.frame = frame;
 globalThis.realm = new ShadowRealm();
-await new Promise(resolve => realm.evaluate(`(frame, bound) => {{
-  import('bobcat-internal:host').then(H => {{ H.bindFrame(frame); bound(); }});
-}}`)(__GetElementUniqueID(frame), resolve));
+const close = await new Promise(resolve => realm.evaluate(`ready => {{
+  import('bobcat-internal:host').then(H => ready(() => H.closeRealm()));
+}}`)(resolve));
+// Called with no receiver: a wrapped function refuses an object `this`.
 globalThis.updatePage = () => {{
-  releaseFrame(__GetElementUniqueID(globalThis.frame));
+  close();
 }};
 "
             ))

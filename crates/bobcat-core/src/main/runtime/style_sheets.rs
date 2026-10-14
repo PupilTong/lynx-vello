@@ -6,8 +6,7 @@ use std::rc::Rc;
 use quickjs_rust_bridge::HostValue;
 use tokio_util::sync::CancellationToken;
 
-use super::frames::{RealmRoot, SheetTarget};
-use super::{DocumentSlot, MainThreadError, ScriptEngine, install};
+use super::{DocumentSlot, MainThreadError, ScriptEngine, install, optional_node_id_argument};
 use crate::jobs::JsThreadHandle;
 use crate::link::{SourceAnswer, ViewOutbox};
 use crate::main::tree::LynxDocument;
@@ -16,8 +15,6 @@ use crate::resource::{LoadedSource, SourceRequest, StyleSheetSource, unanswered_
 pub(super) fn install_styles(
     engine: &mut ScriptEngine,
     document: &Rc<RefCell<DocumentSlot>>,
-    // Where an adoption mounts: the document, or the frame's shadow root.
-    root: &Rc<RealmRoot>,
     outbox: &ViewOutbox,
     thread: JsThreadHandle,
 ) -> Result<(), MainThreadError> {
@@ -47,18 +44,30 @@ pub(super) fn install_styles(
     })?;
 
     let document = Rc::clone(document);
-    let root = Rc::clone(root);
     let token = outbox.token().clone();
     let sources = outbox.host_outbox(token.clone());
+    // `adoptStyleSheet(url, shadowRoot?)`: the second argument names a shadow
+    // root to mount on — a frame's, where `bobcat:frame-boot` mounts its
+    // card's page CSS, so it styles the nested tree alone — and without it
+    // the sheet is the document's.
     install(engine, "adoptStyleSheet", 1, move |args| {
+        const NAME: &str = "bobcat-internal:host.adoptStyleSheet";
         let Some(HostValue::String(url)) = args.first() else {
             return Err("adoptStyleSheet expects a URL".to_owned());
         };
+        let target = optional_node_id_argument(NAME, args, 1)?;
         let mut slot = document.borrow_mut();
-        // Before the request: a frame realm bound to no frame, or whose frame
-        // was released, has nowhere to mount and asks for nothing. Nothing
-        // releases a frame while this call waits, because no JavaScript runs.
-        let target = root.sheets(slot.document_mut())?;
+        // Before the request: a target that is no live shadow root asks for
+        // nothing. Nothing frees it while this call waits, because no
+        // JavaScript runs.
+        if let Some(shadow) = target
+            && !slot
+                .document_mut()
+                .get(shadow)
+                .is_some_and(dom::Node::is_shadow_root)
+        {
+            return Err(format!("{NAME}: {shadow:?} is not a live shadow root"));
+        }
         // This receiver lives only for this call. Cache lookup and sharing an
         // in-flight preload belong to the resource fetcher on the host thread.
         let answer = sources.request(SourceRequest::StyleSheet(url.clone()));
@@ -76,7 +85,7 @@ pub(super) fn install_styles(
         // mounted at the document's construction. A frame's sheets are a
         // cascade of their own, in the frame's shadow tree, which the listed
         // sheets have no order against.
-        if matches!(target, SheetTarget::Document) {
+        if target.is_none() {
             slot.settle_sheets(&thread)?;
         }
         settle_style_sheet(slot.document_mut(), &thread, &token, url, answer, target)?;
@@ -85,8 +94,8 @@ pub(super) fn install_styles(
 }
 
 /// Waits inside a job for the answer to one author stylesheet request, then
-/// mounts it on `target` — the document, or one frame's shadow root — after
-/// every sheet it already holds.
+/// mounts it on `shadow` — one shadow root, or the document for `None` —
+/// after every sheet it already holds.
 ///
 /// The one path both kinds of author sheet take: `adoptStyleSheet` with the
 /// answer to the request it just made, and the first `__FlushElementTree`
@@ -100,7 +109,7 @@ pub(super) fn settle_style_sheet(
     token: &CancellationToken,
     url: &str,
     answer: SourceAnswer,
-    target: SheetTarget,
+    shadow: Option<dom::NodeId>,
 ) -> Result<(), String> {
     let sheet = match wait_for_source(thread, token, answer) {
         Ok(LoadedSource::StyleSheet(sheet)) => Ok(sheet),
@@ -110,17 +119,17 @@ pub(super) fn settle_style_sheet(
         Err(reason) => Err(reason),
     }
     .map_err(|reason| format!("loading stylesheet {url}: {reason}"))?;
-    match (target, sheet) {
-        (SheetTarget::Document, StyleSheetSource::Text(css)) => {
+    match (shadow, sheet) {
+        (None, StyleSheetSource::Text(css)) => {
             crate::style::add_style_sheet_text(document, &css);
         }
-        (SheetTarget::Document, StyleSheetSource::Preparsed(sheet)) => {
+        (None, StyleSheetSource::Preparsed(sheet)) => {
             crate::style::add_preparsed_style_sheet(document, &sheet);
         }
-        (SheetTarget::Shadow(shadow), StyleSheetSource::Text(css)) => {
+        (Some(shadow), StyleSheetSource::Text(css)) => {
             crate::style::add_style_sheet_text_to_shadow(document, shadow, &css);
         }
-        (SheetTarget::Shadow(shadow), StyleSheetSource::Preparsed(sheet)) => {
+        (Some(shadow), StyleSheetSource::Preparsed(sheet)) => {
             crate::style::add_preparsed_style_sheet_to_shadow(document, shadow, &sheet);
         }
     }

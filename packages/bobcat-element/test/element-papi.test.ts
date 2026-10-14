@@ -558,6 +558,10 @@ describe("installation", () => {
         // Not a PAPI member: the lifecycle export the boot module
         // constructs, which `MTS_CHUNK_PREAMBLE` does not import.
         "Document",
+        // Nor these two: `bobcat:frame-boot` chooses a frame realm's page
+        // root, and `bobcat:frame` finds a frame's handle by its id.
+        "__BobcatUsePageRoot",
+        "__BobcatHandleOf",
       ].sort(),
     );
     // The six every event carries; the detail numbers are a rest parameter,
@@ -640,6 +644,13 @@ describe("__CreatePage", () => {
     expect(first).toBeTypeOf("object");
     expect(second).toBe(first);
     expect(mock.named("createPage")).toHaveLength(2);
+  });
+
+  it("refuses a page root once the realm's page is chosen", () => {
+    const page = __CreatePage("card", 0);
+    expect(() => elementModule.__BobcatUsePageRoot(99)).toThrow(TypeError);
+    expect(__CreatePage("card", 0)).toBe(page);
+    expect(elementModule.__BobcatHandleOf(elementModule.__GetElementUniqueID(page) as number)).toBe(page);
   });
 
   it("ignores its arguments entirely", () => {

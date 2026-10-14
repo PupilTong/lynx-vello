@@ -18,8 +18,9 @@
 //! per realm key, and a child has none of its own, so its `false` would
 //! cancel its parent's demand (`docs/tracking/deviations.md`). What else a
 //! child gets is its owner's [`ChildHostModules`], if the owner names any:
-//! an MTS realm's children get the page's document members, bound to no
-//! frame until one binds them (`main/runtime/frames.rs`), and a worker
+//! an MTS realm's children get the page's document members, the same code
+//! over the same document, with a `closeRealm` that sets the child's
+//! `retired` flag (`main/runtime/lib.rs`'s `DocumentHost`), and a worker
 //! realm's get nothing more, so no child has a worker member. Grandchildren
 //! are in the same flat list, and get the same modules, because every child
 //! is the owner's to service.
@@ -31,8 +32,9 @@
 //! step before the deadline releases every child nothing needs any more:
 //! nothing of another realm refers to it, it has no timer armed and no load
 //! or settle in flight. That is the only place a child is freed while its
-//! owner lives, and it is outside every JavaScript call, because freeing a
-//! realm collects the whole runtime.
+//! owner lives (the MTS realm also runs it right after a `frame`'s
+//! disconnection), and it is outside every JavaScript call, because freeing
+//! a realm collects the whole runtime.
 //!
 //! Every operation on one child detaches it from the list first and puts it
 //! back after, so a `new ShadowRealm()` the child's code makes pushes a
@@ -277,8 +279,10 @@ impl ChildRealms {
     /// nothing of another realm with no timer armed and nothing in flight.
     /// Answers with how many were freed.
     ///
-    /// Run by the epilogue alone, outside every JavaScript call: freeing a
-    /// realm collects the whole runtime. One child's release can leave
+    /// Run by the epilogue, and by the MTS realm right after it hands a
+    /// `frame`'s disconnection to `bobcat:frame`, so the child that disposal
+    /// retired goes in that entry; always outside every JavaScript call:
+    /// freeing a realm collects the whole runtime. One child's release can leave
     /// another unreferenced — a grandchild only its `ShadowRealm` held — so
     /// this repeats until nothing more goes.
     pub(crate) fn release_unneeded(&self) -> usize {

@@ -110,7 +110,9 @@ import { frameSourceChanged } from "bobcat:frame";
 // A `frame` handle — from `__CreateFrame`, or `__CreateElement("frame")` — is
 // marked under a realm-local symbol, and an `src` written to it is handed,
 // after the native write, to `bobcat:frame`, which loads that card into a
-// `ShadowRealm` bound to the frame. Native's `FiberCreateFrame`
+// `ShadowRealm` that renders under the frame's nested page. In that child,
+// `__CreatePage` answers the nested page: `bobcat:frame-boot` names it with
+// `__BobcatUsePageRoot` before the card runs. Native's `FiberCreateFrame`
 // (`lynx/core/runtime/lepus/bindings/renderer_functions.cc`) and web-core's
 // `__CreateFrame` (`CreateFramePAPI = CreateViewPAPI`) both take the parent
 // component id alone.
@@ -767,6 +769,8 @@ export class Document {
 }
 
 let pageHandle: Handle | undefined;
+/** The page root `__BobcatUsePageRoot` chose, which `__CreatePage` answers without asking the host. */
+let pageRootHandle: Handle | undefined;
 
 function createHandle(nodeId: number): Handle {
   const handle: Handle = { [nodeIdSymbol]: nodeId };
@@ -801,6 +805,14 @@ function handleOf(nodeId: number): Handle | undefined {
     handlesByNodeId.delete(nodeId);
   }
   return handle;
+}
+
+/**
+ * The live handle this realm holds for `nodeId`, or undefined: how
+ * `bobcat:frame` finds the frame the host's connection calls name.
+ */
+export function __BobcatHandleOf(nodeId: number): object | undefined {
+  return handleOf(nodeId);
 }
 
 function nodeIdOf(handle: unknown): number {
@@ -879,21 +891,46 @@ function adoptUnder(parentNodeId: number, child: unknown): undefined {
   return undefined;
 }
 
+/**
+ * The handle `__CreatePage` answers: the realm's page root, which is never
+ * registered for collection and so never dropped. It is still indexed,
+ * because an event whose path reaches the page has to find it.
+ */
+function holdPageRoot(nodeId: number): Handle {
+  const handle: Handle = { [nodeIdSymbol]: nodeId };
+  handlesByNodeId.set(nodeId, new WeakRef(handle));
+  return handle;
+}
+
 export function __CreatePage(
   componentID?: unknown,
   componentCSSID?: unknown,
 ): object {
   void componentID;
   void componentCSSID;
+  // A frame's realm was handed its nested page before its card ran.
+  if (pageRootHandle !== undefined) return pageRootHandle;
+  // The page realm's is the document's permanent `page`, minted on the first
+  // call; every call still marks it, as the host's `createPage` does.
   const nodeId = createPage();
-  if (pageHandle === undefined) {
-    // The page handle is permanent and exempt from the collection
-    // backstop: the page can never be dropped. It is still indexed, because
-    // an event whose path reaches the page has to find it.
-    pageHandle = { [nodeIdSymbol]: nodeId };
-    handlesByNodeId.set(nodeId, new WeakRef(pageHandle));
-  }
+  pageHandle ??= holdPageRoot(nodeId);
   return pageHandle;
+}
+
+/**
+ * Makes `nodeId` this realm's page root, which every `__CreatePage` answers
+ * from now on: `bobcat:frame-boot` names the nested page of the frame its
+ * card renders in (`framePage`) before the card runs. The handle is held by
+ * this module and never registered for collection, like the page realm's,
+ * so no collection of this realm's ever drops the nested page, which is the
+ * frame's for its whole life. A realm whose page is already chosen refuses.
+ */
+export function __BobcatUsePageRoot(nodeId: number): undefined {
+  if (pageHandle !== undefined) {
+    throw new TypeError("this realm's page root is already chosen");
+  }
+  pageRootHandle = pageHandle = holdPageRoot(nodeId);
+  return undefined;
 }
 
 export function __CreateElement(

@@ -42,15 +42,15 @@ use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
 use crate::esm::{
     ANIMATION_FRAME_MODULE_SPECIFIER, BTS_MODULE_SPECIFIER, ELEMENT_MODULE_SPECIFIER,
-    HOST_MODULE_SPECIFIER, RUNTIME_MODULE_SPECIFIER, TIMER_MODULE_SPECIFIER,
-    WORKER_CLASS_MODULE_SPECIFIER,
+    FRAME_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER, RUNTIME_MODULE_SPECIFIER,
+    TIMER_MODULE_SPECIFIER, WORKER_CLASS_MODULE_SPECIFIER,
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::exposure::{Exposure, is_exposure_attribute};
 use crate::main::record::write_record_field;
 use crate::main::tree::{
-    Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, LynxDocument, PageConfig,
-    invoke_base_method, is_svg, new_document,
+    Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, LynxDocument, MAX_FRAME_DEPTH,
+    PageConfig, frame_depth, invoke_base_method, is_svg, nested_page, new_document,
 };
 use crate::realm::child::ChildHostModules;
 use crate::realm::policy::context_of;
@@ -61,6 +61,10 @@ use crate::view::{LynxViewError, ScreenMetrics, ScriptSource, StartupSource, Vie
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
+/// The `bobcat:frame` exports a `frame`'s connection and disconnection are
+/// handed to; see [`MainThreadRuntime::dispatch_component_events`].
+const FRAME_CONNECTED_EXPORT: &str = "__BobcatFrameConnected";
+const FRAME_DISCONNECTED_EXPORT: &str = "__BobcatFrameDisconnected";
 /// The `bobcat:runtime` export one global exposure record list is handed to;
 /// see [`MainThreadRuntime::send_exposure_records`].
 const EXPOSURE_EXPORT: &str = "__BobcatSendExposure";
@@ -285,10 +289,7 @@ fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut Arguments<'a>) {
 /// heap. Compiled `ReactLynx` records are a handful of properties.
 const INLINE_DECLARATIONS: usize = 16;
 
-mod frames;
 mod style_sheets;
-
-use self::frames::{FrameBinding, RealmRoot};
 
 /// A card's MTS body as the entry `bobcat-source` registers for it:
 /// [`crate::esm::MTS_CHUNK_PREAMBLE`], then the body on the preamble's own
@@ -574,8 +575,8 @@ struct DocumentSlot {
     removals: u32,
     /// The event names the view's realms have a registration for anywhere,
     /// as their global edges said, each with how many realms hold it: the
-    /// page realm and every frame realm (`frames.rs`), so a frame realm that
-    /// closes `tap` leaves the page's `tap` open.
+    /// page realm and every `ShadowRealm` child a `frame` renders in, so a
+    /// frame realm that closes `tap` leaves the page's `tap` open.
     listened: FxHashMap<Arc<str>, u32>,
     /// The event names the document's components observe on an element that
     /// exists, as [`dom::Document::take_observed_name_edges`] said when last
@@ -589,9 +590,6 @@ struct DocumentSlot {
     /// takes a container out, and so does its node being freed. Bounded by
     /// the containers scrolling at once.
     scrolling: SmallVec<[dom::NodeId; 4]>,
-    /// Every bound `frame`, by its host: the nested page its child realm
-    /// renders into and that child's release flag (`frames.rs`).
-    frames: FxHashMap<dom::NodeId, FrameBinding>,
     /// Where committed frames leave for the painting side.
     outbox: ViewOutbox,
 }
@@ -625,7 +623,6 @@ impl DocumentSlot {
             listened: FxHashMap::default(),
             observed: FxHashSet::default(),
             scrolling: SmallVec::new(),
-            frames: FxHashMap::default(),
             outbox,
         }))
     }
@@ -945,28 +942,6 @@ impl DocumentSlot {
         Ok(())
     }
 
-    /// A frame realm's `__FlushElementTree`: [`Self::flush`] when the host's
-    /// own first flush has already settled what it waits for — the listed
-    /// sheets and the binding — and otherwise nothing, which leaves the
-    /// commit to the epilogue's [`Self::commit_if_dirty`].
-    ///
-    /// A frame exists only once the host's entry has made one, so this skips
-    /// at most during the host's boot; it never parks, because the parking
-    /// is the host's to do in its own flush.
-    fn flush_without_parking(
-        &mut self,
-        thread: &crate::jobs::JsThreadHandle,
-    ) -> Result<(), String> {
-        if !self.sheets.is_empty() || self.failed_sheet.is_some() {
-            return Ok(());
-        }
-        self.adopt_metrics();
-        if !self.bound {
-            return Ok(());
-        }
-        self.flush(thread)
-    }
-
     /// Mounts every listed author sheet not mounted yet, in listed order,
     /// waiting inside the job for each answer that has not arrived.
     ///
@@ -991,7 +966,7 @@ impl DocumentSlot {
                 &token,
                 &url,
                 answer,
-                frames::SheetTarget::Document,
+                None,
             ) {
                 self.failed_sheet = Some(error.clone());
                 return Err(error);
@@ -1241,16 +1216,11 @@ impl MainThreadRuntime {
             thread,
             None,
             ScriptSource::Main,
-            // Every child gets the same document members, rooted at the
-            // frame it binds.
+            // Every child gets the same document members.
             Some(Rc::clone(&document) as Rc<dyn ChildHostModules>),
             |engine| {
                 document
-                    .install_members(
-                        engine,
-                        &Rc::new(RealmRoot::Document),
-                        startup_strings(&mut startup),
-                    )
+                    .install_members(engine, startup_strings(&mut startup), None)
                     .map_err(MainThreadError::into_script_error)?;
                 // The transport alone: the view's modules are the BTS's, and
                 // this realm has no `NativeModules`. What the transport is
@@ -1665,7 +1635,8 @@ impl MainThreadRuntime {
     /// `svg` and `overlay` components, the dialog's UI methods and the
     /// scroll events ([`Self::adopt_scroll_offsets`],
     /// [`Self::queue_instant_scroll_events`]) have queued, in the order they
-    /// formed.
+    /// formed, and hands each connection and disconnection the `frame`
+    /// component queued to `bobcat:frame` ([`Self::frame_connection`]).
     ///
     /// Called by the entry the page posts for the batch and by nothing else:
     /// the events are tasks, not part of the entry that produced them. Each
@@ -1743,6 +1714,12 @@ impl MainThreadRuntime {
                     (node, ERROR_EVENT, false)
                 }
                 ComponentEvent::Plain { node, name } => (node, name, false),
+                ComponentEvent::Frame { node, connected } => {
+                    if let Err(error) = self.frame_connection(js_runtime, node, connected) {
+                        failures.push(error);
+                    }
+                    continue;
+                }
                 ComponentEvent::Scroll { node, name, delta } => {
                     let scroll_box = self.slot.borrow_mut().document_mut().scroll_box(node);
                     let (offset, size) = scroll_box.map_or_else(
@@ -1788,6 +1765,47 @@ impl MainThreadRuntime {
             }
         }
         failures
+    }
+
+    /// Hands one `frame`'s connection (`connected`) or disconnection to
+    /// `bobcat:frame` in the page realm: `__BobcatFrameConnected(frameId)`,
+    /// which loads the card the frame's `src` names if none is loaded, as
+    /// web-core's `LynxView` renders on `connectedCallback`, or
+    /// `__BobcatFrameDisconnected(frameId)`, which disposes of it, as
+    /// `disconnectedCallback` does. What happens is the module's to decide:
+    /// a frame whose handle is another realm's, or that never had a `src`,
+    /// is nothing to it.
+    ///
+    /// After a disconnection, the children nothing needs any more are freed
+    /// here, outside the call, so the child the disposal retired goes in
+    /// this entry rather than waiting for its epilogue.
+    fn frame_connection(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+        frame: dom::NodeId,
+        connected: bool,
+    ) -> Result<(), MainThreadError> {
+        let export = if connected {
+            FRAME_CONNECTED_EXPORT
+        } else {
+            FRAME_DISCONNECTED_EXPORT
+        };
+        let result = self
+            .core
+            .engine
+            .call_module_export(
+                js_runtime,
+                FRAME_MODULE_SPECIFIER,
+                export,
+                &[HostArgument::Number(packed_node_id(frame))],
+            )
+            .map(drop)
+            .map_err(|error| MainThreadError::from_engine("delivering a frame connection", error));
+        let finished = self.finish_batch(js_runtime, result.is_ok());
+        if !connected {
+            self.core.children.release_unneeded();
+        }
+        result.and(finished)
     }
 
     /// Runs `probe` against the realm's document — the observation seam for
@@ -2785,11 +2803,16 @@ await Promise.resolve().then(() => __FlushElementTree());
 /// the page realm, and each of its `ShadowRealm` children, which are the
 /// realms a `frame` renders.
 ///
-/// One set of members for both (user ruling): the same slot, the same
-/// outbox and thread, the same listener name count. What a child's members
-/// differ in is its [`RealmRoot`] alone, and what it does not get — the
-/// startup strings answer `undefined`, and the `Worker` and native module
-/// members are the page realm's, installed beside these by
+/// One set of members for both (user ruling), and the same code: the same
+/// slot, the same outbox and thread, the same listener name count, the same
+/// `createPage` and the same `flushElementTree`. Nothing in it knows which
+/// page a realm renders: a child's `bobcat:element` answers `__CreatePage`
+/// with the nested page `bobcat:frame-boot` handed it
+/// (`__BobcatUsePageRoot`), and its card's sheet goes to the frame's shadow
+/// root because `adoptStyleSheet` was told so. What a child differs in is
+/// its `retired` flag, which its `closeRealm` sets, and what it does not get
+/// — the startup strings answer `undefined`, and the `Worker` and native
+/// module members are the page realm's, installed beside these by
 /// [`MainThreadRuntime::new`].
 ///
 /// Held by every realm's `ShadowRealm` hook, so it holds no engine: the
@@ -2803,25 +2826,25 @@ struct DocumentHost {
 }
 
 impl DocumentHost {
-    /// Installs the document members into one realm, rooted at `root`, with
-    /// `startup` as its one-shot strings.
+    /// Installs the document members into one realm, with `startup` as its
+    /// one-shot strings and `retired` as the flag its `closeRealm` sets:
+    /// `None` for the page realm, which cannot close itself.
     fn install_members(
         &self,
         engine: &mut ScriptEngine,
-        root: &Rc<RealmRoot>,
         startup: [(&'static str, Option<String>); 4],
+        retired: Option<Rc<Cell<bool>>>,
     ) -> Result<(), MainThreadError> {
-        install_host_module(engine, &self.slot, root, self.thread.clone())?;
+        install_host_module(engine, &self.slot, self.thread.clone(), retired)?;
         install_event_members(engine, &self.slot)?;
-        style_sheets::install_styles(engine, &self.slot, root, &self.outbox, self.thread.clone())?;
-        install_startup_strings(engine, startup)?;
-        frames::install_frame_members(engine, &self.slot, root)
+        style_sheets::install_styles(engine, &self.slot, &self.outbox, self.thread.clone())?;
+        install_startup_strings(engine, startup)
     }
 }
 
 impl ChildHostModules for DocumentHost {
-    /// A child's members: rooted at no frame until its `bindFrame`, and no
-    /// startup strings, which are the page's.
+    /// A child's members: the page realm's, with no startup strings, which
+    /// are the page's, and a `closeRealm` that retires the child.
     fn install(
         &self,
         engine: &mut ScriptEngine,
@@ -2829,8 +2852,8 @@ impl ChildHostModules for DocumentHost {
     ) -> Result<(), ScriptError> {
         self.install_members(
             engine,
-            &Rc::new(RealmRoot::frame(retired)),
             STARTUP_STRINGS.map(|name| (name, None)),
+            Some(retired),
         )
         .map_err(MainThreadError::into_script_error)
     }
@@ -2878,21 +2901,17 @@ macro_rules! tree_members {
 fn install_host_module(
     engine: &mut ScriptEngine,
     handle: &Rc<RefCell<DocumentSlot>>,
-    // What `createPage` answers and whether `flushElementTree` parks.
-    root: &Rc<RealmRoot>,
     // `flushElementTree`'s, for the waits it makes on the listed author sheets
     // and before a painter has bound.
     thread: crate::jobs::JsThreadHandle,
+    // A child's own release flag, which its `closeRealm` sets; `None` in the
+    // page realm.
+    retired: Option<Rc<Cell<bool>>>,
 ) -> Result<(), MainThreadError> {
-    let tree = Rc::clone(handle);
-    let page = Rc::clone(root);
-    install(engine, "createPage", 0, move |_arguments| {
-        const NAME: &str = "bobcat-internal:host.createPage";
-        let mut handle = borrow_slot(NAME, &tree)?;
-        Ok(node_id_value(page.page(handle.document_mut())?))
-    })?;
-
     tree_members! { engine, handle;
+        fn createPage() |document| {
+            Ok(node_id_value(document.document_element().id()))
+        }
         fn createElement(tag: string_argument) |document| {
             Ok(node_id_value(document.create_element(tag, ())))
         }
@@ -2963,8 +2982,15 @@ fn install_host_module(
     // listener the realm had on it is gone too, since those lived on the
     // handle — which the realm settles itself, before it calls this, by
     // closing whatever event names that handle alone held open.
+    let closed = retired.clone();
     install(engine, "dropElement", 1, move |arguments| {
         const NAME: &str = "bobcat-internal:host.dropElement";
+        // A closed child's handles may still be finalized before the
+        // epilogue frees the realm, naming nodes `resetFrame` has already
+        // freed: nothing of the realm's is the document's to settle any more.
+        if closed.as_ref().is_some_and(|closed| closed.get()) {
+            return Ok(HostValue::Undefined);
+        }
         let node = node_id_argument(NAME, arguments, 0)?;
         let mut tree = borrow_slot(NAME, &tree)?;
         let document = tree.document_mut();
@@ -2979,21 +3005,73 @@ fn install_host_module(
                  graph and the tree disagree"
             ));
         }
-        // A bound frame takes its nested page and its child realm with it.
-        tree.release_frame(node);
-        tree.document_mut().drop_element(node);
+        document.drop_element(node);
         Ok(HostValue::Undefined)
     })?;
 
     let tree = Rc::clone(handle);
-    let parks = root.parks();
     install(engine, "flushElementTree", 0, move |_arguments| {
-        let mut slot = borrow_slot("bobcat-internal:host.flushElementTree", &tree)?;
-        if parks {
-            slot.flush(&thread)?;
-        } else {
-            slot.flush_without_parking(&thread)?;
+        borrow_slot("bobcat-internal:host.flushElementTree", &tree)?.flush(&thread)?;
+        Ok(HostValue::Undefined)
+    })?;
+
+    install_nested_page_members(engine, handle, retired)
+}
+
+/// Installs the three members a nested card's realms speak to, all generic:
+/// `framePage` reads a `frame`'s nested page, `resetFrame` empties it, and
+/// `closeRealm` retires the realm that calls it. Which realm renders which
+/// frame, and when one is let go of, is `bobcat:frame`'s to decide; nothing
+/// here keeps a record of it.
+fn install_nested_page_members(
+    engine: &mut ScriptEngine,
+    handle: &Rc<RefCell<DocumentSlot>>,
+    retired: Option<Rc<Cell<bool>>>,
+) -> Result<(), MainThreadError> {
+    tree_members! { engine, handle;
+        // The nested page a `frame` component built with the element, which
+        // lives as long as the frame. Refused past `MAX_FRAME_DEPTH`
+        // frames, so a card that embeds itself stops there.
+        fn framePage(frame: node_id_argument) |document| {
+            validate_live_element(document, NAME, frame)?;
+            let page = nested_page(document, frame)
+                .ok_or_else(|| format!("{NAME} requires a frame element"))?;
+            if frame_depth(document, frame) > MAX_FRAME_DEPTH {
+                return Err(format!(
+                    "{NAME}: frames nest at most {MAX_FRAME_DEPTH} deep"
+                ));
+            }
+            Ok(node_id_value(page))
         }
+        // Frees every child of a frame's nested page with its whole subtree
+        // — it is inside a shadow tree, so `dom` frees what is under it
+        // outright — and every sheet mounted on the frame's shadow root, so
+        // the card loaded next is styled by its own alone. The nested page
+        // stays.
+        fn resetFrame(frame: node_id_argument) |document| {
+            validate_live_element(document, NAME, frame)?;
+            let page = nested_page(document, frame)
+                .ok_or_else(|| format!("{NAME} requires a frame element"))?;
+            let shadow = document
+                .shadow_root(frame)
+                .expect("a nested page sits in its frame's shadow root");
+            let children: SmallVec<[dom::NodeId; 8]> = document
+                .get(page)
+                .map(|page| page.child_ids().iter().copied().collect())
+                .unwrap_or_default();
+            for child in children {
+                document.drop_element(child);
+            }
+            document.clear_shadow_stylesheets(shadow);
+            Ok(HostValue::Undefined)
+        }
+    }
+
+    install(engine, "closeRealm", 0, move |_arguments| {
+        let Some(retired) = &retired else {
+            return Err("the page realm cannot close itself".to_owned());
+        };
+        retired.set(true);
         Ok(HostValue::Undefined)
     })?;
 

@@ -30,7 +30,8 @@
 //! `content`, its `parseEnd`, `link` and `imageTap` events and its
 //! `getContent`, `getImages`, `getParseResult`, `getTextBoundingRect` and
 //! `getCharIndexByPoint` UI methods ([`markdown`]), and the frame's open
-//! shadow root, which the nested page of the realm bound to it goes into
+//! shadow root with the nested page in it, and the
+//! `connected`/`disconnected` signals its card's lifecycle follows
 //! ([`frame`]). A component's UI methods are its
 //! [`dom::CustomElement::invoke`], which the runtime's `callElementMethod`
 //! reaches through [`dom::Document::invoke_element_method`]. The methods
@@ -75,7 +76,7 @@ use std::rc::Rc;
 use dom::{Document, ImageOutcome, NodeId, StylesheetOrigin};
 
 pub(crate) use self::base_methods::invoke_base_method;
-pub(crate) use self::frame::is_frame;
+pub(crate) use self::frame::{MAX_FRAME_DEPTH, frame_depth, nested_page};
 pub(crate) use self::svg::is_svg;
 pub(crate) use self::swiper::Autoplays;
 pub use self::ua_sheet::PageConfig;
@@ -97,8 +98,9 @@ pub(super) const SLOT_CHANGE: &str = "slotchange";
 /// `events` is the queue the `image` and `svg` components leave a source that
 /// settled at its bind in, the `dialog` component the `close` and `cancel` its
 /// methods queue, the `overlay` component its `showoverlay` and
-/// `dismissoverlay`, and the `markdown` component its `parseEnd`, `link` and
-/// `imageTap`, for the runtime to dispatch once it is out of the
+/// `dismissoverlay`, the `markdown` component its `parseEnd`, `link` and
+/// `imageTap`, and the `frame` component its connections and
+/// disconnections, for the runtime to dispatch once it is out of the
 /// JavaScript call that caused them. `autoplays` is where the `x-swiper`
 /// component keeps its autoplay timers, for the runtime to wait out and run.
 #[must_use]
@@ -123,8 +125,8 @@ pub(crate) fn new_document(
     markdown::define(&mut document, events.clone());
     dialog::define(&mut document, events.clone());
     // After `dialog`: every overlay builds one in its shadow tree.
-    overlay::define(&mut document, events);
-    frame::define(&mut document);
+    overlay::define(&mut document, events.clone());
+    frame::define(&mut document, events);
     document.add_stylesheet(
         &ua_sheet::ua_stylesheet(config),
         StylesheetOrigin::UserAgent,
@@ -187,7 +189,8 @@ pub(super) fn element_children(
 
 /// One event a component owes script, at the element the component belongs
 /// to. None of them bubbles; a [`ComponentEvent::Detailed`] alone is
-/// composed.
+/// composed. A [`ComponentEvent::Frame`] is the one that script does not
+/// hear as an event: it is a call into `bobcat:frame`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ComponentEvent {
     /// An `<image>`'s or `<svg>`'s own source settled: `load`, which carries
@@ -225,6 +228,11 @@ pub(crate) enum ComponentEvent {
         name: &'static str,
         detail: ComponentDetail,
     },
+    /// A `frame` was connected to the document or disconnected from it
+    /// ([`frame`]): not an event script hears, but a call into
+    /// `bobcat:frame`, which loads the frame's card on a connection and
+    /// disposes of it on a disconnection.
+    Frame { node: NodeId, connected: bool },
 }
 
 /// The `detail` of a [`ComponentEvent::Detailed`]: one variant per *shape*
@@ -267,9 +275,9 @@ pub(crate) enum ComponentDetail {
 /// A handle rather than a field, because the producers are on both sides of
 /// the document: the `image` component, which is inside it and reaches nothing
 /// else; the runtime's own image report path, which is outside it; the
-/// `dialog` component's UI methods; and the `overlay` component, inside the
-/// document like `image`, as is any component that queues a
-/// [`ComponentEvent::Detailed`].
+/// `dialog` component's UI methods; and the `overlay` and `frame`
+/// components, inside the document like `image`, as is any component that
+/// queues a [`ComponentEvent::Detailed`].
 /// Each holds a clone of this one queue, and the runtime drains it in an entry
 /// of its own, posted by the epilogue of the entry that filled it
 /// (`docs/runtime-architecture.md` has the entry boundary,
@@ -320,6 +328,13 @@ impl ComponentEvents {
         self.0
             .borrow_mut()
             .push(ComponentEvent::Detailed { node, name, detail });
+    }
+
+    /// Queues a `frame`'s connection (`connected`) or disconnection.
+    pub(crate) fn queue_frame(&self, node: NodeId, connected: bool) {
+        self.0
+            .borrow_mut()
+            .push(ComponentEvent::Frame { node, connected });
     }
 
     /// Takes everything queued since the last drain.

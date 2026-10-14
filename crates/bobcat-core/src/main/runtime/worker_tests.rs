@@ -4151,7 +4151,7 @@ fn a_callback_for_a_worker_that_has_ended_says_so_and_invoking_it_does_nothing()
 }
 
 /// A worker realm's children get the core alone: no document members, so
-/// `bobcat:element` does not link in one, and no `bindFrame`.
+/// `bobcat:element` does not link in one, and no `framePage`.
 #[test]
 fn a_worker_realms_children_have_no_document_members() {
     let mut pair = Pair::new(
@@ -4169,7 +4169,7 @@ fn a_worker_realms_children_have_no_document_members() {
         try { await realm.importValue('bobcat:element', '__CreatePage'); } catch (error) { failed = error; }
         postMessage(failed instanceof TypeError ? 'refused' : 'linked ' + failed);
         postMessage(await new Promise(resolve => realm.evaluate(`report => {
-            import('bobcat-internal:host').then(H => report(typeof H.bindFrame));
+            import('bobcat-internal:host').then(H => report(typeof H.framePage));
         }`)(resolve)));
     ",
     );

@@ -2346,18 +2346,21 @@ consequential choice about whether to follow the spec or the quirk.
   - *Events fire on transitions only.* web-core re-runs `showModal()` and
     fires `showoverlay` for every write of a showing value (`"true"` to
     `""`); here a rewrite that keeps the overlay shown fires nothing.
-- **`<frame>` renders its card in the host's document**, in the frame's shadow
-  root, driven by a `ShadowRealm` child of the MTS realm bound to it
-  (`bobcat-core`'s `main/runtime/frames.rs`, user ruling: one PAPI, no second
-  engine). Native stands up a second `LynxTemplateRender` per frame
-  (`LynxFrameView.java`) and web-core a nested `lynx-view` with an iframe
-  realm; what follows from sharing one document:
-  - *A disconnected frame keeps its realm.* The frame component has no
-    `disconnected_callback`: removing a bound frame leaves its nested page and
-    its child realm in place, and only `releaseFrame` — or a `dropElement` of
-    the frame once its handle is collected — frees them. Native tears a
-    frame's render down with its UI; web-core's `lynx-view` disposes in its
-    `disconnectedCallback`.
+- **`<frame>` renders its card in the host's document**, under the nested page
+  the frame's custom element keeps in its shadow root, driven by a
+  `ShadowRealm` child of the MTS realm (`bobcat-core`'s `main/tree/frame.rs`
+  and `bobcat-element`'s `frame.ts`/`frame-boot.ts`, user rulings: one PAPI,
+  no second engine; a custom-element ability). Native stands up a second
+  `LynxTemplateRender` per frame (`LynxFrameView.java`) and web-core a nested
+  `lynx-view` with an iframe realm; what follows from sharing one document:
+  - *A frame inside a nested card is disconnected for nobody but the page
+    realm.* Connections and disconnections reach `bobcat:frame` in the page
+    realm alone, which holds no handle for a frame a nested card created; so
+    a nested card that removes one of its own frames and keeps its handle
+    keeps that frame's card running. Letting go of the handle disposes of it
+    (the child's `FinalizationRegistry`), and so does the outer card going:
+    its `dispose` closes every card its frames loaded. web-core's nested
+    `lynx-view` hears its own `disconnectedCallback` at any depth.
   - *The nested card's `PageConfig` is ignored.* The nested page is styled by
     the host document's UA sheet, built from the host's
     `defaultDisplayLinear`, `defaultOverflowVisible` and the rest; native and
