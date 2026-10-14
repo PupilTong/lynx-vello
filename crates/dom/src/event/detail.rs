@@ -22,6 +22,7 @@ use euclid::default::{Point2D, Vector2D};
 use smallvec::SmallVec;
 
 use crate::input::{Modifiers, PointerId, PointerKind};
+use crate::tree::document::NodeId;
 
 /// In a touch event's `touches`: the finger is still down once this event
 /// has been applied, so a lifted or cancelled finger never carries it.
@@ -98,6 +99,23 @@ pub enum EventDetail {
         repeat: bool,
         modifiers: Modifiers,
     },
+    /// `beforeinput` or `input` (Input Events Level 2): `InputEvent.inputType`,
+    /// `data` (`None` for the deletions and `insertLineBreak`) and
+    /// `isComposing`. What an [`EditEvent`](crate::editing::EditEvent) of
+    /// either kind carries.
+    Input {
+        input_type: &'static str,
+        data: Option<Arc<str>>,
+        is_composing: bool,
+    },
+    /// `compositionstart`, `compositionupdate` or `compositionend` (UI
+    /// Events): `CompositionEvent.data`.
+    Composition { data: Arc<str> },
+    /// `focus`, `blur`, `focusin` or `focusout` (UI Events):
+    /// `FocusEvent.relatedTarget` — for `focus`/`focusin` the element that
+    /// lost focus, for `blur`/`focusout` the one gaining it — as
+    /// [`FocusEvent`](crate::editing::FocusEvent) records it.
+    Focus { related_target: Option<NodeId> },
     /// An element's exposure changed. The payload is read off the target at
     /// delivery, so the variant carries nothing.
     Exposure,
@@ -116,7 +134,13 @@ impl EventDetail {
             Self::Pointer { position, .. }
             | Self::Wheel { position, .. }
             | Self::Touch { position, .. } => Some(*position),
-            Self::None | Self::Key { .. } | Self::Exposure | Self::ContentVisibility { .. } => None,
+            Self::None
+            | Self::Key { .. }
+            | Self::Input { .. }
+            | Self::Composition { .. }
+            | Self::Focus { .. }
+            | Self::Exposure
+            | Self::ContentVisibility { .. } => None,
         }
     }
 
