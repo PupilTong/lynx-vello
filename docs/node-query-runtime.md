@@ -122,9 +122,21 @@ queue without clearing it. Selection captures its root at select time.
   box overlaps the scrollport, `id` and `itemKey` the attributes (empty when
   absent), `index` the position among the list's `list-item` children, the
   rect in CSS px relative to the list's scrollport (native's coordinates;
-  web-core reports the viewport's). `autoScroll` and `getScrollInfo` are
-  code 3, and a `list` has no `scrollTo` of its own, so the base set's
-  CSSOM-View `scrollTo` answers one.
+  web-core reports the viewport's). `getScrollInfo` is code 3, and a `list`
+  has no `scrollTo` of its own, so the base set's CSSOM-View `scrollTo`
+  answers one.
+  `autoScroll({rate, start = false, autoStop = true})` on a `scroll-view` or
+  a `list` (`scroll_container.rs`'s `auto_scroll`, shared) succeeds with no
+  data and moves nothing itself: a truthy `start` records a change of the
+  container's auto-scroll (`dom::Document::auto_scroll`) at `rate` CSS px
+  per second on the scrolling axis — a number, or a string read as
+  `scrollTo`'s `offset` is, negative toward the start edge — which the next
+  committed frame carries to the painter; a falsy or missing `start` records
+  the stop. The painter moves the axis on its own clock until the edge it
+  moves toward, where the auto-scroll ends unless `autoStop` is the JSON
+  `false`; the offsets come back through its posts as a user scroll's do. A
+  `start` with a zero, missing or unreadable `rate` fails with code 4 and
+  changes nothing.
   `show`, `showModal`, `close` and `requestClose` on a `dialog` are HTML's
   `HTMLDialogElement` methods and succeed with no data; HTML's
   `InvalidStateError` (`show` on a modal dialog, `showModal` on an open
@@ -217,7 +229,7 @@ native numeric-length conversion remain unsupported.
 
 Legacy component-scoped roots, direct MTS selector PAPI, UI invoke methods
 other than the base set's four (`boundingClientRect`, `scrollIntoView`,
-`scrollTo`, `scrollBy`), `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s three, a `list`'s four, an `x-refresh-view`'s three, a scroll coordinator's `setFoldExpanded`, a `text`'s `getTextBoundingRect` and a dialog's four (a `list`'s `autoScroll` and a coordinator's `getScrollInfo` among them), animation methods
+`scrollTo`, `scrollBy`), `selectTab`, a swiper's `scrollTo`, a `scroll-view`'s four, a `list`'s five, an `x-refresh-view`'s three, a scroll coordinator's `setFoldExpanded`, a `text`'s `getTextBoundingRect` and a dialog's four (a `list`'s and a coordinator's `getScrollInfo` among them), animation methods
 and cross-realm host objects remain pending.
 An `image`'s `startAnimate`/`pauseAnimation`/`resumeAnimation`/`stopAnimation`
 and a `text`'s `getSelectedText`/`setTextSelection` are code 3 for want of a

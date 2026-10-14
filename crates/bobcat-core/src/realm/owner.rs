@@ -71,6 +71,7 @@ use std::rc::Rc;
 use super::RealmCore;
 use super::child::{ChildKey, ChildRealms};
 use super::policy::{self, Row, Scene};
+use crate::clock::ClockInstant;
 use crate::future::HostFuture;
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, run_job};
 use crate::link::{HostOutbox, SourceAnswer};
@@ -180,6 +181,13 @@ pub(crate) trait RealmOwner: Sized + 'static {
     /// What this owner's role settles once the module loads and the future
     /// settles are spawned, before the next deadline is armed.
     fn after_settles(_owner: &Rc<Self>, _realm: &mut Self::Realm) {}
+
+    /// The earliest deadline `realm` waits for on its own account, which the
+    /// [`epilogue`] arms last beside its children's: its next timer, and for
+    /// a page whichever of that and its components' own timers comes first.
+    fn next_deadline(realm: &mut Self::Realm) -> Option<ClockInstant> {
+        Self::core(realm).timers.next_deadline()
+    }
 
     /// What this owner's role owes the end beyond the lifetime's own, run
     /// once, by the call to [`end`] that ended it. It touches no realm borrow,
@@ -344,8 +352,9 @@ pub(crate) fn enter_now<O: RealmOwner, T>(
 /// 13. **[`RealmOwner::after_settles`]**: a page's `@font-face` loads.
 /// 14. **The release of every child nothing needs any more**, outside every JavaScript call: see
 ///     [`ChildRealms::release_unneeded`]. Nothing else frees a child while its owner lives.
-/// 15. **The next timer deadline** — the earliest of the realm's own and every child's —
-///     republished only when it moved.
+/// 15. **The next deadline** — the earliest of the realm's own ([`RealmOwner::next_deadline`]: its
+///     next timer, and on a page an `x-swiper`'s next autoplay turn if that is sooner) and every
+///     child's — republished only when it moved.
 /// 16. **The checkpoint generation**, last, so it names the generation this entry ran the shared
 ///     job queue up to: the clock task compares a bump against it to tell this owner's own entries
 ///     from a sibling's.
@@ -427,10 +436,7 @@ fn epilogue<O: RealmOwner>(owner: &Rc<O>, realm: &mut O::Realm, js: &mut ScriptR
     }
     O::after_settles(owner, realm);
     children.release_unneeded();
-    let deadline = match (
-        O::core(realm).timers.next_deadline(),
-        children.next_deadline(),
-    ) {
+    let deadline = match (O::next_deadline(realm), children.next_deadline()) {
         (Some(own), Some(child)) => Some(own.min(child)),
         (own, child) => own.or(child),
     };

@@ -23,8 +23,8 @@ use super::{AnimationSample, PaintOrder, SpaceSamples};
 use crate::NodeId;
 use crate::paint::compose::{self, ComposeOp, FilterGroup};
 use crate::scroll::{
-    CaptureAxes, ChainLink, ScrollAxes, ScrollRequest, SnapAxis, SnapPoint, SnapStrictness,
-    unwrap_axis, wrap_axis, wrap_period_axis,
+    AutoScrollRequest, CaptureAxes, ChainLink, ScrollAxes, ScrollRequest, SnapAxis, SnapPoint,
+    SnapStrictness, unwrap_axis, wrap_axis, wrap_period_axis,
 };
 use crate::vello::Scene;
 use crate::vello::kurbo::Affine;
@@ -788,6 +788,17 @@ impl CommittedFrame {
     #[must_use]
     pub fn scroll_slots(&self) -> &[ScrollSlot] {
         self.order.slots()
+    }
+
+    /// The pending auto-scroll change of each container that has one, with
+    /// the container: carried by every frame until the painter acknowledges
+    /// it, and handled by the painter once per serial
+    /// ([`Document::auto_scroll`](crate::Document::auto_scroll)). Every
+    /// container named has a slot in this frame. Empty for a document no
+    /// script has called `autoScroll` on.
+    #[must_use]
+    pub fn auto_scroll_requests(&self) -> &[(NodeId, AutoScrollRequest)] {
+        self.order.auto_scroll_requests()
     }
 
     /// The slot a scroll container node has in this frame, if it is one:

@@ -2568,6 +2568,92 @@ fn select_tab_turns_a_viewpager_through_both_invoke_paths() {
     assert_eq!(offset(), dom::Vector2D::new(400.0, 0.0));
 }
 
+/// An `x-swiper` given `autoplay` through `__SetAttribute` keeps a timer the
+/// page waits for with its realm's own: nothing is armed before the
+/// attribute, the deadline is one `interval` away after it, and the turn
+/// that comes due asks the painter for the next item as a request that
+/// yields to a pointer, then waits for the one after. No script runs for it.
+#[test]
+fn an_autoplaying_swiper_arms_the_pages_deadline_and_turns_when_due() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const swiper = __CreateElement('x-swiper', 0);
+                  __SetInlineStyles(swiper, 'width:200px;height:100px');
+                  __AppendElement(page, swiper);
+                  for (let i = 0; i < 3; i++) {
+                    __AppendElement(swiper, __CreateElement('x-swiper-item', 0));
+                  }
+                  __FlushElementTree();
+                  globalThis.swiper = swiper;
+                };
+                ",
+            "app:///autoplay.js",
+        )
+        .expect("main-thread script");
+    assert_eq!(runtime.next_deadline(), None, "no autoplay, nothing armed");
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __SetAttribute } from 'bobcat:element';
+                __SetAttribute(swiper, 'interval', '20');
+                __SetAttribute(swiper, 'autoplay', true);
+                ",
+            "app:///start.js",
+            "starting autoplay",
+        )
+        .expect("starting autoplay");
+    let armed = runtime
+        .next_deadline()
+        .expect("the swiper's timer is armed");
+    let wait = armed.duration_since(ClockInstant::now());
+    assert!(
+        wait <= std::time::Duration::from_millis(20),
+        "one interval away"
+    );
+
+    let content = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let swiper = tree.get(page).expect("the page").child_ids()[0];
+        crate::main::tree::swiper::content(&tree, swiper).expect("the swiper's `#content`")
+    };
+    assert!(
+        runtime.run_due_timers(&mut js_runtime).is_empty(),
+        "a turn throws nothing"
+    );
+    assert_eq!(
+        elements.tree().pending_scroll_request(content),
+        None,
+        "not due yet"
+    );
+
+    std::thread::sleep(wait + std::time::Duration::from_millis(5));
+    assert!(runtime.run_due_timers(&mut js_runtime).is_empty());
+    let frame = elements.tree().commit();
+    let slot = frame.slot_of(content).expect("the scroller has a slot");
+    let request = frame.scroll_slots()[slot as usize]
+        .request
+        .expect("the turn is a scroll request");
+    assert_eq!(
+        request.target,
+        dom::Vector2D::new(200.0, 0.0),
+        "the next item"
+    );
+    assert_eq!(request.behavior, dom::scroll::ScrollBehavior::Smooth);
+    assert!(request.yields_to_pointer);
+    assert!(
+        runtime.next_deadline().expect("armed again") > armed,
+        "the following turn"
+    );
+}
+
 /// `scrollTo({index, smooth})` on a swiper, through both paths a card reaches
 /// a UI method by: `__InvokeUIMethod`, and the selector-query `invoke` the
 /// background thread's `lynx.createSelectorQuery()` sends
@@ -3197,7 +3283,11 @@ fn a_scroll_view_answers_its_scroll_info_and_what_scroll_by_consumed() {
                 expectAnswer(viaPapi('scrollTo', {index: 5}), 4, undefined);
                 expectAnswer(viaPapi('getScrollInfo', {}), 0,
                              {scrollX: 0, scrollY: 42.5, scrollRange: 100, maxScrollOffset: 100});
-                expectAnswer(viaPapi('autoScroll', {rate: 60, start: true}), 3, undefined);
+                // The painter moves it; the document's offset stays put.
+                expectAnswer(viaPapi('autoScroll', {rate: 60, start: true}), 0, undefined);
+                expectAnswer(viaPapi('autoScroll', {start: true}), 4, undefined);
+                expectAnswer(viaPapi('autoScroll', {start: false}), 0, undefined);
+                expectAnswer(viaPapi('takeContentScreenshot', {}), 3, undefined);
                 ",
             "app:///scroll-view-methods.js",
             "scroll-view methods",
@@ -3279,7 +3369,9 @@ fn a_list_answers_its_methods_and_the_base_set_answers_scroll_to() {
                 ]);
                 expectAnswer(viaPapi('scrollToPosition', {position: 5}), 4, undefined);
                 expectAnswer(viaPapi('scrollBy', {}), 4, undefined);
-                expectAnswer(viaPapi('autoScroll', {rate: 60, start: true}), 3, undefined);
+                expectAnswer(viaPapi('autoScroll', {rate: '60px', start: true, autoStop: false}),
+                             0, undefined);
+                expectAnswer(viaPapi('autoScroll', {rate: 0, start: true}), 4, undefined);
                 expectAnswer(viaPapi('getScrollInfo', {}), 3, undefined);
                 // The base set's `scrollTo`, which the list does not shadow.
                 expectAnswer(viaPapi('scrollTo', {top: 50}), 0, undefined);

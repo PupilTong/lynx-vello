@@ -141,6 +141,14 @@ pub(crate) fn build<T: Sync>(
             u32::try_from(index).expect("a frame cannot hold 2^32 scroll containers"),
         )
     }));
+    // Copied only for a document that has one pending, which is almost
+    // none: the list allocates nothing otherwise.
+    let auto_scroll_requests = state
+        .auto_scroll_requests
+        .iter()
+        .filter(|(node, _)| slot_index.contains_key(node))
+        .copied()
+        .collect();
     let mut order = PaintOrder {
         items: builder.items,
         clips: builder.clips,
@@ -157,6 +165,7 @@ pub(crate) fn build<T: Sync>(
         auto_boxes: builder.auto_boxes,
         snap_points: builder.snap_points,
         initial_targets: builder.initial_targets,
+        auto_scroll_requests,
         inert_floor,
         commit_id,
     };

@@ -1341,6 +1341,115 @@ fn a_smooth_request_glides_to_its_target() {
     );
 }
 
+/// An auto-scroll end to end: the document's change reaches the painter in
+/// a frame, the painter owes frames while it moves the container at the
+/// rate, its posts move the document and acknowledge the change, and a
+/// stop ends it where it stands with nothing owed.
+#[test]
+fn an_auto_scroll_runs_on_the_painter_and_its_posts_reach_the_document() {
+    let mut engine = booted(SCROLLING_GESTURE_PAGE);
+    assert!(!engine.is_animating());
+    engine
+        .probe_document(|document| document.auto_scroll(node_id(3), 120.0, false, true))
+        .expect("the view's task answers probes");
+    // A later entry, so the change's own commit has been published too.
+    assert_eq!(scroll_offset_of(&mut engine, 3), dom::Vector2D::zero());
+
+    adopt_at(&mut engine, 1.0);
+    assert!(engine.is_animating(), "the auto-scroll owes frames");
+    assert!(engine.painter.scroll_intents.has_auto_scroll(node_id(3)));
+    let mut at = 1.0;
+    for _ in 0..31 {
+        at += 1.0 / 60.0;
+        frame_at(&mut engine, at);
+    }
+    // The first frame starts the count; thirty more are half a second.
+    let live = live_offset(&mut engine, 3);
+    assert!((live.y - 60.0).abs() < 0.01, "got {live:?}");
+    assert!(engine.is_animating(), "still on its way");
+    engine.painter.publish_scroll(at, None);
+    assert_eq!(
+        scroll_offset_of(&mut engine, 3),
+        live,
+        "the document follows"
+    );
+    assert_eq!(
+        engine
+            .probe_document(|document| document.pending_auto_scroll(node_id(3)))
+            .expect("the view's task answers probes"),
+        None,
+        "the painter's post acknowledged the change"
+    );
+
+    engine
+        .probe_document(|document| document.auto_scroll(node_id(3), 0.0, false, true))
+        .expect("the view's task answers probes");
+    assert_eq!(scroll_offset_of(&mut engine, 3), live);
+    adopt_at(&mut engine, at);
+    assert!(!engine.is_animating(), "stopped, nothing is owed");
+    frame_at(&mut engine, at + 1.0);
+    assert_eq!(live_offset(&mut engine, 3), live, "where it stood");
+}
+
+/// An `x-swiper` with `autoplay` turns by itself, end to end: the page's
+/// clock task waits the interval out with no script armed, the turn that
+/// comes due commits a scroll request, the painter glides to the next item,
+/// and its posts move the document there.
+#[test]
+fn an_autoplaying_swiper_turns_by_itself() {
+    let mut engine = booted(
+        r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const swiper = __CreateElement('x-swiper', 0);
+          __SetInlineStyles(swiper, 'width:200px;height:100px');
+          __SetAttribute(swiper, 'interval', '30');
+          __SetAttribute(swiper, 'autoplay', true);
+          __AppendElement(page, swiper);
+          for (let i = 0; i < 3; i++) {
+            __AppendElement(swiper, __CreateElement('x-swiper-item', 0));
+          }
+          globalThis.held = [page, swiper];
+          __FlushElementTree();
+        };
+        ",
+    );
+    let content = engine
+        .probe_document(|document| {
+            let page = document.document_element().id();
+            let swiper = document.get(page).expect("the page").child_ids()[0];
+            crate::main::tree::swiper::content(document, swiper)
+        })
+        .expect("the view's task answers probes")
+        .expect("the swiper's `#content`");
+    assert_eq!(
+        engine
+            .probe_document(move |document| document.scroll_offset(content))
+            .expect("the view's task answers probes"),
+        dom::Vector2D::zero(),
+        "on its first item"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut at = 1.0;
+    loop {
+        at += 1.0 / 60.0;
+        adopt_at(&mut engine, at);
+        engine.painter.publish_scroll(at, None);
+        let offset = engine
+            .probe_document(move |document| document.scroll_offset(content))
+            .expect("the view's task answers probes");
+        if offset.x >= 200.0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the swiper never turned, at {offset:?}"
+        );
+        std::thread::yield_now();
+    }
+}
+
 /// An instant programmatic scroll lands in one frame even while a fling is
 /// carrying the container: the fling stops, and a post the painter made
 /// before it saw the request does not undo the document's move.

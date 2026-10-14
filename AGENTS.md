@@ -222,7 +222,10 @@ the public view facade, `paint/` the `Painter` with its `gesture.rs` input
 router, `motion.rs` scroll kinematics (lynx-ui's rubber band, fling decay,
 bounce back, and the glide — the bounce back's spring toward a snap position
 or a smooth programmatic scroll's target) with `inertia.rs` running them over
-the scroll intents,
+the scroll intents, beside the constant-rate motion of Lynx's `autoScroll`
+(which yields to every one of them and to a finger, writes at most about
+sixty times a second and a physical pixel at a time, and owes no frame while
+it cannot move),
 `images.rs` image protocol and `graphics.rs` GPU target. `link.rs` is
 the one channel set a view spans its two threads with, `jobs.rs` the engine
 thread itself — its scheduler and its job queue — `lifetime.rs` the task set,
@@ -1740,13 +1743,13 @@ reflection and its UA box), `tree::scroll_container` (`scroll-view` and
 way the subtree stacks, from `web-elements`' own `scroll-view.css` and
 `x-list.css`; `enable-scroll="false"` leaves the box a scroll container only
 script can move — and a `scroll-view` component whose `CustomElement::invoke`
-answers the `scrollTo`, `scrollBy` and `getScrollInfo` UI methods on the axis
-the tag scrolls; `autoScroll` and `takeContentScreenshot` are not built),
+answers the `scrollTo`, `scrollBy`, `autoScroll` and `getScrollInfo` UI
+methods on the axis the tag scrolls; `takeContentScreenshot` is not built),
 `tree::list` (`list`'s scroll axis, `list-type` layout modes and cell
 virtualization as UA rules, and a `list` component whose `CustomElement::invoke`
-answers `scrollToPosition`, `scrollBy` (`scroll-view`'s, on the list's axis),
-`getScrollContainerInfo` and `getVisibleCells`; `autoScroll` and
-`getScrollInfo` are not built, and the base set's `scrollTo` answers on a list),
+answers `scrollToPosition`, `scrollBy` and `autoScroll` (`scroll-view`'s, on
+the list's axis), `getScrollContainerInfo` and `getVisibleCells`;
+`getScrollInfo` is not built, and the base set's `scrollTo` answers on a list),
 `tree::base_methods` (the UI methods every element has, which
 `callElementMethod` runs when the element's kind has no method of the name:
 `boundingClientRect` over `Document::bounding_client_rect`,
@@ -1767,7 +1770,11 @@ the item count the component keeps in `--swiper-count` on `slotchange` at its
 slot; the five `mode` layouts with `coverflow` and `carry` as
 compositor-exported `view()` transform animations — `carry` a scale,
 `coverflow` a turn drawn with 2D functions (scale, skew, translate) — and
-`current` by the viewpager recipe; `autoplay`, `interval` and `smooth-scroll` deferred, no events; its
+`current` by the viewpager recipe; `autoplay`, `interval` and `smooth-scroll`
+as a timer of the component's — kept in the document's `Autoplays`, which the
+page waits out beside its realm's timers (`RealmOwner::next_deadline`) and
+runs in its epilogue, each turn a `Document::scroll_to_yielding` request the
+painter declines while a pointer holds the swiper; no events; its
 one UI method, `scrollTo({index, smooth})`, scrolls the item into view at its
 snap position through `Document::scroll_into_view`, its `CustomElement::invoke`), `tree::refresh_view` (`x-refresh-view`/`x-refresh-header`/
 `x-refresh-footer`: a component with web-core's UA shadow tree, a `#container`
@@ -2735,6 +2742,14 @@ Subsystems:
   `scroll/request.rs` is CSSOM-View's `scrollTo({behavior})`: a script-facing
   scroll is a request the committed frame carries to the painter, which
   animates a smooth one and names the request in the offsets it posts back.
+  `Document::scroll_to_yielding` is the one request the painter may decline,
+  while a pointer holds the container, for a turn a timer asked for rather
+  than a script (an `x-swiper`'s autoplay); the document moves no offset for
+  it. Lynx's `autoScroll` rides the same file as `Document::auto_scroll`: a
+  change of a container's constant-rate motion, kept in a list that is empty
+  unless a script asked for one and carried beside the frame's scroll slots
+  rather than in them, so it costs a container that never auto-scrolls
+  nothing and arrives together with a scroll request of the same turn.
   `scroll/into_view.rs` is CSSOM-View's `scrollIntoView(options)`
   (`Document::scroll_into_view`, the editor's draft with its `container`
   option): each scroll container on the element's containing-block chain,
@@ -3128,9 +3143,9 @@ would host it:
   `__SetAttribute(element, "update-list-info", …)` — delivers a compiled
   `<list>`'s cells as real element children, which is the only path one
   receives children on. `<list>` is a `dom::CustomElement` for its UI
-  methods only (`scrollToPosition`, `scrollBy`, `getScrollContainerInfo`,
-  `getVisibleCells`): there is no cell recycling, no `autoScroll`, no
-  threshold or scroll events, and no sticky-bottom or snap rules
+  methods only (`scrollToPosition`, `scrollBy`, `autoScroll`,
+  `getScrollContainerInfo`, `getVisibleCells`): there is no cell recycling,
+  no threshold or scroll events, and no sticky-bottom or snap rules
   (`docs/tracking/deviations.md`).
 - **Gesture detectors and the arena.** `crates/bobcat-core/src/paint/gesture.rs`
   has no fling or velocity, no `:active` driving, no `consume-slide-event`, no
@@ -3151,13 +3166,13 @@ would host it:
   `scrollTo`/`scrollBy` on every element, `selectTab` on
   the two pager tags only, `scrollTo({index, smooth})` on `x-swiper` only,
   the three scroll methods on `scroll-view` only, where they shadow the
-  standard two, the four list methods on `list` only, whose `scrollBy`
+  standard two, the five list methods on `list` only, whose `scrollBy`
   shadows the standard one, the refresh view's three on `x-refresh-view`
   only, `setFoldExpanded` on `scroll-coordinator` and `x-foldview-ng` only,
   `getTextBoundingRect` on `text` only, the dialog's on `dialog` only) through
   `__InvokeUIMethod`; every other name — the base set's `focus`/`blur` (no
-  focus model), a `scroll-view`'s `autoScroll` and `takeContentScreenshot`,
-  a `list`'s `autoScroll` and `getScrollInfo`, a scroll coordinator's
+  focus model), a `scroll-view`'s `takeContentScreenshot`,
+  a `list`'s `getScrollInfo`, a scroll coordinator's
   `getScrollInfo`, an `image`'s four animation methods (nothing plays image
   frames), a `text`'s `getSelectedText` and `setTextSelection` (no
   selection model), `requestUIInfo`,
@@ -3167,8 +3182,8 @@ would host it:
 - **The text `layout` event.** The per-line ranges `hughie`'s
   `text/block/content.rs` computes have no delivery path.
 - **`rpx`-aware view/device policy** and the rest of the `<list>` component
-  (`autoScroll`, scroll and threshold events, sticky cells and snapping; the
-  layout mapping and virtualization are UA rules already, and four UI methods
+  (scroll and threshold events, sticky cells and snapping; the
+  layout mapping and virtualization are UA rules already, and five UI methods
   are built).
 - **Animated image playback.** `bobcat-resources` decodes an image's first
   frame only, with no `region-to-decode` and no `blur-radius`
