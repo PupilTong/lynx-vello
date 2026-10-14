@@ -6,9 +6,8 @@ Status: design ruled 2026-10-14; implementation in progress (series E1–E5 belo
 
 Editable text is laid out, painted and edited **inside the engine** (route B,
 the Chromium/WebKit/Clay/Flutter model). The host platform contributes only
-what an engine cannot: the soft keyboard, the input method (composition,
-candidates, autocorrect), the clipboard, and on mobile the system selection
-widgets. The alternative, an OS-native text field composited above the vello
+what an engine cannot: the input method (composition, candidates,
+autocorrect) and the clipboard. The alternative, an OS-native text field composited above the vello
 surface, was surveyed and rejected: the committed frame cannot produce the
 "everything painted above this element" region such a view would need to mask
 itself with, and every project that tried it (Flutter, Lynx native, Compose
@@ -40,16 +39,13 @@ Other rulings that shape the design:
   `EventWalk` beside its stop flag (`docs/tracking/deviations.md`).
 - Pointer events over an editing host are routed exactly like any other
   element's; the engine, not the host, turns them into caret placement.
-- Platform-specific text features that need a real native control
-  (iOS autocorrect bubbles, inline prediction, strong-password autofill) are
-  out of scope for this series; the hidden-native-responder pattern (makepad,
-  Compose Multiplatform 1.11) is the recorded follow-up for iOS/Android.
+- Text features that need a real native control (inline prediction,
+  password autofill) are out of scope for this series.
 
 ## Why the host can answer the OS synchronously
 
 Chromium waits up to 1.5 s for `firstRectForCharacterRange:`; WebKit waits 1 s
-for the autocorrection context; Chromium Android blocks a dedicated IME thread
-on `getTextBeforeCursor`. All three exist because the editor lives in another
+for the autocorrection context. Both waits exist because the editor lives in another
 process. Here the editor (bobcat-main) and the host thread share a process
 and already share `Arc<CommittedFrame>`, so the host receives a complete
 `TextInputState` on every change through the view's notice queue and answers
@@ -131,7 +127,7 @@ Chromium's set plus the local editing actions a keyboard produces:
 | `SetComposition { text, selection }` | replace the composition (or the selection when none) with `text`; selection inside it |
 | `CommitText { text, relative_cursor }` | delete the composition, insert `text`, place the caret |
 | `FinishComposition { keep_selection }` | commit the composition as-is |
-| `SetCompositionFromExistingText { range }` | mark committed text as the composition (Android `setComposingRegion`) |
+| `SetCompositionFromExistingText { range }` | mark committed text as the composition |
 | `DeleteSurrounding { before, after }` | delete UTF-16 units around the selection |
 | `ExtendSelectionAndDelete { before, after }` | widen then delete |
 | `SetSelection { range }` | UTF-16 selection |
@@ -194,9 +190,10 @@ winit's macOS backend sends no key event for them at all (E3).
 | **E5** | bobcat-core (components), bobcat-element | `x-input` / `x-textarea`: UA shadow tree with a plain-text editing host, attributes (`value`, `placeholder`, `type`, `maxlength`, `confirm-type`, `disabled`, `readonly`, `input-filter`, `send-composing-input`), `lynxinput`/`confirm`/`selection`/`focus`/`blur` in web-core's shape, methods (`setValue`, `getValue`, `focus`, `blur`, `setSelectionRange`, `select`) | E2 |
 
 Deferred after E5, in the order the survey ranks them: clipboard (needs a host
-notice pair), caret blink, selection handles + magnifier + edit menu on touch
-hosts, `::selection` colors, rich-text hosts, undo/redo, spellcheck markers,
-the hidden native responder on iOS/Android, Windows TSF.
+notice pair), caret blink, `::selection` colors, rich-text hosts, undo/redo,
+spellcheck markers, the `EditContext` path for the browser host (E4).
+Platforms the engine does not support (iOS, Android, Windows) are out of
+scope.
 
 ## Native vs web-core conflicts recorded for E5
 
@@ -253,7 +250,6 @@ Public surface:
   border and padding.
 - **`CommitText`'s `relative_cursor` is Blink's**: relative to the end of the
   inserted text (`0` = just after it), in UTF-16 units, clamped to the value.
-  An Android `newCursorPosition` converts as `n > 0 ? n - 1 : n - text_len`.
 - **Event order follows UI Events and Input Events Level 2.**
   `compositionstart`, then per update `beforeinput` (`insertCompositionText`),
   `compositionupdate`, the change, `input`; `compositionend` alone at the
@@ -499,7 +495,7 @@ pointer/wheel/touch kind was renamed `DETAIL_POSITION` to match the realm's.
 - **Keyboard mapping.** As the brief lists, plus meta-ArrowUp/ArrowDown to the
   value's start and end (`Granularity::Document`, the macOS binding), and
   Backspace/Delete doing nothing with ctrl or meta held rather than deleting
-  one character. No platform-specific bindings (ctrl-arrow on Windows,
+  one character. No platform-specific bindings (ctrl-arrow word movement,
   emacs keys on macOS).
 - **`TextInputState` is compared every epilogue while a host is focused**,
   after the commit, so a geometry-only change (a relayout, a scroll the page
@@ -694,10 +690,9 @@ Public surface:
 `key_command` took the typed text from the key (E3), and Backspace, Delete
 and Enter were the `keydown`'s default actions whatever the text. A browser
 reports the same Backspace twice: as the `keydown` and as the textarea's
-`beforeinput` `deleteContentBackward` — and on Android a soft keyboard's
-deletion often arrives as the `beforeinput` alone, with a `keydown` of
-`"Unidentified"` or none. So the deletion has to come from one path, and
-only the `beforeinput` path sees every deletion. With
+`beforeinput` `deleteContentBackward`. So the deletion has to come from one
+path, and the `beforeinput` path is the one that also carries the
+deletions no key reports, such as a cut. With
 `TextInputSource::Commands`, `key_command` answers only movement (the
 arrows, Home, End, with their modifiers) and ctrl/meta-A; text, Enter,
 Backspace and Delete are `None`, and the proxy's commands do them. The
@@ -709,8 +704,7 @@ so the macOS host and the headless driver are unchanged.
 
 - **Lifetime and placement.** One `<textarea>`, made the first time a state
   says a host is focused and appended to the canvas's document body;
-  `position: fixed`, `opacity: 0`, `pointer-events: none`, `font-size: 16px`
-  (iOS Safari zooms a page that focuses a smaller field), `white-space: pre`,
+  `position: fixed`, `opacity: 0`, `pointer-events: none`, `white-space: pre`,
   `autocapitalize`/`autocomplete`/`autocorrect` off, `spellcheck=false`,
   `tabindex=-1`. It sits over the caret, mapped from viewport CSS px through
   the canvas's client box, 1 px wide and a caret tall, and follows a scroll
@@ -754,17 +748,14 @@ so the macOS host and the headless driver are unchanged.
   drift; no page listener can cancel that key in the engine, whose default
   action always runs (the E2 ruling).
 - **Focus.** A state that newly says a host is focused focuses the textarea
-  at once. That raises the keyboard on a desktop and, within the tap's
-  transient activation, on Chrome for Android, but iOS Safari raises it only
-  for a focus inside the gesture's own handler — which the engine's decision
-  never is. So the facade's canvas `pointerup` asks the proxy too: it
-  focuses the textarea when a host is focused and the textarea is not (the
-  user tabbed away and pressed the canvas again), and once per focus the
-  engine gave, for a touch or a pen, blurs and refocuses it inside the
-  gesture. A later state does not take focus back. While the textarea has
-  focus, the canvas's `mousedown` is prevented, so a press keeps it (and a
-  soft keyboard) and the engine alone decides whether the press blurs its
-  host.
+  at once. The facade's canvas `pointerup` asks the proxy too: it focuses
+  the textarea when a host is focused and the textarea is not (the user
+  tabbed away or clicked another control, and pressed the canvas again), so
+  typing reaches the host the engine still has focused. A later state does
+  not take focus back. While the textarea has focus, the canvas's
+  `mousedown` is prevented, so a press does not move focus off it (which
+  would end an open composition) and the engine alone decides whether the
+  press blurs its host.
 - **Focus leaving the proxy** (Tab, another control) leaves the engine's
   focus as it is, as a browser keeps a document's focused element when the
   window loses focus; a composition the browser left open is sent as
@@ -783,20 +774,14 @@ so the macOS host and the headless driver are unchanged.
 
 ### Limitations
 
-- **Chrome for Android and Gboard.** Composition events there are not a
-  reliable account of the edit: Gboard composes every word, re-opens a
-  composition over existing text (`setComposingRegion`) when the caret
-  enters a word, and reports some deletions only as the textarea's changed
-  value. CodeMirror 6 and Monaco both diff the textarea instead. E4 maps the
-  events as above; a composition re-opened over committed text is sent as a
-  new composition at the caret and duplicates that word. The recorded
-  follow-up is the `EditContext` API (`window.EditContext`, Chrome 121+),
-  which reports text updates as ranges against a text model the page owns
-  and takes the selection and character bounds from it — exactly
+- **The textarea's events, not a text model.** E4 maps `beforeinput` and
+  the composition events as above, which describe an edit against the
+  textarea rather than against the engine's value. The recorded follow-up is
+  the `EditContext` API (`window.EditContext`, Chrome 121+), made for canvas
+  editors: it reports text updates as ranges against a text model the page
+  owns and takes the selection and character bounds from it — exactly
   `TextInputState` — with the textarea kept for the other browsers. No
   feature detection is shipped.
-- **The first tap on iOS Safari focuses the host without the keyboard**; the
-  next tap raises it (above).
 - **A page cannot stop an edit.** No engine event is cancelable from script
   (the E2 ruling), so neither a `keydown` nor a `beforeinput` listener stops
   the proxy's insertion, deletion or line break; a native browser's page
@@ -812,6 +797,7 @@ so the macOS host and the headless driver are unchanged.
   composition open, and its later `compositionend` is committed when its
   text differs from the last update sent.
 - **A password host is a plain textarea**: `inputType` crosses but a
-  `<textarea>` has no password mode, so the keyboard may learn and suggest.
+  `<textarea>` has no password mode, so the input method may learn and
+  suggest.
 - **The proxy has no accessible name** and is not announced as the host;
   accessibility of editing hosts is not built.

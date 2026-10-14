@@ -322,7 +322,7 @@ class CanvasPointerInput {
   #disposed = false
   #height: number
   #holdsTextFocus: () => boolean
-  #onRelease: (touch: boolean) => void
+  #onRelease: () => void
   #previousTouchAction: string
   #send: (values: PointerFields) => void
   #sendKey: (values: KeyFields) => void
@@ -336,7 +336,7 @@ class CanvasPointerInput {
     send: (values: PointerFields) => void,
     sendWheel: (values: WheelFields) => void,
     sendKey: (values: KeyFields) => void,
-    onRelease: (touch: boolean) => void,
+    onRelease: () => void,
     holdsTextFocus: () => boolean,
   ) {
     this.#canvas = canvas
@@ -365,7 +365,7 @@ class CanvasPointerInput {
     canvas.addEventListener('keydown', this.#onKey)
     canvas.addEventListener('keyup', this.#onKey)
     // While the text proxy holds focus, a press on the canvas must not move
-    // it (and close a soft keyboard): the engine decides whether the press
+    // it (and end an open composition): the engine decides whether the press
     // blurs its host, and the proxy follows the state it publishes.
     canvas.addEventListener('mousedown', this.#onMouseDown)
   }
@@ -476,9 +476,8 @@ class CanvasPointerInput {
   #onPointerUp = (event: PointerEvent) => {
     const active = this.#active.get(event.pointerId)
     this.#finish(event, POINTER_PHASE_UP)
-    // Inside the gesture, where a focus raises a soft keyboard.
     if (active !== undefined && !this.#disposed) {
-      this.#onRelease(active.device !== POINTER_DEVICE_MOUSE)
+      this.#onRelease()
     }
   }
 
@@ -954,7 +953,7 @@ export class BobcatCanvas {
       (values) => client.dispatchPointer(values),
       (values) => client.dispatchWheel(values),
       (values) => client.dispatchKey(values),
-      (touch) => this.#textInput.gesture(touch),
+      () => this.#textInput.press(),
       () => this.#textInput.holdsFocus,
     )
     this.#pointerInput = pointerInput

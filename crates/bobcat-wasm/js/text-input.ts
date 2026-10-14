@@ -1,8 +1,8 @@
 // The browser host's text input (`docs/editable-text-design.md`, E4).
 //
 // The engine lays out, paints and edits its `contenteditable` hosts itself;
-// what a page cannot give it is the browser's input method, its soft
-// keyboard and its clipboard, which only reach a focused text control. So
+// what a page cannot give it is the browser's input method and its
+// clipboard, which only reach a focused text control. So
 // the facade keeps one hidden `<textarea>` — Monaco's, CodeMirror 5's and
 // Flutter web's technique — over the canvas at the engine's caret, focused
 // while the engine has an editing host focused, holding the host's value and
@@ -13,7 +13,7 @@
 // - a composition is the browser's to draw into the textarea while it lasts (its `beforeinput` is
 //   not cancelable); each update is sent as `setComposition` and its end as `commitText`;
 // - each `TextInputState` the engine publishes is mirrored back: the value, the selection, where
-//   the box sits, which keyboard it asks for.
+//   the box sits, the host's `inputmode` and `enterkeyhint`.
 //
 // The pure mapping is exported for `scripts/text-input.test.ts`; the class
 // at the end owns the element.
@@ -265,7 +265,7 @@ export function proxyBox(
 }
 
 /**
- * The `inputmode` the textarea asks for: the host's own, or the keyboard
+ * The `inputmode` the textarea carries: the host's own, or the mode
  * its input type implies, or none. A password host is not told apart: a
  * `<textarea>` has no password mode.
  */
@@ -304,8 +304,7 @@ export interface TextInputProxyHost {
 }
 
 // Not shown, not hit-tested, not reached by Tab, and never auto-corrected,
-// capitalized or spell-checked: the engine's value is the value. 16px keeps
-// iOS Safari from zooming the page when it takes focus.
+// capitalized or spell-checked: the engine's value is the value.
 const TEXTAREA_STYLE = [
   'position: fixed',
   'display: none',
@@ -321,7 +320,6 @@ const TEXTAREA_STYLE = [
   'color: transparent',
   'background: transparent',
   'caret-color: transparent',
-  'font-size: 16px',
 ].join('; ')
 
 const TEXTAREA_ATTRIBUTES: readonly (readonly [string, string])[] = [
@@ -337,21 +335,16 @@ const TEXTAREA_ATTRIBUTES: readonly (readonly [string, string])[] = [
  * The hidden `<textarea>` itself, made the first time the engine focuses a
  * host and kept until the canvas is disposed.
  *
- * Focus: a browser lets script focus a text control at any time, but a
- * mobile browser only raises its keyboard for a focus inside a user gesture
- * (iOS Safari for one in the gesture's own handler, Chrome for Android
- * within its transient activation). The engine decides focus after the tap
- * that caused it, so a state that focuses a host focuses the textarea at
- * once — enough on a desktop and on Android — and the next tap on the canvas
- * focuses it again inside the tap's `pointerup` (`gesture`), which is what
- * raises the keyboard on iOS. Only the engine's focusing a host, or a press
- * on the canvas, focuses the textarea: a later state does not take focus
- * back from wherever the user moved it.
+ * Focus: a state that focuses a host focuses the textarea at once. When
+ * the user moves focus elsewhere in the page while the engine keeps its host
+ * focused, the next press released on the canvas (`press`) focuses the
+ * textarea again, so typing reaches the host the user returned to. Only the
+ * engine's focusing a host, or a press on the canvas, focuses the textarea:
+ * a later state does not take focus back from wherever the user moved it.
  */
 export class TextInputProxy {
   #composition = new CompositionTracker()
   #disposed = false
-  #gestureFocusOwed = false
   #host: TextInputProxyHost
   // Set while the proxy itself blurs the textarea, whose `blur` is then not
   // the user's leaving.
@@ -371,7 +364,7 @@ export class TextInputProxy {
   /**
    * Whether the textarea has focus while the engine has a host focused: a
    * press on the canvas then keeps it there (the canvas's `mousedown`
-   * default would move focus away and close the soft keyboard), and the
+   * default would move focus away and end an open composition), and the
    * engine decides whether the press blurs its host.
    */
   get holdsFocus(): boolean {
@@ -425,35 +418,17 @@ export class TextInputProxy {
     // relayout) does not take focus back from wherever the user moved it.
     if (focusing && !this.#focused()) {
       textarea.focus({ preventScroll: true })
-      this.#gestureFocusOwed = true
     }
   }
 
   /**
-   * A pointer released on the canvas: inside a user gesture, where a focus
-   * raises a mobile browser's keyboard. Focuses the textarea when the engine
-   * has a host focused and the textarea lost focus (the user tabbed away
-   * and came back), and once per focus the engine gave outside a gesture,
-   * for a touch or a pen, blurs and refocuses it so the keyboard comes up.
+   * A pointer released on the canvas. Focuses the textarea when the engine
+   * has a host focused and the textarea lost focus (the user tabbed away or
+   * clicked another control, and came back).
    */
-  gesture(touch: boolean): void {
+  press(): void {
     const textarea = this.#textarea
-    if (!this.active || textarea === undefined) {
-      return
-    }
-    if (!this.#focused()) {
-      textarea.focus({ preventScroll: true })
-      this.#gestureFocusOwed = false
-      return
-    }
-    if (touch && this.#gestureFocusOwed) {
-      this.#gestureFocusOwed = false
-      this.#ownBlur = true
-      try {
-        textarea.blur()
-      } finally {
-        this.#ownBlur = false
-      }
+    if (this.active && textarea !== undefined && !this.#focused()) {
       textarea.focus({ preventScroll: true })
     }
   }
@@ -539,7 +514,6 @@ export class TextInputProxy {
     // may still hold is its host's, so its end must not be committed into
     // whatever the engine focuses next.
     this.#composition.forget()
-    this.#gestureFocusOwed = false
     if (this.#focused()) {
       this.#ownBlur = true
       try {

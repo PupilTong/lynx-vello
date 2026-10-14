@@ -413,8 +413,8 @@ typed, and a key the input method is composing with (`isComposing`, or
 
 Text reaches a `contenteditable` host through one hidden `<textarea>`
 (`js/text-input.ts`), the technique Monaco, CodeMirror 5 and Flutter web use
-for the input method, the soft keyboard and the clipboard, which only a
-focused text control receives (`docs/editable-text-design.md`, E4):
+for the input method and the clipboard, which only a focused text control
+receives (`docs/editable-text-design.md`, E4):
 
 - **Engine → page.** `BobcatRenderer::pump` hands the newest
   `TextInputState` of a turn to the Render Worker's `postTextInputState`
@@ -449,18 +449,16 @@ focused text control receives (`docs/editable-text-design.md`, E4):
   `keydown`'s default action in the engine is only movement and select-all:
   a Backspace deletes once, by its `beforeinput`.
 - **Focus.** The engine's focus decides the proxy's. A state that newly
-  focuses a host focuses the textarea; a canvas `pointerup` focuses it again
-  inside the gesture when it lost focus, and once more for a touch or a pen
-  so iOS Safari raises its keyboard. While it has focus the canvas's
-  `mousedown` is prevented, so a press on the canvas keeps the keyboard up
-  and the engine decides whether the press blurs its host. Focus that leaves
-  the textarea for something else finishes an open composition and leaves
-  the engine's focus alone.
+  focuses a host focuses the textarea, and a canvas `pointerup` focuses it
+  again when the user had moved focus elsewhere in the page while the host
+  stayed focused. While it has focus the canvas's `mousedown` is prevented,
+  so a press on the canvas does not take focus from it (which would end an
+  open composition) and the engine decides whether the press blurs its host.
+  Focus that leaves the textarea for something else finishes an open
+  composition and leaves the engine's focus alone.
 
-Chrome for Android's composition events are not a reliable account of the
-edit (Gboard composes whole words and re-opens compositions over committed
-text); `EditContext` is the recorded follow-up, with the limitations listed
-in the design document.
+`EditContext` is the recorded follow-up, with the limitations listed in the
+design document.
 
 ## Synchronization and rendering
 
