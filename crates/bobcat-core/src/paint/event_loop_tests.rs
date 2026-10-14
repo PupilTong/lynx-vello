@@ -529,12 +529,10 @@ fn drag(engine: &mut TestEngine, from_y: f32, to_y: f32) {
     ));
 }
 
-fn assert_intent(engine: &TestEngine, node: u64, expected: f32) {
-    let offset = engine
-        .painter
-        .scroll_intents
-        .offset_for(node_id(node))
-        .unwrap_or_else(|| panic!("node {node} has a scroll intent"));
+/// Asserts the painter shows `node` at `expected` on y, whether a live
+/// intent holds it there or a commit has already adopted it.
+fn assert_shown_at(engine: &mut TestEngine, node: u64, expected: f32) {
+    let offset = live_offset(engine, node);
     assert!(
         (offset.y - expected).abs() < 0.5,
         "node {node} should sit at {expected}, got {offset:?}"
@@ -548,7 +546,7 @@ fn assert_intent(engine: &TestEngine, node: u64, expected: f32) {
 fn a_capturing_container_hands_its_drag_to_the_scroller_above() {
     let mut engine = booted(&nested_scrollers_page("scroll-capture:nearest"));
     drag(&mut engine, 50.0, 20.0);
-    assert_intent(&engine, 3, 22.0);
+    assert_shown_at(&mut engine, 3, 22.0);
     assert_eq!(
         engine.painter.scroll_intents.offset_for(node_id(4)),
         None,
@@ -565,7 +563,7 @@ fn overscroll_contain_keeps_a_wheel_inside_its_container() {
         Point2D::new(100.0, 50.0),
         dom::Vector2D::new(0.0, 5000.0),
     ));
-    assert_intent(&engine, 4, 900.0);
+    assert_shown_at(&mut engine, 4, 900.0);
     assert_eq!(
         engine.painter.scroll_intents.offset_for(node_id(3)),
         None,
@@ -588,18 +586,18 @@ fn a_released_drag_settles_onto_the_nearest_snap_position() {
     ));
     touch_at(&mut engine, 0.0, PointerPhase::Down, 150.0);
     touch_at(&mut engine, 0.05, PointerPhase::Move, 20.0);
-    assert_intent(&engine, 3, 122.0);
+    assert_shown_at(&mut engine, 3, 122.0);
     touch_at(&mut engine, 0.4, PointerPhase::Up, 20.0);
-    assert_intent(&engine, 3, 122.0);
+    assert_shown_at(&mut engine, 3, 122.0);
     assert!(engine.is_animating(), "the settle owes frames");
     frame_at(&mut engine, 0.45);
-    let moving = intent_y(&engine, 3);
+    let moving = live_offset(&mut engine, 3).y;
     assert!(moving > 122.0 && moving < 200.0, "on its way, got {moving}");
     frame_at(&mut engine, 1.5);
     assert!(
-        (intent_y(&engine, 3) - 200.0).abs() < f32::EPSILON,
+        (live_offset(&mut engine, 3).y - 200.0).abs() < f32::EPSILON,
         "exactly on the position, got {}",
-        intent_y(&engine, 3)
+        live_offset(&mut engine, 3).y
     );
     assert!(!engine.is_animating());
 }
@@ -618,12 +616,12 @@ fn a_wheel_tick_moves_to_the_next_snap_position() {
         Point2D::new(100.0, 100.0),
         dom::Vector2D::new(0.0, 30.0),
     ));
-    assert_intent(&engine, 3, 200.0);
+    assert_shown_at(&mut engine, 3, 200.0);
     engine.dispatch_input(InputEvent::wheel(
         Point2D::new(100.0, 100.0),
         dom::Vector2D::new(0.0, -30.0),
     ));
-    assert_intent(&engine, 3, 0.0);
+    assert_shown_at(&mut engine, 3, 0.0);
 }
 
 /// A `mandatory` scroller whose initial offset is no snap position (a 50px
@@ -642,7 +640,7 @@ fn a_snapping_container_rests_on_a_position_after_its_first_commit() {
         Point2D::new(100.0, 100.0),
         dom::Vector2D::zero(),
     ));
-    assert_intent(&engine, 3, 50.0);
+    assert_shown_at(&mut engine, 3, 50.0);
 }
 
 /// `scroll-initial-target: nearest` on the third card sets the scroller's
@@ -689,15 +687,6 @@ fn frame_at(engine: &mut TestEngine, at: f64) {
     engine.painter.service_gesture_clock(at);
 }
 
-fn intent_y(engine: &TestEngine, node: u64) -> f32 {
-    engine
-        .painter
-        .scroll_intents
-        .offset_for(node_id(node))
-        .unwrap_or_else(|| panic!("node {node} has a scroll intent"))
-        .y
-}
-
 /// A flick: 60px of upward finger travel over 20ms, released at speed —
 /// 52px of drag after the slop, then a release velocity of 3 px/ms.
 fn flick(engine: &mut TestEngine, at: f64) {
@@ -716,26 +705,26 @@ fn flick(engine: &mut TestEngine, at: f64) {
 fn a_flick_keeps_scrolling_after_its_release_and_comes_to_rest() {
     let mut engine = booted(&snapping_page("", "", 200, 0));
     flick(&mut engine, 0.0);
-    assert!((intent_y(&engine, 3) - 52.0).abs() < 0.5);
+    assert!((live_offset(&mut engine, 3).y - 52.0).abs() < 0.5);
     assert!(engine.is_animating(), "a fling owes frames");
 
     frame_at(&mut engine, 0.1);
-    let early = intent_y(&engine, 3);
+    let early = live_offset(&mut engine, 3).y;
     // 80ms at 3 px/ms decaying at 0.998: 3·(0.998^80 − 1)/ln 0.998 ≈ 222.
     assert!(
         (early - (52.0 + 222.0)).abs() < 3.0,
         "the first frame moved by the curve, got {early}"
     );
     frame_at(&mut engine, 0.3);
-    let later = intent_y(&engine, 3);
+    let later = live_offset(&mut engine, 3).y;
     assert!(later > early, "still moving");
     for at in [1.0, 2.0, 4.0, 8.0] {
         frame_at(&mut engine, at);
     }
     assert!(
-        (intent_y(&engine, 3) - 800.0).abs() < 0.5,
+        (live_offset(&mut engine, 3).y - 800.0).abs() < 0.5,
         "spent against the end, got {}",
-        intent_y(&engine, 3)
+        live_offset(&mut engine, 3).y
     );
     assert!(!engine.is_animating(), "at rest, no frame owed");
 }
@@ -759,7 +748,7 @@ fn a_fling_on_a_snapping_scroller_lands_on_a_snap_position() {
     for at in [0.5, 1.0, 2.0, 4.0, 8.0] {
         frame_at(&mut engine, at);
     }
-    let unsnapped = intent_y(&engine, 3);
+    let unsnapped = live_offset(&mut engine, 3).y;
     assert!(
         (unsnapped - 551.5).abs() < 2.0,
         "the curve's whole travel, got {unsnapped}"
@@ -773,15 +762,15 @@ fn a_fling_on_a_snapping_scroller_lands_on_a_snap_position() {
     ));
     slow_flick(&mut engine);
     frame_at(&mut engine, 0.5);
-    let mid = intent_y(&engine, 3);
+    let mid = live_offset(&mut engine, 3).y;
     assert!(mid > 100.0 && mid < 600.0, "on its way, got {mid}");
     for at in [1.0, 2.0, 4.0, 8.0] {
         frame_at(&mut engine, at);
     }
     assert!(
-        (intent_y(&engine, 3) - 600.0).abs() < 0.5,
+        (live_offset(&mut engine, 3).y - 600.0).abs() < 0.5,
         "aimed at the position, got {}",
-        intent_y(&engine, 3)
+        live_offset(&mut engine, 3).y
     );
     assert!(!engine.is_animating());
 }
@@ -801,7 +790,7 @@ fn a_drag_past_a_bouncing_edge_stretches_and_springs_back() {
     ));
     touch_at(&mut engine, 0.0, PointerPhase::Down, 50.0);
     touch_at(&mut engine, 0.05, PointerPhase::Move, 150.0);
-    let stretched = intent_y(&engine, 3);
+    let stretched = live_offset(&mut engine, 3).y;
     assert!((stretched - -40.4).abs() < 0.2, "got {stretched}");
     assert!(!engine.is_animating(), "under the finger nothing animates");
     // Held still, then let go: no velocity, so the bounce back starts at
@@ -809,19 +798,19 @@ fn a_drag_past_a_bouncing_edge_stretches_and_springs_back() {
     touch_at(&mut engine, 0.4, PointerPhase::Up, 150.0);
     assert!(engine.is_animating(), "the bounce back owes frames");
     frame_at(&mut engine, 0.41);
-    let first = intent_y(&engine, 3);
+    let first = live_offset(&mut engine, 3).y;
     assert!(
         first < 0.0 && first > stretched,
         "barely moved yet, got {first}"
     );
     frame_at(&mut engine, 0.6);
-    let later = intent_y(&engine, 3);
+    let later = live_offset(&mut engine, 3).y;
     assert!(later > first && later < 0.0, "on its way home, got {later}");
     frame_at(&mut engine, 1.5);
     assert!(
-        intent_y(&engine, 3).abs() < f32::EPSILON,
+        live_offset(&mut engine, 3).y.abs() < f32::EPSILON,
         "home on the edge, got {}",
-        intent_y(&engine, 3)
+        live_offset(&mut engine, 3).y
     );
     assert!(!engine.is_animating());
 }
@@ -840,12 +829,12 @@ fn a_fling_into_a_bouncing_edge_overshoots_and_springs_back() {
         Point2D::new(100.0, 100.0),
         dom::Vector2D::new(0.0, 700.0),
     ));
-    assert_intent(&engine, 3, 700.0);
+    assert_shown_at(&mut engine, 3, 700.0);
     flick(&mut engine, 0.0);
-    let mut furthest = intent_y(&engine, 3);
+    let mut furthest = live_offset(&mut engine, 3).y;
     for at in [0.05, 0.1, 0.15, 0.2, 0.25, 0.3] {
         frame_at(&mut engine, at);
-        furthest = furthest.max(intent_y(&engine, 3));
+        furthest = furthest.max(live_offset(&mut engine, 3).y);
     }
     assert!(
         furthest > 800.0 && furthest <= 1000.0,
@@ -855,9 +844,9 @@ fn a_fling_into_a_bouncing_edge_overshoots_and_springs_back() {
         frame_at(&mut engine, at);
     }
     assert!(
-        (intent_y(&engine, 3) - 800.0).abs() < f32::EPSILON,
+        (live_offset(&mut engine, 3).y - 800.0).abs() < f32::EPSILON,
         "back on the edge, got {}",
-        intent_y(&engine, 3)
+        live_offset(&mut engine, 3).y
     );
     assert!(!engine.is_animating());
 }
@@ -874,9 +863,9 @@ fn a_fling_into_a_plain_edge_stops_there() {
     flick(&mut engine, 0.0);
     for at in [0.05, 0.1, 0.2] {
         frame_at(&mut engine, at);
-        assert!(intent_y(&engine, 3) <= 800.0);
+        assert!(live_offset(&mut engine, 3).y <= 800.0);
     }
-    assert!((intent_y(&engine, 3) - 800.0).abs() < 0.5);
+    assert!((live_offset(&mut engine, 3).y - 800.0).abs() < 0.5);
     assert!(!engine.is_animating(), "spent against the wall");
 }
 
@@ -924,7 +913,7 @@ fn a_flick_forward_from_the_last_page_wraps_to_the_first() {
         Point2D::new(100.0, 100.0),
         dom::Vector2D::new(0.0, 800.0),
     ));
-    assert_intent(&engine, 3, 800.0);
+    assert_shown_at(&mut engine, 3, 800.0);
     touch_at(&mut engine, 0.0, PointerPhase::Down, 150.0);
     touch_at(&mut engine, 0.02, PointerPhase::Move, 140.0);
     touch_at(&mut engine, 0.04, PointerPhase::Move, 130.0);
@@ -1032,7 +1021,7 @@ fn a_fling_on_a_plain_circular_axis_runs_past_the_end() {
         Point2D::new(100.0, 100.0),
         dom::Vector2D::new(0.0, 700.0),
     ));
-    assert_intent(&engine, 3, 700.0);
+    assert_shown_at(&mut engine, 3, 700.0);
     flick(&mut engine, 0.0);
     // Summed modulo the period frame by frame, so a rebase that brings
     // the live offset back into the period does not lose the travel.
@@ -1070,27 +1059,27 @@ fn a_drag_on_a_flinging_scroller_takes_it_over() {
     let mut engine = booted(SCROLLING_GESTURE_PAGE);
     flick(&mut engine, 0.0);
     frame_at(&mut engine, 0.1);
-    let moving = intent_y(&engine, 3);
+    let moving = live_offset(&mut engine, 3).y;
     assert!(moving > 52.0 && engine.is_animating());
 
     touch_at(&mut engine, 0.15, PointerPhase::Down, 100.0);
     frame_at(&mut engine, 0.2);
     assert!(engine.is_animating(), "a down alone decides nothing");
-    let found = intent_y(&engine, 3);
+    let found = live_offset(&mut engine, 3).y;
     assert!(found > moving);
     // 10px of travel: the 8px slop, then a 2px step that takes over.
     touch_at(&mut engine, 0.25, PointerPhase::Move, 90.0);
     assert!(!engine.is_animating(), "the drag stopped the fling");
-    let held = intent_y(&engine, 3);
+    let held = live_offset(&mut engine, 3).y;
     assert!(
         (held - (found + 2.0)).abs() < 0.5,
         "got {held} after {found}"
     );
     frame_at(&mut engine, 0.5);
-    assert!((intent_y(&engine, 3) - held).abs() < f32::EPSILON);
+    assert!((live_offset(&mut engine, 3).y - held).abs() < f32::EPSILON);
     touch_at(&mut engine, 0.6, PointerPhase::Up, 90.0);
     frame_at(&mut engine, 1.0);
-    assert!((intent_y(&engine, 3) - held).abs() < f32::EPSILON);
+    assert!((live_offset(&mut engine, 3).y - held).abs() < f32::EPSILON);
     assert!(!engine.is_animating());
 
     engine.painter.clock.pin(2.0);
@@ -2529,7 +2518,7 @@ fn a_tap_finds_a_scroll_driven_header_where_the_scroll_carries_it() {
     touch_at(&mut engine, 0.0, PointerPhase::Down, 250.0);
     touch_at(&mut engine, 0.05, PointerPhase::Move, 150.0);
     touch_at(&mut engine, 0.5, PointerPhase::Up, 150.0);
-    assert!((intent_y(&engine, 4) - 92.0).abs() < 0.5);
+    assert!((live_offset(&mut engine, 4).y - 92.0).abs() < 0.5);
     assert!(
         (scroll_offset_of(&mut engine, 4).y - 92.0).abs() < 0.5,
         "main adopted the scroll"
