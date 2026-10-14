@@ -1908,7 +1908,10 @@ index at all. The realm runs the capture, bubble and `global-bindEvent` passes,
 derives `eventPhase` per step, and ends the dispatch itself; neither
 `stopPropagation` nor `stopImmediatePropagation` crosses the boundary. What
 does cross back is the dispatch's answer, `event.defaultPrevented`
-(`preventDefault()` sets it on a cancelable event alone), which
+(`preventDefault()` sets it on a cancelable event alone; it is a read-only
+getter over a flag local to the dispatch, as `stopPropagation`'s are, so no
+member of the event captures the event itself and it is freed when the
+dispatch ends rather than by the cycle collector), which
 `MainThreadRuntime::dispatch` returns as `Dispatched { delivered,
 default_prevented }`: the editing default actions read it
 (`main/runtime/editing.rs` — a canceled `beforeinput` drops its edit, a

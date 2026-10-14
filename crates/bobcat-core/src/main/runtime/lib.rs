@@ -168,10 +168,11 @@ fn push_detail_strings<'a>(
     }
 }
 
-/// Inline arguments for one dispatch: the six of the header, then an
-/// input event's discriminator and eight detail numbers. Extras and touch
-/// points spill.
-type Arguments<'a> = SmallVec<[HostArgument<'a>; 15]>;
+/// Inline arguments for one dispatch: the seven of the header (the two
+/// paths, the name, `bubbles`, `cancelable`, the timestamp and the extras
+/// count), then an input event's discriminator and eight detail numbers.
+/// Extras and touch points spill.
+type Arguments<'a> = SmallVec<[HostArgument<'a>; 16]>;
 
 /// An event's three flags, as DOM's `EventInit` has them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

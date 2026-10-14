@@ -3181,6 +3181,29 @@ describe("editing events and cancellation", () => {
     expect(seen?.cancelable).toBe(false);
   });
 
+  it("keeps defaultPrevented read-only and canceled through a detached preventDefault", () => {
+    const { outer, inner } = tree();
+    const read: boolean[] = [];
+    __AddEventListener(inner, "keydown", (event: EditingEvent) => {
+      read.push(event.defaultPrevented);
+      // Called off the event, as a copy or a destructuring would call it.
+      const { preventDefault } = event;
+      preventDefault();
+      read.push(event.defaultPrevented);
+      expect(() => {
+        (event as { defaultPrevented: boolean }).defaultPrevented = false;
+      }).toThrow(TypeError);
+    }, {});
+    __AddEventListener(outer, "keydown", (event: EditingEvent) => {
+      read.push(event.defaultPrevented);
+    }, {});
+
+    expect(dispatch([inner, outer], "keydown", {
+      key: { key: "x", code: "KeyX", repeat: false, modifiers: 0 },
+    }, undefined, true, true)).toBe(true);
+    expect(read).toEqual([false, true, true]);
+  });
+
   it("answers false for a path with no step", () => {
     expect(
       elementModule.__BobcatDispatchEvent("", "", "keydown", true, true, 0, 0, DETAIL_EMPTY),
