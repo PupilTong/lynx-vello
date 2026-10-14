@@ -3,9 +3,10 @@
 //! Plain resolved-value structs instead of the box-protocol wire format or a
 //! trait over `ComputedValues`: paragraph limits arrive through `TextContainerStyle`,
 //! custom inline-truncation is content, and the Lynx grammar is
-//! narrower than stylo's — `white-space` is only `normal | nowrap`, there is
-//! no `word-spacing`, no `pre*` — so two-value enums make the unsupported
-//! states unrepresentable instead of mapped and ignored. Font values stay
+//! narrower than stylo's — there is no `word-spacing`, and
+//! `white-space-collapse` has the three values [`WhiteSpaceCollapse`] names —
+//! so small enums make the unsupported states unrepresentable instead of
+//! mapped and ignored. Font values stay
 //! stylo types: they are already hughie public API, cheap to own, and their
 //! parley translation is shared with the measurement path.
 
@@ -35,8 +36,9 @@ pub struct BlockStyle {
     /// paragraph engine — bidi comes from the text itself — so the declared
     /// direction decides alignment and nothing else.
     pub direction: Direction,
-    /// `white-space: normal | nowrap`. Collapsing is always on (Lynx has no
-    /// `pre*` values); newline preservation is per-run for raw-text.
+    /// `text-wrap-mode`. Whitespace collapsing is a per-run value
+    /// ([`WhiteSpaceCollapse`] on each [`TextRunItem`](super::TextRunItem)),
+    /// because `white-space-collapse` inherits into nested text.
     pub text_wrap: TextWrap,
     pub word_break: WordBreak,
     pub overflow: TextOverflow,
@@ -119,6 +121,27 @@ pub enum TextWrap {
     #[default]
     Wrap,
     NoWrap,
+}
+
+/// css-text-4 `white-space-collapse`, per run.
+///
+/// The three values the paragraph implements. `break-spaces` (the fork's
+/// fourth keyword) is read as [`Self::Collapse`] by the host, as it always
+/// was; `discard` and `preserve-spaces` do not parse in the fork at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum WhiteSpaceCollapse {
+    /// Spaces, tabs and segment breaks collapse (css-text-3 §4.1.1).
+    #[default]
+    Collapse,
+    /// Segment breaks are preserved as forced line breaks; spaces and tabs
+    /// still collapse, and the ones next to a preserved break are removed.
+    /// What Lynx raw-text carries.
+    PreserveBreaks,
+    /// Spaces, tabs and segment breaks are all preserved. A preserved segment
+    /// break is a forced line break, a preserved space is one cluster per
+    /// source space, and a preserved tab advances to the next tab stop
+    /// (`super::tab`).
+    Preserve,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

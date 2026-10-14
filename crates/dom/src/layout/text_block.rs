@@ -29,7 +29,7 @@ use hughie::style::{CoreStyle, PositionProperty};
 use hughie::text::TextContext;
 use hughie::text::block::{
     BlockConstraint, BlockStyle, InlineBoxSpec, InlineItem, RunStyle, TextBlock, TextRunItem,
-    VerticalAlign,
+    VerticalAlign, WhiteSpaceCollapse,
 };
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{Content, ContentItem};
@@ -199,7 +199,7 @@ enum OwnedItem {
     Run {
         text: String,
         style: RunStyle,
-        preserve_newlines: bool,
+        white_space: WhiteSpaceCollapse,
     },
     Atom {
         vertical_align: VerticalAlign,
@@ -324,7 +324,7 @@ fn collect_content<T>(
                 item: OwnedItem::Run {
                     text: text.to_owned(),
                     style: RunStyle::from_run_style(&run),
-                    preserve_newlines: preserves_newlines(node),
+                    white_space: run_white_space(node),
                 },
                 // The *element* the run's style came from, not the text node:
                 // a text node carries no computed style, so it could never
@@ -429,7 +429,7 @@ fn collect_generated<T>(tree: &TreeArenas<T>, slot: NodeSlot, out: &mut Vec<Coll
             item: OwnedItem::Run {
                 text,
                 style: RunStyle::from_run_style(&TextRunView::from_values(style)),
-                preserve_newlines: style_preserves_newlines(style),
+                white_space: style_white_space(style),
             },
             source: slot,
         });
@@ -437,18 +437,26 @@ fn collect_generated<T>(tree: &TreeArenas<T>, slot: NodeSlot, out: &mut Vec<Coll
     true
 }
 
-/// Whether a run keeps the literal newlines in its source.
+/// Which of its whitespace a run keeps.
 ///
-/// The one place Lynx preserves one: a carrier's UA rule sets
-/// `white-space-collapse: preserve-breaks`, which inherits into text runs.
-/// Read from computed style, so no tag is named.
-fn preserves_newlines<T>(node: &Node<T>) -> bool {
-    style_preserves_newlines(inline_style_of(node))
+/// Read from computed style, so no tag is named: a raw-text carrier's UA
+/// rule sets `white-space-collapse: preserve-breaks`, an author's `pre` or
+/// `white-space: pre` sets `preserve`, and either inherits into text runs.
+fn run_white_space<T>(node: &Node<T>) -> WhiteSpaceCollapse {
+    style_white_space(inline_style_of(node))
 }
 
-fn style_preserves_newlines(style: &ComputedValues) -> bool {
+/// The paragraph's three modes over the fork's four keywords.
+/// `break-spaces` stays collapsed, as it always has been here: it would need
+/// a wrap opportunity after every preserved space and spaces that never
+/// hang, neither of which the paragraph models.
+fn style_white_space(style: &ComputedValues) -> WhiteSpaceCollapse {
     use stylo::computed_values::white_space_collapse::T as Collapse;
-    *style.get_inherited_text().get_white_space_collapse() == Collapse::PreserveBreaks
+    match *style.get_inherited_text().get_white_space_collapse() {
+        Collapse::Preserve => WhiteSpaceCollapse::Preserve,
+        Collapse::PreserveBreaks => WhiteSpaceCollapse::PreserveBreaks,
+        Collapse::Collapse | Collapse::BreakSpaces => WhiteSpaceCollapse::Collapse,
+    }
 }
 
 /// A cheap structural identity of the flattened content.
@@ -468,13 +476,11 @@ fn fingerprint(flat: &Flattened) -> u64 {
             entry.source.hash(&mut hasher);
             match &entry.item {
                 OwnedItem::Run {
-                    text,
-                    preserve_newlines,
-                    ..
+                    text, white_space, ..
                 } => {
                     0_u8.hash(&mut hasher);
                     text.hash(&mut hasher);
-                    preserve_newlines.hash(&mut hasher);
+                    white_space.hash(&mut hasher);
                 }
                 OwnedItem::Atom { .. } => 1_u8.hash(&mut hasher),
             }
@@ -495,11 +501,11 @@ fn as_items(collected: &[Collected], id_offset: usize) -> Vec<InlineItem<'_>> {
             OwnedItem::Run {
                 text,
                 style,
-                preserve_newlines,
+                white_space,
             } => InlineItem::Run(TextRunItem {
                 text,
                 style,
-                preserve_newlines: *preserve_newlines,
+                white_space: *white_space,
             }),
             OwnedItem::Atom { vertical_align } => InlineItem::Box(InlineBoxSpec {
                 // The item index is the box id, so one table answers for
@@ -1557,5 +1563,175 @@ mod hit_tests {
         assert_eq!(doc.paragraph_of(out_of_flow), None, "not inline content");
         assert_eq!(doc.inline_source_range(atom), Some(2..3));
         assert_eq!(at(&doc, inner, 5.0, 5.0), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod preserve_tests {
+    use euclid::default::{Point2D, Rect, Size2D};
+
+    use crate::{Document, FontBlob, NodeId, StylesheetOrigin};
+
+    /// A 10px Ahem paragraph holding `content`, styled by `inline`. Every
+    /// Ahem glyph, the space included, advances 10px.
+    fn paragraph(inline: &str, content: &str) -> (Document<()>, NodeId) {
+        let mut doc = Document::new(crate::tree::document::tests::device(), "page", ());
+        doc.register_fonts(FontBlob::from_static(include_bytes!(
+            "../../../hughie/tests/fixtures/Ahem.ttf"
+        )));
+        doc.add_stylesheet(
+            "page { display: flex; align-items: flex-start; } \
+             text { display: -lynx-text; font-family: Ahem; font-size: 10px; } \
+             span { display: -lynx-text; } \
+             .pre { white-space-collapse: preserve; }",
+            StylesheetOrigin::Author,
+        );
+        let text = doc.create_element("text", ());
+        doc.set_inline_style(text, inline);
+        doc.append_child(doc.document_element().id(), text);
+        let run = doc.create_text_node(content, ());
+        doc.append_child(text, run);
+        doc.layout();
+        (doc, text)
+    }
+
+    fn glyph(left: f32, top: f32, width: f32) -> Rect<f32> {
+        Rect::new(Point2D::new(left, top), Size2D::new(width, 10.0))
+    }
+
+    #[test]
+    fn preserved_indentation_is_four_advances_in() {
+        let (doc, text) = paragraph(
+            "white-space-collapse: preserve; text-wrap-mode: nowrap;",
+            "    x",
+        );
+        assert_eq!(
+            doc.text_range_boxes(text, 4, 5),
+            Some(vec![glyph(40.0, 0.0, 10.0)])
+        );
+        assert!((doc.text_block_size(text).unwrap().width - 50.0).abs() < 0.001);
+        // A preserved space is a cluster of its own: both queries answer it.
+        assert_eq!(
+            doc.text_range_boxes(text, 1, 2),
+            Some(vec![glyph(10.0, 0.0, 10.0)])
+        );
+        assert_eq!(
+            doc.text_range_boxes(text, 0, 4),
+            Some(vec![glyph(0.0, 0.0, 40.0)])
+        );
+        assert_eq!(
+            doc.text_index_at_point(text, Point2D::new(15.0, 5.0)),
+            Some(1)
+        );
+        assert_eq!(
+            doc.text_index_at_point(text, Point2D::new(39.9, 5.0)),
+            Some(3)
+        );
+
+        // `white-space: pre` is the same pair through the shorthand.
+        let (doc, text) = paragraph("white-space: pre;", "    x");
+        assert_eq!(
+            doc.text_range_boxes(text, 4, 5),
+            Some(vec![glyph(40.0, 0.0, 10.0)])
+        );
+
+        // Collapsed, the run of spaces is one space wide.
+        let (doc, text) = paragraph("", "    x");
+        assert_eq!(
+            doc.text_range_boxes(text, 4, 5),
+            Some(vec![glyph(10.0, 0.0, 10.0)])
+        );
+    }
+
+    #[test]
+    fn a_tab_lands_on_column_eight_and_each_break_restarts_the_columns() {
+        let (doc, text) = paragraph("white-space: pre;", "abc\tx\n\ty");
+        // `abc` ends at 30; the tab shifts to the stop at 8 spaces.
+        assert_eq!(
+            doc.text_range_boxes(text, 3, 4),
+            Some(vec![glyph(30.0, 0.0, 50.0)])
+        );
+        assert_eq!(
+            doc.text_range_boxes(text, 4, 5),
+            Some(vec![glyph(80.0, 0.0, 10.0)])
+        );
+        assert_eq!(
+            doc.text_range_boxes(text, 7, 8),
+            Some(vec![glyph(80.0, 10.0, 10.0)])
+        );
+        assert_eq!(
+            doc.text_index_at_point(text, Point2D::new(50.0, 5.0)),
+            Some(3)
+        );
+        assert_eq!(
+            doc.text_index_at_point(text, Point2D::new(10.0, 15.0)),
+            Some(6)
+        );
+    }
+
+    #[test]
+    fn preserve_breaks_still_collapses_the_spaces_around_a_break() {
+        let (doc, text) = paragraph("white-space-collapse: preserve-breaks;", "  a\n  b");
+        assert_eq!(
+            doc.text_range_boxes(text, 6, 7),
+            Some(vec![glyph(0.0, 10.0, 10.0)])
+        );
+    }
+
+    #[test]
+    fn preserve_inherits_into_a_nested_scope_alone() {
+        let mut doc = Document::new(crate::tree::document::tests::device(), "page", ());
+        doc.register_fonts(FontBlob::from_static(include_bytes!(
+            "../../../hughie/tests/fixtures/Ahem.ttf"
+        )));
+        doc.add_stylesheet(
+            "page { display: flex; align-items: flex-start; } \
+             text { display: -lynx-text; font-family: Ahem; font-size: 10px; } \
+             span { display: -lynx-text; } \
+             .pre { white-space-collapse: preserve; }",
+            StylesheetOrigin::Author,
+        );
+        let text = doc.create_element("text", ());
+        doc.append_child(doc.document_element().id(), text);
+        let before = doc.create_text_node("a  ", ());
+        doc.append_child(text, before);
+        let code = doc.create_element("span", ());
+        doc.add_class(code, "pre");
+        doc.append_child(text, code);
+        let inner = doc.create_text_node("  b", ());
+        doc.append_child(code, inner);
+        doc.layout();
+        // `a`, the collapsed pair as one space, then two preserved spaces:
+        // the collapsible space is kept by the preserved one after it.
+        assert_eq!(
+            doc.text_range_boxes(text, 5, 6),
+            Some(vec![glyph(40.0, 0.0, 10.0)])
+        );
+
+        // Turning the mode off rebuilds the paragraph.
+        doc.remove_class(code, "pre");
+        doc.layout();
+        assert_eq!(
+            doc.text_range_boxes(text, 5, 6),
+            Some(vec![glyph(20.0, 0.0, 10.0)])
+        );
+    }
+
+    #[test]
+    fn the_keywords_the_paragraph_does_not_model_stay_collapsed() {
+        // `break-spaces` parses and is read as `collapse`; `preserve-spaces`
+        // and `discard` do not parse in the fork, leaving the initial value.
+        for inline in [
+            "white-space-collapse: break-spaces;",
+            "white-space-collapse: preserve-spaces;",
+            "white-space-collapse: discard;",
+        ] {
+            let (doc, text) = paragraph(inline, "    x");
+            assert_eq!(
+                doc.text_range_boxes(text, 4, 5),
+                Some(vec![glyph(10.0, 0.0, 10.0)]),
+                "{inline}",
+            );
+        }
     }
 }
