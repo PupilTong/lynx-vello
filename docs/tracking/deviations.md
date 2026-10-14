@@ -723,10 +723,14 @@ consequential choice about whether to follow the spec or the quirk.
   page with `key`, `code`, `repeat`, `altKey`, `ctrlKey`, `metaKey` and
   `shiftKey` on the event object and a `{}` detail, which is web-core's shape
   (`createCrossThreadEvent.ts`), bubbling and composed. Recorded deviations:
-  - **No focus model**, so the target is always the document element (the
-    page), as it is in a browser with nothing focused; the painter does not
-    hit-test a key. A focus model changes that one target and nothing else.
-  - **No `keypress`, `input` or composition events**, and no IME.
+  - **The target is the focused element** (2026-10-14, editable text E2):
+    the focused editing host when one is focused, and the document element
+    (the page) otherwise, as in a browser with nothing focused; the painter
+    does not hit-test a key, and the main thread retargets it. Only editing
+    hosts are focusable (`docs/editable-text-design.md`).
+  - **No `keypress`.** `beforeinput`/`input` and the composition events are
+    the editing host's (`docs/tracking/dom-events.md`); an input method's
+    text arrives through `LynxView::edit`, not as keys.
   - **No `keyCode`.** web-core forwards the deprecated numeric `keyCode` for
     parity with iOS/Android; this engine reports the W3C `key`/`code` only.
   - **The macOS CLI maps winit's keys** through a table

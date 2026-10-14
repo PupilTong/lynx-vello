@@ -422,6 +422,19 @@ pub enum EngineEvent {
         level: String,
         message: String,
     },
+    /// The focused editing host's [`TextInputState`](crate::editing::TextInputState)
+    /// changed: its value, selection or composition, the geometry of the
+    /// commit that showed them, or the focus itself — a default state means
+    /// nothing editable is focused any more. Sent once per main-thread entry
+    /// that changed it, after that entry's commit, so the geometry is the
+    /// frame's; never repeated for a state equal to the last one. Not sent
+    /// once the view has failed or been released.
+    ///
+    /// The host keeps the latest one and answers every synchronous platform
+    /// input-method query (the candidate window's rectangle, the text around
+    /// the caret) from it; the commands it sends back go through
+    /// [`LynxView::edit`].
+    TextInputStateChanged(Box<dom::editing::TextInputState>),
     /// A realm's console output, delivered to the embedder that owns the view.
     /// `level` is the name of the console method that was called: `"log"`,
     /// `"info"`, `"debug"`, `"warn"` or `"error"`. Reported under the same
@@ -1262,6 +1275,37 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         })
     }
 
+    /// Applies one editing command to the focused editing host: what a
+    /// platform input method asks for (a composition, a commit, a deletion
+    /// around the caret, a selection) and the keyboard editing actions a
+    /// host decided itself.
+    ///
+    /// Queued behind every command sent before it — the painter's routed
+    /// input among them — so a `keydown` dispatched first is delivered
+    /// first, and a frame post the painter makes after this call is
+    /// acknowledged only once it has been applied, as
+    /// [`Painter::dispatch_input`](crate::Painter::dispatch_input)'s events
+    /// are. On the main thread the command dispatches the events it owes at
+    /// the host — `beforeinput`, `compositionstart`/`update`/`end`, `input`
+    /// — around the change, and a listener that cancels a cancelable
+    /// `beforeinput` drops it. A command with nothing focused, or one the
+    /// editing host refuses, does nothing at all. What it did reaches the
+    /// host as [`EngineEvent::TextInputStateChanged`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::NotReady`] before MTS boot is observed or after
+    /// the view ends, like the page updates; the command is not queued.
+    pub fn edit(&self, command: dom::editing::Command) -> Result<(), EngineError> {
+        if !self.is_ready() {
+            return Err(EngineError::NotReady);
+        }
+        self.seat
+            .commands
+            .send(ToMain::Edit(command))
+            .map_err(|_| EngineError::NotReady)
+    }
+
     fn send_page_update(&self, update: crate::link::PageUpdate) -> Result<(), EngineError> {
         if !self.is_ready() {
             return Err(EngineError::NotReady);
@@ -1317,6 +1361,11 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                 ViewNotice::PreloadSource(request) => {
                     if self.state != ViewState::Failed && !self.cancel.is_cancelled() {
                         self.fetcher.preload_source(request);
+                    }
+                }
+                ViewNotice::TextInputState(state) => {
+                    if self.state != ViewState::Failed && !self.cancel.is_cancelled() {
+                        events.push(EngineEvent::TextInputStateChanged(state));
                     }
                 }
                 ViewNotice::RequestImages(sources) => image_requests.extend(sources),

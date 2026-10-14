@@ -8934,6 +8934,11 @@ fn close_realm_retires_the_child_and_silences_its_drops() {
 /// A frame whose handle the page realm lets go of is dropped like any
 /// element, and its shadow tree — the nested page and everything under it
 /// — goes with it. Nothing frame-specific runs in the host.
+///
+/// The removed frame's handle is held on `globalThis` until its nested page
+/// has been read, and let go of by a second script: a collection `QuickJS`
+/// starts on its own while the first script allocates would otherwise free
+/// the frame before the test reads it.
 #[test]
 fn dropping_a_frame_frees_its_nested_page() {
     let (mut js, mut runtime, elements) = runtime();
@@ -8943,11 +8948,14 @@ fn dropping_a_frame_frees_its_nested_page() {
             r"
         import { createElement, framePage, insertBefore } from 'bobcat-internal:host';
         const page = __CreatePage();
-        let frame = __CreateElement('frame', 0);
-        __AppendElement(page, frame);
-        insertBefore(framePage(__GetElementUniqueID(frame)), createElement('view'), undefined);
-        __RemoveElement(page, frame);
-        frame = undefined;
+        globalThis.frame = __CreateElement('frame', 0);
+        __AppendElement(page, globalThis.frame);
+        insertBefore(
+            framePage(__GetElementUniqueID(globalThis.frame)),
+            createElement('view'),
+            undefined,
+        );
+        __RemoveElement(page, globalThis.frame);
     ",
             "app:///dropped-frame.js",
         )
@@ -8957,6 +8965,14 @@ fn dropping_a_frame_frees_its_nested_page() {
         let page = frame_page_of(&tree, node_id(3));
         (page, tree.get(page).unwrap().child_ids()[0])
     };
+    runtime
+        .evaluate_module(
+            &mut js,
+            "globalThis.frame = undefined;",
+            "app:///drop-frame.js",
+            "dropping the frame",
+        )
+        .unwrap();
     runtime.collect_garbage(&mut js).unwrap();
     let tree = elements.tree();
     assert!(tree.get(node_id(3)).is_none(), "the frame was dropped");
@@ -9015,4 +9031,75 @@ fn a_frame_realm_closes_only_its_own_listener_names() {
         "a freed child's names close with it"
     );
     assert!(names.contains("tap"));
+}
+
+/// The editing account of the painter's name set: the pointer and key names
+/// an editing host's default actions need are routed while the document has
+/// one — whether or not the realm listens — and closed when the last one
+/// goes, except for a name the realm itself listens for.
+#[test]
+fn an_editing_host_routes_the_pointer_and_key_names_while_it_exists() {
+    let (mut js_runtime, mut runtime, _elements, mut names) =
+        runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const host = __CreateView(0);
+                  __AppendElement(page, host);
+                  globalThis.held = [page, host];
+                  __AddEventListener(page, 'pointerup', () => {}, {});
+                };
+                ",
+            "app:///editing-routes.js",
+        )
+        .expect("main-thread script");
+    runtime.sync_editing_routes();
+    assert!(!names.contains("pointerdown"), "no host yet");
+    assert!(names.contains("pointerup"), "the realm's own");
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __SetAttribute } from 'bobcat:element';
+                __SetAttribute(held[1], 'contenteditable', 'true');
+                ",
+            "app:///editable.js",
+            "editing",
+        )
+        .expect("an attribute write");
+    runtime.sync_editing_routes();
+    for name in [
+        "pointerdown",
+        "pointermove",
+        "pointerup",
+        "pointercancel",
+        "keydown",
+    ] {
+        assert!(names.contains(name), "{name} is routed for the host");
+    }
+    assert!(!names.contains("keyup"), "keyup has no editing action");
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __SetAttribute } from 'bobcat:element';
+                __SetAttribute(held[1], 'contenteditable', 'false');
+                ",
+            "app:///uneditable.js",
+            "editing",
+        )
+        .expect("an attribute write");
+    runtime.sync_editing_routes();
+    for name in ["pointerdown", "pointermove", "pointercancel", "keydown"] {
+        assert!(!names.contains(name), "{name} closes with the last host");
+    }
+    assert!(
+        names.contains("pointerup"),
+        "a name the realm listens for stays open"
+    );
 }
