@@ -3071,6 +3071,57 @@ consequential choice about whether to follow the spec or the quirk.
     tag gets, with `x-markdown.css`'s column display; web-core's host is in
     no such block.
 
+- **`x-input` / `x-textarea` (2026-10-14, editable text E5)** — Lynx-only
+  (bucket 2): web-core wraps a real `<input>`/`<textarea>` in a shadow
+  tree; here the shadow tree holds one plain-text editing host over
+  `dom::editing` (`bobcat-core`'s `tree::text_field`,
+  `docs/editable-text-design.md` E5). Where native Lynx and web-core (or
+  the Lynx typings) disagree, web-core was followed:
+  - *`send-composing-input` is off by default* (web-core). Native sends
+    `input` during a composition by default; web-core suppresses it until
+    `compositionend` unless the attribute is present.
+  - *`maxlength` defaults to 140* (web-core and the typings). Native has no
+    limit by default.
+  - *`maxlength` counts UTF-16 units* (web-core, the browser's rule) and
+    takes back the excess from the end of the text just inserted, never
+    half a surrogate pair. Native counts UTF-16 units too but never splits a
+    composed character sequence, so a grapheme cluster of several code
+    points can be cut here where native drops it whole.
+  - *`input-filter` removes what the pattern matches* (web-core's
+    `value.replace(new RegExp(filter, 'g'), '')`). Native keeps only the
+    characters that match. The pattern is compiled by `regex-lite`, not an
+    ECMAScript engine: `\uXXXX` escapes are translated, and lookaround and
+    backreferences, which it lacks, make the pattern filter nothing.
+  - *`setInputFilter({pattern})` filters.* web-core's writes the inner
+    `<input>`'s `pattern` attribute, which filters nothing; here it
+    replaces `input-filter`'s pattern, the last write winning.
+  - *An `x-textarea` confirms only with `confirm-enter`* (web-core). Native
+    fires `confirm` on Enter whenever `confirm-type` is not the default.
+    Here `confirm` follows that Enter's `input` (web-core fires it on the
+    `keyup`), so an Enter the input method consumed does not confirm.
+  - *`getValue` answers a field that is not focused* with a caret at the
+    end of the value (web-core's `<input>` keeps that selection); native
+    answers `-1` for both offsets. The data carries the typings'
+    `selectionStart` and web-core's `selectionBegin`, both.
+  - *`selection` fires for a selected range only* (web-core's `select`):
+    a change of selection that changed no value and leaves text selected.
+    Native fires it on every selection change, caret moves included.
+  - *`readonly` cannot be focused.* A browser's (and native's) read-only
+    field takes focus and a caret but no edit; here `readonly`, like
+    `disabled`, turns the editor's `contenteditable` off, so a tap focuses
+    nothing and no `focus` fires.
+  - *A `password` field is not masked.* web-core's `<input type=password>`
+    shows bullets; here the text shows as typed, because masking needs a
+    paragraph that shows other text than the value, which `dom` refuses to
+    edit. `TextInputState::input_type` is `Password`.
+  - *No intrinsic width.* An unsized field in a row is as wide as its text;
+    a browser's `<input>` is about 20 characters wide.
+  - *The single-line field does not follow its caret.* Text wider than the
+    field is clipped; a browser scrolls its inner editor to keep the caret
+    in view.
+  - *`placeholder-font-style` and the `-x-placeholder-*` aliases* are
+    native's and not web-core's, and not built.
+
 ## JS runtime & APIs (see [js-runtime.md](js-runtime.md), [accessibility.md](accessibility.md))
 
 - **`ShadowRealm` children have no animation frames, and report under their

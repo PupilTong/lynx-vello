@@ -8,6 +8,7 @@
 //! append a description of each event to its `log` attribute, which a probe
 //! reads on the view's own thread.
 
+use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use dom::Point2D;
@@ -511,4 +512,191 @@ fn a_touch_drag_that_scrolls_does_not_focus_the_host_and_a_tap_does() {
     engine.dispatch_input(touch(PointerPhase::Down, 100.0, 100.0));
     engine.dispatch_input(touch(PointerPhase::Up, 100.0, 100.0));
     assert_eq!(focused(&mut engine), Some(node_id(4)), "the tap focused it");
+}
+
+// --- `x-input` and `x-textarea` (E5) -----------------------------------------
+
+/// The text field (node 3), 200×40 with 10px padding in 20px Ahem, with
+/// `attributes`, and listeners for the Lynx events and the standard
+/// `beforeinput`, each logging `type:detail` — the detail as JSON — to the
+/// field's `log` attribute. `on_confirm` runs in the `confirm` listener
+/// with `field` and `note` in scope, after the confirm is logged.
+fn field_page(tag: &str, attributes: &[(&str, &str)], on_confirm: &str) -> String {
+    let mut set = String::new();
+    for (name, value) in attributes {
+        write!(set, "__SetAttribute(field, '{name}', '{value}');").expect("writing to a String");
+    }
+    let attributes = set;
+    format!(
+        r"
+        globalThis.renderPage = function () {{
+          const page = __CreatePage('card', 0);
+          const field = __CreateElement('{tag}', 0);
+          __AppendElement(page, field);
+          globalThis.held = [page, field];
+          globalThis.entries = [];
+          {attributes}
+          __SetInlineStyles(field, 'width:200px;height:40px;padding:10px;font-family:Ahem;font-size:20px;line-height:20px');
+          const note = (line) => {{
+            entries.push(line);
+            __SetAttribute(field, 'log', entries.join('|'));
+          }};
+          for (const name of ['input', 'confirm', 'focus', 'blur', 'selection', 'beforeinput']) {{
+            __AddEventListener(field, name, (event) => {{
+              note(event.type + ':' + JSON.stringify(event.detail));
+              if (event.type === 'confirm') {{
+                {on_confirm}
+              }}
+            }}, {{}});
+          }}
+          __FlushElementTree();
+        }};
+        "
+    )
+}
+
+fn field_engine(tag: &str, attributes: &[(&str, &str)], on_confirm: &str) -> TestEngine {
+    TestViewSpec::new(&field_page(tag, attributes, on_confirm))
+        .with_font("Ahem", AHEM)
+        .boot()
+}
+
+fn enter() -> InputEvent {
+    InputEvent::key(
+        KeyPhase::Down,
+        "Enter",
+        "Enter",
+        false,
+        Modifiers::default(),
+    )
+    .with_text(Some("\r".into()))
+}
+
+/// A tap in the field's padding focuses its editor; keys type into it and
+/// fire web-core's `input`, never the standard `beforeinput` (which stays in
+/// the shadow tree); `maxlength` refuses the fourth character; Enter fires
+/// `confirm`, whose listener reads `getValue` and blurs the field, which
+/// fires `blur`.
+#[test]
+fn an_x_input_types_confirms_and_reports_in_web_core_s_shape() {
+    let mut engine = field_engine(
+        "x-input",
+        &[("maxlength", "3"), ("placeholder", "say")],
+        "const answer = [];
+         __InvokeUIMethod(field, 'getValue', {}, (result) => answer.push(result));
+         note('getValue:' + JSON.stringify(answer[0]));
+         __InvokeUIMethod(field, 'blur', {}, () => {});",
+    );
+    let mut states = States::default();
+    engine.dispatch_input(touch(PointerPhase::Down, 3.0, 3.0));
+    engine.dispatch_input(touch(PointerPhase::Up, 3.0, 3.0));
+    let focused = states.wait(&mut engine, "focusing the editor", |state| {
+        state.host.is_some()
+    });
+    assert_ne!(
+        focused.host,
+        Some(node_id(HOST)),
+        "the editor, not the host"
+    );
+    assert_eq!(focused.enter_key_hint, dom::editing::EnterKeyHint::Send);
+
+    for text in ["a", "b", "c", "d"] {
+        engine.dispatch_input(key(text));
+    }
+    states.wait(&mut engine, "with abc", |state| state.value == "abc");
+    engine.dispatch_input(enter());
+    let detail = |value: &str, at: u32| {
+        format!(
+            r#"{{"value":"{value}","textLength":{at},"cursor":{at},"isComposing":false,"selectionStart":{at},"selectionEnd":{at}}}"#
+        )
+    };
+    wait_for_log(
+        &mut engine,
+        &[
+            r#"focus:{"value":""}"#.to_owned(),
+            format!("input:{}", detail("a", 1)),
+            format!("input:{}", detail("ab", 2)),
+            format!("input:{}", detail("abc", 3)),
+            r#"confirm:{"value":"abc"}"#.to_owned(),
+            r#"getValue:{"code":0,"data":{"value":"abc","selectionStart":3,"selectionEnd":3,"isComposing":false,"selectionBegin":3}}"#.to_owned(),
+            r#"blur:{"value":"abc"}"#.to_owned(),
+        ]
+        .join("|"),
+    );
+    let blurred = states.wait(&mut engine, "blurred", |state| state.host.is_none());
+    assert_eq!(blurred, TextInputState::default());
+}
+
+/// A host's input-method commands reach the field's editor: a composition
+/// fires one `input` at its end, and `setValue`/`setSelectionRange` from a
+/// listener move the value and the selection with no `input`.
+#[test]
+fn an_x_textarea_reports_a_composition_once_and_takes_script_writes() {
+    let mut engine = field_engine(
+        "x-textarea",
+        &[("confirm-enter", "")],
+        "__InvokeUIMethod(field, 'setValue', { value: 'hello' }, () => {});
+         __InvokeUIMethod(field, 'setSelectionRange', { selectionStart: 1, selectionEnd: 3 }, () => {});",
+    );
+    let mut states = States::default();
+    engine.dispatch_input(touch(PointerPhase::Down, 20.0, 20.0));
+    engine.dispatch_input(touch(PointerPhase::Up, 20.0, 20.0));
+    states.wait(&mut engine, "focusing the editor", |state| {
+        state.host.is_some()
+    });
+    for text in ["に", "日"] {
+        engine
+            .view
+            .edit(Command::SetComposition {
+                text: text.to_owned(),
+                selection: 1..1,
+            })
+            .unwrap();
+    }
+    engine
+        .view
+        .edit(Command::FinishComposition {
+            keep_selection: false,
+        })
+        .unwrap();
+    engine.dispatch_input(enter());
+    wait_for_log(
+        &mut engine,
+        &[
+            r#"focus:{"value":""}"#,
+            r#"input:{"value":"日","textLength":1,"cursor":1,"isComposing":false,"selectionStart":1,"selectionEnd":1}"#,
+            r#"input:{"value":"日\n","textLength":2,"cursor":2,"isComposing":false,"selectionStart":2,"selectionEnd":2}"#,
+            r#"confirm:{"value":"日\n"}"#,
+            r#"selection:{"selectionStart":1,"selectionEnd":3}"#,
+        ]
+        .join("|"),
+    );
+    let state = states.wait(&mut engine, "with hello", |state| state.value == "hello");
+    assert_eq!(state.selection, 1..3);
+}
+
+/// A `readonly` field cannot be focused: a tap focuses nothing and keys
+/// type nothing.
+#[test]
+fn a_readonly_x_input_is_not_focused_by_a_tap() {
+    let mut engine = field_engine("x-input", &[("readonly", ""), ("value", "fixed")], "");
+    engine.dispatch_input(touch(PointerPhase::Down, 20.0, 20.0));
+    engine.dispatch_input(touch(PointerPhase::Up, 20.0, 20.0));
+    engine.dispatch_input(key("x"));
+    let (focused, value) = engine
+        .probe_document(|tree| {
+            let editor = tree.shadow_root(node_id(HOST)).and_then(|root| {
+                tree.get(root)?
+                    .children()
+                    .find(|child| child.is_element())
+                    .map(dom::Node::id)
+            });
+            let value = editor
+                .and_then(|editor| tree.get(editor)?.first_child()?.text().map(str::to_owned));
+            (tree.focused(), value)
+        })
+        .expect("the view answers");
+    assert_eq!(focused, None);
+    assert_eq!(value.as_deref(), Some("fixed"));
+    assert_eq!(log_of(&mut engine), None, "no event fired");
 }

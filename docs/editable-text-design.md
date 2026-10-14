@@ -1,6 +1,6 @@
 # Editable text: `contenteditable` in the engine, IME bridged per host
 
-Status: design ruled 2026-10-14; implementation in progress (series E1–E5 below).
+Status: design ruled 2026-10-14; series E1–E5 implemented (sections below).
 
 ## Ruling
 
@@ -197,10 +197,14 @@ scope.
 
 ## Native vs web-core conflicts recorded for E5
 
-`send-composing-input` default (iOS on, web-core attribute-gated → web-core);
-`maxlength` unit (iOS grapheme clusters, browsers UTF-16 → browser);
-`input-filter` is an attribute (iOS, web-core) not a method (Clay); textarea
-`confirm` only with a non-default `confirm-type` (iOS) → web-core behaviour.
+Recorded in `docs/tracking/deviations.md` ("`x-input` / `x-textarea`"),
+web-core followed in each: `send-composing-input` off by default (native
+on); `maxlength` 140 by default (native unlimited) and counted in UTF-16
+units without native's whole-cluster rule; `input-filter` removes what
+matches (native keeps what matches); a textarea confirms only with
+`confirm-enter` (native: whenever `confirm-type` is not the default);
+`getValue` of a field not focused answers a caret at the end (native `-1`);
+`selection` fires for selected ranges only (native: every change).
 
 ## E1: what was built
 
@@ -801,3 +805,110 @@ so the macOS host and the headless driver are unchanged.
   suggest.
 - **The proxy has no accessible name** and is not announced as the host;
   accessibility of editing hosts is not built.
+
+## E5: what was built
+
+`x-input` and `x-textarea` as Lynx elements over the kernel:
+`crates/bobcat-core/src/main/tree/text_field.rs` (the component, its UA and
+shadow rules, its tests), the event and focus plumbing in
+`main/runtime/editing.rs` and `main/runtime/lib.rs`, the `getValue` decoder in
+`packages/bobcat-element/src/element-papi.ts`, end-to-end tests in
+`main/editing_tests.rs`, and three small `dom` additions.
+
+Public surface:
+
+- `dom::Document::set_host_value(host, value, selection)`: a script's write to
+  a field's value — written as one text node, no event owed, and for the
+  focused host the composition ended and the selection placed (UTF-16,
+  rounded down inside a pair, clamped).
+- `dom::Document::has_focus_events()`.
+- `TextInputState::input_type` is read from the host's `type` attribute with
+  `<input type>`'s keywords (`password`, `search`, `email`, `number`, `tel`,
+  `url`; anything else `Text`).
+- `bobcat-core`: `ComponentEvent::TextField` with `TextFieldDetail`, and string
+  values on the extras channel (`Extra::String`); a new dependency,
+  `regex-lite`, for `input-filter`.
+
+### Choices made where the brief left one
+
+- **Tags.** `input`, `x-input`, `x-input-ng` and `textarea`, `x-textarea`,
+  `x-textarea-ng`: a compiled bundle writes the JSX tag verbatim here, and
+  web-core maps all six (`constants.ts:104-107`).
+- **The host is the field's box**, not web-core's `display: contents` host
+  with an inner `<input>` that inherits a dozen box properties through
+  `::part`. The editor fills the host's content box (a row flex box with
+  the line centred for `x-input`, a column for `x-textarea`); 14px is
+  web-core's default size. A press in the host outside the editor — padding,
+  above or below the line — focuses the editor
+  (`tree::focus_delegate`, called by the press when the target is in no
+  editing host: HTML's `delegatesFocus` for this component), and places the
+  caret from that point, clamped into the paragraph.
+- **Single line.** The editing-host UA rule now pins only
+  `white-space-collapse: preserve` (`!important`), the half of `pre-wrap`
+  the invariant "the paragraph shows the value byte for byte" needs;
+  `text-wrap-mode` cascades. The single-line editor is `white-space: pre`
+  from the shadow sheet, and the value never holds a line break: after each
+  edit the component removes `\n` and `\r` (an `<input>`'s value
+  sanitization), so a paste is one line and Enter's `insertLineBreak`
+  leaves the value as it was and fires `confirm`. Both ways keep the
+  invariant; the carve-out alone would have needed a second `!important`
+  rule naming the editor.
+- **The placeholder is CSS.** `#placeholder`, after the editor, is shown by
+  `.editor:empty ~ #placeholder`, absolutely positioned over the content box
+  (`padding: inherit` from the host), `pointer-events: none`; its colour,
+  size, weight and family are custom properties the host declares from typed
+  `attr()` (grey and `normal` by default; an absent size or family is
+  invalid at computed-value time, so the placeholder inherits the host's).
+  The component writes only the text.
+- **Events are derived from the editor's standard events, heard in Rust.**
+  An editing host inside a UA shadow tree dispatches its edit and focus
+  events non-composed (`is_shadow_content` in `runtime/editing.rs`): the
+  realm's path loses every shadow step, so no realm listener hears them —
+  web-core stops its inner `<input>`'s `input` at its `#form` for the same
+  reason — and the Rust walk delivers them to the field at its shadow root.
+  The component runs on `input` (bubble pass), `compositionend`, `focus`,
+  `blur` and the engine-only `selectionchange` (capture pass), which the
+  runtime fires at the host after every command it applied. Each Lynx event
+  is queued on `ComponentEvents` with its detail read at that moment and
+  dispatched under the Lynx name (`input`, not web-core's `lynxinput`).
+  `input` fires once per edit that changed the value since the last one
+  reported (the focused editor's last reported value and selection are one
+  slot, not a per-element table), so an edit `maxlength` or a filter undid
+  fires nothing.
+- **`maxlength` and the filters run after the edit**, the component's only
+  option since its handler runs after the commit: line breaks, then
+  `maxlength` — the excess over the limit taken back from the end of what
+  the edit inserted (its `data`, a composition's at `compositionend`), never
+  half a surrogate pair, so a value already over the limit is not cut by a
+  deletion — then the `number` filter (digits and the last `.`), then
+  `input-filter`, each moving the caret by what it removed before it, and
+  the result written with `set_host_value`. None runs during a composition.
+- **`input-filter` on `regex-lite`.** web-core hands the pattern to
+  `new RegExp`; ECMAScript's `\uXXXX` is translated to `\x{XXXX}`, and a
+  pattern the small engine cannot compile (lookaround, backreferences)
+  filters nothing. `setInputFilter` writes the same pattern (the editor's
+  `pattern` attribute, where web-core writes it too), so the last write
+  wins.
+- **Methods.** `focus()` focuses with the caret at the end and queues the
+  Lynx `focus` inside the call, so a `setSelectionRange` in the same job
+  reports after it; the standard focus events it leaves in `dom` are
+  dispatched from the entry that delivers component events
+  (`has_component_events` asks `has_focus_events`). `setSelectionRange`
+  and `select` act only on a focused field.
+
+### Limitations
+
+- A `password` field is not masked (masking needs a paragraph showing other
+  text than the value, which `dom` refuses to edit).
+- The single-line field does not scroll to follow the caret; text past its
+  width is clipped.
+- No intrinsic width: an unsized field in a row is as wide as its text.
+- `readonly` fields cannot be focused (editing is off, as for `disabled`).
+- Not built: `maxlines`, `line-spacing`, `auto-height`/`min-height`/
+  `max-height`, `linechange`, `autocomplete`, `spell-check`,
+  `getTextBoundingRect` on a field, `placeholder-font-style` and the
+  `-x-placeholder-*` aliases.
+- The standard `beforeinput` and composition events of a field are not
+  visible to script at the field's host (web-core lets `beforeinput` and the
+  composition events through; no Lynx event names them).
+

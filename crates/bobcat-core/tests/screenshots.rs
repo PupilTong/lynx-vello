@@ -527,6 +527,49 @@ globalThis.renderPage = function () {
     screenshots().assert_matches(&["text-maxline"], &image);
 }
 
+/// `x-input` and `x-textarea` (editable text E5): an empty input shows its
+/// placeholder grey (or in `placeholder-color`) centred in its content box, a
+/// filled one its value in the field's own colour on one line, and a
+/// textarea wraps its value from the top. Ahem squares make every glyph a
+/// box, so the picture is exact.
+#[tokio::test]
+async fn text_fields_draw_their_placeholder_or_their_value() {
+    const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
+    const SOURCE: &str = r"
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  __SetInlineStyles(page, 'display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:8px;background-color:white');
+  function field(tag, attributes) {
+    const element = __CreateElement(tag, 0);
+    __SetInlineStyles(element, 'width:180px;height:40px;padding:0 8px;font-size:10px;line-height:10px;background-color:#e5e7eb;color:#1d4ed8');
+    for (const [name, value] of attributes) __SetAttribute(element, name, value);
+    __AppendElement(page, element);
+  }
+  field('x-input', [['placeholder', 'say hi']]);
+  field('input', [['placeholder', 'red'], ['placeholder-color', 'red']]);
+  field('x-input', [['value', 'hello world'], ['placeholder', 'unseen']]);
+  field('x-textarea', [['value', 'one two three four five six seven']]);
+};
+";
+    let (mut view, mut painter) = solo_view(
+        Arc::new(NoWakeup),
+        200.0,
+        200.0,
+        1.0,
+        DrawTarget::Offscreen,
+        fetcher(SOURCE.as_bytes()),
+        ViewSources {
+            fonts: vec![FontBlob::from_static(AHEM)],
+            default_font_family: Some("Ahem".to_owned()),
+            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN)
+        },
+    )
+    .await
+    .expect("view");
+    wait_for_script(&mut view).expect("script execution");
+    screenshots().assert_matches(&["text-fields"], &captured(&mut painter));
+}
+
 /// Requirement: a class change made by script must restyle against author
 /// rules that were never parsed from text. The script paints itself red, then
 /// swaps the class and flushes again; only the second commit is captured.

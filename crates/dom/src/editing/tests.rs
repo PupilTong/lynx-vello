@@ -874,6 +874,66 @@ fn the_input_state_reports_value_offsets_and_geometry() {
 
         doc.set_attribute(host, "inputmode", "bogus");
         assert_eq!(state(&doc).input_mode, InputMode::Default);
+
+        // The input type is the host's `type`, read with `<input type>`'s
+        // keywords; anything else is text.
+        for (value, expected) in [
+            ("password", InputType::Password),
+            ("EMAIL", InputType::Email),
+            ("number", InputType::Number),
+            ("tel", InputType::Tel),
+            ("search", InputType::Search),
+            ("url", InputType::Url),
+            ("digit", InputType::Text),
+        ] {
+            doc.set_attribute(host, "type", value);
+            assert_eq!(state(&doc).input_type, expected, "{value:?}");
+        }
+    }
+}
+
+#[test]
+fn a_value_written_by_the_element_layer_ends_the_composition_and_places_the_selection() {
+    for kind in KINDS {
+        eprintln!("kind {kind:?}");
+        let (mut doc, host) = host_in(kind, &["ab", "c"], 200.0);
+        assert!(
+            doc.apply_editing(Command::SetComposition {
+                text: "x".to_owned(),
+                selection: 1..1,
+            })
+            .applied
+        );
+        assert_eq!(state(&doc).composition, Some(0..1));
+        doc.set_host_value(host, "h😀llo", 3..3);
+        let input = state(&doc);
+        assert_eq!(input.value, "h😀llo");
+        assert_eq!(input.selection, 3..3);
+        assert_eq!(input.composition, None);
+        // One text node now, as the first edit leaves it.
+        let texts = doc.get(host).unwrap().child_ids().len();
+        assert_eq!(texts, 1);
+        // Inside the pair rounds down; past the end clamps.
+        doc.set_host_value(host, "h😀llo", 2..99);
+        assert_eq!(state(&doc).selection, 1..6);
+        // The paragraph is stale until the next pass and edits still apply.
+        assert!(doc.apply_editing(Command::Insert("!".to_owned())).applied);
+        assert_eq!(value(&doc), "h!");
+        doc.layout();
+        assert_eq!(selection(&doc), 2..2);
+
+        // A host that is not focused only takes the text, and no event is
+        // owed.
+        let other = doc.create_element("view", ());
+        doc.append_child(doc.document_element().id(), other);
+        doc.set_host_value(other, "plain", 0..0);
+        assert_eq!(doc.host_value(other), "plain");
+        assert_eq!(doc.focused(), Some(host));
+        assert!(!doc.has_focus_events());
+        assert!(doc.blur());
+        assert!(doc.has_focus_events());
+        doc.take_focus_events();
+        assert!(!doc.has_focus_events());
     }
 }
 
