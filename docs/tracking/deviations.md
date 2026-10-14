@@ -2372,10 +2372,11 @@ consequential choice about whether to follow the spec or the quirk.
     contents`, the browser's 2px `border-spacing` as gap and padding; it does
     not size rows and columns by the table algorithm.
   - *`pre` scrolls with `overflow-x: scroll; overflow-y: hidden`* for
-    web-core's `overflow: auto` (no `auto` here), and its code paragraph
-    keeps line breaks with `white-space-collapse: preserve-breaks`, the one
-    preserving mode hughie has: runs of spaces collapse, so indentation in a
-    code block is lost.
+    web-core's `overflow: auto` (no `auto` here), and its code paragraph is
+    HTML's `pre`: `white-space-collapse: preserve` (spaces, tabs to 8-column
+    stops, line breaks) with `text-wrap-mode: nowrap`. The `preserve` mode
+    landed with this component ([css-text.md](css-text.md)); `tab-size` is
+    not a property here, so the stop is 8.
   - *An image is an atomic box in its line* (the engine's `image` with
     `auto-size`), where web-core makes its `<img>` `display: block`: text
     beside an image in one paragraph shares its line.

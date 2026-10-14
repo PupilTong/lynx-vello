@@ -79,9 +79,9 @@
 //!   inline `text-align` on its cells, as markdown-it's `style` attribute. An approximation: rows
 //!   do not size as table rows do across a cell that spans more than its column's share.
 //! - **`pre`** is web-core's `overflow: auto`, written `overflow-x: scroll; overflow-y: hidden`
-//!   (this engine has no `auto`), and its code keeps line breaks (`white-space-collapse:
-//!   preserve-breaks`, the one preserving mode hughie has) without wrapping; runs of spaces still
-//!   collapse, so an indented line loses its indent.
+//!   (this engine has no `auto`), and its code is HTML's `pre`: `white-space-collapse: preserve`
+//!   keeps every space, tab (to 8-column stops) and line break, and `text-wrap-mode: nowrap` keeps
+//!   each line whole, so the paragraph sizes to its longest line and `pre` scrolls it.
 //! - **Images** are atomic boxes in the line, sized from their bitmap by `auto-size` (whose UA rule
 //!   already caps the width at 100%) where web-core makes an `<img>` `display: block`: an image
 //!   with text beside it in one paragraph shares that text's line.
@@ -314,12 +314,13 @@ const SHADOW_RULES: &str = r#"
 .markdown-body code {
   font-family: ui-monospace, SFMono-Regular, SFMono, Menlo, Consolas, "Liberation Mono", monospace;
 }
-/* :317-320; display: block is the paragraph, which keeps the code's line
-   breaks (HTML's pre is white-space: pre) and sizes to its longest line so
-   pre scrolls it. */
+/* :317-320; display: block is the paragraph, under HTML's pre
+   (white-space: pre, here its two longhands), which keeps the code's
+   spaces, tabs and line breaks and sizes to its longest line so pre scrolls
+   it. */
 .markdown-body pre code {
   display: -lynx-text; padding: 0;
-  white-space-collapse: preserve-breaks; text-wrap-mode: nowrap; align-self: flex-start;
+  white-space-collapse: preserve; text-wrap-mode: nowrap; align-self: flex-start;
 }
 /* :321-325, for the engine's image: height: auto is the default and
    display: block is not built (an image is an atomic box in its line). */

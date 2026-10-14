@@ -933,11 +933,11 @@ fn a_tap_on_a_link_or_an_image_queues_web_cores_events() {
     );
 }
 
-/// A code block keeps its line breaks and does not wrap, and scrolls
-/// sideways in its `pre`; runs of spaces collapse, `preserve-breaks` being
-/// the one preserving mode the engine has.
+/// A code block keeps its line breaks, its indentation and its runs of
+/// spaces (HTML's `pre`, `white-space-collapse: preserve`), does not wrap,
+/// and scrolls sideways in its `pre`.
 #[test]
-fn a_code_block_keeps_its_lines_without_wrapping() {
+fn a_code_block_keeps_its_lines_and_indentation_without_wrapping() {
     let (mut document, _events, element) = markdown(AHEM_HOST);
     document.set_attribute(
         element,
@@ -961,12 +961,18 @@ fn a_code_block_keeps_its_lines_without_wrapping() {
         300.0,
         "the pre stays the element's width"
     );
-    // `  d`'s two spaces collapse away at the start of its line.
+    // `  d` keeps its two leading spaces: three glyphs from the line's start.
     let boxes = document
         .text_range_boxes(code, 4, 7)
         .expect("the second line");
     assert_eq!(boxes.len(), 1);
-    assert_eq!(boxes[0].size.width, 10.0);
+    assert_eq!(boxes[0].origin.x, 0.0);
+    assert_eq!(boxes[0].size.width, 30.0);
+    // `d` itself sits two advances in.
+    let d = document
+        .text_range_boxes(code, 6, 7)
+        .expect("the indented glyph");
+    assert_eq!(d[0].origin.x, 20.0);
 }
 
 /// The definition's entry for a host goes with the host's free — the
