@@ -42,6 +42,13 @@ http = "1"
 image = { version = "0.25.10", default-features = false }
 getrandom = "0.4.3"
 markup5ever_rcdom = "0.39"
+# `<markdown>`'s source parser (`bobcat-core`'s `tree::markdown::parse`):
+# CommonMark plus GFM tables and strikethrough. No default feature: the
+# `html` writer and the `getopts` binary are not used, and `simd` only
+# accelerates that writer's escaping.
+pulldown-cmark = { version = "0.13", default-features = false }
+# Bare URL and email autolinking for `<markdown>`, markdown-it's `linkify`.
+linkify = "0.11"
 parley = { version = "0.11", default-features = false, features = [
     "std",
     "system",

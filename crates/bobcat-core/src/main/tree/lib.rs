@@ -44,6 +44,7 @@ mod blur_view;
 pub(crate) mod dialog;
 mod image;
 mod list;
+mod markdown;
 mod overlay;
 mod popover;
 pub(crate) mod raw_text;
