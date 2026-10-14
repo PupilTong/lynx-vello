@@ -501,7 +501,7 @@ test('leaving the proxy finishes an open composition and keeps the engine’s fo
   // A later state does not take focus back; a press on the canvas does.
   input.update(state({ value: 'x' }))
   assert.equal(document.activeElement, null)
-  input.gesture(false)
+  input.press()
   assert.equal(document.activeElement, area)
 })
 
@@ -515,15 +515,12 @@ test('the engine’s blur forgets a composition the browser still holds', () => 
   assert.deepEqual(edits, [], 'nothing is committed into the next host')
 })
 
-test('a tap after a focus the engine gave outside a gesture focuses again inside it', () => {
+test('a press while the proxy holds focus focuses nothing again', () => {
   const { input, textarea } = proxy()
   input.update(state())
   const area = textarea()
   assert.equal(area.focusCount, 1)
-  input.gesture(false)
-  assert.equal(area.focusCount, 1, 'a mouse needs no second focus')
-  input.gesture(true)
-  assert.equal(area.focusCount, 2, 'a touch gets one, inside its gesture')
-  input.gesture(true)
-  assert.equal(area.focusCount, 2, 'only once per focus')
+  input.press()
+  input.press()
+  assert.equal(area.focusCount, 1)
 })
