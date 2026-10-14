@@ -726,6 +726,10 @@ struct Recorder {
 }
 
 impl dom::CustomElement<()> for Recorder {
+    fn observed_events(&self) -> &'static [&'static str] {
+        &["contentvisibilityautostatechange"]
+    }
+
     fn handle_event(
         &self,
         document: &mut dom::Document<()>,

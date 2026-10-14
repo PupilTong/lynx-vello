@@ -939,9 +939,14 @@ host follows it as itself. `ElementEventKind` is the extension point. Its
 variants are css-contain-2 §4.4's `ContentVisibilityAutoStateChange { skipped }`,
 which `Document::dispatch_content_visibility_changes` fires from the queue the
 relevance pass filled — `bubbles`, not composed, not cancelable, and never
-reaching a realm — and DOM's `SlotChange`, fired by the slot assignment paths
-above. A document that defines nothing pays one `is_empty` check
-per dispatch and builds no path.
+reaching a realm — DOM's `SlotChange`, fired by the slot assignment paths
+above, and Lynx's `Tap { x, y }`, which this crate never fires itself:
+`bobcat-core` fires it at a tap's hit node, `bubbles` and not composed, when
+that node is UA shadow content, so the component whose shadow tree it is
+hears which inner node was tapped. Which types are walked at all is the
+definitions' answer: `CustomElement::observed_events` names them, `define`
+unions every list into one set, and a dispatch of a type no definition
+observes pays one set lookup and builds no path.
 
 ## Text
 

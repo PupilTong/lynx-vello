@@ -860,6 +860,10 @@ impl Recorder {
 }
 
 impl CustomElement<()> for Recorder {
+    fn observed_events(&self) -> &'static [&'static str] {
+        &["contentvisibilityautostatechange"]
+    }
+
     fn connected_callback(&self, _document: &mut Document<()>, _element: NodeId) {
         if self.connections {
             self.record(format!("{}:connected", self.who));

@@ -233,7 +233,7 @@ mod tests {
             .into_iter()
             .map(|event| match event {
                 ComponentEvent::Image(outcome) => outcome,
-                ComponentEvent::Plain { name, .. } => panic!("no {name} here"),
+                other => panic!("no such event here: {other:?}"),
             })
             .collect()
     }

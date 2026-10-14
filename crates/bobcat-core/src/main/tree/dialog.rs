@@ -385,7 +385,7 @@ mod tests {
             .into_iter()
             .map(|event| match event {
                 ComponentEvent::Plain { node, name } => (node, name),
-                ComponentEvent::Image(outcome) => panic!("no image here: {outcome:?}"),
+                other => panic!("no such event here: {other:?}"),
             })
             .collect()
     }

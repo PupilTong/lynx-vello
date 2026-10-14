@@ -1100,6 +1100,10 @@ struct SlotHost {
 }
 
 impl CustomElement<()> for SlotHost {
+    fn observed_events(&self) -> &'static [&'static str] {
+        &["slotchange"]
+    }
+
     fn constructed(&self, document: &mut Document<()>, element: NodeId) {
         let shadow = document.attach_shadow(element, ShadowRootMode::Open);
         for &name in self.slots {
@@ -1329,6 +1333,170 @@ fn slotchange_does_not_leave_a_nested_components_shadow_tree() {
     assert_eq!(take(&log), slotchange("outer", "default", 1));
 }
 
+// ---------------------------------------------------------------------------
+// A tap the host fires, heard by the component whose shadow tree it hit
+// ---------------------------------------------------------------------------
+
+/// A component whose constructor builds `<frame><a/><slot/></frame>` in its
+/// shadow tree, with an `inner` component after the slot when one is named,
+/// and that records every tap it hears as `who:phase:target-tag:x,y`.
+struct TapHost {
+    who: &'static str,
+    log: Log,
+    inner: Option<&'static str>,
+}
+
+impl CustomElement<()> for TapHost {
+    fn observed_events(&self) -> &'static [&'static str] {
+        &["tap"]
+    }
+
+    fn constructed(&self, document: &mut Document<()>, element: NodeId) {
+        let shadow = document.attach_shadow(element, ShadowRootMode::Open);
+        let frame = document.create_element("frame", ());
+        document.append_child(shadow, frame);
+        for tag in ["a", "slot"].into_iter().chain(self.inner) {
+            let child = document.create_element(tag, ());
+            document.append_child(frame, child);
+        }
+    }
+
+    fn handle_event(&self, document: &mut Document<()>, element: NodeId, event: &mut ElementEvent) {
+        let ElementEventKind::Tap { x, y } = event.kind() else {
+            return;
+        };
+        assert_eq!(event.kind().name(), "tap");
+        assert_eq!(event.current_target(), element);
+        let phase = match event.phase() {
+            EventPhase::Capturing => "capture",
+            EventPhase::AtTarget => "at-target",
+            EventPhase::Bubbling => "bubble",
+        };
+        let tag = document
+            .get(event.target())
+            .and_then(|node| node.tag_name())
+            .unwrap_or("?")
+            .to_owned();
+        self.log
+            .lock()
+            .expect("the log is never poisoned")
+            .push(format!("{}:{phase}:{tag}:{x},{y}", self.who));
+    }
+}
+
+/// The one shadow-tree child of `host`'s `<frame>` with tag `tag`.
+fn shadow_child(doc: &Doc, host: NodeId, tag: &str) -> NodeId {
+    let shadow = doc
+        .dom
+        .shadow_root(host)
+        .expect("the constructor attached one");
+    let frame = doc.dom.get(shadow).unwrap().child_ids()[0];
+    doc.dom
+        .get(frame)
+        .unwrap()
+        .child_ids()
+        .iter()
+        .copied()
+        .find(|&child| doc.dom.get(child).and_then(|node| node.tag_name()) == Some(tag))
+        .expect("the constructor built it")
+}
+
+fn tap(doc: &mut Doc, target: NodeId) {
+    doc.dom.dispatch_element_event(
+        target,
+        ElementEventKind::Tap { x: 3.0, y: 4.5 },
+        true,
+        false,
+    );
+}
+
+#[test]
+fn a_non_composed_tap_inside_a_shadow_tree_reaches_the_host_with_the_inner_target() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    doc.dom.define(
+        "x-tap",
+        Box::new(TapHost {
+            who: "host",
+            log: Arc::clone(&log),
+            inner: None,
+        }),
+    );
+    let host = doc.el(root, "x-tap");
+    let link = shadow_child(&doc, host, "a");
+
+    tap(&mut doc, link);
+    assert_eq!(
+        take(&log),
+        ["host:capture:a:3,4.5", "host:bubble:a:3,4.5"],
+        "the shadow root's step, in both passes, with the node the tap hit as the target"
+    );
+
+    // A light child is in the document's tree, so `composed: false` ends
+    // nothing short of the document: the host is an ancestor on the path and
+    // hears the tap as itself, the light child as the target. Keeping a host
+    // from hearing taps at content it merely displays is the firing side's
+    // choice of target (`bobcat-core` fires at shadow content alone).
+    let slotted = doc.el(host, "view");
+    tap(&mut doc, slotted);
+    assert_eq!(
+        take(&log),
+        ["host:capture:view:3,4.5", "host:bubble:view:3,4.5"]
+    );
+}
+
+#[test]
+fn a_tap_inside_a_nested_components_shadow_tree_stays_there() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    doc.dom.define(
+        "x-inner",
+        Box::new(TapHost {
+            who: "inner",
+            log: Arc::clone(&log),
+            inner: None,
+        }),
+    );
+    doc.dom.define(
+        "x-outer",
+        Box::new(TapHost {
+            who: "outer",
+            log: Arc::clone(&log),
+            inner: Some("x-inner"),
+        }),
+    );
+    let outer = doc.el(root, "x-outer");
+    let inner = shadow_child(&doc, outer, "x-inner");
+
+    let inner_link = shadow_child(&doc, inner, "a");
+    tap(&mut doc, inner_link);
+    assert_eq!(
+        take(&log),
+        ["inner:capture:a:3,4.5", "inner:bubble:a:3,4.5"],
+        "composed: false — the outer host, past the inner shadow root, hears nothing"
+    );
+
+    let outer_link = shadow_child(&doc, outer, "a");
+    tap(&mut doc, outer_link);
+    assert_eq!(
+        take(&log),
+        ["outer:capture:a:3,4.5", "outer:bubble:a:3,4.5"]
+    );
+
+    tap(&mut doc, inner);
+    assert_eq!(
+        take(&log),
+        [
+            "outer:capture:x-inner:3,4.5",
+            "inner:at-target:x-inner:3,4.5",
+            "outer:bubble:x-inner:3,4.5",
+        ],
+        "a defined element inside the outer shadow tree is on the path as itself"
+    );
+}
+
 /// A `slotchange` handler that mutates: what it signals fires after the
 /// set being fired, not inside its own call.
 #[test]
@@ -1337,6 +1505,10 @@ fn a_slot_signalled_by_a_slotchange_handler_fires_after_the_current_set() {
         log: Log,
     }
     impl CustomElement<()> for Mover {
+        fn observed_events(&self) -> &'static [&'static str] {
+            &["slotchange"]
+        }
+
         fn constructed(&self, document: &mut Document<()>, element: NodeId) {
             let shadow = document.attach_shadow(element, ShadowRootMode::Open);
             for name in ["a", "b"] {

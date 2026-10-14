@@ -1688,7 +1688,9 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
             "app:///edges.js",
         )
         .expect("main-thread script");
-    assert_eq!(names.names(), ["swipe", "tap"]);
+    // `slotchange` is the swiper's and the refresh view's, published once
+    // when the document was built and never closed.
+    assert_eq!(names.names(), ["slotchange", "swipe", "tap"]);
 
     runtime
         .evaluate_module(
@@ -1705,7 +1707,7 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
             "unregistering",
         )
         .expect("unregistration");
-    assert_eq!(names.names(), ["tap"]);
+    assert_eq!(names.names(), ["slotchange", "tap"]);
 
     runtime
         .evaluate_module(
@@ -1720,7 +1722,28 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
             "unregistering",
         )
         .expect("unregistration");
-    assert!(names.names().is_empty(), "the last registration closes it");
+    assert_eq!(
+        names.names(),
+        ["slotchange"],
+        "the last registration closes it; a component's name stays open"
+    );
+
+    // The realm's own edges for a component's name are not forwarded: its
+    // last removal does not close what the component still observes.
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __AddEventListener, __RemoveEventListener } from 'bobcat:element';
+                const [, outer] = globalThis.held;
+                __AddEventListener(outer, 'slotchange', globalThis.listener, {});
+                __RemoveEventListener(outer, 'slotchange', globalThis.listener, {});
+                ",
+            "app:///component-name.mjs",
+            "registering a component's name",
+        )
+        .expect("registration");
+    assert_eq!(names.names(), ["slotchange"]);
 }
 
 /// The replica is what the painting side filters against, so a
@@ -3869,6 +3892,395 @@ fn an_overlay_shows_and_dismisses_through_set_attribute() {
         &mut runtime,
         "page-capture:2:dismissoverlay:{}|overlay:4:dismissoverlay:{}",
     );
+}
+
+/// A component event with a string detail, queued from inside a scope as a
+/// component's own callback queues one, is delivered from an entry of its
+/// own at the element, bubbling or not as it was queued, with the detail built in the realm from
+/// one string argument per key: `{id}`, `{url, content, contentId}` and
+/// `{url, contentId}`, the shapes `<x-markdown>`'s `parseEnd`, `link` and
+/// `imageTap` carry. A string the component had no value for is a key the
+/// detail leaves out, so it does not reach the `JSON.stringify` below even
+/// as `undefined`.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario: every shape, with and without its optional key"
+)]
+fn a_component_event_with_a_string_detail_reaches_script_built_per_shape() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const outer = __CreateView(0);
+                  const markdown = __CreateView(0);
+                  __AppendElement(page, outer);
+                  __AppendElement(outer, markdown);
+                  globalThis.held = [page, outer, markdown];
+                  const note = (label) => ({
+                    type: 'worklet',
+                    value: {
+                      body: (event) =>
+                        seen.push(
+                          label + ':' + event.currentTarget.uid + ':' + event.type + ':' +
+                          JSON.stringify(event.detail) + ':' +
+                          Object.keys(event.detail).join(','),
+                        ),
+                    },
+                  });
+                  for (const name of ['parseEnd', 'link', 'imageTap']) {
+                    __AddEvent(markdown, 'bindEvent', name, note('markdown'));
+                    __AddEvent(outer, 'bindEvent', name, note('outer'));
+                  }
+                };
+                ",
+            "app:///string-details.js",
+        )
+        .expect("main-thread script");
+    let markdown = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let outer = tree.get(page).expect("the page").child_ids()[0];
+        tree.get(outer).expect("the outer view").child_ids()[0]
+    };
+    let text = |value: &str| Some(value.to_owned());
+    let image = "https://lynxjs.org/a.png".to_owned();
+    for (name, detail) in [
+        ("parseEnd", ComponentDetail::Id { id: text("doc-1") }),
+        ("parseEnd", ComponentDetail::Id { id: None }),
+        (
+            "link",
+            ComponentDetail::UrlContent {
+                url: "https://lynxjs.org/".to_owned(),
+                content: "Lynx \u{201c}docs\u{201d}".to_owned(),
+                content_id: text("doc-1"),
+            },
+        ),
+        (
+            "link",
+            ComponentDetail::UrlContent {
+                url: String::new(),
+                content: String::new(),
+                content_id: None,
+            },
+        ),
+        (
+            "imageTap",
+            ComponentDetail::Url {
+                url: image.clone(),
+                content_id: text(""),
+            },
+        ),
+        (
+            "imageTap",
+            ComponentDetail::Url {
+                url: image,
+                content_id: None,
+            },
+        ),
+    ] {
+        runtime
+            .slot
+            .borrow()
+            .component_events
+            .queue_detailed(markdown, name, false, detail);
+    }
+    assert!(runtime.has_component_events());
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    assert!(!runtime.has_component_events());
+    // Queued non-bubbling: the bind pass runs at the element alone, so the
+    // outer view's handlers never run.
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        &[
+            r#"markdown:4:parseend:{"id":"doc-1"}:id"#,
+            "markdown:4:parseend:{}:",
+            "markdown:4:link:{\"url\":\"https://lynxjs.org/\",\"content\":\"Lynx \u{201c}docs\u{201d}\",\"contentId\":\"doc-1\"}:url,content,contentId",
+            r#"markdown:4:link:{"url":"","content":""}:url,content"#,
+            r#"markdown:4:imagetap:{"url":"https://lynxjs.org/a.png","contentId":""}:url,contentId"#,
+            r#"markdown:4:imagetap:{"url":"https://lynxjs.org/a.png"}:url"#,
+        ]
+        .join("|"),
+    );
+
+    // Queued bubbling, as `<x-markdown>` queues its three (web-core's
+    // `bubbles: true, composed: true`): the outer view's `bindEvent` hears
+    // it after the element's own. A `Plain` event of the same name still
+    // does not bubble.
+    {
+        let slot = runtime.slot.borrow();
+        slot.component_events.queue_detailed(
+            markdown,
+            "link",
+            true,
+            ComponentDetail::UrlContent {
+                url: "https://lynxjs.org/".to_owned(),
+                content: "Lynx".to_owned(),
+                content_id: None,
+            },
+        );
+        slot.component_events.queue(markdown, "link");
+    }
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        &[
+            r#"markdown:4:link:{"url":"https://lynxjs.org/","content":"Lynx"}:url,content"#,
+            r#"outer:3:link:{"url":"https://lynxjs.org/","content":"Lynx"}:url,content"#,
+            "markdown:4:link:{}:",
+        ]
+        .join("|"),
+    );
+}
+
+/// What [`TapProbe`] heard, one entry per delivery.
+type TapLog = Rc<RefCell<Vec<String>>>;
+
+/// A test component that builds `<view><text/></view>` in its shadow tree,
+/// as a UA component builds its content, and records every
+/// [`dom::event::ElementEventKind::Tap`] it hears as
+/// `phase:target-tag:x,y`. In the bubble pass it also writes the tapped
+/// tag to its own `heard` attribute, which script's `tap` listener reads to
+/// see that the component heard the tap first.
+struct TapProbe {
+    log: TapLog,
+}
+
+impl dom::CustomElement<()> for TapProbe {
+    fn observed_events(&self) -> &'static [&'static str] {
+        &["tap"]
+    }
+
+    fn constructed(&self, document: &mut LynxDocument, element: dom::NodeId) {
+        let shadow = document.attach_shadow(element, dom::ShadowRootMode::Open);
+        let frame = document.create_element("view", ());
+        document.append_child(shadow, frame);
+        let text = document.create_element("text", ());
+        document.append_child(frame, text);
+    }
+
+    fn handle_event(
+        &self,
+        document: &mut LynxDocument,
+        element: dom::NodeId,
+        event: &mut dom::event::ElementEvent,
+    ) {
+        let dom::event::ElementEventKind::Tap { x, y } = event.kind() else {
+            return;
+        };
+        let phase = match event.phase() {
+            dom::event::EventPhase::Capturing => "capture",
+            dom::event::EventPhase::AtTarget => "at-target",
+            dom::event::EventPhase::Bubbling => "bubble",
+        };
+        let tag = document
+            .get(event.target())
+            .and_then(dom::Node::tag_name)
+            .unwrap_or("?")
+            .to_owned();
+        if event.phase() == dom::event::EventPhase::Bubbling {
+            document.set_attribute(element, "heard", &tag);
+        }
+        self.log.borrow_mut().push(format!("{phase}:{tag}:{x},{y}"));
+    }
+}
+
+/// A `tap` the gesture path delivers at a component's UA shadow content is
+/// heard first by that component, through `dom`'s walk, with the shadow node
+/// it hit as the target and the gesture's position; script's `tap` follows,
+/// starting at the host, retargeted, and sees what the component did. A tap
+/// at the host's light child reaches script alone: the host only displays
+/// it.
+#[test]
+fn a_tap_at_shadow_content_is_heard_by_its_component_before_script() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.renderPage = function () {
+                  globalThis.held = [__CreatePage('card', 0)];
+                };
+                ",
+            "app:///tap-probe.js",
+        )
+        .expect("main-thread script");
+    let log = TapLog::default();
+    runtime.with_document(|document| {
+        document.define(
+            "x-tap-probe",
+            Box::new(TapProbe {
+                log: Rc::clone(&log),
+            }),
+        );
+    });
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import {
+                  __AddEventListener, __AppendElement, __CreateElement, __CreateView,
+                  __GetAttributeByName,
+                } from 'bobcat:element';
+                const [page] = held;
+                const probe = __CreateElement('x-tap-probe', 0);
+                const light = __CreateView(0);
+                __AppendElement(page, probe);
+                __AppendElement(probe, light);
+                held.push(probe, light);
+                __AddEventListener(probe, 'tap', (event) => {
+                  seen.push(
+                    'script:' + event.currentTarget.uid + ':' + event.target.uid + ':' +
+                    __GetAttributeByName(probe, 'heard') + ':' + event.detail.x,
+                  );
+                }, {});
+                ",
+            "app:///tap-probe-tree.js",
+            "tree",
+        )
+        .expect("the probe tree");
+    let (probe, light, text) = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let probe = tree.get(page).expect("the page").child_ids()[0];
+        let light = tree.get(probe).expect("the probe").child_ids()[0];
+        let shadow = tree.shadow_root(probe).expect("the probe's shadow root");
+        let frame = tree.get(shadow).expect("the shadow root").child_ids()[0];
+        let text = tree.get(frame).expect("the shadow view").child_ids()[0];
+        (probe, light, text)
+    };
+
+    runtime
+        .dispatch_for_test(&mut js_runtime, text, &tap(), event_point())
+        .expect("the tap at shadow content");
+    assert_eq!(
+        std::mem::take(&mut *log.borrow_mut()),
+        ["capture:text:12,30", "bubble:text:12,30"],
+        "the shadow root's step, in both passes, as the host's own"
+    );
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        &format!("script:{0}:{0}:text:12", probe.to_bits()),
+    );
+
+    runtime
+        .dispatch_for_test(&mut js_runtime, light, &tap(), event_point())
+        .expect("the tap at light content");
+    assert!(
+        log.borrow().is_empty(),
+        "a light child is not the component's content"
+    );
+    // `heard` is still the earlier tap's.
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        &format!("script:{}:{}:text:12", probe.to_bits(), light.to_bits()),
+    );
+}
+
+/// A name a component observes is in the painter's name set with no realm
+/// listener anywhere, so the painter sends the gesture's `tap` and the
+/// component hears it. The realm's own edges for that name are not
+/// forwarded, so a script that listens for it and then stops does not
+/// close what the component still observes.
+#[test]
+fn a_tap_a_component_observes_is_routed_with_no_script_listener() {
+    let (mut js_runtime, mut runtime, elements, mut names) =
+        runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  globalThis.held = [__CreatePage('card', 0)];
+                  globalThis.listener = () => {};
+                };
+                ",
+            "app:///observed-tap.js",
+        )
+        .expect("main-thread script");
+    assert!(
+        !names.contains("tap"),
+        "nothing the document was built with observes `tap`, and no script listens"
+    );
+
+    let log = TapLog::default();
+    elements.tree().define(
+        "x-tap-probe",
+        Box::new(TapProbe {
+            log: Rc::clone(&log),
+        }),
+    );
+    assert!(elements.tree().observes_event("tap"));
+    // What building the document does for the definitions `new_document`
+    // makes: publish what they observe, once. This one came after the
+    // build, so the test publishes it the same way.
+    {
+        let slot = runtime.slot.borrow();
+        slot.outbox.publish_observed_names(
+            slot.document
+                .as_ref()
+                .expect("the realm has created its document")
+                .observed_event_names(),
+        );
+    }
+    assert!(
+        names.contains("tap"),
+        "the painter routes `tap` for the component alone"
+    );
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import {
+                  __AddEventListener, __AppendElement, __CreateElement, __RemoveEventListener,
+                } from 'bobcat:element';
+                const [page] = held;
+                const probe = __CreateElement('x-tap-probe', 0);
+                __AppendElement(page, probe);
+                held.push(probe);
+                __AddEventListener(probe, 'tap', globalThis.listener, {});
+                __RemoveEventListener(probe, 'tap', globalThis.listener, {});
+                ",
+            "app:///observed-tap-tree.js",
+            "tree",
+        )
+        .expect("the probe tree");
+    assert!(
+        names.contains("tap"),
+        "the realm's last removal does not close a component's name"
+    );
+
+    let text = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let probe = tree.get(page).expect("the page").child_ids()[0];
+        let shadow = tree.shadow_root(probe).expect("the probe's shadow root");
+        let frame = tree.get(shadow).expect("the shadow root").child_ids()[0];
+        tree.get(frame).expect("the shadow view").child_ids()[0]
+    };
+    runtime
+        .dispatch_for_test(&mut js_runtime, text, &tap(), event_point())
+        .expect("a tap no script listens for is no error");
+    assert_eq!(*log.borrow(), ["capture:text:12,30", "bubble:text:12,30"]);
 }
 
 /// An event at a UA component's shadow content — an `<x-swiper>`'s

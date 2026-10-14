@@ -77,6 +77,11 @@ pub(crate) type LynxDocument = Document<()>;
 
 pub(crate) const PAGE_TAG: &str = "page";
 
+/// DOM's `slotchange`, which a component with a UA shadow tree observes
+/// ([`dom::CustomElement::observed_events`]) to learn that its assigned
+/// children changed.
+pub(super) const SLOT_CHANGE: &str = "slotchange";
+
 /// Creates the document with its permanent `page` element, the components the
 /// engine defines, and the UA cascade.
 ///
@@ -165,9 +170,10 @@ pub(super) fn element_children(
         .filter(|child| document.get(*child).is_some_and(dom::Node::is_element))
 }
 
-/// One event a component owes script: always non-bubbling, at the element
-/// the component belongs to.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// One event a component owes script, at the element the component belongs
+/// to: non-bubbling, except a [`ComponentEvent::Detailed`] that says
+/// otherwise.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ComponentEvent {
     /// An `<image>`'s or `<svg>`'s own source settled: `load`, which carries
     /// an `<image>`'s intrinsic size and an `<svg>`'s layout size, or `error`,
@@ -177,6 +183,58 @@ pub(crate) enum ComponentEvent {
     /// a `<dialog>`'s `close` and `cancel` ([`dialog`]), an `<overlay>`'s
     /// `showoverlay` and `dismissoverlay` ([`overlay`]).
     Plain { node: NodeId, name: &'static str },
+    /// An event whose detail is made of strings the component read when it
+    /// queued the event, named by that component. [`ComponentDetail`] is the
+    /// detail's shape.
+    ///
+    /// `bubbles` is the event's own, and a bubbling one is composed too: the
+    /// two flags web-core's components set together on the events of this
+    /// kind they fire (`XMarkdownAttributes.ts`: `bindlink`, `bindimageTap`
+    /// and `bindparseEnd` are each `bubbles: true, composed: true`). Bubbling,
+    /// it reaches every `bindEvent` on the path and the `global-bindEvent`
+    /// pass; composed, it leaves a UA shadow tree its host sits in.
+    Detailed {
+        node: NodeId,
+        name: &'static str,
+        bubbles: bool,
+        detail: ComponentDetail,
+    },
+}
+
+/// The `detail` of a [`ComponentEvent::Detailed`]: one variant per *shape*
+/// the realm builds, never per event name, so two events whose details have
+/// the same keys share one.
+///
+/// Owned, because the event outlives the call that queued it: the component
+/// reads its attributes or its content at that moment, and the runtime
+/// delivers from an entry of its own. Each string crosses to the realm as one
+/// primitive argument, and the realm builds the object (`element-papi.ts`,
+/// `detailOf`); no JSON is written or parsed. A `None` is a key the realm
+/// leaves out of the object, neither `undefined`-valued nor `""`: web-core's
+/// `{id: undefined}` loses that key when it is serialized, and the transport
+/// here would carry an `undefined`-valued key as one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "queued by `<x-markdown>`, which is not built yet")
+)]
+pub(crate) enum ComponentDetail {
+    /// `{id}`: a content id, such as the `content-id` attribute an
+    /// `<x-markdown>`'s `parseEnd` reports.
+    Id { id: Option<String> },
+    /// `{url, content, contentId}`: a link and its text, such as the `<a>` an
+    /// `<x-markdown>`'s `link` reports.
+    UrlContent {
+        url: String,
+        content: String,
+        content_id: Option<String>,
+    },
+    /// `{url, contentId}`: a resource, such as the `<img>` an
+    /// `<x-markdown>`'s `imageTap` reports.
+    Url {
+        url: String,
+        content_id: Option<String>,
+    },
 }
 
 /// The events this document's components have produced and not delivered
@@ -186,7 +244,8 @@ pub(crate) enum ComponentEvent {
 /// the document: the `image` component, which is inside it and reaches nothing
 /// else; the runtime's own image report path, which is outside it; the
 /// `dialog` component's UI methods; and the `overlay` component, inside the
-/// document like `image`.
+/// document like `image`, as is any component that queues a
+/// [`ComponentEvent::Detailed`].
 /// Each holds a clone of this one queue, and the runtime drains it in an entry
 /// of its own, posted by the epilogue of the entry that filled it
 /// (`docs/runtime-architecture.md` has the entry boundary,
@@ -221,6 +280,27 @@ impl ComponentEvents {
         self.0
             .borrow_mut()
             .push(ComponentEvent::Plain { node, name });
+    }
+
+    /// Queues an event at `node` whose detail is `detail`'s strings, bubbling
+    /// and composed when `bubbles` is set, neither otherwise.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "queued by `<x-markdown>`, which is not built yet")
+    )]
+    pub(crate) fn queue_detailed(
+        &self,
+        node: NodeId,
+        name: &'static str,
+        bubbles: bool,
+        detail: ComponentDetail,
+    ) {
+        self.0.borrow_mut().push(ComponentEvent::Detailed {
+            node,
+            name,
+            bubbles,
+            detail,
+        });
     }
 
     /// Takes everything queued since the last drain.
