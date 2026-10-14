@@ -564,10 +564,13 @@ struct DocumentSlot {
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
     /// The event names the realm has a registration for anywhere, as its
-    /// global edges said: this thread's copy of the set the painter routes
-    /// against, less the names the document's components observe, which are
-    /// published once and never closed.
+    /// global edges said.
     listened: FxHashSet<Arc<str>>,
+    /// The event names the document's components observe on an element that
+    /// exists, as [`dom::Document::take_observed_name_edges`] said when last
+    /// drained ([`Self::sync_observed_names`]). With [`Self::listened`], this
+    /// thread's copy of what the painter routes against ([`Self::routes`]).
+    observed: FxHashSet<&'static str>,
     /// The scroll containers that have scrolled since the painter last
     /// posted them at rest: an adopted offset moved them, or a script-facing
     /// instant scroll did. Kept whether or not anything listens, so a
@@ -606,6 +609,7 @@ impl DocumentSlot {
             exposure: Exposure::new(),
             removals: 0,
             listened: FxHashSet::default(),
+            observed: FxHashSet::default(),
             scrolling: SmallVec::new(),
             outbox,
         }))
@@ -687,10 +691,9 @@ impl DocumentSlot {
             }
             document
         })?;
-        // The components' own names are routed for the document's whole
-        // life, whether or not the realm listens too.
-        self.outbox
-            .publish_observed_names(document.observed_event_names());
+        // Nothing of the components' is published here: a name they observe
+        // is routed once an element observing it exists, which the
+        // document's edges say at the first commit.
         self.document = Some(document);
         Ok(())
     }
@@ -717,35 +720,65 @@ impl DocumentSlot {
         }
     }
 
-    /// Whether anything hears `name`: a realm registration anywhere, or a
-    /// component that observes it. Two set lookups.
+    /// Whether anything hears `name`: a realm registration anywhere, or an
+    /// element of a component that observes it. Two set lookups.
     fn listens(&self, name: &str) -> bool {
-        self.listened.contains(name)
-            || self
-                .document
-                .as_ref()
-                .is_some_and(|document| document.observes_event(name))
+        self.listened.contains(name) || self.observed.contains(name)
     }
 
     /// One global edge of the realm's listener-name count: `available` for a
     /// name's first registration anywhere, not for the removal of its last.
-    ///
-    /// Recorded here and forwarded to the painter, except for a name a
-    /// component observes: that one was published when the document was
-    /// built and stays open, so neither edge is forwarded.
-    ///
-    /// The painter's set is what [`Self::routes`] says, so an edge may move
-    /// two of its names: `dblclick` is decided here from the `click`s the
-    /// painter sends, so opening it opens `click` there too, and closing it
-    /// closes `click` unless the realm listens for `click` itself.
+    /// Recorded here, and forwarded to the painter as [`Self::change_names`]
+    /// says.
     fn listener_edge(&mut self, name: &str, available: bool) {
+        self.change_names(name, |slot| {
+            if available {
+                slot.listened.insert(Arc::from(name));
+            } else {
+                slot.listened.remove(name);
+            }
+        });
+    }
+
+    /// Applies the observed-name edges the document recorded since the last
+    /// call, forwarding each to the painter as [`Self::change_names`] says.
+    ///
+    /// Called before every commit is published ([`Self::flush`],
+    /// [`Self::commit_if_dirty`]): the edges cross in the mailbox the frame
+    /// does, ahead of it, so the painter routes a name from the first frame
+    /// that shows the element observing it. One length check when nothing
+    /// was created or freed with a definition observing a name, and none
+    /// before the document exists.
+    fn sync_observed_names(&mut self) {
+        let Some(document) = self.document.as_mut() else {
+            return;
+        };
+        let edges = document.take_observed_name_edges();
+        for (name, live) in edges {
+            self.change_names(name, |slot| {
+                if live {
+                    slot.observed.insert(name);
+                } else {
+                    slot.observed.remove(name);
+                }
+            });
+        }
+    }
+
+    /// Runs `change` on [`Self::listened`] or [`Self::observed`] for `name`,
+    /// then forwards to the painter whatever moved in what
+    /// [`Self::routes`] says: the painter's set is the union of the two
+    /// sides, so a name crosses open when either side first wants it and
+    /// closed when neither does, and a realm registration for a name an
+    /// element already observes moves nothing there.
+    ///
+    /// An edge may move two of its names: `dblclick` is decided here from
+    /// the `click`s the painter sends, so opening it opens `click` there
+    /// too, and closing it closes `click` unless `click` itself is wanted.
+    fn change_names(&mut self, name: &str, change: impl FnOnce(&mut Self)) {
         let paired = (name == DOUBLE_CLICK_EVENT).then_some(CLICK_EVENT);
         let before = (self.routes(name), paired.map(|paired| self.routes(paired)));
-        if available {
-            self.listened.insert(Arc::from(name));
-        } else {
-            self.listened.remove(name);
-        }
+        change(self);
         if self.routes(name) != before.0 {
             self.outbox.listener_edge(Arc::from(name), !before.0);
         }
@@ -756,18 +789,11 @@ impl DocumentSlot {
         }
     }
 
-    /// Whether the painter's name set must hold `name` on the realm's
-    /// account: a realm registration for it, or for `click` a `dblclick`
-    /// one as well. A name a component observes is never the realm's to
-    /// open or close there: it was published with the document and stays.
+    /// Whether the painter's name set must hold `name`: a realm
+    /// registration or a live component element wants it
+    /// ([`Self::listens`]), or, for `click`, a `dblclick`.
     fn routes(&self, name: &str) -> bool {
-        let observed = self
-            .document
-            .as_ref()
-            .is_some_and(|document| document.observes_event(name));
-        !observed
-            && (self.listened.contains(name)
-                || (name == CLICK_EVENT && self.listened.contains(DOUBLE_CLICK_EVENT)))
+        self.listens(name) || (name == CLICK_EVENT && self.listens(DOUBLE_CLICK_EVENT))
     }
 
     /// An exposure attribute of the live element `node` was written or
@@ -855,6 +881,7 @@ impl DocumentSlot {
         // is then already at its size rather than held and recomputed.
         self.settle_sheets(thread)?;
         self.adopt_metrics();
+        self.sync_observed_names();
         let frame = self.document_mut().commit();
         if self.bound {
             // A frame held from before the binding is older than this one, and
@@ -934,6 +961,9 @@ impl DocumentSlot {
     /// commits before the binding is held for whichever flush or binding
     /// publishes next.
     fn commit_if_dirty(&mut self) {
+        // Before the sheets' check: the names an element observes are routed
+        // whether or not this entry commits.
+        self.sync_observed_names();
         if !self.sheets.is_empty() || self.failed_sheet.is_some() {
             return;
         }
@@ -1574,12 +1604,13 @@ impl MainThreadRuntime {
     /// is one non-bubbling dispatch at the element it belongs to, which is
     /// web-core's shape for an image's two events
     /// (`commonEventInitConfiguration.ts`: `bubbles: false`) and HTML's for a
-    /// dialog's `close` and `cancel`. A [`ComponentEvent::Detailed`] is the
-    /// exception when it says so: one that bubbles is dispatched bubbling and
-    /// composed, as web-core fires `<x-markdown>`'s `link`, `imageTap` and
-    /// `parseEnd` (`XMarkdownAttributes.ts:628-649, 993-999`). An element freed between the event
-    /// forming and this call resolves to nothing, exactly as a routed input
-    /// event at a freed target does.
+    /// dialog's `close` and `cancel`. A [`ComponentEvent::Detailed`] does not
+    /// bubble either, as native fires `<markdown>`'s `link`, `imageTap` and
+    /// `parseEnd` (`lynx/core/renderer/events/touch_event_handler.cc:388-403`,
+    /// ruled 2026-10-14), but is composed, so script's `target` is the
+    /// component's element. An element freed between the event forming and
+    /// this call resolves to nothing, exactly as a routed input event at a
+    /// freed target does.
     ///
     /// Returns what the listeners threw. A handler that throws is nonfatal,
     /// the standing every event listener has here.
@@ -1612,11 +1643,9 @@ impl MainThreadRuntime {
             //
             // A detailed event carries the strings its component read when it
             // queued it, as extras borrowed from the queue for the call, one
-            // per key the component had a value for, and its own `bubbles`,
-            // which says `composed` as well: web-core fires each event of that
-            // kind with both flags or neither.
+            // per key the component had a value for.
             let mut extras: SmallVec<[(&'static str, Extra<'_>); 7]> = SmallVec::new();
-            let (target, name, bubbles) = match *event {
+            let (target, name, composed) = match *event {
                 ComponentEvent::Image(dom::ImageOutcome::Loaded {
                     node,
                     width,
@@ -1668,22 +1697,21 @@ impl MainThreadRuntime {
                 ComponentEvent::Detailed {
                     node,
                     name,
-                    bubbles,
                     ref detail,
                 } => {
                     push_detail_strings(detail, &mut extras);
-                    (node, name, bubbles)
+                    (node, name, true)
                 }
             };
-            // A non-bubbling one is not composed either, as HTML and web-core
-            // fire every one of them: one queued at a UA shadow tree's node
-            // stays inside that tree.
+            // None bubbles. Every one but a detailed event is not composed
+            // either, as HTML and web-core fire them: one queued at a UA
+            // shadow tree's node stays inside that tree.
             if let Err(error) = self.dispatch(
                 js_runtime,
                 target,
                 name,
-                bubbles,
-                bubbles,
+                false,
+                composed,
                 timestamp,
                 &EventDetail::None,
                 &extras,

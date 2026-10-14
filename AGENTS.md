@@ -1645,8 +1645,10 @@ definition lists the type in `CustomElement::observed_events` hears it first;
 a component's `stop_propagation` ends that walk only. What the event carries
 is `dom::event::EventDetail` (one variant per payload shape), which the router
 fills in, `ToMain::DispatchEvent` carries, the Rust walk lends out and
-`encode_detail` turns into the realm's numbers. The names components observe
-are published to the painter's name set once per document and never closed.
+`encode_detail` turns into the realm's numbers. A name a component observes is
+in the painter's name set while an element of that component exists, beside
+the realm's own names: `dom`'s `Document::take_observed_name_edges` reports
+its 0↔1 edges, drained before each commit is published.
 CSSOM-View's `scroll` and `scrollend` are decided on this thread, never on
 the painter: `adopt_scroll_offsets` queues a `scroll` per container a post
 moved and a `scrollend` when a post names it at rest after it scrolled, and a

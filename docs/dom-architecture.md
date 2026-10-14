@@ -950,7 +950,14 @@ delivers nothing, since its host follows it as itself. For a non-bubbling
 event that step is in the capture pass only, so a handler that keeps only
 bubble-phase deliveries never sees one. A definition names the types it
 handles in `CustomElement::observed_events`; `define` unions them into one
-set, and a type nothing observes costs one set lookup and builds no path. The
+set, and a type nothing observes costs one set lookup and builds no path.
+Which of those names have an instance is tracked beside it: the registry
+counts the elements of each definition (counted where an element is given its
+definition, uncounted where it is freed) and, per name, the definitions with
+an element alive, and `Document::take_observed_name_edges` hands out the
+names whose liveness changed since the last call — the input a host's router
+is fed per instance, while the walk's gate (`observes_event`) stays per
+definition. The
 engine-only types are css-contain-2 §4.4's
 `contentvisibilityautostatechange` (`EventDetail::ContentVisibility {
 skipped }`), which `Document::dispatch_content_visibility_changes` fires from

@@ -2410,9 +2410,21 @@ consequential choice about whether to follow the spec or the quirk.
     relative to the element's border box, the rendered-text index (or, with
     `indexType: "source"`, the source offset web-core's greedy prefix walk
     matches it at); nothing under the point is code 8, native's 1.
-  - *`link` and `imageTap` bubble and are composed* (web-core's
-    `bubbles: true, composed: true`), from a `tap`: a paragraph's runs have
-    no box, so the anchor under a tap is found from the character it hits.
+  - *`link`, `imageTap` and `parseEnd` do not bubble and are composed*
+    (user ruling 2026-10-14). Not bubbling is native's: a component's custom
+    event is dispatched with `bubbles_ = false, composed_ = false` on the
+    legacy path (`lynx/core/renderer/events/touch_event_handler.cc:399-403`)
+    and as an `event::CustomEvent` whose defaults are `Bubbles::kNo`,
+    `ComposedMode::kScoped` on the refactored one (`:388-394`,
+    `lynx/core/event/custom_event.h:17-23`), so only a `bindlink` on the
+    element itself hears it, never an ancestor's nor `global-bindEvent`.
+    Composed departs from native's flag so that script's `target` is the
+    markdown element itself. web-core fires all three
+    `bubbles: true, composed: true` (`XMarkdownAttributes.ts:627-643,
+    994-995`), which no ReactLynx handler can observe there, because its
+    events are misnamed (next bullet). `link` and `imageTap` come from a
+    `tap`: a paragraph's runs have no box, so the anchor under a tap is
+    found from the character it hits.
   - *The events are named `link`, `imageTap` and `parseEnd`*, native's names
     (`LynxMarkdownEventDispatcher.m`), so a compiled card's `bindlink`,
     `bindimageTap` and `bindparseEnd` handlers run. web-core's `XMarkdown`

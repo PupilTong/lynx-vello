@@ -150,8 +150,11 @@ pub trait CustomElement<T> {
     /// definition names, and a handler that cares about one element filters
     /// by `element`.
     ///
-    /// The host publishes the union as listened-for names, so its input
-    /// router routes them whether or not a realm listens too.
+    /// A name is *live* while at least one element of a definition naming it
+    /// exists ([`Document::take_observed_name_edges`]): the host publishes
+    /// the live names as listened-for names, so its input router routes them
+    /// whether or not a realm listens too, and only while an element is there
+    /// to hear them.
     fn observed_events(&self) -> &'static [&'static str] {
         &[]
     }
@@ -372,6 +375,12 @@ enum Reaction {
 
 struct Definition<T> {
     observed: Box<[LocalName]>,
+    /// The handler's [`CustomElement::observed_events`], read once.
+    events: &'static [&'static str],
+    /// How many elements of this definition exist: counted where a node is
+    /// given the definition, uncounted where it is freed
+    /// ([`CustomElement::freed`]'s call), which every such node reaches.
+    instances: usize,
     handler: Arc<dyn CustomElement<T>>,
 }
 
@@ -382,6 +391,13 @@ pub(crate) struct CustomElementRegistry<T> {
     /// The union of every definition's [`CustomElement::observed_events`]:
     /// the one lookup a dispatch of a type nothing observes costs.
     observed_events: FxHashSet<&'static str>,
+    /// Per observed name, how many definitions naming it have an element
+    /// alive: a name is live while this is non-zero.
+    live_observers: FxHashMap<&'static str, usize>,
+    /// The names whose liveness changed since the last
+    /// [`Document::take_observed_name_edges`], each at most once, with the
+    /// liveness it changed to. An edge that undoes a pending one removes it.
+    observed_name_edges: Vec<(&'static str, bool)>,
     element_queue: Vec<NodeId>,
     reactions: FxHashMap<NodeId, VecDeque<Reaction>>,
     pinned: SmallVec<[NodeId; 4]>,
@@ -401,6 +417,8 @@ impl<T> Default for CustomElementRegistry<T> {
             definitions: Vec::new(),
             by_name: FxHashMap::default(),
             observed_events: FxHashSet::default(),
+            live_observers: FxHashMap::default(),
+            observed_name_edges: Vec::new(),
             element_queue: Vec::new(),
             reactions: FxHashMap::default(),
             pinned: SmallVec::new(),
@@ -419,6 +437,59 @@ impl<T> CustomElementRegistry<T> {
 
     fn is_draining(&self) -> bool {
         self.depth.load(Ordering::Acquire) != 0
+    }
+
+    /// One more element of `definition`. Its first opens each name it
+    /// observes that no other definition's element kept live.
+    fn instance_created(&mut self, definition: DefinitionId) {
+        let entry = &mut self.definitions[definition.index()];
+        entry.instances += 1;
+        if entry.instances != 1 {
+            return;
+        }
+        for &name in entry.events {
+            let count = self.live_observers.entry(name).or_insert(0);
+            *count += 1;
+            if *count == 1 {
+                Self::observed_name_edge(&mut self.observed_name_edges, name, true);
+            }
+        }
+    }
+
+    /// One element of `definition` fewer. Its last closes each name it
+    /// observes that no other definition's element keeps live.
+    fn instance_freed(&mut self, definition: DefinitionId) {
+        let entry = &mut self.definitions[definition.index()];
+        entry.instances = entry
+            .instances
+            .checked_sub(1)
+            .expect("an element is freed once, and was counted when it was given its definition");
+        if entry.instances != 0 {
+            return;
+        }
+        for &name in entry.events {
+            let count = self
+                .live_observers
+                .get_mut(name)
+                .expect("a live definition counted its observed names");
+            *count -= 1;
+            if *count == 0 {
+                self.live_observers.remove(name);
+                Self::observed_name_edge(&mut self.observed_name_edges, name, false);
+            }
+        }
+    }
+
+    /// Records that `name` became live or stopped being. A name's edges
+    /// alternate, so a pending one for it is the opposite of this one, and
+    /// the two cancel.
+    fn observed_name_edge(edges: &mut Vec<(&'static str, bool)>, name: &'static str, live: bool) {
+        if let Some(pending) = edges.iter().position(|&(held, _)| held == name) {
+            debug_assert_ne!(edges[pending].1, live, "a name's edges alternate");
+            edges.remove(pending);
+        } else {
+            edges.push((name, live));
+        }
     }
 }
 
@@ -527,9 +598,10 @@ impl<T> Document<T> {
             .into_iter()
             .map(|attribute| LocalName::from(attribute.as_str()))
             .collect();
+        let events = element.observed_events();
         self.custom_elements
             .observed_events
-            .extend(element.observed_events().iter().copied());
+            .extend(events.iter().copied());
         let definition = DefinitionId(
             u32::try_from(self.custom_elements.definitions.len() + 1)
                 .ok()
@@ -538,6 +610,8 @@ impl<T> Document<T> {
         );
         self.custom_elements.definitions.push(Definition {
             observed,
+            events,
+            instances: 0,
             handler: Arc::from(element),
         });
         self.custom_elements
@@ -566,6 +640,7 @@ impl<T> Document<T> {
                 root.custom_state = CustomElementState::Constructing;
                 root.mark_custom_subtree_may_contain();
             }
+            self.custom_elements.instance_created(definition);
             self.note_custom_subtree_inserted(DOCUMENT_ELEMENT_NODE_ID);
             self.enqueue_reaction(DOCUMENT_ELEMENT_NODE_ID, Reaction::Constructed);
             self.enqueue_reaction(DOCUMENT_ELEMENT_NODE_ID, Reaction::Connected);
@@ -742,10 +817,31 @@ impl<T> Document<T> {
         self.custom_elements.observed_events.contains(type_name)
     }
 
-    /// Every event type some definition observes, in no particular order.
-    /// The host publishes these once, as names its router must route.
+    /// Every event type some definition observes, in no particular order,
+    /// whether or not an element of it exists: the set
+    /// [`Self::observes_event`] reads. What a host routes is the live subset,
+    /// which [`Self::take_observed_name_edges`] reports as it changes.
     pub fn observed_event_names(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.custom_elements.observed_events.iter().copied()
+    }
+
+    /// The observed names whose liveness changed since the last call, each
+    /// once, with what it changed to: `true` for a name that became live —
+    /// the first element of any definition observing it was created — and
+    /// `false` for one whose last such element was freed.
+    ///
+    /// A name is live while at least one element of a definition naming it
+    /// in [`CustomElement::observed_events`] exists, connected or not; an
+    /// element of a shadow tree counts as any other. A change undone before
+    /// the call (an element created and freed in between) is not reported,
+    /// so applying the edges in order to the set of live names the previous
+    /// calls described gives the set of live names now. Empty, and
+    /// allocation-free, when nothing changed: what a host drains after every
+    /// mutation batch to keep the names its router routes per instance
+    /// rather than per definition. [`Self::observes_event`] stays per
+    /// definition.
+    pub fn take_observed_name_edges(&mut self) -> Vec<(&'static str, bool)> {
+        std::mem::take(&mut self.custom_elements.observed_name_edges)
     }
 
     /// The set's own `'static` spelling of `type_name`, which is how the
@@ -835,6 +931,7 @@ impl<T> Document<T> {
             node.custom_state = CustomElementState::Constructing;
             node.mark_custom_subtree_may_contain();
         }
+        self.custom_elements.instance_created(definition);
         self.enqueue_reaction(element, Reaction::Constructed);
     }
 
@@ -942,14 +1039,16 @@ impl<T> Document<T> {
     }
 
     /// Tells `element`'s definition, if it has one, that the element is
-    /// freed ([`CustomElement::freed`]). Called by the free of every node,
-    /// after the node left the arenas, with the definition it had.
+    /// freed ([`CustomElement::freed`]), and uncounts it. Called by the free
+    /// of every node, after the node left the arenas, with the definition it
+    /// had.
     pub(crate) fn note_custom_element_freed(
-        &self,
+        &mut self,
         element: NodeId,
         definition: Option<DefinitionId>,
     ) {
         if let Some(definition) = definition {
+            self.custom_elements.instance_freed(definition);
             self.custom_elements.definitions[definition.index()]
                 .handler
                 .freed(element);

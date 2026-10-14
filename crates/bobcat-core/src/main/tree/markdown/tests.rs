@@ -532,13 +532,11 @@ fn parse_end_is_queued_per_render_with_the_content_id() {
             ComponentEvent::Detailed {
                 node: element,
                 name: "parseEnd",
-                bubbles: true,
                 detail: ComponentDetail::Id { id: None },
             },
             ComponentEvent::Detailed {
                 node: element,
                 name: "parseEnd",
-                bubbles: true,
                 detail: ComponentDetail::Id {
                     id: Some("doc-1".to_owned()),
                 },
@@ -901,7 +899,6 @@ fn a_tap_on_a_link_or_an_image_queues_web_cores_events() {
             [ComponentEvent::Detailed {
                 node: element,
                 name: "link",
-                bubbles: true,
                 detail: ComponentDetail::UrlContent {
                     url: "https://example.com".to_owned(),
                     content: "link".to_owned(),
@@ -924,7 +921,6 @@ fn a_tap_on_a_link_or_an_image_queues_web_cores_events() {
         [ComponentEvent::Detailed {
             node: element,
             name: "imageTap",
-            bubbles: true,
             detail: ComponentDetail::Url {
                 url: "/a.png".to_owned(),
                 content_id: Some("case-1".to_owned()),

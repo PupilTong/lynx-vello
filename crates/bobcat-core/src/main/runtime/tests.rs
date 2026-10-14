@@ -1688,10 +1688,10 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
             "app:///edges.js",
         )
         .expect("main-thread script");
-    // `slotchange` is the swiper's and the refresh view's, and `tap` the
-    // markdown component's, published once when the document was built and
-    // never closed.
-    assert_eq!(names.names(), ["longpress", "slotchange", "swipe", "tap"]);
+    // Nothing of the components': `slotchange` (the swiper's and the refresh
+    // view's) and `tap` (the markdown component's) are routed only while an
+    // element of theirs exists, and this page has none.
+    assert_eq!(names.names(), ["longpress", "swipe"]);
 
     runtime
         .evaluate_module(
@@ -1708,7 +1708,7 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
             "unregistering",
         )
         .expect("unregistration");
-    assert_eq!(names.names(), ["longpress", "slotchange", "tap"]);
+    assert_eq!(names.names(), ["longpress"]);
 
     runtime
         .evaluate_module(
@@ -1723,14 +1723,10 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
             "unregistering",
         )
         .expect("unregistration");
-    assert_eq!(
-        names.names(),
-        ["slotchange", "tap"],
-        "the last registration closes it; a component's name stays open"
-    );
+    assert!(names.names().is_empty(), "the last registration closes it");
 
-    // The realm's own edges for a component's name are not forwarded: its
-    // last removal does not close what the component still observes.
+    // A name a component observes, with no element of it alive, is the
+    // realm's like any other: its last removal closes it.
     runtime
         .evaluate_module(
             &mut js_runtime,
@@ -1744,7 +1740,8 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
             "registering a component's name",
         )
         .expect("registration");
-    assert_eq!(names.names(), ["slotchange", "tap"]);
+    runtime.commit_if_dirty();
+    assert!(names.names().is_empty());
 }
 
 /// The replica is what the painting side filters against, so a
@@ -2062,10 +2059,10 @@ fn adopted_offsets_queue_scroll_events_only_for_a_name_something_hears() {
 /// The painter's name set follows the realm's edges with two adjustments:
 /// a `dblclick` registration opens `click` there too (the `dblclick` is
 /// decided from the `click`s the painter sends) and closing it closes
-/// `click` only when `click` is not listened for itself; and a name a
-/// component observes (`slotchange`, and the markdown component's `tap`)
-/// stays open whatever the realm's edges for it say, where an unobserved
-/// name's close closes it.
+/// `click` only when `click` is not listened for itself; and a name an
+/// element alive observes (the page's `x-swiper`'s `slotchange`) stays open
+/// whatever the realm's edges for it say, where an unobserved name's close
+/// closes it. `tap`, which no element here observes, is not there at all.
 #[test]
 fn the_painter_names_pair_click_with_dblclick_and_keep_observed_names() {
     let (mut js_runtime, mut runtime, _elements, mut names) =
@@ -2076,6 +2073,7 @@ fn the_painter_names_pair_click_with_dblclick_and_keep_observed_names() {
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
+                  __AppendElement(page, __CreateElement('x-swiper', 0));
                   globalThis.held = [page];
                 };
                 globalThis.listener = () => {};
@@ -2095,36 +2093,36 @@ fn the_painter_names_pair_click_with_dblclick_and_keep_observed_names() {
     };
 
     step("__AddEventListener(page, 'dblclick', globalThis.listener, {});");
-    assert_eq!(names.names(), ["click", "dblclick", "slotchange", "tap"]);
+    assert_eq!(names.names(), ["click", "dblclick", "slotchange"]);
     step("__AddEventListener(page, 'click', globalThis.listener, {});");
     step("__RemoveEventListener(page, 'dblclick', globalThis.listener, {});");
     assert_eq!(
         names.names(),
-        ["click", "slotchange", "tap"],
+        ["click", "slotchange"],
         "`click` is listened for itself"
     );
     step("__AddEventListener(page, 'dblclick', globalThis.listener, {});");
     step("__RemoveEventListener(page, 'click', globalThis.listener, {});");
     assert_eq!(
         names.names(),
-        ["click", "dblclick", "slotchange", "tap"],
+        ["click", "dblclick", "slotchange"],
         "`dblclick` still needs the `click`s"
     );
     step("__RemoveEventListener(page, 'dblclick', globalThis.listener, {});");
-    assert_eq!(names.names(), ["slotchange", "tap"]);
+    assert_eq!(names.names(), ["slotchange"]);
 
     step(
         "__AddEventListener(page, 'slotchange', globalThis.listener, {});
          __AddEventListener(page, 'swipe', globalThis.listener, {});",
     );
-    assert_eq!(names.names(), ["slotchange", "swipe", "tap"]);
+    assert_eq!(names.names(), ["slotchange", "swipe"]);
     step(
         "__RemoveEventListener(page, 'slotchange', globalThis.listener, {});
          __RemoveEventListener(page, 'swipe', globalThis.listener, {});",
     );
     assert_eq!(
         names.names(),
-        ["slotchange", "tap"],
+        ["slotchange"],
         "the realm's close of an observed name is not forwarded; of another, it is"
     );
 }
@@ -4525,7 +4523,7 @@ fn an_overlay_shows_and_dismisses_through_set_attribute() {
 
 /// A component event with a string detail, queued from inside a scope as a
 /// component's own callback queues one, is delivered from an entry of its
-/// own at the element, bubbling or not as it was queued, with the detail built in the realm from
+/// own at the element, not bubbling and composed, with the detail built in the realm from
 /// one string argument per key: `{id}`, `{url, content, contentId}` and
 /// `{url, contentId}`, the shapes `<x-markdown>`'s `parseEnd`, `link` and
 /// `imageTap` carry. A string the component had no value for is a key the
@@ -4548,9 +4546,11 @@ fn a_component_event_with_a_string_detail_reaches_script_built_per_shape() {
                   const page = __CreatePage('card', 0);
                   const outer = __CreateView(0);
                   const markdown = __CreateView(0);
+                  const aside = __CreateView(0);
                   __AppendElement(page, outer);
                   __AppendElement(outer, markdown);
-                  globalThis.held = [page, outer, markdown];
+                  __AppendElement(page, aside);
+                  globalThis.held = [page, outer, markdown, aside];
                   const note = (label) => ({
                     type: 'worklet',
                     value: {
@@ -4565,6 +4565,7 @@ fn a_component_event_with_a_string_detail_reaches_script_built_per_shape() {
                   for (const name of ['parseEnd', 'link', 'imageTap']) {
                     __AddEvent(markdown, 'bindEvent', name, note('markdown'));
                     __AddEvent(outer, 'bindEvent', name, note('outer'));
+                    __AddEvent(aside, 'global-bindEvent', name, note('aside-global'));
                   }
                 };
                 ",
@@ -4617,7 +4618,7 @@ fn a_component_event_with_a_string_detail_reaches_script_built_per_shape() {
             .slot
             .borrow()
             .component_events
-            .queue_detailed(markdown, name, false, detail);
+            .queue_detailed(markdown, name, detail);
     }
     assert!(runtime.has_component_events());
     assert!(
@@ -4626,8 +4627,9 @@ fn a_component_event_with_a_string_detail_reaches_script_built_per_shape() {
             .is_empty()
     );
     assert!(!runtime.has_component_events());
-    // Queued non-bubbling: the bind pass runs at the element alone, so the
-    // outer view's handlers never run.
+    // Not bubbling (native's custom events): the bind pass runs at the
+    // element alone, so the outer view's handlers never run, and there is no
+    // `global-bindEvent` pass.
     expect_seen(
         &mut js_runtime,
         &mut runtime,
@@ -4642,16 +4644,15 @@ fn a_component_event_with_a_string_detail_reaches_script_built_per_shape() {
         .join("|"),
     );
 
-    // Queued bubbling, as `<x-markdown>` queues its three (web-core's
-    // `bubbles: true, composed: true`): the outer view's `bindEvent` hears
-    // it after the element's own. A `Plain` event of the same name still
-    // does not bubble.
+    // A `link` as `<x-markdown>` queues it, and a `Plain` event of the same
+    // name: neither reaches the outer view's `bindEvent` or the
+    // `global-bindEvent` pass, the detailed one is heard first and carries its
+    // strings.
     {
         let slot = runtime.slot.borrow();
         slot.component_events.queue_detailed(
             markdown,
             "link",
-            true,
             ComponentDetail::UrlContent {
                 url: "https://lynxjs.org/".to_owned(),
                 content: "Lynx".to_owned(),
@@ -4670,7 +4671,6 @@ fn a_component_event_with_a_string_detail_reaches_script_built_per_shape() {
         &mut runtime,
         &[
             r#"markdown:4:link:{"url":"https://lynxjs.org/","content":"Lynx"}:url,content"#,
-            r#"outer:3:link:{"url":"https://lynxjs.org/","content":"Lynx"}:url,content"#,
             "markdown:4:link:{}:",
         ]
         .join("|"),
@@ -4945,11 +4945,12 @@ fn a_tap_on_markdown_link_text_reaches_script_as_link() {
 }
 
 /// A name a component observes is in the painter's name set with no realm
-/// listener anywhere — `tap`, which the document's own markdown component
-/// observes from the build on — so the painter sends the gesture's `tap` and
-/// a component defined later hears it too. The realm's own edges for that name are not
-/// forwarded, so a script that listens for it and then stops does not
-/// close what the component still observes.
+/// listener anywhere once an element of it exists — `tap`, for a probe
+/// component defined after the build, whose element's creation opens it at
+/// the next commit — so the painter sends the gesture's `tap` and the
+/// component hears it. Before that element, the document's own markdown
+/// definition opens nothing. A script that listens for the name and then
+/// stops does not close what the element still observes.
 #[test]
 fn a_tap_a_component_observes_is_routed_with_no_script_listener() {
     let (mut js_runtime, mut runtime, elements, mut names) =
@@ -4967,9 +4968,8 @@ fn a_tap_a_component_observes_is_routed_with_no_script_listener() {
         )
         .expect("main-thread script");
     assert!(
-        names.contains("tap"),
-        "the markdown component the document was built with observes `tap`, \
-         published with the build though no script listens"
+        !names.contains("tap"),
+        "the markdown definition alone, with no element of it, routes nothing"
     );
 
     let log = TapLog::default();
@@ -4980,44 +4980,45 @@ fn a_tap_a_component_observes_is_routed_with_no_script_listener() {
         }),
     );
     assert!(elements.tree().observes_event("tap"));
-    // What building the document does for the definitions `new_document`
-    // makes: publish what they observe, once. This one came after the
-    // build, so the test publishes it the same way.
-    {
-        let slot = runtime.slot.borrow();
-        slot.outbox.publish_observed_names(
-            slot.document
-                .as_ref()
-                .expect("the realm has created its document")
-                .observed_event_names(),
-        );
-    }
-    assert!(
-        names.contains("tap"),
-        "the painter routes `tap` for the component alone"
-    );
+    runtime.commit_if_dirty();
+    assert!(!names.contains("tap"), "a definition opens nothing");
 
     runtime
         .evaluate_module(
             &mut js_runtime,
             r"
-                import {
-                  __AddEventListener, __AppendElement, __CreateElement, __RemoveEventListener,
-                } from 'bobcat:element';
+                import { __AppendElement, __CreateElement } from 'bobcat:element';
                 const [page] = held;
                 const probe = __CreateElement('x-tap-probe', 0);
                 __AppendElement(page, probe);
                 held.push(probe);
-                __AddEventListener(probe, 'tap', globalThis.listener, {});
-                __RemoveEventListener(probe, 'tap', globalThis.listener, {});
                 ",
             "app:///observed-tap-tree.js",
             "tree",
         )
         .expect("the probe tree");
     assert!(
+        !names.contains("tap"),
+        "an element's names cross where the entry's commit does"
+    );
+    runtime.commit_if_dirty();
+    assert!(names.contains("tap"), "the probe element opens `tap`");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __AddEventListener, __RemoveEventListener } from 'bobcat:element';
+                const [, probe] = held;
+                __AddEventListener(probe, 'tap', globalThis.listener, {});
+                __RemoveEventListener(probe, 'tap', globalThis.listener, {});
+                ",
+            "app:///observed-tap-listener.js",
+            "listening",
+        )
+        .expect("the listener");
+    assert!(
         names.contains("tap"),
-        "the realm's last removal does not close a component's name"
+        "the realm's last removal does not close an element's name"
     );
 
     let text = {
@@ -5038,6 +5039,116 @@ fn a_tap_a_component_observes_is_routed_with_no_script_listener() {
             "bubble:text:12,30",
             "at-target:x-tap-probe:12,30"
         ]
+    );
+}
+
+/// `tap` is in the painter's name set while an `x-markdown` element exists,
+/// not because the document defines the component: creating one opens it at
+/// the next commit, a script `tap` listener added and removed meanwhile does
+/// not close it, freeing one of two markdowns (by collection, the only
+/// release path) closes nothing, and freeing the last closes it unless
+/// script still listens — in which case the script's last removal does.
+#[test]
+fn a_markdown_element_routes_tap_while_it_exists() {
+    let (mut js_runtime, mut runtime, elements, mut names) =
+        runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  globalThis.held = [__CreatePage('card', 0)];
+                  globalThis.listener = () => {};
+                };
+                ",
+            "app:///markdown-tap.js",
+        )
+        .expect("main-thread script");
+    assert!(!names.contains("tap"), "no markdown, no `tap`");
+    let mut step = |runtime: &mut MainThreadRuntime, source: &str| {
+        let source = format!(
+            "import {{
+               __AddEventListener, __AppendElement, __CreateElement, __RemoveElement,
+               __RemoveEventListener,
+             }} from 'bobcat:element';
+             // A function's scope, not the module's, which outlives the
+             // evaluation and would keep every element it names.
+             (() => {{
+               const [page] = globalThis.held;
+               {source}
+             }})();"
+        );
+        runtime
+            .evaluate_module(&mut js_runtime, &source, "app:///step.mjs", "a step")
+            .expect("the step runs");
+        runtime
+            .collect_garbage(&mut js_runtime)
+            .expect("collection");
+        // What the entry's epilogue does before its commit crosses.
+        runtime.commit_if_dirty();
+    };
+
+    step(
+        &mut runtime,
+        "const first = __CreateElement('x-markdown', 0);
+         const second = __CreateElement('x-markdown', 0);
+         __AppendElement(page, first);
+         __AppendElement(page, second);
+         globalThis.held.push(first, second);",
+    );
+    let (first, second) = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let children = tree.get(page).expect("the page").child_ids();
+        (children[0], children[1])
+    };
+    let freed = |node: dom::NodeId| elements.tree().get(node).is_none();
+    assert!(names.contains("tap"), "a markdown element opens `tap`");
+
+    step(
+        &mut runtime,
+        "__AddEventListener(page, 'tap', globalThis.listener, {});
+         __RemoveEventListener(page, 'tap', globalThis.listener, {});",
+    );
+    assert!(
+        names.contains("tap"),
+        "the realm's last removal does not close what a markdown observes"
+    );
+
+    step(
+        &mut runtime,
+        "__RemoveElement(page, globalThis.held[1]);
+         globalThis.held.splice(1, 1);",
+    );
+    assert!(freed(first), "the first markdown is collected");
+    assert!(!freed(second));
+    assert!(
+        names.contains("tap"),
+        "the second markdown still observes it"
+    );
+
+    step(
+        &mut runtime,
+        "__AddEventListener(page, 'tap', globalThis.listener, {});
+         __RemoveElement(page, globalThis.held.pop());",
+    );
+    assert!(freed(second), "the second markdown is collected");
+    assert!(names.contains("tap"), "script still listens");
+    step(
+        &mut runtime,
+        "__RemoveEventListener(page, 'tap', globalThis.listener, {});",
+    );
+    assert!(!names.contains("tap"), "neither side wants it");
+
+    step(
+        &mut runtime,
+        "globalThis.held.push(__CreateElement('x-markdown', 0));",
+    );
+    assert!(names.contains("tap"), "a new markdown opens it again");
+    step(&mut runtime, "globalThis.held.pop();");
+    assert!(
+        !names.contains("tap"),
+        "freeing the last markdown closes it"
     );
 }
 

@@ -181,8 +181,8 @@ pub(super) fn element_children(
 }
 
 /// One event a component owes script, at the element the component belongs
-/// to: non-bubbling, except a [`ComponentEvent::Detailed`] that says
-/// otherwise.
+/// to. None of them bubbles; a [`ComponentEvent::Detailed`] alone is
+/// composed.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ComponentEvent {
     /// An `<image>`'s or `<svg>`'s own source settled: `load`, which carries
@@ -206,16 +206,18 @@ pub(crate) enum ComponentEvent {
     /// queued the event, named by that component. [`ComponentDetail`] is the
     /// detail's shape.
     ///
-    /// `bubbles` is the event's own, and a bubbling one is composed too: the
-    /// two flags web-core's components set together on the events of this
-    /// kind they fire (`XMarkdownAttributes.ts`: `bindlink`, `bindimageTap`
-    /// and `bindparseEnd` are each `bubbles: true, composed: true`). Bubbling,
-    /// it reaches every `bindEvent` on the path and the `global-bindEvent`
-    /// pass; composed, it leaves a UA shadow tree its host sits in.
+    /// Dispatched not bubbling and composed (ruled 2026-10-14). Not bubbling
+    /// is native's: Lynx fires `<markdown>`'s `link`, `imageTap` and
+    /// `parseEnd` as custom events that do not bubble
+    /// (`lynx/core/renderer/events/touch_event_handler.cc:388-403`,
+    /// `lynx/core/event/custom_event.h:17-23`), so only a `bindEvent` on the
+    /// element itself hears one, never an ancestor's nor the
+    /// `global-bindEvent` pass. Composed is so that an event queued at a node
+    /// of a UA shadow tree retargets to the host for script, whose `target`
+    /// is then the component's element.
     Detailed {
         node: NodeId,
         name: &'static str,
-        bubbles: bool,
         detail: ComponentDetail,
     },
 }
@@ -307,21 +309,12 @@ impl ComponentEvents {
             .push(ComponentEvent::Scroll { node, name, delta });
     }
 
-    /// Queues an event at `node` whose detail is `detail`'s strings, bubbling
-    /// and composed when `bubbles` is set, neither otherwise.
-    pub(crate) fn queue_detailed(
-        &self,
-        node: NodeId,
-        name: &'static str,
-        bubbles: bool,
-        detail: ComponentDetail,
-    ) {
-        self.0.borrow_mut().push(ComponentEvent::Detailed {
-            node,
-            name,
-            bubbles,
-            detail,
-        });
+    /// Queues an event at `node` whose detail is `detail`'s strings: not
+    /// bubbling, composed ([`ComponentEvent::Detailed`]).
+    pub(crate) fn queue_detailed(&self, node: NodeId, name: &'static str, detail: ComponentDetail) {
+        self.0
+            .borrow_mut()
+            .push(ComponentEvent::Detailed { node, name, detail });
     }
 
     /// Takes everything queued since the last drain.

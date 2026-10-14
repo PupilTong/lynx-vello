@@ -112,8 +112,9 @@
 //!
 //! Each render of non-empty content queues `parseEnd` at the host with
 //! `{id}`, the `content-id` attribute (`#dispatchParseEnd`,
-//! `XMarkdownAttributes.ts:993-1001`), bubbling and composed. web-core skips
-//! it for an append that ends with a line break and for empty content.
+//! `XMarkdownAttributes.ts:993-1001`), not bubbling and composed (see Events).
+//! web-core skips it for an append that ends with a line break and for empty
+//! content.
 //!
 //! ## Events
 //!
@@ -121,8 +122,7 @@
 //! the hit node, heard at the shadow root's step in the bubble pass with that
 //! node as the target; the composed `tap` of the one dispatch, which reaches
 //! the host as itself, is ignored — becomes web-core's click handling
-//! (`#handleClick`, `XMarkdownAttributes.ts:620-651`), both events bubbling
-//! and composed:
+//! (`#handleClick`, `XMarkdownAttributes.ts:620-651`):
 //!
 //! - **`link`** `{url, content, contentId}`, the anchor's `href`, its text and the `content-id`:
 //!   when the hit node is inside an `a` (web-core's `closest('a')`), or when the tap lands on a
@@ -135,11 +135,20 @@
 //!
 //! A tap on anything else queues nothing.
 //!
-//! A known cost: `observed_events` is per definition, so with the component
-//! in every document the painter forwards every `tap` to the main thread,
-//! one message per gesture, on pages with no markdown and no tap listener
-//! too. Accepted for a user-rate event; observing per instance is the
-//! follow-up.
+//! All three events (`parseEnd` too) are dispatched at the host not bubbling
+//! and composed (ruled 2026-10-14, [`super::ComponentEvent::Detailed`]):
+//! native fires them as custom events that do not bubble
+//! (`lynx/core/renderer/events/touch_event_handler.cc:388-403`,
+//! `lynx/core/event/custom_event.h:17-23`), so only the element's own
+//! `bindEvent` hears one. web-core's `bubbles: true, composed: true` is not
+//! followed: its events are named `bindlink`, `bindimageTap` and
+//! `bindparseEnd`, so no `ReactLynx` handler hears them there and the flags are
+//! unobservable (`docs/tracking/deviations.md`).
+//!
+//! `tap` is routed per instance: the painter forwards taps to the main
+//! thread only while some element observing `tap` is alive
+//! ([`dom::Document::take_observed_name_edges`]), so a page with no markdown
+//! and no tap listener pays nothing for the component's definition.
 //!
 //! ## UI methods
 //!
@@ -428,7 +437,6 @@ impl Markdown {
             self.events.queue_detailed(
                 element,
                 "parseEnd",
-                true,
                 ComponentDetail::Id {
                     id: content_id(document, element),
                 },
@@ -453,7 +461,6 @@ impl Markdown {
             self.events.queue_detailed(
                 element,
                 "imageTap",
-                true,
                 ComponentDetail::Url {
                     url,
                     content_id: content_id(document, element),
@@ -473,7 +480,6 @@ impl Markdown {
         self.events.queue_detailed(
             element,
             "link",
-            true,
             ComponentDetail::UrlContent {
                 url,
                 content: text_content(document, anchor),

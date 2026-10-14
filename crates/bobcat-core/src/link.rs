@@ -739,8 +739,10 @@ impl ViewOutbox {
         self.requester.request_event();
     }
 
-    /// Publishes a global listener-name edge: the first registration for a
-    /// name, or the removal of its last.
+    /// Publishes one edge of the painter's listener-name set: a name the
+    /// main thread starts or stops wanting routed, because a realm
+    /// registration or a live component element wants it (`DocumentSlot`'s
+    /// `routes` in `main::runtime`).
     ///
     /// No wakeup. Nothing a host does depends on it — the painter reads the
     /// set at the start of its next routing pass, which is a turn the host
@@ -754,20 +756,6 @@ impl ViewOutbox {
                 names.remove(&name);
             }
             published.listeners = Arc::new(names);
-        });
-    }
-
-    /// Publishes, once, the names the document's engine components observe
-    /// ([`dom::CustomElement::observed_events`]), so the painter routes them
-    /// whether or not the realm listens too. Never closed: a definition
-    /// observes its names for the document's whole life, and the realm's own
-    /// close edge for one of them is not forwarded
-    /// ([`listener_edge`](Self::listener_edge)'s caller filters it).
-    pub(crate) fn publish_observed_names(&self, names: impl IntoIterator<Item = &'static str>) {
-        self.frames.send_modify(|published| {
-            let mut listeners = published.listeners.as_ref().clone();
-            listeners.extend(names.into_iter().map(Arc::from));
-            published.listeners = Arc::new(listeners);
         });
     }
 
