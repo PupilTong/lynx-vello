@@ -1,5 +1,5 @@
 import { loadModuleSync, resolveModuleUrl } from "bobcat-internal:host";
-import { sectionURL } from "bobcat:section-url";
+import { bundlePathURL, sectionURL } from "bobcat:section-url";
 
 // The compiler factory ABI, and the one way a bundle path becomes a value.
 //
@@ -111,20 +111,20 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
    * absolute URL and refuses everything else.
    *
    * **Any other entry is a lazy container's `bundleName`** — the string
-   * `lynx.fetchBundle` was given and echoed back — and its sections live
-   * *under* that URL: `sectionURL` writes exactly the string the installer
-   * registered them at (`named_chunk_url` in
-   * `crates/bobcat-source/src/page.rs`), which is also what MTS's `chunkURL`
-   * writes for the same container. Nothing is resolved here: the string stays
-   * as it is, rooted or relative. The host resolves the section's load
-   * against the view's base URL, the fetcher resolved the container's fetch
-   * against its own, and the embedder keeps the two bases equal, so both
-   * name one URL.
+   * `lynx.fetchBundle` was given and echoed back — and its bodies live
+   * *under* that URL: a section name (`kind` `"section"`) as `sectionURL`
+   * writes it, a manifest path as `bundlePathURL` does — exactly the strings
+   * the installer registered them at (`crates/bobcat-source/src/container.rs`),
+   * and what MTS's `chunkURL` writes for the same container. Nothing is
+   * resolved here: the string stays as it is, rooted or relative. The host
+   * resolves the load against the view's base URL, the fetcher resolved the
+   * container's fetch against its own, and the embedder keeps the two bases
+   * equal, so both name one URL.
    */
-  function bodyUrl(path: string, entry: string): string {
+  function bodyUrl(path: string, entry: string, kind: "path" | "section"): string {
     const template = templateUrls.get(entry);
     if (template === undefined && entry !== DEFAULT_ENTRY) {
-      return sectionURL(path, entry);
+      return kind === "section" ? sectionURL(path, entry) : bundlePathURL(path, entry);
     }
     const specifier = ABSOLUTE_URL.test(path)
       ? path : `.${path.startsWith("/") ? path : `/${path}`}`;
@@ -186,8 +186,8 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
    * The load parks the job this call runs in. The text never becomes a value
    * here, and a URL is evaluated once per realm however often it is asked for.
    */
-  function loadBody(path: string, entry: string): () => ModuleValue {
-    const loaded = loadModuleSync(bodyUrl(path, entry), "module, exports");
+  function loadBody(path: string, entry: string, kind: "path" | "section"): () => ModuleValue {
+    const loaded = loadModuleSync(bodyUrl(path, entry, kind), "module, exports");
     if (loaded.kind === "json") return factoryOf(loaded.value, entry);
     if (loaded.kind === "module") {
       const namespace = loaded.value as {default?: ModuleValue};
@@ -218,7 +218,7 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
     _options?: {timeout?: number}): ModuleValue {
     const cached = cache.get(path);
     if (cached) return cached;
-    const factory = factories.get(path) ?? loadBody(path, entry);
+    const factory = factories.get(path) ?? loadBody(path, entry, "path");
     // Both tables are written after the factory returned, as lynx-core writes
     // `_$factoryCache` only there (`app.ts` `loadScript`): a factory whose
     // `init` threw is not retained either, so the next call runs the whole
@@ -246,7 +246,7 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
    * which is the one every factory here is given.
    */
   function loadScriptInit(sourceURL: string, entry = DEFAULT_ENTRY) {
-    const factory = loadBody(sourceURL, entry);
+    const factory = loadBody(sourceURL, entry, "path");
     return {init: (_inject?: ModuleValue): ModuleValue => factory()};
   }
   /**
@@ -266,7 +266,7 @@ export function createLynxModules(app: ModuleValue, lynx: ModuleValue, console: 
     const entry = options.bundleName ?? DEFAULT_ENTRY;
     const cacheKey = `${entry}:${key}`;
     if (sectionExports.has(cacheKey)) return sectionExports.get(cacheKey);
-    const value = loadBody(key, entry)();
+    const value = loadBody(key, entry, "section")();
     sectionExports.set(cacheKey, value);
     return value;
   }

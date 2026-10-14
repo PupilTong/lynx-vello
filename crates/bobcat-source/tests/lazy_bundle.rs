@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use bobcat_core::{DrawTarget, EngineEvent, LynxGroup, NoWakeup, Painter, StyleThreads};
 use bobcat_resources::{Resources, ResourcesConfig};
-use bobcat_source::{LazyBundleInstaller, PageSource};
+use bobcat_source::{BundleInstaller, ContainerSources, PageSource};
 use url::Url;
 
 /// The screen these tests' views report, as a host with no screen to measure
@@ -40,7 +40,7 @@ fn registered(name: &str) -> (bobcat_core::ViewSources, Resources) {
             base_url: Some(input.clone()),
             // Without this every `lynx.fetchBundle` fails: installing a
             // container is what makes its sections loadable.
-            container_installer: Some(Arc::new(LazyBundleInstaller)),
+            container_installer: Some(Arc::new(BundleInstaller)),
             ..ResourcesConfig::default()
         },
         || {},
@@ -166,35 +166,55 @@ fn the_real_lazy_chunk_installs_the_sections_both_realms_ask_for() {
     let (name, bytes) = fixture.chunks[0];
     let url = Url::parse(&format!("{ORIGIN}/{name}")).expect("a chunk URL");
 
-    let sources = bobcat_source::lazy_bundle_sources(&url, bytes).expect("the container decodes");
+    let sources = ContainerSources::from_bytes(&url, bytes).expect("the container decodes");
 
-    let mut scripts: Vec<&str> = sources
-        .scripts
-        .iter()
-        .map(|(url, _)| url.as_str())
-        .collect();
-    scripts.sort_unstable();
     assert_eq!(
-        scripts,
+        sources
+            .scripts()
+            .iter()
+            .map(|(url, _)| url.as_str())
+            .collect::<Vec<_>>(),
         [
+            // `/background`, the manifest path the native decoder files the
+            // `background` section under too: `requireModule` would ask here.
+            format!("{ORIGIN}/{name}/background"),
             // `lynx.loadScript('background', {bundleName})` on BTS.
             format!("{ORIGIN}/{name}/background.js"),
+            // `/main-thread`, the same section's manifest path.
+            format!("{ORIGIN}/{name}/main-thread"),
             // `lynx.loadScript('main-thread', {bundleName})` on MTS.
             format!("{ORIGIN}/{name}/main-thread.js"),
         ]
     );
     assert_eq!(
         sources
-            .style_sheets
+            .style_sheets()
             .iter()
             .map(|(url, _)| url.as_str())
             .collect::<Vec<_>>(),
         // `__LoadStyleSheet('CSS', bundleName)` on MTS.
         [format!("{ORIGIN}/{name}/custom_section/CSS.css")]
     );
+    // Its own `StyleInfo` is registered when it holds any rule, and nothing
+    // asks for it: a lazy container's CSS is its `CSS` section.
+    let template = bobcat_source::native::decode(bytes).expect("the container decodes");
+    let has_style_info = template.style_info.as_ref().is_some_and(|info| {
+        info.css_id_to_style_sheet
+            .values()
+            .any(|sheet| !sheet.rules.is_empty())
+    });
+    assert_eq!(
+        sources.style_info().map(Url::as_str),
+        has_style_info
+            .then(|| format!("{ORIGIN}/{name}/style-info.css"))
+            .as_deref()
+    );
+    // A lazy container has no `root`, so no entry and no boot.
+    assert!(sources.entry().is_none());
+    assert!(sources.background_entry().is_none());
 
     let (_, main_thread) = sources
-        .scripts
+        .scripts()
         .iter()
         .find(|(url, _)| url.as_str().ends_with("/main-thread.js"))
         .expect("the MTS section");

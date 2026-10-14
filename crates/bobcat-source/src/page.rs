@@ -60,6 +60,8 @@ use bobcat_resources::Resources;
 use thiserror::Error;
 use url::Url;
 
+use crate::container::{named_chunk_url, named_style_url};
+
 /// A decoded page container and the in-memory resources it contributes to a
 /// Bobcat view.
 #[derive(Clone, Debug)]
@@ -160,6 +162,13 @@ pub enum SourceError {
     MissingNativeEntry { input: String, entry: String },
     #[error("`{0}` is a Lynx page rather than a container of sections")]
     NotAContainer(String),
+    /// Two of a container's names reach one URL with different texts, or a
+    /// stylesheet's URL is also a script's.
+    #[error("container `{input}` names `{url}` twice, with different contents")]
+    ConflictingSection { input: String, url: String },
+    /// A container URL that cannot be a base, so no section hangs under it.
+    #[error("container URL `{0}` cannot be a base for its sections")]
+    OpaqueContainerUrl(String),
 }
 
 /// Explicit name for [`SourceError`] at APIs that carry several error types.
@@ -644,7 +653,7 @@ fn xml_background_source(body: &str) -> String {
 /// evaluates `/app-service.js` beside it, synchronously, from inside this
 /// module's own evaluation. No entry is named: this bundle registers under the
 /// default entry either way.
-fn background_boot_source(input: &Url, has_app_service: bool) -> String {
+pub(crate) fn background_boot_source(input: &Url, has_app_service: bool) -> String {
     let template_url = serde_json::to_string(input.as_str()).expect("a URL is a JavaScript string");
     let mut source = format!(
         "import {{lynx, __BobcatRegisterBundle}} from 'bobcat:bts-runtime';\n\
@@ -667,36 +676,6 @@ fn bundle_source_url(input: &Url, path: &str) -> Option<Url> {
         format!("./{path}")
     };
     input.join(&reference).ok()
-}
-
-/// The resource URL `__LoadLepusChunk` names one non-root Lepus chunk by: the
-/// root script's own path, then the encoded chunk name as a `.js` file. The
-/// realm writes the same string in `main-thread-runtime.ts`'s `chunkURL`.
-pub(crate) fn named_chunk_url(entry: &Url, name: &str) -> Url {
-    let mut url = entry.clone();
-    let encoded: String = url::form_urlencoded::byte_serialize(name.as_bytes()).collect();
-    url.set_path(&format!(
-        "{}/{}.js",
-        entry.path().trim_end_matches('/'),
-        encoded.replace('+', "%20")
-    ));
-    url
-}
-
-/// The resource URL `__LoadStyleSheet` names one named stylesheet by: the
-/// container URL's path, then `custom_section/` and the encoded section name
-/// as a `.css` file, the `?#` suffix kept — so the compiler's `CSS` section
-/// is `<path>/custom_section/CSS.css`. The realm writes the same string in
-/// `packages/bobcat-element/src/section-url.ts`'s `styleSheetURL`.
-pub(crate) fn named_style_url(entry: &Url, key: &str) -> Url {
-    let mut url = entry.clone();
-    let encoded: String = url::form_urlencoded::byte_serialize(key.as_bytes()).collect();
-    url.set_path(&format!(
-        "{}/custom_section/{}.css",
-        entry.path().trim_end_matches('/'),
-        encoded.replace('+', "%20")
-    ));
-    url
 }
 
 /// Parses and registers one already-decoded browser Lynx XML response.
@@ -793,7 +772,7 @@ fn xml_section_url(input: &Url, fragment: &str) -> Url {
     url
 }
 
-fn diagnostic_url(input: &Url) -> String {
+pub(crate) fn diagnostic_url(input: &Url) -> String {
     if input.cannot_be_a_base() {
         return format!("{}:[redacted]", input.scheme());
     }

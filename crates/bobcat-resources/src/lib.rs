@@ -183,7 +183,7 @@ pub struct ResourcesConfig {
     /// `None`, the default, changes nothing about the fetch — it still
     /// completes, exactly as an image fetch does. A host that wants
     /// `lynx.fetchBundle` to install lazy bundles passes
-    /// `bobcat_source::LazyBundleInstaller`.
+    /// `bobcat_source::BundleInstaller`.
     pub container_installer: Option<Arc<dyn ContainerInstaller>>,
     /// This Worker's end of the channel whose other end the host's
     /// main-thread image decoder listens on (`js/image-decoder.ts` in the

@@ -277,21 +277,20 @@ describe("one load per bundle path, and the factory ABI over it", () => {
     expect(loads).toEqual(["https://cdn.test/app/chunk.js"]);
   });
 
-  it("hangs a lazy container's sections under its bundleName", () => {
+  it("hangs a lazy container's manifest paths under its bundleName", () => {
     const {modules} = environment("https://cdn.test/app/x.web.bundle");
-    // `.js.js`, and deliberately: `named_chunk_url` writes `<name>.js` for
-    // whatever name a container carries, and a manifest path is one of those
-    // names — so `/chunk.js` is the section `chunk.js`, registered at
-    // `chunk.js.js`. The two sides agree because both are this one rule.
-    files.set("https://lazy.test/bundle/lazy.bundle/chunk.js.js",
+    // A manifest path is the path it is under the container — one leading
+    // `/` stripped, no `.js` appended — the string `bundle_path_url`
+    // registered it at.
+    files.set("https://lazy.test/bundle/lazy.bundle/chunk.js",
       commonjs("exports.lazy = true;"));
 
     // An entry no `__BobcatRegisterBundle` named is a lazy container's
     // `bundleName`, the string `lynx.fetchBundle` was given: nothing is
-    // resolved, and the section hangs under that URL's path.
+    // resolved, and the path hangs under that URL's path.
     expect(modules.requireModule("/chunk.js", "https://lazy.test/bundle/lazy.bundle"))
       .toEqual({lazy: true});
-    expect(loads).toEqual(["https://lazy.test/bundle/lazy.bundle/chunk.js.js"]);
+    expect(loads).toEqual(["https://lazy.test/bundle/lazy.bundle/chunk.js"]);
   });
 
   it("keeps a lazy bundleName's own query suffix after the section", () => {

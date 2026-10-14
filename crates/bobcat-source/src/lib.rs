@@ -7,13 +7,13 @@
 #![forbid(unsafe_code)]
 
 mod archive;
+mod container;
 mod custom_style;
-mod lazy_bundle;
 mod lower_style;
 pub mod native;
 mod page;
 pub mod web;
 pub mod xml;
 pub use archive::*;
-pub use lazy_bundle::{LazyBundleInstaller, LazyBundleSources, lazy_bundle_sources};
+pub use container::{BundleInstaller, ContainerSources};
 pub use page::*;

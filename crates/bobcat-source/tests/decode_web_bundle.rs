@@ -234,17 +234,29 @@ fn decodes_css_custom_sections_into_the_style_info_map() {
     assert_eq!(selectors, [".page"]);
 }
 
-/// The same container's named stylesheets as the installer registers them:
-/// each one under `custom_section/`, its name encoded, the `?#` suffix kept.
+/// The same container's named stylesheets as `ContainerSources` registers
+/// them: each one under `custom_section/`, its name encoded, the `?#` suffix
+/// kept.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn css_custom_sections_register_under_custom_section() {
     let url = url::Url::parse("https://cdn.test/sections.bundle?rev=1").unwrap();
-    let sources =
-        bobcat_source::lazy_bundle_sources(&url, fixtures::fixture("css-custom-sections").page)
-            .unwrap();
+    let sources = bobcat_source::ContainerSources::from_bytes(
+        &url,
+        fixtures::fixture("css-custom-sections").page,
+    )
+    .unwrap();
+    // The card's own `StyleInfo` and its root hang under the container too.
+    assert_eq!(
+        sources.style_info().map(url::Url::as_str),
+        Some("https://cdn.test/sections.bundle/style-info.css?rev=1")
+    );
+    assert_eq!(
+        sources.entry().map(url::Url::as_str),
+        Some("https://cdn.test/sections.bundle/root.js?rev=1")
+    );
     let sheets: Vec<(&str, Vec<String>)> = sources
-        .style_sheets
+        .style_sheets()
         .iter()
         .map(|(url, sheet)| {
             (
