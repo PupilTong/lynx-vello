@@ -1679,18 +1679,19 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
                   globalThis.listener = () => {};
                   // Two handles on one name, and on one of them a second
                   // registration of another kind entirely: still one name.
-                  __AddEventListener(outer, 'tap', globalThis.listener, {});
-                  __AddEventListener(inner, 'tap', globalThis.listener, { capture: true });
-                  __AddEvent(inner, 'bindEvent', 'tap', '3:0:bindtap');
+                  __AddEventListener(outer, 'longpress', globalThis.listener, {});
+                  __AddEventListener(inner, 'longpress', globalThis.listener, { capture: true });
+                  __AddEvent(inner, 'bindEvent', 'longpress', '3:0:bindlongpress');
                   __AddEvent(outer, 'global-bindEvent', 'swipe', '3:0:swipe');
                 };
                 ",
             "app:///edges.js",
         )
         .expect("main-thread script");
-    // `slotchange` is the swiper's and the refresh view's, published once
-    // when the document was built and never closed.
-    assert_eq!(names.names(), ["slotchange", "swipe", "tap"]);
+    // `slotchange` is the swiper's and the refresh view's, and `tap` the
+    // markdown component's, published once when the document was built and
+    // never closed.
+    assert_eq!(names.names(), ["longpress", "slotchange", "swipe", "tap"]);
 
     runtime
         .evaluate_module(
@@ -1699,15 +1700,15 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
                 import { __AddEvent, __RemoveEventListener } from 'bobcat:element';
                 const [, outer, inner] = globalThis.held;
                 // `inner` still has its `__AddEvent` handler, and `outer`
-                // still has its closure, so neither of these closes `tap`.
-                __RemoveEventListener(inner, 'tap', globalThis.listener, { capture: true });
+                // still has its closure, so neither of these closes `longpress`.
+                __RemoveEventListener(inner, 'longpress', globalThis.listener, { capture: true });
                 __AddEvent(outer, 'global-bindEvent', 'swipe', null);
                 ",
             "app:///partial.mjs",
             "unregistering",
         )
         .expect("unregistration");
-    assert_eq!(names.names(), ["slotchange", "tap"]);
+    assert_eq!(names.names(), ["longpress", "slotchange", "tap"]);
 
     runtime
         .evaluate_module(
@@ -1715,8 +1716,8 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
             r"
                 import { __AddEvent, __RemoveEventListener } from 'bobcat:element';
                 const [, outer, inner] = globalThis.held;
-                __AddEvent(inner, 'bindEvent', 'tap', null);
-                __RemoveEventListener(outer, 'tap', globalThis.listener, {});
+                __AddEvent(inner, 'bindEvent', 'longpress', null);
+                __RemoveEventListener(outer, 'longpress', globalThis.listener, {});
                 ",
             "app:///last.mjs",
             "unregistering",
@@ -1724,7 +1725,7 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
         .expect("unregistration");
     assert_eq!(
         names.names(),
-        ["slotchange"],
+        ["slotchange", "tap"],
         "the last registration closes it; a component's name stays open"
     );
 
@@ -1743,7 +1744,7 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
             "registering a component's name",
         )
         .expect("registration");
-    assert_eq!(names.names(), ["slotchange"]);
+    assert_eq!(names.names(), ["slotchange", "tap"]);
 }
 
 /// The replica is what the painting side filters against, so a
@@ -1762,13 +1763,13 @@ fn registering_a_listener_publishes_its_name_to_the_painting_side() {
                   __AppendElement(page, view);
                   globalThis.held = [page, view];
                   globalThis.listener = () => {};
-                  __AddEventListener(view, 'tap', globalThis.listener, {});
+                  __AddEventListener(view, 'longpress', globalThis.listener, {});
                 };
                 ",
             "app:///publish.js",
         )
         .expect("main-thread script");
-    assert!(names.contains("tap"));
+    assert!(names.contains("longpress"));
     assert!(!names.contains("scroll"));
 
     // A second module rather than a second entry: the point is a later
@@ -1780,14 +1781,14 @@ fn registering_a_listener_publishes_its_name_to_the_painting_side() {
             &mut js_runtime,
             r"
                 import { __RemoveEventListener } from 'bobcat:element';
-                __RemoveEventListener(globalThis.held[1], 'tap', globalThis.listener, {});
+                __RemoveEventListener(globalThis.held[1], 'longpress', globalThis.listener, {});
                 ",
             "app:///unpublish.mjs",
             "unpublishing",
         )
         .expect("unregistration");
     assert!(
-        !names.contains("tap"),
+        !names.contains("longpress"),
         "the last listener for a name unpublishes it"
     );
 }
@@ -3075,6 +3076,72 @@ fn a_foldview_answers_set_fold_expanded_through_both_invoke_paths() {
     }
 }
 
+/// An `<x-markdown>`'s UI methods through `__InvokeUIMethod`, each answer
+/// built by `element-papi.ts` from the record the component writes:
+/// `getContent`'s `{content}` with web-core's inclusive `end`, `getImages`'
+/// and `getParseResult`'s typings shapes, `getTextBoundingRect`'s
+/// `{boundingRect, boxes}` and `getCharIndexByPoint`'s `{index}` over the
+/// rendered text, and code 4 for `getParseResult` without tags. A 10px Ahem
+/// paragraph at the page's origin.
+#[test]
+fn a_markdown_answers_its_ui_methods_through_invoke() {
+    let (mut js_runtime, mut runtime, _elements) = text_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const markdown = __CreateElement('x-markdown', 0);
+                  __SetInlineStyles(markdown, 'font-family:Ahem;font-size:10px;width:300px');
+                  __SetAttribute(markdown, 'content-id', 'doc-1');
+                  __SetAttribute(markdown, 'content', 'see [docs](https://a.test/) ![i](x.png)');
+                  __AppendElement(page, markdown);
+                  globalThis.held = [page, markdown];
+                };
+                ",
+            "app:///markdown-methods.js",
+        )
+        .expect("main-thread script");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __FlushElementTree, __InvokeUIMethod } from 'bobcat:element';
+                __FlushElementTree();
+                const call = (method, params) => {
+                  let answer;
+                  __InvokeUIMethod(held[1], method, params, result => { answer = result; });
+                  return answer;
+                };
+                const expectAnswer = (answer, code, data) => {
+                  if (answer.code !== code || JSON.stringify(answer.data) !== JSON.stringify(data)) {
+                    throw new Error('expected ' + JSON.stringify({code, data}) + ', got ' +
+                                    JSON.stringify(answer));
+                  }
+                };
+                expectAnswer(call('getContent', {start: 4, end: 9}), 0, {content: '[docs]'});
+                expectAnswer(call('getImages', {}), 0, {images: ['x.png']});
+                expectAnswer(call('getParseResult', {tags: ['a', 'img']}), 0, {
+                  id: 'doc-1',
+                  result: {a: [{start: 4, end: 8}], img: [{start: 0, end: 0}]},
+                });
+                expectAnswer(call('getParseResult', {}), 4, undefined);
+                // 'docs' is rendered 4..8, 40px into the line.
+                const box = {left: 40, top: 0, right: 80, bottom: 14, width: 40, height: 14};
+                expectAnswer(call('getTextBoundingRect', {start: 4, end: 8}), 0,
+                             {boundingRect: box, boxes: [box]});
+                expectAnswer(call('getCharIndexByPoint', {x: 45, y: 5}), 0, {index: 4});
+                expectAnswer(call('getCharIndexByPoint', {x: 45, y: 5, indexType: 'source'}), 0,
+                             {index: 5});
+                expectAnswer(call('getSelectedText', {}), 3, undefined);
+                ",
+            "app:///markdown-method-calls.js",
+            "markdown methods",
+        )
+        .expect("the markdown's methods answer as expected");
+}
+
 /// `getTextBoundingRect` on a `text`, through `__InvokeUIMethod` and the
 /// selector-query `invoke`: a 10px Ahem paragraph at (20, 30) with 5px of
 /// padding answers its range's box in viewport CSS px, from the content
@@ -4195,9 +4262,117 @@ fn a_tap_at_shadow_content_is_heard_by_its_component_before_script() {
     );
 }
 
+/// An `<x-markdown>` a script creates renders its `content` in its UA shadow
+/// tree, and a `tap` the gesture path delivers at the paragraph holding a
+/// link — the node the hit lands on, a paragraph's runs having no box of
+/// their own — reaches the script as `link`, with web-core's
+/// `{url, content, contentId}` detail, from an entry of its own. The
+/// component hears the tap with no `tap` listener in the realm.
+#[test]
+fn a_tap_on_markdown_link_text_reaches_script_as_link() {
+    let (mut js_runtime, mut runtime, elements) = text_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const markdown = __CreateElement('x-markdown', 0);
+                  __SetInlineStyles(markdown, 'font-family:Ahem;font-size:10px;width:300px');
+                  __SetAttribute(markdown, 'content-id', 'doc-1');
+                  __SetAttribute(markdown, 'content', 'see [docs](https://lynxjs.org/) now');
+                  __AppendElement(page, markdown);
+                  __AddEvent(markdown, 'bindEvent', 'link', {
+                    type: 'worklet',
+                    value: {
+                      body: (event) => seen.push(
+                        event.type + ':' + event.currentTarget.uid + ':' +
+                        JSON.stringify(event.detail),
+                      ),
+                    },
+                  });
+                  globalThis.held = [page, markdown];
+                };
+                ",
+            "app:///markdown-link.js",
+        )
+        .expect("main-thread script");
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __FlushElementTree } from 'bobcat:element';
+                __FlushElementTree();
+                ",
+            "app:///markdown-link-flush.js",
+            "flush",
+        )
+        .expect("the flush");
+    // The render's `parseEnd`, which nothing here listens for.
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    let (markdown, paragraph) = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let markdown = tree.get(page).expect("the page").child_ids()[0];
+        let shadow = tree
+            .shadow_root(markdown)
+            .expect("the markdown's shadow root");
+        let root = tree.get(shadow).expect("the shadow root").child_ids()[0];
+        let paragraph = tree.get(root).expect("the markdown root").child_ids()[0];
+        assert_eq!(tree.get(paragraph).and_then(dom::Node::tag_name), Some("p"));
+        (markdown, paragraph)
+    };
+
+    // "see " is four 10px Ahem glyphs: the link's text starts at x = 40.
+    runtime
+        .dispatch_for_test(
+            &mut js_runtime,
+            paragraph,
+            &tap(),
+            dom::Point2D::new(45.0, 5.0),
+        )
+        .expect("the tap on the link text");
+    expect_seen(&mut js_runtime, &mut runtime, "");
+    assert!(
+        runtime.has_component_events(),
+        "owed to an entry of its own"
+    );
+    assert!(
+        runtime
+            .dispatch_component_events(&mut js_runtime)
+            .is_empty()
+    );
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        &format!(
+            r#"link:{}:{{"url":"https://lynxjs.org/","content":"docs","contentId":"doc-1"}}"#,
+            markdown.to_bits()
+        ),
+    );
+
+    // Plain text owes nothing.
+    runtime
+        .dispatch_for_test(
+            &mut js_runtime,
+            paragraph,
+            &tap(),
+            dom::Point2D::new(5.0, 5.0),
+        )
+        .expect("the tap on plain text");
+    assert!(!runtime.has_component_events());
+}
+
 /// A name a component observes is in the painter's name set with no realm
-/// listener anywhere, so the painter sends the gesture's `tap` and the
-/// component hears it. The realm's own edges for that name are not
+/// listener anywhere — `tap`, which the document's own markdown component
+/// observes from the build on — so the painter sends the gesture's `tap` and
+/// a component defined later hears it too. The realm's own edges for that name are not
 /// forwarded, so a script that listens for it and then stops does not
 /// close what the component still observes.
 #[test]
@@ -4217,8 +4392,9 @@ fn a_tap_a_component_observes_is_routed_with_no_script_listener() {
         )
         .expect("main-thread script");
     assert!(
-        !names.contains("tap"),
-        "nothing the document was built with observes `tap`, and no script listens"
+        names.contains("tap"),
+        "the markdown component the document was built with observes `tap`, \
+         published with the build though no script listens"
     );
 
     let log = TapLog::default();

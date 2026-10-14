@@ -141,6 +141,13 @@ pub(super) struct Document {
     pub(super) blocks: Vec<Block>,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the component counts rendered text off its shadow tree; this module's tests check the parse's"
+    )
+)]
 impl Document {
     /// The text the whole document renders, in tree order.
     pub(super) fn text_content(&self) -> String {
@@ -316,6 +323,13 @@ pub(super) enum HtmlElement {
     P,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the component counts rendered text off its shadow tree; this module's tests check the parse's"
+    )
+)]
 impl Block {
     pub(super) fn range(&self) -> &SourceRange {
         match self {
@@ -383,6 +397,13 @@ impl TableRow {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the component counts rendered text off its shadow tree; this module's tests check the parse's"
+    )
+)]
 impl Inline {
     pub(super) fn range(&self) -> &SourceRange {
         match self {

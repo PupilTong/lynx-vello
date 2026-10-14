@@ -12,8 +12,8 @@
 //! Each tag owns its UA rules and tests. Numeric text and list attributes
 //! flow through `attr()`; boolean flags use attribute selectors. Only `image`,
 //! `svg`, `blur_view`, `swiper`, `refresh_view`, `viewpager`,
-//! `scroll_container`, `list`, `scroll_coordinator`, `dialog` and `overlay`
-//! need components: for image resources (an `svg`'s `content` as a document
+//! `scroll_container`, `list`, `scroll_coordinator`, `dialog`, `overlay` and
+//! `markdown` need components: for image resources (an `svg`'s `content` as a document
 //! handed to the host as its bytes), blur hints,
 //! the swiper's UA shadow tree, item count and `scrollTo` UI method, the
 //! refresh view's UA shadow tree, its header and footer slot assignment and
@@ -24,9 +24,12 @@
 //! `getVisibleCells` UI methods ([`list`]), the scroll coordinator's
 //! `setFoldExpanded` UI method ([`scroll_coordinator`]), the dialog's
 //! `:open`/`:modal` state, top-layer membership and four UI methods
-//! ([`dialog`]), and the overlay's UA shadow tree, the top-layer membership of
+//! ([`dialog`]), the overlay's UA shadow tree, the top-layer membership of
 //! the `dialog` in it, and its `showoverlay` and `dismissoverlay` events
-//! ([`overlay`]). A component's UI methods are its
+//! ([`overlay`]), and the markdown element's UA shadow tree rendered from its
+//! `content`, its `parseEnd`, `link` and `imageTap` events and its
+//! `getContent`, `getImages`, `getParseResult`, `getTextBoundingRect` and
+//! `getCharIndexByPoint` UI methods ([`markdown`]). A component's UI methods are its
 //! [`dom::CustomElement::invoke`], which the runtime's `callElementMethod`
 //! reaches through [`dom::Document::invoke_element_method`]. The methods
 //! every element has whatever its kind, which `callElementMethod` runs when
@@ -88,8 +91,9 @@ pub(super) const SLOT_CHANGE: &str = "slotchange";
 ///
 /// `events` is the queue the `image` and `svg` components leave a source that
 /// settled at its bind in, the `dialog` component the `close` and `cancel` its
-/// methods queue, and the `overlay` component its `showoverlay` and
-/// `dismissoverlay`, for the runtime to dispatch once it is out of the
+/// methods queue, the `overlay` component its `showoverlay` and
+/// `dismissoverlay`, and the `markdown` component its `parseEnd`, `link` and
+/// `imageTap`, for the runtime to dispatch once it is out of the
 /// JavaScript call that caused them.
 #[must_use]
 pub(crate) fn new_document(
@@ -108,6 +112,8 @@ pub(crate) fn new_document(
     list::define(&mut document);
     scroll_coordinator::define(&mut document);
     text::define(&mut document);
+    // After `image`: every image a markdown element renders is one.
+    markdown::define(&mut document, events.clone());
     dialog::define(&mut document, events.clone());
     // After `dialog`: every overlay builds one in its shadow tree.
     overlay::define(&mut document, events);
@@ -215,10 +221,6 @@ pub(crate) enum ComponentEvent {
 /// `{id: undefined}` loses that key when it is serialized, and the transport
 /// here would carry an `undefined`-valued key as one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "queued by `<x-markdown>`, which is not built yet")
-)]
 pub(crate) enum ComponentDetail {
     /// `{id}`: a content id, such as the `content-id` attribute an
     /// `<x-markdown>`'s `parseEnd` reports.
@@ -285,10 +287,6 @@ impl ComponentEvents {
 
     /// Queues an event at `node` whose detail is `detail`'s strings, bubbling
     /// and composed when `bubbles` is set, neither otherwise.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "queued by `<x-markdown>`, which is not built yet")
-    )]
     pub(crate) fn queue_detailed(
         &self,
         node: NodeId,

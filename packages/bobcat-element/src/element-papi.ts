@@ -1808,7 +1808,17 @@ function invokeUIMethod(handle: Handle, method: string, params: unknown): Invoke
  *   range shows content on; `boundingRect` is their union, built here as
  *   iOS's `CGRectUnion` builds it (`LynxUIText.m:867-887`), so one box is
  *   its own union. No `id` or `dataset` rides along: the natives send only
- *   the two keys.
+ *   the two keys. A `markdown`'s answers in the same record and shape, its
+ *   offsets the rendered text's.
+ * - `getContent`, a `markdown`'s: `{content}`, one string field.
+ * - `getImages`, a `markdown`'s: `{images}`, the typings' shape (web-core
+ *   answers the bare array). The host writes the count and then each URL.
+ * - `getParseResult`, a `markdown`'s: `{id, result}`, the typings' and
+ *   native's shape (web-core answers the bare map), `result` an object from
+ *   each tag name asked to its `{start, end}` ranges. The host writes `id`,
+ *   the tag count, and per tag its name, its range count and two numbers
+ *   per range.
+ * - `getCharIndexByPoint`, a `markdown`'s: `{index}`.
  *
  * A method without an arm gets the fields themselves.
  */
@@ -1868,6 +1878,33 @@ function decodeMethodData(handle: Handle, method: string, fields: string[]): unk
       }
       return { boundingRect: { ...boundingRect }, boxes };
     }
+    case "getContent":
+      return { content: fields[0] ?? "" };
+    case "getImages": {
+      const count = Number(fields[0] ?? 0);
+      return { images: fields.slice(1, 1 + count) };
+    }
+    case "getParseResult": {
+      const id = fields[0] ?? "";
+      const count = Number(fields[1] ?? 0);
+      const result: Record<string, { start: number; end: number }[]> = {};
+      let at = 2;
+      for (let tag = 0; tag < count; tag++) {
+        const name = fields[at] ?? "";
+        const ranges = Number(fields[at + 1] ?? 0);
+        const list = [];
+        for (let range = 0; range < ranges; range++) {
+          const start = Number(fields[at + 2 + range * 2]);
+          const end = Number(fields[at + 3 + range * 2]);
+          list.push({ start, end });
+        }
+        result[name] = list;
+        at += 2 + ranges * 2;
+      }
+      return { id, result };
+    }
+    case "getCharIndexByPoint":
+      return { index: Number(fields[0]) };
     default:
       return fields;
   }

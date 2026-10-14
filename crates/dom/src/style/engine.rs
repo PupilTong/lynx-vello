@@ -501,6 +501,41 @@ impl StyleEngine {
         Self::note_flush(&mut self.changed_position_try_names, &invalidations);
     }
 
+    /// Replaces the scoped sheet at `index` with one parsed from `css`, in
+    /// the same place in the tree's sheet order: the new sheet goes in
+    /// before the old one, which then leaves.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the tree has no sheet at `index`.
+    pub(crate) fn replace_scoped_stylesheet(
+        &mut self,
+        styles: &mut AuthorStyles<ShadowStyleSheet>,
+        index: usize,
+        css: &str,
+    ) {
+        let sheet = ShadowStyleSheet(Arc::new(self.parse_stylesheet(css, Origin::Author)));
+        let old = styles
+            .stylesheets
+            .get(index)
+            .cloned()
+            .expect("Document::replace_shadow_stylesheet: no sheet at that index");
+        let guard = self.lock.read();
+        styles
+            .stylesheets
+            .insert_stylesheet_before(sheet, old.clone(), &guard);
+        // No device: a shadow tree's sheets collect no invalidations (stylo's
+        // `AuthorStyles::flush` passes none either); the caller re-matches
+        // the host's subtree instead.
+        let data = styles.data.clone();
+        styles
+            .stylesheets
+            .remove_stylesheet(None, data.custom_media_map(), old, &guard);
+        let invalidations = styles.flush(&mut self.stylist, &guard);
+        drop(guard);
+        Self::note_flush(&mut self.changed_position_try_names, &invalidations);
+    }
+
     /// Installs rules this engine built as one author-origin sheet.
     pub(crate) fn append_rules(&mut self, rules: Vec<CssRule>) {
         assert!(
@@ -777,6 +812,30 @@ impl<T> Document<T> {
         {
             let (engine, shadow) = self.shadow_style_parts(shadow_root);
             engine.add_scoped_stylesheet(&mut shadow.styles, css);
+        }
+        self.mark_subtree_dirty(host);
+    }
+
+    /// Replaces the stylesheet at `index` among those
+    /// [`Self::add_shadow_stylesheet`] added to one shadow tree, counting from
+    /// the first added, keeping its place in their order: a sheet a component
+    /// rewrites, such as the one `<x-markdown>` builds from its
+    /// `markdown-style` attribute, still cascades after the sheets added
+    /// before it and before the ones added after it, as replacing the text of
+    /// a `<style>` element in a shadow tree keeps that element's place.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `shadow_root` is no live shadow root, or has no sheet at
+    /// `index`.
+    pub fn replace_shadow_stylesheet(&mut self, shadow_root: NodeId, index: usize, css: &str) {
+        let host = self
+            .shadow_host(shadow_root)
+            .expect("Document::replace_shadow_stylesheet: not a live shadow root");
+        self.note_visual_mutation();
+        {
+            let (engine, shadow) = self.shadow_style_parts(shadow_root);
+            engine.replace_scoped_stylesheet(&mut shadow.styles, index, css);
         }
         self.mark_subtree_dirty(host);
     }

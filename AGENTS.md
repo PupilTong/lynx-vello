@@ -1825,7 +1825,23 @@ top-left, and hide every other child with one `!important`; the shadow sheet
 makes a pass-through dialog `pointer-events: none` (its popover `::backdrop`
 already is); non-bubbling `showoverlay`/`dismissoverlay` at the host on the
 same `ComponentEvents` queue, on transitions only, while the dialog's own
-`close`, not composed, stays in its shadow tree; no UI method), and
+`close`, not composed, stays in its shadow tree; no UI method),
+`tree::markdown` (`markdown`/`x-markdown`, web-core's `x-markdown`: a
+component that renders `content` into a UA shadow tree
+`div#markdown-root.markdown-body[part=root]` of markdown-it's HTML-named
+elements — `parse.rs` replicates markdown-it 15 as web-core configures it
+over `pulldown-cmark` and `linkify`, `style.rs` turns `markdown-style` into
+a second shadow sheet the component replaces in place with
+`Document::replace_shadow_stylesheet`, `build.rs` builds the elements,
+paragraphs as `-lynx-text`, blocks as column flex boxes, list markers as
+absolutely placed glyph elements, tables as grids; a render reparses and
+keeps the elements of the equal prefix of top-level blocks; bubbling
+`parseEnd` per render, and `link`/`imageTap` from a `tap` it observes at its
+shadow content, the anchor found from the character the tap hits; UI
+methods `getContent`, `getImages`, `getParseResult`, `getTextBoundingRect`
+and `getCharIndexByPoint` in web-core's rendered-text offsets, which
+`rendered.rs` counts with markdown-it's line breaks between block tags; the
+typewriter, truncation and selection are deferred), and
 `tree::blur_view` (`blur-radius` reflected into a
 `backdrop-filter: blur()` presentational hint, under both the native tag
 `blur-view` and web-core's `x-blur-view`, as a CSS length rather than
@@ -1837,8 +1853,9 @@ describe. Attribute policy stays in each tag's module. Numeric text and list
 attributes use UA `attr()` declarations and registered custom properties;
 `tail-color-convert` uses an attribute selector. Only image resources, blur
 hints, the swiper's item count, the refresh view's slot
-assignment, the dialog's `:open`/`:modal` state, and the overlay's shadow
-tree, its dialog's top-layer membership and its events need
+assignment, the dialog's `:open`/`:modal` state, the overlay's shadow
+tree, its dialog's top-layer membership and its events, and the markdown
+element's shadow tree, its rendering and its events need
 `dom::CustomElement` callbacks. Runtime attribute members perform
 DOM mutations; Stylo tracks attribute dependencies and recascades on changes.
 HTML's own rules — the dialog's, the popover's and the display `dialog` maps

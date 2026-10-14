@@ -52,11 +52,12 @@
 
 use super::blur_view::{BLUR_VIEW_TAG, X_BLUR_VIEW_TAG};
 use super::dialog::DIALOG_TAG;
+use super::markdown::{MARKDOWN_TAG, X_MARKDOWN_TAG};
 use super::refresh_view::{REFRESH_FOOTER_TAG, REFRESH_HEADER_TAG};
 use super::swiper::{SWIPER_ITEM_TAG, SWIPER_TAG};
 use super::viewpager::{VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG};
 use super::{
-    dialog, image, list, overlay, popover, raw_text, refresh_view, scroll_container,
+    dialog, image, list, markdown, overlay, popover, raw_text, refresh_view, scroll_container,
     scroll_coordinator, svg, swiper, text, viewpager,
 };
 
@@ -119,8 +120,10 @@ impl Default for PageConfig {
 /// `overlay` and `x-overlay-ng` are in neither: their host is `display:
 /// contents`, as web-core's, and what renders is the `dialog` in their shadow
 /// tree, which takes the switch's display as `dialog` ([`super::overlay`]).
-/// Every tag that generates a box of its own — the containers, `text` and
-/// `image` — also gets the rest of that common block: `border-width: 0` with
+/// Every tag that generates a box of its own — the containers, the two
+/// markdown tags ([`super::markdown`], which keep the column display of
+/// `x-markdown.css` rather than the switch's), `text` and `image` — also
+/// gets the rest of that common block: `border-width: 0` with
 /// `border-style: solid`, `position: relative` (which is what makes a
 /// coordinator the containing block of its header and slot,
 /// [`super::scroll_coordinator`]), `min-width: 0` and
@@ -231,7 +234,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     };
     format!(
         "page, view, scroll-view, list, list-item, {component_tags}, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG}, \
-         text, image, svg {{ box-sizing: border-box; border-width: 0; border-style: solid; \
+         {MARKDOWN_TAG}, {X_MARKDOWN_TAG}, text, image, svg {{ box-sizing: border-box; border-width: 0; border-style: solid; \
          position: relative; overflow: clip; min-width: 0; min-height: 0; }}\n\
          {display}\
          {overflow}\
@@ -248,6 +251,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          {popovers}\
          :where({DIALOG_TAG}:popover-open) {{ display: {block}; }}\n\
          {overlays}\
+         {markdowns}\
          {text}\
          {inheritance}\
          {carriers}\
@@ -262,6 +266,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
         dialogs = dialog::UA_RULES,
         popovers = popover::UA_RULES,
         overlays = overlay::UA_RULES,
+        markdowns = markdown::UA_RULES,
         text = text::UA_RULES,
         carriers = raw_text::UA_RULES,
         images = image::UA_RULES,

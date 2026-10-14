@@ -110,8 +110,10 @@ inherit through, and what layout, paint and hit testing walk; it is reached
 exclusively through `Node::flat_children`/`flat_parent_id`, both returning
 arena slices so every consumer keeps its `&[NodeId]` iteration. Each shadow
 root owns an `AuthorStyles<DocumentStyleSheet>` whose scoped `CascadeData`
-(`Document::add_shadow_stylesheet`) replaces the document's author rules inside
-that tree; `::slotted()` and `::part()`/`exportparts` work off the same data.
+(`Document::add_shadow_stylesheet`; `Document::replace_shadow_stylesheet`
+swaps one sheet's text in its place in their order, as rewriting a shadow
+`<style>` does) replaces the document's author rules inside that tree;
+`::slotted()` and `::part()`/`exportparts` work off the same data.
 Slot assignment is eager — every mutation that can change it (host child list,
 shadow-tree slot set, `slot`/`name` attribute) resolves the affected tree in
 the same call, gated on a live-shadow-root counter so a document with none pays
