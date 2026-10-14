@@ -18,16 +18,20 @@
 //!   nothing.
 //! - **Key events** go to the focused element when there is one, and a `keydown` nobody canceled
 //!   runs the keyboard's editing action ([`key_command`]).
-//! - **Pointer events** over an editing host place the caret: a primary press focuses the host and
-//!   places it ([`Command::SelectFromPoint`]), a second and third quick press select the word and
-//!   the line, and a mouse drag with the button held extends the selection.
-//! - **The painter routes those names while the document has an editing host.** It forwards an
-//!   event only when its name is in the published listener-name set, so the slot opens
-//!   [`EDITING_ROUTED_EVENTS`] in that set while [`dom::Document::has_editing_hosts`] says yes and
-//!   closes them when it says no, through the same edges a realm registration moves
-//!   ([`super::DocumentSlot::sync_editing_routes`]). An event routed only on that account calls no
-//!   listener: [`MainThreadRuntime::deliver_input_event`] skips the realm when nothing hears the
-//!   name.
+//! - **Pointer events** over an editing host place the caret. A mouse's primary press focuses the
+//!   host and places it ([`Command::SelectFromPoint`]), a second and third quick press select the
+//!   word and the line, and a drag with the button held extends the selection. A finger or a pen
+//!   does the same on the tap — the `click` — rather than the press, as touch browsers do, so a
+//!   scroll that begins on a host does not focus it; it never drags a selection.
+//! - **The painter routes those names by state.** It forwards an event only when its name is in the
+//!   published listener-name set, so the slot opens names there on an editing account of its own
+//!   ([`EditingRoute`]), through the same edges a realm registration moves: `pointerdown` and
+//!   `click` while the document has an editing host, `keydown` while an element is focused (both
+//!   from the page's epilogue, [`super::DocumentSlot::sync_editing_routes`]), and `pointermove`,
+//!   `pointerup` and `pointercancel` only while a mouse drag is held, opened by the press and
+//!   closed when the drag ends ([`MainThreadRuntime::set_pressed`]). An event routed only on that
+//!   account calls no listener: [`MainThreadRuntime::deliver_input_event`] skips the realm when
+//!   nothing hears the name.
 //! - **[`TextInputState`](dom::editing::TextInputState)** is compared after each epilogue's commit
 //!   and published to the host when it changed ([`MainThreadRuntime::publish_text_input_state`]).
 
@@ -44,18 +48,45 @@ use super::{
 use crate::link::{InputEventPayload, ViewNotice};
 use crate::main::tree::LynxDocument;
 
-/// The event names the painter routes to this thread while the document has
-/// an editing host, whether or not the realm listens for them: the press,
-/// the drag and the release that place the caret and extend the selection,
-/// the cancellation that ends a drag, and the `keydown` the keyboard's
-/// editing actions follow.
-pub(super) const EDITING_ROUTED_EVENTS: [&str; 5] = [
-    "pointerdown",
-    "pointermove",
-    "pointerup",
-    "pointercancel",
-    "keydown",
-];
+/// One group of event names the painter routes to this thread on the
+/// editing account, whether or not the realm listens for them, each while
+/// the state that needs it holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EditingRoute {
+    /// `pointerdown` and `click`, while the document has an editing host:
+    /// a mouse press and a touch or pen tap are what focus a host and place
+    /// its caret, and a press outside every host is what blurs one.
+    Hosts,
+    /// `keydown`, while an element is focused: the keyboard's editing
+    /// actions need a focused host.
+    Focus,
+    /// `pointermove`, `pointerup` and `pointercancel`, while a mouse drag
+    /// that placed a caret is held: the moves extend the selection and the
+    /// release or cancellation ends the drag.
+    Drag,
+}
+
+impl EditingRoute {
+    pub(super) const ALL: [Self; 3] = [Self::Hosts, Self::Focus, Self::Drag];
+
+    /// The names the route holds open.
+    pub(super) const fn names(self) -> &'static [&'static str] {
+        match self {
+            Self::Hosts => &["pointerdown", "click"],
+            Self::Focus => &["keydown"],
+            Self::Drag => &["pointermove", "pointerup", "pointercancel"],
+        }
+    }
+
+    /// The route's bit in `DocumentSlot::editing_routes`.
+    pub(super) const fn bit(self) -> u8 {
+        match self {
+            Self::Hosts => 1,
+            Self::Focus => 2,
+            Self::Drag => 4,
+        }
+    }
+}
 
 /// What the pointer's editing default actions remember between events.
 #[derive(Debug, Default)]
@@ -199,11 +230,33 @@ impl MainThreadRuntime {
         release: Option<dom::NodeId>,
     ) -> Vec<MainThreadError> {
         let mut failures = Vec::new();
-        if release.is_some() {
-            if let Err(error) =
-                self.dispatch_input_event(js_runtime, target, name, payload, release)
+        if let Some(release) = release {
+            let dispatched = self
+                .dispatch_input_event(js_runtime, target, name, payload, Some(release))
+                .unwrap_or_else(|error| {
+                    failures.push(error);
+                    Dispatched::default()
+                });
+            // A finger's or a pen's tap is its press, as a touch browser
+            // focuses and places the caret on the tap: at the release, where
+            // the tap landed.
+            if !dispatched.default_prevented
+                && let EventDetail::Pointer {
+                    position,
+                    id,
+                    device: device @ (PointerKind::Touch | PointerKind::Pen),
+                    ..
+                } = payload.detail
             {
-                failures.push(error);
+                self.press(
+                    js_runtime,
+                    release,
+                    position,
+                    id,
+                    device,
+                    payload.timestamp,
+                    &mut failures,
+                );
             }
             return failures;
         }
@@ -246,9 +299,15 @@ impl MainThreadRuntime {
     ) {
         let timestamp = payload.timestamp;
         match (&payload.detail, name) {
-            (EventDetail::Pointer { id, .. }, "pointerup" | "pointercancel") => {
-                self.pointer_editing.pressed.take_if(|(held, _)| held == id);
+            (EventDetail::Pointer { id, .. }, "pointerup" | "pointercancel")
+                if self
+                    .pointer_editing
+                    .pressed
+                    .is_some_and(|(held, _)| held == *id) =>
+            {
+                self.set_pressed(None);
             }
+            (_, "pointerup" | "pointercancel") => {}
             _ if dispatched.default_prevented => {}
             (EventDetail::Key { key, modifiers, .. }, "keydown") => {
                 let focused = self.slot.borrow().document_ref().focused();
@@ -262,7 +321,7 @@ impl MainThreadRuntime {
                 EventDetail::Pointer {
                     position,
                     id,
-                    device,
+                    device: device @ PointerKind::Mouse,
                     button: 0,
                     ..
                 },
@@ -289,7 +348,7 @@ impl MainThreadRuntime {
                 // moved on (a listener's doing): the drag is over.
                 let focused = self.slot.borrow().document_ref().focused();
                 if buttons & 1 == 0 || focused != Some(host) {
-                    self.pointer_editing.pressed = None;
+                    self.set_pressed(None);
                     return;
                 }
                 if let Some(point) = self.host_point(host, *position) {
@@ -307,11 +366,12 @@ impl MainThreadRuntime {
         }
     }
 
-    /// A primary press nobody canceled: inside an editing host it focuses
-    /// the host and places the caret — or, as the second or third press in
-    /// quick succession on that host, selects the word or the line — and
-    /// outside one it takes the focus away, as a press on a page's
-    /// unfocusable area does in a browser.
+    /// A mouse's primary press, or a finger's or pen's tap, nobody canceled:
+    /// inside an editing host it focuses the host and places the caret —
+    /// or, as the second or third in quick succession on that host, selects
+    /// the word or the line — and outside one it takes the focus away, as a
+    /// press on a page's unfocusable area does in a browser. A mouse press
+    /// that placed a caret starts a drag.
     #[allow(
         clippy::too_many_arguments,
         reason = "one press's facts, read out of its detail by the caller"
@@ -346,8 +406,9 @@ impl MainThreadRuntime {
             host
         };
         failures.extend(self.dispatch_focus_events(js_runtime, timestamp));
+        self.set_pressed(None);
         let Some(host) = host else {
-            self.pointer_editing = PointerEditing::default();
+            self.pointer_editing.last_press = None;
             return;
         };
         let count = match self.pointer_editing.last_press {
@@ -359,7 +420,6 @@ impl MainThreadRuntime {
             _ => 1,
         };
         self.pointer_editing.last_press = Some((host, timestamp, count));
-        self.pointer_editing.pressed = None;
         // A `focus` listener can move the focus on, and then the press
         // places nothing in a host that is no longer the focused one.
         if self.slot.borrow().document_ref().focused() != Some(host) {
@@ -380,8 +440,28 @@ impl MainThreadRuntime {
         // Only a mouse drags a selection: a finger or a pen dragging over a
         // host is the scroll gesture, as on a touch browser.
         if device == PointerKind::Mouse {
-            self.pointer_editing.pressed = Some((pointer, host));
+            self.set_pressed(Some((pointer, host)));
         }
+    }
+
+    /// Records the mouse drag a press started, or its end, and opens or
+    /// closes [`EditingRoute::Drag`] with it: the drag's moves and its
+    /// release reach this thread while it is held, and nothing of a mouse
+    /// that is only hovering does.
+    ///
+    /// The edge is written inside this job and seen by the painter at its
+    /// next routing pass (`DocumentSlot::set_editing_route`), so a move the
+    /// painter decided before the press ran here was dropped there: the
+    /// first move that crosses extends to its own position, which catches
+    /// the selection up. A release decided that early never crosses either;
+    /// the drag then ends at the next move that reports the button up or
+    /// the focus moved, or at the next press, which is routed whenever the
+    /// document has a host.
+    pub(super) fn set_pressed(&mut self, pressed: Option<(PointerId, dom::NodeId)>) {
+        self.pointer_editing.pressed = pressed;
+        self.slot
+            .borrow_mut()
+            .set_editing_route(EditingRoute::Drag, pressed.is_some());
     }
 
     /// A viewport position in `host`'s border-box space, which the pointer
@@ -542,10 +622,11 @@ impl MainThreadRuntime {
         failures
     }
 
-    /// Opens or closes [`EDITING_ROUTED_EVENTS`] in the painter's name set as
-    /// the document gains its first editing host or loses its last. Asked by
-    /// the page's epilogue, once per entry, before the commit that publishes
-    /// the frame those hosts are in.
+    /// Opens or closes [`EditingRoute::Hosts`] as the document gains its
+    /// first editing host or loses its last, and [`EditingRoute::Focus`] as
+    /// an element gains or loses focus. Asked by the page's epilogue, once
+    /// per entry, before the commit that publishes the frame those hosts are
+    /// in.
     pub(crate) fn sync_editing_routes(&mut self) {
         self.slot.borrow_mut().sync_editing_routes();
     }

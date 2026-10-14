@@ -325,9 +325,14 @@ import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 // `componentAtIndexes` batch callback, which is filed and never called, as
 // in web-core.
 //
-// There is no `preventDefault` and no `cancelable`: Lynx dispatches no
-// cancelable event, and suppressing a built-in behavior goes through gesture
-// arbitration, on the separate `InputEvent::default_prevented` seam.
+// Every event carries the host's `cancelable` flag, and `preventDefault()`
+// sets `defaultPrevented` on a cancelable one only. The dispatch answers
+// `defaultPrevented` to the host, which is how a listener drops an edit (a
+// cancelable `beforeinput`) or stops an editing default action (a `keydown`,
+// a `pointerdown`, a touch tap's `click`). None of the three is published to
+// a background handler. Suppressing the user-agent scroll is not this: it
+// goes through gesture arbitration, on the separate
+// `InputEvent::default_prevented` seam.
 //
 // # Identity and lifecycle
 //

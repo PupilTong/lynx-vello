@@ -375,26 +375,49 @@ pointer/wheel/touch kind was renamed `DETAIL_POSITION` to match the realm's.
   burst; draining in the epilogue would deliver `focus` after them. The fixup
   rule (a removed or uneditable host) fires nothing, so nothing else can queue
   one. A future `focus()`/`blur()` element method (E5) drains its own.
-- **Routing: an editing account in the painter's name set.** The painter
-  forwards an event only when its name is in the published listener-name set.
-  `dom` counts the editing hosts it holds, connected or not
-  (`Document::has_editing_hosts`, kept by the `contenteditable` setters and
-  `free_node`), and the page's epilogue, before its commit, opens
-  `pointerdown`, `pointermove`, `pointerup`, `pointercancel` and `keydown` in
-  that set when the count leaves zero and closes them when it returns to zero
-  (`DocumentSlot::sync_editing_routes`), through the same edge path a realm
-  registration uses, so a name the realm listens for anyway is never touched.
-  No hosted-node table reaches the committed frame. An event routed only on
-  that account skips the realm (`deliver_input_event`) and runs its default
-  action alone. A detached host keeps the names open until it is freed.
-- **Multi-click counts presses, not clicks.** A browser selects the word on
-  the second `mousedown`, so the main thread counts primary presses on the
-  same host within `DOUBLE_CLICK_MILLISECONDS` (500 ms) itself, rather than
-  reading `dispatch_click`'s count, which needs `click` routed and lands after
-  the release. Two presses select the word, three or more the line.
+- **Routing: an editing account in the painter's name set, by state.** The
+  painter forwards an event only when its name is in the published
+  listener-name set. The slot opens names there on an account of its own
+  (`EditingRoute`), through the same edge path a realm registration uses, so
+  a name the realm listens for anyway is never touched:
+  - `pointerdown` and `click` while `Document::has_editing_hosts` (a counter
+    `dom` keeps in the `contenteditable` setters and `free_node`; a detached
+    host counts until it is freed);
+  - `keydown` while `Document::focused()` is some;
+  - `pointermove`, `pointerup` and `pointercancel` only while a mouse drag
+    that placed a caret is held, opened by the press and closed when the
+    drag ends (release, cancellation, a move with the button up, the focus
+    moved, the next press) — `MainThreadRuntime::set_pressed`.
+
+  The first two are synced by the page's epilogue before its commit
+  (`DocumentSlot::sync_editing_routes`); the drag route is written inside
+  the press's own job. The replica is a `watch` write with no
+  acknowledgement and no wakeup, and `Painter::dispatch_input` polls the
+  link before it routes, so every event the painter decides after the write
+  sees it; one decided before it was filtered against the old set and never
+  crossed. For a drag that means the first moves can be lost (the first one
+  that crosses extends to its own position, so the selection catches up), and
+  a release decided that early leaves the drag held until the next move with
+  the button up or the next press. Likewise keys typed before the epilogue of
+  the tap that focused a host are not routed. No hosted-node table reaches
+  the committed frame, and an event routed only on this account skips the
+  realm (`deliver_input_event`) and runs its default action alone.
+- **Touch and pen focus on the tap, a mouse on the press.** A mouse's
+  primary `pointerdown` focuses the host and places the caret, as a
+  browser's `mousedown` does. A finger's or pen's does it on the `click` the
+  release produces (`deliver_input_event`, after `dispatch_click`, at the
+  release target and position, unless the `click` was canceled), as touch
+  browsers do, so a drag the scroller consumed — which produces no `click`
+  — does not focus the host it began on.
+- **Multi-click counts presses, not clicks, for a mouse.** A browser selects
+  the word on the second `mousedown`, so the main thread counts primary
+  presses on the same host within `DOUBLE_CLICK_MILLISECONDS` (500 ms)
+  itself, rather than reading `dispatch_click`'s count, which lands after the
+  release. Two presses select the word, three or more the line. For touch
+  and pen the same count runs over taps.
 - **Only a mouse drags a selection.** A held mouse button's `pointermove`
   extends; a finger or pen dragging over a host is the scroll gesture, as on a
-  touch browser, and only places the caret where it went down.
+  touch browser.
 - **A press outside every editing host blurs the focused one**, as a press on
   an unfocusable area does in a browser.
 - **Keyboard mapping.** As the brief lists, plus meta-ArrowUp/ArrowDown to the
@@ -415,10 +438,12 @@ pointer/wheel/touch kind was renamed `DETAIL_POSITION` to match the realm's.
 - **No shift-click extension.** `InputKind::Pointer` carries no modifiers, so
   a press cannot say shift is held; extending by shift-click needs that field
   in `dom::input` and every host filling it in.
-- **The press runs on `pointerdown`, not `mousedown`.** A listener that
+- **A mouse press runs on `pointerdown`, not `mousedown`.** A listener that
   cancels the compatibility `mousedown` does not stop the focus change or the
-  caret placement, where a browser's would. On touch the caret is placed at
-  the touch's start rather than at the tap.
+  caret placement, where a browser's would.
+- **A touch drag that scrolls nothing still taps.** This engine's `click`
+  has no movement slop (only a consumed scroll or a cancel suppresses it), so
+  a finger dragged over a host outside any scroller focuses it on release.
 - **`relatedTarget` is not retargeted.** An element of a UA shadow tree
   reports `null` rather than its host.
 - **`LynxView::edit` before boot is refused** (`NotReady`), as the page

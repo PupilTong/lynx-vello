@@ -651,10 +651,10 @@ struct DocumentSlot {
     exposure: Exposure,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
-    /// Whether [`editing::EDITING_ROUTED_EVENTS`] are open in the painter's
-    /// name set on the editing account: the document had an editing host at
-    /// the last [`Self::sync_editing_routes`].
-    editing_routed: bool,
+    /// Which [`editing::EditingRoute`]s are open in the painter's name set
+    /// on the editing account, one bit per route
+    /// ([`editing::EditingRoute::bit`]).
+    editing_routes: u8,
     /// The event names the view's realms have a registration for anywhere,
     /// as their global edges said, each with how many realms hold it: the
     /// page realm and every `ShadowRealm` child a `frame` renders in, so a
@@ -702,7 +702,7 @@ impl DocumentSlot {
             autoplays: Autoplays::default(),
             exposure: Exposure::new(),
             removals: 0,
-            editing_routed: false,
+            editing_routes: 0,
             listened: FxHashMap::default(),
             observed: FxHashSet::default(),
             scrolling: SmallVec::new(),
@@ -904,35 +904,56 @@ impl DocumentSlot {
     /// Whether the painter's name set must hold `name`: a realm
     /// registration or a live component element wants it
     /// ([`Self::listens`]), or, for `click`, a `dblclick`; or, on the editing
-    /// account, it is one of [`editing::EDITING_ROUTED_EVENTS`] while the
-    /// document has an editing host.
+    /// account, it is a name of an open [`editing::EditingRoute`].
     fn routes(&self, name: &str) -> bool {
         self.listens(name)
             || (name == CLICK_EVENT && self.listens(DOUBLE_CLICK_EVENT))
-            || (self.editing_routed && editing::EDITING_ROUTED_EVENTS.contains(&name))
+            || editing::EditingRoute::ALL.into_iter().any(|route| {
+                self.editing_routes & route.bit() != 0 && route.names().contains(&name)
+            })
     }
 
-    /// Moves the editing account's names in the painter's set when
-    /// [`dom::Document::has_editing_hosts`] changed since the last call: the
-    /// first editing host opens [`editing::EDITING_ROUTED_EVENTS`], and the
-    /// last one freed or made uneditable closes them. Each name moves only
-    /// where [`Self::routes`] changes, so a name a realm or a component
-    /// wants anyway is not touched. One counter read when nothing changed.
-    fn sync_editing_routes(&mut self) {
-        let editable = self
-            .document
-            .as_ref()
-            .is_some_and(LynxDocument::has_editing_hosts);
-        if editable == self.editing_routed {
+    /// Opens or closes one [`editing::EditingRoute`] in the painter's name
+    /// set. Each of its names moves only where [`Self::routes`] changes, so a
+    /// name a realm or a component wants anyway, or another open route
+    /// holds, is not touched. Nothing at all when the route is already in that state.
+    ///
+    /// The edge is [`ViewOutbox::listener_edge`]: a `watch` write, with no
+    /// acknowledgement and no wakeup, which the painter adopts at the start
+    /// of its next routing pass ([`crate::Painter::dispatch_input`] polls
+    /// the link first). So a route opened inside a job routes every event
+    /// the painter decides after that job wrote it; one it decided before
+    /// was filtered against the old set and never crossed.
+    fn set_editing_route(&mut self, route: editing::EditingRoute, open: bool) {
+        if (self.editing_routes & route.bit() != 0) == open {
             return;
         }
-        let before = editing::EDITING_ROUTED_EVENTS.map(|name| self.routes(name));
-        self.editing_routed = editable;
-        for (name, was) in editing::EDITING_ROUTED_EVENTS.into_iter().zip(before) {
+        let names = route.names();
+        let before: SmallVec<[bool; 4]> = names.iter().map(|name| self.routes(name)).collect();
+        if open {
+            self.editing_routes |= route.bit();
+        } else {
+            self.editing_routes &= !route.bit();
+        }
+        for (name, was) in names.iter().zip(before) {
             if self.routes(name) != was {
-                self.outbox.listener_edge(Arc::from(name), !was);
+                self.outbox.listener_edge(Arc::from(*name), !was);
             }
         }
+    }
+
+    /// Moves the two routes the document's state decides, once per entry
+    /// from the page's epilogue: [`editing::EditingRoute::Hosts`] while
+    /// [`dom::Document::has_editing_hosts`], [`editing::EditingRoute::Focus`]
+    /// while an element is focused. One counter read and one field read when
+    /// nothing changed. The drag route is the press's own
+    /// ([`MainThreadRuntime::set_pressed`]).
+    fn sync_editing_routes(&mut self) {
+        let (hosts, focused) = self.document.as_ref().map_or((false, false), |document| {
+            (document.has_editing_hosts(), document.focused().is_some())
+        });
+        self.set_editing_route(editing::EditingRoute::Hosts, hosts);
+        self.set_editing_route(editing::EditingRoute::Focus, focused);
     }
 
     /// An exposure attribute of the live element `node` was written or
