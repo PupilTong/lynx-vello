@@ -205,10 +205,12 @@ impl Default for PageConfig {
 /// ([`super::popover`]). The overlay's is one more, after it: only an
 /// overlay's first child renders, which web-core itself pins and native's
 /// measurement of child 0 alone agrees with ([`super::overlay`] carries the
-/// argument). An editing host's `display: -lynx-text` is the last
-/// ([`EDITING_HOST_RULE`]): a `contenteditable` element is laid out as one
-/// paragraph whatever its tag's own `display` says, because the editor
-/// addresses that paragraph's layout.
+/// argument). An editing host's `display: -lynx-text` and `white-space:
+/// pre-wrap` are the last ([`EDITING_HOST_RULE`]): a `contenteditable`
+/// element is laid out as one paragraph that shows its text byte for byte,
+/// whatever its tag's `display` or an author's `white-space` says, because
+/// the editor addresses that paragraph's layout in the offsets of the text
+/// it edits.
 /// `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions`
 /// pins the set to exactly those twenty-one rules.
 #[must_use]
@@ -292,14 +294,17 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
 /// editor places its caret and selection in that paragraph's layout, and
 /// `pre-wrap`'s `white-space-collapse: preserve` keeps the layout's text
 /// byte for byte the text being edited, as a browser's plain-text editing
-/// relies on. `display` is `!important`: an editing host is a paragraph by
-/// what it is, not by a default a page may override, so unlike a `text`'s
-/// plain `-lynx-text` it does not yield to an author `display: none`.
-/// `white-space` is a plain declaration. Both apply to every
-/// value but an ASCII case-insensitive `"false"`, which is HTML's reading of
-/// the attribute and `dom::Document::is_editing_host`'s.
+/// relies on. Both declarations are `!important`: an editing host is a
+/// paragraph by what it is, not by a default a page may override, so unlike
+/// a `text`'s plain `-lynx-text` its `display` does not yield to an author
+/// `display: none`; and an author `white-space: normal` that collapsed
+/// `"a  b"` to `"a b"` would put every editor offset after the collapse in
+/// the wrong place (`dom` refuses value changes over a paragraph that does
+/// not show the value, so the host would become read-only instead). Both
+/// apply to every value but an ASCII case-insensitive `"false"`, which is
+/// HTML's reading of the attribute and `dom::Document::is_editing_host`'s.
 pub(super) const EDITING_HOST_RULE: &str = "[contenteditable]:not([contenteditable=\"false\" i]) \
-     { display: -lynx-text !important; white-space: pre-wrap; }";
+     { display: -lynx-text !important; white-space: pre-wrap !important; }";
 
 #[cfg(test)]
 mod tests {
@@ -672,9 +677,9 @@ mod tests {
     }
 
     /// A `contenteditable` element is one paragraph that keeps its white
-    /// space, whatever its tag or an author `!important` says, for every
-    /// value but HTML's `"false"`, which the selector's `i` flag matches in
-    /// any case.
+    /// space, whatever its tag or an author `!important` `display` or
+    /// `white-space` says, for every value but HTML's `"false"`, which the
+    /// selector's `i` flag matches in any case.
     #[test]
     fn an_editing_host_is_one_preserving_paragraph() {
         use dom::stylo::computed_values::white_space_collapse::T as Collapse;
@@ -689,7 +694,11 @@ mod tests {
         ]
         .into_iter()
         .map(|(value, editable)| {
-            let view = child(&mut document, "view", "display: flex !important;");
+            let view = child(
+                &mut document,
+                "view",
+                "display: flex !important; white-space: normal !important;",
+            );
             document.set_attribute(view, "contenteditable", value);
             (view, editable)
         })
@@ -795,6 +804,14 @@ mod tests {
     /// !important`, and native measures child 0 alone, so an author
     /// `display` on a second child must not bring it back.
     /// [`super::super::overlay`] carries the argument.
+    ///
+    /// The editing host's follows the overlay's, with two important
+    /// declarations in its one rule: `display: -lynx-text` and `white-space:
+    /// pre-wrap`. `dom`'s editor addresses the host's paragraph in the
+    /// offsets of the text it edits, which holds only while the paragraph is
+    /// one and keeps every character; an author `white-space: normal` that
+    /// collapsed spaces would make the host read-only.
+    /// [`EDITING_HOST_RULE`] carries the argument.
     #[test]
     fn the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions() {
         const ALLOWED: [&str; 21] = [

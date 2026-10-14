@@ -216,7 +216,7 @@ fn editing_golden(
     // The embedder's UA rule for an editing host (bobcat-core's sheet).
     dom.add_stylesheet(
         "[contenteditable]:not([contenteditable=\"false\" i]) \
-         { display: -lynx-text !important; white-space: pre-wrap; }",
+         { display: -lynx-text !important; white-space: pre-wrap !important; }",
         StylesheetOrigin::UserAgent,
     );
     let root = dom.document_element().id();
