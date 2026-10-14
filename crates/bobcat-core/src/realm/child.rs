@@ -272,6 +272,23 @@ impl ChildRealms {
         })
     }
 
+    /// [`Self::call_module_export`], answering what the export returned when
+    /// it returned a boolean ([`ScriptEngine::call_module_export_for_flag`]).
+    pub(crate) fn call_module_export_for_flag(
+        &self,
+        js: &mut ScriptRuntime,
+        key: ChildKey,
+        module_specifier: &str,
+        export_name: &str,
+        arguments: &[HostArgument<'_>],
+    ) -> Option<Result<Option<bool>, ScriptError>> {
+        self.with_child(key, |child| {
+            child
+                .engine
+                .call_module_export_for_flag(js, module_specifier, export_name, arguments)
+        })
+    }
+
     /// One rejection per child that left any unhandled, in construction
     /// order: the entry that ran the child's code checkpointed for its own
     /// realm, which leaves a child's rejections queued for the child.

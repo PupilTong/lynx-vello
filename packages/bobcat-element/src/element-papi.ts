@@ -140,8 +140,8 @@ import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 // once, in Rust: the engine's components hear each step there, and at the
 // path's top step the host releases the document and calls each realm that
 // listens once, the page realm first, with the whole path:
-// `__BobcatDispatchEvent(nodes, targets, name, bubbles, timestamp,
-// extraCount, ...extraNameValuePairs, detailKind, ...detailValues)`, where
+// `__BobcatDispatchEvent(nodes, targets, name, bubbles, cancelable,
+// timestamp, extraCount, ...extraNameValuePairs, detailKind, ...detailValues)`, where
 // `nodes` is the path in target-first order as comma-joined decimal node
 // ids — every step but the shadow roots and the nodes freed since the path
 // was computed — and `targets` carries, position for position, the
@@ -203,7 +203,19 @@ import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 //   shift 8). They become `key`, `code`, `repeat`, `altKey`, `ctrlKey`,
 //   `metaKey` and `shiftKey` on the event object itself, where
 //   `KeyboardEvent` and web-core (`createCrossThreadEvent.ts`) put them; the
-//   `detail` is `{}`. With no focus model the target is the page element.
+//   `detail` is `{}`. The target is the focused editing host, or the page
+//   element when nothing is focused.
+// - `DETAIL_INPUT` — `beforeinput` and `input` (Input Events Level 2): the
+//   `inputType` string, `data` as a string or null, and `isComposing` as a
+//   boolean, which become those three members of the event object itself,
+//   where `InputEvent` puts them; the `detail` is `{}`.
+// - `DETAIL_COMPOSITION` — `compositionstart`, `compositionupdate` and
+//   `compositionend`: the `data` string, `CompositionEvent.data` on the event
+//   object; the `detail` is `{}`.
+// - `DETAIL_FOCUS` — `focus`, `blur`, `focusin` and `focusout`: the
+//   `relatedTarget`'s node id, or null. The event's `relatedTarget` is that
+//   element's descriptor, or null when there is none or script holds no
+//   handle of it (an element of a UA shadow tree); the `detail` is `{}`.
 // - `DETAIL_EXPOSURE` — an element's `uiappear` or `uidisappear`: no values
 //   either. The `detail` is web-core's (`ExposureServices.ts:198-208`), built
 //   here out of the event's own target: its node id as `unique-id`, and its
@@ -236,6 +248,14 @@ import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 // about it is per-event-name. Lynx's own `<image>` `load` and `error` are the
 // events this carries today: web-core builds both with `bubbles: false`
 // (`web-elements/src/elements/common/commonEventInitConfiguration.ts`).
+//
+// `cancelable` is the event's own flag. `preventDefault()` sets
+// `defaultPrevented` on a cancelable event and does nothing on any other,
+// and the dispatch answers `defaultPrevented` when it ends, which is how the
+// host learns that a listener canceled a `beforeinput` (the edit is dropped)
+// or a `keydown` or `pointerdown` (its editing default action does not run).
+// The three are the realm's: none of them is part of the event a background
+// handler receives, which is web-core's cross-thread shape.
 //
 // Both stop methods are pure local state. `stopPropagation` ends the
 // remaining steps of this realm's walk and `stopImmediatePropagation` also
@@ -2844,6 +2864,11 @@ interface DispatchedEvent {
   params: Record<string, unknown>;
   stopPropagation: () => void;
   stopImmediatePropagation: () => void;
+  // DOM's cancellation: `preventDefault()` sets `defaultPrevented` when the
+  // event is `cancelable`, and the dispatch answers it to the host.
+  cancelable: boolean;
+  defaultPrevented: boolean;
+  preventDefault: () => void;
   // The three lists only a touch event carries. Absent — not
   // `undefined`-valued — on every other event, because the transport carries
   // an `undefined`-valued key as one.
@@ -2873,6 +2898,12 @@ interface DispatchedEvent {
   ctrlKey?: boolean;
   metaKey?: boolean;
   shiftKey?: boolean;
+  // `InputEvent`'s members, on `beforeinput` and `input` alone.
+  inputType?: string;
+  data?: string | null;
+  isComposing?: boolean;
+  // `FocusEvent.relatedTarget`, on the four focus events alone.
+  relatedTarget?: ReturnType<typeof targetInfo> | null;
 }
 
 /**
@@ -2936,6 +2967,9 @@ const DETAIL_POSITION = 0;
 const DETAIL_EMPTY = 2;
 const DETAIL_EXPOSURE = 3;
 const DETAIL_KEY = 4;
+const DETAIL_INPUT = 5;
+const DETAIL_COMPOSITION = 6;
+const DETAIL_FOCUS = 7;
 
 /** The modifier bits a key event's last argument carries. */
 const MODIFIER_ALT = 1;
@@ -3082,11 +3116,43 @@ function keyMembers(values: unknown[]): {
 }
 
 /**
+ * The members one `DETAIL_INPUT`, `DETAIL_COMPOSITION` or `DETAIL_FOCUS`
+ * dispatch puts on its event: `InputEvent`'s `inputType`, `data` and
+ * `isComposing`; `CompositionEvent.data`; `FocusEvent.relatedTarget`, as the
+ * related element's descriptor or null. Undefined for every other kind.
+ */
+function editingMembers(
+  kind: number,
+  values: unknown[],
+): Partial<DispatchedEvent> | undefined {
+  if (kind === DETAIL_INPUT) {
+    return {
+      inputType: String(values[0]),
+      data: values[1] === null || values[1] === undefined ? null : String(values[1]),
+      isComposing: values[2] === true,
+    };
+  }
+  if (kind === DETAIL_COMPOSITION) {
+    return { data: String(values[0] ?? "") };
+  }
+  if (kind === DETAIL_FOCUS) {
+    const related = values[0];
+    return {
+      relatedTarget: typeof related === "number" && handleOf(related) !== undefined
+        ? targetInfo(related)
+        : null,
+    };
+  }
+  return undefined;
+}
+
+/**
  * The `detail` object one kind's numbers make, for an event at `target`.
  *
  * `DETAIL_EMPTY` spends none and is web-core's `error` detail exactly.
  * `DETAIL_KEY`'s values are the event's own members ([`keyMembers`]), and
- * its `detail` is `{}` too.
+ * its `detail` is `{}` too; so are `DETAIL_INPUT`'s, `DETAIL_COMPOSITION`'s
+ * and `DETAIL_FOCUS`'s ([`editingMembers`]).
  * `DETAIL_EXPOSURE` spends none either: it is web-core's exposure detail,
  * read off `target` itself — the event's own target, which the host resolved
  * before it called, so its attributes answer — and is the only kind that
@@ -3103,7 +3169,10 @@ function detailOf(
   target: number,
   origin: PageOrigin,
 ): EventDetail {
-  if (kind === DETAIL_EMPTY || kind === DETAIL_KEY) {
+  if (
+    kind === DETAIL_EMPTY || kind === DETAIL_KEY || kind === DETAIL_INPUT ||
+    kind === DETAIL_COMPOSITION || kind === DETAIL_FOCUS
+  ) {
     return {};
   }
   if (kind === DETAIL_EXPOSURE) {
@@ -3223,10 +3292,12 @@ function backgroundTargetInfo(
 /**
  * What is published in place of the event: values only.
  *
- * The two stop methods are destructured out rather than overwritten with
- * `undefined`, because the transport carries an `undefined`-valued key as one
- * rather than dropping it — and the handles in `target`/`currentTarget` are
- * replaced with the values that describe them. A touch event's three lists
+ * The two stop methods, `preventDefault` and the two cancellation flags are
+ * destructured out rather than overwritten with `undefined`, because the
+ * transport carries an `undefined`-valued key as one rather than dropping it
+ * — cancellation is the realm's, and web-core's cross-thread event carries
+ * none of it — and the handles in `target`, `currentTarget` and a focus
+ * event's `relatedTarget` are replaced with the values that describe them. A touch event's three lists
  * are values already, so they cross with the rest. The copy itself is the
  * transport's, taken at send time: a new object here is only what keeps this
  * event's own later mutations, and the walk clearing `currentTarget`, out of
@@ -3236,13 +3307,20 @@ function backgroundEvent(event: DispatchedEvent): Record<string, unknown> {
   const {
     stopPropagation: _stop,
     stopImmediatePropagation: _stopImmediate,
+    preventDefault: _prevent,
+    cancelable: _cancelable,
+    defaultPrevented: _defaultPrevented,
     ...rest
   } = event;
-  return {
+  const published: Record<string, unknown> = {
     ...rest,
     target: backgroundTargetInfo(event.target),
     currentTarget: backgroundTargetInfo(event.currentTarget),
   };
+  if (event.relatedTarget !== undefined) {
+    published["relatedTarget"] = backgroundTargetInfo(event.relatedTarget);
+  }
+  return published;
 }
 
 /**
@@ -3463,16 +3541,23 @@ function handlerInPass(
  * and — for a position detail — the three touch lists out of the four numbers
  * per point that follow. An event with no touch points carries no such keys
  * at all.
+ *
+ * Answers the event's `defaultPrevented` as the dispatch left it: `true`
+ * only for a `cancelable` event a listener called `preventDefault()` on.
+ * The host runs an event's default action — committing an edit after its
+ * `beforeinput`, a key's editing command, a press's caret placement — only
+ * on `false`. A path with no step answers `false`.
  */
 function dispatchEvent(
   pathIds: unknown,
   targetIds: unknown,
   eventName: unknown,
   bubbles: unknown,
+  cancelable: unknown,
   timestamp: unknown,
   extraCount: unknown,
   ...rest: unknown[]
-): undefined {
+): boolean {
   // The extras' name/value pairs first, then the detail kind and its values,
   // which run to the end because a touch event's points have no fixed count.
   const pairs = Number(extraCount ?? 0) * 2;
@@ -3487,7 +3572,7 @@ function dispatchEvent(
   // to run, or nothing at all.
   const first = steps.find((step) => handleOf(step.node) !== undefined);
   if (first === undefined && !bubbles) {
-    return undefined;
+    return false;
   }
   const name = String(eventName).toLowerCase();
   let stopped = false;
@@ -3523,6 +3608,13 @@ function dispatchEvent(
       stopped = true;
       immediate = true;
     },
+    cancelable: cancelable === true,
+    defaultPrevented: false,
+    preventDefault: () => {
+      if (event.cancelable) {
+        event.defaultPrevented = true;
+      }
+    },
   };
   // Assigned rather than declared above, so an event that carries no touches
   // has no such keys at all — the transport would carry three
@@ -3543,6 +3635,10 @@ function dispatchEvent(
   }
   if (kind === DETAIL_KEY) {
     Object.assign(event, keyMembers(detailNumbers));
+  }
+  const editing = editingMembers(kind, detailNumbers);
+  if (editing !== undefined) {
+    Object.assign(event, editing);
   }
 
   // Points the event at one delivery. `currentTarget` is rebuilt per step,
@@ -3693,7 +3789,7 @@ function dispatchEvent(
     event.eventPhase = NONE;
     event.currentTarget = null;
   }
-  return undefined;
+  return event.defaultPrevented;
 }
 
 export function __AddEventListener(

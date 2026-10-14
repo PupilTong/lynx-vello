@@ -141,6 +141,35 @@ impl RealmCore {
             }
         }
     }
+
+    /// [`Self::call_module_export`], answering what the export returned when
+    /// it returned a boolean ([`ScriptEngine::call_module_export_for_flag`]):
+    /// `Some(None)` when the module exported no such function, `Some(true)`
+    /// only for a returned `true`. `None` is a child that is gone.
+    pub(crate) fn call_module_export_for_flag(
+        &mut self,
+        js: &mut ScriptRuntime,
+        id: RealmId,
+        module_specifier: &str,
+        export_name: &str,
+        arguments: &[HostArgument<'_>],
+    ) -> Option<Result<Option<bool>, ScriptError>> {
+        match id {
+            RealmId::Page => Some(self.engine.call_module_export_for_flag(
+                js,
+                module_specifier,
+                export_name,
+                arguments,
+            )),
+            RealmId::Child(key) => self.children.call_module_export_for_flag(
+                js,
+                key,
+                module_specifier,
+                export_name,
+                arguments,
+            ),
+        }
+    }
 }
 
 /// Opens one realm on `js`: creates it, enables module loading, installs the

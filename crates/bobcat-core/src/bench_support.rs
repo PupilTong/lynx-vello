@@ -183,6 +183,7 @@ impl ScriptHarness {
         self.runtime
             .dispatch_input_event(&mut self.js_runtime, target, name, &payload, None)
             .expect("the benchmark dispatch completes")
+            .delivered
     }
 
     /// Whether the realm has published a listener for this event name — the

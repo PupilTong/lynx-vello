@@ -379,7 +379,10 @@ discards the posts queued ahead of it.
 
 A view owns its channels end to end, all `tokio::sync` and none addressed.
 Three cross that link: a `ToMain` mpsc carrying commands in; a `ViewNotice`
-mpsc carrying lifecycle events and resource asks back; and one
+mpsc carrying lifecycle events, resource asks and the focused editing host's
+`TextInputState` back (the last as `ViewNotice::TextInputState`, sent from a
+page's epilogue after its commit when it changed, which `pump` hands on as
+`EngineEvent::TextInputStateChanged`); and one
 `watch<Published>` carrying what an observer wants the *latest* of — the newest
 committed frame, the listener-name set, and the newest serviced frame post.
 Commands are a FIFO because their arrival order is what they mean; a frame is
@@ -387,7 +390,10 @@ not. `ToMain` carries a `PageUpdate` (the data, global-prop, global-event and
 reload commands a host accepted after observing MTS boot, in host FIFO order),
 a `DispatchEvent` (one event's type and target, plus the payload the router
 decided as values: the position, the wheel delta, the timestamp and — for the
-four touch events — its touch points), a `Vsync` (the display-frame reading a realm that called
+four touch events — its touch points), an `Edit` (one `dom::editing::Command`
+for the focused editing host, from `LynxView::edit`; main dispatches the
+`beforeinput`/`input`/`composition*` events it owes around the change and
+drops it on a canceled cancelable `beforeinput`), a `Vsync` (the display-frame reading a realm that called
 `requestScriptFrame` asked for), `Posted` (payload-free: the view's
 `ScrollMailbox` holds the painter's latest offset per scroll container and one
 coalesced frame post — a timeline reading, the sequence number the
@@ -1921,8 +1927,8 @@ walks it once (`dom`'s `EventWalk`), and at the path's first capture step
 releases the document and makes one call to each listening realm's Element
 module `__BobcatDispatchEvent` export, the page realm first, then the
 children in construction order — the page realm's through
-`quickjs::ScriptEngine::call_module_export`, a `frame`'s card's through
-`ChildRealms::call_module_export` — every call carrying the same path,
+`quickjs::ScriptEngine::call_module_export_for_flag`, a `frame`'s card's
+through `ChildRealms::call_module_export_for_flag` — every call carrying the same path,
 encoded once before the first (`encode_path`): the standard's bubble steps,
 target-first, as two comma-joined decimal id strings — the nodes, and
 position for position each step's shadow-retargeted target, less the steps
@@ -1934,7 +1940,8 @@ none of, and every card; a card everything outside its nested page — and its
 shadow chrome reaches the page realm at its host (routed input events are
 composed, the components' events are not, as HTML and web-core fire them);
 a realm holding no step runs its `global-bindEvent` pass alone, aimed at each
-registering element. Then the name and primitives alone: the
+registering element. Then the name and primitives alone: `bubbles`,
+`cancelable`, the
 `timestamp` (milliseconds on the view's timeline); the extras channel
 (`extraCount`, then name/value pairs: what a Lynx handler reads beside the W3C
 payload, such as a `load`'s size or a `scroll`'s metrics, which the realm makes
@@ -1942,7 +1949,10 @@ the Lynx `detail`); then the W3C payload's kind and values — for an input
 event the position, the wheel delta, a pointer's `button`, `buttons`,
 `pointerId` and `pointerType` (each `undefined` where the shape has none), and
 four numbers per touch point (`identifier`, `x`, `y`, flags); for a key event
-its `key` and `code` strings, `repeat` and a modifier bitmask. Kernel events
+its `key` and `code` strings, `repeat` and a modifier bitmask; for
+`beforeinput`/`input` the `inputType`, the `data` (or null) and `isComposing`;
+for a composition event its `data`; for a focus event the `relatedTarget`'s
+id (or null). Kernel events
 are W3C-shaped and `element-papi.ts` is the Lynx layer that reshapes them
 (user ruling 2026-10-13; `docs/tracking/dom-events.md`). The realm builds
 the `detail` object, the W3C members on the event object and the three touch
@@ -1978,6 +1988,31 @@ kinds)` (1 bubble, 2 capture, 4 global, or'ed; the host replaces the kinds on
 a repeat) and `listenerClosed(node, name)`, from `element-papi.ts`'s
 `reconcile` only; a freed node's rows leave in the document's free path, so a
 collected handle tells the host nothing.
+What crosses back is each realm's answer, `event.defaultPrevented`
+(`preventDefault()` sets it on a cancelable event alone), which
+`MainThreadRuntime::dispatch` ORs over the realms it called into
+`Dispatched { delivered, default_prevented }` (a realm whose call threw
+counts as not canceled): the editing default actions read it
+(`main/runtime/editing.rs` — a canceled `beforeinput` drops its edit, a
+canceled `keydown` or `pointerdown` runs no editing action).
+
+Editable text (`docs/editable-text-design.md`, E2) is wired here.
+`LynxView::edit` sends `ToMain::Edit`; `MainThreadRuntime::apply_edit`
+prepares the command in `dom`, dispatches the events before the change at the
+host, commits unless a cancelable `beforeinput` was canceled, and dispatches
+the rest. A routed `keydown`/`keyup` is delivered at `Document::focused()`
+when there is one, and a `keydown` nobody canceled runs the keyboard's editing
+command (`key_command`); a primary `pointerdown` nobody canceled inside an
+editing host focuses it (dispatching `focus`/`focusin`, and `blur`/`focusout`
+at the host that lost it — drained from `dom` right after the press) and
+places the caret, a second and third quick press select the word and the
+line, and a held mouse drag extends. While `Document::has_editing_hosts()`
+the slot keeps `pointerdown`, `pointermove`, `pointerup`, `pointercancel` and
+`keydown` open in the painter's name set on an editing account of its own
+(`DocumentSlot::sync_editing_routes`, from the page's epilogue), so those
+reach main with no realm listener, and an event routed only on that account
+skips the realm. The epilogue publishes the focused host's `TextInputState`
+after its commit when it changed.
 
 That host side is one function, `MainThreadRuntime::dispatch`, the only place
 an event script hears is delivered. It computes the steps once and drives
@@ -3267,9 +3302,13 @@ Subsystems:
   paragraph's source map (`hughie::text::paragraph::OffsetMap`), the
   Chromium-shaped command set with
   its `beforeinput`/`input`/`composition*` events reported as data
-  (`prepare_editing`/`commit_editing`), and `TextInputState`. The caret,
-  selection highlight and composition underline are painted by
-  `paint/text.rs`. Nothing reaches a realm yet (PR E2).
+  (`prepare_editing`/`commit_editing`), `TextInputState`, and the count of
+  editing hosts an embedder routes input by (`has_editing_hosts`, kept by the
+  `contenteditable` setters and `free_node`). The caret, selection highlight
+  and composition underline are painted by `paint/text.rs`. `bobcat-core`'s
+  `main/runtime/editing.rs` dispatches the events and runs the default
+  actions (E2); the events cross as `EventDetail::{Input, Composition,
+  Focus}`.
 - `input/` and `event/` — the `InputEvent` host seam, `Document::event_steps`,
   which computes a path for a *script* dispatch above,
   `Document::dispatch_element_event_over`, which walks those same steps here

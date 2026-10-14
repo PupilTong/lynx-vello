@@ -72,6 +72,15 @@ pub mod input {
     };
 }
 
+/// The editing vocabulary a host speaks to a view in: the commands
+/// [`LynxView::edit`] takes and the state
+/// [`EngineEvent::TextInputStateChanged`] reports.
+pub mod editing {
+    pub use dom::editing::{
+        Command, Direction, EnterKeyHint, Granularity, InputMode, InputType, TextInputState,
+    };
+}
+
 pub use dom::{
     DocumentKind, FontBlob, FrameImages, ImageEvent, ImageInbox, ImageReports, ImageSizeHint,
     MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS, NoImages, VectorDocument, is_renderable, vello,
