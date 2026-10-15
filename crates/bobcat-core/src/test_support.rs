@@ -256,9 +256,32 @@ pub(crate) struct TestViewSpec {
     default_font: Option<(String, dom::FontBlob)>,
     fetchable: FxHashSet<String>,
     probes_style_sheets: bool,
+    /// The names of the [`EchoModule`]s the view is built with.
+    echo_modules: Vec<&'static str>,
     target: TestTarget,
     width: f32,
     height: f32,
+}
+
+/// A native module that answers every call through its first function
+/// argument, with the call's own argument list: what a test needs to see
+/// that a realm's call reached the embedder and its answer came back.
+struct EchoModule(&'static str);
+
+impl crate::native_module::NativeModule for EchoModule {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    fn methods(&self) -> Vec<String> {
+        vec!["echo".to_owned()]
+    }
+
+    fn invoke(&self, call: crate::native_module::ModuleCall) {
+        if let Some(callback) = call.callbacks.into_iter().next() {
+            callback.invoke(call.arguments);
+        }
+    }
 }
 
 impl TestViewSpec {
@@ -280,6 +303,7 @@ impl TestViewSpec {
             default_font: None,
             fetchable: FxHashSet::default(),
             probes_style_sheets: false,
+            echo_modules: Vec::new(),
             target: TestTarget::None,
             width: 393.0,
             height: 727.0,
@@ -350,6 +374,14 @@ impl TestViewSpec {
         self
     }
 
+    /// A native module the view is built with, named `name`, with one
+    /// method, `echo`, which answers through its first function argument
+    /// with the call's argument list as JSON text.
+    pub(crate) fn with_echo_module(mut self, name: &'static str) -> Self {
+        self.echo_modules.push(name);
+        self
+    }
+
     /// One author sheet as CSS text, mounted before the entry runs.
     pub(crate) fn with_style_sheet(mut self, css: &str) -> Self {
         let url = format!("app:///sheet-{}.css", self.sheets.len());
@@ -415,6 +447,7 @@ impl TestViewSpec {
             default_font,
             fetchable,
             probes_style_sheets,
+            echo_modules,
             target,
             width,
             height,
@@ -449,7 +482,20 @@ impl TestViewSpec {
                 .await
                 .expect("the test group starts");
             let view = group
-                .create_lynx_view(width, height, 1.0, |_reports| fetcher, Vec::new(), sources)
+                .create_lynx_view(
+                    width,
+                    height,
+                    1.0,
+                    |_reports| fetcher,
+                    echo_modules
+                        .into_iter()
+                        .map(|name| {
+                            Box::new(EchoModule(name))
+                                as Box<dyn crate::native_module::NativeModule>
+                        })
+                        .collect(),
+                    sources,
+                )
                 .expect("the test view is built");
             let painter = if with_painter {
                 let mut painter = match target {

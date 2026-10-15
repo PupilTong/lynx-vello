@@ -2393,13 +2393,6 @@ consequential choice about whether to follow the spec or the quirk.
     (`Document::append_shadow_rules`).
   - *No `load` event* yet, and a frame with no author height and no
     `auto-height` is 0 tall (strict containment).
-  - *A later `data` write does not re-render a compiled ReactLynx card.*
-    `data` and `global-props` reach the card at boot and, once it booted,
-    through its `updateData`/`updateGlobalProps` (2026-10-15), but
-    ReactLynx's MTS `updatePage` re-renders only before the first screen
-    is synced and leaves every later render to the BTS, which a frame does
-    not have; so web-core-e2e's `api-frame-data-update` cannot pass here.
-    A card whose own `updatePage` renders does re-render.
   - *A `src` change keeps the frame's last `data` and `global-props`*
     (user ruling 2026-10-15): every boot — the first, a new `src`'s, a
     reconnected frame's — reads the last values written, as web-core's
@@ -2434,18 +2427,60 @@ consequential choice about whether to follow the spec or the quirk.
     `LynxViewGroup`'s group global props before the frame's own
     (`LynxTemplateRender.java:1686-1692`); web-core and this engine start a
     frame's global props from what the frame was given.
-  - *The nested card has no BTS and gets no events.* Its boot
-    (`packages/bobcat-element/src/frame-boot.ts`) runs the card's `root` and
-    nothing for the background thread: `__BobcatDetachBackground` drops
-    every message the realm would post to one, so a ReactLynx card's
-    `useState`/effects and event handlers never run, and its first screen is
-    the MTS render alone. Native and web-core both start a full nested
-    runtime. Input dispatch does not enter a frame either.
+  - *The nested card's BTS is a `Worker` its `ShadowRealm` child owns*
+    (user ruling 2026-10-15): `frame-boot.ts` connects
+    `new Worker("bobcat:bts")` at `U#background-thread` as the page boot
+    does, the worker runs on the group's worker runtime beside the page's
+    BTS, and its messages are delivered to the child. Native and web-core
+    both start a full nested runtime, so a compiled card hydrates, runs its
+    effects and re-renders on a later `data`/`global-props` write as there
+    (web-core-e2e `api-frame-data-update`, ported in
+    `crates/bobcat-source/tests/frame.rs`). Where the two references
+    disagree:
+    - *`sharedData` is the group's* (user ruling 2026-10-15, native): the
+      frame's BTS reads and writes the same `lynx.setSharedData` store as
+      the page's BTS and every other view of the group, and the observers of
+      all of them run on a set. Native's nested render joins its parent's
+      `LynxGroup`, sharing its JS context when that group is shared, which a
+      group here always is (`LynxTemplateRender.java:4280-4305`,
+      `runtime_manager.cc:167-200`); web-core gives a frame a dedicated
+      Worker, never the parent's `lynx-group-id`, so its own `sharedData`
+      (`Background.ts:66-69, 155-171`).
+    - *`NativeModules` are the view's* (user ruling 2026-10-15, native):
+      `bobcat:frame` hands the child the view's module table and the
+      frame's BTS calls the view's modules, answered in that BTS. Native's
+      nested render inherits its parent's module wrappers
+      (`LynxBackgroundRuntimeOptions.java:251-266`); web-core gives a frame
+      `{}` and three stub modules that never answer
+      (`LynxViewInstance.ts:117-118`).
+    - *`SystemInfo` is the parent's* (my decision, native's): web-core gives
+      a frame the default, with no `browserConfig`.
+    - *A frame's BTS reports as any BTS* (my decision): `WorkerThrew` and
+      `WorkerEnded` name `worker <id> bobcat:bts`, non-fatal, so an embedder
+      cannot tell it from the page's.
+    - *`lynx.stopExposure`/`resumeExposure` from a frame's BTS switch the
+      whole document's exposure* (my decision): both references scope it to
+      the nested view; here exposure is the document's.
+    - *Disposal does not hold the frame* (my decision): a removal or a new
+      `src` runs the old card's BTS `dispose` (ReactLynx's `destroyCard`,
+      its unmount effects) and empties the nested page at once, without
+      waiting for the acknowledgement; the old child is kept until its BTS
+      acknowledges and ignores what that BTS says meanwhile. As the view ends
+      the page closes its frames first, so each frame card's BTS gets
+      `dispose` ahead of the page BTS's, but nothing waits for their
+      acknowledgements. web-core awaits its nested instance's dispose RPC
+      before terminating the Worker; native destroys the nested render with
+      the frame.
+  - *The nested card gets no events.* Input dispatch does not enter a
+    frame (`MainThreadRuntime::dispatch` drops the steps in a shadow tree),
+    so a handler inside the card never runs; native and web-core dispatch
+    into the nested view.
   - *A relative `src` resolves against the view's base*, not the host card's
-    URL: `src` is handed to `fetchResource` as written, which the fetcher
-    resolves against `ViewSources::base_url`, and the child's `__Card__` is
-    that same string, so a relative `src` inside a nested card also resolves
-    against the view's base rather than against the nested card's URL.
+    URL: `bobcat:frame` resolves `src` with `resolveUrl`, which is the
+    resolution the fetcher makes against `ViewSources::base_url`, and the
+    child's `__Card__` is that absolute URL, so a relative `src` inside a
+    nested card also resolves against the view's base rather than against
+    the nested card's URL.
     web-core fetches its `url` against the embedding document's base
     (`templateManager.fetchBundle` in `LynxView.ts`), which nests no base per
     card either; native hands `src` as written to its resource loader

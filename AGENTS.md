@@ -220,7 +220,7 @@ with a space as `%20` after one leading `/` is stripped:
 | manifest path `p` | `P/<p> S` (no `.js`, `?`/`#` in `p` escaped) | the same choice by name |
 | named stylesheet `k` | `P/custom_section/<k>.css S` | `PreparsedStyleSheet` |
 | the container's non-empty StyleInfo | `P/style-info.css S` | lowered `PreparsedStyleSheet` |
-| BTS boot (an entry and a non-empty manifest) | `U` with fragment `#background-thread` | `background_boot_source` |
+| BTS boot (every container with an entry) | `U` with fragment `#background-thread` | `background_boot_source` |
 
 `packages/bobcat-element/src/section-url.ts` writes the same strings for both
 realms. The entry is the Lepus chunk literally named `root`; a container
@@ -1255,8 +1255,8 @@ to a `LynxDocument` and no value of either runtime can be named by the other.
 One realm per live worker, and the group's workers take turns. **One task per
 live worker, and a worker's whole state is that task**: a `WorkerStart` carries
 its key, its name, its URL, the receiving end of its message channel, the
-sender its events go back on — the creating MTS realm's `WorkerEvent` channel
-— the Worker's own cancellation token, and the `HostOutbox` it asks the
+sender its events go back on — the view's one `WorkerEvent` channel, which
+every realm over the view's document reports on — the Worker's own cancellation token, and the `HostOutbox` it asks the
 view's host through. It carries neither a script nor a `ScriptSource`: the
 worker's realm asks for its own script, and both threads write the source
 from the key and the URL, as `ScriptSource::Worker { id, url }`. There is no
@@ -1287,8 +1287,17 @@ graph that failed to load or is still loading leaves its modules compiled but
 never linked, and reading the namespace of such a module crashes QuickJS.
 MTS routes events through weak references to JS Worker objects; their
 finalizers and explicit `terminate()` release sending handles, and releasing
-the MTS realm closes its remaining senders. Apart from those handles, the
-realm's `WorkerOwner` records each key's public `ScriptSource`
+the MTS realm closes its remaining senders. **Every realm over the view's
+document has a `WorkerOwner` of its own** — the page realm and each of its
+`ShadowRealm` children (`main/workers.rs`) — and all of them share the view's
+`ViewWorkers`: the one events channel, and a table from the key of each
+worker a child created to that child's owner. `dispatch_worker_event` reads
+it first, so an event reaches the realm whose `Worker` object it is for: a
+key no child recorded is the page realm's, and an event for a child that is
+gone is dropped (`ChildRealms::call_module_export`). A child's owner is its
+`ChildHostState`, dropped with the child after its realm, which closes its
+workers' channels and takes its keys out of the table. Apart from those
+handles, the realm's `WorkerOwner` records each key's public `ScriptSource`
 (`Worker { id, url }`: the key's id and the worker's script URL, the value the
 worker thread writes too, from the same `Start`) from the moment the key is
 allocated until
@@ -1447,7 +1456,7 @@ registered with the host as an ES module *under* the container URL — the
 page's input URL — and the BTS boot script hands that URL alone to the modules
 layer, which hangs every `requireModule` of a bundle path under it before
 loading it synchronously. Each view costs one additional realm on the group's
-worker runtime.
+worker runtime, and so does each `<frame>` card it shows.
 
 MTS boot does not await BTS: `ScriptFinished` means MTS boot finished — the
 entry module evaluated, its top-level await settled, and its first flush
@@ -1501,7 +1510,8 @@ Every realm, MTS or worker, is opened by the one constructor
 `realm::open_realm` (`crates/bobcat-core/src/realm/mod.rs`). It creates the
 realm, enables module loading and installs the core every realm has under
 `bobcat-internal:host`: `requestScriptFrame`, `setTimer`/`clearTimer`,
-`waitFuture`/`takeFuture`/`settleFuture`, `fetchResource`,
+`waitFuture`/`takeFuture`/`settleFuture`, `fetchResource`, `resolveUrl` (a URL
+resolved against the view's base, as the fetcher resolves what it is handed),
 `resolveModuleUrl`/`loadModuleSync`, and the diagnostics pair
 `reportScriptError`/`logScriptMessage`, which send `ScriptReported` and
 `ConsoleMessage` through the realm's own `HostOutbox`, and then the global
@@ -1515,7 +1525,11 @@ a worker passes `bobcat-internal:worker` and
 `bobcat-internal:native-modules`, the same `invokeNativeModule` in both. So
 is what the realm's `ShadowRealm` children get beyond the core, a
 `realm::child::ChildHostModules`: the MTS realm passes its document members
-(the `DocumentHost` in `main/runtime/lib.rs`), a worker `None`. The constructor has no role field; it is told
+and the `Worker` members over a worker owner of each child's own (the
+`DocumentHost` in `main/runtime/lib.rs`), a worker `None`. It is handed the
+`ChildKey` the child will be kept under, allocated before it runs, and
+answers the child's `ChildHostState`, which the child holds and drops after
+its realm. The constructor has no role field; it is told
 two things about a realm: the key its display-frame demand is reported under,
 `None` for MTS and the worker's key for a worker, and the `ScriptSource` its
 diagnostics carry, `Main` for MTS and, for a worker, `Worker { id, url }`
@@ -1534,9 +1548,11 @@ table and a future table of its own and the parent's `HostOutbox`, thread and
 owner's `ChildHostModules`, installed over the child's `retired` flag, which
 `adopt` creates first and `ChildRealms::keep` stores: an MTS realm's children,
 grandchildren included, get the page realm's document members (the
-`frame` paragraphs below), so `bobcat:element` links in them, and a worker realm's get
-nothing more, so `bobcat:timers` links in one and `bobcat:element` does not.
-No child has a worker member or `bobcat-internal:native-modules`.
+`frame` paragraphs below) and `Worker` members over a worker owner of their
+own, so `bobcat:element` and `bobcat-internal` link in them, and a worker
+realm's get nothing more, so `bobcat:timers` links in one and
+`bobcat:element` does not. A worker realm's child has no worker member, and
+no child has `bobcat-internal:native-modules`.
 `requestScriptFrame` is a
 no-op there: the frame demand is one flag per realm key, and a child under its
 parent's key would cancel the parent's demand with its own `false`. The child
@@ -1558,8 +1574,11 @@ leave a rejection in the parent (an `importValue` that rejects); and the
 earliest child deadline joins the owner's. The epilogue's last step before the
 deadline frees every child nothing needs any more — no `ShadowRealm`, wrapped
 function or `importValue` of another realm refers to it
-(`is_referenced_across_realms`), no timer is armed and no load or settle is in
-flight — outside every JavaScript call, because freeing a realm collects the
+(`is_referenced_across_realms`), no timer is armed, no load or settle is in
+flight and its `ChildHostState` is not busy — an MTS child with a worker of
+its own still running is, because what that worker says is the child's, a
+card's BTS acknowledging its disposal included; a retired child goes all the
+same — outside every JavaScript call, because freeing a realm collects the
 whole runtime; nothing else frees a child while its owner lives but the
 release a frame's disconnection runs right after its `bobcat:frame` call,
 which is the same step, and a child the hook could not furnish is kept retired for that step. A child's
@@ -1578,8 +1597,9 @@ readback, exposure, event-name, stylesheet and nested-page members over the
 same `Rc<RefCell<DocumentSlot>>`, `ViewOutbox` and thread, through the same
 `DocumentHost::install_members(engine, startup, retired)` (`retired` is
 `None` for the page realm and the child's own flag from the
-`ChildHostModules` seam); its startup strings answer `undefined`, and it has
-no `Worker` members and no `bobcat-internal:native-modules`. `createPage` and
+`ChildHostModules` seam); its startup strings answer `undefined`, it has
+`Worker` members over a worker owner of its own, and it has no
+`bobcat-internal:native-modules`. `createPage` and
 `flushElementTree` are the same code in every realm (a child's flush may
 park for the listed sheets and the painter binding as the page's would).
 Node ids are document-global and each realm's `bobcat:element` has its own
@@ -1634,15 +1654,18 @@ keeps its card, as native's `FrameElement::OnSetSrc` ignores it and web-core's
 value equal to the frame's current one, which both skip. Any other tears the
 current card down (`teardown`: the child's `dispose`, then
 `resetFrame(frameId)`) and loads the new one, connected or not: a load bumps
-the generation, calls `fetchResource(src)` with `src` as written — the
-fetcher resolves it against `ViewSources::base_url`, and `bobcat-source`'s
-`BundleInstaller` registers the card through `ContainerSources`, its `root`
-at `<U>/root.js` and its StyleInfo at `<U>/style-info.css` (`U` the resolved
-`src`), before the fetch settles — and when it settles (a probe hit's `true` in a microtask, a `Future` id through
+the generation, resolves `src` once with `resolveUrl` into `U` (against
+`ViewSources::base_url`, as the fetcher would) and calls `fetchResource(U)` —
+`bobcat-source`'s `BundleInstaller` registers the card through
+`ContainerSources`, its `root` at `<U>/root.js`, its StyleInfo at
+`<U>/style-info.css` and its BTS boot at `U#background-thread`, before the
+fetch settles — and when it settles (a probe hit's `true` in a microtask, a `Future` id through
 its `then`) creates a `ShadowRealm`, imports `bobcat:frame-boot`'s `boot`, `dispose`,
-`updateData` and `updateGlobalProps`, and calls `boot(frameId, src, data,
-globalProps, JSON.stringify(SystemInfo))` with the frame's `data` and
-`global-props` as they stand then. A `data` or `global-props` write keeps
+`updateData` and `updateGlobalProps`, and calls `boot(frameId, U, data,
+globalProps, JSON.stringify(SystemInfo), __BobcatNativeModuleTable())` with
+the frame's `data` and `global-props` as they stand then. The frame keeps
+`src` as written, which a later `src` is compared against and a failure
+names. A `data` or `global-props` write keeps
 text that parses to a plain object (a non-null, non-array object) and
 ignores anything else; a removal makes what the next boot reads `{}`. Every
 boot reads the last values written — the first, a new `src`'s, a
@@ -1652,7 +1675,8 @@ ruling 2026-10-15). Once a card booted, each write is also handed to it, no
 deduplication: `updateData(json)` is `__BobcatUpdateData(json, "", false)`
 (the card's `processData` with the default processor, then its
 `updatePage`), `updateGlobalProps(json)` is `__BobcatUpdateGlobalProps`, the
-page's own update paths; a write while the fetch or the import is in flight
+page's own update paths, both of which post to the card's BTS as well
+(`updateCardData`, `updateGlobalProps`); a write while the fetch or the import is in flight
 reaches `boot` alone. A disconnection tears the card down, as
 web-core's `LynxView` disposes on `disconnectedCallback`; a connection loads
 the frame's `src` again when nothing is loaded or loading, as
@@ -1664,27 +1688,50 @@ an earlier load starts nothing; a failure here (the fetch, the realm, the
 import) is one `ScriptReported` naming `src`. A wrapped function is called
 with no receiver: the `ShadowRealm` call wraps `this`, and an object `this`
 is a `TypeError`. The child's boot (`frame-boot.ts`) imports
-`bobcat:runtime` before `bobcat:element` and is the page boot minus the
-`Document`, the BTS and the entry import: `framePage(frameId)` and
-`__BobcatUsePageRoot(page)`, `__BobcatDetachBackground` (everything the realm
-would send a BTS is dropped), `__BobcatInitializeMTS` with the parent's page
-data and `SystemInfo`, `__BobcatInitEntry(src)` (so `__Card__` is `src` as
-written, ReactLynx's `bundleName`, and `chunkURL`/`styleSheetURL` name what
-the installer registered), `adoptStyleSheet(bundleStyleSheetURL(src),
-parentNode(page))` — the frame's shadow root — when `hasStyleSheet` holds it,
-`loadModuleSync(sectionURL("root", src))` in a `try` of its own (a throwing
+`bobcat:runtime` before `bobcat:element` and is the page boot, in the page
+boot's order, minus the `Document` and the entry import: `framePage(frameId)`
+and `__BobcatUsePageRoot(page)`, `__BobcatInitializeMTS` with the parent's
+page data, `SystemInfo` and native module table, `__BobcatInitEntry(U)` (so
+`__Card__` is the card's absolute URL, ReactLynx's `bundleName`, and
+`chunkURL`/`styleSheetURL` name what the installer registered),
+`adoptStyleSheet(bundleStyleSheetURL(U), parentNode(page))` — the frame's
+shadow root — when `hasStyleSheet` holds it,
+`loadModuleSync(sectionURL("root", U))` in a `try` of its own (a throwing
 root is reported and boot still renders), `__BobcatProcessInitData`,
-`__BobcatRenderPage`, and a flush queued one microtask later, as the page
-boot queues its own. It answers `false` for a failure it already reported.
-Its `dispose()` lets go of every card its own frames loaded
-(`__BobcatCloseFrames`) and then calls `closeRealm()`. A frame inside a
+`__BobcatConnectBackground(new Worker("bobcat:bts", {name: "lynx-bg"}),
+data, backgroundThreadURL(U))` — the card's own BTS, which the child creates
+and owns, so its messages are delivered to the child —, `__BobcatRenderPage`,
+and a flush queued one microtask later, as the page boot queues its own. It
+answers `false` for a failure it already reported. Its `dispose()` lets go of
+every card its own frames loaded (`__BobcatCloseFrames`), then starts
+`__BobcatDispose()` — `__DestroyLifetime` and the BTS's `dispose`, whose app
+cleanup (ReactLynx's `destroyCard`, unmount effects) runs before the BTS
+acknowledges and the Worker is terminated — and calls `closeRealm()` only once
+that settles. It returns at once: the parent's `resetFrame` follows without
+waiting, a new `src` boots into the emptied nested page, and the old child is
+kept meanwhile because its worker runs; a BTS that never answers keeps it
+until the view ends. Once a realm's disposal has started it handles nothing
+its BTS says but the acknowledgement, as it already sends nothing, so a late
+patch never reaches nodes `resetFrame` freed. The page's own disposal module
+(`MainThreadRuntime::begin_dispose`) closes the page's frames the same way
+before `__BobcatDispose`, so every frame card's BTS has its `dispose` queued
+on the shared worker thread ahead of the page BTS's; their acknowledgements
+are not awaited. (`bobcat:runtime` cannot import `bobcat:frame` to do this
+itself: the cycle that closes makes QuickJS leak an object when a worker's
+`import("bobcat:element")` fails to link, which aborts the runtime's
+release.) A frame inside a
 nested card that the nested card disconnects without letting go of its
 handle keeps its card: the connection calls reach the page realm alone. No
-`load` event, no events into the frame, no frame methods beyond the shared
-base set (native's surface; user ruling 2026-10-15) and no nested BTS — so a
-compiled ReactLynx card renders its first screen with the frame's data but
-does not re-render on a later write, which its MTS `updatePage` leaves to
-the BTS (`docs/tracking/deviations.md`).
+`load` event, no events into the frame (so a handler inside the card never
+runs) and no frame methods beyond the shared base set (native's surface; user
+ruling 2026-10-15). The card's BTS is a BTS like the page's, on the group's
+worker runtime, with the parent's `SystemInfo`; it shares the group's
+`sharedData` with every other BTS and has the view's `NativeModules` (both
+native's, where web-core gives a frame its own `sharedData` and none; user
+rulings 2026-10-15). So a compiled ReactLynx card hydrates, runs its effects
+and re-renders on a later `data`/`global-props` write, which its MTS
+`updatePage` leaves to the BTS — web-core-e2e `api-frame-data-update`, ported
+in `crates/bobcat-source/tests/frame.rs` (`docs/tracking/deviations.md`).
 
 The members that answer with a list encode it in the return string, since
 the boundary's value type carries no array: `attributeNames` and
@@ -2813,7 +2860,8 @@ as `bobcat:global-event-emitter`, `src/selector-query.ts` as
 `src/main-thread-runtime.ts` as `bobcat:runtime`, `src/frame.ts` as
 `bobcat:frame` (what a `frame`'s `src` does in the realm that wrote it: the
 fetch, the `ShadowRealm`, the call into the child), `src/frame-boot.ts` as
-`bobcat:frame-boot` (a nested card's boot inside that child), `src/timers.ts` as
+`bobcat:frame-boot` (a nested card's boot inside that child, its BTS Worker
+included), `src/timers.ts` as
 `bobcat:timers`, `src/future.ts` as `bobcat:future`, `src/module.ts` as
 `bobcat:module`, `src/section-url.ts` as `bobcat:section-url`,
 `src/bundle-fetch.ts` as `bobcat:bundle-fetch`, `src/diagnostics.ts` as
@@ -2981,8 +3029,12 @@ of the element path in the same file.
   `api-frame-src`/`api-frame-inner`: a red host page whose 100px
   `<frame src="./react-frame-inner.web.bundle">` shows a blue card;
   `api-frame-data` and `api-frame-global-props` as `react-frame-data`;
-  `api-frame-auto-height` as `react-frame-auto-height`; all rendered end to
-  end by `crates/bobcat-source/tests/frame.rs`) is in that
+  `api-frame-auto-height` as `react-frame-auto-height`;
+  `api-frame-data-update` as `react-frame-data-update`, whose button's tap
+  re-renders the frame's card through that card's own BTS, beside
+  `react-frame-global-props-update`, the same for `global-props` (no upstream
+  case); all rendered end to end by `crates/bobcat-source/tests/frame.rs`) is
+  in that
   package's `NOTICE.lynx-stack`. Native builds use the shared
   `scripts/lynx-bytecode.ts` hook to disable BTS manifest bytecode. MTS keeps
   the compiler's default encoding. The fixture-only source repack remains

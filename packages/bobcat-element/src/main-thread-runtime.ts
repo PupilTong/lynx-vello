@@ -33,6 +33,12 @@
 // table. The worker is started like any other `Worker`, so a plain one, which
 // is posted none of this, sees none of it.
 //
+// A `frame`'s card runs this same module in a `ShadowRealm` child of the page
+// realm (`bobcat:frame-boot`), with a BTS Worker of its own, which the child
+// creates and connects the way the page's boot does. What the child is
+// handed instead of the host's startup members — its page data, `SystemInfo`
+// and the view's native module table — comes through `__BobcatInitializeMTS`.
+//
 // This is not an Element PAPI implementation. Every `__*` element member,
 // including the scoped-style sink `__SetCSSId`, belongs to element-papi.ts.
 // Background-thread-only bindings such as `lynxCoreInject` also do not belong
@@ -254,6 +260,12 @@ export function __BobcatConnectBackground(worker: Worker, data: unknown, entry?:
   });
   worker.addEventListener("message", (event: { data: FromBackground }) => {
     const message = event.data;
+    // Once disposal has started, only its acknowledgement is heard: this
+    // realm sends nothing any more (`sendToBackground`), and what the BTS
+    // still says — a patch, a call, a Context event — would act on a card
+    // that is being let go of. A frame's card's nodes may already be freed
+    // by then (`bobcat:frame`'s `resetFrame` does not wait for this).
+    if (backgroundDisposal && !(message?.bobcat === "runtime" && message.method === "disposed")) return;
     if (message?.bobcat === "runtime") {
       if (message.method === "nodeQuery") {
         try {
@@ -298,17 +310,6 @@ export function __BobcatConnectBackground(worker: Worker, data: unknown, entry?:
   }
 }
 
-/**
- * Called instead of `__BobcatConnectBackground` by a realm that has no BTS —
- * a `frame`'s nested card, booted by `bobcat:frame-boot`: what it has queued
- * for one is dropped, and so is everything it sends from now on, as if its
- * BTS were already disposed. A Worker connected later is terminated.
- */
-export function __BobcatDetachBackground(): void {
-  pendingBackgroundMessages = [];
-  backgroundDisposal ??= Promise.resolve();
-}
-
 export function __BobcatPublishEvent(
   componentId: unknown,
   handlerName: string,
@@ -342,7 +343,21 @@ function disposeBackground(): Promise<void> {
 
 engineContext.addEventListener("__DestroyLifetime", () => { void disposeBackground(); });
 
-/** MTS keeps its Worker alive until BTS has acknowledged app cleanup. */
+/**
+ * MTS keeps its Worker alive until BTS has acknowledged app cleanup.
+ *
+ * Whoever disposes of a realm lets go of the cards its frames hold first
+ * (`bobcat:frame`'s `__BobcatCloseFrames`): the page's disposal module, which
+ * `bobcat-core` writes, and `bobcat:frame-boot`'s `dispose`. So each card's
+ * BTS has its `dispose` queued on the group's worker thread ahead of this
+ * realm's own BTS, and its app cleanup runs before this BTS acknowledges.
+ *
+ * Not from here: importing `bobcat:frame` into this module closes a cycle
+ * (`bobcat:frame` imports this one) that QuickJS leaks when a worker realm's
+ * `import("bobcat:element")` fails to link, which aborts the worker
+ * runtime's release (`bobcat-core`'s
+ * `a_worker_links_only_the_built_ins_its_host_modules_have_members_for`).
+ */
 export function __BobcatDispose(): Promise<void> {
   engineContext.dispatchEvent({ type: "__DestroyLifetime" });
   return disposeBackground();
@@ -401,11 +416,22 @@ let hostGlobalPropsJson = "{}";
 const hostInitialProcessor = getInitialProcessor() ?? "";
 // The view's native modules as the host wrote them, a record of names and
 // comma-joined method lists. This realm has no `NativeModules` and never
-// decodes it: `__BobcatConnectBackground` posts it to the BTS Worker.
-const hostNativeModuleTable = nativeModuleTable();
+// decodes it: `__BobcatConnectBackground` posts it to the BTS Worker. A
+// frame's realm has no startup members of its own (the host answers
+// `undefined`), and is handed the page's table by `__BobcatInitializeMTS`.
+let hostNativeModuleTable = nativeModuleTable() ?? "";
 
 let initialProcessor = hostInitialProcessor;
 let jsDataProcessor = false;
+
+/**
+ * The view's native module table as this realm holds it, for
+ * `bobcat:frame` to hand a frame's card: its BTS gets the view's modules, as
+ * native's nested `LynxView` inherits its parent's module wrappers.
+ */
+export function __BobcatNativeModuleTable(): string {
+  return hostNativeModuleTable;
+}
 
 export function __BobcatInitializeMTS(options: {
   initData?: unknown;
@@ -413,6 +439,8 @@ export function __BobcatInitializeMTS(options: {
   systemInfo?: Record<string, unknown>;
   processorName?: string;
   enableJSDataProcessor?: boolean;
+  /** The native module table to post to the BTS, where the host gave none. */
+  nativeModuleTable?: string;
 }) {
   lynx.__initData = "initData" in options ? options.initData : __BobcatInitData;
   hostGlobalPropsJson = JSON.stringify("globalProps" in options ? options.globalProps : __globalProps);
@@ -422,6 +450,7 @@ export function __BobcatInitializeMTS(options: {
   lynx.SystemInfo = SystemInfo;
   initialProcessor = options.processorName ?? hostInitialProcessor;
   jsDataProcessor = options.enableJSDataProcessor === true;
+  if (options.nativeModuleTable !== undefined) hostNativeModuleTable = options.nativeModuleTable;
 }
 
 export function __BobcatProcessInitData(data: unknown) { return __BobcatProcessData(data, initialProcessor); }

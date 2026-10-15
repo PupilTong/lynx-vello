@@ -52,7 +52,7 @@ use crate::main::tree::{
     Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, LynxDocument, MAX_FRAME_DEPTH,
     PageConfig, frame_depth, invoke_base_method, is_svg, nested_page, new_document,
 };
-use crate::realm::child::ChildHostModules;
+use crate::realm::child::{ChildHostModules, ChildHostState, ChildKey};
 use crate::realm::policy::context_of;
 use crate::realm::{RealmCore, open_realm, string_argument};
 use crate::script::ScriptError;
@@ -1099,14 +1099,16 @@ fn construction_phase<T>(phase: &str, work: impl FnOnce() -> T) -> Result<T, Str
 ///
 /// `workers` follows the realm handles: its channels belong to this MTS
 /// runtime and close when it is released. JS host functions reference it
-/// weakly, so queued finalizers cannot extend the channels' lifetime.
+/// weakly, so queued finalizers cannot extend the channels' lifetime. A
+/// child's own workers go with the child, inside `core`, before it.
 pub(crate) struct MainThreadRuntime {
     /// The realm and the members every realm has, which
     /// [`crate::realm::open_realm`] installed.
     core: RealmCore,
     /// This realm's side of the workers it created, shared with the three
     /// host functions that drive them, and where a worker failure is reported
-    /// from.
+    /// from. It is also what finds the side of a child that created a
+    /// worker, whose events go to that child.
     workers: Rc<super::workers::WorkerOwner>,
     slot: Rc<RefCell<DocumentSlot>>,
     /// The newest reading of the view's timeline this side has been handed —
@@ -1205,18 +1207,24 @@ impl MainThreadRuntime {
         // The view's own token: what this realm's core members park on ends
         // with the view.
         let host = outbox.host_outbox(outbox.token().clone());
+        // One channel for every worker of the view, the children's included,
+        // and this realm's own owner of them.
+        let (view_workers, incoming) = workers.view(outbox.clone());
+        let workers = view_workers.owner(None);
         let document = Rc::new(DocumentHost {
             slot: Rc::clone(&slot),
-            outbox: outbox.clone(),
+            outbox,
             thread: thread.clone(),
+            workers: Rc::downgrade(&view_workers),
         });
-        let (core, (workers, incoming)) = open_realm(
+        let (core, ()) = open_realm(
             js_runtime,
             &host,
             thread,
             None,
             ScriptSource::Main,
-            // Every child gets the same document members.
+            // Every child gets the same document members, and `Worker`
+            // members of its own.
             Some(Rc::clone(&document) as Rc<dyn ChildHostModules>),
             |engine| {
                 document
@@ -1228,7 +1236,7 @@ impl MainThreadRuntime {
                 crate::native_module::install(engine, &host, None)
                     .map_err(|error| context_of("installing the native module members", error))?;
                 workers
-                    .install(engine, outbox)
+                    .install(engine)
                     .map_err(|error| context_of("installing Worker", error))
             },
         )
@@ -1271,6 +1279,16 @@ impl MainThreadRuntime {
         self.workers.live_workers()
     }
 
+    /// Hands one event of one of this view's workers to the realm whose
+    /// `Worker` object it is for: this realm's `bobcat-internal`, or, for a
+    /// worker a `ShadowRealm` child created, the child's own — a frame's
+    /// card's background thread is its child's. A worker no child recorded
+    /// is this realm's, and an event for a key no realm still holds is
+    /// dropped by the `bobcat-internal` it reaches.
+    ///
+    /// The failure report, and the end of what the realm keeps of a worker
+    /// that ended, are the creating realm's side's too, so a child's
+    /// worker is reported by the source that side recorded.
     pub(crate) fn dispatch_worker_event(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -1278,6 +1296,10 @@ impl MainThreadRuntime {
         payload: crate::background::WorkerPayload,
     ) -> Result<(), MainThreadError> {
         use crate::background::WorkerPayload;
+        // Looked up before `forget` below drops the route of a worker that
+        // ended, whose end is still the child's to hear.
+        let child_owner = self.workers.child_owner(key);
+        let owner = child_owner.as_ref().unwrap_or(&self.workers);
         let failed = matches!(payload, WorkerPayload::Failed(_));
         // Read before `forget` below removes it, and for a failure alone:
         // nothing else reports it, so a message clones no source. `None`
@@ -1289,14 +1311,14 @@ impl MainThreadRuntime {
             payload,
             WorkerPayload::Errored(_) | WorkerPayload::Failed(_)
         )
-        .then(|| self.workers.source_of(key))
+        .then(|| owner.source_of(key))
         .flatten();
         // A worker that closed itself, or whose realm could not be built or
         // whose thread trapped, has ended: this is where the realm learns
         // it, and so where the right to tell it to stop stops being worth
         // keeping.
         if matches!(payload, WorkerPayload::Closed | WorkerPayload::Failed(_)) {
-            self.workers.forget(key);
+            owner.forget(key);
         }
         // `(key, kind, data, filename, lineno, colno)`: `data` is the value
         // the worker posted — primitive or structured clone — for a message,
@@ -1311,30 +1333,44 @@ impl MainThreadRuntime {
                 // Before the `Worker` object's `error` event below, so no
                 // listener of it decides whether the embedder hears of this.
                 if let Some(source) = source {
-                    self.workers.report_failure(source, failed, error);
+                    owner.report_failure(source, failed, error);
                 }
                 (kind, data, location)
             }
         };
+        let child = child_owner.as_ref().and_then(|owner| owner.realm());
         let location = location.as_ref();
         let key = key.get().to_string();
-        let called = self
-            .core
-            .engine
-            .call_module_export(
+        let arguments = [
+            HostArgument::String(&key),
+            HostArgument::String(kind),
+            data.as_argument(),
+            HostArgument::String(location.and_then(|l| l.source.as_deref()).unwrap_or("")),
+            HostArgument::Number(f64::from(location.and_then(|l| l.line).unwrap_or(0))),
+            HostArgument::Number(f64::from(location.and_then(|l| l.column).unwrap_or(0))),
+        ];
+        let called = match child {
+            None => self.core.engine.call_module_export(
                 js_runtime,
                 WORKER_CLASS_MODULE_SPECIFIER,
                 "__BobcatDispatchWorkerEvent",
-                &[
-                    HostArgument::String(&key),
-                    HostArgument::String(kind),
-                    data.as_argument(),
-                    HostArgument::String(location.and_then(|l| l.source.as_deref()).unwrap_or("")),
-                    HostArgument::Number(f64::from(location.and_then(|l| l.line).unwrap_or(0))),
-                    HostArgument::Number(f64::from(location.and_then(|l| l.column).unwrap_or(0))),
-                ],
-            )
-            .map_err(|error| MainThreadError::from_engine("delivering a worker event", error));
+                &arguments,
+            ),
+            // A child that is gone took its workers with it; what one said
+            // last reaches no realm.
+            Some(child) => self
+                .core
+                .children
+                .call_module_export(
+                    js_runtime,
+                    child,
+                    WORKER_CLASS_MODULE_SPECIFIER,
+                    "__BobcatDispatchWorkerEvent",
+                    &arguments,
+                )
+                .unwrap_or(Ok(false)),
+        }
+        .map_err(|error| MainThreadError::from_engine("delivering a worker event", error));
         let finished = self.finish_batch(js_runtime, called.is_ok());
         called.map(|_| ()).and(finished)
     }
@@ -2735,8 +2771,17 @@ await Promise.resolve().then(() => __FlushElementTree());
             .map_err(|error| MainThreadError::from_engine("booting the MTS entry", error))
     }
 
-    /// Run the MTS module's asynchronous disposal through the ordinary ESM
-    /// evaluator. JavaScript owns the BTS request, acknowledgement and stop.
+    /// Runs the MTS module's asynchronous disposal through the ordinary ESM
+    /// evaluator, as the view ends. JavaScript owns the BTS request,
+    /// acknowledgement and stop.
+    ///
+    /// The cards the page's frames hold are let go of first, as
+    /// `bobcat:frame-boot`'s `dispose` lets go of a frame's own, so each
+    /// card's BTS has its `dispose` queued on the worker thread ahead of the
+    /// page BTS's and runs its app cleanup before the page BTS acknowledges;
+    /// then the page's own `__BobcatDispose`, whose acknowledgement
+    /// [`Self::disposal_finished`] reads. The frames' acknowledgements are not
+    /// waited for.
     pub(crate) fn begin_dispose(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -2745,7 +2790,11 @@ await Promise.resolve().then(() => __FlushElementTree());
             .engine
             .start_module(
                 js_runtime,
-                "import { __BobcatDispose } from 'bobcat:runtime'; await __BobcatDispose();",
+                &format!(
+                    "import {{ __BobcatCloseFrames }} from '{FRAME_MODULE_SPECIFIER}'; \
+                     import {{ __BobcatDispose }} from '{RUNTIME_MODULE_SPECIFIER}'; \
+                     __BobcatCloseFrames(); await __BobcatDispose();"
+                ),
                 "bobcat:dispose",
             )
             .map_err(|error| MainThreadError::from_engine("disposing the MTS realm", error))
@@ -2810,19 +2859,25 @@ await Promise.resolve().then(() => __FlushElementTree());
 /// with the nested page `bobcat:frame-boot` handed it
 /// (`__BobcatUsePageRoot`), and its card's sheet goes to the frame's shadow
 /// root because `adoptStyleSheet` was told so. What a child differs in is
-/// its `retired` flag, which its `closeRealm` sets, and what it does not get
-/// — the startup strings answer `undefined`, and the `Worker` and native
-/// module members are the page realm's, installed beside these by
-/// [`MainThreadRuntime::new`].
+/// its `retired` flag, which its `closeRealm` sets, what it does not get —
+/// the startup strings answer `undefined`, and the native module members
+/// are the page realm's, installed beside these by
+/// [`MainThreadRuntime::new`] — and its workers: a child gets the same three
+/// `Worker` members, over a worker owner of its own, which the child keeps
+/// as its host state, so the workers it creates talk to it and end with it.
 ///
 /// Held by every realm's `ShadowRealm` hook, so it holds no engine: the
-/// slot, the outbox and a weak thread handle only. The children's members
-/// hold clones of the slot, and the children are freed with the realm core,
-/// before [`MainThreadRuntime`]'s own `slot` field drops.
+/// slot, the outbox, a weak thread handle and a weak handle on the view's
+/// workers only. The children's members hold clones of the slot, and the
+/// children are freed with the realm core, before [`MainThreadRuntime`]'s
+/// own `slot` field drops.
 struct DocumentHost {
     slot: Rc<RefCell<DocumentSlot>>,
     outbox: ViewOutbox,
     thread: crate::jobs::JsThreadHandle,
+    /// What a child's worker owner is made from. Weak, as the thread handle
+    /// is: the page realm's owner holds it, and goes with the page realm.
+    workers: std::rc::Weak<super::workers::ViewWorkers>,
 }
 
 impl DocumentHost {
@@ -2844,18 +2899,34 @@ impl DocumentHost {
 
 impl ChildHostModules for DocumentHost {
     /// A child's members: the page realm's, with no startup strings, which
-    /// are the page's, and a `closeRealm` that retires the child.
+    /// are the page's, and a `closeRealm` that retires the child; then the
+    /// `Worker` members over a worker owner of the child's, recorded under
+    /// `key` so the workers it creates are delivered to it, which is what the
+    /// child keeps.
     fn install(
         &self,
         engine: &mut ScriptEngine,
+        key: ChildKey,
         retired: Rc<Cell<bool>>,
-    ) -> Result<(), ScriptError> {
+    ) -> Result<Box<dyn ChildHostState>, ScriptError> {
         self.install_members(
             engine,
             STARTUP_STRINGS.map(|name| (name, None)),
             Some(retired),
         )
-        .map_err(MainThreadError::into_script_error)
+        .map_err(MainThreadError::into_script_error)?;
+        // Gone only with the page realm's owner, while the page realm is
+        // released, when no JavaScript runs to construct a child.
+        let view = self.workers.upgrade().ok_or_else(|| {
+            crate::threads::platform_script_error(
+                "the view's workers have been released".to_owned(),
+            )
+        })?;
+        let workers = view.owner(Some(key));
+        workers
+            .install(engine)
+            .map_err(|error| context_of("installing Worker", error))?;
+        Ok(Box::new(workers))
     }
 }
 

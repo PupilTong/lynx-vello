@@ -25,20 +25,21 @@
 //    unchanged `url`. A new `src` lets go of the frame's current card first
 //    (`teardown`) and loads the new one, connected or not: a frame given a
 //    `src` while detached renders into its nested page all the same.
-// 2. `fetchResource(src)` fetches the container, `src` as written: the
-//    fetcher resolves it against the view's base URL, and its installer
-//    (`BundleInstaller`) registers the card's `root` at `<U>/root.js` and its
-//    StyleInfo at `<U>/style-info.css`, `U` the resolved `src`, before the
-//    fetch settles. `true` is a
+// 2. `src` is resolved against the view's base URL (`resolveUrl`), once per
+//    load, into the card's URL `U`, and `fetchResource(U)` fetches the
+//    container: its installer (`BundleInstaller`) registers the card's
+//    `root` at `<U>/root.js`, its StyleInfo at `<U>/style-info.css` and its
+//    BTS boot at `U#background-thread` before the fetch settles. `true` is a
 //    container this view already fetched, which still starts in a later
 //    microtask, so a start is never inside the `__SetAttribute` that asked
 //    for it.
 // 3. Once it settles, a fresh `ShadowRealm` imports `bobcat:frame-boot`'s
 //    `boot`, `dispose`, `updateData` and `updateGlobalProps`, and calls
-//    `boot` with primitives alone — the frame's node id, `src`, and the
-//    frame's `data` and `global-props` as they stand at that moment and
-//    `SystemInfo`, each as JSON text — which renders the card under the
-//    frame's nested page.
+//    `boot` with primitives alone — the frame's node id, `U`, the frame's
+//    `data` and `global-props` as they stand at that moment and `SystemInfo`,
+//    each as JSON text, and the view's native module table — which renders
+//    the card under the frame's nested page and connects the card's own BTS
+//    Worker, which the child realm creates and owns.
 // 4. A frame keeps its `data` and `global-props` as JSON text, `{}` until
 //    one is written. A write takes a plain object alone — a non-null,
 //    non-array object, which `bobcat:element` hands over as its JSON text,
@@ -67,12 +68,16 @@
 //    module's `FinalizationRegistry`, so no orphan child is left running on
 //    its timers.
 //
-// Letting go (`teardown`) is two generic host calls in order: the child's
-// `dispose` (its `closeRealm`, after disposing of the frames its own card
-// loaded), and `resetFrame(frameId)`, which frees everything under the nested
-// page and the sheets on the frame's shadow root. The retired child is freed
-// by the host outside every JavaScript call. The frame keeps its `src`, its
-// `data` and its `global-props`, which the next boot reads.
+// Letting go (`teardown`) is two calls in order: the child's `dispose`, and
+// `resetFrame(frameId)`, which frees everything under the nested page and
+// the sheets on the frame's shadow root at once. The child's `dispose` lets
+// go of the frames its own card loaded and starts its card's disposal: the
+// card's BTS runs its app cleanup and acknowledges, the child terminates the
+// Worker, and only then calls `closeRealm`. Until then the child stays, for
+// the host keeps a realm whose worker still runs; it is freed outside every
+// JavaScript call once it closed. The frame keeps its `src`, its `data` and
+// its `global-props`, which the next boot reads, and a new `src` boots into
+// the emptied nested page without waiting for the old card's BTS.
 //
 // Every step checks that the frame still wants this load: a later `src` or a
 // teardown bumps the frame's generation, and a fetch or an import that
@@ -94,23 +99,24 @@
 // load started are also in `loaded`, for `__BobcatCloseFrames`; a state holds
 // no handle, so neither keeps one alive.
 
-import { fetchResource, resetFrame } from "bobcat-internal:host";
+import { fetchResource, resetFrame, resolveUrl } from "bobcat-internal:host";
 // Read only when the host calls in, never as this module evaluates:
 // `bobcat:element` imports this module.
 import { __BobcatHandleOf } from "bobcat:element";
 import { reportError } from "bobcat:diagnostics";
 import { Future } from "bobcat:future";
-// A live binding, read when a load starts, never as this module evaluates:
-// `bobcat:runtime` imports `bobcat:element`, which imports this module.
-import { SystemInfo } from "bobcat:runtime";
+// Read when a load starts, never as this module evaluates: `bobcat:runtime`
+// imports `bobcat:element`, which imports this module.
+import { SystemInfo, __BobcatNativeModuleTable } from "bobcat:runtime";
 
 /** `bobcat:frame-boot`'s `boot`, as the child's wrapped function. */
 type Boot = (
   frameId: number,
-  src: string,
+  url: string,
   initData: string,
   globalProps: string,
   systemInfo: string,
+  nativeModuleTable: string,
 ) => boolean;
 
 /** `bobcat:frame-boot`'s `dispose`, as the child's wrapped function. */
@@ -285,30 +291,40 @@ export function __BobcatFrameDisconnected(frameId: number): undefined {
 
 /**
  * Lets go of every card a frame of this realm holds, without touching the
- * document: `bobcat:frame-boot`'s `dispose` calls it before it closes its
- * own realm, whose nested page the parent's `resetFrame` frees whole.
+ * document. Whoever disposes of this realm calls it before
+ * `__BobcatDispose` — the page's disposal module `bobcat-core` writes as the
+ * view ends, and `bobcat:frame-boot`'s `dispose` before a frame's card's
+ * realm closes, whose nested page the parent's `resetFrame` frees whole — so
+ * each card's BTS has its `dispose` queued ahead of this realm's own BTS.
  */
 export function __BobcatCloseFrames(): undefined {
   for (const state of [...loaded]) close(state);
   return undefined;
 }
 
-/** Starts loading `src` into the frame. */
+/**
+ * Starts loading `src` into the frame: resolved against the view's base
+ * once, so the fetch, the card's `__Card__` and every URL the card builds
+ * under it name one absolute URL. The frame keeps `src` as written, which
+ * is what a later `src` is compared against and what a failure names.
+ */
 function load(frameId: number, state: FrameState, src: string): void {
   state.generation += 1;
   state.loaded = true;
   loaded.add(state);
   const generation = state.generation;
   const current = () => state.generation === generation;
+  let url: string;
   let fetched: number | true;
   try {
-    fetched = fetchResource(src);
+    url = resolveUrl(src);
+    fetched = fetchResource(url);
   } catch (error) {
     report(src, error);
     return;
   }
   const start = () => {
-    if (current()) startFrame(state, frameId, src, current);
+    if (current()) startFrame(state, frameId, src, url, current);
   };
   if (fetched === true) {
     void Promise.resolve().then(start);
@@ -320,11 +336,20 @@ function load(frameId: number, state: FrameState, src: string): void {
 }
 
 /**
- * Creates the frame's realm and boots `src` in it, with the frame's `data`
- * and `global-props` as they stand once the import settled: a write while
- * the fetch or the import was in flight is what the card boots with.
+ * Creates the frame's realm and boots the card at `url` — `src` resolved —
+ * in it, with the frame's `data` and `global-props` as they stand once the
+ * import settled: a write while the fetch or the import was in flight is
+ * what the card boots with. The card's BTS gets this realm's native module
+ * table: a frame's card has the view's modules, as native's nested view
+ * inherits its parent's.
  */
-function startFrame(state: FrameState, frameId: number, src: string, current: () => boolean): void {
+function startFrame(
+  state: FrameState,
+  frameId: number,
+  src: string,
+  url: string,
+  current: () => boolean,
+): void {
   let realm: ShadowRealm;
   try {
     realm = new ShadowRealm();
@@ -343,10 +368,11 @@ function startFrame(state: FrameState, frameId: number, src: string, current: ()
     state.dispose = dispose as Dispose;
     const booted = (boot as Boot)(
       frameId,
-      src,
+      url,
       state.data,
       state.globalProps,
       JSON.stringify(SystemInfo),
+      __BobcatNativeModuleTable(),
     );
     // A `false` was reported in the child; there is nothing to add here, and
     // nothing booted to update: later writes reach the next boot alone.
@@ -359,10 +385,11 @@ function startFrame(state: FrameState, frameId: number, src: string, current: ()
 }
 
 /**
- * Lets go of the frame's card: closes its realm, then frees what it built
+ * Lets go of the frame's card: starts its disposal, then frees what it built
  * under the nested page and the sheets it mounted on the frame's shadow
- * root. The frame keeps its `src`, which a connection loads again, and its
- * `data` and `global-props`, which that load boots with.
+ * root, without waiting for the card's BTS to acknowledge. The frame keeps
+ * its `src`, which a connection loads again, and its `data` and
+ * `global-props`, which that load boots with.
  */
 function teardown(frameId: number, state: FrameState): void {
   close(state);
@@ -373,7 +400,11 @@ function teardown(frameId: number, state: FrameState): void {
   }
 }
 
-/** Makes every load of the frame stale and closes the realm it created. */
+/**
+ * Makes every load of the frame stale and lets go of the realm it created:
+ * the child's `dispose`, which closes the realm once the card's BTS has
+ * acknowledged its disposal.
+ */
 function close(state: FrameState): void {
   state.generation += 1;
   state.loaded = false;

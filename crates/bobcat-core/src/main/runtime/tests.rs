@@ -7750,16 +7750,12 @@ fn an_mts_realm_declares_these_host_members() {
 }
 
 /// What a `ShadowRealm` child of the MTS realm exports under
-/// `bobcat-internal:host`: every member of the page realm's but the three
-/// `Worker` members, and no `bobcat-internal:native-modules` at all.
+/// `bobcat-internal:host`: every member of the page realm's, the three
+/// `Worker` members included, and no `bobcat-internal:native-modules` at
+/// all.
 #[test]
-fn a_frame_realm_declares_the_page_members_but_the_worker_ones() {
-    let expected = MTS_HOST_MEMBERS
-        .iter()
-        .filter(|name| !["createWorker", "sendWorkerMessage", "terminateWorker"].contains(name))
-        .copied()
-        .collect::<Vec<_>>()
-        .join(",");
+fn a_frame_realm_declares_the_page_members() {
+    let expected = MTS_HOST_MEMBERS.join(",");
     let (mut js, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -7779,7 +7775,7 @@ fn a_frame_realm_declares_the_page_members_but_the_worker_ones() {
 
 /// The page realm's `bobcat-internal:host` exports, sorted as a namespace
 /// lists them.
-const MTS_HOST_MEMBERS: [&str; 51] = [
+const MTS_HOST_MEMBERS: [&str; 52] = [
     "adoptStyleSheet",
     "attributeNames",
     "callElementMethod",
@@ -7817,6 +7813,7 @@ const MTS_HOST_MEMBERS: [&str; 51] = [
     "requestScriptFrame",
     "resetFrame",
     "resolveModuleUrl",
+    "resolveUrl",
     "sendWorkerMessage",
     "setAttribute",
     "setInlineStyleProperty",
@@ -8565,9 +8562,10 @@ async function frameRealm() {
 /// A child of the MTS realm has the core members and the document members
 /// the page realm has, over the same document and as the same code:
 /// `bobcat:timers` and `bobcat:element` both link in it, and its
-/// `createPage` is the document's `page`, as the page realm's is. Its
-/// startup strings answer `undefined`; the `Worker` members and
-/// `bobcat-internal:native-modules` are the page realm's alone.
+/// `createPage` is the document's `page`, as the page realm's is. It has
+/// the three `Worker` members too, over a side of its own, so
+/// `bobcat-internal` links in it. Its startup strings answer `undefined`;
+/// `bobcat-internal:native-modules` is the page realm's alone.
 #[test]
 fn a_shadow_realm_links_the_document_built_ins() {
     let (mut js, mut runtime, _elements) = runtime();
@@ -8585,9 +8583,11 @@ fn a_shadow_realm_links_the_document_built_ins() {
         for (const name of ['initData', 'globalProps', 'initialProcessor', 'nativeModuleTable']) {{
             if (realm.evaluate(`H.${{name}}()`) !== undefined) throw Error(name + ' answered');
         }}
-        for (const name of ['createWorker', 'sendWorkerMessage', 'terminateWorker']) {{
-            if (realm.evaluate(`typeof H.${{name}}`) !== 'undefined') throw Error(name + ' installed');
+        for (const name of ['createWorker', 'sendWorkerMessage', 'terminateWorker', 'resolveUrl']) {{
+            if (realm.evaluate(`typeof H.${{name}}`) !== 'function') throw Error(name + ' missing');
         }}
+        const worker = await realm.importValue('bobcat-internal', '__BobcatDispatchWorkerEvent');
+        if (typeof worker !== 'function') throw Error('bobcat-internal did not link: ' + typeof worker);
         let failed;
         try {{
             await realm.importValue('bobcat:native-modules', 'callNativeModule');

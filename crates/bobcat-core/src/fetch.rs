@@ -33,6 +33,17 @@
 //! Core still keeps no cache. What has been fetched is the *fetcher's*
 //! knowledge, asked for through a `Send + Sync` probe the view handed over at
 //! construction, and a host that gave none simply never answers `true`.
+//!
+//! # The URL a fetch names
+//!
+//! `resolveUrl(url)` answers `url` resolved against the view's
+//! [`ViewSources::base_url`](crate::ViewSources::base_url) by URL rules — the
+//! resolution a synchronous load makes before it asks the host, and the one
+//! the view's fetcher makes of a URL it is handed. A realm that goes on to
+//! build other URLs out of the one it fetched — a `<frame>`'s card, whose
+//! sections, background thread and workers all hang under the card's URL —
+//! resolves it once, so what it fetches and what it builds name one
+//! absolute URL. It requests nothing.
 
 use std::rc::Rc;
 
@@ -49,17 +60,30 @@ use crate::script::ScriptError;
 /// or `true`, for a URL this view has fetched already.
 const FETCH_EXPORT: &str = "fetchResource";
 
-/// Installs the one member a realm fetches a URL through.
+/// Resolves a URL against the view's base, as a fetch of it resolves it.
+const RESOLVE_EXPORT: &str = "resolveUrl";
+
+/// Installs the one member a realm fetches a URL through, and the one that
+/// resolves a URL the way that fetch does.
 ///
-/// It evaluates nothing, touches no document and reads no byte of what comes
-/// back: it registers the fetch as a future of this realm's and answers that
-/// future's id — unless the view's fetcher says it already holds that URL, in
-/// which case it answers `true` and starts nothing.
+/// Neither evaluates anything or touches a document. `fetchResource` reads no
+/// byte of what comes back: it registers the fetch as a future of this
+/// realm's and answers that future's id — unless the view's fetcher says it
+/// already holds that URL, in which case it answers `true` and starts
+/// nothing. `resolveUrl` answers a string, and throws for a URL that does not
+/// resolve.
 pub(crate) fn install(
     engine: &mut ScriptEngine,
     sources: &HostOutbox,
     futures: &Rc<FutureTable>,
 ) -> Result<(), ScriptError> {
+    let resolving = sources.clone();
+    install_member(engine, RESOLVE_EXPORT, 1, move |arguments| {
+        const NAME: &str = "bobcat-internal:host.resolveUrl";
+        resolving
+            .resolve(string_argument(NAME, arguments, 0)?)
+            .map(HostValue::String)
+    })?;
     let requests = sources.clone();
     let futures = Rc::clone(futures);
     install_member(engine, FETCH_EXPORT, 1, move |arguments| {

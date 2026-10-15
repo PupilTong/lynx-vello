@@ -41,6 +41,7 @@ export default defineConfig(({ env }) => {
           'react-swiper-scroll-to', 'react-refresh-view', 'react-dialog', 'react-overlay',
           'react-overlay-pass-through', 'react-svg', 'react-markdown', 'css-custom-sections',
           'react-frame', 'react-frame-inner', 'react-frame-data', 'react-frame-auto-height',
+          'react-frame-data-update', 'react-frame-global-props-update',
           'react-set-shared-data', 'react-get-shared-data']
           .map(fixture => [`web-${fixture}`, {
             source: { entry: { [fixture]: fixture === 'react-bts-query'

@@ -10,6 +10,7 @@
 
 import { describe, expect, it } from "@rstest/core";
 import {
+  backgroundThreadURL,
   bundlePathURL,
   bundleStyleSheetURL,
   sectionURL,
@@ -59,5 +60,19 @@ describe("the container URL rule", () => {
     expect(bundleStyleSheetURL("./card.web.bundle?rev=2"))
       .toBe("./card.web.bundle/style-info.css?rev=2");
     expect(sectionURL("root", "./card.web.bundle?rev=2")).toBe("./card.web.bundle/root.js?rev=2");
+  });
+
+  it("names the BTS boot script the container itself, at another fragment", () => {
+    expect(backgroundThreadURL(BUNDLE)).toBe(`${BUNDLE}#background-thread`);
+    // The query stays and the fragment is replaced, as `Url::set_fragment`
+    // replaces it.
+    expect(backgroundThreadURL(`${BUNDLE}?rev=1#f`)).toBe(`${BUNDLE}?rev=1#background-thread`);
+    expect(backgroundThreadURL(`${BUNDLE}?rev=1`)).toBe(`${BUNDLE}?rev=1#background-thread`);
+    expect(backgroundThreadURL(`${BUNDLE}#`)).toBe(`${BUNDLE}#background-thread`);
+    expect(backgroundThreadURL(`${BUNDLE}#a#b`)).toBe(`${BUNDLE}#background-thread`);
+    // A trailing `/` of the path is the container's own, and stays.
+    expect(backgroundThreadURL(`${BUNDLE}/`)).toBe(`${BUNDLE}/#background-thread`);
+    // A `#` the serialization escaped is in the path, not a fragment.
+    expect(backgroundThreadURL("app:///a%23b.web.bundle")).toBe("app:///a%23b.web.bundle#background-thread");
   });
 });

@@ -336,16 +336,18 @@ interface BobcatNative {
    * module — its `NativeModules` key, then its method names joined with
    * commas, empty for a module that declared none. Empty for a view built with
    * no modules at all. This realm has no `NativeModules` and posts the record
-   * unread to its BTS Worker in `initialize`. Answers once, like `initData`.
+   * unread to its BTS Worker in `initialize`. Answers once, like `initData`,
+   * and `undefined` after that and in a `ShadowRealm` child, which is handed
+   * the page realm's table instead.
    */
-  nativeModuleTable(): string;
+  nativeModuleTable(): string | undefined;
 }
 
 /**
  * The native functions a worker realm gets instead of the document, under
  * `bobcat-internal:worker`. Its `bobcat-internal:host` carries only the
  * members every realm is opened with — `requestScriptFrame`, the timer pair,
- * the `Future` members, `fetchResource`, `resolveModuleUrl`,
+ * the `Future` members, `fetchResource`, `resolveUrl`, `resolveModuleUrl`,
  * `loadModuleSync`, `reportScriptError` and `logScriptMessage` — and none of
  * the document members, because a worker has no tree to mutate.
  */
@@ -415,8 +417,14 @@ declare module "bobcat-internal:host" {
    *
    * The host joins `url` to `baseUrl` — the realm's `__Card__`: the view's
    * card URL (a container page's container URL), or else the page entry's
-   * response URL — by URL rules, and does not keep the base. A `url` that
-   * does not resolve starts nothing and answers `null`.
+   * response URL; in a frame's realm, the frame's card — by URL rules, and
+   * does not keep the base. A `url` that does not resolve starts nothing and
+   * answers `null`.
+   *
+   * A `ShadowRealm` child of this realm has these three members too, over a
+   * side of its own: what its workers say is delivered to the child, a
+   * child is not freed while one of its workers runs (unless it closed
+   * itself with `closeRealm`), and freeing it ends the workers it has left.
    */
   export function createWorker(
     url: string,
@@ -495,6 +503,16 @@ declare module "bobcat-internal:host" {
    * the later loads `lynx.loadScript` and `__AdoptStyleSheet` make by URL.
    */
   export function fetchResource(url: string): number | true;
+  /**
+   * `url` resolved against the view's base URL by URL rules, in its WHATWG
+   * serialization: what a fetch of `url` names, since the view's fetcher
+   * resolves a URL it is handed against that same base. An absolute URL
+   * answers itself; one that does not resolve throws. Requests nothing.
+   *
+   * `bobcat:frame` resolves a frame's `src` once, so the card's sections,
+   * its background thread and its workers all hang under the URL it fetched.
+   */
+  export function resolveUrl(url: string): string;
   /**
    * The URL a module at `base` names by `specifier` — the same resolution an
    * `import` there gets, so a `require` and an `import` name one module by one

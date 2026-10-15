@@ -1,16 +1,19 @@
 //! `<frame src>` end to end, over a real view: the page realm's
 //! `__CreateFrame` and `__SetAttribute(frame, "src", …)`, `bobcat:frame`'s
 //! fetch and `ShadowRealm`, `bobcat:frame-boot` running the nested card's
-//! `root` in the child under the frame's nested page, the frame's `data`
-//! and `global-props`, which the card boots with and takes as updates, and
-//! the frame's connection and disconnection, which the custom element
-//! queues and `bobcat:frame` turns into a load and a disposal.
+//! `root` in the child under the frame's nested page and connecting the
+//! card's own background thread, a `Worker` the child creates, the frame's
+//! `data` and `global-props`, which the card boots with and takes as updates
+//! on both threads, and the frame's connection and disconnection, which the
+//! custom element queues and `bobcat:frame` turns into a load and a
+//! disposal that waits for the card's background thread.
 //!
 //! The host stands in for a container installer: it answers the plain fetch
 //! of the card's URL, and serves `<url>/root.js` (the card's root as an MTS
-//! entry, `MTS_CHUNK_PREAMBLE` and then the body) and `<url>/style-info.css`
-//! (its page CSS), which is what `bobcat-source`'s `BundleInstaller`
-//! registers for a fetched full card.
+//! entry, `MTS_CHUNK_PREAMBLE` and then the body), `<url>/style-info.css`
+//! (its page CSS) and `<url>#background-thread` (its BTS boot, here a
+//! stand-in that logs what the BTS is handed), which is what
+//! `bobcat-source`'s `BundleInstaller` registers for a fetched full card.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,10 +33,11 @@ const SECOND: &str = "app:///second.web.bundle";
 /// The nested card's `root`, as a compiled card's root defines its
 /// `renderPage`: a global the boot calls with the processed init data. It
 /// throws — which the test sees as a diagnostic — unless its `__Card__` is
-/// `src` as the frame wrote it and its `SystemInfo` is the host's.
-fn root(src: &str) -> String {
+/// `card`, the frame's `src` resolved against the view's base, and its
+/// `SystemInfo` is the host's.
+fn root(card: &str) -> String {
     format!(
-        "if (__Card__ !== '{src}') throw Error('__Card__ is ' + __Card__); \
+        "if (__Card__ !== '{card}') throw Error('__Card__ is ' + __Card__); \
         if (SystemInfo.pixelWidth !== 393) throw Error('SystemInfo ' + JSON.stringify(SystemInfo)); \
         globalThis.renderPage = () => {{ const p = __CreatePage('0', 0); \
         const t = __CreateText(0); __AppendElement(t, __CreateRawText('nested')); \
@@ -110,16 +114,42 @@ fn host_page_with(src: &str, attached: bool, before: &str) -> String {
     )
 }
 
-/// A host serving the card at [`CARD`], with its root and its page CSS,
-/// for a frame whose `src` is `src`.
+/// The BTS boot a host serves at `<card>#background-thread`, which a
+/// frame's card connects its background thread to: a stand-in for
+/// `bobcat-source`'s, which loads the card's `/app-service.js`, that logs
+/// what the BTS was started with and every update and app hook it is
+/// handed, each line as `bts <card> …`, and then runs `extra`.
+///
+/// `data` lines also read the group's shared data under `from`, which a
+/// page's BTS may have set.
+fn bts_boot(card: &str, extra: &str) -> String {
+    format!(
+        "import {{ lynx, NativeModules }} from 'bobcat:bts-runtime';
+        const app = lynx.getApp();
+        const log = line => console.log('bts {card} ' + line);
+        log('booted ' + lynx.__initData.label + '/' + lynx.__globalProps.message);
+        app.updateCardData = data => log('data ' + data.label + ' shared ' + lynx.getSharedData('from'));
+        app.updateGlobalProps = props => log('props ' + props.message);
+        app.callDestroyLifetimeFun = () => log('destroyed');
+        {extra}"
+    )
+}
+
+/// `spec` serving `card`'s BTS boot, [`bts_boot`] with `extra`.
+fn with_bts(spec: TestViewSpec, card: &str, extra: &str) -> TestViewSpec {
+    spec.with_module(&format!("{card}#background-thread"), &bts_boot(card, extra))
+}
+
+/// A host serving the card at [`CARD`], with its root, its page CSS and its
+/// BTS boot, for a frame whose `src` is `src`.
 fn serving_the_card(src: &str) -> TestViewSpec {
-    serving_a_root(src, &root(src))
+    serving_a_root(src, &root(CARD))
 }
 
 /// The same, with `root` as the card's root body. [`SECOND`] is served
-/// too, with its own root and no page CSS.
+/// too, with its own root, its BTS boot and no page CSS.
 fn serving_a_root(src: &str, root: &str) -> TestViewSpec {
-    TestViewSpec::new(&host_entry(src))
+    let spec = TestViewSpec::new(&host_entry(src))
         .with_fetchable(CARD)
         .with_module(&format!("{CARD}/root.js"), &super::card_entry(root))
         .serving_style_sheet(&format!("{CARD}/style-info.css"), "text { color: red }")
@@ -128,7 +158,8 @@ fn serving_a_root(src: &str, root: &str) -> TestViewSpec {
             &format!("{SECOND}/root.js"),
             &super::card_entry(&self::root(SECOND)),
         )
-        .with_style_sheet_probe()
+        .with_style_sheet_probe();
+    with_bts(with_bts(spec, CARD, ""), SECOND, "")
 }
 
 /// Writes `src` (JSON: a string or `null`) to the host's frame through
@@ -226,15 +257,54 @@ fn pump_until(
     }
 }
 
-/// Every diagnostic among `events`, as its message.
+/// Every diagnostic among `events`, as its message: the realms' own reports,
+/// and every worker's throw or end, so a frame's card's BTS that failed is
+/// one too.
 fn reported(events: &[EngineEvent]) -> Vec<&str> {
     events
         .iter()
         .filter_map(|event| match event {
             EngineEvent::ScriptReported { message, .. } => Some(message.as_str()),
+            EngineEvent::WorkerThrew { error, .. } | EngineEvent::WorkerEnded { error, .. } => {
+                Some(&*error.message)
+            }
             _ => None,
         })
         .collect()
+}
+
+/// Whether some console message among `events` is exactly `message`.
+fn logged(events: &[EngineEvent], message: &str) -> bool {
+    events.iter().any(
+        |event| matches!(event, EngineEvent::ConsoleMessage { message: seen, .. } if seen == message),
+    )
+}
+
+/// How many console messages among `events` are exactly `message`.
+fn logged_times(events: &[EngineEvent], message: &str) -> usize {
+    events
+        .iter()
+        .filter(
+            |event| matches!(event, EngineEvent::ConsoleMessage { message: seen, .. } if seen == message),
+        )
+        .count()
+}
+
+/// Pumps until a console message among `events` is exactly `message`,
+/// collecting every event.
+fn pump_until_logged(engine: &mut TestEngine, events: &mut Vec<EngineEvent>, message: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !logged(events, message) {
+        for event in engine.pump() {
+            assert!(!event.is_fatal(), "the view ended: {event:?}");
+            events.push(event);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "nothing logged {message:?}: {events:?}"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
 }
 
 /// A frame's `src` boots the card in a `ShadowRealm` bound to it: the
@@ -247,9 +317,11 @@ fn a_frames_src_boots_the_card_inside_it() {
     a_frame_boots(CARD);
 }
 
-/// A relative `src` is the fetcher's to resolve, against the view's base:
-/// the frame hands it over as written, and its section URLs are written
-/// from that same string, so they resolve to what the fetch registered.
+/// A relative `src` is resolved against the view's base once, by
+/// `resolveUrl`, the way the fetcher resolves it: the card's `__Card__`, its
+/// section URLs and its BTS entry are all that absolute URL, so they name
+/// what the fetch registered, while the frame keeps `src` as written for
+/// its unchanged-`src` check.
 #[test]
 fn a_relative_frame_src_resolves_against_the_view_base() {
     a_frame_boots("child.web.bundle");
@@ -263,6 +335,12 @@ fn a_frame_boots(src: &str) {
         &mut events,
         "the nested card rendered",
         |state| state.nested.len() == 2 && state.nested_color.is_some(),
+    );
+    // Its background thread, at the card's resolved URL.
+    pump_until_logged(
+        &mut engine,
+        &mut events,
+        &format!("bts {CARD} booted undefined/undefined"),
     );
     assert_eq!(state.frame_size, (100.0, 50.0));
     let red = AbsoluteColor::srgb_legacy(255, 0, 0, 1.0);
@@ -429,9 +507,10 @@ fn pump_until_ticking(engine: &mut TestEngine, what: &str) {
 }
 
 /// Asserts that no `tick` comes any more: what the card's realm queued
-/// before it was let go of is drained first, then nothing more arrives.
+/// before it was let go of, and what it ran while its BTS acknowledged its
+/// disposal, are drained first, then nothing more arrives.
 fn assert_no_more_ticks(engine: &mut TestEngine, what: &str) {
-    pump_for(engine, Duration::from_millis(50));
+    pump_for(engine, Duration::from_millis(150));
     let later = pump_for(engine, Duration::from_millis(200));
     assert_eq!(ticks(&later), 0, "{what}: {later:?}");
 }
@@ -517,15 +596,15 @@ fn a_removed_frame_disposes_of_its_card_and_reappending_renders_it_again() {
 /// running on its timers.
 #[test]
 fn a_collected_frame_handle_disposes_of_its_card() {
-    let mut engine = TestViewSpec::new(&host_page(CARD, false))
+    let spec = TestViewSpec::new(&host_page(CARD, false))
         .with_fetchable(CARD)
         .with_module(
             &format!("{CARD}/root.js"),
             &super::card_entry(&ticking_root()),
         )
         .serving_style_sheet(&format!("{CARD}/style-info.css"), "text { color: red }")
-        .with_style_sheet_probe()
-        .create(Arc::new(NoWakeup));
+        .with_style_sheet_probe();
+    let mut engine = with_bts(spec, CARD, "").create(Arc::new(NoWakeup));
     pump_until_ticking(&mut engine, "the detached frame's card runs");
     operate(&mut engine, "forget");
     assert_no_more_ticks(&mut engine, "the collected frame's card is disposed of");
@@ -556,9 +635,9 @@ fn data_root(src: &str) -> String {
 }
 
 /// A host running `entry` that serves [`CARD`] and [`SECOND`], each with a
-/// [`data_root`] and no page CSS.
+/// [`data_root`], a [`bts_boot`] and no page CSS.
 fn serving_data_cards(entry: &str) -> TestViewSpec {
-    TestViewSpec::new(entry)
+    let spec = TestViewSpec::new(entry)
         .with_fetchable(CARD)
         .with_module(
             &format!("{CARD}/root.js"),
@@ -569,7 +648,8 @@ fn serving_data_cards(entry: &str) -> TestViewSpec {
             &format!("{SECOND}/root.js"),
             &super::card_entry(&data_root(SECOND)),
         )
-        .with_style_sheet_probe()
+        .with_style_sheet_probe();
+    with_bts(with_bts(spec, CARD, ""), SECOND, "")
 }
 
 /// Writes `value` (JSON, `null` for a removal) to the host's frame through
@@ -762,5 +842,146 @@ fn a_frame_answers_the_base_methods_and_none_of_its_own() {
             rect.origin.x, rect.origin.y, rect.size.width, rect.size.height
         )
     );
+    assert_eq!(reported(&events), Vec::<&str>::new());
+}
+
+/// A frame's card has a background thread of its own, as in native and in
+/// web-core: a `Worker` at `bobcat:bts` its child realm creates and connects
+/// to the card's BTS boot. It starts with the frame's `data` and
+/// `global-props`; a later write reaches it as `updateCardData` and
+/// `updateGlobalProps` — what re-renders a compiled card once its first
+/// screen is out — after the card's main thread took it; and it shares the
+/// group's `sharedData` with the page's BTS, as native's nested view joins
+/// its parent's group.
+#[test]
+fn a_frames_card_runs_a_background_thread_that_takes_its_data() {
+    let before = "__SetAttribute(frame, 'data', {label: 'first'}); \
+                  __SetAttribute(frame, 'global-props', {message: 'hello'});";
+    let mut engine = serving_data_cards(&host_page_with(CARD, true, before))
+        .with_background_entry(
+            "import { lynx } from 'bobcat:bts-runtime'; \
+             lynx.setSharedData('from', 'page'); console.log('page bts set');",
+        )
+        .create(Arc::new(NoWakeup));
+    let mut events = Vec::new();
+    let text = pump_until_text(&mut engine, &mut events, "first/hello", None);
+    pump_until_logged(
+        &mut engine,
+        &mut events,
+        &format!("bts {CARD} booted first/hello"),
+    );
+    pump_until_logged(&mut engine, &mut events, "page bts set");
+
+    write_frame(&mut engine, "data", r#"{"label":"second"}"#);
+    pump_until_logged(
+        &mut engine,
+        &mut events,
+        &format!("bts {CARD} data second shared page"),
+    );
+    assert_eq!(
+        pump_until_text(&mut engine, &mut events, "second/hello", None),
+        text,
+        "the card's main thread took it too"
+    );
+    write_frame(&mut engine, "globalProps", r#"{"message":"there"}"#);
+    pump_until_logged(&mut engine, &mut events, &format!("bts {CARD} props there"));
+    pump_until_text(&mut engine, &mut events, "second/there", None);
+    assert_eq!(
+        logged_times(&events, &format!("bts {CARD} booted first/hello")),
+        1,
+        "one background thread, which the updates reach"
+    );
+    assert_eq!(reported(&events), Vec::<&str>::new());
+}
+
+/// The card's background thread gets the view's native modules, as native's
+/// nested view inherits its parent's: `bobcat:frame` hands the page realm's
+/// module table to the card, which posts it in its BTS's `initialize`, and
+/// the answer comes back to the frame's BTS through the inbox the view
+/// registered for the worker the child created.
+#[test]
+fn a_frames_card_background_thread_calls_the_views_native_modules() {
+    let spec = TestViewSpec::new(&host_entry(CARD))
+        .with_fetchable(CARD)
+        .with_module(&format!("{CARD}/root.js"), &super::card_entry(&root(CARD)))
+        .with_style_sheet_probe()
+        .with_echo_module("Echo");
+    let mut engine = with_bts(
+        spec,
+        CARD,
+        "NativeModules.Echo.echo('from-frame', (...args) => log('echoed ' + JSON.stringify(args)));",
+    )
+    .create(Arc::new(NoWakeup));
+    let mut events = Vec::new();
+    pump_until_logged(
+        &mut engine,
+        &mut events,
+        &format!(r#"bts {CARD} echoed ["from-frame",null]"#),
+    );
+    assert_eq!(reported(&events), Vec::<&str>::new());
+}
+
+/// Letting go of a frame's card disposes of its background thread before its
+/// realm goes, as both references do: the card's BTS runs its app cleanup
+/// (`callDestroyLifetimeFun`, `ReactLynx`'s `destroyCard`) and acknowledges,
+/// the child terminates it, and only then closes. The child is kept the
+/// while: here the BTS's cleanup holds the worker thread for a while, and
+/// the card's main thread goes on ticking after the cleanup began. Then
+/// both threads stop, and a reconnection boots the card with a new BTS.
+#[test]
+fn a_frames_card_background_thread_is_disposed_before_its_realm_goes() {
+    let spec = TestViewSpec::new(&host_entry(CARD))
+        .with_fetchable(CARD)
+        .with_module(
+            &format!("{CARD}/root.js"),
+            &super::card_entry(&ticking_root()),
+        )
+        .with_style_sheet_probe();
+    let bts_tick = format!("bts {CARD} tick");
+    let mut engine = with_bts(
+        spec,
+        CARD,
+        "setInterval(() => log('tick'), 5); \
+         app.callDestroyLifetimeFun = () => { \
+             log('destroyed'); \
+             const until = Date.now() + 200; while (Date.now() < until); \
+         };",
+    )
+    .create(Arc::new(NoWakeup));
+    let mut events = Vec::new();
+    pump_until_logged(&mut engine, &mut events, &bts_tick);
+    pump_until_ticking(&mut engine, "the card's main thread runs");
+
+    operate(&mut engine, "detach");
+    let destroyed = format!("bts {CARD} destroyed");
+    pump_until_logged(&mut engine, &mut events, &destroyed);
+    let after = pump_for(&mut engine, Duration::from_millis(400));
+    assert!(
+        ticks(&after) > 0,
+        "the card's realm lived on while its BTS disposed: {after:?}"
+    );
+    assert_no_more_ticks(
+        &mut engine,
+        "the card's realm closed after its BTS answered",
+    );
+    let quiet = pump_for(&mut engine, Duration::from_millis(100));
+    assert_eq!(
+        logged_times(&quiet, &bts_tick),
+        0,
+        "the card's BTS was terminated: {quiet:?}"
+    );
+    events.extend(after);
+
+    operate(&mut engine, "attach");
+    let booted = format!("bts {CARD} booted undefined/undefined");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut again = Vec::new();
+    while logged_times(&again, &booted) == 0 || ticks(&again) == 0 {
+        again.extend(pump_for(&mut engine, Duration::from_millis(5)));
+        assert!(Instant::now() < deadline, "no new realm and BTS: {again:?}");
+    }
+    events.extend(again);
+    assert_eq!(logged_times(&events, &booted), 2);
+    assert_eq!(logged_times(&events, &destroyed), 1);
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
