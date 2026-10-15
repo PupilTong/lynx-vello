@@ -163,6 +163,11 @@ unsafe extern "C" {
         export_name: *const c_char,
         value: *const QjsValue,
     ) -> c_int;
+    pub(crate) fn qjs_context_add_host_module_shared_object(
+        context: *mut QjsContext,
+        name: *const c_char,
+        export_name: *const c_char,
+    ) -> c_int;
     pub(crate) fn qjs_context_register_synchronous_loader(
         context: *mut QjsContext,
         name: *const c_char,

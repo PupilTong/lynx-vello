@@ -2945,6 +2945,15 @@ consequential choice about whether to follow the spec or the quirk.
   between a `terminate()` and the script is an import's, that the script does
   not run when the worker has read the `Terminate` before the job that
   completes the script runs.
+- **`lynx.setSharedData`'s store has no prototype** (2026-10-15;
+  `packages/bobcat-element/src/background-thread-runtime.ts`). lynx-core's
+  store is a `{}` on the group's shared JS global, so a key no card set but
+  `Object.prototype` has — `getSharedData('toString')` — answers that member.
+  Here the store is `Object.create(null)` on the runtime's shared object,
+  because every view's BTS is a realm of its own and a `{}` would carry the
+  first view's intrinsics: such a key reads `undefined`. Everything else is
+  lynx-core's: values by reference, and every observer of the group called
+  inside the set.
 - **Accessibility**: Lynx has **no implicit ARIA-like semantic
   roles/focusability** (nothing is focusable/announced unless explicitly
   opted in via `accessibility-element`), and `accessibility-traits` is a flat

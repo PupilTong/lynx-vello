@@ -95,6 +95,12 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   settleFuture: () => { throw new Error("no future in this suite"); },
 }));
 
+// The runtime's shared object, which every worker realm of a group holds by
+// reference: a sibling view's BTS runs this same runtime against it, so the
+// suite stands in for one by reading and writing it directly.
+const sharedObject: Record<PropertyKey, unknown> = Object.create(null);
+rstest.mockRequire("bobcat-internal:worker", () => ({ sharedObject }));
+
 /** What the mock host serves a load from, by the URL it is asked for. */
 const hostFiles = new Map<string, string>();
 /** The bodies among them, as the namespace of the module each one is. */
@@ -1178,6 +1184,73 @@ describe("runtime events and diagnostics", () => {
     mts.console["debug"]?.(circular);
     expect(consoleMessages).toHaveBeenLastCalledWith("debug", "[object Object]");
     expect(toMain).toHaveLength(0);
+  });
+});
+
+describe("lynx shared data", () => {
+  it("stores the value itself, under a property key, in a store with no prototype", () => {
+    const value = {n: 1};
+    bts.setSharedData("user", value);
+    value.n = 2;
+    expect(bts.getSharedData("user")).toBe(value);
+    expect(bts.getSharedData("user")).toEqual({n: 2});
+    const callback = () => "stored";
+    bts.setSharedData("callback", callback);
+    expect(bts.getSharedData("callback")).toBe(callback);
+    bts.setSharedData(7, "seven");
+    expect(bts.getSharedData("7")).toBe("seven");
+    expect(bts.getSharedData("never set")).toBeUndefined();
+    expect(bts.getSharedData("toString")).toBeUndefined();
+  });
+
+  it("keeps the store and the observers on the shared object, where a sibling view's BTS finds them", () => {
+    const store = sharedObject["sharedData"] as Record<string, unknown>;
+    const observers = sharedObject["sharedDataObservers"] as unknown[];
+    bts.setSharedData("theme", "dark");
+    expect(store["theme"]).toBe("dark");
+    // What a sibling view's set leaves, and an observer its BTS registered.
+    store["fromSibling"] = "light";
+    expect(bts.getSharedData("fromSibling")).toBe("light");
+    const siblingObserver = rstest.fn();
+    observers.push(siblingObserver);
+    bts.setSharedData("theme", "light");
+    expect(siblingObserver).toHaveBeenCalledExactlyOnceWith({theme: "light"});
+    bts.removeSharedDataObserver(siblingObserver);
+    expect(observers).toEqual([]);
+  });
+
+  it("calls the observers in order with the value itself, and logs one that throws", () => {
+    consoleMessages.mockClear();
+    const value = {n: 1};
+    const changes: unknown[] = [];
+    const calls: string[] = [];
+    const first = (change: {k: unknown}) => { calls.push("first"); changes.push(change.k); };
+    const throwing = () => { calls.push("throwing"); throw new Error("observer failed"); };
+    const last = () => { calls.push("last"); };
+    const observers = [first, "not a function", throwing, last];
+    for (const observer of observers) bts.registerSharedDataObserver(observer);
+    bts.setSharedData("k", value);
+    expect(calls).toEqual(["first", "throwing", "last"]);
+    expect(changes[0]).toBe(value);
+    expect(consoleMessages).toHaveBeenCalledExactlyOnceWith(
+      "log", "SharedData change and notifyDataChange error info:Error: observer failed",
+    );
+    for (const observer of observers) bts.removeSharedDataObserver(observer);
+  });
+
+  it("logs a second registration of one observer and the removal of an unknown one", () => {
+    consoleMessages.mockClear();
+    const observer = rstest.fn();
+    bts.registerSharedDataObserver(observer);
+    bts.registerSharedDataObserver(observer);
+    bts.setSharedData("once", 1);
+    bts.removeSharedDataObserver(observer);
+    bts.removeSharedDataObserver(observer);
+    expect(observer).toHaveBeenCalledExactlyOnceWith({once: 1});
+    expect(consoleMessages.mock.calls).toEqual([
+      ["log", "Subject: Observer has been attached already."],
+      ["log", "Subject: Nonexistent observer."],
+    ]);
   });
 });
 

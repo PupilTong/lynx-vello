@@ -57,6 +57,12 @@ pub(super) struct WorkerFlags {
 /// read is also how the thread learns that the whole module has run in this
 /// realm, which is what [`WorkerFlags::scope_installed`] records.
 ///
+/// `sharedObject` is the runtime's shared object: the same reference in
+/// every worker realm of the group, and the one value a realm reaches in
+/// another without a host function in between. `bobcat:bts-runtime` keeps
+/// lynx-core's `sharedData` and its observers on it, as lynx-core keeps them
+/// on the JS global a native group's cards share.
+///
 /// There is no document member here and no way to add one: this realm is on
 /// another runtime, on another thread, and the document is neither `Send` nor
 /// reachable from anything the closures below capture. The native-module
@@ -97,6 +103,8 @@ pub(super) fn install_worker_members(
             Ok(HostValue::Undefined)
         }),
     )?;
+
+    engine.register_host_module_shared_object(WORKER_HOST_MODULE_SPECIFIER, "sharedObject")?;
 
     let closing = Rc::new(Cell::new(false));
     let closer = Rc::clone(&closing);

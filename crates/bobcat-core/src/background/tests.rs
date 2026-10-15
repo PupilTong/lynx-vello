@@ -244,6 +244,38 @@ impl Group {
         self.start_worker(view, "lynx-bg", BTS_MODULE_SPECIFIER, posted)
     }
 
+    /// Names one BTS on a view, initializes it with an entry at
+    /// `app:///bts<key>.js` and answers that entry with `source`, which
+    /// imports `bobcat:bts-runtime` for its `lynx`.
+    fn background_running(&mut self, view: usize, source: &str) -> WorkerKey {
+        let key = self.construct_background(view);
+        let url = format!("app:///bts{}.js", key.get());
+        self.send(
+            key,
+            WorkerMessage::Post(wire_value(&format!(
+                r#"({{bobcat: "runtime", method: "initialize", entry: "{url}"}})"#
+            ))),
+        );
+        self.views[view]
+            .request_for(&url)
+            .complete(Ok(LoadedSource::Module {
+                source: source.to_owned(),
+                url,
+            }));
+        key
+    }
+
+    /// Emits the global event `name` with no arguments in the BTS `key`, as
+    /// the main thread's `sendGlobalEvent` does.
+    fn global_event(&self, key: WorkerKey, name: &str) {
+        self.send(
+            key,
+            WorkerMessage::Post(wire_value(&format!(
+                r#"({{bobcat: "runtime", method: "sendGlobalEvent", name: "{name}", args: []}})"#
+            ))),
+        );
+    }
+
     /// Sends one `Start` on a view, as `createWorker` builds it for `url`,
     /// and keeps the sending end of the new worker's message channel, into
     /// which `posted` is sent first.
@@ -1379,6 +1411,137 @@ const handle = setInterval(() => {
     assert_eq!(group.message(0), HostValue::Number(3.0));
 }
 
+/// `lynx.setSharedData` stores on the runtime's shared object, which every
+/// BTS of the group holds by reference: another view reads the object that
+/// was set, sees a mutation made after the set, and can call a function
+/// another view stored.
+#[test]
+fn a_bts_reads_what_another_views_bts_set_as_itself() {
+    let mut group = Group::new();
+    let setting = group.background_running(
+        0,
+        r"
+        import { lynx } from 'bobcat:bts-runtime';
+        const value = {n: 1};
+        lynx.setSharedData('user', value);
+        lynx.setSharedData('greet', () => 'from view 0');
+        lynx.getJSModule('GlobalEventEmitter').addListener('mutate', () => {
+            value.n = 2;
+            postMessage('mutated');
+        });
+        postMessage('set');
+    ",
+    );
+    assert_eq!(group.message(0), wire("set"));
+    let reading = group.background_running(
+        1,
+        r"
+        import { lynx } from 'bobcat:bts-runtime';
+        lynx.getJSModule('GlobalEventEmitter').addListener('read', () => {
+            const user = lynx.getSharedData('user');
+            postMessage(JSON.stringify([
+                user,
+                user === lynx.getSharedData('user'),
+                lynx.getSharedData('greet')(),
+            ]));
+        });
+        postMessage('ready');
+    ",
+    );
+    assert_eq!(group.message(1), wire("ready"));
+    group.global_event(setting, "mutate");
+    assert_eq!(group.message(0), wire("mutated"));
+    group.global_event(reading, "read");
+    assert_eq!(group.message(1), wire(r#"[{"n":2},true,"from view 0"]"#));
+}
+
+/// The observer list is on the shared object too, so a set in one view
+/// calls every observer of the group inside the set, in registration order:
+/// the other view's observer marks the change before the setter's own
+/// observer, registered after it, reads it. That observer's `postMessage`
+/// reaches its own view, although it runs in the setter's task. Once it is
+/// removed, the next set calls the setter's alone.
+#[test]
+fn a_set_calls_every_observer_of_the_group_inside_the_set() {
+    let mut group = Group::new();
+    let observing = group.background_running(
+        1,
+        r"
+        import { lynx } from 'bobcat:bts-runtime';
+        const observer = change => {
+            change.seenBy = 'view 1';
+            postMessage('observed ' + JSON.stringify(change));
+        };
+        lynx.registerSharedDataObserver(observer);
+        lynx.getJSModule('GlobalEventEmitter').addListener('stop', () => {
+            lynx.removeSharedDataObserver(observer);
+            postMessage('stopped');
+        });
+        postMessage('observing');
+    ",
+    );
+    assert_eq!(group.message(1), wire("observing"));
+    let setting = group.background_running(
+        0,
+        r"
+        import { lynx } from 'bobcat:bts-runtime';
+        const own = [];
+        lynx.registerSharedDataObserver(change => own.push(JSON.stringify(change)));
+        let count = 0;
+        lynx.getJSModule('GlobalEventEmitter').addListener('set', () => {
+            count += 1;
+            lynx.setSharedData('theme', {count});
+            postMessage('own ' + own.splice(0).join(' '));
+        });
+        postMessage('ready');
+    ",
+    );
+    assert_eq!(group.message(0), wire("ready"));
+
+    group.global_event(setting, "set");
+    assert_eq!(
+        group.message(1),
+        wire(r#"observed {"theme":{"count":1},"seenBy":"view 1"}"#)
+    );
+    assert_eq!(
+        group.message(0),
+        wire(r#"own {"theme":{"count":1},"seenBy":"view 1"}"#)
+    );
+
+    group.global_event(observing, "stop");
+    assert_eq!(group.message(1), wire("stopped"));
+    group.global_event(setting, "set");
+    assert_eq!(group.message(0), wire(r#"own {"theme":{"count":2}}"#));
+}
+
+/// The shared object goes with the group's last worker realm, as native's
+/// shared JS context goes with the group's last view and web-core's group
+/// worker with its last card: a BTS started after every earlier one has
+/// ended reads nothing of theirs.
+#[test]
+fn the_shared_data_goes_with_the_groups_last_worker() {
+    let mut group = Group::new();
+    group.background_running(
+        0,
+        r"
+        import { lynx } from 'bobcat:bts-runtime';
+        lynx.setSharedData('color', 'green');
+        postMessage(String(lynx.getSharedData('color')));
+    ",
+    );
+    assert_eq!(group.message(0), wire("green"));
+    group.release(0);
+    group.wait_for_workers_to_end(0, PATIENCE, "the released view's BTS ended");
+    group.background_running(
+        1,
+        r"
+        import { lynx } from 'bobcat:bts-runtime';
+        postMessage(String(lynx.getSharedData('color')));
+    ",
+    );
+    assert_eq!(group.message(1), wire("undefined"));
+}
+
 #[test]
 fn two_views_over_one_url_each_run_their_own_bytes() {
     let mut group = Group::new();
@@ -1678,7 +1841,12 @@ fn a_worker_realm_declares_these_host_members() {
         "testFuture",
         "waitFuture",
     ];
-    let worker = ["closeWorker", "postWorkerMessage", "workerName"];
+    let worker = [
+        "closeWorker",
+        "postWorkerMessage",
+        "sharedObject",
+        "workerName",
+    ];
     let native_modules = ["invokeNativeModule"];
     assert_eq!(
         group.message(0),

@@ -573,6 +573,22 @@ impl ScriptEngine {
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
     }
 
+    /// Adds the runtime's shared object as a named export of a native ESM
+    /// module: the one object every realm of this runtime it is added to
+    /// holds by reference, so what one realm stores on it another reads as
+    /// itself. Registered when [`Self::register_host_module_function`]
+    /// registers; see the bridge's `register_host_module_shared_object` for
+    /// how long the object lives.
+    pub(crate) fn register_host_module_shared_object(
+        &mut self,
+        module_specifier: &str,
+        export_name: &str,
+    ) -> Result<(), ScriptError> {
+        self.realm
+            .register_host_module_shared_object(module_specifier, export_name)
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
+    }
+
     /// Installs one synchronous source loader as a named export of a native
     /// ESM module: the realm asks it for a URL and gets back the compiled
     /// source, and the text never becomes a JavaScript value.

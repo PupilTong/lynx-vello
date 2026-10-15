@@ -369,6 +369,12 @@ interface BobcatWorkerNative {
    * message only to a realm in which it has.
    */
   workerName(): string;
+  /**
+   * The runtime's shared object: one null-prototype object, the same
+   * reference in every worker realm of the group, so what one realm stores
+   * on it another reads as itself. It lives while any of those realms does.
+   */
+  sharedObject: Record<PropertyKey, unknown>;
 }
 
 declare module "bobcat-internal:host" {
@@ -648,6 +654,7 @@ declare module "bobcat-internal:worker" {
   export const postWorkerMessage: BobcatWorkerNative["postWorkerMessage"];
   export const closeWorker: BobcatWorkerNative["closeWorker"];
   export const workerName: BobcatWorkerNative["workerName"];
+  export const sharedObject: BobcatWorkerNative["sharedObject"];
 }
 
 /**

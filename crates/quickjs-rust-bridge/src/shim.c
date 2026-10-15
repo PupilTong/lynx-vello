@@ -173,6 +173,11 @@ typedef struct QjsRuntime {
        At zero no body of any realm on this runtime is part-way through, and
        a module this runtime has is therefore safe to link or evaluate. */
     int evaluation_depth;
+    /* The one object every realm given it shares by reference, and how many
+       live realms have been given it; `JS_UNDEFINED` while none has. See
+       `qjs_context_add_host_module_shared_object`. */
+    JSValue shared_object;
+    size_t shared_object_holders;
 } QjsRuntime;
 
 
@@ -265,6 +270,9 @@ struct QjsContext {
     /* How objects of other realms name this one; made the first time one
        needs to. */
     QjsRealmToken *token;
+    /* Whether this realm was given the runtime's shared object, and so is
+       one of the holders its release counts down. */
+    int holds_shared_object;
 };
 
 
@@ -1134,6 +1142,7 @@ QjsRuntime *qjs_runtime_new(JSClassID host_owner_class_id,
     JS_SetModuleLoaderFunc2(runtime->raw, qjs_module_normalize, qjs_module_loader,
                             qjs_check_module_attributes, runtime);
     JS_SetModuleLoadDeferrer(runtime->raw, qjs_defer_module, runtime);
+    runtime->shared_object = JS_UNDEFINED;
     runtime->host_owner_class_id = host_owner_class_id;
     runtime->shadow_realm_class_id = shadow_realm_class_id;
     runtime->realm_link_class_id = realm_link_class_id;
@@ -1168,6 +1177,7 @@ void qjs_runtime_free(QjsRuntime *runtime) {
         free(current);
         current = next;
     }
+    JS_FreeValueRT(runtime->raw, runtime->shared_object);
     JS_FreeRuntime(runtime->raw);
     qjs_module_sources_free(runtime->module_sources);
     qjs_host_module_names_free(runtime->host_module_names);
@@ -1258,6 +1268,14 @@ void qjs_context_free(QjsContext *context) {
     }
     qjs_rejections_drop_context(context->runtime, context);
     qjs_host_modules_free(context, context->host_modules);
+    /* The export above was this realm's reference; the runtime's own goes
+       with its last holder, before the collection below, so what the object
+       kept alive is collected with this realm. */
+    if (context->holds_shared_object &&
+        --context->runtime->shared_object_holders == 0) {
+        JS_FreeValueRT(context->runtime->raw, context->runtime->shared_object);
+        context->runtime->shared_object = JS_UNDEFINED;
+    }
     qjs_module_instances_free(context->module_instances);
     qjs_module_sources_free(context->module_sources);
     while (context->deferred_imports != NULL) {
@@ -1360,6 +1378,40 @@ int qjs_context_add_host_module_export(QjsContext *context, const char *name,
                                        const char *export_name,
                                        const QjsValue *value) {
     return qjs_add_host_module_export(context, name, export_name, value->value);
+}
+
+/* Adds the runtime's shared object as one export of a native module of this
+   realm: one object with a null prototype, so it names no realm's
+   intrinsics, and the same reference in every realm of the runtime that is
+   given it. It is the only value one realm can reach in another without a
+   host function between them. The runtime keeps it while any realm it was
+   given to is alive; the next realm given it after the last of those is
+   freed gets a new, empty one. */
+int qjs_context_add_host_module_shared_object(QjsContext *context,
+                                              const char *name,
+                                              const char *export_name) {
+    QjsRuntime *runtime = context->runtime;
+    int status;
+
+    if (JS_IsUndefined(runtime->shared_object)) {
+        JSValue object = JS_NewObjectProto(context->raw, JS_NULL);
+        if (JS_IsException(object)) {
+            JS_FreeValue(context->raw, JS_GetException(context->raw));
+            return -1;
+        }
+        runtime->shared_object = object;
+    }
+    status = qjs_add_host_module_export(context, name, export_name,
+                                        runtime->shared_object);
+    if (status == 0 && !context->holds_shared_object) {
+        context->holds_shared_object = 1;
+        runtime->shared_object_holders += 1;
+    }
+    if (runtime->shared_object_holders == 0) {
+        JS_FreeValueRT(runtime->raw, runtime->shared_object);
+        runtime->shared_object = JS_UNDEFINED;
+    }
+    return status;
 }
 
 QjsValue *qjs_module_namespace(QjsContext *context, const char *name) {

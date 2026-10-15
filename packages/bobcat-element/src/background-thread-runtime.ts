@@ -18,6 +18,7 @@ import { console, reportError } from "bobcat:diagnostics";
 import type { TimerGlobals } from "bobcat:timers";
 import { cancelAnimationFrame, clearAnimationFrames, requestAnimationFrame } from "bobcat:animation-frame";
 import { createSystemInfo } from "bobcat:system-info";
+import { sharedObject } from "bobcat-internal:worker";
 
 const timers = globalThis as unknown as TimerGlobals;
 
@@ -243,6 +244,36 @@ function noop() {
 }
 
 /**
+ * lynx-core's `nativeGlobal.sharedData` and `nativeGlobal.shareDataSubject`,
+ * kept where every BTS of the group reaches them: on the runtime's shared
+ * object, which is one reference in every worker realm of the group, as
+ * lynx-core's JS global is one object for every card of a native group. The
+ * first BTS to run makes both; the rest find them. Values are stored as
+ * they are, so a view reads the object another set, and an observer
+ * registered in one view runs inside a set made in another.
+ *
+ * The store has a null prototype, so a key such as `toString` reads nothing
+ * where lynx-core's `{}` reads `Object.prototype`'s member, and it names no
+ * realm's intrinsics. The observer list is lynx-core's `ShareDataSubject`:
+ * registration order, a non-function entry kept and skipped, and an
+ * observer that throws logged with the rest still called.
+ */
+const shared = sharedObject as {
+  sharedData?: Record<PropertyKey, unknown>;
+  sharedDataObservers?: unknown[];
+};
+const sharedData = shared.sharedData ??= Object.create(null) as Record<PropertyKey, unknown>;
+const sharedDataObservers = shared.sharedDataObservers ??= [];
+
+function notifySharedDataObservers(change: Record<PropertyKey, unknown>) {
+  sharedDataObservers.forEach(observer => {
+    if (typeof observer !== "function") return;
+    try { observer(change); }
+    catch (error) { console["log"]?.("SharedData change and notifyDataChange error info:" + error); }
+  });
+}
+
+/**
  * Arms this realm as the BTS: the first `initialize` message initializes it
  * and then calls `loadEntry` with that message, which is where `bobcat:bts`
  * reads the entry's URL from.
@@ -412,6 +443,33 @@ export const lynx = {
   __globalProps: {} as unknown,
   getJSModule: app.getJSModule,
   registerModule: app.registerModule,
+  /**
+   * lynx-core's members over the group's store: a set stores the value
+   * itself and calls every observer of the group, this view's or another's,
+   * before it returns, with `{[key]: value}`.
+   */
+  setSharedData(dataKey: PropertyKey, dataVal: unknown) {
+    sharedData[dataKey] = dataVal;
+    notifySharedDataObservers({ [dataKey]: dataVal });
+  },
+  getSharedData(dataKey: PropertyKey): unknown {
+    return sharedData[dataKey];
+  },
+  registerSharedDataObserver(callback: unknown) {
+    if (sharedDataObservers.includes(callback)) {
+      console["log"]?.("Subject: Observer has been attached already.");
+      return;
+    }
+    sharedDataObservers.push(callback);
+  },
+  removeSharedDataObserver(callback: unknown) {
+    const index = sharedDataObservers.indexOf(callback);
+    if (index === -1) {
+      console["log"]?.("Subject: Nonexistent observer.");
+      return;
+    }
+    sharedDataObservers.splice(index, 1);
+  },
   // A leveled diagnostic, reported by this realm directly: no `error` event,
   // and nothing sent to the main thread.
   reportError,
