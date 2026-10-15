@@ -185,6 +185,9 @@ jobs:
           --test decode_web_bundle --test zip_source --locked -Z build-std=std,panic_abort
 
       - name: Test the bobcat-wasm package scripts
+        # These unit tests take seconds; leaked MessagePorts must not hold a
+        # runner (and the main CI concurrency group) for the six-hour default.
+        timeout-minutes: 2
         run: pnpm --filter bobcat-wasm test
 
       - name: Build the Explorer homepage for the Canvas tab
