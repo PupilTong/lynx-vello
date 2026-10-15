@@ -7720,57 +7720,7 @@ fn an_engine_name_nothing_answers_fails_in_the_realm_without_a_request() {
 /// under `bobcat-internal:host`, which only this realm kind has.
 #[test]
 fn an_mts_realm_declares_these_host_members() {
-    let expected = [
-        "adoptStyleSheet",
-        "attributeNames",
-        "callElementMethod",
-        "childElementIds",
-        "clearTimer",
-        "createDocument",
-        "createElement",
-        "createPage",
-        "createWorker",
-        "dropElement",
-        "exposureEvents",
-        "fetchResource",
-        "flushElementTree",
-        "getAttribute",
-        "getComputedStyleMap",
-        "globalProps",
-        "hasStyleSheet",
-        "initData",
-        "initialProcessor",
-        "insertBefore",
-        "listenerNameClosed",
-        "listenerNameOpened",
-        "loadModuleSync",
-        "logScriptMessage",
-        "nativeModuleTable",
-        "parentNode",
-        "preloadStyleSheet",
-        "queryElementIds",
-        "removeAttribute",
-        "removeElement",
-        "replaceElement",
-        "reportScriptError",
-        "requestScriptFrame",
-        "resolveModuleUrl",
-        "sendWorkerMessage",
-        "setAttribute",
-        "setInlineStyleProperty",
-        "setInlineStyles",
-        "setTimer",
-        "settleFuture",
-        "supportsStyleProperty",
-        "swapElement",
-        "switchExposure",
-        "tagName",
-        "takeFuture",
-        "terminateWorker",
-        "testFuture",
-        "waitFuture",
-    ]
-    .join(",");
+    let expected = MTS_HOST_MEMBERS.join(",");
     let native_modules = "invokeNativeModule";
     let (mut js, mut runtime, _elements) = runtime();
     runtime
@@ -7798,6 +7748,90 @@ fn an_mts_realm_declares_these_host_members() {
         )
         .unwrap();
 }
+
+/// What a `ShadowRealm` child of the MTS realm exports under
+/// `bobcat-internal:host`: every member of the page realm's but the three
+/// `Worker` members, and no `bobcat-internal:native-modules` at all.
+#[test]
+fn a_frame_realm_declares_the_page_members_but_the_worker_ones() {
+    let expected = MTS_HOST_MEMBERS
+        .iter()
+        .filter(|name| !["createWorker", "sendWorkerMessage", "terminateWorker"].contains(name))
+        .copied()
+        .collect::<Vec<_>>()
+        .join(",");
+    let (mut js, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            &format!(
+                r"
+        const members = await new Promise(resolve => new ShadowRealm().evaluate(`report => {{
+            import('bobcat-internal:host').then(H => report(Object.keys(H).join(',')));
+        }}`)(resolve));
+        if (members !== '{expected}') throw Error(members);
+    "
+            ),
+            "app:///frame-members.js",
+        )
+        .unwrap();
+}
+
+/// The page realm's `bobcat-internal:host` exports, sorted as a namespace
+/// lists them.
+const MTS_HOST_MEMBERS: [&str; 51] = [
+    "adoptStyleSheet",
+    "attributeNames",
+    "callElementMethod",
+    "childElementIds",
+    "clearTimer",
+    "closeRealm",
+    "createDocument",
+    "createElement",
+    "createPage",
+    "createWorker",
+    "dropElement",
+    "exposureEvents",
+    "fetchResource",
+    "flushElementTree",
+    "framePage",
+    "getAttribute",
+    "getComputedStyleMap",
+    "globalProps",
+    "hasStyleSheet",
+    "initData",
+    "initialProcessor",
+    "insertBefore",
+    "listenerNameClosed",
+    "listenerNameOpened",
+    "loadModuleSync",
+    "logScriptMessage",
+    "nativeModuleTable",
+    "parentNode",
+    "preloadStyleSheet",
+    "queryElementIds",
+    "removeAttribute",
+    "removeElement",
+    "replaceElement",
+    "reportScriptError",
+    "requestScriptFrame",
+    "resetFrame",
+    "resolveModuleUrl",
+    "sendWorkerMessage",
+    "setAttribute",
+    "setInlineStyleProperty",
+    "setInlineStyles",
+    "setTimer",
+    "settleFuture",
+    "supportsStyleProperty",
+    "swapElement",
+    "switchExposure",
+    "tagName",
+    "takeFuture",
+    "terminateWorker",
+    "testFuture",
+    "waitFuture",
+];
 
 /// The card's one element, the page element's first child: the element
 /// every exposure test below registers.
@@ -8504,32 +8538,481 @@ fn the_main_thread_realm_has_shadow_realms() {
     assert_eq!(runtime.child_realms(), 1);
 }
 
-/// A child has the realm core members under `bobcat-internal:host` and
-/// nothing of the MTS realm's kind: `bobcat:timers` links in it, and
-/// `bobcat:element`, which needs the document members, does not — a failure
-/// the parent's `importValue` rejects with a `TypeError` of its own.
+/// A function the page realm's tests define to make a `ShadowRealm` child
+/// with `bobcat:element` and `bobcat-internal:host` loaded in it, as `E` and
+/// `H` on the child's own global: what `bobcat:frame-boot` imports, reached
+/// here through `evaluate`.
+///
+/// `bobcat:runtime` first, as the boot module imports it: it and
+/// `bobcat:element` import each other, and the order is what lets
+/// `bobcat:element` evaluate ahead of the module that reads its classes.
+const FRAME_REALM: &str = r"
+async function frameRealm() {
+    const realm = new ShadowRealm();
+    await new Promise((resolve, reject) => realm.evaluate(`(resolve, reject) => {
+        import('bobcat:runtime').then(() => Promise.all([
+            import('bobcat:element'),
+            import('bobcat-internal:host'),
+        ])).then(
+            ([element, host]) => { globalThis.E = element; globalThis.H = host; resolve(); },
+            error => reject(String(error && error.message || error)),
+        );
+    }`)(resolve, reject));
+    return realm;
+}
+";
+
+/// A child of the MTS realm has the core members and the document members
+/// the page realm has, over the same document and as the same code:
+/// `bobcat:timers` and `bobcat:element` both link in it, and its
+/// `createPage` is the document's `page`, as the page realm's is. Its
+/// startup strings answer `undefined`; the `Worker` members and
+/// `bobcat-internal:native-modules` are the page realm's alone.
 #[test]
-fn a_shadow_realm_links_the_core_built_ins_and_not_the_document_ones() {
+fn a_shadow_realm_links_the_document_built_ins() {
+    let (mut js, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            &format!(
+                r"{FRAME_REALM}
+        import {{ createPage }} from 'bobcat-internal:host';
+        const realm = await frameRealm();
+        const run = await realm.importValue('bobcat:timers', '__BobcatRunTimer');
+        if (typeof run !== 'function') throw Error('bobcat:timers did not link: ' + typeof run);
+        if (realm.evaluate('typeof setTimeout') !== 'function') throw Error('no child setTimeout');
+        if (realm.evaluate('H.createPage()') !== createPage()) throw Error('two createPages');
+        for (const name of ['initData', 'globalProps', 'initialProcessor', 'nativeModuleTable']) {{
+            if (realm.evaluate(`H.${{name}}()`) !== undefined) throw Error(name + ' answered');
+        }}
+        for (const name of ['createWorker', 'sendWorkerMessage', 'terminateWorker']) {{
+            if (realm.evaluate(`typeof H.${{name}}`) !== 'undefined') throw Error(name + ' installed');
+        }}
+        let failed;
+        try {{
+            await realm.importValue('bobcat:native-modules', 'callNativeModule');
+        }} catch (error) {{
+            failed = error;
+        }}
+        if (!(failed instanceof TypeError)) throw Error('native modules linked: ' + failed);
+    "
+            ),
+            "app:///shadow-realm-imports.js",
+        )
+        .unwrap();
+}
+
+/// The page realm cannot close itself, and its `createPage` is the
+/// document's `page`, as before frames existed.
+#[test]
+fn the_page_realm_cannot_close_itself() {
+    let (mut js, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        import { closeRealm, createPage } from 'bobcat-internal:host';
+        let refused;
+        try { closeRealm(); } catch (error) { refused = error.message; }
+        if (refused !== 'the page realm cannot close itself') throw Error(refused);
+        if (__GetElementUniqueID(__CreatePage()) !== createPage()) throw Error('two pages');
+        globalThis.page = createPage();
+    ",
+            "app:///page-closes-nothing.js",
+        )
+        .unwrap();
+    assert_eq!(elements.tree().document_element().id(), node_id(2));
+}
+
+/// The first element child of the document's page: the frame the page
+/// realm's script appended first.
+fn first_frame(tree: &LynxDocument) -> dom::NodeId {
+    tree.document_element()
+        .children()
+        .find(|child| child.tag_name() == Some("frame"))
+        .map(dom::Node::id)
+        .expect("the page holds a frame")
+}
+
+/// The nested page the `frame` component built in `frame`'s shadow root.
+fn frame_page_of(tree: &LynxDocument, frame: dom::NodeId) -> dom::NodeId {
+    let page = nested_page(tree, frame).expect("a frame holds its nested page");
+    let node = tree.get(page).expect("live");
+    assert_eq!(node.tag_name(), Some("page"));
+    assert_eq!(node.attribute("part"), Some("page"));
+    page
+}
+
+/// A child handed a frame's nested page renders into it: `framePage` reads
+/// the page the component built, `__BobcatUsePageRoot` makes it what the
+/// child's `__CreatePage` answers, what the child builds under it lands in
+/// the frame's box, and the child's flush — the page realm's flush, the same
+/// code — commits it.
+#[test]
+fn a_child_renders_under_the_nested_page_it_was_handed() {
+    let (mut js, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            &format!(
+                r"{FRAME_REALM}
+        const page = __CreatePage();
+        const spacer = __CreateView(0);
+        __SetInlineStyles(spacer, 'height:20px');
+        __AppendElement(page, spacer);
+        const frame = __CreateElement('frame', 0);
+        __SetInlineStyles(frame, 'width:100px;height:50px');
+        __AppendElement(page, frame);
+        __FlushElementTree();
+        globalThis.realm = await frameRealm();
+        const nested = realm.evaluate(`frame => {{
+            const page = H.framePage(frame);
+            if (H.framePage(frame) !== page) throw Error('framePage moved');
+            E.__BobcatUsePageRoot(page);
+            const own = E.__CreatePage();
+            if (E.__GetElementUniqueID(own) !== page) throw Error('createPage is not the nested page');
+            if (E.__CreatePage() !== own) throw Error('two page handles');
+            let again;
+            try {{ E.__BobcatUsePageRoot(page); }} catch (error) {{ again = error.message; }}
+            if (!again.includes('already chosen')) throw Error('chosen twice: ' + again);
+            const text = E.__CreateText(0);
+            E.__AppendElement(text, E.__CreateRawText('hi'));
+            E.__AppendElement(own, text);
+            E.__FlushElementTree();
+            return page;
+        }}`)(__GetElementUniqueID(frame));
+        if (typeof nested !== 'number') throw Error('framePage answered ' + nested);
+    "
+            ),
+            "app:///frame-page.js",
+        )
+        .unwrap();
+    let tree = elements.tree();
+    let frame = first_frame(&tree);
+    let page = frame_page_of(&tree, frame);
+    let text = tree
+        .get(page)
+        .and_then(|page| page.children().find(|child| child.is_element()))
+        .map(dom::Node::id)
+        .expect("the child's text is under the nested page");
+    assert_eq!(tree.get(text).and_then(dom::Node::tag_name), Some("text"));
+
+    let frame_box = tree
+        .bounding_client_rect(frame)
+        .expect("the frame has a box");
+    assert_eq!(
+        (
+            frame_box.origin.y,
+            frame_box.size.width,
+            frame_box.size.height
+        ),
+        (20.0, 100.0, 50.0)
+    );
+    // The UA sheet's `page` rule fills the frame, as web-core's
+    // `[part="page"]` does.
+    assert_eq!(
+        tree.bounding_client_rect(page).expect("laid out"),
+        frame_box,
+        "the nested page fills the frame"
+    );
+    let text_box = tree.bounding_client_rect(text).expect("the text has a box");
+    assert!(
+        frame_box.contains_rect(&text_box) && text_box.size.height > 0.0,
+        "the child's text lays out inside the frame: {text_box:?} in {frame_box:?}"
+    );
+    assert!(
+        !tree.needs_render(),
+        "the child's flush committed what it built"
+    );
+}
+
+/// Every refusal `framePage` makes is a JavaScript exception and the view
+/// goes on: a node that is not a frame, an id that names nothing any more,
+/// and one that never named anything. It is a member of every realm.
+#[test]
+fn frame_page_refuses_what_is_no_frame() {
     let (mut js, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
             &mut js,
             r"
-        const realm = new ShadowRealm();
-        const run = await realm.importValue('bobcat:timers', '__BobcatRunTimer');
-        if (typeof run !== 'function') throw Error('bobcat:timers did not link: ' + typeof run);
-        if (realm.evaluate('typeof setTimeout') !== 'function') throw Error('no child setTimeout');
-        let failed;
-        try {
-            await realm.importValue('bobcat:element', 'Document');
-        } catch (error) {
-            failed = error;
-        }
-        if (!(failed instanceof TypeError)) throw Error('bobcat:element linked: ' + failed);
-        // The link names a member of the MTS realm's own host module.
-        if (!failed.message.includes('bobcat-internal:host')) throw Error(failed.message);
+        import { createElement, dropElement, framePage } from 'bobcat-internal:host';
+        const view = __CreateView(0);
+        __AppendElement(__CreatePage(), view);
+        const gone = createElement('frame');
+        dropElement(gone);
+        const outcomes = [__GetElementUniqueID(view), gone, 2 ** 50].map(id => {
+            try { return String(framePage(id)); } catch (error) { return 'refused: ' + error.message; }
+        });
+        const expected = ['requires a frame element', 'stale element id', 'is no element id'];
+        expected.forEach((message, index) => {
+            if (!outcomes[index].startsWith('refused: ') || !outcomes[index].includes(message))
+                throw Error(index + ': ' + outcomes[index]);
+        });
+        // A detached frame has its nested page already.
+        if (!(framePage(createElement('frame')) > 0)) throw Error('a detached frame has no page');
     ",
-            "app:///shadow-realm-imports.js",
+            "app:///frame-page-refusals.js",
         )
         .unwrap();
+}
+
+/// Frames nest — each one in the nested page of the one before — and
+/// `framePage` answers for the eighth frame deep and refuses the ninth, so
+/// a card that embeds itself stops there. Nothing about it is a child's:
+/// the page realm builds the whole chain.
+#[test]
+fn frame_page_refuses_past_eight_frames_deep() {
+    let (mut js, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        import { createElement, framePage, insertBefore } from 'bobcat-internal:host';
+        const frames = [__CreateElement('frame', 0)];
+        __AppendElement(__CreatePage(), frames[0]);
+        let parent = framePage(__GetElementUniqueID(frames[0]));
+        const ids = [__GetElementUniqueID(frames[0])];
+        for (let depth = 2; depth <= 9; ++depth) {
+            const frame = createElement('frame');
+            insertBefore(parent, frame, undefined);
+            ids.push(frame);
+            if (depth < 9) parent = framePage(frame);
+        }
+        let refused;
+        try { framePage(ids[8]); } catch (error) { refused = error.message; }
+        if (!refused || !refused.includes('frames nest at most 8 deep')) throw Error(refused);
+    ",
+            "app:///nested-frames.js",
+        )
+        .unwrap();
+}
+
+/// A child's adoption names the frame's shadow root, and mounts there: a
+/// `.box` inside the frame takes the sheet, and the host's own `.box` does
+/// not. A target that is no shadow root is refused before anything is
+/// requested. `resetFrame` then frees what the child built under the nested
+/// page and removes the sheet, and the nested page stays.
+#[test]
+#[expect(clippy::float_cmp, reason = "rounded widths are exact CSS pixels")]
+fn a_frames_sheet_styles_its_shadow_tree_alone_until_the_frame_is_reset() {
+    for text in [true, false] {
+        let (mut js, mut runtime, elements, far) = runtime_over_watching_names(ingredients());
+        let mut notices = far.0.notices;
+        let host = std::thread::spawn(move || {
+            let (url, completion) = requested_stylesheet(&mut notices);
+            assert_eq!(url, "app:///frame.css");
+            completion.complete(Ok(sheet_source(text, "40px")));
+        });
+        runtime
+            .run_main_thread_script(
+                &mut js,
+                &format!(
+                    r"{FRAME_REALM}
+            const page = __CreatePage();
+            const box = __CreateView(0);
+            __SetClasses(box, 'box');
+            __SetInlineStyles(box, 'height:10px');
+            __AppendElement(page, box);
+            const frame = __CreateElement('frame', 0);
+            __SetInlineStyles(frame, 'width:100px;height:50px');
+            __AppendElement(page, frame);
+            __FlushElementTree();
+            globalThis.frame = frame;
+            const realm = await frameRealm();
+            globalThis.realm = realm;
+            realm.evaluate(`frame => {{
+                const page = H.framePage(frame);
+                E.__BobcatUsePageRoot(page);
+                let refused;
+                try {{ H.adoptStyleSheet('app:///frame.css', page); }}
+                catch (error) {{ refused = error.message; }}
+                if (!refused.includes('is not a live shadow root')) throw Error(refused);
+                const inner = E.__CreateView(0);
+                E.__SetClasses(inner, 'box');
+                E.__SetInlineStyles(inner, 'height:10px');
+                E.__AppendElement(E.__CreatePage(), inner);
+                H.adoptStyleSheet('app:///frame.css', H.parentNode(page));
+                E.__FlushElementTree();
+            }}`)(__GetElementUniqueID(frame));
+        "
+                ),
+                "app:///frame-sheet.js",
+            )
+            .unwrap();
+        host.join().unwrap();
+        let (page, inner) = {
+            let tree = elements.tree();
+            let frame = first_frame(&tree);
+            let page = frame_page_of(&tree, frame);
+            let inner = tree.get(page).unwrap().child_ids()[0];
+            let outer = node_id(3);
+            assert_eq!(
+                tree.rounded_layout(inner).unwrap().size.width,
+                40.0,
+                "text {text}"
+            );
+            assert_eq!(
+                tree.rounded_layout(outer).unwrap().size.width,
+                393.0,
+                "the host's .box is outside the frame's sheet: text {text}"
+            );
+            (page, inner)
+        };
+
+        runtime
+            .evaluate_module(
+                &mut js,
+                r"
+                import { __FlushElementTree, __GetElementUniqueID } from 'bobcat:element';
+                import { createElement, insertBefore, resetFrame, setAttribute } from 'bobcat-internal:host';
+                // In the order `bobcat:frame` lets go of a card: the child
+                // first, so its handles' drops are silent, then the frame.
+                globalThis.realm.evaluate('H.closeRealm()');
+                resetFrame(__GetElementUniqueID(globalThis.frame));
+                // A box the next card would build, through the host alone.
+                const next = createElement('view');
+                setAttribute(next, 'class', 'box');
+                setAttribute(next, 'style', 'height:10px');
+                insertBefore(H_PAGE, next, undefined);
+                globalThis.next = next;
+                __FlushElementTree();
+            "
+                .replace("H_PAGE", &packed_node_id(page).to_string())
+                .as_str(),
+                "app:///reset-frame.js",
+                "resetting the frame",
+            )
+            .unwrap();
+        let tree = elements.tree();
+        assert!(tree.get(inner).is_none(), "the child's box was freed");
+        assert_eq!(
+            frame_page_of(&tree, first_frame(&tree)),
+            page,
+            "the nested page stays"
+        );
+        let next = tree.get(page).unwrap().child_ids()[0];
+        assert_eq!(
+            tree.rounded_layout(next).unwrap().size.width,
+            100.0,
+            "the frame's sheet is gone with the card: text {text}"
+        );
+    }
+}
+
+/// `closeRealm` retires the child that calls it, which the owner's release
+/// step frees though the page still holds its `ShadowRealm`; until then,
+/// the child's `dropElement` — what its handles' finalizers call — is
+/// silent, even for an id that names nothing.
+#[test]
+fn close_realm_retires_the_child_and_silences_its_drops() {
+    let (mut js, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            &format!(
+                r"{FRAME_REALM}
+        globalThis.realm = await frameRealm();
+        const before = realm.evaluate(`(() => {{
+            try {{ H.dropElement(2 ** 50); return 'dropped'; }} catch (error) {{ return error.message; }}
+        }})()`);
+        if (!before.includes('is no element id')) throw Error(before);
+        realm.evaluate('H.closeRealm()');
+        const after = realm.evaluate(`(() => {{
+            try {{ return String(H.dropElement(2 ** 50)); }} catch (error) {{ return error.message; }}
+        }})()`);
+        if (after !== 'undefined') throw Error(after);
+    "
+            ),
+            "app:///close-realm.js",
+        )
+        .unwrap();
+    assert_eq!(runtime.core().children.release_unneeded(), 1);
+    assert_eq!(runtime.child_realms(), 0);
+}
+
+/// A frame whose handle the page realm lets go of is dropped like any
+/// element, and its shadow tree — the nested page and everything under it
+/// — goes with it. Nothing frame-specific runs in the host.
+#[test]
+fn dropping_a_frame_frees_its_nested_page() {
+    let (mut js, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        import { createElement, framePage, insertBefore } from 'bobcat-internal:host';
+        const page = __CreatePage();
+        let frame = __CreateElement('frame', 0);
+        __AppendElement(page, frame);
+        insertBefore(framePage(__GetElementUniqueID(frame)), createElement('view'), undefined);
+        __RemoveElement(page, frame);
+        frame = undefined;
+    ",
+            "app:///dropped-frame.js",
+        )
+        .unwrap();
+    let (nested, inner) = {
+        let tree = elements.tree();
+        let page = frame_page_of(&tree, node_id(3));
+        (page, tree.get(page).unwrap().child_ids()[0])
+    };
+    runtime.collect_garbage(&mut js).unwrap();
+    let tree = elements.tree();
+    assert!(tree.get(node_id(3)).is_none(), "the frame was dropped");
+    assert!(tree.get(nested).is_none(), "and its nested page with it");
+    assert!(tree.get(inner).is_none(), "and what was under the page");
+}
+
+/// The published names are the union of every realm's: a child that opens
+/// and closes `tap`, which the page also holds, leaves it published, and a
+/// name only a closed child held is closed when the child is freed.
+#[test]
+fn a_frame_realm_closes_only_its_own_listener_names() {
+    let (mut js, mut runtime, _elements, mut names) = runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            &format!(
+                r"{FRAME_REALM}
+        const page = __CreatePage();
+        const view = __CreateView(0);
+        __AppendElement(page, view);
+        __AddEvent(view, 'bindEvent', 'tap', '3:0:bindtap');
+        const frame = __CreateElement('frame', 0);
+        __AppendElement(page, frame);
+        globalThis.realm = await frameRealm();
+        realm.evaluate(`frame => {{
+            E.__BobcatUsePageRoot(H.framePage(frame));
+            const inner = E.__CreateView(0);
+            E.__AppendElement(E.__CreatePage(), inner);
+            E.__AddEvent(inner, 'bindEvent', 'tap', 'child');
+            E.__AddEvent(inner, 'bindEvent', 'tap', null);
+            E.__AddEvent(inner, 'bindEvent', 'scroll', 'child');
+        }}`)(__GetElementUniqueID(frame));
+    "
+            ),
+            "app:///frame-names.js",
+        )
+        .unwrap();
+    assert!(names.contains("tap"), "the page's tap stays published");
+    assert!(names.contains("scroll"), "the child's scroll is published");
+    runtime
+        .evaluate_module(
+            &mut js,
+            "globalThis.realm.evaluate('H.closeRealm()');",
+            "app:///close-names.js",
+            "closing the frame's realm",
+        )
+        .unwrap();
+    assert!(
+        names.contains("scroll"),
+        "the child still lives until the release step"
+    );
+    assert_eq!(runtime.core().children.release_unneeded(), 1);
+    assert!(
+        !names.contains("scroll"),
+        "a freed child's names close with it"
+    );
+    assert!(names.contains("tap"));
 }

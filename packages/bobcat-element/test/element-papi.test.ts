@@ -70,6 +70,16 @@ rstest.mockRequire("bobcat:runtime", () => ({
   },
 }));
 
+// A frame's `src` load is `bobcat:frame`'s, tested in frame.test.ts; here it
+// is the one call `__SetAttribute` makes, recorded with the mock's calls.
+rstest.mockRequire("bobcat:frame", () => ({
+  frameSourceChanged(handle: object, frameId: number, src: string | null) {
+    const native =
+      globalThis.__bobcatTestHost as ReturnType<typeof createMockBobcat>;
+    native.calls.push(["frameSourceChanged", handle, frameId, src]);
+  },
+}));
+
 /**
  * What the mock's second `createDocument` throws, so a test can assert that
  * the host's refusal reaches the caller by identity — the native member
@@ -489,6 +499,7 @@ describe("installation", () => {
       ["__CreateScrollView", 1],
       ["__CreateRawText", 1],
       ["__CreateList", 3],
+      ["__CreateFrame", 1],
       ["__AppendElement", 2],
       ["__InsertElementBefore", 3],
       ["__RemoveElement", 2],
@@ -547,6 +558,10 @@ describe("installation", () => {
         // Not a PAPI member: the lifecycle export the boot module
         // constructs, which `MTS_CHUNK_PREAMBLE` does not import.
         "Document",
+        // Nor these two: `bobcat:frame-boot` chooses a frame realm's page
+        // root, and `bobcat:frame` finds a frame's handle by its id.
+        "__BobcatUsePageRoot",
+        "__BobcatHandleOf",
       ].sort(),
     );
     // The six every event carries; the detail numbers are a rest parameter,
@@ -631,6 +646,13 @@ describe("__CreatePage", () => {
     expect(mock.named("createPage")).toHaveLength(2);
   });
 
+  it("refuses a page root once the realm's page is chosen", () => {
+    const page = __CreatePage("card", 0);
+    expect(() => elementModule.__BobcatUsePageRoot(99)).toThrow(TypeError);
+    expect(__CreatePage("card", 0)).toBe(page);
+    expect(elementModule.__BobcatHandleOf(elementModule.__GetElementUniqueID(page) as number)).toBe(page);
+  });
+
   it("ignores its arguments entirely", () => {
     expect(() => __CreatePage()).not.toThrow();
     expect(() => __CreatePage(5, {})).not.toThrow();
@@ -646,6 +668,7 @@ describe("constructors", () => {
     __CreateView(0);
     __CreateScrollView(0);
     __CreateList(1, () => {}, () => {});
+    __CreateFrame(0);
     expect(mock.named("createElement").map((call) => call[1])).toEqual([
       "custom-widget",
       "wrapper",
@@ -654,6 +677,7 @@ describe("constructors", () => {
       "view",
       "scroll-view",
       "list",
+      "frame",
     ]);
   });
 
@@ -1285,6 +1309,30 @@ describe("__SetAttribute", () => {
       ["setAttribute", 3, "id", "header"],
       ["setAttribute", 3, "class", "row"],
       ["setAttribute", 3, "style", "color:red"],
+    ]);
+  });
+
+  it("hands a frame's src to bobcat:frame after the native write", () => {
+    const frame = __CreateFrame(0);
+    const named = __CreateElement("frame", 0);
+    const view = __CreateView(0);
+    mock.calls.length = 0;
+
+    __SetAttribute(frame, "src", "app:///child.web.bundle");
+    __SetAttribute(named, "src", 7);
+    __SetAttribute(frame, "src", null);
+    // Only a frame's `src` is a load; another name, or another tag, is not.
+    __SetAttribute(frame, "data", "{}");
+    __SetAttribute(view, "src", "app:///child.web.bundle");
+    expect(mock.calls).toEqual([
+      ["setAttribute", 3, "src", "app:///child.web.bundle"],
+      ["frameSourceChanged", frame, 3, "app:///child.web.bundle"],
+      ["setAttribute", 4, "src", "7"],
+      ["frameSourceChanged", named, 4, "7"],
+      ["removeAttribute", 3, "src"],
+      ["frameSourceChanged", frame, 3, null],
+      ["setAttribute", 3, "data", "{}"],
+      ["setAttribute", 5, "src", "app:///child.web.bundle"],
     ]);
   });
 

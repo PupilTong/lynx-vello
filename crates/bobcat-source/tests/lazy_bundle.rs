@@ -260,3 +260,23 @@ fn a_fetched_full_card_registers_its_root_as_the_entry_module() {
         "registered, though only a page lists it"
     );
 }
+
+/// A full card whose page CSS lowers to nothing registers no page sheet, so a
+/// `<frame>` that adopts `<U>/style-info.css` by URL adopts nothing; its
+/// `root` is still the entry module, the container's `?#` suffix kept.
+#[test]
+fn a_fetched_full_card_without_page_css_registers_no_page_sheet() {
+    let bytes = fixtures::fixture("basic-bindtap").page;
+    let url = Url::parse(&format!("{ORIGIN}/frames/bindtap.web.bundle?rev=1")).expect("a URL");
+    let sources = ContainerSources::from_bytes(&url, bytes).expect("the card decodes");
+
+    assert!(sources.style_info().is_none());
+    let root = format!("{ORIGIN}/frames/bindtap.web.bundle/root.js?rev=1");
+    assert_eq!(sources.entry().map(Url::as_str), Some(root.as_str()));
+    let (_, registered) = sources
+        .scripts()
+        .iter()
+        .find(|(at, _)| at.as_str() == root)
+        .expect("the root is registered");
+    assert!(registered.starts_with(bobcat_core::MTS_CHUNK_PREAMBLE));
+}

@@ -11,7 +11,10 @@
 //! [`RealmCore`]'s list for the owner's epilogue to service.
 //!
 //! What differs between realm kinds is the host modules installed after the
-//! core, and those are the caller's: [`open_realm`] takes them as a closure.
+//! core, and those are the caller's: [`open_realm`] takes them as a closure,
+//! and the ones its `ShadowRealm` children get beyond the core as a
+//! [`ChildHostModules`] (an MTS realm's document members, `None` for a
+//! worker).
 //! An MTS realm's are its document, style, startup and `Worker` members; a
 //! worker realm's are the members of `bobcat-internal:worker`. Both kinds
 //! also install `bobcat-internal:native-modules` through
@@ -35,7 +38,7 @@ use std::rc::{Rc, Weak};
 
 use quickjs_rust_bridge::HostValue;
 
-use self::child::{ChildRealms, ShadowRealmHook};
+use self::child::{ChildHostModules, ChildRealms, ShadowRealmHook};
 use self::policy::context_of;
 use crate::background::WorkerKey;
 use crate::esm::HOST_MODULE_SPECIFIER;
@@ -77,13 +80,16 @@ pub(crate) struct RealmCore {
 /// MTS realm, the worker's own for a worker realm, so a wait ends with the
 /// realm that asked. `thread` is the engine thread whose jobs this realm's
 /// entries are. `source` is what this realm's console output and reports are
-/// named by when they reach the embedder.
+/// named by when they reach the embedder. `child_hosts` is what every
+/// `ShadowRealm` child of this realm, and of its children, gets beyond the
+/// core.
 pub(crate) fn open_realm<T>(
     js: &mut ScriptRuntime,
     host: &HostOutbox,
     thread: JsThreadHandle,
     frame_target: Option<WorkerKey>,
     source: ScriptSource,
+    child_hosts: Option<Rc<dyn ChildHostModules>>,
     host_modules: impl FnOnce(&mut ScriptEngine) -> Result<T, ScriptError>,
 ) -> Result<(RealmCore, T), ScriptError> {
     let mut engine = js
@@ -102,6 +108,7 @@ pub(crate) fn open_realm<T>(
         FrameDemand::Report(frame_target),
         source,
         &Rc::downgrade(&children),
+        child_hosts,
     )?;
     let installed = host_modules(&mut engine)?;
     Ok((
@@ -133,7 +140,8 @@ pub(crate) enum FrameDemand {
 /// One function for an owner's realm and for each `ShadowRealm` child, which
 /// differ only in `frames`. A child is furnished from inside its parent's
 /// JavaScript, which is why nothing here takes the runtime. `children` is the
-/// list every `new ShadowRealm()` of this realm, and of its children, joins.
+/// list every `new ShadowRealm()` of this realm, and of its children, joins,
+/// and `child_hosts` what each of them gets beyond the core.
 fn install_realm_core(
     engine: &mut ScriptEngine,
     host: &HostOutbox,
@@ -141,6 +149,7 @@ fn install_realm_core(
     frames: FrameDemand,
     source: ScriptSource,
     children: &Weak<ChildRealms>,
+    child_hosts: Option<Rc<dyn ChildHostModules>>,
 ) -> Result<(Rc<TimerState>, Rc<FutureTable>), ScriptError> {
     let notices = host.clone();
     crate::script_frames::install(engine, move |pending| {
@@ -170,6 +179,7 @@ fn install_realm_core(
             host: host.clone(),
             thread,
             source,
+            child_hosts,
         },
     )
     .map_err(|error| context_of("installing ShadowRealm", error))?;

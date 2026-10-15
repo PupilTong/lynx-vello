@@ -54,5 +54,10 @@ describe("the container URL rule", () => {
     expect(bundleStyleSheetURL(BUNDLE)).toBe(`${BUNDLE}/style-info.css`);
     expect(bundleStyleSheetURL(`${BUNDLE}?rev=1`)).toBe(`${BUNDLE}/style-info.css?rev=1`);
     expect(bundleStyleSheetURL(`${BUNDLE}/#f`)).toBe(`${BUNDLE}/style-info.css#f`);
+    // Written as a `<frame src>` names it: a relative container stays
+    // relative, for the realm's base to resolve.
+    expect(bundleStyleSheetURL("./card.web.bundle?rev=2"))
+      .toBe("./card.web.bundle/style-info.css?rev=2");
+    expect(sectionURL("root", "./card.web.bundle?rev=2")).toBe("./card.web.bundle/root.js?rev=2");
   });
 });

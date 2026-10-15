@@ -5140,6 +5140,44 @@ globalThis.updatePage = () => {{
     });
 }
 
+/// A closed child goes in the epilogue of the entry that closed it, though
+/// the page still holds its `ShadowRealm` and the wrapped function it
+/// called.
+#[test]
+fn a_closed_child_is_freed_by_the_closing_entrys_epilogue() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned
+            .boot(&format!(
+                "{ONE_BOX}
+globalThis.realm = new ShadowRealm();
+const close = await new Promise(resolve => realm.evaluate(`ready => {{
+  import('bobcat-internal:host').then(H => ready(() => H.closeRealm()));
+}}`)(resolve));
+// Called with no receiver: a wrapped function refuses an object `this`.
+globalThis.updatePage = () => {{
+  close();
+}};
+"
+            ))
+            .await;
+        assert_eq!(child_realms(&owned.page).await, Some(1));
+
+        owned.page.apply(vec![update_command(1)]).await;
+        assert_eq!(
+            child_realms(&owned.page).await,
+            Some(0),
+            "the retired child goes though the page still refers to it"
+        );
+        let events = owned.events();
+        assert!(
+            !events.iter().any(EngineEvent::is_fatal),
+            "the release ended nothing: {events:?}"
+        );
+    });
+}
+
 /// A child's module request goes to the view's host like the owner's own and
 /// is completed in the child, and a future a `.then` in the child asked to
 /// settle is delivered into the child: both by tasks the owner's epilogue

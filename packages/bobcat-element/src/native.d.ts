@@ -21,7 +21,11 @@ interface BobcatNative {
     enableJSDataProcessor: boolean,
     enableCssInheritance: boolean,
   ): void;
-  /** Marks the permanent page live and returns its `NodeId`. */
+  /**
+   * Returns the `NodeId` of the document's permanent `page`, in every realm.
+   * A frame's `ShadowRealm` child does not call it: its `__CreatePage`
+   * answers the nested page `bobcat:frame-boot` named.
+   */
   createPage(): number;
   /** Creates a detached element and returns its `NodeId`. */
   createElement(tag: string): number;
@@ -262,7 +266,9 @@ interface BobcatNative {
   /**
    * Frees the element of a collected handle, and only it: its element
    * children are unlinked into detached roots, and what no handle could name
-   * — the text node a `raw-text` reflects — goes with it.
+   * — the text node a `raw-text` reflects — goes with it. A `frame` takes
+   * its shadow tree with it, as every element does. In a child that called
+   * `closeRealm` it does nothing and answers `undefined`.
    */
   dropElement(nodeId: number): void;
   /**
@@ -271,7 +277,8 @@ interface BobcatNative {
    * The first call waits for every author stylesheet the view listed and
    * mounts them in listed order before anything is styled; a sheet that
    * failed to load throws `loading stylesheet <url>: <reason>`. Before a
-   * painter has bound the view it then waits for the binding.
+   * painter has bound the view it then waits for the binding. The same in
+   * every realm, a frame's `ShadowRealm` child included.
    */
   flushElementTree(): void;
   /**
@@ -376,7 +383,14 @@ declare module "bobcat-internal:host" {
    */
   export function hasStyleSheet(url: string): boolean;
   export function preloadStyleSheet(url: string): void;
-  export function adoptStyleSheet(url: string): void;
+  /**
+   * Requests the stylesheet at `url`, waits for it inside the job and mounts
+   * it: on the shadow root `shadowRoot` names (a frame's, which
+   * `bobcat:frame-boot` mounts its card's page CSS on), or on the document
+   * without one, behind the view's listed sheets. Throws for a
+   * `shadowRoot` that is no live shadow root, and for a sheet that fails.
+   */
+  export function adoptStyleSheet(url: string, shadowRoot?: number): void;
   /**
    * Reports one diagnostic to the embedder as `EngineEvent::ScriptReported`,
    * named by this realm. `bobcat:diagnostics` passes `"warn"`, `"error"` or
@@ -431,6 +445,26 @@ declare module "bobcat-internal:host" {
   export const swapElement: BobcatNative["swapElement"];
   export const dropElement: BobcatNative["dropElement"];
   export const flushElementTree: BobcatNative["flushElementTree"];
+  /**
+   * The `NodeId` of the nested page (`page[part=page]`) the `frame` element
+   * `frame` built in its shadow root, which lives as long as the frame.
+   * Read-only. Throws for a node that is not a live frame, and for a frame
+   * that sits more than eight frames deep.
+   */
+  export function framePage(frame: number): number;
+  /**
+   * Frees every child of the `frame` element `frame`'s nested page, each
+   * with its whole subtree, and removes every sheet mounted on the frame's
+   * shadow root. The nested page stays.
+   */
+  export function resetFrame(frame: number): void;
+  /**
+   * Retires the `ShadowRealm` child that calls it: the host frees it outside
+   * every JavaScript call, whoever still refers to it, and its `dropElement`
+   * does nothing from now on. Throws in the page realm, which cannot close
+   * itself.
+   */
+  export function closeRealm(): void;
   export const listenerNameOpened: BobcatNative["listenerNameOpened"];
   export const listenerNameClosed: BobcatNative["listenerNameClosed"];
   export const exposureEvents: BobcatNative["exposureEvents"];
@@ -526,6 +560,24 @@ declare module "bobcat-internal:host" {
    * into `bobcat:future`. A future that is not pending throws.
    */
   export function settleFuture(id: number): void;
+}
+
+/**
+ * The TC39 `ShadowRealm`, a global of every realm this engine builds,
+ * installed by the host rather than by ES2023: `bobcat:frame` creates one per
+ * card a `frame` loads. Only primitives and callables cross: an object
+ * crossing either way is a `TypeError`, and a callable crosses as a wrapped
+ * function of the other realm.
+ */
+declare class ShadowRealm {
+  constructor();
+  /** Evaluates `sourceText` as a script in the child and answers its value. */
+  evaluate(sourceText: string): unknown;
+  /**
+   * Imports `specifier` in the child and answers its export `bindingName`,
+   * which must be a primitive or a callable.
+   */
+  importValue(specifier: string, bindingName: string): Promise<unknown>;
 }
 
 /** What one synchronous load answers with. */

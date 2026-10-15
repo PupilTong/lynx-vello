@@ -16,10 +16,14 @@
 //! diagnostics are named by its parent's source. The one member that does
 //! nothing in a child is `requestScriptFrame`: the frame demand is reported
 //! per realm key, and a child has none of its own, so its `false` would
-//! cancel its parent's demand (`docs/tracking/deviations.md`). A child gets
-//! no host module of its parent's kind: no document, no worker members.
-//! Grandchildren are in the same flat list, because every child is the
-//! owner's to service.
+//! cancel its parent's demand (`docs/tracking/deviations.md`). What else a
+//! child gets is its owner's [`ChildHostModules`], if the owner names any:
+//! an MTS realm's children get the page's document members, the same code
+//! over the same document, with a `closeRealm` that sets the child's
+//! `retired` flag (`main/runtime/lib.rs`'s `DocumentHost`), and a worker
+//! realm's get nothing more, so no child has a worker member. Grandchildren
+//! are in the same flat list, and get the same modules, because every child
+//! is the owner's to service.
 //!
 //! The owner's epilogue services every child (`realm/owner.rs`): their due
 //! timers after the owner's own, their module requests and future settles
@@ -28,8 +32,9 @@
 //! step before the deadline releases every child nothing needs any more:
 //! nothing of another realm refers to it, it has no timer armed and no load
 //! or settle in flight. That is the only place a child is freed while its
-//! owner lives, and it is outside every JavaScript call, because freeing a
-//! realm collects the whole runtime.
+//! owner lives (the MTS realm also runs it right after a `frame`'s
+//! disconnection), and it is outside every JavaScript call, because freeing
+//! a realm collects the whole runtime.
 //!
 //! Every operation on one child detaches it from the list first and puts it
 //! back after, so a `new ShadowRealm()` the child's code makes pushes a
@@ -100,8 +105,9 @@ impl ChildRealms {
         self.live.borrow().is_empty()
     }
 
-    /// Keeps one child the hook was handed: furnished, or `retired` when
-    /// furnishing it failed. A child the hook could not furnish is still
+    /// Keeps one child the hook was handed, with the `retired` flag its
+    /// host modules were installed over: clear for a furnished child, set
+    /// when furnishing it failed. A child the hook could not furnish is still
     /// kept, because the hook runs inside a JavaScript call, where no realm
     /// is freed; the epilogue's release step frees it.
     fn keep(
@@ -109,7 +115,7 @@ impl ChildRealms {
         engine: ScriptEngine,
         timers: Rc<TimerState>,
         futures: Rc<FutureTable>,
-        retired: bool,
+        retired: Rc<Cell<bool>>,
     ) {
         // Sixty-four bits do not run out, so a key is never reused.
         let id = self.next.get();
@@ -119,7 +125,7 @@ impl ChildRealms {
             key: ChildKey(id),
             timers,
             futures,
-            retired: Rc::new(Cell::new(retired)),
+            retired,
             in_flight: Cell::new(0),
         });
     }
@@ -273,8 +279,10 @@ impl ChildRealms {
     /// nothing of another realm with no timer armed and nothing in flight.
     /// Answers with how many were freed.
     ///
-    /// Run by the epilogue alone, outside every JavaScript call: freeing a
-    /// realm collects the whole runtime. One child's release can leave
+    /// Run by the epilogue, and by the MTS realm right after it hands a
+    /// `frame`'s disconnection to `bobcat:frame`, so the child that disposal
+    /// retired goes in that entry; always outside every JavaScript call:
+    /// freeing a realm collects the whole runtime. One child's release can leave
     /// another unreferenced — a grandchild only its `ShadowRealm` held — so
     /// this repeats until nothing more goes.
     pub(crate) fn release_unneeded(&self) -> usize {
@@ -327,8 +335,26 @@ impl Drop for Detached<'_> {
     }
 }
 
+/// The host modules an owner's `ShadowRealm` children get beyond the core,
+/// installed into every child — grandchildren included — right after it.
+///
+/// `retired` is the child's own release flag, the one [`ChildRealms`] keeps
+/// it under: setting it is how a member of the child's says the child is to
+/// be freed by the next epilogue's release step, whoever still refers to it.
+///
+/// Whatever implements this is held by every realm's hook for the owner's
+/// life, so it must hold nothing that holds an engine of the owner's.
+pub(crate) trait ChildHostModules {
+    fn install(
+        &self,
+        engine: &mut ScriptEngine,
+        retired: Rc<Cell<bool>>,
+    ) -> Result<(), ScriptError>;
+}
+
 /// What every `new ShadowRealm()` in one owner's realms is furnished from:
-/// the list it joins and what its core members reach the host through.
+/// the list it joins, what its core members reach the host through, and the
+/// owner's [`ChildHostModules`], if it has any.
 ///
 /// The list is held weakly: a strong one would be a cycle no drop ends — the
 /// list holds the child's engine, the engine holds this hook, and the hook
@@ -338,6 +364,7 @@ pub(crate) struct ShadowRealmHook {
     pub(crate) host: HostOutbox,
     pub(crate) thread: JsThreadHandle,
     pub(crate) source: ScriptSource,
+    pub(crate) child_hosts: Option<Rc<dyn ChildHostModules>>,
 }
 
 /// Installs the `ShadowRealm` constructor on `engine`, every construction
@@ -348,6 +375,7 @@ pub(crate) fn install(engine: &mut ScriptEngine, hook: ShadowRealmHook) -> Resul
 
 /// Furnishes one fresh child and keeps it: module loading, then the realm
 /// core with its own tables and the `ShadowRealm` constructor of its own,
+/// then the owner's [`ChildHostModules`] over the child's `retired` flag,
 /// then the list.
 ///
 /// A child whose furnishing failed is kept retired and refused: the
@@ -360,21 +388,33 @@ fn adopt(hook: &ShadowRealmHook, mut engine: ScriptEngine) -> Result<(), String>
         .upgrade()
         .ok_or("the realm is being released")?;
     engine.enable_module_loading();
-    match super::install_realm_core(
+    // First, so the members that retire the child and the list that frees
+    // it read one flag.
+    let retired = Rc::new(Cell::new(false));
+    let furnished = super::install_realm_core(
         &mut engine,
         &hook.host,
         hook.thread.clone(),
         FrameDemand::Ignored,
         hook.source.clone(),
         &hook.children,
-    ) {
+        hook.child_hosts.clone(),
+    )
+    .and_then(|tables| {
+        if let Some(modules) = &hook.child_hosts {
+            modules.install(&mut engine, Rc::clone(&retired))?;
+        }
+        Ok(tables)
+    });
+    match furnished {
         Ok((timers, futures)) => {
-            children.keep(engine, timers, futures, false);
+            children.keep(engine, timers, futures, retired);
             Ok(())
         }
         Err(error) => {
+            retired.set(true);
             let unused = (Rc::new(TimerState::new()), Rc::new(FutureTable::new()));
-            children.keep(engine, unused.0, unused.1, true);
+            children.keep(engine, unused.0, unused.1, retired);
             Err(error.message.to_string())
         }
     }

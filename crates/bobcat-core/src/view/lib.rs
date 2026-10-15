@@ -1477,6 +1477,18 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         &mut self,
         probe: impl FnOnce(&mut crate::main::tree::LynxDocument) -> T + Send + 'static,
     ) -> Option<T> {
+        self.probe_document_within(std::time::Duration::from_secs(30), probe)
+    }
+
+    /// [`Self::probe_document`], giving up after `patience`: for a test
+    /// whose document thread may be parked on a source only this thread's
+    /// next `pump` answers. A probe given up on still runs later, into a
+    /// receiver nobody holds.
+    pub(crate) fn probe_document_within<T: Send + 'static>(
+        &mut self,
+        patience: std::time::Duration,
+        probe: impl FnOnce(&mut crate::main::tree::LynxDocument) -> T + Send + 'static,
+    ) -> Option<T> {
         let (sender, receiver) = std::sync::mpsc::channel();
         let _ = self
             .seat
@@ -1484,9 +1496,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
             .send(ToMain::Probe(Box::new(move |document| {
                 let _ = sender.send(probe(document));
             })));
-        receiver
-            .recv_timeout(std::time::Duration::from_secs(30))
-            .ok()
+        receiver.recv_timeout(patience).ok()
     }
 
     /// The newest committed frame this view has published.

@@ -37,9 +37,10 @@
 //! `lynx.loadScript(key, {bundleName})` a custom section, and its
 //! `lynx.requireModule` and `nativeApp.loadScript` a manifest path;
 //! `__LoadStyleSheet` a named stylesheet. A page's view lists its
-//! `style-info.css` as its author sheet; a lazy container's is registered
-//! and never asked for (native applies a lazy bundle's CSS only through
-//! `__LoadStyleSheet('CSS')`, `docs/tracking/deviations.md`).
+//! `style-info.css` as its author sheet; a fetched container's is registered,
+//! adopted by a `<frame src>` boot into the frame's shadow root, and never
+//! asked for by a lazy component (native applies a lazy bundle's CSS only
+//! through `__LoadStyleSheet('CSS')`, `docs/tracking/deviations.md`).
 //!
 //! A `.lynx.bundle`'s decoder maps each custom source section `n` to both
 //! `custom_sections[n]` and `manifest["/n"]`, so its body lands at both

@@ -112,7 +112,8 @@ or a stylesheet URL a script also reaches, is
 `SourceError::OpaqueContainerUrl`. A page's view names `<U>/root.js` as its
 entry, `U` as its `card_url` (so `__Card__` is the container) and its
 `style-info.css` as its one listed sheet; a fetched container's StyleInfo is
-registered and never adopted. XML and ZIP keep their own `bobcat-memory://`
+registered, adopted only by a `<frame src>` boot into the frame's shadow root,
+and never by a lazy component. XML and ZIP keep their own `bobcat-memory://`
 URLs.
 
 Accepted consequences, each a change from the two paths this replaced:

@@ -5,7 +5,7 @@
 //! [`super::list`], [`super::viewpager`], [`super::swiper`],
 //! [`super::refresh_view`], [`super::scroll_coordinator`], [`super::dialog`],
 //! [`super::popover`], [`super::overlay`], [`super::text`], [`super::raw_text`],
-//! [`super::image`], [`super::svg`] — and this module
+//! [`super::frame`], [`super::image`], [`super::svg`] — and this module
 //! only decides what they all agree on and what order they land in.
 //! [`super::blur_view`] is the one tag module with no rules of its own: a
 //! blur view is a container and nothing more, so everything it needs is here.
@@ -57,8 +57,8 @@ use super::refresh_view::{REFRESH_FOOTER_TAG, REFRESH_HEADER_TAG};
 use super::swiper::{SWIPER_ITEM_TAG, SWIPER_TAG};
 use super::viewpager::{VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG};
 use super::{
-    dialog, image, list, markdown, overlay, popover, raw_text, refresh_view, scroll_container,
-    scroll_coordinator, svg, swiper, text, viewpager,
+    dialog, frame, image, list, markdown, overlay, popover, raw_text, refresh_view,
+    scroll_container, scroll_coordinator, svg, swiper, text, viewpager,
 };
 
 /// Page configuration for the Lynx runtime and UA cascade.
@@ -120,10 +120,13 @@ impl Default for PageConfig {
 /// `overlay` and `x-overlay-ng` are in neither: their host is `display:
 /// contents`, as web-core's, and what renders is the `dialog` in their shadow
 /// tree, which takes the switch's display as `dialog` ([`super::overlay`]).
+/// `frame` is in neither the display line nor the overflow switch: it is
+/// always a flex box with strict containment, web-core's `lynx-view`
+/// ([`super::frame`]).
 /// Every tag that generates a box of its own — the containers, the two
 /// markdown tags ([`super::markdown`], which keep the column display of
-/// `x-markdown.css` rather than the switch's), `text` and `image` — also
-/// gets the rest of that common block: `border-width: 0` with
+/// `x-markdown.css` rather than the switch's), `text`, `image`, `svg` and
+/// `frame` — also gets the rest of that common block: `border-width: 0` with
 /// `border-style: solid`, `position: relative` (which is what makes a
 /// coordinator the containing block of its header and slot,
 /// [`super::scroll_coordinator`]), `min-width: 0` and
@@ -234,7 +237,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     };
     format!(
         "page, view, scroll-view, list, list-item, {component_tags}, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG}, \
-         {MARKDOWN_TAG}, {X_MARKDOWN_TAG}, text, image, svg {{ box-sizing: border-box; border-width: 0; border-style: solid; \
+         {MARKDOWN_TAG}, {X_MARKDOWN_TAG}, text, image, svg, frame {{ box-sizing: border-box; border-width: 0; border-style: solid; \
          position: relative; overflow: clip; min-width: 0; min-height: 0; }}\n\
          {display}\
          {overflow}\
@@ -255,6 +258,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          {text}\
          {inheritance}\
          {carriers}\
+         {frames}\
          {images}\
          {svgs}",
         scrollers = scroll_container::UA_RULES,
@@ -269,6 +273,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
         markdowns = markdown::UA_RULES,
         text = text::UA_RULES,
         carriers = raw_text::UA_RULES,
+        frames = frame::UA_RULES,
         images = image::UA_RULES,
         svgs = svg::UA_RULES,
     )
@@ -367,11 +372,12 @@ mod tests {
         boxes.push(child(&mut document, "text", ""));
         boxes.push(child(&mut document, "image", ""));
         boxes.push(child(&mut document, "svg", ""));
+        boxes.push(child(&mut document, "frame", ""));
         document.layout();
 
         for (tag, element) in CONTAINER_TAGS
             .iter()
-            .chain(&["text", "image", "svg"])
+            .chain(&["text", "image", "svg", "frame"])
             .zip(boxes)
         {
             let style = style_of(&document, element);
@@ -546,6 +552,7 @@ mod tests {
             let leaves = [
                 "text",
                 "image",
+                "frame",
                 SWIPER_TAG,
                 VIEWPAGER_ITEM_TAG,
                 X_VIEWPAGER_ITEM_TAG,

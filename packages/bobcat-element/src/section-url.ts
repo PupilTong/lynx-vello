@@ -74,8 +74,9 @@ export function bundlePathURL(path: string, bundleURL: string): string {
 
 /**
  * The resource URL a container's own StyleInfo lives at: the container URL's
- * path, then `style-info.css`, the `?#` suffix kept. Only a page adopts it,
- * as the view's listed author sheet; a lazy container's is registered and
+ * path, then `style-info.css`, the `?#` suffix kept. A page adopts its own
+ * as the view's listed author sheet and a `<frame src>` boot adopts its
+ * card's into the frame's shadow root; a lazy component's is registered and
  * never asked for.
  */
 export function bundleStyleSheetURL(bundleURL: string): string {

@@ -228,7 +228,8 @@ without one (a lazy bundle) has no entry and no boot, and nothing guesses a
 sole `*__main-thread` as one. A page's view names `<U>/root.js` as its entry,
 `U#background-thread` as its BTS entry, `style-info.css` as its only listed
 sheet and `U` as its `ViewSources::card_url`; a fetched container's StyleInfo
-is registered and never asked for. Scripts are collected per URL: one text at
+is registered, never asked for by a lazy component, and adopted only by a
+`<frame src>` boot into the frame's shadow root. Scripts are collected per URL: one text at
 one URL deduplicates, two texts — or a sheet URL a script also reaches — is
 `SourceError::ConflictingSection`, and a URL that cannot be a base is
 `SourceError::OpaqueContainerUrl`. The native decoder files each custom
@@ -814,7 +815,8 @@ names is the **fetcher's**, through `bobcat_resources::ContainerInstaller` and
 `bobcat_source::BundleInstaller`, which sniffs the two container magics,
 leaves every other fetch alone, and registers a container exactly as a page's
 own is registered (`ContainerSources`; its `root`, if any, at `root.js` as the
-entry's module, its StyleInfo at `style-info.css`). Nothing is evaluated by any of it. The
+entry's module, its StyleInfo at `style-info.css`) — which is what a
+`<frame src>` loads and adopts. Nothing is evaluated by any of it. The
 handle is native's `{wait, then}` host object rather than a Promise, built in
 `bundle-fetch.ts` over the **`bobcat:future`** `Future` the member answers
 with: `wait(seconds)` is `Future.wait` in milliseconds, so it parks the job
@@ -1471,7 +1473,8 @@ members group as the document's own life, tree vocabulary over numeric
 edges, timers, the one-shot startup strings the realm alone reads (the
 page-data triple handed over as plain JSON and processor-name strings, and
 the native module table it posts unread to its BTS), the stylesheet pair, the
-diagnostics pair, the display-frame demand, and the three worker operations.
+diagnostics pair, the display-frame demand, the three worker operations, and
+the nested-page members `framePage`, `resetFrame` and `closeRealm` (below).
 Those four one-shot strings do not arrive separately: they, the entry's
 resolved URL, the BTS entry's, the listed stylesheets' answers and the screen
 are one `RealmStartup`, which is everything a realm is opened with and nothing
@@ -1491,9 +1494,12 @@ enters no JavaScript, and a child is furnished from inside the parent's entry,
 which holds the runtime. Every other host module
 is a parameter of that call: `MainThreadRuntime::new` passes the document,
 stylesheet, startup-string (the module table among them), event-name and
-`Worker` members and `bobcat-internal:native-modules`, and a worker passes
-`bobcat-internal:worker` and `bobcat-internal:native-modules`, the same
-`invokeNativeModule` in both. The constructor has no role field; it is told
+nested-page members, the `Worker` members and `bobcat-internal:native-modules`, and
+a worker passes `bobcat-internal:worker` and
+`bobcat-internal:native-modules`, the same `invokeNativeModule` in both. So
+is what the realm's `ShadowRealm` children get beyond the core, a
+`realm::child::ChildHostModules`: the MTS realm passes its document members
+(the `DocumentHost` in `main/runtime/lib.rs`), a worker `None`. The constructor has no role field; it is told
 two things about a realm: the key its display-frame demand is reported under,
 `None` for MTS and the worker's key for a worker, and the `ScriptSource` its
 diagnostics carry, `Main` for MTS and, for a worker, `Worker { id, url }`
@@ -1508,9 +1514,14 @@ bridge's hook (`Context::install_shadow_realm`) hands each `new ShadowRealm()`
 to `realm/child.rs`, inside the construction: the child gets module loading
 and the same core, installed by the same `install_realm_core`, over a timer
 table and a future table of its own and the parent's `HostOutbox`, thread and
-`ScriptSource`, and a `ShadowRealm` constructor of its own, and no host module
-of its parent's kind (no document, no worker members), so `bobcat:timers`
-links in a child and `bobcat:element` does not. `requestScriptFrame` is a
+`ScriptSource`, and a `ShadowRealm` constructor of its own, and then its
+owner's `ChildHostModules`, installed over the child's `retired` flag, which
+`adopt` creates first and `ChildRealms::keep` stores: an MTS realm's children,
+grandchildren included, get the page realm's document members (the
+`frame` paragraphs below), so `bobcat:element` links in them, and a worker realm's get
+nothing more, so `bobcat:timers` links in one and `bobcat:element` does not.
+No child has a worker member or `bobcat-internal:native-modules`.
+`requestScriptFrame` is a
 no-op there: the frame demand is one flag per realm key, and a child under its
 parent's key would cancel the parent's demand with its own `false`. The child
 is then kept in `RealmCore::children`, a flat `ChildRealms` list that holds
@@ -1533,11 +1544,113 @@ deadline frees every child nothing needs any more — no `ShadowRealm`, wrapped
 function or `importValue` of another realm refers to it
 (`is_referenced_across_realms`), no timer is armed and no load or settle is in
 flight — outside every JavaScript call, because freeing a realm collects the
-whole runtime; nothing else frees a child while its owner lives, and a child
-the hook could not furnish is kept retired for that step. A child's
+whole runtime; nothing else frees a child while its owner lives but the
+release a frame's disconnection runs right after its `bobcat:frame` call,
+which is the same step, and a child the hook could not furnish is kept retired for that step. A child's
 diagnostics carry the parent's `ScriptSource`. Each operation detaches the
 child from the list and puts it back after, so a `new ShadowRealm()` in the
 child's code meets no borrow.
+
+**A `frame` is a custom-element ability** (user ruling 2026-10-14): what is
+frame-specific lives in the `tree::frame` component and in the JavaScript
+modules `bobcat:frame`/`bobcat:frame-boot`, and the host module keeps only
+generic members. One PAPI over one document (user ruling: no second engine,
+no scoped copy of the PAPI, no admission check or per-realm node set — the
+host card and its frames are one trust domain). An MTS realm's
+`ShadowRealm` child installs exactly the page realm's document, attribute,
+readback, exposure, event-name, stylesheet and nested-page members over the
+same `Rc<RefCell<DocumentSlot>>`, `ViewOutbox` and thread, through the same
+`DocumentHost::install_members(engine, startup, retired)` (`retired` is
+`None` for the page realm and the child's own flag from the
+`ChildHostModules` seam); its startup strings answer `undefined`, and it has
+no `Worker` members and no `bobcat-internal:native-modules`. `createPage` and
+`flushElementTree` are the same code in every realm (a child's flush may
+park for the listed sheets and the painter binding as the page's would).
+Node ids are document-global and each realm's `bobcat:element` has its own
+handle table; a child's `__CreatePage` answers the page root
+`__BobcatUsePageRoot(nodeId)` chose, a handle held by the module and never
+registered for collection, like the page realm's. The four generic members:
+`framePage(frame)` reads the nested page of a live `frame`
+(`tree::frame::nested_page`), refusing a frame more than `MAX_FRAME_DEPTH`
+(8) frames deep over shadow-including ancestors, so a card that embeds itself
+stops; it keeps no state. `resetFrame(frame)` `drop_element`s every child of
+the nested page (inside a shadow tree, so `dom` frees each subtree whole) and
+clears the frame's shadow-root sheets (`Document::clear_shadow_stylesheets`);
+the nested page stays. `adoptStyleSheet(url, shadowRoot?)` mounts on the
+named shadow root (`style::add_*_to_shadow`, no listed sheet settled) or, with
+no second argument, on the document after the listed sheets.
+`closeRealm()` sets the calling child's `retired` (the page realm's throws
+`the page realm cannot close itself`), so the release step frees it whoever
+refers to it; after it, the child's `dropElement` answers `undefined` without
+looking, because its handles' finalizers may still run before the realm goes
+and name nodes `resetFrame` already freed. `dropElement` of a frame host does
+nothing frame-specific: its shadow tree goes with it. Nodes a closed child
+created and never attached stay until the view ends. The published listener
+names are the union of every realm's (`DocumentSlot::listened` counts the
+realms holding each name, `RealmListenerNames` deduplicates one realm's): a
+child closing `tap` leaves the page's open, and what a freed child held open
+is closed when its members drop.
+
+**The frame's lifecycle.** The component builds the nested page
+(`page[part=page]`, web-core's `[part="page"]`) in `constructed`, for the
+element's life, and its `connected_callback`/`disconnected_callback` queue
+`ComponentEvent::Frame { node, connected }` on the document's
+`ComponentEvents` (a reaction queues, never acts, because it holds the
+document). `MainThreadRuntime::dispatch_component_events` hands each to the
+page realm as one call of `bobcat:frame`'s `__BobcatFrameConnected(frameId)`
+or `__BobcatFrameDisconnected(frameId)` (`call_module_export`, failures under
+`Scene::Listener`), and after a disconnection runs
+`children.release_unneeded()` outside the call, so the retired child goes in
+that entry. What happens is JavaScript's
+(`packages/bobcat-element/src/frame.ts`): `__CreateFrame` and
+`__CreateElement("frame")` mark the handle, and `__SetAttribute(frame,
+"src", value)` hands the new value (`null` for a removal) to
+`frameSourceChanged` after the native write. The per-frame state —
+generation, `src`, whether a load is started, the realm and the child's
+`dispose` — lives on the handle; the host's calls find it through
+`bobcat:element`'s `__BobcatHandleOf`, so a frame whose handle another realm
+holds is nothing to the page realm. A `null` or `""` does nothing — the frame
+keeps its card, as native's `FrameElement::OnSetSrc` ignores it and web-core's
+`LynxView` keeps its running card when `url` is removed — and neither does a
+value equal to the frame's current one, which both skip. Any other tears the
+current card down (`teardown`: the child's `dispose`, then
+`resetFrame(frameId)`) and loads the new one, connected or not: a load bumps
+the generation, calls `fetchResource(src)` with `src` as written — the
+fetcher resolves it against `ViewSources::base_url`, and `bobcat-source`'s
+`BundleInstaller` registers the card through `ContainerSources`, its `root`
+at `<U>/root.js` and its StyleInfo at `<U>/style-info.css` (`U` the resolved
+`src`), before the fetch settles — and when it settles (a probe hit's `true` in a microtask, a `Future` id through
+its `then`) creates a `ShadowRealm`, imports `bobcat:frame-boot`'s `boot` and
+`dispose`, and calls `boot(frameId, src, "{}", "{}",
+JSON.stringify(SystemInfo))`. A disconnection tears the card down, as
+web-core's `LynxView` disposes on `disconnectedCallback`; a connection loads
+the frame's `src` again when nothing is loaded or loading, as
+`connectedCallback` renders (so a move re-renders). A frame handle collected
+while it still has a card (given a `src`, never connected) disposes of it
+through the module's `FinalizationRegistry`, so no orphan child stays alive
+on its timers. Every step checks the generation, so a fetch or an import for
+an earlier load starts nothing; a failure here (the fetch, the realm, the
+import) is one `ScriptReported` naming `src`. A wrapped function is called
+with no receiver: the `ShadowRealm` call wraps `this`, and an object `this`
+is a `TypeError`. The child's boot (`frame-boot.ts`) imports
+`bobcat:runtime` before `bobcat:element` and is the page boot minus the
+`Document`, the BTS and the entry import: `framePage(frameId)` and
+`__BobcatUsePageRoot(page)`, `__BobcatDetachBackground` (everything the realm
+would send a BTS is dropped), `__BobcatInitializeMTS` with the parent's page
+data and `SystemInfo`, `__BobcatInitEntry(src)` (so `__Card__` is `src` as
+written, ReactLynx's `bundleName`, and `chunkURL`/`styleSheetURL` name what
+the installer registered), `adoptStyleSheet(bundleStyleSheetURL(src),
+parentNode(page))` — the frame's shadow root — when `hasStyleSheet` holds it,
+`loadModuleSync(sectionURL("root", src))` in a `try` of its own (a throwing
+root is reported and boot still renders), `__BobcatProcessInitData`,
+`__BobcatRenderPage`, and a flush queued one microtask later, as the page
+boot queues its own. It answers `false` for a failure it already reported.
+Its `dispose()` lets go of every card its own frames loaded
+(`__BobcatCloseFrames`) and then calls `closeRealm()`. A frame inside a
+nested card that the nested card disconnects without letting go of its
+handle keeps its card: the connection calls reach the page realm alone. No
+`load` event, no `data`/`global-props`, no events into the frame and no
+nested BTS (`docs/tracking/deviations.md`).
 
 The members that answer with a list encode it in the return string, since
 the boundary's value type carries no array: `attributeNames` and
@@ -1602,7 +1715,7 @@ which a card's entry receives through the import `bobcat-source` prepends to
 its body, and **the header table of `packages/bobcat-element/src/element-papi.ts`
 is the authoritative enumeration** — it names every member and what backs it, and
 `MTS_CHUNK_PREAMBLE` in `esm.rs` imports exactly that set. By kind:
-every ReactLynx Snapshot constructor except `__CreateFrame`; all six tree
+every ReactLynx Snapshot constructor, `__CreateFrame` included; all six tree
 mutations; the properties and queries a Snapshot's `create`/`update` functions
 write through and read back, among them `__SetInlineStyles` and the name-based
 `__AddInlineStyle`, with `__SetCSSId` writing `l-css-id`; the readback pair
@@ -1619,8 +1732,8 @@ dialog's `show`/`showModal`/`close`/`requestClose`, and
 caller; the event
 registration and propagation members, `__AddEvent` and `__AddEventListener`
 included; `__CreateList` with `__UpdateListCallbacks`; and
-`__FlushElementTree`. Everything else is not implemented, `__CreateFrame` and
-`__DropElement` (which no web-core generation has) included; a bundle reaching
+`__FlushElementTree`. Everything else is not implemented, `__DropElement`
+(which no web-core generation has) included; a bundle reaching
 for another member fails at the missing name with a precise `ReferenceError`,
 not silently.
 
@@ -1945,7 +2058,17 @@ shadow content, the anchor found from the character the tap hits; UI
 methods `getContent`, `getImages`, `getParseResult`, `getTextBoundingRect`
 and `getCharIndexByPoint` in web-core's rendered-text offsets, which
 `rendered.rs` counts with markdown-it's line breaks between block tags; the
-typewriter, truncation and selection are deferred), and
+typewriter, truncation and selection are deferred),
+`tree::frame` (`frame`, web-core's nested `lynx-view`: a component whose
+`constructed` attaches an open shadow root holding the nested page
+`page[part=page]`, which the UA sheet sizes 100% of the frame and which
+lives as long as the frame — no shadow sheet and no slot, so light children
+never render — whose `connected_callback`/`disconnected_callback` queue
+`ComponentEvent::Frame` for `bobcat:frame`'s connection exports,
+`display: flex; contain: strict` whatever `defaultDisplayLinear` says, the
+shared box block, `is_frame`, `nested_page` and `frame_depth`; `src` is an
+ordinary attribute to Rust, which observes nothing — `bobcat:frame` reacts
+to it in the realm that wrote it), and
 `tree::blur_view` (`blur-radius` reflected into a
 `backdrop-filter: blur()` presentational hint, under both the native tag
 `blur-view` and web-core's `x-blur-view`, as a CSS length rather than
@@ -1958,9 +2081,9 @@ attributes use UA `attr()` declarations and registered custom properties;
 `tail-color-convert` uses an attribute selector. Only image resources, blur
 hints, the swiper's item count, the refresh view's slot
 assignment, the dialog's `:open`/`:modal` state, the overlay's shadow
-tree, its dialog's top-layer membership and its events, and the markdown
-element's shadow tree, its rendering and its events need
-`dom::CustomElement` callbacks. Runtime attribute members perform
+tree, its dialog's top-layer membership and its events, the markdown
+element's shadow tree, its rendering and its events, and the frame's
+shadow root need `dom::CustomElement` callbacks. Runtime attribute members perform
 DOM mutations; Stylo tracks attribute dependencies and recascades on changes.
 HTML's own rules — the dialog's, the popover's and the display `dialog` maps
 `block` to — are written with their selectors inside `:where()` and ordered
@@ -2075,7 +2198,12 @@ file is evaluated, which is the first point author code can run and so the
 first point another load can replace the buffers the host lent. A module is
 linked during that compile, so the imports it pulls in are loaded — each
 through the same borrowed-until-the-next-load host callback — before its own
-evaluation starts.
+evaluation starts. A module whose evaluation throws fails the load with that
+throw and leaves no rejection behind: QuickJS runs every module body as an
+async function, so the throw rejects that body's promise, each failing
+module's on the path and the evaluation promise, and the shim forgets every
+rejection the evaluation recorded with the thrown value
+(`qjs_rejections_forget_since`), so a caller that catches it has handled it.
 
 A runtime can also reserve module-name prefixes
 (`Runtime::reserve_module_prefix`), which checks a name at two places. The
@@ -2628,12 +2756,15 @@ browser WebGPU completion is Promise-driven.
 
 The dependency-free TypeScript sources of the ESMs `bobcat-core` preloads into
 its QuickJS realms, one file per module. Both of a group's runtimes register
-all twenty-one, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
+all twenty-three, as `esm.rs`'s `BUILTIN_MODULES` lists them in the order of
 `src/tsconfig.json`'s `paths` (a unit test holds the two equal):
 `src/lynx-modules.ts` as `bobcat:lynx-modules`, `src/global-event-emitter.ts`
 as `bobcat:global-event-emitter`, `src/selector-query.ts` as
 `bobcat:selector-query`, `src/element-papi.ts` as `bobcat:element`,
-`src/main-thread-runtime.ts` as `bobcat:runtime`, `src/timers.ts` as
+`src/main-thread-runtime.ts` as `bobcat:runtime`, `src/frame.ts` as
+`bobcat:frame` (what a `frame`'s `src` does in the realm that wrote it: the
+fetch, the `ShadowRealm`, the call into the child), `src/frame-boot.ts` as
+`bobcat:frame-boot` (a nested card's boot inside that child), `src/timers.ts` as
 `bobcat:timers`, `src/future.ts` as `bobcat:future`, `src/module.ts` as
 `bobcat:module`, `src/section-url.ts` as `bobcat:section-url`,
 `src/bundle-fetch.ts` as `bobcat:bundle-fetch`, `src/diagnostics.ts` as
@@ -2797,7 +2928,11 @@ of the element path in the same file.
   `pnpm --filter reactlynx-test-fixtures build` before Rust tests, clippy or
   benches: the emitted `dist/index.rs` registry is what names the bundles, and
   no compiled fixture is versioned. Upstream provenance for the five `basic-*`
-  cards is in that package's `NOTICE.lynx-stack`. Native builds use the shared
+  cards and the `react-frame`/`react-frame-inner` pair (lynx-stack's
+  web-core-e2e `api-frame-src`/`api-frame-inner`: a red host page whose
+  100px `<frame src="./react-frame-inner.web.bundle">` shows a blue card,
+  rendered end to end by `crates/bobcat-source/tests/frame.rs`) is in that
+  package's `NOTICE.lynx-stack`. Native builds use the shared
   `scripts/lynx-bytecode.ts` hook to disable BTS manifest bytecode. MTS keeps
   the compiler's default encoding. The fixture-only source repack remains
   necessary for Bobcat's source evaluator.
@@ -3019,7 +3154,9 @@ Rulings and limits to know before touching it:
   2026-10-12; Lynx's CSS compiler drops the rule and the `.web.bundle` wire
   cannot carry it, so it reaches the engine through CSS-text sheets only).
   Matching, proximity, invalidation and the sharing cache's scope check are
-  stylo's. `dom` adds one thing: a shadow tree's sheets are
+  stylo's. `dom` adds one thing: a shadow tree's sheets — CSS text through
+  `Document::add_shadow_stylesheet`, pre-built rules through
+  `Document::append_shadow_rules` — are
   `ShadowStyleSheet`s (`crates/dom/src/style/engine.rs`), whose implicit
   `@scope` root is the shadow host (`ImplicitScopeRoot::Constructed`), where
   a document sheet's is the document element. WPT ports are in

@@ -34,6 +34,17 @@ fragment suffixes are preserved after the appended path. For example:
 - Loading `('A &/中', './component.bundle#entry')` requests
   `./component.bundle/custom_section/A%20%26%2F%E4%B8%AD.css#entry`.
 
+A container's own page StyleInfo — what a `<frame src>` card carries as its
+page CSS — is no named section and has a URL of its own:
+`<path>/style-info.css`, the suffix kept likewise (`bundleStyleSheetURL` in
+`section-url.ts`, `bundle_style_url` in `container.rs`). With container
+`https://cdn.test/card.web.bundle?rev=2` it is
+`https://cdn.test/card.web.bundle/style-info.css?rev=2`. `ContainerSources`
+registers it pre-parsed for a page and a fetched container alike;
+`__LoadStyleSheet` never names it, a page's view lists its own, and of a
+fetched container's only a `<frame>` boot (`bobcat:frame-boot`) adopts it, on
+the frame's shadow root, when `hasStyleSheet` says the fetcher holds it.
+
 JS constructs the specifier; URL resolution and transport policy remain with
 the embedder. It can answer registered URLs, load CSS from a server, or decode a
 container and return preparsed styles through the same completion. There is no

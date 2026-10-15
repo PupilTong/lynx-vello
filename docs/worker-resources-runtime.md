@@ -302,9 +302,10 @@ URL and the browser through `load_sources`. A
 own binding list, then `export default <the body>` — and everything else the
 BTS module `bts_module_source` already wrote. A container's `root`, when it
 has one, is registered at `root.js` as the entry's module, as a page's is.
-The container's *own* StyleInfo is registered too, at `style-info.css`, and
-never adopted: native applies a lazy bundle's CSS only through
-`__LoadStyleSheet('CSS')`.
+The container's *own* StyleInfo is registered too, at `style-info.css`, but
+only a `<frame src>` boot adopts it, into the frame's shadow root: native
+applies a lazy bundle's CSS only through `__LoadStyleSheet('CSS')`, and
+`rLynxPrepareLazyBundleMTS` asks for nothing else.
 
 **What has been fetched is the fetcher's, and it answers through a probe.**
 Core remembers nothing. `ResourceFetcher::fetch_probe()` hands the realms one

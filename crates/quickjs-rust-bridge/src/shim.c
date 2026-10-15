@@ -34,6 +34,9 @@ typedef struct QjsUnhandledRejection {
     QjsContext *context;
     JSValue promise;
     JSValue reason;
+    /* The runtime's `rejection_serial` when this was recorded, so a caller
+       can tell what an evaluation it ran left behind. */
+    uint64_t serial;
     struct QjsUnhandledRejection *next;
 } QjsUnhandledRejection;
 
@@ -148,6 +151,8 @@ typedef struct QjsRuntime {
     JSRuntime *raw;
     QjsUnhandledRejection *rejection_head;
     QjsUnhandledRejection *rejection_tail;
+    /* Counts every rejection ever recorded; see `QjsUnhandledRejection`. */
+    uint64_t rejection_serial;
     int rejection_tracker_oom;
     QjsInterruptCallback *interrupt_callback;
     void *interrupt_opaque;
@@ -499,6 +504,7 @@ static void qjs_promise_rejection_tracker(JSContext *raw_context,
     current->context = context;
     current->promise = JS_DupValue(raw_context, promise);
     current->reason = JS_DupValue(raw_context, reason);
+    current->serial = ++runtime->rejection_serial;
     current->next = NULL;
     if (runtime->rejection_tail == NULL) {
         runtime->rejection_head = current;
@@ -1573,6 +1579,41 @@ static JSValue qjs_require_answer(JSContext *raw, JSValue response,
     return result;
 }
 
+/* Forgets every rejection `context` recorded after `since` whose reason is
+   `reason`: what one failed module evaluation left behind. QuickJS runs each
+   module body as an async function, so a body that throws rejects that
+   function's own promise as well as the evaluation promise, and every module
+   of the graph on the failing path adds one more — all with the one thrown
+   value, and none of them reachable from script. */
+static void qjs_rejections_forget_since(QjsRuntime *runtime,
+                                        QjsContext *context, uint64_t since,
+                                        JSValueConst reason) {
+    QjsUnhandledRejection *current = runtime->rejection_head;
+    QjsUnhandledRejection *previous = NULL;
+
+    while (current != NULL) {
+        QjsUnhandledRejection *next = current->next;
+
+        if (current->context == context && current->serial > since &&
+            JS_StrictEq(context->raw, current->reason, reason)) {
+            if (previous == NULL) {
+                runtime->rejection_head = next;
+            } else {
+                previous->next = next;
+            }
+            if (runtime->rejection_tail == current) {
+                runtime->rejection_tail = previous;
+            }
+            JS_FreeValue(context->raw, current->promise);
+            JS_FreeValue(context->raw, current->reason);
+            free(current);
+        } else {
+            previous = current;
+        }
+        current = next;
+    }
+}
+
 /* Evaluates one module for a `require` and answers its namespace.
    `JS_EvalFunction` links the graph and runs it, and hands back the
    evaluation promise, which is already settled unless something in the graph
@@ -1580,9 +1621,10 @@ static JSValue qjs_require_answer(JSContext *raw, JSValue response,
 
    - fulfilled: the namespace object, which is what `require` returns;
    - rejected: whatever the body threw, thrown again here, so a `require` fails the way the module
-     did. The rejection is marked handled first: the realm has been told about it by the throw, and
-     a promise nothing else holds would otherwise be reported a second time as an unhandled
-     rejection;
+     did. Every rejection the evaluation left with that value is forgotten first — the evaluation
+     promise and the promise of each module body on the failing path: the realm has been told about
+     it by the throw, and promises nothing else holds would otherwise be reported a second time as
+     unhandled rejections;
    - pending: refused. Settling it means running promise jobs, and a `require` is a call inside
      whatever job is already running: it cannot run the queue it is itself part of. Node refuses
      the same thing as `ERR_REQUIRE_ASYNC_MODULE`.
@@ -1596,6 +1638,7 @@ static JSValue qjs_require_evaluate(QjsContext *context,
     JSContext *raw = context->raw;
     JSValue promise;
     JSValue reason;
+    uint64_t since = context->runtime->rejection_serial;
     int state;
 
     context->runtime->evaluation_depth += 1;
@@ -1612,8 +1655,7 @@ static JSValue qjs_require_evaluate(QjsContext *context,
     state = JS_PromiseState(raw, promise);
     if (state == JS_PROMISE_REJECTED) {
         reason = JS_PromiseResult(raw, promise);
-        qjs_promise_rejection_tracker(raw, promise, JS_UNDEFINED, 1,
-                                      context->runtime);
+        qjs_rejections_forget_since(context->runtime, context, since, reason);
         JS_FreeValue(raw, promise);
         return JS_Throw(raw, reason);
     }

@@ -409,6 +409,8 @@ impl Worker {
                             id: crate::WorkerId::from(self.key),
                             url: Arc::from(self.url.as_str()),
                         },
+                        // A worker's children get the core alone.
+                        None,
                         |engine| {
                             let events = self.events.clone();
                             let key = self.key;
