@@ -1621,9 +1621,12 @@ that entry. What happens is JavaScript's
 (`packages/bobcat-element/src/frame.ts`): `__CreateFrame` and
 `__CreateElement("frame")` mark the handle, and `__SetAttribute(frame,
 "src", value)` hands the new value (`null` for a removal) to
-`frameSourceChanged` after the native write. The per-frame state —
-generation, `src`, whether a load is started, the realm and the child's
-`dispose` — lives on the handle; the host's calls find it through
+`frameSourceChanged` after the native write, as it hands a `data` or
+`global-props` write to `frameDataChanged` (both are `bobcat:element`'s
+`STRUCTURED_PROPERTIES` of a `frame`, so an object is written as its JSON
+text). The per-frame state — generation, `src`, whether a load is started,
+the realm, the child's `dispose`, `updateData` and `updateGlobalProps`, and
+the frame's `data` and `global-props` as JSON text — lives on the handle; the host's calls find it through
 `bobcat:element`'s `__BobcatHandleOf`, so a frame whose handle another realm
 holds is nothing to the page realm. A `null` or `""` does nothing — the frame
 keeps its card, as native's `FrameElement::OnSetSrc` ignores it and web-core's
@@ -1636,9 +1639,21 @@ fetcher resolves it against `ViewSources::base_url`, and `bobcat-source`'s
 `BundleInstaller` registers the card through `ContainerSources`, its `root`
 at `<U>/root.js` and its StyleInfo at `<U>/style-info.css` (`U` the resolved
 `src`), before the fetch settles — and when it settles (a probe hit's `true` in a microtask, a `Future` id through
-its `then`) creates a `ShadowRealm`, imports `bobcat:frame-boot`'s `boot` and
-`dispose`, and calls `boot(frameId, src, "{}", "{}",
-JSON.stringify(SystemInfo))`. A disconnection tears the card down, as
+its `then`) creates a `ShadowRealm`, imports `bobcat:frame-boot`'s `boot`, `dispose`,
+`updateData` and `updateGlobalProps`, and calls `boot(frameId, src, data,
+globalProps, JSON.stringify(SystemInfo))` with the frame's `data` and
+`global-props` as they stand then. A `data` or `global-props` write keeps
+text that parses to a plain object (a non-null, non-array object) and
+ignores anything else; a removal makes what the next boot reads `{}`. Every
+boot reads the last values written — the first, a new `src`'s, a
+reconnected frame's — as web-core's `LynxView` renders every card with its
+current `initData`/`globalProps` (native boots a new `src` with none; user
+ruling 2026-10-15). Once a card booted, each write is also handed to it, no
+deduplication: `updateData(json)` is `__BobcatUpdateData(json, "", false)`
+(the card's `processData` with the default processor, then its
+`updatePage`), `updateGlobalProps(json)` is `__BobcatUpdateGlobalProps`, the
+page's own update paths; a write while the fetch or the import is in flight
+reaches `boot` alone. A disconnection tears the card down, as
 web-core's `LynxView` disposes on `disconnectedCallback`; a connection loads
 the frame's `src` again when nothing is loaded or loading, as
 `connectedCallback` renders (so a move re-renders). A frame handle collected
@@ -1665,8 +1680,11 @@ Its `dispose()` lets go of every card its own frames loaded
 (`__BobcatCloseFrames`) and then calls `closeRealm()`. A frame inside a
 nested card that the nested card disconnects without letting go of its
 handle keeps its card: the connection calls reach the page realm alone. No
-`load` event, no `data`/`global-props`, no events into the frame and no
-nested BTS (`docs/tracking/deviations.md`).
+`load` event, no events into the frame, no frame methods beyond the shared
+base set (native's surface; user ruling 2026-10-15) and no nested BTS — so a
+compiled ReactLynx card renders its first screen with the frame's data but
+does not re-render on a later write, which its MTS `updatePage` leaves to
+the BTS (`docs/tracking/deviations.md`).
 
 The members that answer with a list encode it in the return string, since
 the boundary's value type carries no array: `attributeNames` and
@@ -2081,10 +2099,13 @@ typewriter, truncation and selection are deferred),
 lives as long as the frame — no shadow sheet and no slot, so light children
 never render — whose `connected_callback`/`disconnected_callback` queue
 `ComponentEvent::Frame` for `bobcat:frame`'s connection exports,
-`display: flex; contain: strict` whatever `defaultDisplayLinear` says, the
-shared box block, `is_frame`, `nested_page` and `frame_depth`; `src` is an
-ordinary attribute to Rust, which observes nothing — `bobcat:frame` reacts
-to it in the realm that wrote it), and
+`display: flex; contain: strict` whatever `defaultDisplayLinear` says,
+relaxed to `inline-size layout paint style` by `auto-height` and to
+`layout paint style` by `auto-width` (UA attribute selectors; `preset-*`
+and `enable-multi-async-thread` are accepted and do nothing), the shared
+box block, `is_frame`, `nested_page` and `frame_depth`; `src`, `data` and
+`global-props` are ordinary attributes to Rust, which observes nothing —
+`bobcat:frame` reacts to them in the realm that wrote them), and
 `tree::blur_view` (`blur-radius` reflected into a
 `backdrop-filter: blur()` presentational hint, under both the native tag
 `blur-view` and web-core's `x-blur-view`, as a CSS length rather than
@@ -2956,10 +2977,12 @@ of the element path in the same file.
   `pnpm --filter reactlynx-test-fixtures build` before Rust tests, clippy or
   benches: the emitted `dist/index.rs` registry is what names the bundles, and
   no compiled fixture is versioned. Upstream provenance for the five `basic-*`
-  cards and the `react-frame`/`react-frame-inner` pair (lynx-stack's
-  web-core-e2e `api-frame-src`/`api-frame-inner`: a red host page whose
-  100px `<frame src="./react-frame-inner.web.bundle">` shows a blue card,
-  rendered end to end by `crates/bobcat-source/tests/frame.rs`) is in that
+  cards and the `react-frame*` cards (lynx-stack's web-core-e2e
+  `api-frame-src`/`api-frame-inner`: a red host page whose 100px
+  `<frame src="./react-frame-inner.web.bundle">` shows a blue card;
+  `api-frame-data` and `api-frame-global-props` as `react-frame-data`;
+  `api-frame-auto-height` as `react-frame-auto-height`; all rendered end to
+  end by `crates/bobcat-source/tests/frame.rs`) is in that
   package's `NOTICE.lynx-stack`. Native builds use the shared
   `scripts/lynx-bytecode.ts` hook to disable BTS manifest bytecode. MTS keeps
   the compiler's default encoding. The fixture-only source repack remains

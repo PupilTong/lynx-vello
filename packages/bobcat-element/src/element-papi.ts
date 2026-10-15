@@ -28,10 +28,11 @@ import {
 import type { NodeQueryRequest, QueryNode } from "bobcat:selector-query";
 import { __BobcatPublishEvent } from "bobcat:runtime";
 import { splitRecord } from "bobcat:record";
-// Read only when a frame's `src` is written, never as this module evaluates:
-// `bobcat:frame` imports `bobcat:runtime`, which imports this module, so the
-// cycle is safe exactly because nothing crosses it at evaluation.
-import { frameSourceChanged } from "bobcat:frame";
+// Read only when a frame's `src`, `data` or `global-props` is written, never
+// as this module evaluates: `bobcat:frame` imports `bobcat:runtime`, which
+// imports this module, so the cycle is safe exactly because nothing crosses
+// it at evaluation.
+import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 
 // The Lynx Element PAPI runtime.
 //
@@ -55,7 +56,7 @@ import { frameSourceChanged } from "bobcat:frame";
 // | `__CreateScrollView(parentComponentUniqueID)` | native `createElement` export |
 // | `__CreateRawText(text)` | native `createElement` + `setAttribute` exports |
 // | `__CreateList(parentComponentUniqueID, ...)` | native `createElement` export + this runtime's own store |
-// | `__CreateFrame(parentComponentUniqueID)` | native `createElement` export; its `src` drives `bobcat:frame` |
+// | `__CreateFrame(parentComponentUniqueID)` | native `createElement` export; its `src`, `data` and `global-props` drive `bobcat:frame` |
 // | `__AppendElement(parent, child)` | native `insertBefore` export |
 // | `__InsertElementBefore(parent, child, reference?)` | native `insertBefore` export |
 // | `__RemoveElement(parent, child)` | native `removeElement` export |
@@ -110,7 +111,9 @@ import { frameSourceChanged } from "bobcat:frame";
 // A `frame` handle — from `__CreateFrame`, or `__CreateElement("frame")` — is
 // marked under a realm-local symbol, and an `src` written to it is handed,
 // after the native write, to `bobcat:frame`, which loads that card into a
-// `ShadowRealm` that renders under the frame's nested page. In that child,
+// `ShadowRealm` that renders under the frame's nested page; so are its
+// `data` and `global-props`, as JSON text, which that card boots with or
+// takes as an update. In that child,
 // `__CreatePage` answers the nested page: `bobcat:frame-boot` names it with
 // `__BobcatUsePageRoot` before the card runs. Native's `FiberCreateFrame`
 // (`lynx/core/runtime/lepus/bindings/renderer_functions.cc`) and web-core's
@@ -1787,13 +1790,28 @@ function updateListInfo(list: unknown, operations: unknown): undefined {
  * `markdown`, native's tag for the same component, which web-core does not
  * register, has the same properties: native hands its component the object
  * itself, and the one component behind both tags here reads JSON text.
+ *
+ * A `frame` has two more, `data` and `global-props`, each of which
+ * ReactLynx passes as the object itself. web-core's frame is a nested
+ * `lynx-view`, whose `data` and `global-props` setters take an object or its
+ * JSON text (`web-core/ts/client/mainthread/LynxView.ts:228-276`, the
+ * `globalProps`, `initData` and `data` properties); native's
+ * `FrameElement::SetAttribute` keeps a shallow copy of the value under the
+ * same two names (`lynx/core/renderer/dom/fiber/frame_element.cc:52-101`).
+ * Here the attribute holds the JSON text, which is also what `bobcat:frame`
+ * hands the nested card: that card runs in another realm, and only a
+ * primitive crosses into it.
  */
 const STRUCTURED_PROPERTIES: ReadonlyMap<string, ReadonlyMap<string, string>> = (() => {
   const markdown = new Map([
     ["markdown-style", "markdown-style"],
     ["markdownStyle", "markdown-style"],
   ]);
-  return new Map([["x-markdown", markdown], ["markdown", markdown]]);
+  const frame = new Map([
+    ["data", "data"],
+    ["global-props", "global-props"],
+  ]);
+  return new Map([["x-markdown", markdown], ["markdown", markdown], ["frame", frame]]);
 })();
 
 /**
@@ -1826,7 +1844,11 @@ const STRUCTURED_PROPERTY_NAMES: ReadonlySet<string> = new Set(
  *
  * `src` on a `frame` is an attribute like any other, and then also a load:
  * once the attribute is written, `bobcat:frame` is told the new value (`null`
- * for a removal) and replaces whatever card the frame showed.
+ * for a removal) and replaces whatever card the frame showed. So are a
+ * frame's `data` and `global-props`, as the text the attribute now holds —
+ * an object's JSON text, any other value as its string, `null` for a
+ * removal — which the frame's card boots with, or takes as an update once
+ * it booted, when it is the text of a plain object.
  */
 export function __SetAttribute(
   element: unknown,
@@ -1839,6 +1861,8 @@ export function __SetAttribute(
   const nodeId = nodeIdOf(element);
   const values = valuesOf(element, attributeValuesSymbol);
   let key = String(name);
+  // The text the attribute now holds, or `null` once it is removed.
+  let written: string | null = null;
   if (value === null || value === undefined) {
     removeAttribute(nodeId, key);
     values.delete(key);
@@ -1854,11 +1878,16 @@ export function __SetAttribute(
         text = String(JSON.stringify(value));
       }
     }
-    setAttribute(nodeId, key, text ?? String(value));
+    written = text ?? String(value);
+    setAttribute(nodeId, key, written);
     values.set(key, copyElementValue(value));
   }
-  if (key === "src" && (element as Handle)[frameSymbol] === true) {
-    frameSourceChanged(element as object, nodeId, value == null ? null : String(value));
+  if ((element as Handle)[frameSymbol] === true) {
+    if (key === "src") {
+      frameSourceChanged(element as object, nodeId, written);
+    } else if (key === "data" || key === "global-props") {
+      frameDataChanged(element as object, key, written);
+    }
   }
   return undefined;
 }

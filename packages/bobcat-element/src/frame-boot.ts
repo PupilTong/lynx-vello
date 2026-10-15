@@ -9,7 +9,14 @@
 // realm's page root — no BTS Worker is started, and the entry is not
 // imported but loaded synchronously, from the URL the fetched container
 // registered its `root` at. The page data is whatever the parent hands over,
-// as JSON text; `bobcat:frame` hands over `{}` for both today.
+// as JSON text: `bobcat:frame` hands over the frame's `data` and
+// `global-props` as they stand when this card boots, `{}` for one the frame
+// was never given.
+//
+// `updateData` and `updateGlobalProps` take each later write of the frame's
+// `data` and `global-props` while this card runs, as the page's own
+// `__BobcatUpdateData` and `__BobcatUpdateGlobalProps` take the view's
+// `update_data` and `update_global_props`.
 //
 // `dispose` is the other half: `bobcat:frame` calls it when the frame lets
 // go of this card, and it closes this realm, after letting go of every card
@@ -26,6 +33,8 @@ import {
   __BobcatInitializeMTS,
   __BobcatProcessInitData,
   __BobcatRenderPage,
+  __BobcatUpdateData,
+  __BobcatUpdateGlobalProps,
   lynx,
 } from "bobcat:runtime";
 import { __BobcatUsePageRoot, __FlushElementTree } from "bobcat:element";
@@ -97,6 +106,41 @@ export function boot(
   } catch (error) {
     _ReportError(error);
     return false;
+  }
+}
+
+/**
+ * Takes the frame's new `data`, JSON text of a plain object, as the page's
+ * `update_data` takes the view's with no processor name and no reset: the
+ * card's `processData` with the default processor, then its `updatePage`,
+ * which is the card's own code, and merges the update into the card's data
+ * as that code does.
+ *
+ * The page path also posts the processed data to the BTS; this realm has
+ * none, and `__BobcatDetachBackground` dropped that post before boot. What
+ * fails is the card's and is reported here, so nothing crosses back.
+ */
+export function updateData(json: string): void {
+  try {
+    __BobcatUpdateData(json, "", false);
+  } catch (error) {
+    _ReportError(error);
+  }
+}
+
+/**
+ * Takes the frame's new `global-props`, JSON text of a plain object, as the
+ * page's `update_global_props` takes the view's: merged over the card's
+ * current global props, its top-level keys replacing theirs, and the merged
+ * object handed to the card's `updateGlobalProps`. What it merges over is
+ * what `boot` handed `__BobcatInitializeMTS`, which seeds the same host copy
+ * the page's boot seeds; the BTS post is dropped as `updateData`'s is.
+ */
+export function updateGlobalProps(json: string): void {
+  try {
+    __BobcatUpdateGlobalProps(json);
+  } catch (error) {
+    _ReportError(error);
   }
 }
 

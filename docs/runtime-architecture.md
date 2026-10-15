@@ -862,7 +862,9 @@ its shadow root for the element's life and queues its connections as
 as written, creates the child, and calls `bobcat:frame-boot`'s `boot` in it,
 which reads the nested page (`framePage`), makes it the child's page root
 (`__BobcatUsePageRoot`), mounts the card's sheet on the frame's shadow root
-(`adoptStyleSheet(url, shadowRoot)`) and runs the card's `root`. A new `src`
+(`adoptStyleSheet(url, shadowRoot)`) and runs the card's `root` with the
+frame's `data` and `global-props`, whose later writes `bobcat:frame` hands
+the running child as its `updateData`/`updateGlobalProps`. A new `src`
 or a disconnection calls the child's `dispose` (`closeRealm`) and then
 `resetFrame`, which frees the nested page's children and the shadow root's
 sheets (see AGENTS.md, "The frame's lifecycle"). A worker realm's child has

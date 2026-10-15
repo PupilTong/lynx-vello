@@ -1,9 +1,10 @@
 //! `<frame src>` end to end, over a real view: the page realm's
 //! `__CreateFrame` and `__SetAttribute(frame, "src", …)`, `bobcat:frame`'s
 //! fetch and `ShadowRealm`, `bobcat:frame-boot` running the nested card's
-//! `root` in the child under the frame's nested page, and the frame's
-//! connection and disconnection, which the custom element queues and
-//! `bobcat:frame` turns into a load and a disposal.
+//! `root` in the child under the frame's nested page, the frame's `data`
+//! and `global-props`, which the card boots with and takes as updates, and
+//! the frame's connection and disconnection, which the custom element
+//! queues and `bobcat:frame` turns into a load and a disposal.
 //!
 //! The host stands in for a container installer: it answers the plain fetch
 //! of the card's URL, and serves `<url>/root.js` (the card's root as an MTS
@@ -42,14 +43,22 @@ fn root(src: &str) -> String {
 
 /// The host page: a text of its own, then a 100×50 frame showing `src`.
 /// `updatePage` writes the data's `src` to the frame, `null` included, so a
-/// test reaches the page realm through `LynxView::update_data`; an `op`
-/// instead detaches the frame, attaches it again, or lets go of its handle.
+/// test reaches the page realm through `LynxView::update_data`; a `data` or
+/// a `globalProps` key instead writes its value, as the object itself, to the
+/// frame's `data` or `global-props`; an `op` detaches the frame, attaches it
+/// again, lets go of its handle, or logs what two UI methods answer for it.
 fn host_entry(src: &str) -> String {
     host_page(src, true)
 }
 
 /// [`host_entry`], with the frame appended to the page or left detached.
 fn host_page(src: &str, attached: bool) -> String {
+    host_page_with(src, attached, "")
+}
+
+/// [`host_page`], running `before` — which names the frame `frame` — after
+/// the frame is created and before its `src` is written.
+fn host_page_with(src: &str, attached: bool, before: &str) -> String {
     format!(
         r"
         const page = __CreatePage('0', 0);
@@ -58,6 +67,7 @@ fn host_page(src: &str, attached: bool) -> String {
         __AppendElement(page, own);
         let frame = __CreateFrame(0);
         __SetAttribute(frame, 'style', 'width:100px;height:50px');
+        {before}
         __SetAttribute(frame, 'src', '{src}');
         if ({attached}) __AppendElement(page, frame);
         __FlushElementTree();
@@ -75,6 +85,22 @@ fn host_page(src: &str, attached: bool) -> String {
                     __AppendElement(page, view);
                     __RemoveElement(page, view);
                 }}
+            }} else if (data.op === 'measure') {{
+                const answers = {{}};
+                for (const method of ['boundingClientRect', 'updateData']) {{
+                    __InvokeUIMethod(frame, method, {{}}, result => {{
+                        answers[method] = result;
+                    }});
+                }}
+                const rect = answers.boundingClientRect;
+                const refused = answers.updateData;
+                console.log('measured ' + rect.code + ' ' +
+                    [rect.data.left, rect.data.top, rect.data.width, rect.data.height].join(',') +
+                    ' ' + refused.code + ' ' + String(refused.data));
+            }} else if ('data' in data) {{
+                __SetAttribute(frame, 'data', data.data);
+            }} else if ('globalProps' in data) {{
+                __SetAttribute(frame, 'global-props', data.globalProps);
             }} else {{
                 __SetAttribute(frame, 'src', data.src);
             }}
@@ -503,4 +529,238 @@ fn a_collected_frame_handle_disposes_of_its_card() {
     pump_until_ticking(&mut engine, "the detached frame's card runs");
     operate(&mut engine, "forget");
     assert_no_more_ticks(&mut engine, "the collected frame's card is disposed of");
+}
+
+/// A card's `root` that shows its page data: one `text` reading
+/// `<data.label>/<global props' message>`, which `renderPage` builds from
+/// the processed init data. Its `updatePage` merges an update into
+/// `lynx.__initData`, as a compiled card's own `updatePage` keeps its data,
+/// and its `updateGlobalProps` reads the merged `lynx.__globalProps`; both
+/// rewrite the same raw text in place. It logs `booted <src>` once per realm
+/// it runs in.
+fn data_root(src: &str) -> String {
+    format!(
+        "if (__Card__ !== '{src}') throw Error('__Card__ is ' + __Card__); \
+        console.log('booted ' + __Card__); \
+        let raw; \
+        const label = (data) => data.label + '/' + lynx.__globalProps.message; \
+        globalThis.renderPage = (data) => {{ const p = __CreatePage('0', 0); \
+        const t = __CreateText(0); raw = __CreateRawText(label(data)); \
+        __AppendElement(t, raw); __AppendElement(p, t); }}; \
+        globalThis.updatePage = (data) => {{ \
+        lynx.__initData = {{ ...lynx.__initData, ...data }}; \
+        __SetAttribute(raw, 'text', label(lynx.__initData)); __FlushElementTree(); }}; \
+        globalThis.updateGlobalProps = () => {{ \
+        __SetAttribute(raw, 'text', label(lynx.__initData)); __FlushElementTree(); }};"
+    )
+}
+
+/// A host running `entry` that serves [`CARD`] and [`SECOND`], each with a
+/// [`data_root`] and no page CSS.
+fn serving_data_cards(entry: &str) -> TestViewSpec {
+    TestViewSpec::new(entry)
+        .with_fetchable(CARD)
+        .with_module(
+            &format!("{CARD}/root.js"),
+            &super::card_entry(&data_root(CARD)),
+        )
+        .with_fetchable(SECOND)
+        .with_module(
+            &format!("{SECOND}/root.js"),
+            &super::card_entry(&data_root(SECOND)),
+        )
+        .with_style_sheet_probe()
+}
+
+/// Writes `value` (JSON, `null` for a removal) to the host's frame through
+/// `updatePage`: `key` is `data` for the frame's `data`, `globalProps` for
+/// its `global-props`.
+fn write_frame(engine: &mut TestEngine, key: &str, value: &str) {
+    engine
+        .view
+        .update_data(format!(r#"{{"{key}":{value}}}"#), String::new())
+        .expect("the view takes an update");
+}
+
+/// The text the frame's card shows — the raw text of the nested page's
+/// `text` — and that `text`'s id, read off the document.
+fn nested_text(tree: &mut LynxDocument) -> Option<(dom::NodeId, String)> {
+    let frame = tree
+        .document_element()
+        .children()
+        .find(|child| child.tag_name() == Some("frame"))?
+        .id();
+    let page = crate::main::tree::nested_page(tree, frame)?;
+    let text = tree
+        .get(page)?
+        .children()
+        .find(|child| child.tag_name() == Some("text"))?;
+    let raw = text
+        .children()
+        .find(|child| child.tag_name() == Some("raw-text"))?;
+    Some((text.id(), raw.attribute("text")?.to_owned()))
+}
+
+/// Pumps until the frame's card shows `expected` — in a `text` other than
+/// `replacing`, when given, so that a card booted in place of another one
+/// showing the same text is told apart — collecting every event, and
+/// answers the id of the `text` showing it.
+fn pump_until_text(
+    engine: &mut TestEngine,
+    events: &mut Vec<EngineEvent>,
+    expected: &str,
+    replacing: Option<dom::NodeId>,
+) -> dom::NodeId {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        for event in engine.pump() {
+            assert!(!event.is_fatal(), "the view ended: {event:?}");
+            events.push(event);
+        }
+        if let Some((text, shown)) = engine
+            .view
+            .probe_document_within(Duration::from_millis(20), nested_text)
+            .flatten()
+            && shown == expected
+            && replacing != Some(text)
+        {
+            // What the card logged before it rendered was sent before the
+            // probe was answered: one more turn collects it.
+            events.extend(engine.pump());
+            return text;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the card never showed {expected:?}: {events:?}"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// How many realms booted `src` among `events`.
+fn boots(events: &[EngineEvent], src: &str) -> usize {
+    let booted = format!("booted {src}");
+    events
+        .iter()
+        .filter(|event| {
+            matches!(event, EngineEvent::ConsoleMessage { message, .. } if *message == booted)
+        })
+        .count()
+}
+
+/// A frame's `data` and `global-props`: what is written before `src` is
+/// what the card boots with; a write after boot is the card's own
+/// `updateData`/`updateGlobalProps`, re-rendered in place by the same realm;
+/// a new `src` and a reconnection boot with the last plain objects written;
+/// anything else is ignored without a diagnostic, and a removal leaves the
+/// running card as it is and boots the next one with `{}`.
+#[test]
+fn a_frames_data_and_global_props_reach_its_card() {
+    let before = "__SetAttribute(frame, 'data', {label: 'first'}); \
+                  __SetAttribute(frame, 'global-props', {message: 'hello'});";
+    let mut engine =
+        serving_data_cards(&host_page_with(CARD, true, before)).create(Arc::new(NoWakeup));
+    let mut events = Vec::new();
+    let text = pump_until_text(&mut engine, &mut events, "first/hello", None);
+    assert_eq!(boots(&events, CARD), 1);
+
+    write_frame(&mut engine, "data", r#"{"label":"second"}"#);
+    assert_eq!(
+        pump_until_text(&mut engine, &mut events, "second/hello", None),
+        text,
+        "an update re-renders the card in place"
+    );
+    write_frame(&mut engine, "globalProps", r#"{"message":"there"}"#);
+    assert_eq!(
+        pump_until_text(&mut engine, &mut events, "second/there", None),
+        text
+    );
+    assert_eq!(boots(&events, CARD), 1, "and boots nothing");
+
+    // None of these is a plain object, so none replaces what the next
+    // boot reads.
+    for ignored in ["3", "[1]", r#""nope""#, r#""[1]""#] {
+        write_frame(&mut engine, "data", ignored);
+        write_frame(&mut engine, "globalProps", ignored);
+    }
+    write_src(&mut engine, &format!("{SECOND:?}"));
+    // The first card showed the same text: the second one is its own `text`.
+    let second = pump_until_text(&mut engine, &mut events, "second/there", Some(text));
+    assert_eq!(boots(&events, SECOND), 1);
+
+    // A write while the frame is detached reaches the card it boots when
+    // it is attached again.
+    operate(&mut engine, "detach");
+    write_frame(&mut engine, "data", r#"{"label":"third"}"#);
+    operate(&mut engine, "attach");
+    let third = pump_until_text(&mut engine, &mut events, "third/there", Some(second));
+    assert_eq!(boots(&events, SECOND), 2);
+
+    // A removal leaves the running card's data alone: the next update
+    // still reads `third`.
+    write_frame(&mut engine, "data", "null");
+    write_frame(&mut engine, "globalProps", r#"{"message":"last"}"#);
+    assert_eq!(
+        pump_until_text(&mut engine, &mut events, "third/last", None),
+        third
+    );
+    // And the next boot reads `{}`, which has no label.
+    operate(&mut engine, "detach");
+    operate(&mut engine, "attach");
+    pump_until_text(&mut engine, &mut events, "undefined/last", Some(third));
+    assert_eq!(boots(&events, SECOND), 3);
+    assert_eq!(reported(&events), Vec::<&str>::new());
+}
+
+/// A frame answers the base set's methods as any element does —
+/// `boundingClientRect` with code 0 and its box — and has no method of its
+/// own: `updateData` is code 3, the shared table's "no such method".
+#[test]
+fn a_frame_answers_the_base_methods_and_none_of_its_own() {
+    let mut engine = serving_the_card(CARD).create(Arc::new(NoWakeup));
+    let mut events = Vec::new();
+    pump_until(
+        &mut engine,
+        &mut events,
+        "the nested card rendered",
+        |state| state.nested.len() == 2,
+    );
+    operate(&mut engine, "measure");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let measured = loop {
+        for event in engine.pump() {
+            assert!(!event.is_fatal(), "the view ended: {event:?}");
+            events.push(event);
+        }
+        if let Some(message) = events.iter().find_map(|event| match event {
+            EngineEvent::ConsoleMessage { message, .. } if message.starts_with("measured ") => {
+                Some(message.clone())
+            }
+            _ => None,
+        }) {
+            break message;
+        }
+        assert!(Instant::now() < deadline, "nothing measured: {events:?}");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    let rect = engine
+        .probe_document(|tree| {
+            let frame = tree
+                .document_element()
+                .children()
+                .find(|child| child.tag_name() == Some("frame"))?
+                .id();
+            tree.bounding_client_rect(frame)
+        })
+        .flatten()
+        .expect("the frame has a box");
+    assert_eq!((rect.size.width, rect.size.height), (100.0, 50.0));
+    assert_eq!(
+        measured,
+        format!(
+            "measured 0 {},{},{},{} 3 undefined",
+            rect.origin.x, rect.origin.y, rect.size.width, rect.size.height
+        )
+    );
+    assert_eq!(reported(&events), Vec::<&str>::new());
 }

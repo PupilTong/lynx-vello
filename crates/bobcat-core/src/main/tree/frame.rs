@@ -24,8 +24,10 @@
 //! slot, the frame's light children are assigned nowhere and never render,
 //! which is native's "a frame element cannot adopt any child"
 //! (`frame_element.cc`, `OnNodeAdded`) without refusing the insertion.
-//! `src` is an ordinary attribute: what loads it is JavaScript's, so no
-//! attribute is observed.
+//! No attribute is observed here: `src`, `data` and `global-props` are
+//! `bobcat:frame`'s, in JavaScript, which `bobcat:element` calls after
+//! writing them, and `auto-width` and `auto-height` act through the UA
+//! rules alone.
 //!
 //! What the component does observe is its connection: each
 //! `connectedCallback` and `disconnectedCallback` queues a
@@ -41,12 +43,52 @@
 //! `position: relative`, `overflow: clip`, zero minimums — and
 //! [`UA_RULES`]: `display: flex`, whatever `defaultDisplayLinear` says,
 //! and `contain: strict`, web-core's `lynx-view` containment
-//! (`web-core/css/index.css`). Strict containment makes the frame's size
-//! independent of what renders in it: it is what its author and its
-//! container give it — stretched across the page's column, and 0 tall with
-//! no author height, as a native frame without `preset-height` or
-//! `auto-height` is before its card reports one. The nested page is a `page`, so the UA sheet sizes
-//! it 100% of the frame, which is web-core's `[part="page"] { width: 100%; height: 100% }`.
+//! (`web-core/css/index.css:7-18`). Strict containment makes the frame's
+//! size independent of what renders in it: it is what its author and its
+//! container give it. Under the default linear page, that is stretched
+//! across the page's width and 0 tall with no author height and no
+//! `auto-height`; a row stretches its height instead. The nested page is a
+//! `page`, so the UA sheet sizes it 100% of the frame, which is web-core's
+//! `[part="page"] { width: 100%; height: 100% }`
+//! (`web-core/css/index.css:47-55`).
+//!
+//! Two boolean attributes let the nested card's content size the frame.
+//! Each is a selector over the attribute and `:not([…="false"])`, as
+//! `image[auto-size]` is ([`super::image`]), because `__SetAttribute`
+//! writes `false` as the string `"false"`.
+//!
+//! - `auto-height`, on which native and web-core agree, relaxes the containment to `inline-size
+//!   layout paint style`. That is web-core's `lynx-view[auto-height] { contain: content }` over the
+//!   `container-type: inline-size` every `lynx-view` has (`web-core/css/index.css:7-45`), which
+//!   together contain the width alone. Native lays the nested card out with an unspecified height
+//!   (`LynxFrameView.java:199-208`) and gives the frame the height the card reports
+//!   (`FrameShadowNode.java:57-83`).
+//! - `auto-width` is native's alone, and native is what this follows (user ruling). Native lays the
+//!   nested card out with an unspecified width (`LynxFrameView.java:188-197`), and
+//!   `FrameShadowNode.measure` gives the frame the width the card reports wherever its own width is
+//!   not `EXACTLY`: an author width or a stretch still wins, and min and max still clamp. Here that
+//!   is `contain: layout paint style`, no size containment at all, so the frame's width is its
+//!   content's on an axis nothing makes definite, as any flex box's is. The rule comes after
+//!   `auto-height`'s at the same specificity, so a frame with both attributes takes it. The gap,
+//!   accepted by the same ruling: CSS has no containment of the height alone, so an `auto-width`
+//!   frame with no author height takes its content's height too, where native leaves it 0 tall.
+//!
+//! The nested page needs no rule of its own for either. Its `height: 100%`
+//! of an indefinite height behaves as `auto`, so its content's height is
+//! an `auto-height` frame's; its `width: 100%` is cyclic in the frame's
+//! intrinsic size contribution, which takes it as `auto` (css-sizing-3
+//! §5.2.1), so its content's width is an `auto-width` frame's. Either way
+//! the page then fills what the frame became.
+//!
+//! `preset-width` and `preset-height` are accepted and do nothing. Native
+//! hands them to the nested card as its viewport until the frame has a
+//! content rect of its own (`LynxFrameView.java:106-110`, `149-156`) and
+//! never sizes the frame's box by them; web-core reads neither. Here the
+//! nested page lays out in the same pass as the frame, so there is no
+//! moment before the frame has a size. `enable-multi-async-thread` is
+//! native's choice of threads for the nested card
+//! (`LynxFrameView.java:103-105`), which web-core does not read either: it
+//! is accepted and does nothing.
 
 use dom::{CustomElement, NodeId, ShadowRootMode};
 
@@ -64,8 +106,13 @@ const PAGE_PART: &str = "page";
 /// without bound.
 pub(crate) const MAX_FRAME_DEPTH: usize = 8;
 
-/// The frame's own rules; see the module documentation.
-pub(super) const UA_RULES: &str = "frame { display: flex; contain: strict; }\n";
+/// The frame's own rules; see the module documentation. The `auto-width`
+/// rule comes last at the same specificity, so a frame with both attributes
+/// takes its `contain: layout paint style`.
+pub(super) const UA_RULES: &str = r#"frame { display: flex; contain: strict; }
+frame[auto-height]:not([auto-height="false"]) { contain: inline-size layout paint style; }
+frame[auto-width]:not([auto-width="false"]) { contain: layout paint style; }
+"#;
 
 /// Installs the component, over the queue its connections go on. Must run
 /// before any element could carry the tag, which is
@@ -139,13 +186,13 @@ pub(crate) fn frame_depth(document: &LynxDocument, node: NodeId) -> usize {
 mod tests {
     #![allow(clippy::float_cmp)] // Authored pixel sizes lay out exactly.
 
-    use dom::ShadowRootMode;
     use dom::stylo::values::computed::Display;
+    use dom::{NodeId, ShadowRootMode};
 
     use super::super::test_support::{
         child, display, document, element_under, with_component_events, with_config,
     };
-    use super::super::{ComponentEvent, ComponentEvents, PAGE_TAG, PageConfig};
+    use super::super::{ComponentEvent, ComponentEvents, LynxDocument, PAGE_TAG, PageConfig};
     use super::{FRAME_TAG, frame_depth, is_frame, nested_page};
 
     #[test]
@@ -223,6 +270,234 @@ mod tests {
         document.layout();
         let size = document.rounded_layout(page).expect("laid out").size;
         assert_eq!((size.width, size.height), (100.0, 50.0));
+    }
+
+    /// Both values of `defaultDisplayLinear`, which decides the nested page's
+    /// own display and so how its content measures.
+    fn under_either_switch() -> impl Iterator<Item = (bool, LynxDocument)> {
+        [true, false].into_iter().map(|linear| {
+            (
+                linear,
+                with_config(PageConfig {
+                    default_display_linear: linear,
+                    ..PageConfig::default()
+                }),
+            )
+        })
+    }
+
+    /// A frame under `parent` with `style` and `attributes`, and one view of
+    /// `content` in its nested page; the frame and its nested page.
+    fn frame_holding(
+        document: &mut LynxDocument,
+        parent: NodeId,
+        style: &str,
+        attributes: &[(&str, &str)],
+        content: &str,
+    ) -> (NodeId, NodeId) {
+        let frame = element_under(document, parent, FRAME_TAG, style);
+        for (name, value) in attributes {
+            document.set_attribute(frame, name, value);
+        }
+        let page = nested_page(document, frame).expect("a nested page");
+        element_under(document, page, "view", content);
+        (frame, page)
+    }
+
+    /// A flex container under the page with `style`. The page's own display
+    /// follows `defaultDisplayLinear` (a vertical linear box, or a row flex
+    /// container that stretches a child's height), so the tests that run
+    /// under either switch place the frame in a container of their own and
+    /// let the switch decide only the nested page's display.
+    fn container(document: &mut LynxDocument, style: &str) -> NodeId {
+        child(document, "view", &format!("display: flex; {style}"))
+    }
+
+    /// A row that does not stretch: a frame in it is sized by its own
+    /// contribution on both axes.
+    fn row(document: &mut LynxDocument) -> NodeId {
+        container(document, "flex-direction: row; align-items: flex-start")
+    }
+
+    fn size_of(document: &LynxDocument, node: NodeId) -> (f32, f32) {
+        let size = document.rounded_layout(node).expect("laid out").size;
+        (size.width, size.height)
+    }
+
+    /// `auto-height`: the nested card's content sizes the frame's height,
+    /// and the page, `height: 100%` of an indefinite height, takes it too.
+    #[test]
+    fn an_auto_height_frame_takes_its_contents_height() {
+        for (linear, mut document) in under_either_switch() {
+            let column = container(&mut document, "flex-direction: column");
+            let (frame, nested) = frame_holding(
+                &mut document,
+                column,
+                "width: 300px",
+                &[("auto-height", "")],
+                "width: 80px; height: 80px",
+            );
+            document.layout();
+            assert_eq!(size_of(&document, frame), (300.0, 80.0), "linear {linear}");
+            assert_eq!(size_of(&document, nested), (300.0, 80.0), "linear {linear}");
+        }
+    }
+
+    /// `__SetAttribute` writes `false` as the string `"false"`, which is off.
+    #[test]
+    fn auto_height_false_is_off() {
+        let mut document = document();
+        let page = document.document_element().id();
+        let (frame, _) = frame_holding(
+            &mut document,
+            page,
+            "width: 300px",
+            &[("auto-height", "false")],
+            "width: 80px; height: 80px",
+        );
+        document.layout();
+        assert_eq!(size_of(&document, frame), (300.0, 0.0));
+    }
+
+    /// An author height is a definite height, which content does not move.
+    #[test]
+    fn an_author_height_wins_over_auto_height() {
+        let mut document = document();
+        let page = document.document_element().id();
+        let (frame, nested) = frame_holding(
+            &mut document,
+            page,
+            "width: 300px; height: 50px",
+            &[("auto-height", "")],
+            "width: 80px; height: 80px",
+        );
+        document.layout();
+        assert_eq!(size_of(&document, frame), (300.0, 50.0));
+        assert_eq!(size_of(&document, nested), (300.0, 50.0));
+    }
+
+    /// `auto-width`: where nothing stretches it, the nested card's content
+    /// width is the frame's, and the page's `width: 100%` follows it.
+    #[test]
+    fn an_auto_width_frame_takes_its_contents_width() {
+        for (linear, mut document) in under_either_switch() {
+            let row = row(&mut document);
+            let (frame, nested) = frame_holding(
+                &mut document,
+                row,
+                "height: 120px",
+                &[("auto-width", "")],
+                "width: 70px; height: 80px",
+            );
+            document.layout();
+            assert_eq!(size_of(&document, frame), (70.0, 120.0), "linear {linear}");
+            assert_eq!(size_of(&document, nested), (70.0, 120.0), "linear {linear}");
+        }
+    }
+
+    /// Both attributes: the content's size on both axes.
+    #[test]
+    fn a_frame_with_both_attributes_takes_its_contents_size() {
+        for (linear, mut document) in under_either_switch() {
+            let row = row(&mut document);
+            let (frame, nested) = frame_holding(
+                &mut document,
+                row,
+                "",
+                &[("auto-width", ""), ("auto-height", "")],
+                "width: 70px; height: 80px",
+            );
+            document.layout();
+            assert_eq!(size_of(&document, frame), (70.0, 80.0), "linear {linear}");
+            assert_eq!(size_of(&document, nested), (70.0, 80.0), "linear {linear}");
+        }
+    }
+
+    /// A stretched width is a definite one, which wins over `auto-width` as
+    /// native's `EXACTLY` measure mode does. With no author height, the
+    /// frame also takes its content's height: CSS has no containment of the
+    /// height alone, where native would leave the frame 0 tall.
+    #[test]
+    fn a_stretched_auto_width_frame_keeps_the_stretched_width() {
+        for (linear, mut document) in under_either_switch() {
+            let column = container(&mut document, "flex-direction: column; width: 200px");
+            let (frame, nested) = frame_holding(
+                &mut document,
+                column,
+                "",
+                &[("auto-width", "")],
+                "width: 70px; height: 80px",
+            );
+            document.layout();
+            assert_eq!(size_of(&document, frame), (200.0, 80.0), "linear {linear}");
+            assert_eq!(size_of(&document, nested), (200.0, 80.0), "linear {linear}");
+        }
+    }
+
+    /// The same on the other axis: a row stretches an `auto-height` frame's
+    /// height to its own, and the content does not move it.
+    #[test]
+    fn a_stretched_auto_height_frame_keeps_the_stretched_height() {
+        for (linear, mut document) in under_either_switch() {
+            let row = container(&mut document, "flex-direction: row; height: 150px");
+            let (frame, nested) = frame_holding(
+                &mut document,
+                row,
+                "width: 300px",
+                &[("auto-height", "")],
+                "width: 80px; height: 80px",
+            );
+            document.layout();
+            assert_eq!(size_of(&document, frame), (300.0, 150.0), "linear {linear}");
+            assert_eq!(
+                size_of(&document, nested),
+                (300.0, 150.0),
+                "linear {linear}"
+            );
+        }
+    }
+
+    /// `preset-height` is native's nested viewport before the first content
+    /// rect, a window this engine does not have: it sizes nothing.
+    #[test]
+    fn preset_height_has_no_effect() {
+        let mut document = document();
+        let page = document.document_element().id();
+        let (frame, _) = frame_holding(
+            &mut document,
+            page,
+            "",
+            &[("preset-height", "200px"), ("preset-width", "100px")],
+            "width: 80px; height: 80px",
+        );
+        document.layout();
+        assert_eq!(size_of(&document, frame), (393.0, 0.0));
+    }
+
+    /// The attribute rules restyle: adding `auto-height` sizes the frame by
+    /// its content and removing it again puts it back at 0.
+    #[test]
+    fn toggling_auto_height_relayouts_the_frame() {
+        let mut document = document();
+        let page = document.document_element().id();
+        let (frame, _) = frame_holding(
+            &mut document,
+            page,
+            "width: 300px",
+            &[],
+            "width: 80px; height: 80px",
+        );
+        document.layout();
+        assert_eq!(size_of(&document, frame), (300.0, 0.0));
+        document.set_attribute(frame, "auto-height", "");
+        document.layout();
+        assert_eq!(size_of(&document, frame), (300.0, 80.0), "on");
+        document.remove_attribute(frame, "auto-height");
+        document.layout();
+        assert_eq!(size_of(&document, frame), (300.0, 0.0), "off again");
+        document.set_attribute(frame, "auto-height", "false");
+        document.layout();
+        assert_eq!(size_of(&document, frame), (300.0, 0.0), "\"false\"");
     }
 
     /// What the component queued since the last call, as `(node,
