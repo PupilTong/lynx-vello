@@ -56,13 +56,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bobcat_core::input::{InputEvent, PointerKind, PointerPhase};
+use bobcat_core::input::{InputEvent, KeyPhase, Modifiers, PointerKind, PointerPhase};
 use bobcat_core::{
     DrawTarget, EngineError, EngineEvent, LynxGroup, LynxView, ModuleCall, NativeModule, NoWakeup,
     Painter, PreparsedDeclaration, PreparsedRule, PreparsedStyleSheet, ScreenMetrics, StyleThreads,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
-use bobcat_source::{LazyBundleInstaller, PageSource};
+use bobcat_source::{BundleInstaller, PageSource};
 use flashbulb::{Image, Screenshots};
 use url::Url;
 
@@ -309,6 +309,22 @@ enum Step {
     /// A wheel turn over this viewport point, by this many CSS pixels on each
     /// axis: upstream's `locator.hover()` followed by `mouse.wheel(dx, dy)`.
     Wheel((f32, f32), (f32, f32)),
+    /// A key pressed and released: upstream's `keyboard.press`. The W3C
+    /// `key` and `code` strings, then whether Shift is held for both.
+    Press(&'static str, &'static str, bool),
+    /// A key put down and held: upstream's `keyboard.down`.
+    KeyDown(&'static str, &'static str),
+    /// A held key let go: upstream's `keyboard.up`.
+    KeyUp(&'static str, &'static str),
+    /// The mouse moved to this viewport point with no button held:
+    /// upstream's `locator.hover()`.
+    MouseOver(f32, f32),
+    /// The primary mouse button pressed at this viewport point: upstream's
+    /// `mouse.down()` where the pointer is.
+    MouseDown(f32, f32),
+    /// The primary mouse button released at this viewport point: upstream's
+    /// `mouse.up()`.
+    MouseUp(f32, f32),
     /// The host's `updateData`, with the default processor: JSON text.
     UpdateData(&'static str),
     /// The host's `updateGlobalProps`: JSON text.
@@ -333,6 +349,10 @@ enum Step {
     /// and their only evidence is a `console` line — a frame captured after
     /// one says the picture is what the card looks like *once that happened*.
     Logged(&'static str),
+    /// Waits until the card has logged a line that begins with this text, and
+    /// fails the frame if it never does: [`Step::Logged`] for a line whose
+    /// tail differs from run to run, such as a logged event's `timestamp`.
+    LoggedStart(&'static str),
 }
 
 /// A frame the suite pins after a card's first screen: what is done to the
@@ -388,7 +408,7 @@ impl Card {
                 // Without an installer every `lynx.fetchBundle` fails, and a
                 // lazy card shows its fallback for ever — the picture of a
                 // load that failed, for a card about one that succeeds.
-                container_installer: Some(Arc::new(LazyBundleInstaller)),
+                container_installer: Some(Arc::new(BundleInstaller)),
                 ..ResourcesConfig::default()
             },
             || {},
@@ -562,6 +582,26 @@ impl Card {
     async fn apply(&mut self, step: Step) -> Result<(), String> {
         let refused = |call: &str, error: EngineError| format!("{call} was refused: {error}");
         match step {
+            Step::Press(key, code, shift) => {
+                for phase in [KeyPhase::Down, KeyPhase::Up] {
+                    self.key(phase, key, code, shift).await;
+                }
+            }
+            Step::KeyDown(key, code) => self.key(KeyPhase::Down, key, code, false).await,
+            Step::KeyUp(key, code) => self.key(KeyPhase::Up, key, code, false).await,
+            Step::MouseOver(x, y) => {
+                let over = InputEvent::pointer((x, y), 1, PointerKind::Mouse, PointerPhase::Move)
+                    .with_buttons(-1, 0);
+                self.input(over).await;
+            }
+            Step::MouseDown(x, y) => {
+                let down = InputEvent::pointer((x, y), 1, PointerKind::Mouse, PointerPhase::Down);
+                self.input(down).await;
+            }
+            Step::MouseUp(x, y) => {
+                let up = InputEvent::pointer((x, y), 1, PointerKind::Mouse, PointerPhase::Up);
+                self.input(up).await;
+            }
             Step::Tap(x, y) => {
                 for phase in [PointerPhase::Down, PointerPhase::Up] {
                     self.painter.dispatch_input(InputEvent::pointer(
@@ -629,23 +669,48 @@ impl Card {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
             }
-            Step::Logged(line) => {
-                let deadline = Instant::now() + LOGGED_DEADLINE;
-                loop {
-                    let unheard = &self.logged[self.heard..];
-                    if let Some(at) = unheard.iter().position(|logged| logged == line) {
-                        self.heard += at + 1;
-                        break;
-                    }
-                    if Instant::now() >= deadline {
-                        return Err(format!("the card never logged {line:?}"));
-                    }
-                    self.turn();
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
+            Step::Logged(line) => self.hear(line, |logged| logged == line).await?,
+            Step::LoggedStart(start) => {
+                self.hear(start, |logged| logged.starts_with(start)).await?;
             }
         }
         Ok(())
+    }
+
+    /// Hands the view one input event, then turns it once.
+    async fn input(&mut self, event: InputEvent) {
+        self.painter.dispatch_input(event);
+        self.turn();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    /// One key event, with Shift held or not and no other modifier.
+    async fn key(&mut self, phase: KeyPhase, key: &str, code: &str, shift: bool) {
+        let modifiers = Modifiers {
+            shift,
+            ..Modifiers::default()
+        };
+        self.input(InputEvent::key(phase, key, code, false, modifiers))
+            .await;
+    }
+
+    /// Waits until the card logs a line `matches` accepts, past the lines an
+    /// earlier wait already took, and says which line was waited for when it
+    /// never comes.
+    async fn hear(&mut self, what: &str, matches: impl Fn(&str) -> bool) -> Result<(), String> {
+        let deadline = Instant::now() + LOGGED_DEADLINE;
+        loop {
+            let unheard = &self.logged[self.heard..];
+            if let Some(at) = unheard.iter().position(|logged| matches(logged)) {
+                self.heard += at + 1;
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("the card never logged {what:?}"));
+            }
+            self.turn();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 }
 

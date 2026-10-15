@@ -10,7 +10,8 @@
 // goldens: `<case>.png` for the first screen, `<case>.<label>.png` after it.
 
 use Step::{
-    Drag, Fresh, Logged, Reload, SendGlobalEvent, Tap, UpdateData, UpdateGlobalProps, Wait, Wheel,
+    Drag, Fresh, KeyDown, KeyUp, Logged, LoggedStart, MouseDown, MouseOver, MouseUp, Press, Reload,
+    SendGlobalEvent, Tap, UpdateData, UpdateGlobalProps, Wait, Wheel,
 };
 
 driven! {
@@ -142,14 +143,24 @@ driven! {
     "basic-element-image-support-tap-event" => [
         "tapped": [Tap(100.0, 100.0)],
     ],
-    // Upstream scrolls the list to offset 500 by script; here the wheel is turned
-    // that far over it.
+    // Upstream scrolls the list to offset 500 by script, here the wheel is turned
+    // that far over it, and upstream then asserts that the card logged a `scroll` and a
+    // `scrollend` event. A logged event ends with its `timestamp`, so each is waited
+    // for by the start of its line.
     "basic-element-list-basic" => [
-        "scrolled": [Wheel((196.5, 250.0), (0.0, 500.0))],
+        "scrolled": [
+            Wheel((196.5, 250.0), (0.0, 500.0)),
+            LoggedStart("{\"type\":\"scroll\","),
+            LoggedStart("{\"type\":\"scrollend\","),
+        ],
     ],
     // The same scroll over cells sized by their content.
     "basic-element-list-basic-size" => [
-        "scrolled": [Wheel((196.5, 250.0), (0.0, 500.0))],
+        "scrolled": [
+            Wheel((196.5, 250.0), (0.0, 500.0)),
+            LoggedStart("{\"type\":\"scroll\","),
+            LoggedStart("{\"type\":\"scrollend\","),
+        ],
     ],
     // The wheel is turned 100px over `#target`, the 240x240 list at the origin.
     "basic-element-list-bindwheel" => [
@@ -172,6 +183,23 @@ driven! {
     // `#scrollToPosition`, clicked once.
     "basic-element-list-scroll-to-position" => [
         "scrolled-to-position": [Tap(196.5, 508.0)],
+    ],
+    // Upstream's CDP swipe from (100, 300) up 100px over the 300x600 scroll-view, then
+    // the `scroll` event the card logs and keeps.
+    "basic-element-scroll-view-event-scroll" => [
+        "swiped": [
+            Drag((100.0, 300.0), (100.0, 200.0)),
+            Wait(100),
+            LoggedStart("{\"type\":\"scroll\","),
+        ],
+    ],
+    // Upstream sets the scroll-view's `scrollTop` to 200 by script; here the wheel is
+    // turned that far over it. Then the `scrollend` event the card logs and keeps.
+    "basic-element-scroll-view-event-scrollend" => [
+        "scrolled": [
+            Wheel((150.0, 300.0), (0.0, 200.0)),
+            LoggedStart("{\"type\":\"scrollend\","),
+        ],
     ],
     // Upstream's two CDP swipes: from (100, 500) up 450px, 100 ms apart.
     "basic-element-scroll-view-event-scrolltolower" => [
@@ -321,12 +349,13 @@ driven! {
         "current-3-duration-100": [Tap(388.0, 5.0), Tap(191.5, 75.0)],
         "current-4-out-of-range": [Tap(191.5, 75.0)],
     ],
-    // Upstream waits for one 5 s autoplay turn, then clicks the two 10x10 buttons under
-    // the swiper: `interval` 1000 (y 150..160), then `interval` 0 (y 160..170).
+    // Upstream waits 5.6 s for one 5 s autoplay turn, then clicks the two 10x10 buttons
+    // under the swiper, `interval` 1000 (y 150..160) and `interval` 0 (y 160..170),
+    // waiting 1.6 s and 0.6 s after them.
     "basic-element-x-swiper-interval" => [
-        "second-item": [Wait(5100)],
-        "third-item": [Tap(5.0, 155.0), Wait(1100)],
-        "last-item": [Tap(5.0, 165.0)],
+        "second-item": [Wait(5600)],
+        "third-item": [Tap(5.0, 155.0), Wait(1600)],
+        "last-item": [Tap(5.0, 165.0), Wait(600)],
     ],
     // The right-hand swiper, `#swiper-1`, whose `bindtap` invokes `scrollTo` with the
     // next index, clicked twice.
@@ -456,9 +485,12 @@ driven! {
         "tapped": [Tap(50.0, 50.0)],
         "reloaded": [Tap(50.0, 150.0)],
     ],
-    // `#tap-me`. Upstream reads `scrollTop` three seconds into an auto-scroll.
+    // `#tap-me`. Upstream reads `scrollTop` three seconds into an auto-scroll at 120 px/s;
+    // a screen that is still scrolling cannot be pinned, so the frame is taken after the
+    // run has reached the end of the 2200px list and stopped there (`autoStop`), which
+    // takes about 16 s.
     "basic-main-query-selector" => [
-        "auto-scrolling": [Tap(196.5, 55.0)],
+        "auto-scrolled-to-end": [Tap(196.5, 55.0), Wait(17000)],
     ],
     // `#target`, clicked once.
     "basic-mts-bindtap" => [
@@ -488,7 +520,9 @@ driven! {
     "basic-page-event" => [
         "tapped": [Tap(50.0, 50.0)],
     ],
-    // `#target`, clicked once.
+    // `#target`, clicked once. Upstream reads `scrollTop` two seconds into an auto-scroll
+    // at 120 px/s; the five items scroll 230px, so the run has reached the end and
+    // stopped before the frame settles.
     "basic-ref-main-invoke-ui-method" => [
         "auto-scrolled": [Tap(196.5, 55.0)],
     ],
@@ -498,6 +532,38 @@ driven! {
         "reloaded": [Reload],
     ],
     // `#target`, clicked twice.
+    // Upstream hovers `#target`, the red 100x100 box at the origin, then presses and
+    // releases the mouse button there.
+    "basic-bindmouse" => [
+        "pressed-and-released": [MouseOver(50.0, 50.0), MouseDown(50.0, 50.0), MouseUp(50.0, 50.0)],
+    ],
+    // Upstream presses `a`; the view's own `bindKeydown` must not hear a key nothing
+    // has focused.
+    "basic-bindkeydown-out-of-view-noop" => [
+        "pressed-a": [Press("a", "KeyA", false)],
+    ],
+    // Upstream presses `a`.
+    "basic-global-bindkeydown" => [
+        "pressed-a": [Press("a", "KeyA", false)],
+    ],
+    // Upstream presses `a` and reads `code`.
+    "basic-global-bindkeydown-code" => [
+        "pressed-a": [Press("a", "KeyA", false)],
+    ],
+    // Upstream presses `Enter` and reads `key`.
+    "basic-global-bindkeydown-key" => [
+        "pressed-enter": [Press("Enter", "Enter", false)],
+    ],
+    // Upstream presses `Shift+a`: here the `a` key with Shift held, which is what the
+    // card reads (`shiftKey`).
+    "basic-global-bindkeydown-shift" => [
+        "pressed-shift-a": [Press("A", "KeyA", true)],
+    ],
+    // Upstream puts `a` down, checks nothing changed yet, and lets it go.
+    "basic-global-bindkeyup" => [
+        "a-down": [KeyDown("a", "KeyA")],
+        "a-up": [KeyUp("a", "KeyA")],
+    ],
     "basic-style-remove" => [
         "inline-removed": [Tap(50.0, 50.0)],
         "inline-restored": [Tap(50.0, 50.0)],
