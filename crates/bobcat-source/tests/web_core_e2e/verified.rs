@@ -480,4 +480,14 @@ verified! {
     basic_global_bindkeyup => "basic-global-bindkeyup",
     // The lazy component mounts as a pink 100x100 box, and a tap on its `main-thread:bindtap` box turns it green through its `main-thread:ref`. The lazy bundle carries the main-thread worklet runtime in its own `main-thread` section since lynx-stack #4066 (canary 02b6e1d2), so its handler is registered.
     basic_lazy_component_mts_bindtap => "basic-lazy-component-mts-bindtap",
+    // The page is one sizeless view; the card's subject is that a module-level `globalThis.foo = 123` is the bare identifier `foo` on both threads, and the script waits for the two lines upstream listens for: `btsFoo 123` from the background thread's effect and `mtsFoo 123` from the `runOnMainThread` worklet, in whichever order they arrive.
+    api_globalthis => "api-globalThis",
+    // A `<text text-maxlength='5'>` that `setState` fills with `123456` one second in; the first screen is taken after two more settles (`LATE`), past that timer, as upstream's is 1.5 s in. It shows `12345`, centred: the value is cut at five characters, with no marker because the text has no `text-overflow` (the 2026-09-14 ruling).
+    basic_element_text_maxline_with_setdata => "basic-element-text-maxline-with-setData",
+    // One `carry` swiper, its first item at full size. With a finger held 250px left of where it went down, both items are part-scaled about their centres: the red one leaving at about 0.77 and the green one entering at about 0.87, the orange swiper showing between them. web-core's frame at the same moment has them at about 0.65 and 0.97: its keyframes run with the default `ease` and these run linear, a difference `docs/tracking/deviations.md` records for `carry` and `coverflow`. Lifted, the swiper settles on the green item.
+    basic_element_x_swiper_mode_carry => "basic-element-x-swiper-mode-carry",
+    // The `<svg content=...>` drawing, its 100x100 viewBox scaled to 188x188 and centred in the 188x492 box, and under it `#result`, which the `bindload` handler has turned green. `#result` is 100x100 by the fourth rewrite of the vendored text (2026-10-15, `packages/web-core-e2e-fixtures/README.md`); upstream's own `#result` has no size, so its colour showed nowhere.
+    basic_element_svg_bindload => "basic-element-svg-bindload",
+    // The fourth rewrite of the vendored text (2026-10-15) gives the boxes sizes and colours: a yellow flex column 300px high with its one child, the red 100x100 linear view, at its start; inside the red view the two blue 20x20 children stack down its vertical main axis from the top. The card also writes the deprecated `linear-gravity: space-between` on that view, which this engine drops by the user's decision of 2026-07 (`docs/tracking/deviations.md`), so the two blue squares are not spread apart; upstream asserts the `justify-content: space-between` web-core maps it to.
+    basic_flex_nested_linear_setting => "basic-flex-nested-linear-setting",
 }

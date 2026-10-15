@@ -21,9 +21,9 @@ scope decision, will not. Upstream's own `dist/` is built without an
 this engine has no intention of serving. Compiled here at `4.1.0`, the same
 sources exercise the path it does.
 
-The cards, their CSS and their assets are otherwise upstream's, with three
+The cards, their CSS and their assets are otherwise upstream's, with four
 rewrites applied to the vendored text by user ruling (the first two on
-2026-09-25, the third on 2026-10-08):
+2026-09-25, the third on 2026-10-08, the fourth on 2026-10-15):
 
 - **`direction: lynx-rtl` becomes `direction: rtl`** (24 files). `lynx-rtl` is
   a value the fork's grammar rejects, so upstream's own spelling left every
@@ -42,8 +42,16 @@ rewrites applied to the vendored text by user ruling (the first two on
   deprecated family — the `basic-linear-*-graverty-*`, `*-cross-gravity` and
   `*-layout-gravity` ones — keep it, and are judged as dropping it.
 
-All three are recorded here rather than absorbed silently, because a re-sync
-from upstream will bring the original spellings back.
+- **Two cards whose subject had no size or colour get both** (2 files).
+  Upstream asserts their computed style, and nothing on their screen showed
+  it. In `basic-element-svg-bindload` the `#result` view whose colour the
+  `bindload` handler turns green gets 100x100. In
+  `basic-flex-nested-linear-setting` the flex parent gets a 300px height and a
+  yellow background, the linear child a red one and two 20x20 blue children,
+  so the child's main axis and its distribution of children are visible.
+
+All four are recorded here rather than absorbed silently, because a re-sync
+from upstream will bring the original text back.
 
 ## Building
 

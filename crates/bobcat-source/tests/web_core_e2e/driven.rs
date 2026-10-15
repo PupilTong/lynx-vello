@@ -10,11 +10,16 @@
 // goldens: `<case>.png` for the first screen, `<case>.<label>.png` after it.
 
 use Step::{
-    Drag, Fresh, KeyDown, KeyUp, Logged, LoggedStart, MouseDown, MouseOver, MouseUp, Press, Reload,
-    SendGlobalEvent, Tap, UpdateData, UpdateGlobalProps, Wait, Wheel,
+    Drag, Fresh, Hold, KeyDown, KeyUp, Logged, LoggedStart, MouseDown, MouseOver, MouseUp, Press,
+    QuickCapture, Release, Reload, SendGlobalEvent, Tap, UpdateData, UpdateGlobalProps, Wait, Wheel,
 };
 
 driven! {
+    // Upstream listens for the two console lines the card writes, one from each thread,
+    // each naming the module-level `globalThis.foo`.
+    "api-globalThis" => [
+        "logged": [Logged("mtsFoo 123"), Logged("btsFoo 123")],
+    ],
     // `#tap-area`, the 100x100 box inset 50px. Upstream also offsets the whole view by
     // 200px in its host page, which a view with no embedding page has no word for.
     "api-bindtap-lynx-view-relative" => [
@@ -352,9 +357,13 @@ driven! {
     // Upstream waits 5.6 s for one 5 s autoplay turn, then clicks the two 10x10 buttons
     // under the swiper, `interval` 1000 (y 150..160) and `interval` 0 (y 160..170),
     // waiting 1.6 s and 0.6 s after them.
+    // Once `interval` is 1000 the swiper turns every second, each turn a half-second
+    // glide, so the screen is quiet for half a second at a time. Upstream's screenshot
+    // is 1.6 s after the click: here 1.1 s of wait and the 0.5 s settle every frame
+    // has, and a short stability check, so the capture falls inside that quiet spell.
     "basic-element-x-swiper-interval" => [
         "second-item": [Wait(5600)],
-        "third-item": [Tap(5.0, 155.0), Wait(1600)],
+        "third-item": [Tap(5.0, 155.0), Wait(1100), QuickCapture],
         "last-item": [Tap(5.0, 165.0), Wait(600)],
     ],
     // The right-hand swiper, `#swiper-1`, whose `bindtap` invokes `scrollTo` with the
@@ -563,6 +572,12 @@ driven! {
     "basic-global-bindkeyup" => [
         "a-down": [KeyDown("a", "KeyA")],
         "a-up": [KeyUp("a", "KeyA")],
+    ],
+    // Upstream's `dragAndHold` from (300, 50) left 250px, the finger kept down, then the
+    // screenshot; here the finger is lifted for a last frame as well.
+    "basic-element-x-swiper-mode-carry" => [
+        "held": [Hold((300.0, 50.0), (50.0, 50.0))],
+        "released": [Release(50.0, 50.0)],
     ],
     "basic-style-remove" => [
         "inline-removed": [Tap(50.0, 50.0)],

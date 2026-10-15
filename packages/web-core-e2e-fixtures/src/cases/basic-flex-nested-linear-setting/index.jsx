@@ -10,6 +10,8 @@ class Page extends Component {
       <view
         id='parent'
         style={{
+          height: '300px',
+          backgroundColor: 'yellow',
           display: 'flex',
           justifyContent: 'space-between',
           flexDirection: 'column',
@@ -23,8 +25,11 @@ class Page extends Component {
             linearGravity: 'space-between',
             height: '100px',
             width: '100px',
+            backgroundColor: 'red',
           }}
         >
+          <view style={{ height: '20px', width: '20px', backgroundColor: 'blue' }} />
+          <view style={{ height: '20px', width: '20px', backgroundColor: 'blue' }} />
         </view>
       </view>
     );
