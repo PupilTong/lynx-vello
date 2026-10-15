@@ -27,6 +27,7 @@
 //! | any other Lepus chunk | `P/<name>.js S` | verbatim |
 //! | any other string custom section | `P/<name>.js S` | a `.json` name verbatim, else [`bts_module_source`] |
 //! | a manifest path `p` | `P/<p> S`, no `.js` appended, a `?`/`#` inside `p` escaped | the same choice by name |
+//! | in a `.web.bundle` with no entry, a manifest path `/<n>` that is a bare name, again | `P/<n>.js S` | the same choice by name |
 //! | a named stylesheet `k` | `P/custom_section/<k>.css S` | a [`PreparsedStyleSheet`] |
 //! | the container's own non-empty `StyleInfo` | `P/style-info.css S` | a lowered [`PreparsedStyleSheet`] |
 //! | the BTS boot script (an entry and a non-empty manifest) | `U` with its fragment replaced by `#background-thread` | `background_boot_source` |
@@ -46,6 +47,15 @@
 //! `custom_sections[n]` and `manifest["/n"]`, so its body lands at both
 //! `P/n.js` and `P/n` — two URLs, and so two module evaluations if a card
 //! asks for it by both.
+//!
+//! A `.web.bundle` assembled from custom sections — a lazy bundle compiled on
+//! the `lynx.fetchBundle` path — has no custom section left: the web encoder
+//! moves each one that is neither CSS nor bytecode into the manifest as
+//! `/<n>` (`WebEncodePlugin.routeSections` in
+//! `@lynx-js/template-webpack-plugin`), and the background thread still asks
+//! for it by name. Such a container has no entry, and each of its manifest
+//! paths that is a bare name — one segment, no extension, as a section's name
+//! is — lands at `P/n.js` too, the same two URLs.
 //!
 //! # Collisions
 //!
@@ -192,6 +202,23 @@ impl ContainerSources {
         }
         for (path, body) in &template.manifest {
             scripts.insert(bundle_path_url(url, path), body_source(target, path, body))?;
+        }
+        // A `.web.bundle` with no entry was assembled from custom sections,
+        // and the web encoder keeps none of them as one: it routes each
+        // section that is neither CSS nor bytecode into the manifest as
+        // `/<name>` (`WebEncodePlugin.routeSections`). Whoever asks for such a
+        // section asks for it by name, `lynx.loadScript(name, {bundleName})`,
+        // so each manifest path that is a bare name — one segment, no
+        // extension — answers at its section URL as well, the two URLs a
+        // `.lynx.bundle`'s section has. A path with an extension is a file the
+        // manifest carries (`/answer.js`), never a section's name.
+        if target == BundleTarget::Web && entry_name.is_none() {
+            for (path, body) in &template.manifest {
+                let name = bare(path);
+                if !name.is_empty() && !name.contains(['/', '.']) {
+                    scripts.insert(named_chunk_url(url, name), body_source(target, name, body))?;
+                }
+            }
         }
         let entry = entry_name.map(|_| named_chunk_url(url, ROOT));
         let background_entry = if entry.is_some() && !template.manifest.is_empty() {
@@ -764,6 +791,64 @@ mod tests {
         assert_eq!(
             script(&sources, &format!("{BUNDLE}#background-thread")),
             background_boot_source(&url(BUNDLE), true)
+        );
+    }
+
+    /// A `.web.bundle` assembled from custom sections — a lazy bundle on the
+    /// `lynx.fetchBundle` path — carries its background section as the
+    /// manifest path `/background`, because the web encoder routes every
+    /// section that is neither CSS nor bytecode there
+    /// (`@lynx-js/template-webpack-plugin`, `WebEncodePlugin.routeSections`).
+    /// The background thread asks for it as the section it was:
+    /// `lynx.loadScript('background', {bundleName})`, `P/background.js`. So
+    /// it answers at both URLs, as a `.lynx.bundle`'s section does.
+    #[test]
+    fn a_web_container_without_root_answers_its_routed_sections_by_name() {
+        let sources = ContainerSources::from_template(
+            &url(BUNDLE),
+            &template(
+                &[("main-thread", "(function (e) {})")],
+                &[("/background", "(function(){})()")],
+                serde_json::json!({}),
+            ),
+            BundleTarget::Web,
+            None,
+        )
+        .expect("a lazy web container");
+        assert_eq!(
+            script_urls(&sources),
+            [
+                format!("{BUNDLE}/background"),
+                format!("{BUNDLE}/background.js"),
+                format!("{BUNDLE}/main-thread.js"),
+            ]
+        );
+        assert_eq!(
+            script(&sources, &format!("{BUNDLE}/background.js")),
+            script(&sources, &format!("{BUNDLE}/background")),
+            "one body, the same module text at both URLs"
+        );
+    }
+
+    /// A web page has a `root`, and its manifest paths are the paths they
+    /// are: `/app-service.js` is not also a section named `app-service.js`.
+    #[test]
+    fn a_web_page_answers_its_manifest_paths_only_as_paths() {
+        let sources = ContainerSources::from_template(
+            &url(BUNDLE),
+            &template(
+                &[("root", "(function (e) {})")],
+                &[("/app-service.js", "(function(){})()")],
+                serde_json::json!({}),
+            ),
+            BundleTarget::Web,
+            None,
+        )
+        .expect("a web page");
+        assert!(
+            !script_urls(&sources).contains(&format!("{BUNDLE}/app-service.js.js").as_str()),
+            "{:?}",
+            script_urls(&sources)
         );
     }
 
