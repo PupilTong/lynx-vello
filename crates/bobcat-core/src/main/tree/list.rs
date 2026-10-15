@@ -152,12 +152,9 @@ use crate::main::record::write_record_field;
 ///
 /// `list > *:not(list-item):not(wrapper)` is specificity (0,0,3), so it
 /// outranks the container block's own `display` (0,0,1) and hides a `view`,
-/// an `image` or a `scroll-view` written directly inside a list. It does
-/// **not** outrank [`super::text`]'s `display: -lynx-text !important`: a
-/// `text` written as a list's direct child keeps its box where a browser
-/// would hide it. That is the price of §D.15's one recorded important
-/// exception and is not worth a second one — a `<text>` outside a
-/// `<list-item>` is not a shape `ReactLynx` emits.
+/// an `image` or a `scroll-view` written directly inside a list. It hides a
+/// `text` there too: [`super::text`]'s `display: -lynx-text` is a plain
+/// declaration this rule outranks.
 pub(super) const UA_RULES: &str = r#"
 @property --list-item-span-count { syntax: "<integer>"; inherits: false; initial-value: 1; }
 @property --list-item-sticky-offset { syntax: "<length>"; inherits: true; initial-value: 0px; }

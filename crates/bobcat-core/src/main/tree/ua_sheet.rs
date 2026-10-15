@@ -170,16 +170,19 @@ impl Default for PageConfig {
 ///
 /// The exceptions are all of the same shape: a fact the cascade is merely
 /// *reporting* rather than a default it is *choosing*.
-/// `display: -lynx-text` on `text`, on `inline-text` and on a `text`'s own
-/// `inline-truncation` child is the first three — Lynx does not decide
-/// inline-ness by cascade at all: `ConvertToInlineElement` runs when a child is
-/// *added* to a text, and no author CSS can undo it. `padding: 0` on an
-/// `image` that is inline content of a paragraph is the fourth: web-core gives
+/// A `text`'s `-lynx-text` display is such a fact, but it is not one of them:
+/// Lynx fixes it structurally (`ConvertToInlineElement`) and still lets
+/// `display: none` hide the text, and an important declaration would swallow
+/// the `none` too. The declaration is plain, and the stylo fork's adjuster
+/// computes any other `display` on a text tag back to `-lynx-text`
+/// ([`super::text`] carries the argument).
+/// `padding: 0` on an `image` that is inline content of a paragraph is the
+/// first: web-core gives
 /// the authored element no box at all and rebuilds one in its shadow tree
 /// without inheriting `padding`, so there is no box for an author's padding to
 /// reach, and a declaration a page could override would misdescribe both
-/// references. [`super::text`] carries the citation for each. The pager's
-/// row is the fifth and sixth: its pages form one row in both references
+/// references. [`super::text`] carries the citation. The pager's
+/// row is the second and third: its pages form one row in both references
 /// whatever main axis an author writes on it, so its `flex-direction`,
 /// `linear-direction` and `flex-wrap`, and its pages' `position`, are pinned
 /// ([`super::viewpager`] carries the argument). The swiper's items are six
@@ -202,8 +205,8 @@ impl Default for PageConfig {
 /// ([`super::popover`]). The overlay's is one more, after it: only an
 /// overlay's first child renders, which web-core itself pins and native's
 /// measurement of child 0 alone agrees with ([`super::overlay`] carries the
-/// argument). `the_ua_sheet_is_important_free_apart_from_the_text_block`
-/// pins the set to exactly those twenty-three rules.
+/// argument). `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions`
+/// pins the set to exactly those twenty rules.
 #[must_use]
 pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     let component_tags = format!(
@@ -668,29 +671,26 @@ mod tests {
         assert_eq!(on.replacen(&format!("{INHERITANCE_RULE}\n"), "", 1), off);
     }
 
-    /// The sheet's important declarations are exactly the text-block ones.
+    /// The sheet's important declarations are exactly the recorded exceptions.
     ///
     /// A UA-origin `!important` outranks author `!important` *and* inline
     /// style, so every one of them removes a knob a page would otherwise
-    /// have. `display: -lynx-text` is the recorded exception
-    /// (`docs/style-assumptions.md` §D.15): in Lynx a `<text>`'s inline-ness
-    /// is established structurally, at tree-mutation time, and no author CSS
-    /// can undo it — so the cascade value naming it has to be equally
-    /// unconditional. This pins the exception rather than dropping the
-    /// invariant: a new important declaration fails here until someone
-    /// decides it deserves the same argument.
+    /// have (`docs/style-assumptions.md` §D.15). This pins the exceptions
+    /// rather than dropping the invariant: a new important declaration fails
+    /// here until someone decides it deserves the same argument.
     ///
-    /// `text > inline-truncation` is the same argument a third time. The tag
-    /// is `display: none` everywhere else, and a `text`'s own child is the
-    /// only place Lynx treats it as the paragraph's custom truncation content
-    /// — a structural role, established by where it is written rather than by
-    /// what any sheet declares.
+    /// A `text`'s `display` is not among them. In Lynx a `<text>`'s
+    /// inline-ness is established structurally, at tree-mutation time, and no
+    /// author CSS can undo it — but an author `display: none` still hides it,
+    /// which an important `display: -lynx-text` would swallow. The
+    /// declaration is plain, and the stylo fork's adjuster computes any other
+    /// `display` on a text tag back to `-lynx-text`; [`super::super::text`]
+    /// carries the argument.
     ///
-    /// The fourth, `padding: 0` on an inline `image`, is the argument reached
-    /// from the other end. web-core gives the authored host element no box at
-    /// all (`x-text > x-image { display: contents !important }`) and rebuilds
-    /// one in the shadow tree out of an inherited property list `padding` is
-    /// not on, so no author CSS there can make an inline image's padding
+    /// `padding: 0` on an inline `image` is the text block's only one.
+    /// web-core gives the authored host element no box at all (`x-text > x-image { display:
+    /// contents !important }`) and rebuilds one in the shadow tree out of an inherited property
+    /// list `padding` is not on, so no author CSS there can make an inline image's padding
     /// matter. Here the authored element *is* the box, and a normal
     /// declaration would lose to the author's own `padding` — which would
     /// describe an engine neither reference has. [`super::text`] carries the
@@ -740,8 +740,8 @@ mod tests {
     /// `display` on a second child must not bring it back.
     /// [`super::super::overlay`] carries the argument.
     #[test]
-    fn the_ua_sheet_is_important_free_apart_from_the_text_block() {
-        const ALLOWED: [&str; 23] = [
+    fn the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions() {
+        const ALLOWED: [&str; 20] = [
             "viewpager, x-viewpager-ng { flex-direction: row !important; \
              linear-direction: row !important; flex-wrap: nowrap !important; }",
             "viewpager-item, x-viewpager-item-ng { position: relative !important; }",
@@ -774,10 +774,6 @@ mod tests {
              pointer-events: none !important; background-color: transparent; }",
             "overlay > :not(:first-child), x-overlay-ng > :not(:first-child) \
              { display: none !important; }",
-            "text { display: -lynx-text !important; color: initial; }",
-            "inline-text { display: -lynx-text !important; }",
-            "text > inline-truncation { display: -lynx-text !important; \
-             --lynx-inline-truncation: 1; }",
             "text > image, text > wrapper > image, inline-text > image, \
              inline-text > wrapper > image, text > inline-truncation > image, \
              text > inline-truncation > wrapper > image { padding: 0 !important; }",

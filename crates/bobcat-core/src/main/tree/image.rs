@@ -130,14 +130,12 @@
 //! moment the order stops holding, rather than a selector list that can only
 //! ever be a snapshot.
 //!
-//! **A `text` child is the one this sheet cannot suppress.** `text` and
-//! `inline-text` carry `display: -lynx-text !important` ([`super::text`]), and
-//! a UA-origin important declaration outranks every normal one whatever its
-//! specificity — so a `text` written inside an `image` keeps its text block.
-//! Matching it would need a second `!important`, which `§D.15` grants to the
-//! paragraph's own rules alone. It is masked wherever it could matter: an
-//! element with a `src` is replaced, and `dom` hides every child of a replaced
-//! box outright, whatever the cascade said.
+//! **A `text` child is suppressed like any other.** `text` and `inline-text`
+//! carry `display: -lynx-text` as a plain declaration ([`super::text`]), so the
+//! `image > *` rule, later in the sheet at the same specificity, hides a `text`
+//! written inside an `image` too. A `src`
+//! would hide it regardless: an element with one is replaced, and `dom` hides
+//! every child of a replaced box outright, whatever the cascade said.
 //!
 //! `text > image` is [`super::text`]'s rule, not this module's — an image
 //! written *inside* a text is content of that paragraph, and so is the
@@ -208,7 +206,7 @@ const FILTER_PROPERTY: &str = "filter";
 /// this block is assembled last; see the module docs.
 ///
 /// Nothing here is `!important`: see
-/// `the_ua_sheet_is_important_free_apart_from_the_text_block`.
+/// `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions`.
 ///
 /// What `x-image.css` carries that this deliberately does not: `object-fit:
 /// fill` (already both the CSS initial value and Lynx's default `mode`),
@@ -611,18 +609,17 @@ mod tests {
         }
     }
 
-    /// The documented exception, asserted rather than wished away: `text`
-    /// carries `display: -lynx-text !important`, and a UA-origin important
-    /// declaration outranks every normal one. A `src` masks it, because a
-    /// replaced element's children are hidden by `dom` and not by the cascade.
+    /// `text`'s `display: -lynx-text` is a plain declaration, so the
+    /// `image > *` rule reaches a `text` child like any other. With a `src` the
+    /// image is replaced, and `dom` hides its children on top of the cascade.
     #[test]
-    fn a_text_inside_an_image_is_the_one_child_the_sheet_cannot_suppress() {
+    fn a_text_inside_an_image_is_suppressed_like_any_other_child() {
         let mut document = document();
         let element = image(&mut document, "width: 100px; height: 60px");
         let text = element_under(&mut document, element, "text", "");
         document.layout();
 
-        assert_eq!(display(&document, text), Display::LynxText);
+        assert_eq!(display(&document, text), Display::None);
 
         document.set_attribute(element, SRC_ATTRIBUTE, SOURCE);
         document.layout();

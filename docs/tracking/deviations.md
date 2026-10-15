@@ -481,6 +481,21 @@ consequential choice about whether to follow the spec or the quirk.
   `crates/hughie/src/text/block/mod.rs:778-876`), which is css-ui
   `text-overflow` in its own right and what both references do for a line that
   overflows its measure.
+- **A `display` other than `none` on a text tag computes to `-lynx-text`** —
+  **ruled by the user on 2026-10-15**, following native Lynx against
+  `web-core`. `text`, `inline-text` and `inline-truncation` carry
+  `display: -lynx-text` as a plain UA declaration, so an author
+  `display: none` hides them in all three engines; the stylo fork's
+  `StyleAdjuster::adjust_for_lynx_text` computes any other value on those
+  three tags back to `-lynx-text`, so `<text style="display: flex">` is still
+  one paragraph. **Native** ignores the value: a text's inline-ness is
+  structural (`TextElement::ConvertToInlineElement`,
+  `lynx/core/renderer/dom/fiber/text_element.cc:196-205`). **web-core** lets
+  the author's value take over the `x-text` host (`x-text { display: flex }`
+  is author-origin, `x-text.css:7-13`), so the host is a flex box there while
+  its shadow tree keeps the text. Here no layout mode lays text out outside
+  `-lynx-text` (`crates/dom/src/layout/host.rs`: a text node outside a text
+  block lays out nothing), and the computed style reports `-lynx-text`.
 - **`position: relative` insets on an atomic inline box inside a `<text>` are
   ignored** — **ruled by the user on 2026-09-17**, following native Lynx
   against `web-core`. The atom is still ordinary in-flow content: it advances
@@ -988,10 +1003,10 @@ consequential choice about whether to follow the spec or the quirk.
   computed style; only its *box* is gone). `margin` is untouched, because the
   shadow part inherits it and it does reach the line in both references. A
   `view` inside a `text` is untouched too: web-core leaves that one a real
-  `inline-flex` box with its padding intact. This is the fourth
-  `!important` in the UA sheet and the second argument
+  `inline-flex` box with its padding intact. This is the text block's one
+  `!important` in the UA sheet, an argument
   [docs/style-assumptions.md](../style-assumptions.md) §D.15 admits;
-  `the_ua_sheet_is_important_free_apart_from_the_text_block` pins the set.
+  `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions` pins the set.
 - **`<image auto-size>` is sized the way both references size it.** The
   attribute lifts the rule above — `image[auto-size]:not([auto-size="false"])
   { contain: none; max-width: 100%; max-height: 100%; }` — and the box is then
@@ -1255,8 +1270,10 @@ consequential choice about whether to follow the spec or the quirk.
   sheet (web-elements' defaults are author origin, ours are user-agent origin,
   and an important UA declaration would outrank author `!important` instead of
   losing to it). §D.15 gained one exception on 2026-09-03 —
-  `display: -lynx-text` on `text`/`inline-text` — and this row is the case
-  that exception deliberately does **not** cover: a scroller's display is a
+  `display: -lynx-text` on `text`/`inline-text`, since 2026-10-15 a plain
+  declaration whose other values (all but `none`) the stylo fork's adjuster
+  computes back to `-lynx-text`, so that `display: none` still hides a text — and this row is the case that exception deliberately
+  does **not** cover: a scroller's display is a
   *default*, gated on page config by web-core itself, where the only question
   is which layout mode the box gets; a text's inline-ness is a *structural
   invariant* Lynx establishes at tree-mutation time and no author CSS can

@@ -1956,29 +1956,15 @@ fn a_compiled_maxline_card_clamps_one_two_and_unlimited_lines() {
 /// the declaration is a real control. The attribute spelling itself is pinned
 /// by `a_text_attribute_on_a_text_element_carries_the_paragraph_s_run`.
 ///
-/// This does not hold here, and the cause is a deliberate, already-recorded
-/// decision rather than an unbuilt feature. Both engines fix a text's
-/// inline-ness, but at different layers: native rewrites the tag outright
-/// (`TextElement::ConvertToInlineElement`,
-/// `/Users/akiwah/repos/lynx/core/renderer/dom/fiber/text_element.cc:196-205`),
-/// while web-core spells it as ordinary author-origin CSS
-/// (`x-text { display: flex }`, `x-text.css:7-13`, with no `!important`), so
-/// the card's inline `display: none` outranks it there. This engine writes the
-/// same invariant as an important user-agent declaration — the one exception
-/// §D.15 of `docs/style-assumptions.md` grants, recorded at
-/// `docs/tracking/deviations.md:485-494` — which swallows the author's
-/// `display: none` along with it. The exception was written to fix a text's
-/// inline-ness, not to make a text unhideable; that is the deviation-review
-/// item this test stands for.
+/// Both engines fix a text's inline-ness, but at different layers: native
+/// rewrites the tag outright (`TextElement::ConvertToInlineElement`,
+/// `lynx/core/renderer/dom/fiber/text_element.cc:196-205`), while web-core
+/// spells it as ordinary author-origin CSS (`x-text { display: flex }`,
+/// `x-text.css:7-13`, with no `!important`), so the card's inline
+/// `display: none` outranks it there. This engine writes `display:
+/// -lynx-text` as a plain UA declaration too, so the declaration the card
+/// writes hides a text here as well.
 #[test]
-#[ignore = "DEVIATION, not a missing feature: \
-            `text { display: -lynx-text !important }` \
-            (crates/bobcat-core/src/main/tree/text.rs:125) is user-agent origin, \
-            so it outranks the author's inline `display: none` and no `text` \
-            element can be hidden by the declaration the card writes. The \
-            important-UA exception is §D.15's, recorded at \
-            docs/tracking/deviations.md:485-494; it was granted for a text's \
-            inline-ness, not to make a text unhideable"]
 fn display_none_removes_a_text_block_and_an_inline_run_alike() {
     let mut document = ahem_document();
 

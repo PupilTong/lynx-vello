@@ -215,7 +215,7 @@ const INNER_CLASS: &str = "overlay-inner";
 
 /// The overlay's UA rules on the host and its light children, as the module
 /// documentation lists. The one `!important` line stays on a line of its
-/// own: `the_ua_sheet_is_important_free_apart_from_the_text_block` reads the
+/// own: `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions` reads the
 /// sheet line by line.
 pub(super) const UA_RULES: &str = r"
 overlay, x-overlay-ng {
