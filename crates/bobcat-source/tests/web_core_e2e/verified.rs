@@ -452,4 +452,32 @@ verified! {
     config_css_inheritance_false => "config-css-inheritance-false",
     // The build leaves `enableCSSInheritance` unset, which is off: the two frames of `config-css-inheritance-false`.
     config_css_inheritance_default => "config-css-inheritance-default",
+    // A 300x120 `<frame src='/dist/api-frame-inner.web.bundle'>`: the nested card's main-thread script runs in a ShadowRealm and renders into the frame's shadow root (#409). Its first line reads `frame:ready`, which is what upstream asserts; `data:` and `global:` are empty because this frame passes neither, and a frame has no `data` or `global-props` by the ruling recorded with #409.
+    api_frame_src => "api-frame-src",
+    // Red at first and still red after 5.6 s with `autoplay` off; a tap on the 10x10 button turns it on, and the swiper turns to green and then blue at its 5 s interval (#408). The second tap writes `autoplay={false}`, and 5.5 s later the swiper has turned once more, to yellow: removing `autoplay` does not stop the timer, the user's ruling of 2026-10-13 and web-core's behaviour. The same four colours as upstream's four web-core screenshots.
+    basic_element_x_swiper_autoplay => "basic-element-x-swiper-autoplay",
+    // A main-thread tap handler finds the scroll-view with `lynx.querySelector` and invokes `autoScroll({rate: 120, start: true})` (#408). Upstream reads `scrollTop` three seconds in; a screen still scrolling cannot be pinned, so the frame is taken after the run reached the end of the twenty 100px items and stopped there (`autoStop`, its default): items 18 and 19 at the bottom of the 300px scrollport.
+    basic_main_query_selector => "basic-main-query-selector",
+    // The same `autoScroll({rate: 120, start: true})`, invoked through a `main-thread:ref` (#408). The five gradient items scroll 230px, so the run reaches the end and stops before the frame settles: the last two items in full and the bottom of the third. Upstream asserts `scrollTop` > 100 two seconds in.
+    basic_ref_main_invoke_ui_method => "basic-ref-main-invoke-ui-method",
+    // Five 100px cells; a 500px wheel turn over the list brings cells 6 to 10. Upstream then asserts that the list's `bindscroll` and `bindscrollend` both ran, and the script waits for the card to log a `scroll` and a `scrollend` event, each with `scrollTop` 500 in its detail (#407).
+    basic_element_list_basic => "basic-element-list-basic",
+    // The same card with cells sized by their content (110px each): the first screen, the 500px scroll, and the logged `scroll` and `scrollend` events with `scrollTop` 500 (#407).
+    basic_element_list_basic_size => "basic-element-list-basic-size",
+    // The mouse moves onto the red box, presses and releases there (#407): `mousemove`, `mousedown` and `mouseup` each arrive with `button`, `buttons`, `x`, `y`, `pageX`, `pageY`, `clientX` and `clientY`, and each turns its own 100x100 indicator green.
+    basic_bindmouse => "basic-bindmouse",
+    // A view with its own `bindKeydown` stays pink when `a` is pressed: a key event goes to what has focus, and nothing on the page does (#407).
+    basic_bindkeydown_out_of_view_noop => "basic-bindkeydown-out-of-view-noop",
+    // `global-bindKeydown` turns the box green when `a` is pressed (#407).
+    basic_global_bindkeydown => "basic-global-bindkeydown",
+    // `global-bindKeydown` reads the event's `code`: after `a` is pressed the box shows `KeyA` (#407).
+    basic_global_bindkeydown_code => "basic-global-bindkeydown-code",
+    // `global-bindKeydown` reads the event's `key`: after Enter is pressed the box shows `Enter` (#407).
+    basic_global_bindkeydown_key => "basic-global-bindkeydown-key",
+    // `global-bindKeydown` turns the box green only when the event's `shiftKey` is set: `A` pressed with Shift held turns it green (#407).
+    basic_global_bindkeydown_shift => "basic-global-bindkeydown-shift",
+    // `global-bindKeyup`: with `a` held down the box is still pink, and it turns green when the key is let go (#407).
+    basic_global_bindkeyup => "basic-global-bindkeyup",
+    // The lazy component mounts as a pink 100x100 box, and a tap on its `main-thread:bindtap` box turns it green through its `main-thread:ref`. The lazy bundle carries the main-thread worklet runtime in its own `main-thread` section since lynx-stack #4066 (canary 02b6e1d2), so its handler is registered.
+    basic_lazy_component_mts_bindtap => "basic-lazy-component-mts-bindtap",
 }
