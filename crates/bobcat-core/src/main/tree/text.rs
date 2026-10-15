@@ -69,35 +69,35 @@
 /// subtree a paragraph takes its custom truncation content from is a
 /// computed-style fact there, exactly as the paragraph limits are.
 ///
-/// # Why a `text`'s `display` is locked rather than important
+/// # Why a `text`'s `display` is not important
 ///
-/// A text block is `-lynx-text` whatever `display` an author writes, except
-/// `none`, which hides it. That is native Lynx's shape on both counts: a text's
-/// inline-ness is structural (`TextElement::ConvertToInlineElement`,
-/// `core/renderer/dom/fiber/text_element.cc:196-205`) so no author `display`
-/// makes it a flex box, and an author `display: none` still removes it from
-/// layout. web-core agrees on `none` — its `x-text { display: flex }` is
-/// author-origin with no `!important` (`x-text.css:7-13`), so the card's
-/// inline `display: none` wins there — and lets every other author value win
-/// too, which has no meaning here: the paragraph *is* the `-lynx-text` box.
+/// A text tag — `text`, `inline-text`, `inline-truncation` — is either a
+/// `-lynx-text` scope or not rendered. Its `display: -lynx-text` here is a
+/// plain declaration, so an author `display: none` wins and hides it, as it
+/// does in native Lynx and in web-core. Any other author `display` computes to
+/// `none` as well: the stylo fork's adjuster keeps `none` and `-lynx-text` on
+/// these three tags and turns every other value into `none`
+/// (`StyleAdjuster::adjust_for_lynx_text`, ruled by the user on 2026-10-15).
+/// Native Lynx fixes a text's inline-ness structurally
+/// (`TextElement::ConvertToInlineElement`,
+/// `core/renderer/dom/fiber/text_element.cc:196-205`), so no `display` value
+/// can make a text a flex or grid box, and no layout mode here lays text out
+/// outside `-lynx-text`. Both references still show the text under
+/// `display: flex` — native ignores the value, and in web-core the author's
+/// value takes over the `x-text` host (`x-text { display: flex }` is
+/// author-origin, `x-text.css:7-13`) while its shadow tree keeps the text —
+/// so that case renders nothing here and something in both references
+/// (`docs/tracking/deviations.md`).
 ///
-/// `display: -lynx-text !important` would say the first half and lose the
-/// second: a UA-origin important declaration outranks the author's
-/// `display: none` along with everything else. The fork's internal
-/// `-lynx-display-lock: -lynx-text` says both — it is declarable from a
-/// user-agent sheet only, and stylo's adjuster computes every cascaded
-/// `display` but `none` to the locked one. The `display: -lynx-text` beside it
-/// is a plain declaration: it is what the lock keeps when nothing else is
-/// written, and on `text > inline-truncation` it is what outranks the tag's
-/// own `display: none` everywhere else.
-///
-/// Since the lock lets every `display: none` through, a UA rule that hides an
-/// element's children now hides a `text` among them, as a browser would:
-/// `list > *:not(list-item):not(wrapper)`, `x-swiper > :not(x-swiper-item,
-/// wrapper)`, `image > *` and `svg > *`. The rule for anything written directly
-/// inside a `text` therefore names the two tags that are nested runs and keeps
-/// its old specificity with `:where`, so the `wrapper`, `view`, `image` and
-/// `inline-truncation` rules after it still outrank it.
+/// Until 2026-10-15 the declaration was `display: -lynx-text !important`,
+/// which also outranked the author's `display: none`. Without it, a UA rule
+/// that hides an element's children hides a `text` among them too, as a
+/// browser would: `list > *:not(list-item):not(wrapper)`,
+/// `x-swiper > :not(x-swiper-item, wrapper)`, `image > *` and `svg > *`. The
+/// rule for anything written directly inside a `text` therefore names the two
+/// tags that are nested runs, and keeps its old specificity with `:where`, so
+/// the `wrapper`, `view`, `image` and `inline-truncation` rules after it still
+/// outrank it.
 ///
 /// # Why an inline `image` has no padding
 ///
@@ -141,7 +141,7 @@ pub(super) const UA_RULES: &str = r#"
 @property --lynx-text-maxlength { syntax: "<integer>"; inherits: false; initial-value: -1; }
 @property --lynx-tail-color-convert { syntax: "<integer>"; inherits: false; initial-value: 0; }
 @property --lynx-inline-truncation { syntax: "<integer>"; inherits: false; initial-value: 0; }
-text { display: -lynx-text; -lynx-display-lock: -lynx-text; color: initial; }
+text { display: -lynx-text; color: initial; }
 text {
   --lynx-text-maxline: attr(text-maxline number, -1);
   --lynx-text-maxlength: attr(text-maxlength number, -1);
@@ -150,12 +150,12 @@ text[tail-color-convert="true"] { --lynx-tail-color-convert: 1; }
 text[text] { content: attr(text); }
 text[text-overflow="ellipsis"] { text-overflow: ellipsis; }
 text[text-overflow="clip"] { text-overflow: clip; }
-inline-text { display: -lynx-text; -lynx-display-lock: -lynx-text; }
+inline-text { display: -lynx-text; }
 inline-image, inline-truncation { display: none; }
 text > :where(:not(text, inline-text)) { display: none; }
 text > wrapper { display: contents; }
 text > view, text > image { display: flex; }
-text > inline-truncation { display: -lynx-text; -lynx-display-lock: -lynx-text; --lynx-inline-truncation: 1; }
+text > inline-truncation { display: -lynx-text; --lynx-inline-truncation: 1; }
 text > text, text > wrapper > text { color: inherit; }
 text > image, text > wrapper > image, inline-text > image, inline-text > wrapper > image, text > inline-truncation > image, text > inline-truncation > wrapper > image { padding: 0 !important; }
 "#;
@@ -909,16 +909,18 @@ mod tests {
         );
     }
 
-    /// The lock: an author `display: none` hides a text scope — a block
-    /// `text`, a nested run, an `inline-text`, a text's own `inline-truncation`
-    /// — and every other author `display` leaves it a text scope.
+    /// A text tag — a block `text`, a nested run, an `inline-text`, a text's
+    /// own `inline-truncation` — is a text scope or nothing: an author
+    /// `display: none` hides it, and so does every other value but
+    /// `-lynx-text`.
     #[test]
-    fn an_author_display_hides_a_text_scope_only_with_none() {
+    fn an_author_display_other_than_lynx_text_hides_a_text_scope() {
         for author in [
             "display: none",
             "display: flex",
             "display: contents",
             "display: grid",
+            "display: -lynx-text",
         ] {
             let mut document = document();
             let text = child(&mut document, "text", author);
@@ -940,10 +942,10 @@ mod tests {
             ];
             document.layout();
 
-            let expected = if author == "display: none" {
-                Display::None
-            } else {
+            let expected = if author == "display: -lynx-text" {
                 Display::LynxText
+            } else {
+                Display::None
             };
             for (label, scope) in scopes {
                 assert_eq!(display(&document, scope), expected, "{label}, {author}");

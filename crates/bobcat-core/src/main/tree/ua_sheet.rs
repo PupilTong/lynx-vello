@@ -173,8 +173,9 @@ impl Default for PageConfig {
 /// A `text`'s `-lynx-text` display is such a fact, but it is not one of them:
 /// Lynx fixes it structurally (`ConvertToInlineElement`) and still lets
 /// `display: none` hide the text, and an important declaration would swallow
-/// the `none` too, so the sheet locks it with the fork's UA-only
-/// `-lynx-display-lock` instead ([`super::text`] carries the argument).
+/// the `none` too. The declaration is plain, and the stylo fork's adjuster
+/// computes any other `display` on a text tag to `none`
+/// ([`super::text`] carries the argument).
 /// `padding: 0` on an `image` that is inline content of a paragraph is the
 /// first: web-core gives
 /// the authored element no box at all and rebuilds one in its shadow tree
@@ -681,9 +682,10 @@ mod tests {
     /// A `text`'s `display` is not among them. In Lynx a `<text>`'s
     /// inline-ness is established structurally, at tree-mutation time, and no
     /// author CSS can undo it — but an author `display: none` still hides it,
-    /// which an important `display: -lynx-text` would swallow. The fork's
-    /// UA-only `-lynx-display-lock` says both halves without `!important`;
-    /// [`super::super::text`] carries the argument.
+    /// which an important `display: -lynx-text` would swallow. The
+    /// declaration is plain, and the stylo fork's adjuster computes any other
+    /// `display` on a text tag to `none`; [`super::super::text`] carries the
+    /// argument.
     ///
     /// `padding: 0` on an inline `image` is the text block's only one.
     /// web-core gives the authored host element no box at all (`x-text > x-image { display:

@@ -163,7 +163,7 @@ the wiring above it, in two places. The UA sheet gave the tag `display: none`
 with nothing to lift it, and `crates/dom` passed `None` for `TextBlock::new`'s
 truncation slice.
 
-- `text > inline-truncation { display: -lynx-text; -lynx-display-lock: -lynx-text; --lynx-inline-truncation: 1; }`
+- `text > inline-truncation { display: -lynx-text; --lynx-inline-truncation: 1; }`
   (`crates/bobcat-core/src/main/tree/text.rs`, with the property registered
   beside it) makes a `text`'s **own** `inline-truncation` child a text scope and
   flags it. That is web-core's scope — `XTextTruncation.ts` queries
@@ -511,11 +511,11 @@ Each blocks replicas that could not be written at all.
 - *Closed 2026-10-15, reversing the 2026-09-14 ruling:* `display: none` on a
   `text`. The UA sheet used to write `text { display: -lynx-text !important }`,
   which outranked an author's `display: none` too, so no `text` element could
-  be hidden. It now locks the display with the stylo fork's UA-only
-  `-lynx-display-lock: -lynx-text`, which computes every cascaded `display`
-  but `none` to `-lynx-text` (`docs/style-assumptions.md` §D.15). A text's
-  inline-ness is still structural, and `display: none` hides a block text
-  or an inline run as it does in both references. The replica
+  be hidden. The declaration is plain now, and the stylo fork's adjuster
+  computes any other `display` on a text tag to `none`
+  (`docs/style-assumptions.md` §D.15, `docs/tracking/deviations.md`).
+  `display: none` hides a block text or an inline run as it does in both
+  references. The replica
   `display_none_removes_a_text_block_and_an_inline_run_alike` runs.
 - **A3. `text-maxline="1"` is a one-line clamp, not a one-line shape.**
   **Ruled (user, 2026-09-15): this engine follows native Lynx here.** Android

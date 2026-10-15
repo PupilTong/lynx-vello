@@ -1961,10 +1961,9 @@ fn a_compiled_maxline_card_clamps_one_two_and_unlimited_lines() {
 /// `lynx/core/renderer/dom/fiber/text_element.cc:196-205`), while web-core
 /// spells it as ordinary author-origin CSS (`x-text { display: flex }`,
 /// `x-text.css:7-13`, with no `!important`), so the card's inline
-/// `display: none` outranks it there. This engine locks a text's `display` to
-/// `-lynx-text` with the fork's UA-only `-lynx-display-lock`, which computes
-/// every cascaded value but `none` to the locked one, so the declaration the
-/// card writes hides a text here as well.
+/// `display: none` outranks it there. This engine writes `display:
+/// -lynx-text` as a plain UA declaration too, so the declaration the card
+/// writes hides a text here as well.
 #[test]
 fn display_none_removes_a_text_block_and_an_inline_run_alike() {
     let mut document = ahem_document();

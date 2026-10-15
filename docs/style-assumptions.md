@@ -284,11 +284,12 @@ the semantics are stylo's.** Everything below refines that sentence.
       can undo any of it — but an author `display: none` still removes the
       text, in native and in web-core alike. From 2026-09-03 to 2026-10-15
       this was `display: -lynx-text !important`, which swallowed that `none`
-      too. The three rules now declare the stylo fork's internal
-      `-lynx-display-lock: -lynx-text`, which only a user-agent sheet can
-      spell and which `StyleAdjuster` applies by computing every cascaded
-      `display` but `none` to `-lynx-text`. The lock lets every `none`
-      through, so a UA rule hiding an element's children
+      too. The declaration is plain now, and the stylo fork's
+      `StyleAdjuster::adjust_for_lynx_text` computes any `display` other
+      than `none` and `-lynx-text` on `text`, `inline-text` and
+      `inline-truncation` to `none` (user ruling, 2026-10-15; the conflict
+      with both references is in `docs/tracking/deviations.md`). With the
+      `!important` gone, a UA rule hiding an element's children
       (`list > *:not(list-item):not(wrapper)`, `x-swiper > :not(…)`,
       `image > *`, `svg > *`) now hides a `text` among them as well.
     - `padding: 0` on an `image` that is inline content of a paragraph
