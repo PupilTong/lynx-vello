@@ -14,7 +14,7 @@ verified! {
     basic_css_compound_selector => "basic-css-compound-selector",
     // The later class wins, and the gradient fills the letterforms themselves.
     basic_element_text_color => "basic-element-text-color",
-    // `display: none` on a `<text>` still paints: the 2026-09-14 ruling.
+    // Four `<text style='display:none'>`, two directly in a view and two nested in a `<text>`: all hidden, so nothing paints. `display: none` hides a `<text>` since #423, which reversed the 2026-09-14 ruling that it stays unsupported; web-core's screenshot is blank as well.
     basic_element_text_display_none => "basic-element-text-display-none",
     // Class against inline text styling across four runs of a flex row.
     basic_element_text_dynamic_text_style_update => "basic-element-text-dynamic-text-style-update",
@@ -490,4 +490,12 @@ verified! {
     basic_element_svg_bindload => "basic-element-svg-bindload",
     // The fourth rewrite of the vendored text (2026-10-15) gives the boxes sizes and colours: a yellow flex column 300px high with its one child, the red 100x100 linear view, at its start; inside the red view the two blue 20x20 children stack down its vertical main axis from the top. The card also writes the deprecated `linear-gravity: space-between` on that view, which this engine drops by the user's decision of 2026-07 (`docs/tracking/deviations.md`), so the two blue squares are not spread apart; upstream asserts the `justify-content: space-between` web-core maps it to.
     basic_flex_nested_linear_setting => "basic-flex-nested-linear-setting",
+    // The effect stores `green` with `lynx.setSharedData` and paints what `lynx.getSharedData` gives back: a green 100x100 box (#424).
+    api_setshareddata => "api-setSharedData",
+    // No upstream test has this name: it is the second view of upstream's `api-shared-context`. The suite boots `api-setSharedData` first in the same group (`COMPANIONS`), which stores `green`; this view starts orange, and a tap reads `lynx.getSharedData('color')` from the group's shared data and paints it green (#424).
+    api_getshareddata => "api-getSharedData",
+    // A 300x600 yellow scroll-view of three 300px views. Upstream swipes up 100px from (100, 300) and asserts that a `scroll` event arrived with `scrollTop`, `scrollLeft`, `scrollHeight` and `scrollWidth` in its detail; the script waits for the card to log one (#407). The swipe flings the scroll-view to its end, so the frame shows green over blue at `scrollTop` 300. The card keeps the event's JSON in a `<text style='display:none'>`, hidden since #423. The events' `isDragging` is false even for the ones dispatched while the finger moved, which upstream does not assert.
+    basic_element_scroll_view_event_scroll => "basic-element-scroll-view-event-scroll",
+    // The same scroll-view; upstream sets `scrollTop` to 200 by script, here the wheel is turned 200px over it, and the card logs one `scrollend` event with `scrollTop` 200 and the other three detail fields upstream asserts (#407). The frame shows the last 100px of red, then green and blue; the `display:none` text that keeps the event is hidden (#423).
+    basic_element_scroll_view_event_scrollend => "basic-element-scroll-view-event-scrollend",
 }

@@ -379,6 +379,10 @@ struct Frame {
     steps: &'static [Step],
 }
 
+/// Cards whose case is about two views in one group, and the card booted
+/// first, into the same group: upstream's shell opens both in one page.
+const COMPANIONS: &[(&str, &str)] = &[("api-getSharedData", "api-setSharedData")];
+
 /// How long a [`Step::Logged`] line may take to arrive.
 const LOGGED_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -390,7 +394,11 @@ struct Card {
     case: String,
     painter: Painter,
     view: LynxView<ViewResources>,
-    _group: LynxGroup,
+    /// The card booted before this one in the same group, for a case that is
+    /// about two views sharing one ([`COMPANIONS`]). Its group is this card's.
+    companion: Option<Box<Card>>,
+    /// The card's own group, or `None` when it shares its companion's.
+    group: Option<LynxGroup>,
     _resources: Resources,
     /// Every `console` line the card has written, oldest first.
     logged: Vec<String>,
@@ -410,6 +418,10 @@ struct Card {
 impl Card {
     /// Boots a card and lets its first screen settle.
     async fn boot(case: &str) -> Self {
+        let companion = match COMPANIONS.iter().find(|(card, _)| *card == case) {
+            Some((_, first)) => Some(Box::new(Box::pin(Self::boot(first)).await)),
+            None => None,
+        };
         let path = corpus().join(format!("{case}.web.bundle"));
         let bytes = std::fs::read(&path).unwrap_or_else(|error| {
             panic!(
@@ -461,10 +473,19 @@ impl Card {
                 .expect("register the injected sheet");
             sources.style_sheets.push(url.to_string());
         }
-        let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto)
-            .await
-            .unwrap();
+        let group = match companion {
+            Some(_) => None,
+            None => Some(
+                LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto)
+                    .await
+                    .unwrap(),
+            ),
+        };
+        let shared = companion.as_deref().map(Card::group);
         let view = group
+            .as_ref()
+            .or(shared)
+            .expect("a card has a group of its own or its companion's")
             .create_lynx_view(
                 width,
                 height,
@@ -483,7 +504,8 @@ impl Card {
             case: case.to_owned(),
             painter,
             view,
-            _group: group,
+            companion,
+            group,
             _resources: resources,
             logged: Vec::new(),
             heard: BTreeSet::new(),
@@ -503,6 +525,15 @@ impl Card {
             card.settle().await;
         }
         card
+    }
+
+    /// The group this card's view was built in.
+    fn group(&self) -> &LynxGroup {
+        match (&self.group, &self.companion) {
+            (Some(group), _) => group,
+            (None, Some(companion)) => companion.group(),
+            (None, None) => unreachable!("a card has a group of its own or its companion's"),
+        }
     }
 
     /// One turn of the view: everything it reported is logged. Says whether
