@@ -2928,24 +2928,15 @@ consequential choice about whether to follow the spec or the quirk.
   between a `terminate()` and the script is an import's, that the script does
   not run when the worker has read the `Terminate` before the job that
   completes the script runs.
-- **`lynx.setSharedData` stores structured clones, and a sibling view's
-  observers run a job later** (user ruling 2026-10-15;
-  `crates/bobcat-core/src/background/shared_data.rs`). Native and web-core
-  both run lynx-core's `Lynx` class, which keeps the store on the background
-  JS global (`nativeGlobal.sharedData[key] = value`) that a whole group
-  shares — native's `LynxGroup` JS context, web-core's `lynx-group-id`
-  worker — and calls every observer of the group synchronously inside the
-  set with `{[key]: value}`. Here each view's BTS is a realm of its own on
-  the group's one worker runtime, and a realm value never crosses the host
-  boundary as itself. **Decision: one store per group, of copies** — the
-  `Worker` `postMessage` structured clone: `getSharedData` answers a fresh
-  copy in every view, the setter's included (`get(k) === get(k)` is false,
-  a mutation after the set is not seen), and a value the serializer refuses
-  (a function, a `Map`) throws at the set. The setting view's observers run
-  inside its set with the value itself; every other observing view's run in
-  a job of its own after the setter's job returns, with its copy. The store
-  goes with the group's last worker realm, as the shared context goes with
-  native's last view and web-core's group worker with its last card.
+- **`lynx.setSharedData`'s store has no prototype** (2026-10-15;
+  `packages/bobcat-element/src/background-thread-runtime.ts`). lynx-core's
+  store is a `{}` on the group's shared JS global, so a key no card set but
+  `Object.prototype` has — `getSharedData('toString')` — answers that member.
+  Here the store is `Object.create(null)` on the runtime's shared object,
+  because every view's BTS is a realm of its own and a `{}` would carry the
+  first view's intrinsics: such a key reads `undefined`. Everything else is
+  lynx-core's: values by reference, and every observer of the group called
+  inside the set.
 - **Accessibility**: Lynx has **no implicit ARIA-like semantic
   roles/focusability** (nothing is focusable/announced unless explicitly
   opted in via `accessibility-element`), and `accessibility-traits` is a flat

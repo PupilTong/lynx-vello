@@ -50,7 +50,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::panic::AssertUnwindSafe;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -61,9 +61,8 @@ use tokio::task::{self, JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use super::scope::{WORKER_DELIVER_EXPORT, install_worker_members};
-use super::shared_data::{Notify, SharedData};
 use super::{WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart};
-use crate::esm::{BTS_RUNTIME_MODULE_SPECIFIER, WORKER_MODULE_SPECIFIER, build_runtime};
+use crate::esm::{WORKER_MODULE_SPECIFIER, build_runtime};
 use crate::jobs::{JsThread, JsThreadHandle};
 use crate::lifetime::{Lifetime, run_job, serve_clock};
 use crate::link::HostOutbox;
@@ -168,10 +167,6 @@ async fn serve_workers(
     reporters: Reporters,
 ) {
     let mut workers = JoinSet::new();
-    // The group's `lynx.setSharedData` store, held here weakly: each worker
-    // holds it, so it goes with the last worker realm of the group, and the
-    // next worker to start opens an empty one.
-    let mut shared = Weak::new();
     loop {
         tokio::select! {
             command = commands.recv() => match command {
@@ -181,13 +176,8 @@ async fn serve_workers(
                         events: start.events.clone(),
                         token: start.token.clone(),
                     };
-                    let data = shared.upgrade().unwrap_or_else(|| {
-                        let data = Rc::new(SharedData::default());
-                        shared = Rc::downgrade(&data);
-                        data
-                    });
                     let handle = workers.spawn_local(
-                        serve_worker(Rc::clone(&js), start, data, thread.clone()),
+                        serve_worker(Rc::clone(&js), start, thread.clone()),
                     );
                     reporters.borrow_mut().insert(handle.id(), reporter);
                 }
@@ -332,16 +322,9 @@ struct Worker {
     /// Messages wait for entry evaluation, including imports and top-level
     /// await. Timers and module completions continue to enter the realm.
     boot_finished: watch::Sender<bool>,
-    /// The group's `lynx.setSharedData` store, which this worker keeps alive
-    /// for as long as it is itself.
-    shared: Rc<SharedData>,
 }
 
 impl Worker {
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one worker's whole start, each a part of `WorkerStart` or the thread's"
-    )]
     fn new(
         js: SharedRuntime,
         key: WorkerKey,
@@ -349,7 +332,6 @@ impl Worker {
         events: mpsc::UnboundedSender<WorkerEvent>,
         token: CancellationToken,
         host: HostOutbox,
-        shared: Rc<SharedData>,
         thread: JsThreadHandle,
     ) -> Rc<Self> {
         Rc::new(Self {
@@ -361,7 +343,6 @@ impl Worker {
             lifetime: Lifetime::new(token, thread),
             host,
             boot_finished: watch::channel(false).0,
-            shared,
         })
     }
 
@@ -433,28 +414,12 @@ impl Worker {
                         |engine| {
                             let events = self.events.clone();
                             let key = self.key;
-                            // Weak, because the store this is filed in is
-                            // one the worker itself holds.
-                            let worker = Rc::downgrade(self);
-                            let notify: Notify = Rc::new(move |data_key, value| {
-                                if let Some(worker) = worker.upgrade() {
-                                    deliver_shared_data(&worker, data_key, value);
-                                }
-                            });
-                            install_worker_members(
-                                engine,
-                                key,
-                                &self.host,
-                                name,
-                                move |data| {
-                                    let _ = events.send(WorkerEvent {
-                                        key,
-                                        payload: WorkerPayload::Message(data),
-                                    });
-                                },
-                                &self.shared,
-                                notify,
-                            )
+                            install_worker_members(engine, key, &self.host, name, move |data| {
+                                let _ = events.send(WorkerEvent {
+                                    key,
+                                    payload: WorkerPayload::Message(data),
+                                });
+                            })
                         },
                     )
                     .map(|(core, flags)| WorkerRealm {
@@ -641,12 +606,6 @@ impl RealmOwner for Worker {
         }
     }
 
-    /// A worker that is over hears no sibling's `setSharedData` again: its
-    /// realm runs nothing more, and the store stops naming it.
-    fn on_end(&self) {
-        self.shared.observe(self.key, None);
-    }
-
     fn booted(&self) -> bool {
         *self.boot_finished.borrow()
     }
@@ -660,12 +619,7 @@ impl RealmOwner for Worker {
 
 /// One worker's whole life on this thread: build it, start its boot, wait for
 /// the end, reclaim. Task lifetime and nothing else.
-async fn serve_worker(
-    js: SharedRuntime,
-    start: WorkerStart,
-    shared: Rc<SharedData>,
-    thread: JsThreadHandle,
-) {
+async fn serve_worker(js: SharedRuntime, start: WorkerStart, thread: JsThreadHandle) {
     let WorkerStart {
         key,
         name,
@@ -675,7 +629,7 @@ async fn serve_worker(
         token,
         sources,
     } = start;
-    let worker = Worker::new(js, key, url, events, token, sources, shared, thread);
+    let worker = Worker::new(js, key, url, events, token, sources, thread);
     owner::spawn(&worker, boot_worker(Rc::clone(&worker), name, messages));
     owner::run_owner(&worker).await;
 }
@@ -751,32 +705,6 @@ fn deliver_module_callback(worker: &Rc<Worker>, call: u64, index: u32, arguments
         );
         if let Err(error) = delivered {
             policy::report(&reporting, Scene::HostCall, error);
-        }
-    }));
-}
-
-/// What a sibling realm set with `lynx.setSharedData`, for this realm's
-/// observers.
-///
-/// Queued while the sibling's job is still running, so it runs once that job
-/// has returned, and dropped by a worker that has ended or closed itself.
-/// Only a realm whose `bobcat:bts-runtime` asked for changes is ever handed
-/// one, so that module has run in it.
-fn deliver_shared_data(worker: &Rc<Worker>, data_key: &str, value: &HostValue) {
-    let reporting = Rc::clone(worker);
-    let data_key = data_key.to_owned();
-    let value = value.clone();
-    drop(owner::enter(worker, move |realm, js| {
-        if realm.closing.get() {
-            return;
-        }
-        if let Err(error) = realm.core.engine.call_module_export(
-            js,
-            BTS_RUNTIME_MODULE_SPECIFIER,
-            "__BobcatSharedDataChanged",
-            &[HostArgument::String(&data_key), value.as_argument()],
-        ) {
-            policy::report(&reporting, Scene::Listener, error);
         }
     }));
 }
@@ -998,7 +926,6 @@ mod tests {
                 None,
                 crate::link::detached_base(),
             ),
-            Rc::default(),
             thread.clone(),
         );
         worker.spawn(boot_worker(Rc::clone(&worker), String::new(), messages_rx));

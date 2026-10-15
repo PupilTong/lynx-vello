@@ -1400,25 +1400,21 @@ does not require its `requestScript`/`readScript` source-text interfaces
 environment runs. All workers use the same protocol; a worker's scope is what
 its script imports.
 
-**`lynx.setSharedData`/`getSharedData` share one store across the group's
-views, as copies.** Native and web-core keep lynx-core's
-`nativeGlobal.sharedData` on the background JS global a group shares; here
-each view's BTS is a realm of its own, so the store is the worker thread's
-(`background/shared_data.rs`), one per group, and holds what the host
-boundary carries: a primitive or a structured clone (user ruling 2026-10-15,
-`docs/tracking/deviations.md`). `bobcat-internal:worker` gives every worker
-realm `setSharedData`, `getSharedData` and `observeSharedData`, and
-`bobcat:bts-runtime` builds the four `lynx` members on them: a set stores a
-clone (a refused value throws there), a get answers a fresh copy in any view
-of the group, the setter's included. `registerSharedDataObserver` keeps
-lynx-core's `ShareDataSubject` list in the realm; the setting view's
-observers run inside its set with the value itself, and the realm's first
-observer and last removal tell the store, which queues a job into every
-other observing realm with its copy, delivered to
-`__BobcatSharedDataChanged`. The thread holds the store weakly and every
-`Worker` strongly, so it goes with the group's last worker realm and a later
-view finds it empty, as native's shared context and web-core's group worker
-go with the group's last view.
+**`lynx.setSharedData`/`getSharedData` and the shared-data observers are
+lynx-core's, over the runtime's shared object** (user ruling 2026-10-15).
+Native and web-core keep `nativeGlobal.sharedData` and the
+`ShareDataSubject` on the background JS global a group's cards share; here
+each view's BTS is a realm of its own on the group's worker runtime, and
+`bobcat:bts-runtime` keeps both on `bobcat-internal:worker`'s `sharedObject`
+instead (see the bridge section), which every worker realm of the group
+holds by reference. The first BTS to run makes the null-prototype store and
+the observer list; the rest find them. So a view reads the very object
+another set, and a set in one view calls every observer of the group, its
+own and other views', inside the set and in registration order — the other
+views' functions run in their own realms inside the setter's entry. No Rust
+code knows the API. The store goes with the group's last worker realm, as
+native's shared context goes with the group's last view and web-core's
+group worker with its last card.
 
 MTS `lynx.getJSContext()` and this BTS Context are stable
 `CrossThreadContext extends EventTarget` instances returned directly by
@@ -2280,6 +2276,18 @@ rather than memory something points at, and
 wrapped function or a pending `importValue` still needs the realm.
 No `Value` crosses realms in Rust; a child's code runs under the parent
 entry's execution limits.
+
+**One JS value is shared across realms by reference: the runtime's shared
+object.** `Context::register_host_module_shared_object(module, export)` adds
+one null-prototype object as a host-module export, and every realm of the
+runtime it is added to gets the same reference, so what one realm stores on
+it — functions included — another reads and calls as itself, with no host
+function in between. The shim keeps it while any realm it was added to is
+alive and counts those realms down in `qjs_context_free`; the next realm it
+is added to after the last of them gets a new, empty object. A function one
+realm stored there and another calls runs in the realm that made it, inside
+the caller's entry. `bobcat-core` adds it to every worker realm as
+`bobcat-internal:worker`'s `sharedObject`, and nowhere else.
 
 It also owns the **host-function seam**: `Realm::function`,
 `define_global_function`, and `register_host_module_function` back a JS

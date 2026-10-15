@@ -1789,6 +1789,39 @@ mod implementation {
             host_module_status(status)
         }
 
+        /// Adds the runtime's shared object as the named export
+        /// `export_name` of the native ESM module `module_name` in this
+        /// realm.
+        ///
+        /// One object with a null prototype, and the same reference in every
+        /// realm of this runtime it is added to: what one realm stores on it,
+        /// another reads as itself, functions included, with no host
+        /// function between them. It is the one value that is not a copy
+        /// when it reaches another realm; everything a host function passes
+        /// still is. The runtime keeps it while any realm it was added to is
+        /// alive, and the next realm it is added to after the last of those
+        /// is freed gets a new, empty one.
+        ///
+        /// Registered under the rules of
+        /// [`Self::register_host_module_function`].
+        pub fn register_host_module_shared_object(
+            &mut self,
+            module_name: &str,
+            export_name: &str,
+        ) -> Result<(), Error> {
+            self.reclaim();
+            let (module_name_c, export_name_c) = host_module_names(module_name, export_name)?;
+            // SAFETY: both names live through the call, which copies them.
+            let status = unsafe {
+                ffi::qjs_context_add_host_module_shared_object(
+                    self.raw().as_ptr(),
+                    module_name_c.as_ptr(),
+                    export_name_c.as_ptr(),
+                )
+            };
+            host_module_status(status)
+        }
+
         /// Registers `export_name` on the native module `module_name` as a
         /// synchronous source loader, backed by `load`.
         ///
@@ -3176,6 +3209,68 @@ mod implementation {
                 if (answer !== 42) throw Error('answer ' + answer);
             "#,
             );
+        }
+
+        /// The runtime's shared object is one null-prototype object, the same
+        /// reference in every realm it is added to: a function one realm
+        /// stores runs when another calls it, and a mutation either makes is
+        /// the other's to read. It lives while a realm it was added to does,
+        /// so a realm it is added to after both are freed gets a new, empty
+        /// one.
+        #[test]
+        fn the_shared_object_is_one_reference_while_a_realm_given_it_lives() {
+            fn open(runtime: &Runtime) -> Context {
+                let mut realm = runtime.create_context().unwrap();
+                realm.enable_module_loading(|_, name| Ok(name.to_owned()));
+                realm
+                    .register_host_module_shared_object("host", "shared")
+                    .unwrap();
+                realm
+            }
+            let mut runtime = Runtime::new().unwrap();
+            let mut first = open(&runtime);
+            let mut second = open(&runtime);
+            import_eval(
+                &mut first,
+                r"import('host').then(({shared}) => {
+                    shared.greet = () => 'from first';
+                    shared.object = {n: 1};
+                    globalThis.shared = shared;
+                });",
+            );
+            runtime.drain_pending_jobs(&first).unwrap();
+            import_eval(
+                &mut second,
+                r"import('host').then(({shared}) => {
+                    globalThis.answer = [
+                        Object.getPrototypeOf(shared) === null,
+                        shared.greet(),
+                        shared.object.n,
+                    ].join();
+                    shared.object.n = 2;
+                });",
+            );
+            runtime.drain_pending_jobs(&second).unwrap();
+            assert_eq!(
+                string_of(&import_eval(&mut second, "answer")),
+                "true,from first,1"
+            );
+            assert_eq!(
+                string_of(&import_eval(&mut first, "String(shared.object.n)")),
+                "2"
+            );
+
+            drop(first);
+            drop(second);
+            let mut third = open(&runtime);
+            import_eval(
+                &mut third,
+                r"import('host').then(({shared}) => {
+                    globalThis.answer = String(Object.keys(shared).length);
+                });",
+            );
+            runtime.drain_pending_jobs(&third).unwrap();
+            assert_eq!(string_of(&import_eval(&mut third, "answer")), "0");
         }
 
         /// The text of a string value, for the root-load tests.
