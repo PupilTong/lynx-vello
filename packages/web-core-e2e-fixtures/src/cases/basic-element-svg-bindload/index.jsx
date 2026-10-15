@@ -26,7 +26,14 @@ function App() {
         bindload={handleLoad}
       >
       </svg>
-      <view id='result' style={{ backgroundColor: success ? 'green' : 'red' }}>
+      <view
+        id='result'
+        style={{
+          backgroundColor: success ? 'green' : 'red',
+          height: '100px',
+          width: '100px',
+        }}
+      >
       </view>
     </>
   );

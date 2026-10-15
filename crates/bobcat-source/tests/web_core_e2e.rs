@@ -74,13 +74,15 @@ const BOOT_DEADLINE: Duration = Duration::from_secs(30);
 /// Time to keep pumping after boot, so a `useEffect` patch, a lazy child and
 /// an image read all land before the capture.
 const SETTLE: Duration = Duration::from_millis(500);
-/// Cards that reach the state their case is about from a timer of their own
-/// that is as long as [`SETTLE`]. Both wait 500 ms after mounting, and
-/// upstream waits a second for them; a first screen taken after one settle
-/// could be either side of that timer, so these get a second one.
-const LATE: &[&str] = &[
-    "api-boundingclientrect-lynx-view-relative",
-    "api-getJSModule",
+/// Cards that reach the state their case is about from a timer of their own,
+/// and how many further [`SETTLE`]s their first screen waits for: a first
+/// screen taken near that timer could be either side of it. Two wait 500 ms
+/// after mounting, and upstream waits a second for them; one sets its text at
+/// 1 s, and upstream waits 1.5 s.
+const LATE: &[(&str, u32)] = &[
+    ("api-boundingclientrect-lynx-view-relative", 1),
+    ("api-getJSModule", 1),
+    ("basic-element-text-maxline-with-setData", 2),
 ];
 /// How long a card may go on changing before the suite refuses to pin it.
 const STABLE_DEADLINE: Duration = Duration::from_secs(10);
@@ -90,6 +92,9 @@ const STABLE_DEADLINE: Duration = Duration::from_secs(10);
 const FRAME_DEADLINE: Duration = Duration::from_secs(10);
 /// Turns between two capture attempts, each a 5 ms sleep apart.
 const STABLE_TICKS: usize = 20;
+/// The same, for a frame a [`Step::QuickCapture`] asked to be taken inside a
+/// short quiet spell.
+const QUICK_STABLE_TICKS: usize = 2;
 
 fn repository() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -309,6 +314,17 @@ enum Step {
     /// A wheel turn over this viewport point, by this many CSS pixels on each
     /// axis: upstream's `locator.hover()` followed by `mouse.wheel(dx, dy)`.
     Wheel((f32, f32), (f32, f32)),
+    /// A finger put down at the first viewport point and dragged to the
+    /// second, and kept there: upstream's `dragAndHold`. A [`Step::Release`]
+    /// lifts it.
+    Hold((f32, f32), (f32, f32)),
+    /// The held finger lifted at this viewport point.
+    Release(f32, f32),
+    /// The capture after this frame's steps compares two captures a couple of
+    /// turns apart rather than [`STABLE_TICKS`]: for a screen that is quiet
+    /// only for a short spell between changes it makes on its own, such as a
+    /// swiper turning every second.
+    QuickCapture,
     /// A key pressed and released: upstream's `keyboard.press`. The W3C
     /// `key` and `code` strings, then whether Shift is held for both.
     Press(&'static str, &'static str, bool),
@@ -378,11 +394,17 @@ struct Card {
     _resources: Resources,
     /// Every `console` line the card has written, oldest first.
     logged: Vec<String>,
-    /// How much of [`Self::logged`] a [`Step::Logged`] has already matched,
-    /// so a line a card writes once per tap is waited for once per tap.
-    heard: usize,
+    /// The lines of [`Self::logged`] a [`Step::Logged`] has already matched,
+    /// so a line a card writes once per tap is waited for once per tap. A set
+    /// rather than a count: two lines written by two threads are waited for in
+    /// whichever order they arrived.
+    heard: BTreeSet<usize>,
     /// Everything else the view reported, for the reader of a dump.
     events: Vec<String>,
+    /// How many turns apart the next capture's two captures are: [`STABLE_TICKS`],
+    /// or [`QUICK_STABLE_TICKS`] after a [`Step::QuickCapture`], for that one
+    /// capture.
+    stable_ticks: usize,
 }
 
 impl Card {
@@ -464,8 +486,9 @@ impl Card {
             _group: group,
             _resources: resources,
             logged: Vec::new(),
-            heard: 0,
+            heard: BTreeSet::new(),
             events: Vec::new(),
+            stable_ticks: STABLE_TICKS,
         };
         let deadline = Instant::now() + BOOT_DEADLINE;
         while !card.turn() {
@@ -473,7 +496,10 @@ impl Card {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         card.settle().await;
-        if LATE.contains(&case) {
+        let late = LATE
+            .iter()
+            .find_map(|(late, settles)| (*late == case).then_some(*settles));
+        for _ in 0..late.unwrap_or(0) {
             card.settle().await;
         }
         card
@@ -559,6 +585,7 @@ impl Card {
         loop {
             let shot = self.painter.capture().expect("capture the screen");
             if previous.as_deref() == Some(shot.pixels.as_slice()) {
+                self.stable_ticks = STABLE_TICKS;
                 return Ok(
                     Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
                         .expect("captured RGBA image"),
@@ -571,7 +598,7 @@ impl Card {
                 );
             }
             previous = Some(shot.pixels);
-            for _ in 0..STABLE_TICKS {
+            for _ in 0..self.stable_ticks {
                 self.turn();
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -604,38 +631,32 @@ impl Card {
             }
             Step::Tap(x, y) => {
                 for phase in [PointerPhase::Down, PointerPhase::Up] {
-                    self.painter.dispatch_input(InputEvent::pointer(
-                        (x, y),
-                        1,
-                        PointerKind::Touch,
-                        phase,
-                    ));
-                    self.turn();
-                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    let event = InputEvent::pointer((x, y), 1, PointerKind::Touch, phase);
+                    self.input(event).await;
                 }
             }
             Step::Drag(from, to) => {
-                // Four moves between the two ends, so the sequence travels
-                // the way a finger does rather than jumping.
-                const MOVES: u8 = 4;
-                let along = |step: u8| {
-                    let t = f32::from(step) / f32::from(MOVES);
-                    (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
-                };
                 let mut sequence = vec![(PointerPhase::Down, from)];
-                sequence.extend((1..=MOVES).map(|step| (PointerPhase::Move, along(step))));
+                sequence.extend(Self::along(from, to).map(|at| (PointerPhase::Move, at)));
                 sequence.push((PointerPhase::Up, to));
                 for (phase, at) in sequence {
-                    self.painter.dispatch_input(InputEvent::pointer(
-                        at,
-                        1,
-                        PointerKind::Touch,
-                        phase,
-                    ));
-                    self.turn();
-                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    let event = InputEvent::pointer(at, 1, PointerKind::Touch, phase);
+                    self.input(event).await;
                 }
             }
+            Step::Hold(from, to) => {
+                let mut sequence = vec![(PointerPhase::Down, from), (PointerPhase::Move, from)];
+                sequence.extend(Self::along(from, to).map(|at| (PointerPhase::Move, at)));
+                for (phase, at) in sequence {
+                    let event = InputEvent::pointer(at, 1, PointerKind::Touch, phase);
+                    self.input(event).await;
+                }
+            }
+            Step::Release(x, y) => {
+                let up = InputEvent::pointer((x, y), 1, PointerKind::Touch, PointerPhase::Up);
+                self.input(up).await;
+            }
+            Step::QuickCapture => self.stable_ticks = QUICK_STABLE_TICKS,
             Step::Wheel(at, delta) => {
                 self.painter.dispatch_input(InputEvent::wheel(at, delta));
                 self.turn();
@@ -677,6 +698,16 @@ impl Card {
         Ok(())
     }
 
+    /// The points a finger's moves pass through from `from` to `to`: four,
+    /// so the sequence travels the way a finger does rather than jumping.
+    fn along(from: (f32, f32), to: (f32, f32)) -> impl Iterator<Item = (f32, f32)> {
+        const MOVES: u8 = 4;
+        (1..=MOVES).map(move |step| {
+            let t = f32::from(step) / f32::from(MOVES);
+            (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
+        })
+    }
+
     /// Hands the view one input event, then turns it once.
     async fn input(&mut self, event: InputEvent) {
         self.painter.dispatch_input(event);
@@ -694,15 +725,15 @@ impl Card {
             .await;
     }
 
-    /// Waits until the card logs a line `matches` accepts, past the lines an
-    /// earlier wait already took, and says which line was waited for when it
-    /// never comes.
+    /// Waits until the card logs a line `matches` accepts that no earlier
+    /// wait took, and says which line was waited for when it never comes.
     async fn hear(&mut self, what: &str, matches: impl Fn(&str) -> bool) -> Result<(), String> {
         let deadline = Instant::now() + LOGGED_DEADLINE;
         loop {
-            let unheard = &self.logged[self.heard..];
-            if let Some(at) = unheard.iter().position(|logged| matches(logged)) {
-                self.heard += at + 1;
+            let found = (0..self.logged.len())
+                .find(|at| !self.heard.contains(at) && matches(&self.logged[*at]));
+            if let Some(at) = found {
+                self.heard.insert(at);
                 return Ok(());
             }
             if Instant::now() >= deadline {
