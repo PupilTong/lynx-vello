@@ -21,9 +21,9 @@ use crate::view::{EngineEvent, NoWakeup};
 
 const AHEM: &[u8] = include_bytes!("../../../../../hughie/tests/fixtures/Ahem.ttf");
 
-/// The URL the card's background thread registers its bundle at, beside
-/// the view's base `app:///`: `requireModule('/app-service.js')` resolves
-/// against it to `app:///app-service.js`.
+/// The URL the card's background thread registers its bundle at:
+/// `requireModule('/app-service.js')` resolves under this container to
+/// `app:///react-markdown.web.bundle/app-service.js`.
 const BUNDLE_URL: &str = "app:///react-markdown.web.bundle";
 
 /// The card's image, a 48 by 24 green PNG.
@@ -64,7 +64,7 @@ fn booted_card() -> TestEngine {
         } else {
             bobcat_source::bts_module_source(bobcat_source::BundleTarget::Web, body)
         };
-        spec = spec.with_module(&format!("app://{path}"), &source);
+        spec = spec.with_module(&format!("{BUNDLE_URL}{path}"), &source);
     }
     let mut engine = spec.create(std::sync::Arc::new(NoWakeup));
     wait_for_boot(&mut engine);
