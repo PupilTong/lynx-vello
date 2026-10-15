@@ -265,23 +265,32 @@ the semantics are stylo's.** Everything below refines that sentence.
     instead owned by the native layout engine's element policy, not fought
     out in the cascade.
 
-    *The exceptions* are all the paragraph's. The test distinguishing them
+    *The exceptions* started as the paragraph's. The test distinguishing them
     from the `scroll-view` case above is **whether the fact is a default or a
     structural invariant**. A scroller's display mode is a default — web-core
     itself gates it on page config, and the question is only *which* layout
     mode the box gets. So the exception is spent on facts the cascade is
     merely *reporting*, never on defaults it is *choosing* — and the set is
-    pinned by `the_ua_sheet_is_important_free_apart_from_the_text_block`,
+    pinned by `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions`,
     which fails on any new important declaration until it earns the same
     argument.
 
-    - `display: -lynx-text` on `text`, on `inline-text`, and on a `text`'s own
-      `inline-truncation` child (user decision, 2026-09-03). A text's
-      inline-ness is not a mode at all: Lynx establishes it at tree-mutation
-      time (`TextElement::OnNodeAdded` calls `ConvertToInlineElement`, which
-      renames the tag and marks the node inline), the paragraph builder never
-      reads `display`, and no author CSS can undo any of it. A cascade value a
-      page could override would therefore describe an engine we do not have.
+    - *Not `!important` since 2026-10-15:* `display: -lynx-text` on `text`,
+      on `inline-text`, and on a `text`'s own `inline-truncation` child. A
+      text's inline-ness is not a mode at all: Lynx establishes it at
+      tree-mutation time (`TextElement::OnNodeAdded` calls
+      `ConvertToInlineElement`, which renames the tag and marks the node
+      inline), the paragraph builder never reads `display`, and no author CSS
+      can undo any of it — but an author `display: none` still removes the
+      text, in native and in web-core alike. From 2026-09-03 to 2026-10-15
+      this was `display: -lynx-text !important`, which swallowed that `none`
+      too. The three rules now declare the stylo fork's internal
+      `-lynx-display-lock: -lynx-text`, which only a user-agent sheet can
+      spell and which `StyleAdjuster` applies by computing every cascaded
+      `display` but `none` to `-lynx-text`. The lock lets every `none`
+      through, so a UA rule hiding an element's children
+      (`list > *:not(list-item):not(wrapper)`, `x-swiper > :not(…)`,
+      `image > *`, `svg > *`) now hides a `text` among them as well.
     - `padding: 0` on an `image` that is inline content of a paragraph
       (2026-09-17). The same argument reached from the other end: in web-core
       the authored host element generates no box at all —

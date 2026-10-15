@@ -89,7 +89,7 @@ const CONTENT_ATTRIBUTE: &str = "content";
 /// [`super::ua_sheet`], which lists `svg` beside `image`. `display: flex`
 /// is `x-svg.css`'s, and keeps the tag out of the `defaultDisplayLinear`
 /// list as `image` is. Nothing here is `!important`: see
-/// `the_ua_sheet_is_important_free_apart_from_the_text_block`.
+/// `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions`.
 pub(super) const UA_RULES: &str = r"svg { display: flex; }
 svg > * { display: none; }
 ";

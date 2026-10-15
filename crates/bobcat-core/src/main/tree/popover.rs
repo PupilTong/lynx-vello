@@ -54,7 +54,7 @@
 /// HTML's popover UA rules, as the module documentation lists, each HTML's
 /// selector inside `:where()` (see "The `html` group" above). The one
 /// `!important` line stays whole on a line of its own:
-/// `the_ua_sheet_is_important_free_apart_from_the_text_block` reads the
+/// `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions` reads the
 /// sheet line by line.
 pub(super) const UA_RULES: &str = r"
 :where([popover]:not(:popover-open):not(dialog[open])) { display: none; }

@@ -163,9 +163,9 @@ the wiring above it, in two places. The UA sheet gave the tag `display: none`
 with nothing to lift it, and `crates/dom` passed `None` for `TextBlock::new`'s
 truncation slice.
 
-- `text > inline-truncation { display: -lynx-text !important; --lynx-inline-truncation: 1; }`
-  (`crates/bobcat-core/src/main/tree/text.rs:132`, with the property registered
-  at `:124`) makes a `text`'s **own** `inline-truncation` child a text scope and
+- `text > inline-truncation { display: -lynx-text; -lynx-display-lock: -lynx-text; --lynx-inline-truncation: 1; }`
+  (`crates/bobcat-core/src/main/tree/text.rs`, with the property registered
+  beside it) makes a `text`'s **own** `inline-truncation` child a text scope and
   flags it. That is web-core's scope — `XTextTruncation.ts` queries
   `:scope > inline-truncation` — so a marker written through a wrapper or
   outside a paragraph keeps the tag's default `display: none`.
@@ -383,9 +383,9 @@ border twice to the static position. Both are fixed, and
   fills a placeholder's `ImageProps` from the specified width and height, the
   four margins, the border radius and `vertical-align`, and reads `padding`
   nowhere — so this is not a native-versus-web choice, only a difference of
-  mechanism. It is the fourth UA-origin `!important` in this engine, recorded
+  mechanism. It is the text block's one UA-origin `!important`, recorded
   in [`deviations.md`](deviations.md) and pinned by
-  `the_ua_sheet_is_important_free_apart_from_the_text_block`. A `view` inside a
+  `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions`. A `view` inside a
   `text` keeps its padding: web-core leaves that one a real `inline-flex` box.
 
 A third defect was found and closed with them, carried by no `#[ignore]`d test
@@ -508,17 +508,15 @@ Each blocks replicas that could not be written at all.
 
 ### F. Recorded deviations, not gaps
 
-- `text { display: -lynx-text !important }` (`tree/text.rs:125`) is user-agent
-  origin, so it outranks an author's `display: none` and no `text` element can be
-  hidden. This is §D.15's recorded exception (`deviations.md:492-498`) — Lynx's
-  inline-ness is structural, not cascaded. `web-core` does let `display: none`
-  win, so the exception is wider than the structural argument alone requires:
-  `display: none` generates no box at all and so cannot break an inline-ness
-  invariant. **Ruled (user, 2026-09-14): `display: none` on a `text` stays
-  unsupported for now**, and the exception keeps its current width. The replica
-  `display_none_removes_a_text_block_and_an_inline_run_alike` stays `#[ignore]`d
-  and marked DEVIATION rather than GAP, so the divergence stays visible and the
-  ruling is reversible by narrowing one UA declaration.
+- *Closed 2026-10-15, reversing the 2026-09-14 ruling:* `display: none` on a
+  `text`. The UA sheet used to write `text { display: -lynx-text !important }`,
+  which outranked an author's `display: none` too, so no `text` element could
+  be hidden. It now locks the display with the stylo fork's UA-only
+  `-lynx-display-lock: -lynx-text`, which computes every cascaded `display`
+  but `none` to `-lynx-text` (`docs/style-assumptions.md` §D.15). A text's
+  inline-ness is still structural, and `display: none` hides a block text
+  or an inline run as it does in both references. The replica
+  `display_none_removes_a_text_block_and_an_inline_run_alike` runs.
 - **A3. `text-maxline="1"` is a one-line clamp, not a one-line shape.**
   **Ruled (user, 2026-09-15): this engine follows native Lynx here.** Android
   builds the `StaticLayout` at the available width and calls `setMaxLines(1)`

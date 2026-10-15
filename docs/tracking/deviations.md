@@ -988,10 +988,10 @@ consequential choice about whether to follow the spec or the quirk.
   computed style; only its *box* is gone). `margin` is untouched, because the
   shadow part inherits it and it does reach the line in both references. A
   `view` inside a `text` is untouched too: web-core leaves that one a real
-  `inline-flex` box with its padding intact. This is the fourth
-  `!important` in the UA sheet and the second argument
+  `inline-flex` box with its padding intact. This is the text block's one
+  `!important` in the UA sheet, an argument
   [docs/style-assumptions.md](../style-assumptions.md) §D.15 admits;
-  `the_ua_sheet_is_important_free_apart_from_the_text_block` pins the set.
+  `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions` pins the set.
 - **`<image auto-size>` is sized the way both references size it.** The
   attribute lifts the rule above — `image[auto-size]:not([auto-size="false"])
   { contain: none; max-width: 100%; max-height: 100%; }` — and the box is then
@@ -1255,8 +1255,10 @@ consequential choice about whether to follow the spec or the quirk.
   sheet (web-elements' defaults are author origin, ours are user-agent origin,
   and an important UA declaration would outrank author `!important` instead of
   losing to it). §D.15 gained one exception on 2026-09-03 —
-  `display: -lynx-text` on `text`/`inline-text` — and this row is the case
-  that exception deliberately does **not** cover: a scroller's display is a
+  `display: -lynx-text` on `text`/`inline-text`, since 2026-10-15 a UA-only
+  `-lynx-display-lock` rather than `!important`, so that `display: none`
+  still hides a text — and this row is the case that exception deliberately
+  does **not** cover: a scroller's display is a
   *default*, gated on page config by web-core itself, where the only question
   is which layout mode the box gets; a text's inline-ness is a *structural
   invariant* Lynx establishes at tree-mutation time and no author CSS can
