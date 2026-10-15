@@ -2,8 +2,9 @@
 
 This private pnpm workspace owns the JSX/CSS/JS sources used by Bobcat's
 compiled ReactLynx integration tests, decoder tests and benchmarks. The five
-`basic-*` cards, the `react-frame`/`react-frame-inner` pair (web-core-e2e's
-`api-frame-src`/`api-frame-inner`) and the `react-set-shared-data`/
+`basic-*` cards, the `react-frame*` cards (web-core-e2e's `api-frame-src`,
+`api-frame-inner`, `api-frame-data`, `api-frame-global-props` and
+`api-frame-auto-height`) and the `react-set-shared-data`/
 `react-get-shared-data` pair (web-core-e2e's `api-setSharedData`/
 `api-getSharedData`) come from lynx-stack; see `NOTICE.lynx-stack` for
 provenance.
@@ -24,7 +25,7 @@ Both commands set `NODE_ENV` explicitly so the fixture matrix and compiler
 use the same mode.
 
 The default build produces eight native production pages, three native development
-variants and twenty-two web pages. Each native environment has its own
+variants and twenty-four web pages. Each native environment has its own
 compilation, so its lazy chunks cannot be shared with another test page.
 
 | Environment | Fixture behavior |
@@ -51,7 +52,9 @@ compilation, so its lazy chunks cannot be shared with another test page.
 | `web-react-overlay-pass-through` | A red page with a blue 60px `#below` square at its bottom-right; a tap sets `visible` on an `events-pass-through` `<overlay>` whose one child is a yellow 120px panel at the top-left. `#below` counts its taps by colour (cyan after one with `showoverlay` seen, magenta after two), so a second tap reaches it only through the pass-through overlay |
 | `web-react-svg` | A white 240px page in bands: two `<svg content={...}>`s sized by CSS (a `<linearGradient>` fill through `url(#fade)` with a green band and a yellow `<path>` triangle, and a blue card with centred white `<text>`); an unsized `<svg src>` of a bundled `shape.svg` at its natural 80 by 40; `<image mode="aspectFit">` of the same `shape.svg` letterboxed on magenta; a `<view>` tiling `tile.svg` with `background-repeat: repeat`. No `<svg>` has children. Both assets are inlined as `data:` URLs; `crates/bobcat-source/tests/reactlynx_runtime.rs` samples the pixels |
 | `web-react-markdown` | An `<x-markdown>` (web-core's tag) rendering web-core's `basic.html` content followed by a `[link]` paragraph and a `data:` PNG image, with a structured `markdown-style={{link: …, inlineCode: …}}`, `content-id="case-1"` and `bindlink`/`bindparseEnd`/`bindimageTap`; a sibling `<markdown>` (native's tag) with plain content; a mount effect whose selector query `invoke`s `getContent`. The background thread logs each event as `markdown-card <name> <detail JSON>`, and `#status` names them. No stylesheet, every style inline. `crates/bobcat-core/src/main/tree/markdown/card_tests.rs` reads its shadow tree and taps the link |
-| `web-react-frame`, `web-react-frame-inner` | A red page whose flex view puts a 100px `<frame src="./react-frame-inner.web.bundle">` at the page's top-left; the inner card is a blue 100px view holding `frame:ready`, whose component body logs `react-frame-inner-rendered` from the frame's realm (its MTS first screen). Ported from lynx-stack's web-core-e2e `api-frame-src`/`api-frame-inner`, without the inner card's `useInitData`/`lynx.__globalProps` texts, which a frame does not pass yet. `crates/bobcat-source/tests/frame.rs` serves the inner bundle where `src` resolves and samples the pixels |
+| `web-react-frame`, `web-react-frame-inner` | A red page whose flex view puts a 100px `<frame src="./react-frame-inner.web.bundle">` at the page's top-left. The inner card is a blue 100px view holding `frame:ready`, then upstream's `data:{initData.label}` and `global:{lynx.__globalProps.message}` texts as two 20px rows below it (140px of content in all, which a 100px frame clips); its component body logs `react-frame-inner-rendered`, `react-frame-inner-data:<label>` and `react-frame-inner-global:<message>` from the frame's realm (its MTS first screen; no nested BTS). Ported from lynx-stack's web-core-e2e `api-frame-src`/`api-frame-inner`. `crates/bobcat-source/tests/frame.rs` serves the inner bundle where `src` resolves and samples the pixels |
+| `web-react-frame-data` | `react-frame`'s page with `data={{ label: 'from-data' }}` and `global-props={{ message: 'from-global-props' }}` on the frame, which the inner card boots with as its init data and `lynx.__globalProps`. web-core-e2e's `api-frame-data` and `api-frame-global-props` in one host; `crates/bobcat-source/tests/frame.rs` reads the inner card's logs |
+| `web-react-frame-auto-height` | A red page whose `display: flex` column holds a 300px-wide green `<frame auto-height src="./react-frame-inner.web.bundle">` with no height, which takes the inner card's 140px content height (a column does not stretch it). Adapted from web-core-e2e's `api-frame-auto-height`, plus the green background that shows the frame's box; `crates/bobcat-source/tests/frame.rs` samples the pixels |
 | `web-react-set-shared-data`, `web-react-get-shared-data` | web-core-e2e's `api-setSharedData` and `api-getSharedData`, copied: the first card's effect stores `green` under `color` with `lynx.setSharedData` and paints its own `getSharedData`; a tap on the second, an orange 100px view, paints what `getSharedData('color')` reads. Booted as two views of one group by `crates/bobcat-source/tests/reactlynx_runtime.rs`, which is web-core-e2e's `api-shared-context` |
 | `web-css-custom-sections` | A 100px red `.page` card whose bundle also carries two `encoding: 'CSS'` custom sections, `CSS` (`CSS.css`) and `A &/中` (`named.css`). No ReactLynx build writes such a web card today (a lazy bundle's CSS goes into its `StyleInfo` on the web target), so `scripts/css-custom-sections.ts` adds them through the template plugin's public `beforeEncode` hook; `@lynx-js/web-core/encode` then writes them as the `CustomSectionsStyleInfo` section (label 7, lynx-stack#4138). Decoded by `crates/bobcat-source/tests/decode_web_bundle.rs` |
 

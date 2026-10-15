@@ -1,7 +1,7 @@
-// `bobcat:frame`: what a frame's `src`, connection and disconnection do in
-// the realm that holds its handle, over stand-ins for the host members it
-// reaches (`fetchResource`, `resetFrame` and the `Future` trio), for the
-// diagnostics pair, and for `ShadowRealm`.
+// `bobcat:frame`: what a frame's `src`, `data`, `global-props`, connection and
+// disconnection do in the realm that holds its handle, over stand-ins for the
+// host members it reaches (`fetchResource`, `resetFrame` and the `Future`
+// trio), for the diagnostics pair, and for `ShadowRealm`.
 //
 // The `Future` class is the real one; its settle is driven through its own
 // `__BobcatSettleFuture`, as the host's epilogue drives it. The child half —
@@ -70,13 +70,18 @@ rstest.mockRequire("bobcat:runtime", () => ({
 }));
 
 /**
- * A stand-in for the host's `ShadowRealm`: its child's `boot` and `dispose`
- * record their calls, `dispose` with the number of the realm it closes.
+ * A stand-in for the host's `ShadowRealm`: its child's `boot`, `dispose`,
+ * `updateData` and `updateGlobalProps` record their calls, each but `boot`
+ * with the number of its realm.
  */
 class FakeShadowRealm {
   static created = 0;
   /** What the next `importValue` settles with, if not a recording export. */
   static importFails: string | undefined;
+  /** What the child's `boot` answers: `false` is a boot that failed. */
+  static bootAnswers = true;
+  /** Set to make the child's update functions throw this, after recording. */
+  static updateFails: string | undefined;
   /** Set to hold every `importValue` until the test calls `release`. */
   static hold = false;
   static held: (() => void)[] = [];
@@ -95,13 +100,15 @@ class FakeShadowRealm {
     calls.push(["importValue", specifier, name]);
     const failure = FakeShadowRealm.importFails;
     if (failure !== undefined) return Promise.reject(new TypeError(failure));
-    const exported = name === "dispose"
-      ? () => {
-        calls.push(["dispose", this.number]);
+    const exported = name === "boot"
+      ? (...args: unknown[]) => {
+        calls.push(["boot", ...args]);
+        return FakeShadowRealm.bootAnswers;
       }
       : (...args: unknown[]) => {
-        calls.push(["boot", ...args]);
-        return true;
+        calls.push([name, this.number, ...args]);
+        const failure = FakeShadowRealm.updateFails;
+        if (failure !== undefined && name !== "dispose") throw new TypeError(failure);
       };
     if (!FakeShadowRealm.hold) return Promise.resolve(exported);
     return new Promise(resolve => {
@@ -114,6 +121,7 @@ import {
   __BobcatCloseFrames,
   __BobcatFrameConnected,
   __BobcatFrameDisconnected,
+  frameDataChanged,
   frameSourceChanged,
 } from "../src/frame.ts";
 
@@ -141,6 +149,8 @@ beforeEach(() => {
   handles.clear();
   FakeShadowRealm.created = 0;
   FakeShadowRealm.importFails = undefined;
+  FakeShadowRealm.bootAnswers = true;
+  FakeShadowRealm.updateFails = undefined;
   FakeShadowRealm.hold = false;
   FakeShadowRealm.held = [];
   (globalThis as Record<string, unknown>)["ShadowRealm"] = FakeShadowRealm;
@@ -165,6 +175,8 @@ describe("frameSourceChanged", () => {
     expect(calls.slice(2)).toEqual([
       ["importValue", "bobcat:frame-boot", "boot"],
       ["importValue", "bobcat:frame-boot", "dispose"],
+      ["importValue", "bobcat:frame-boot", "updateData"],
+      ["importValue", "bobcat:frame-boot", "updateGlobalProps"],
       ["boot", 3, "child.web.bundle", "{}", "{}", SYSTEM_INFO],
     ]);
   });
@@ -372,4 +384,178 @@ describe("connection", () => {
     __BobcatFrameDisconnected(3);
     expect(calls).toEqual([]);
   });
+});
+
+describe("data and global-props", () => {
+  const CHILD = "app:///child.web.bundle";
+  const SECOND = "app:///second.web.bundle";
+
+  /** The `boot` calls so far. */
+  function boots(): unknown[][] {
+    return calls.filter(call => call[0] === "boot");
+  }
+
+  /** The calls of either update function so far. */
+  function updates(): unknown[][] {
+    return calls.filter(call => call[0] === "updateData" || call[0] === "updateGlobalProps");
+  }
+
+  it("boots the first card with the data and global-props written before src", async () => {
+    already.add(CHILD);
+    const frame = frameHandle(3);
+    frameDataChanged(frame, "data", '{"label":"first"}');
+    frameDataChanged(frame, "global-props", '{"theme":"dark"}');
+    // There is no card yet to hand them to.
+    expect(calls).toEqual([]);
+    frameSourceChanged(frame, 3, CHILD);
+    await drain();
+    expect(boots()).toEqual([
+      ["boot", 3, CHILD, '{"label":"first"}', '{"theme":"dark"}', SYSTEM_INFO],
+    ]);
+    expect(updates()).toEqual([]);
+  });
+
+  for (const [name, update] of [["data", "updateData"], ["global-props", "updateGlobalProps"]] as const) {
+    describe(name, () => {
+      /** `boot`'s call for `src` with `json` as this attribute and `{}` as the other. */
+      function booted(src: string, json: string): unknown[] {
+        return name === "data"
+          ? ["boot", 3, src, json, "{}", SYSTEM_INFO]
+          : ["boot", 3, src, "{}", json, SYSTEM_INFO];
+      }
+
+      it("hands every write after boot to the card's update, equal or not, and boots nothing", async () => {
+        already.add(CHILD);
+        const frame = frameHandle(3);
+        frameSourceChanged(frame, 3, CHILD);
+        await drain();
+        calls.length = 0;
+        frameDataChanged(frame, name, '{"label":"second"}');
+        frameDataChanged(frame, name, '{"label":"second"}');
+        expect(calls).toEqual([
+          [update, 1, '{"label":"second"}'],
+          [update, 1, '{"label":"second"}'],
+        ]);
+        await drain();
+        expect(FakeShadowRealm.created).toBe(1);
+        expect(boots()).toEqual([]);
+      });
+
+      it("only keeps a write while the fetch is in flight, which boot then reads", async () => {
+        const frame = frameHandle(3);
+        frameSourceChanged(frame, 3, CHILD);
+        frameDataChanged(frame, name, '{"label":"late"}');
+        future.__BobcatSettleFuture(futures()[0]!, false, undefined);
+        await drain();
+        expect(boots()).toEqual([booted(CHILD, '{"label":"late"}')]);
+        expect(updates()).toEqual([]);
+      });
+
+      it("only keeps a write while the import is in flight, which boot then reads", async () => {
+        already.add(CHILD);
+        FakeShadowRealm.hold = true;
+        const frame = frameHandle(3);
+        frameSourceChanged(frame, 3, CHILD);
+        await drain();
+        expect(FakeShadowRealm.created).toBe(1);
+        frameDataChanged(frame, name, '{"label":"late"}');
+        FakeShadowRealm.release();
+        await drain();
+        expect(boots()).toEqual([booted(CHILD, '{"label":"late"}')]);
+        expect(updates()).toEqual([]);
+      });
+
+      it("leaves the running card alone on removal, and boots the next card with {}", async () => {
+        already.add(CHILD);
+        already.add(SECOND);
+        const frame = frameHandle(3);
+        frameDataChanged(frame, name, '{"label":"first"}');
+        frameSourceChanged(frame, 3, CHILD);
+        await drain();
+        calls.length = 0;
+        frameDataChanged(frame, name, null);
+        expect(calls).toEqual([]);
+        frameSourceChanged(frame, 3, SECOND);
+        await drain();
+        expect(boots()).toEqual([booted(SECOND, "{}")]);
+      });
+
+      it("ignores anything but a plain object, keeping what it had", async () => {
+        already.add(CHILD);
+        const frame = frameHandle(3);
+        frameDataChanged(frame, name, '{"label":"kept"}');
+        frameSourceChanged(frame, 3, CHILD);
+        await drain();
+        calls.length = 0;
+        for (const ignored of ["3", "true", "null", '"text"', "[1]", "nope", "", "[object Object]"]) {
+          frameDataChanged(frame, name, ignored);
+        }
+        expect(calls).toEqual([]);
+        // Nor did any of them replace what the next boot reads.
+        __BobcatFrameDisconnected(3);
+        __BobcatFrameConnected(3);
+        await drain();
+        expect(boots()).toEqual([booted(CHILD, '{"label":"kept"}')]);
+      });
+
+      it("boots a new src with the last value written", async () => {
+        already.add(CHILD);
+        already.add(SECOND);
+        const frame = frameHandle(3);
+        frameDataChanged(frame, name, '{"label":"first"}');
+        frameSourceChanged(frame, 3, CHILD);
+        await drain();
+        frameDataChanged(frame, name, '{"label":"second"}');
+        calls.length = 0;
+        frameSourceChanged(frame, 3, SECOND);
+        await drain();
+        expect(calls[0]).toEqual(["dispose", 1]);
+        expect(boots()).toEqual([booted(SECOND, '{"label":"second"}')]);
+        // The second card is the one a write now reaches.
+        calls.length = 0;
+        frameDataChanged(frame, name, '{"label":"third"}');
+        expect(calls).toEqual([[update, 2, '{"label":"third"}']]);
+      });
+
+      it("boots a reconnected frame with the last value written, and updates no card while it has none", async () => {
+        already.add(CHILD);
+        const frame = frameHandle(3);
+        frameSourceChanged(frame, 3, CHILD);
+        await drain();
+        __BobcatFrameDisconnected(3);
+        calls.length = 0;
+        frameDataChanged(frame, name, '{"label":"while away"}');
+        expect(calls).toEqual([]);
+        __BobcatFrameConnected(3);
+        await drain();
+        expect(boots()).toEqual([booted(CHILD, '{"label":"while away"}')]);
+        expect(updates()).toEqual([]);
+      });
+
+      it("updates no card whose boot failed", async () => {
+        already.add(CHILD);
+        FakeShadowRealm.bootAnswers = false;
+        const frame = frameHandle(3);
+        frameSourceChanged(frame, 3, CHILD);
+        await drain();
+        calls.length = 0;
+        frameDataChanged(frame, name, '{"label":"second"}');
+        expect(calls).toEqual([]);
+      });
+
+      it("reports an update that throws across the boundary once, naming src", async () => {
+        already.add(CHILD);
+        const frame = frameHandle(3);
+        frameSourceChanged(frame, 3, CHILD);
+        await drain();
+        calls.length = 0;
+        FakeShadowRealm.updateFails = "the realm is gone";
+        frameDataChanged(frame, name, '{"label":"second"}');
+        expect(calls).toEqual([
+          [update, 1, '{"label":"second"}'],
+          ["reportError", `frame ${CHILD}: the realm is gone`],
+        ]);
+      });
+    });
+  }
 });

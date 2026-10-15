@@ -70,13 +70,19 @@ rstest.mockRequire("bobcat:runtime", () => ({
   },
 }));
 
-// A frame's `src` load is `bobcat:frame`'s, tested in frame.test.ts; here it
-// is the one call `__SetAttribute` makes, recorded with the mock's calls.
+// A frame's `src` load and its `data`/`global-props` are `bobcat:frame`'s,
+// tested in frame.test.ts; here each is the one call `__SetAttribute` makes,
+// recorded with the mock's calls.
 rstest.mockRequire("bobcat:frame", () => ({
   frameSourceChanged(handle: object, frameId: number, src: string | null) {
     const native =
       globalThis.__bobcatTestHost as ReturnType<typeof createMockBobcat>;
     native.calls.push(["frameSourceChanged", handle, frameId, src]);
+  },
+  frameDataChanged(handle: object, name: string, json: string | null) {
+    const native =
+      globalThis.__bobcatTestHost as ReturnType<typeof createMockBobcat>;
+    native.calls.push(["frameDataChanged", handle, name, json]);
   },
 }));
 
@@ -1322,7 +1328,7 @@ describe("__SetAttribute", () => {
     __SetAttribute(named, "src", 7);
     __SetAttribute(frame, "src", null);
     // Only a frame's `src` is a load; another name, or another tag, is not.
-    __SetAttribute(frame, "data", "{}");
+    __SetAttribute(frame, "title", "x");
     __SetAttribute(view, "src", "app:///child.web.bundle");
     expect(mock.calls).toEqual([
       ["setAttribute", 3, "src", "app:///child.web.bundle"],
@@ -1331,8 +1337,69 @@ describe("__SetAttribute", () => {
       ["frameSourceChanged", named, 4, "7"],
       ["removeAttribute", 3, "src"],
       ["frameSourceChanged", frame, 3, null],
-      ["setAttribute", 3, "data", "{}"],
+      ["setAttribute", 3, "title", "x"],
       ["setAttribute", 5, "src", "app:///child.web.bundle"],
+    ]);
+  });
+
+  it("writes a frame's data and global-props as JSON text and hands that text to bobcat:frame", () => {
+    // ReactLynx passes each as the object itself; web-core's nested
+    // `lynx-view` takes the object through its `data`/`globalProps`
+    // properties, and here the attribute holds its JSON text.
+    const page = __CreatePage("card", 0);
+    const frame = __CreateFrame(0);
+    const view = __CreateView(0);
+    __AppendElement(page, frame);
+    const data = {label: "x", nested: {count: 1}};
+    const json = JSON.stringify(data);
+    for (const name of ["data", "global-props"]) {
+      mock.calls.length = 0;
+      __SetAttribute(frame, name, data);
+      __SetAttribute(frame, name, '{"label":"as written"}');
+      // Anything else is handed over as its text, for `bobcat:frame` to refuse.
+      __SetAttribute(frame, name, 3);
+      __SetAttribute(frame, name, [1]);
+      __SetAttribute(frame, name, null);
+      expect(mock.calls.filter(call => call[0] !== "tagName"), name).toEqual([
+        ["setAttribute", 3, name, json],
+        ["frameDataChanged", frame, name, json],
+        ["setAttribute", 3, name, '{"label":"as written"}'],
+        ["frameDataChanged", frame, name, '{"label":"as written"}'],
+        ["setAttribute", 3, name, "3"],
+        ["frameDataChanged", frame, name, "3"],
+        ["setAttribute", 3, name, "[1]"],
+        ["frameDataChanged", frame, name, "[1]"],
+        ["removeAttribute", 3, name],
+        ["frameDataChanged", frame, name, null],
+      ]);
+      __SetAttribute(frame, name, data);
+      expect(elementModule.__GetAttributeByName(frame, name), name).toBe(json);
+    }
+    // The typed copy a node query's `attribute` field reads is the object.
+    const answer = elementModule.__BobcatQueryNodes({
+      bobcat: "runtime",
+      method: "nodeQuery",
+      operation: "fields",
+      token: {
+        type: 2,
+        identifier: String(__GetElementUniqueID(frame)),
+        component_id: "",
+        first_only: true,
+        root_unique_id: undefined,
+      },
+      params: ["attribute"],
+    });
+    expect(answer).toEqual({
+      status: { code: 0, data: "success" },
+      data: { attribute: { data, "global-props": data } },
+    });
+    // Any other element has no such property, and no frame to tell.
+    mock.calls.length = 0;
+    __SetAttribute(view, "data", data);
+    __SetAttribute(view, "global-props", data);
+    expect(mock.calls.filter(call => call[0] !== "tagName")).toEqual([
+      ["setAttribute", 4, "data", "[object Object]"],
+      ["setAttribute", 4, "global-props", "[object Object]"],
     ]);
   });
 

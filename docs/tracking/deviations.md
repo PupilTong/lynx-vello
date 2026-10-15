@@ -2391,12 +2391,49 @@ consequential choice about whether to follow the spec or the quirk.
     adopts is mounted on the frame's shadow root, and `dom` loads no
     `@font-face` rule of a shadow-tree sheet
     (`Document::append_shadow_rules`).
-  - *No `load` event, no `data`/`global-props`, no `auto-width`/`auto-height`
-    or `preset-*`*: none is built yet, and a frame with no author height is
-    0 tall (strict containment). `bobcat:frame` hands the child `"{}"` for
-    both page data strings, so the seam exists; native's
-    `FrameElement::SetAttributeInternal` and web-core's `LynxView` pass the
-    attributes on.
+  - *No `load` event* yet, and a frame with no author height and no
+    `auto-height` is 0 tall (strict containment).
+  - *A later `data` write does not re-render a compiled ReactLynx card.*
+    `data` and `global-props` reach the card at boot and, once it booted,
+    through its `updateData`/`updateGlobalProps` (2026-10-15), but
+    ReactLynx's MTS `updatePage` re-renders only before the first screen
+    is synced and leaves every later render to the BTS, which a frame does
+    not have; so web-core-e2e's `api-frame-data-update` cannot pass here.
+    A card whose own `updatePage` renders does re-render.
+  - *A `src` change keeps the frame's last `data` and `global-props`*
+    (user ruling 2026-10-15): every boot — the first, a new `src`'s, a
+    reconnected frame's — reads the last values written, as web-core's
+    `LynxView` renders every card with its current `initData`/`globalProps`
+    and Harmony re-sends both. Native Android and iOS consume the pending
+    values at the first load, so a new `src` boots with none unless `data`
+    is written again before its bundle arrives (`UIFrame.java:117-129,
+    334-349`, `LynxUIFrame.mm:96-104, 173-186`).
+  - *`data`/`global-props` take plain objects only* (my decision): a
+    non-null, non-array object, or JSON text of one; anything else is
+    ignored, where Android clears the pending value and web-core passes a
+    string through `JSON.parse`. A removal leaves the running card as it is
+    and makes the next boot's value `{}` (native's reset; web-core's string
+    path). Every write is an update, with no deduplication, as on both.
+  - *`auto-width` with no author height takes its content's height too*
+    (user ruling 2026-10-15, native's `auto-width` over web-core's none):
+    `frame[auto-width]` is `contain: layout paint style`, since CSS has no
+    containment of the height alone; native leaves such a frame 0 tall.
+    `auto-height` is web-core's `contain: content` over its
+    `container-type: inline-size`, i.e. `inline-size layout paint style`.
+  - *`preset-width`/`preset-height` and `enable-multi-async-thread` do
+    nothing* (my decision, web-core's answer): native's presets are the
+    nested page's viewport before the frame has a content rect, which never
+    happens when the nested page lays out in the frame's own pass, and its
+    `enable-multi-async-thread` picks threads.
+  - *No frame methods* (user ruling 2026-10-15, native's surface): a frame
+    answers the shared base set and code 3 for anything else. web-core's
+    `invoke` reaches its `lynx-view`'s `updateData`, `updateGlobalProps`
+    and `reload` by reflection, and a card can write `init-data`,
+    `browser-config` and `transform-*` on it; none is adopted.
+  - *No group inheritance of global props*: Android applies the host
+    `LynxViewGroup`'s group global props before the frame's own
+    (`LynxTemplateRender.java:1686-1692`); web-core and this engine start a
+    frame's global props from what the frame was given.
   - *The nested card has no BTS and gets no events.* Its boot
     (`packages/bobcat-element/src/frame-boot.ts`) runs the card's `root` and
     nothing for the background thread: `__BobcatDetachBackground` drops
