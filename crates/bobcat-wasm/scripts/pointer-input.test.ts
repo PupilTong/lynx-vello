@@ -10,6 +10,7 @@ interface Bounds {
 
 interface FakePointerEvent {
   button: number
+  buttons: number
   clientX: number
   clientY: number
   defaultPrevented: boolean
@@ -87,6 +88,7 @@ class FakeCanvas {
   emit(name: string, values: Partial<FakePointerEvent> = {}): void {
     const event = {
       button: 0,
+      buttons: 0,
       clientX: 0,
       clientY: 0,
       defaultPrevented: false,
@@ -234,7 +236,7 @@ test.after(() => {
   }
 })
 
-test('forwards captured pointer sequences in viewport CSS pixels', async () => {
+test('forwards captured pointer sequences in viewport CSS pixels', async (t) => {
   FakeWorker.instances.length = 0
   const canvas = new FakeCanvas({
     height: 100,
@@ -249,10 +251,13 @@ test('forwards captured pointer sequences in viewport CSS pixels', async () => {
     2,
     LYNX_XML_PAGE_CONFIG,
   )
+  t.after(() => view.dispose())
   const worker = FakeWorker.instances[0]!
 
   assert.equal(canvas.style.touchAction, 'none')
   canvas.emit('pointerdown', {
+    button: 0,
+    buttons: 1,
     clientX: 110,
     clientY: 45,
     defaultPrevented: true,
@@ -260,12 +265,16 @@ test('forwards captured pointer sequences in viewport CSS pixels', async () => {
     pointerType: 'touch',
   })
   canvas.emit('pointermove', {
+    button: -1,
+    buttons: 1,
     clientX: 210,
     clientY: 120,
     pointerId: 7,
     pointerType: 'touch',
   })
   canvas.emit('pointerup', {
+    button: 0,
+    buttons: 0,
     clientX: 230,
     clientY: 120,
     pointerId: 7,
@@ -276,6 +285,8 @@ test('forwards captured pointer sequences in viewport CSS pixels', async () => {
     worker.messages.filter(({ type }) => type === 'bobcat-pointer'),
     [
       {
+        button: 0,
+        buttons: 1,
         defaultPrevented: true,
         device: 1,
         phase: 0,
@@ -285,6 +296,8 @@ test('forwards captured pointer sequences in viewport CSS pixels', async () => {
         y: 50,
       },
       {
+        button: -1,
+        buttons: 1,
         defaultPrevented: false,
         device: 1,
         phase: 1,
@@ -294,6 +307,8 @@ test('forwards captured pointer sequences in viewport CSS pixels', async () => {
         y: 200,
       },
       {
+        button: 0,
+        buttons: 0,
         defaultPrevented: false,
         device: 1,
         phase: 2,
@@ -316,7 +331,7 @@ test('forwards captured pointer sequences in viewport CSS pixels', async () => {
   assert.equal(worker.terminated, true)
 })
 
-test('forwards wheel deltas in viewport CSS pixels and prevents the page scroll', async () => {
+test('forwards wheel deltas in viewport CSS pixels and prevents the page scroll', async (t) => {
   FakeWorker.instances.length = 0
   const canvas = new FakeCanvas({
     height: 100,
@@ -331,6 +346,7 @@ test('forwards wheel deltas in viewport CSS pixels and prevents the page scroll'
     2,
     LYNX_XML_PAGE_CONFIG,
   )
+  t.after(() => view.dispose())
   const worker = FakeWorker.instances[0]!
   const wheelMessages = () =>
     worker.messages.filter(({ type }) => type === 'bobcat-wheel')
@@ -401,7 +417,7 @@ test('forwards wheel deltas in viewport CSS pixels and prevents the page scroll'
   await view.dispose()
 })
 
-test('leaves a ctrl-held wheel to the browser, and every wheel after disposal', async () => {
+test('leaves a ctrl-held wheel to the browser, and every wheel after disposal', async (t) => {
   FakeWorker.instances.length = 0
   const canvas = new FakeCanvas({ height: 100, left: 0, top: 0, width: 100 })
   const view = await BobcatCanvas.create(
@@ -411,6 +427,7 @@ test('leaves a ctrl-held wheel to the browser, and every wheel after disposal', 
     1,
     LYNX_XML_PAGE_CONFIG,
   )
+  t.after(() => view.dispose())
   const worker = FakeWorker.instances[0]!
   const wheelMessages = () =>
     worker.messages.filter(({ type }) => type === 'bobcat-wheel')
@@ -428,7 +445,7 @@ test('leaves a ctrl-held wheel to the browser, and every wheel after disposal', 
   assert.equal(canvas.listenerCount(), 0)
 })
 
-test('ignores secondary mouse buttons and cancels lost capture', async () => {
+test('ignores secondary mouse buttons and cancels lost capture', async (t) => {
   FakeWorker.instances.length = 0
   const canvas = new FakeCanvas({ height: 100, left: 0, top: 0, width: 100 })
   const view = await BobcatCanvas.create(
@@ -438,6 +455,7 @@ test('ignores secondary mouse buttons and cancels lost capture', async () => {
     1,
     LYNX_XML_PAGE_CONFIG,
   )
+  t.after(() => view.dispose())
   const worker = FakeWorker.instances[0]!
 
   canvas.emit('pointerdown', {
@@ -478,7 +496,7 @@ test('ignores secondary mouse buttons and cancels lost capture', async () => {
   await view.dispose()
 })
 
-test('a load releases active pointers before replacing the native view', async () => {
+test('a load releases active pointers before replacing the native view', async (t) => {
   FakeWorker.instances.length = 0
   const canvas = new FakeCanvas({ height: 100, left: 0, top: 0, width: 100 })
   const view = await BobcatCanvas.create(
@@ -488,6 +506,7 @@ test('a load releases active pointers before replacing the native view', async (
     1,
     LYNX_XML_PAGE_CONFIG,
   )
+  t.after(() => view.dispose())
   const worker = FakeWorker.instances[0]!
 
   canvas.emit('pointerdown', {
@@ -517,7 +536,7 @@ test('a load releases active pointers before replacing the native view', async (
   await view.dispose()
 })
 
-test('a Lynx XML load preserves the host-selected page configuration', async () => {
+test('a Lynx XML load preserves the host-selected page configuration', async (t) => {
   FakeWorker.instances.length = 0
   const canvas = new FakeCanvas({ height: 60, left: 0, top: 0, width: 80 })
   const hostConfig = {
@@ -532,6 +551,7 @@ test('a Lynx XML load preserves the host-selected page configuration', async () 
     1,
     hostConfig,
   )
+  t.after(() => view.dispose())
   const worker = FakeWorker.instances[0]!
 
   await view.loadLynxXml('../card.lynx.xml')
@@ -553,7 +573,7 @@ test('a Lynx XML load preserves the host-selected page configuration', async () 
   await view.dispose()
 })
 
-test('a template load resolves the URL and releases active pointer capture', async () => {
+test('a template load resolves the URL and releases active pointer capture', async (t) => {
   FakeWorker.instances.length = 0
   const canvas = new FakeCanvas({ height: 60, left: 0, top: 0, width: 80 })
   const view = await BobcatCanvas.create(
@@ -563,6 +583,7 @@ test('a template load resolves the URL and releases active pointer capture', asy
     1,
     LYNX_XML_PAGE_CONFIG,
   )
+  t.after(() => view.dispose())
   const worker = FakeWorker.instances[0]!
   canvas.emit('pointerdown', { clientX: 20, clientY: 20, pointerId: 7 })
   await view.loadTemplate('../archive/main.web.bundle')
@@ -574,7 +595,7 @@ test('a template load resolves the URL and releases active pointer capture', asy
 })
 
 
-test('a ZIP load forwards owned bytes and the archive URL without document resolution', async () => {
+test('a ZIP load forwards owned bytes and the archive URL without document resolution', async (t) => {
   FakeWorker.instances.length = 0
   const canvas = new FakeCanvas({ height: 60, left: 0, top: 0, width: 80 })
   const view = await BobcatCanvas.create(
@@ -584,6 +605,7 @@ test('a ZIP load forwards owned bytes and the archive URL without document resol
     1,
     LYNX_XML_PAGE_CONFIG,
   )
+  t.after(() => view.dispose())
   const worker = FakeWorker.instances[0]!
   const bytes = new Uint8Array([80, 75, 3, 4])
   canvas.emit('pointerdown', { clientX: 20, clientY: 20, pointerId: 7 })

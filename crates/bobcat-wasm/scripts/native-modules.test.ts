@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test, { type TestContext } from 'node:test'
 
 import type {
   NativeModuleCallMessage,
@@ -146,6 +146,7 @@ function call(
 }
 
 async function createCanvas(
+  t: TestContext,
   nativeModules?: Record<string, Record<string, (...args: unknown[]) => void>>,
 ): Promise<{
   canvas: Awaited<ReturnType<typeof BobcatCanvas.create>>
@@ -160,6 +161,7 @@ async function createCanvas(
     LYNX_XML_PAGE_CONFIG,
     nativeModules === undefined ? {} : { nativeModules },
   )
+  t.after(() => canvas.dispose())
   return { canvas, worker: FakeWorker.instances[0]! }
 }
 
@@ -300,9 +302,9 @@ test('an unknown module or method is ignored', () => {
   )
 })
 
-test('the canvas declares its module table and routes calls to the handlers', async () => {
+test('the canvas declares its module table and routes calls to the handlers', async (t) => {
   const opened: unknown[] = []
-  const { canvas, worker } = await createCanvas({
+  const { canvas, worker } = await createCanvas(t, {
     ExplorerModule: {
       openSchema(...args: unknown[]): void {
         opened.push(args[0])
@@ -329,8 +331,8 @@ test('the canvas declares its module table and routes calls to the handlers', as
   await canvas.dispose()
 })
 
-test('a canvas answers a callback on the Worker channel', async () => {
-  const { canvas, worker } = await createCanvas({
+test('a canvas answers a callback on the Worker channel', async (t) => {
+  const { canvas, worker } = await createCanvas(t, {
     Storage: {
       read(...args: unknown[]): void {
         ;(args[0] as (...values: unknown[]) => void)('value')
@@ -364,8 +366,8 @@ test('a canvas answers a callback on the Worker channel', async () => {
   await canvas.dispose()
 })
 
-test('a canvas without native modules declares an empty table', async () => {
-  const { canvas, worker } = await createCanvas()
+test('a canvas without native modules declares an empty table', async (t) => {
+  const { canvas, worker } = await createCanvas(t)
   const init = worker.messages.find(({ type }) => type === 'bobcat-init')!
   assert.deepEqual(init.nativeModules, {})
   await canvas.dispose()
@@ -402,8 +404,8 @@ test('create refuses a module member that is not a function', async () => {
   )
 })
 
-test('a load carries globalProps as JSON text, and refuses what JSON cannot take', async () => {
-  const { canvas, worker } = await createCanvas()
+test('a load carries globalProps as JSON text, and refuses what JSON cannot take', async (t) => {
+  const { canvas, worker } = await createCanvas(t)
 
   await canvas.loadTemplate('card.web.bundle', {
     globalProps: { screenWidth: 390, theme: 'Dark' },
