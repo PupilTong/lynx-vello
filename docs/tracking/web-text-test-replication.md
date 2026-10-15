@@ -512,7 +512,7 @@ Each blocks replicas that could not be written at all.
   `text`. The UA sheet used to write `text { display: -lynx-text !important }`,
   which outranked an author's `display: none` too, so no `text` element could
   be hidden. The declaration is plain now, and the stylo fork's adjuster
-  computes any other `display` on a text tag to `none`
+  computes any other `display` on a text tag back to `-lynx-text`
   (`docs/style-assumptions.md` §D.15, `docs/tracking/deviations.md`).
   `display: none` hides a block text or an inline run as it does in both
   references. The replica

@@ -174,7 +174,7 @@ impl Default for PageConfig {
 /// Lynx fixes it structurally (`ConvertToInlineElement`) and still lets
 /// `display: none` hide the text, and an important declaration would swallow
 /// the `none` too. The declaration is plain, and the stylo fork's adjuster
-/// computes any other `display` on a text tag to `none`
+/// computes any other `display` on a text tag back to `-lynx-text`
 /// ([`super::text`] carries the argument).
 /// `padding: 0` on an `image` that is inline content of a paragraph is the
 /// first: web-core gives
@@ -684,8 +684,8 @@ mod tests {
     /// author CSS can undo it — but an author `display: none` still hides it,
     /// which an important `display: -lynx-text` would swallow. The
     /// declaration is plain, and the stylo fork's adjuster computes any other
-    /// `display` on a text tag to `none`; [`super::super::text`] carries the
-    /// argument.
+    /// `display` on a text tag back to `-lynx-text`; [`super::super::text`]
+    /// carries the argument.
     ///
     /// `padding: 0` on an inline `image` is the text block's only one.
     /// web-core gives the authored host element no box at all (`x-text > x-image { display:

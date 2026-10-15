@@ -74,19 +74,17 @@
 /// A text tag — `text`, `inline-text`, `inline-truncation` — is either a
 /// `-lynx-text` scope or not rendered. Its `display: -lynx-text` here is a
 /// plain declaration, so an author `display: none` wins and hides it, as it
-/// does in native Lynx and in web-core. Any other author `display` computes to
-/// `none` as well: the stylo fork's adjuster keeps `none` and `-lynx-text` on
-/// these three tags and turns every other value into `none`
+/// does in native Lynx and in web-core. Any other author `display` computes
+/// back to `-lynx-text`: the stylo fork's adjuster keeps `none` on these three
+/// tags and turns every other value into `-lynx-text`
 /// (`StyleAdjuster::adjust_for_lynx_text`, ruled by the user on 2026-10-15).
-/// Native Lynx fixes a text's inline-ness structurally
+/// That is native Lynx's shape: a text's inline-ness is structural
 /// (`TextElement::ConvertToInlineElement`,
-/// `core/renderer/dom/fiber/text_element.cc:196-205`), so no `display` value
-/// can make a text a flex or grid box, and no layout mode here lays text out
-/// outside `-lynx-text`. Both references still show the text under
-/// `display: flex` — native ignores the value, and in web-core the author's
-/// value takes over the `x-text` host (`x-text { display: flex }` is
-/// author-origin, `x-text.css:7-13`) while its shadow tree keeps the text —
-/// so that case renders nothing here and something in both references
+/// `core/renderer/dom/fiber/text_element.cc:196-205`), so native ignores
+/// `display: flex` on a text, and no layout mode here lays text out outside
+/// `-lynx-text`. web-core lets the author's value take over the `x-text` host
+/// (`x-text { display: flex }` is author-origin, `x-text.css:7-13`) while its
+/// shadow tree keeps the text, so the host's box differs there
 /// (`docs/tracking/deviations.md`).
 ///
 /// Until 2026-10-15 the declaration was `display: -lynx-text !important`,
@@ -911,10 +909,9 @@ mod tests {
 
     /// A text tag — a block `text`, a nested run, an `inline-text`, a text's
     /// own `inline-truncation` — is a text scope or nothing: an author
-    /// `display: none` hides it, and so does every other value but
-    /// `-lynx-text`.
+    /// `display: none` hides it, and every other value leaves it a text scope.
     #[test]
-    fn an_author_display_other_than_lynx_text_hides_a_text_scope() {
+    fn an_author_display_hides_a_text_scope_only_with_none() {
         for author in [
             "display: none",
             "display: flex",
@@ -942,10 +939,10 @@ mod tests {
             ];
             document.layout();
 
-            let expected = if author == "display: -lynx-text" {
-                Display::LynxText
-            } else {
+            let expected = if author == "display: none" {
                 Display::None
+            } else {
+                Display::LynxText
             };
             for (label, scope) in scopes {
                 assert_eq!(display(&document, scope), expected, "{label}, {author}");

@@ -286,9 +286,9 @@ the semantics are stylo's.** Everything below refines that sentence.
       this was `display: -lynx-text !important`, which swallowed that `none`
       too. The declaration is plain now, and the stylo fork's
       `StyleAdjuster::adjust_for_lynx_text` computes any `display` other
-      than `none` and `-lynx-text` on `text`, `inline-text` and
-      `inline-truncation` to `none` (user ruling, 2026-10-15; the conflict
-      with both references is in `docs/tracking/deviations.md`). With the
+      than `none` on `text`, `inline-text` and `inline-truncation` to
+      `-lynx-text` (user ruling, 2026-10-15; native ignores such a value too,
+      the difference from web-core is in `docs/tracking/deviations.md`). With the
       `!important` gone, a UA rule hiding an element's children
       (`list > *:not(list-item):not(wrapper)`, `x-swiper > :not(…)`,
       `image > *`, `svg > *`) now hides a `text` among them as well.

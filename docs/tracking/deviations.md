@@ -481,22 +481,21 @@ consequential choice about whether to follow the spec or the quirk.
   `crates/hughie/src/text/block/mod.rs:778-876`), which is css-ui
   `text-overflow` in its own right and what both references do for a line that
   overflows its measure.
-- **A `display` other than `none` or `-lynx-text` on a text tag hides it** —
-  **ruled by the user on 2026-10-15**, against both references. `text`,
-  `inline-text` and `inline-truncation` carry `display: -lynx-text` as a plain
-  UA declaration, and the stylo fork's `StyleAdjuster::adjust_for_lynx_text`
-  computes any other value on those three tags to `none`: an author
-  `<text style="display: flex">hello</text>` renders nothing. **Native**
-  ignores the value: a text's inline-ness is structural
-  (`TextElement::ConvertToInlineElement`,
-  `lynx/core/renderer/dom/fiber/text_element.cc:196-205`), so the text still
-  shows. **web-core** lets the author's value take over the `x-text` host
-  (`x-text { display: flex }` is author-origin, `x-text.css:7-13`) and the
-  text still shows from the shadow tree. Here no layout mode lays text out
-  outside `-lynx-text` (`crates/dom/src/layout/host.rs`: a text node outside a
-  text block lays out nothing), so the computed `none` says what would
-  otherwise render as a box with no text. `display: none` itself hides a
-  text in all three engines.
+- **A `display` other than `none` on a text tag computes to `-lynx-text`** —
+  **ruled by the user on 2026-10-15**, following native Lynx against
+  `web-core`. `text`, `inline-text` and `inline-truncation` carry
+  `display: -lynx-text` as a plain UA declaration, so an author
+  `display: none` hides them in all three engines; the stylo fork's
+  `StyleAdjuster::adjust_for_lynx_text` computes any other value on those
+  three tags back to `-lynx-text`, so `<text style="display: flex">` is still
+  one paragraph. **Native** ignores the value: a text's inline-ness is
+  structural (`TextElement::ConvertToInlineElement`,
+  `lynx/core/renderer/dom/fiber/text_element.cc:196-205`). **web-core** lets
+  the author's value take over the `x-text` host (`x-text { display: flex }`
+  is author-origin, `x-text.css:7-13`), so the host is a flex box there while
+  its shadow tree keeps the text. Here no layout mode lays text out outside
+  `-lynx-text` (`crates/dom/src/layout/host.rs`: a text node outside a text
+  block lays out nothing), and the computed style reports `-lynx-text`.
 - **`position: relative` insets on an atomic inline box inside a `<text>` are
   ignored** — **ruled by the user on 2026-09-17**, following native Lynx
   against `web-core`. The atom is still ordinary in-flow content: it advances
@@ -1272,8 +1271,8 @@ consequential choice about whether to follow the spec or the quirk.
   and an important UA declaration would outrank author `!important` instead of
   losing to it). §D.15 gained one exception on 2026-09-03 —
   `display: -lynx-text` on `text`/`inline-text`, since 2026-10-15 a plain
-  declaration whose other values the stylo fork's adjuster computes to
-  `none`, so that `display: none` still hides a text — and this row is the case that exception deliberately
+  declaration whose other values (all but `none`) the stylo fork's adjuster
+  computes back to `-lynx-text`, so that `display: none` still hides a text — and this row is the case that exception deliberately
   does **not** cover: a scroller's display is a
   *default*, gated on page config by web-core itself, where the only question
   is which layout mode the box gets; a text's inline-ness is a *structural
