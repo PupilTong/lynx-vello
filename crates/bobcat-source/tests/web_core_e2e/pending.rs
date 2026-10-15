@@ -42,8 +42,6 @@ pending! {
         "a `<frame global-props=...>` must reach the nested card's `lynx.__globalProps`, which prints `global:from-global-props`. `<frame>` exists since #409 and renders its nested card's main-thread script into its shadow root (see `api-frame-src`), but the minimal frame has no `global-props`, by the ruling recorded with #409 (MTS only; no `load` event, no `data`, no `global-props`, no `auto-*`)",
     "api-get-path-info" =>
         "awaiting a ruling: the card reads `res.path` in the `path()` callback and expects `id: undefined` for an element with none. web-core answers `{path: […]}` with `id: undefined`; native answers the node array itself with `id: \"\"`, and this engine follows native (`__BobcatQueryNodes`, `nodeFields` in `packages/bobcat-element/src/element-papi.ts`), so `res.path` is undefined and `#result` stays pink",
-    "api-getSharedData" =>
-        "no upstream test has this name: it is the second view of `api-shared-context`, where a tap must paint the colour the first view stored with `lynx.setSharedData`. `lynx.getSharedData` does not exist here (`docs/tracking/js-runtime.md`), and the suite boots no second view in the group",
     "api-global-disallowed-vars" =>
         "DEFECT: `MTS_CHUNK_PREAMBLE` (crates/bobcat-core/src/esm.rs) declares none of the disallowed globals the BTS preamble shadows, so MTS code naming `navigator`/`postMessage` raises a ReferenceError where web-core's lepus wrapper gives `undefined`. The card paints only a sizeless view, so the blank screen hides it",
     "api-invoke-fail" =>
@@ -58,8 +56,6 @@ pending! {
         "`_SetSourceMapRelease` is a deliberate no-op here and `ScriptReported` carries no release, so the report upstream asserts cannot match; the blank screen is consistent but settles nothing",
     "api-set-release-bts" =>
         "DEFECT: the BTS `app` behind `lynxCoreInject.tt` has no `setSourceMapRelease`, so the card hits a TypeError before its own error",
-    "api-setSharedData" =>
-        "the effect stores `green` with `lynx.setSharedData` and paints what `lynx.getSharedData` returns; neither exists here (`docs/tracking/js-runtime.md`), the effect throws on the background thread, and the box stays orange",
     "api-updateData-callback" =>
         "two things stand in the way: the suite never calls `update_data`, and this engine's host API has no completion callback at all — `LynxView::update_data(data, processor_name)` reports no completion, where web-core takes a third callback argument. Upstream asserts only the console line it produces",
     "basic-element-input-bindinput" =>
@@ -176,8 +172,4 @@ pending! {
         "awaiting the same ruling as `api-SystemInfo`: the main-thread tap handler logs `hello world` only if `SystemInfo.platform === 'web'`, and this engine reports `\"headless\"`, so the line never comes",
     "basic-ppx-unit" =>
         "the Lynx-only `ppx` unit is not in the fork's length grammar (`vendor/stylo/style/tests/lynx_lengths.rs::rejects_invalid_or_removed_units`), so both declarations are dropped and nothing paints. Admitting it needs a ruling first: native resolves `ppx` by dividing by the device pixel ratio (`lynx/core/renderer/css/css_style_utils.cc`), web-core defines `--ppx-unit: 1cqw` (`web-core/css/index.css`), and upstream's assertion — a 10x10 box after the host narrows the view to 50px — holds only under web-core's. That resize is also a step the suite does not have",
-    "basic-element-scroll-view-event-scroll" =>
-        "the event arrives: upstream swipes up 100px from (100, 300) and asserts a `scroll` event with `scrollTop`, `scrollLeft`, `scrollHeight` and `scrollWidth` in its detail, and the card logs such events (#407; the script waits for one). No golden can be taken yet: the card keeps the last event's JSON in a `<text style='display:none'>`, `display: none` on `<text>` is unsupported (ruling of 2026-09-14), so that text paints below the scroll-view with the event's `timestamp`, different on every run. The user will fix `display: none` on `<text>` (2026-10-15). The events' `isDragging` is also false for the ones dispatched while the finger moved, which upstream does not assert",
-    "basic-element-scroll-view-event-scrollend" =>
-        "the event arrives: upstream sets `scrollTop` to 200 and asserts a `scrollend` event with the four scroll metrics in its detail, and the card logs one with `scrollTop` 200 (#407; the script turns the wheel 200px and waits for it). No golden can be taken yet, for the reason `basic-element-scroll-view-event-scroll` gives: its `display:none` `#result` text paints and carries the event's `timestamp`, until the user's fix of `display: none` on `<text>` (2026-10-15)",
 }

@@ -15,6 +15,11 @@ use Step::{
 };
 
 driven! {
+    // Upstream's `api-shared-context`: `api-setSharedData` is booted first in the same
+    // group (`COMPANIONS`), then `#target` of this second view is clicked.
+    "api-getSharedData" => [
+        "tapped": [Tap(50.0, 50.0)],
+    ],
     // Upstream listens for the two console lines the card writes, one from each thread,
     // each naming the module-level `globalThis.foo`.
     "api-globalThis" => [
