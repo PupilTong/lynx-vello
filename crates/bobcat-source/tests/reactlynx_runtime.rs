@@ -181,6 +181,91 @@ async fn compiled_worklets_and_main_thread_refs_cross_both_directions() {
     .await;
 }
 
+/// web-core-e2e's `api-setSharedData` and `api-shared-context`, on two views
+/// of one group: the first card's effect stores `green` under `color` and
+/// paints its own read of it, and a tap on the second card reads what the
+/// first stored and paints that.
+#[tokio::test]
+async fn compiled_cards_share_data_across_their_group() {
+    use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
+    use bobcat_core::{DrawTarget, LynxView, Painter};
+
+    const GREEN: [u8; 4] = [0, 128, 0, 255];
+    const ORANGE: [u8; 4] = [255, 165, 0, 255];
+
+    /// Pumps both views and painters until `cards[index]` shows `colour` at
+    /// (50, 50).
+    async fn until_painted<F: bobcat_core::resource::ResourceFetcher + 'static>(
+        cards: &mut [(LynxView<F>, Painter, Resources)],
+        index: usize,
+        colour: [u8; 4],
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            for (view, painter, _) in cards.iter_mut() {
+                for event in view.pump() {
+                    match event {
+                        EngineEvent::ScriptFinished => {}
+                        EngineEvent::ConsoleMessage { level, message, .. } => {
+                            eprintln!("[{level}] {message}");
+                        }
+                        other => panic!("{other:?}"),
+                    }
+                }
+                painter.pump().unwrap();
+            }
+            let shot = cards[index].1.capture().unwrap();
+            let offset = (50 * 240 + 50) * 4;
+            if shot.pixels[offset..offset + 4] == colour {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "card {index}: expected {colour:?}, got {:?}",
+                &shot.pixels[offset..offset + 4]
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto)
+        .await
+        .unwrap();
+    let mut cards = Vec::new();
+    for name in ["react-set-shared-data", "react-get-shared-data"] {
+        let input = Url::parse(&format!("app:///{name}.web.bundle")).unwrap();
+        let page = PageSource::from_bytes(&input, fixtures::fixture(name).page).unwrap();
+        let resources = Resources::new(ResourcesConfig::default(), || {});
+        page.register_with(&resources);
+        let view = group
+            .create_lynx_view(
+                240.0,
+                240.0,
+                1.0,
+                resources.builder(),
+                Vec::new(),
+                page.view_sources(SCREEN),
+            )
+            .unwrap();
+        let mut painter = Painter::new(DrawTarget::Offscreen, 240.0, 240.0, 1.0)
+            .await
+            .unwrap();
+        painter.attach(&view).unwrap();
+        cards.push((view, painter, resources));
+    }
+    until_painted(&mut cards, 0, GREEN).await;
+    until_painted(&mut cards, 1, ORANGE).await;
+    for phase in [PointerPhase::Down, PointerPhase::Up] {
+        cards[1].1.dispatch_input(InputEvent::pointer(
+            Point2D::new(50.0, 50.0),
+            1,
+            PointerKind::Touch,
+            phase,
+        ));
+    }
+    until_painted(&mut cards, 1, GREEN).await;
+}
+
 #[tokio::test]
 async fn compiled_bts_ref_queries_and_native_props_change_real_pixels() {
     paint_and_tap(

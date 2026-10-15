@@ -1400,6 +1400,26 @@ does not require its `requestScript`/`readScript` source-text interfaces
 environment runs. All workers use the same protocol; a worker's scope is what
 its script imports.
 
+**`lynx.setSharedData`/`getSharedData` share one store across the group's
+views, as copies.** Native and web-core keep lynx-core's
+`nativeGlobal.sharedData` on the background JS global a group shares; here
+each view's BTS is a realm of its own, so the store is the worker thread's
+(`background/shared_data.rs`), one per group, and holds what the host
+boundary carries: a primitive or a structured clone (user ruling 2026-10-15,
+`docs/tracking/deviations.md`). `bobcat-internal:worker` gives every worker
+realm `setSharedData`, `getSharedData` and `observeSharedData`, and
+`bobcat:bts-runtime` builds the four `lynx` members on them: a set stores a
+clone (a refused value throws there), a get answers a fresh copy in any view
+of the group, the setter's included. `registerSharedDataObserver` keeps
+lynx-core's `ShareDataSubject` list in the realm; the setting view's
+observers run inside its set with the value itself, and the realm's first
+observer and last removal tell the store, which queues a job into every
+other observing realm with its copy, delivered to
+`__BobcatSharedDataChanged`. The thread holds the store weakly and every
+`Worker` strongly, so it goes with the group's last worker realm and a later
+view finds it empty, as native's shared context and web-core's group worker
+go with the group's last view.
+
 MTS `lynx.getJSContext()` and this BTS Context are stable
 `CrossThreadContext extends EventTarget` instances returned directly by
 `createCrossThreadContext`. `dispatchEvent({type, data})` validates the string

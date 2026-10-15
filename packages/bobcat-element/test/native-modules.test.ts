@@ -16,6 +16,9 @@ rstest.mockRequire("bobcat-internal:worker", () => ({
   postWorkerMessage: rstest.fn(),
   closeWorker: rstest.fn(),
   workerName: () => "",
+  setSharedData: rstest.fn(),
+  getSharedData: rstest.fn(),
+  observeSharedData: rstest.fn(),
 }));
 rstest.mockRequire("bobcat-internal:native-modules", () => ({ invokeNativeModule }));
 import * as record from "../src/record.ts";

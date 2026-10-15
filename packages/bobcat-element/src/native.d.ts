@@ -369,6 +369,22 @@ interface BobcatWorkerNative {
    * message only to a realm in which it has.
    */
   workerName(): string;
+  /**
+   * Stores one value under `key` in the group's `lynx.setSharedData` store,
+   * as the host boundary carries it — a primitive, or a structured clone of
+   * anything else; a value the engine's serializer refuses throws at this
+   * call. Every other realm of the group that is observing the store is
+   * handed its own copy, in a later job of its own.
+   */
+  setSharedData(key: string, value: unknown): void;
+  /** A fresh copy of what the group stores under `key`, or `undefined`. */
+  getSharedData(key: string): unknown;
+  /**
+   * Whether this realm hears what the group's other realms store: `true`
+   * once it has an observer, `false` once it has none. While it does, each
+   * change arrives at `bobcat:bts-runtime`'s `__BobcatSharedDataChanged`.
+   */
+  observeSharedData(observing: boolean): void;
 }
 
 declare module "bobcat-internal:host" {
@@ -648,6 +664,9 @@ declare module "bobcat-internal:worker" {
   export const postWorkerMessage: BobcatWorkerNative["postWorkerMessage"];
   export const closeWorker: BobcatWorkerNative["closeWorker"];
   export const workerName: BobcatWorkerNative["workerName"];
+  export const setSharedData: BobcatWorkerNative["setSharedData"];
+  export const getSharedData: BobcatWorkerNative["getSharedData"];
+  export const observeSharedData: BobcatWorkerNative["observeSharedData"];
 }
 
 /**

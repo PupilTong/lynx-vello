@@ -18,6 +18,11 @@ import { console, reportError } from "bobcat:diagnostics";
 import type { TimerGlobals } from "bobcat:timers";
 import { cancelAnimationFrame, clearAnimationFrames, requestAnimationFrame } from "bobcat:animation-frame";
 import { createSystemInfo } from "bobcat:system-info";
+import {
+  getSharedData as readSharedData,
+  observeSharedData,
+  setSharedData as storeSharedData,
+} from "bobcat-internal:worker";
 
 const timers = globalThis as unknown as TimerGlobals;
 
@@ -243,6 +248,35 @@ function noop() {
 }
 
 /**
+ * `lynx.registerSharedDataObserver`'s list, lynx-core's `ShareDataSubject`:
+ * kept in registration order, called in it with `{[key]: value}`, a
+ * non-function entry kept and skipped, and an observer that throws logged
+ * rather than reported, with the rest still called.
+ *
+ * The list is this realm's, and the group's store is not: the host is told
+ * when the list gains its first entry and loses its last, and while it has
+ * any, what a sibling view sets arrives at `__BobcatSharedDataChanged`.
+ */
+const sharedDataObservers: unknown[] = [];
+
+function notifySharedDataObservers(change: Record<string, unknown>) {
+  sharedDataObservers.forEach(observer => {
+    if (typeof observer !== "function") return;
+    try { observer(change); }
+    catch (error) { console["log"]?.("SharedData change and notifyDataChange error info:" + error); }
+  });
+}
+
+/**
+ * A sibling view's `lynx.setSharedData`, delivered by the host in a job of
+ * this realm's own after the setter's job returned: `value` is this realm's
+ * copy of what was set.
+ */
+export function __BobcatSharedDataChanged(key: string, value: unknown) {
+  notifySharedDataObservers({ [key]: value });
+}
+
+/**
  * Arms this realm as the BTS: the first `initialize` message initializes it
  * and then calls `loadEntry` with that message, which is where `bobcat:bts`
  * reads the entry's URL from.
@@ -412,6 +446,41 @@ export const lynx = {
   __globalProps: {} as unknown,
   getJSModule: app.getJSModule,
   registerModule: app.registerModule,
+  /**
+   * The group's shared data, as lynx-core keeps it on its JS global, except
+   * that every view's BTS is a realm of its own here: the store is the
+   * host's, one per group, and holds a structured clone, so a value the
+   * engine's serializer refuses — a function, a `Map` — throws here, and
+   * `getSharedData` answers a fresh copy, in this view or any other of the
+   * group. This view's observers are called before this returns, with the
+   * value itself; a sibling view's, with its copy, in a later job of its own.
+   * The key is a property key in lynx-core, so it is a string here.
+   */
+  setSharedData(dataKey: unknown, dataVal: unknown) {
+    const key = String(dataKey);
+    storeSharedData(key, dataVal);
+    notifySharedDataObservers({ [key]: dataVal });
+  },
+  getSharedData(dataKey: unknown): unknown {
+    return readSharedData(String(dataKey));
+  },
+  registerSharedDataObserver(callback: unknown) {
+    if (sharedDataObservers.includes(callback)) {
+      console["log"]?.("Subject: Observer has been attached already.");
+      return;
+    }
+    sharedDataObservers.push(callback);
+    if (sharedDataObservers.length === 1) observeSharedData(true);
+  },
+  removeSharedDataObserver(callback: unknown) {
+    const index = sharedDataObservers.indexOf(callback);
+    if (index === -1) {
+      console["log"]?.("Subject: Nonexistent observer.");
+      return;
+    }
+    sharedDataObservers.splice(index, 1);
+    if (sharedDataObservers.length === 0) observeSharedData(false);
+  },
   // A leveled diagnostic, reported by this realm directly: no `error` event,
   // and nothing sent to the main thread.
   reportError,

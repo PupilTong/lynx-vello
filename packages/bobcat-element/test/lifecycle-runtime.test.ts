@@ -95,6 +95,17 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   settleFuture: () => { throw new Error("no future in this suite"); },
 }));
 
+// The group's `lynx.setSharedData` store, stood in for by one map, with
+// `structuredClone` standing in for the host boundary's copy on the way in
+// and on the way out: a function throws at the set, as it does there.
+const sharedData = new Map<string, unknown>();
+const observeSharedData = rstest.fn();
+rstest.mockRequire("bobcat-internal:worker", () => ({
+  setSharedData: (key: string, value: unknown) => { sharedData.set(key, structuredClone(value)); },
+  getSharedData: (key: string) => structuredClone(sharedData.get(key)),
+  observeSharedData,
+}));
+
 /** What the mock host serves a load from, by the URL it is asked for. */
 const hostFiles = new Map<string, string>();
 /** The bodies among them, as the namespace of the module each one is. */
@@ -1178,6 +1189,74 @@ describe("runtime events and diagnostics", () => {
     mts.console["debug"]?.(circular);
     expect(consoleMessages).toHaveBeenLastCalledWith("debug", "[object Object]");
     expect(toMain).toHaveLength(0);
+  });
+});
+
+describe("lynx shared data", () => {
+  it("stores a copy for the group and answers a fresh copy, keyed by string", () => {
+    const value = {n: 1};
+    bts.setSharedData("user", value);
+    value.n = 2;
+    expect(bts.getSharedData("user")).toEqual({n: 1});
+    expect(bts.getSharedData("user")).not.toBe(bts.getSharedData("user"));
+    bts.setSharedData(7, "seven");
+    expect(bts.getSharedData("7")).toBe("seven");
+    expect(bts.getSharedData("never set")).toBeUndefined();
+  });
+
+  it("throws a value the host refuses, and stores and notifies nothing", () => {
+    const observer = rstest.fn();
+    bts.registerSharedDataObserver(observer);
+    expect(() => bts.setSharedData("callback", () => undefined)).toThrow();
+    expect(bts.getSharedData("callback")).toBeUndefined();
+    expect(observer).not.toHaveBeenCalled();
+    bts.removeSharedDataObserver(observer);
+  });
+
+  it("calls this view's observers in order with the value itself, and logs one that throws", () => {
+    consoleMessages.mockClear();
+    const value = {n: 1};
+    const changes: unknown[] = [];
+    const calls: string[] = [];
+    const first = (change: {k: unknown}) => { calls.push("first"); changes.push(change.k); };
+    const throwing = () => { calls.push("throwing"); throw new Error("observer failed"); };
+    const last = () => { calls.push("last"); };
+    const observers = [first, "not a function", throwing, last];
+    for (const observer of observers) bts.registerSharedDataObserver(observer);
+    bts.setSharedData("k", value);
+    expect(calls).toEqual(["first", "throwing", "last"]);
+    expect(changes[0]).toBe(value);
+    expect(consoleMessages).toHaveBeenCalledExactlyOnceWith(
+      "log", "SharedData change and notifyDataChange error info:Error: observer failed",
+    );
+    for (const observer of observers) bts.removeSharedDataObserver(observer);
+  });
+
+  it("tells the host when the list gains its first observer and loses its last", () => {
+    observeSharedData.mockClear();
+    consoleMessages.mockClear();
+    const first = () => undefined;
+    const second = () => undefined;
+    bts.registerSharedDataObserver(first);
+    bts.registerSharedDataObserver(first);
+    bts.registerSharedDataObserver(second);
+    bts.removeSharedDataObserver(first);
+    bts.removeSharedDataObserver(first);
+    bts.removeSharedDataObserver(second);
+    expect(observeSharedData.mock.calls).toEqual([[true], [false]]);
+    expect(consoleMessages.mock.calls).toEqual([
+      ["log", "Subject: Observer has been attached already."],
+      ["log", "Subject: Nonexistent observer."],
+    ]);
+  });
+
+  it("hands a sibling view's change to this view's observers", async () => {
+    const {__BobcatSharedDataChanged} = await import("../src/background-thread-runtime.ts");
+    const observer = rstest.fn();
+    bts.registerSharedDataObserver(observer);
+    __BobcatSharedDataChanged("theme", {dark: true});
+    expect(observer).toHaveBeenCalledExactlyOnceWith({theme: {dark: true}});
+    bts.removeSharedDataObserver(observer);
   });
 });
 

@@ -68,8 +68,14 @@
 //! That machinery is shared and lives with the view realms under
 //! [`main::runtime`](crate::main::runtime); only what a *worker* realm is, and
 //! how the group manages one, is here.
+//!
+//! One thing the group's worker realms share on purpose is
+//! `lynx.setSharedData`'s store, [`shared_data`]: it lives on this thread
+//! because every view's BTS is a realm here, and it holds structured clones
+//! because a realm value never crosses the host boundary as itself.
 
 mod scope;
+mod shared_data;
 #[cfg(test)]
 mod tests;
 mod thread;

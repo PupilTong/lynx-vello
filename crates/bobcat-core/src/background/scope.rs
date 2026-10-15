@@ -4,10 +4,11 @@
 //! the rest of the engine holds them by is [`super::Background`].
 
 use std::cell::Cell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use quickjs_rust_bridge::HostValue;
 
+use super::shared_data::{Notify, SharedData};
 use crate::background::WorkerKey;
 use crate::link::HostOutbox;
 use crate::main::quickjs::ScriptEngine;
@@ -57,6 +58,14 @@ pub(super) struct WorkerFlags {
 /// read is also how the thread learns that the whole module has run in this
 /// realm, which is what [`WorkerFlags::scope_installed`] records.
 ///
+/// `setSharedData`, `getSharedData` and `observeSharedData` are the group's
+/// [`SharedData`] as this realm reaches it: `bobcat:bts-runtime` builds
+/// `lynx.setSharedData` and its siblings on them, and `notify` is how a
+/// sibling's set reaches this realm once `observeSharedData(true)` has asked
+/// for that. They hold the store weakly: the worker holds it, so the store
+/// lives as long as the group's workers and not as long as a released realm
+/// does, which a promise job still queued on the shared runtime can extend.
+///
 /// There is no document member here and no way to add one: this realm is on
 /// another runtime, on another thread, and the document is neither `Send` nor
 /// reachable from anything the closures below capture. The native-module
@@ -68,7 +77,10 @@ pub(super) fn install_worker_members(
     host: &HostOutbox,
     name: String,
     mut post: impl FnMut(HostValue) + 'static,
+    shared: &Rc<SharedData>,
+    notify: Notify,
 ) -> Result<WorkerFlags, ScriptError> {
+    let shared = Rc::downgrade(shared);
     crate::native_module::install(engine, host, Some(key))?;
 
     let mut name = Some(name);
@@ -94,6 +106,55 @@ pub(super) fn install_worker_members(
             // made. A value it refuses never arrives here at all: the
             // trampoline throws in the realm that called `postMessage`.
             post(arguments.first().cloned().unwrap_or(HostValue::Undefined));
+            Ok(HostValue::Undefined)
+        }),
+    )?;
+
+    let store = Weak::clone(&shared);
+    engine.register_host_module_function(
+        WORKER_HOST_MODULE_SPECIFIER,
+        "setSharedData",
+        2,
+        Box::new(move |arguments| {
+            // The value as the boundary carries it: a value the realm's
+            // serializer refuses has already thrown in the realm, so nothing
+            // is stored and no one is told.
+            let [HostValue::String(data_key), value] = arguments else {
+                return Err("setSharedData expects a string key and a value".to_owned());
+            };
+            if let Some(store) = store.upgrade() {
+                store.set(key, data_key.clone(), value.clone());
+            }
+            Ok(HostValue::Undefined)
+        }),
+    )?;
+
+    let store = Weak::clone(&shared);
+    engine.register_host_module_function(
+        WORKER_HOST_MODULE_SPECIFIER,
+        "getSharedData",
+        1,
+        Box::new(move |arguments| {
+            let [HostValue::String(data_key)] = arguments else {
+                return Err("getSharedData expects a string key".to_owned());
+            };
+            Ok(store
+                .upgrade()
+                .map_or(HostValue::Undefined, |store| store.get(data_key)))
+        }),
+    )?;
+
+    engine.register_host_module_function(
+        WORKER_HOST_MODULE_SPECIFIER,
+        "observeSharedData",
+        1,
+        Box::new(move |arguments| {
+            let [HostValue::Boolean(observing)] = arguments else {
+                return Err("observeSharedData expects a boolean".to_owned());
+            };
+            if let Some(store) = shared.upgrade() {
+                store.observe(key, observing.then(|| Rc::clone(&notify)));
+            }
             Ok(HostValue::Undefined)
         }),
     )?;
