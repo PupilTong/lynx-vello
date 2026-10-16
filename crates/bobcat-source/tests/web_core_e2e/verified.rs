@@ -506,4 +506,6 @@ verified! {
     api_frame_auto_height => "api-frame-auto-height",
     // A `<frame auto-width>` 120px tall with a yellow background, in a column flex parent that does not stretch it (vendored rewrite, see the fixtures README): the yellow box is 85px wide, the width of the nested card's widest line `frame:ready`, because `auto-width` drops the frame's size containment and the frame takes its content's width (#425).
     api_frame_auto_width => "api-frame-auto-width",
+    // A 300x120 `<frame>` whose `data` is `{ label }` from the outer card's state, over an `update` button. First screen: the nested card reads `data:before`. After the tap on `update` the outer card sets `label` to `after` and the nested card re-renders to `data:after`, through the background thread #426 gives a frame's card; `global:` stays empty, the frame passes no `global-props`.
+    api_frame_data_update => "api-frame-data-update",
 }
