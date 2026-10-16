@@ -277,9 +277,18 @@ struct PlacedItem<N> {
     stacking_bias: f32,
     /// Index of the first track the item covers in the grid axis.
     first_track: usize,
+    /// Index of the last track the item covers in the grid axis.
+    last_track: usize,
     /// Whether this item is the first one placed in at least one of its tracks.
     first_in_track: bool,
+    /// Whether this item is the last one placed in at least one of its
+    /// tracks; settled once the whole pass has placed every item.
+    last_in_track: bool,
     baseline: Option<f32>,
+    last_baseline: Option<f32>,
+    /// The relative offset `layout.location` carries, which the container's
+    /// baselines leave out.
+    relative: Point<f32>,
     overflow: Point<Overflow>,
     /// A sticky item's grid-axis lane span, its containing block there.
     sticky_area: Option<Edges<f32>>,
@@ -299,6 +308,11 @@ struct LanesContext<'a> {
     /// Whether every live track of the grid axis is sized by its own function
     /// alone, which is what an auto-placed item's area independence needs.
     all_tracks_fixed: bool,
+    /// The container's own measurement was asked for an exact last baseline
+    /// (`LayoutInput::reads_last_baseline`). Which items close a track, and
+    /// so give that baseline (§6.5), is known only once every item is
+    /// placed, so each item's measurement is asked for its own.
+    reads_last_baseline: bool,
 }
 
 struct LanesPass<N> {
@@ -406,7 +420,8 @@ where
         let output = tree.compute_layout(
             state,
             item.key.node,
-            LayoutInput::new(item_goal, known, area, available),
+            LayoutInput::new(item_goal, known, area, available)
+                .reading_last_baseline(context.reads_last_baseline && !item_goal.commits()),
         );
 
         // Auto margins take the grid-axis free space; in the stacking axis
@@ -499,10 +514,21 @@ where
                 + stacking.start(margin)
                 + stacking.point(relative),
             first_track: start,
+            last_track: start + span - 1,
             first_in_track,
+            last_in_track: false,
             baseline: output.first_baselines.y,
+            last_baseline: output.last_baselines.y,
+            relative,
             overflow: item.overflow,
         });
+    }
+    // Placement is final now, so the last item of each track is known.
+    used.fill(false);
+    for item in placed.iter_mut().rev() {
+        let tracks = item.first_track..=item.last_track;
+        item.last_in_track = used[tracks.clone()].iter().any(|&value| !value);
+        used[tracks].fill(true);
     }
 
     LanesPass {
@@ -512,26 +538,44 @@ where
 }
 
 /// §6.5: with lanes running down the columns the container's first baseline is
-/// the highest one among the items placed first in each track; with lanes
-/// running across the rows it is the first item's, in order, in the first
-/// track that received one. An item without a baseline contributes none — no
-/// bottom edge is synthesised in its place.
-fn lanes_first_baseline<N>(items: &[PlacedItem<N>], grid_axis: Axis) -> Option<f32> {
-    let baseline = |item: &PlacedItem<N>| {
-        item.baseline
-            .map(|baseline| item.layout.location.y + baseline)
+/// the highest first baseline among the items placed first in each track, and
+/// its last baseline the lowest last baseline among the items placed last in
+/// each track; with lanes running across the rows the first baseline is the
+/// first item's, in order, in the first track that received one, and the
+/// last baseline the last item's, in order, in the last track that received
+/// one. An item without a baseline contributes none — no bottom edge is
+/// synthesised in its place. Positions leave relative offsets out: relative
+/// positioning moves no other box's baseline (css-position-3 §2), its
+/// container's included.
+fn lanes_baselines<N>(items: &[PlacedItem<N>], grid_axis: Axis) -> [Option<f32>; 2] {
+    let at = |item: &PlacedItem<N>, baseline: Option<f32>| {
+        baseline.map(|baseline| item.layout.location.y - item.relative.y + baseline)
     };
     match grid_axis {
-        Axis::Horizontal => items
-            .iter()
-            .filter(|item| item.first_in_track)
-            .filter_map(baseline)
-            .reduce(f32::min),
-        Axis::Vertical => items
-            .iter()
-            .filter(|item| item.baseline.is_some())
-            .min_by_key(|item| item.first_track)
-            .and_then(baseline),
+        Axis::Horizontal => [
+            items
+                .iter()
+                .filter(|item| item.first_in_track)
+                .filter_map(|item| at(item, item.baseline))
+                .reduce(f32::min),
+            items
+                .iter()
+                .filter(|item| item.last_in_track)
+                .filter_map(|item| at(item, item.last_baseline))
+                .reduce(f32::max),
+        ],
+        Axis::Vertical => [
+            items
+                .iter()
+                .filter(|item| item.baseline.is_some())
+                .min_by_key(|item| item.first_track)
+                .and_then(|item| at(item, item.baseline)),
+            items
+                .iter()
+                .filter(|item| item.last_baseline.is_some())
+                .max_by_key(|item| item.last_track)
+                .and_then(|item| at(item, item.last_baseline)),
+        ],
     }
 }
 
@@ -701,12 +745,14 @@ where
             );
             // §6.5 allows baseline self-alignment to fall back in the stacking
             // axis; grid-axis baseline sharing is not implemented either, so
-            // both axes take the fallback before anything reads them.
-            if item.align_self == AlignFlags::BASELINE {
-                item.align_self = AlignFlags::START;
-            }
-            if item.justify_self == AlignFlags::BASELINE {
-                item.justify_self = AlignFlags::START;
+            // both axes take the fallback before anything reads them: `start`
+            // for `baseline`, and `end` for `last baseline`.
+            for alignment in [&mut item.align_self, &mut item.justify_self] {
+                if *alignment == AlignFlags::BASELINE {
+                    *alignment = AlignFlags::START;
+                } else if *alignment == AlignFlags::LAST_BASELINE {
+                    *alignment = AlignFlags::END;
+                }
             }
             item
         })
@@ -827,6 +873,7 @@ where
         rtl,
         goal: container_goal,
         all_tracks_fixed,
+        reads_last_baseline: input.reads_last_baseline && !input.goal.commits(),
     };
     let stacking_content = |range: f32| stacking_axis.size(contained.extents()).unwrap_or(range);
     // A percentage stacking gutter against an indefinite stacking size is
@@ -890,10 +937,11 @@ where
             item_end_margin(scroll_container, placed.layout.margin),
         );
     }
-    let baselines = if layout_contained {
-        Point::NONE
+    // Layout containment exports no baseline (css-contain-2 §3.2).
+    let [first_baseline, last_baseline] = if layout_contained {
+        [None, None]
     } else {
-        Point::new(None, lanes_first_baseline(&pass.items, grid_axis))
+        lanes_baselines(&pass.items, grid_axis)
     };
     if commits_layout {
         for placed in pass.items {
@@ -980,7 +1028,9 @@ where
         content_size = content_size.zip_map(absolute_content_size, f32::max);
     }
     let content_size = own_scrollable_overflow(&style, outer_size, metrics.border, content_size);
-    LayoutOutput::new(outer_size, content_size).with_first_baselines(baselines)
+    LayoutOutput::new(outer_size, content_size)
+        .with_first_baselines(Point::new(None, first_baseline))
+        .with_last_baselines(Point::new(None, last_baseline))
 }
 
 #[cfg(test)]

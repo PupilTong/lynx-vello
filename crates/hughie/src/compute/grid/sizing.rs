@@ -6,7 +6,7 @@ use stylo::computed_values::box_sizing;
 use stylo::values::computed::TrackBreadth;
 use stylo::values::specified::align::AlignFlags;
 
-use super::super::util::{clamp, resolve_intrinsic, resolve_length_percentage};
+use super::super::util::{BaselineSet, clamp, resolve_intrinsic, resolve_length_percentage};
 use super::tracks::AxisTrackSpec;
 use super::types::{Axis, GridItem, Track, TrackSet, TrackSizingFunction};
 use crate::style::CoreStyle;
@@ -283,12 +283,24 @@ where
         Axis::Horizontal => crate::geometry::Size::new(None, cross_area),
         Axis::Vertical => crate::geometry::Size::new(cross_area, None),
     };
-    let mut input = LayoutInput::measure(known, parent_size, available, axis.requested());
+    // A row's last-baseline group reads the item's last baseline, its §11.5
+    // shim included: ask for it exactly.
+    let reads_last_baseline =
+        axis == Axis::Vertical && item.baseline_participation() == Some(BaselineSet::Last);
+    let mut input = LayoutInput::measure(known, parent_size, available, axis.requested())
+        .reading_last_baseline(reads_last_baseline);
     input.sizing_mode = SizingMode::IgnoreSizeStyles;
     let output = tree.compute_layout(state, item.key.node, input);
     let size = output.size;
-    if axis == Axis::Vertical && item.align_self == AlignFlags::BASELINE {
-        item.measured_baselines.y = Some(output.first_baselines.y.unwrap_or(size.height));
+    if axis == Axis::Vertical {
+        // A box with no baseline set is aligned by one synthesized from its
+        // border box's bottom edge (css-align-3 §9.1).
+        if item.align_self == AlignFlags::BASELINE {
+            item.measured_baseline = Some(output.first_baselines.y.unwrap_or(size.height));
+        } else if item.align_self == AlignFlags::LAST_BASELINE {
+            item.measured_last_descent =
+                Some(size.height - output.last_baselines.y.unwrap_or(size.height));
+        }
     }
     let mut measured = axis.size(size);
     if let (Some(ratio), Some(cross_size)) = (item.aspect_ratio, transferred_cross)
@@ -619,6 +631,12 @@ where
     contribution.min(limit).max(minimum)
 }
 
+/// css-grid-1 §11.5 step 1: shims baseline-aligned items so their intrinsic
+/// row contributions reflect their alignment. A `baseline` item is shimmed
+/// on its start side, against the other members of its startmost row's
+/// first-baseline group; a `last baseline` item on its end side, against its
+/// endmost row's last-baseline group (css-align-3 §9.2: a spanning item
+/// joins the startmost or endmost shared alignment context).
 fn prepare_baseline_shims<T>(
     tree: &T,
     state: &mut T::State,
@@ -632,29 +650,41 @@ fn prepare_baseline_shims<T>(
     if axis != Axis::Vertical {
         return;
     }
-    let mut candidates = Vec::<(i32, usize)>::new();
+    let mut candidates = Vec::<(BaselineSet, i32, usize)>::new();
     for (index, item) in items.iter_mut().enumerate() {
         item.baseline_shim = 0.0;
-        if item.align_self != AlignFlags::BASELINE
-            || item.margin_auto.start(Axis::Vertical)
-            || item.margin_auto.end(Axis::Vertical)
-        {
+        let Some(set) = item.baseline_participation() else {
             continue;
-        }
+        };
         let span = span_for(item, axis);
         debug_assert!(tracks.span_indices(span.start, span.end).start < tracks.tracks.len());
-        candidates.push((span.start, index));
+        let line = match set {
+            BaselineSet::First => span.start,
+            BaselineSet::Last => span.end,
+        };
+        candidates.push((set, line, index));
     }
-    candidates.sort_unstable_by_key(|&(row, _)| row);
+    candidates.sort_unstable_by_key(|&(set, line, _)| (set, line));
+    // The distance a group aligns: from a member's outer start edge down to
+    // its first baseline, or from its last baseline down to its outer end
+    // edge.
+    let extent = |item: &GridItem<T::NodeId>, set: BaselineSet| match set {
+        BaselineSet::First => item
+            .measured_baseline
+            .map(|baseline| item.margin.top + baseline),
+        BaselineSet::Last => item
+            .measured_last_descent
+            .map(|descent| descent + item.margin.bottom),
+    };
     let mut start = 0;
     while start < candidates.len() {
-        let row = candidates[start].0;
+        let (set, line, _) = candidates[start];
         let mut end = start + 1;
-        while end < candidates.len() && candidates[end].0 == row {
+        while end < candidates.len() && (candidates[end].0, candidates[end].1) == (set, line) {
             end += 1;
         }
         let group = &candidates[start..end];
-        let contribution_uses_shim = group.iter().any(|&(_, item_index)| {
+        let contribution_uses_shim = group.iter().any(|&(_, _, item_index)| {
             let span = span_for(&items[item_index], axis);
             tracks.tracks[tracks.span_indices(span.start, span.end)]
                 .iter()
@@ -664,8 +694,8 @@ fn prepare_baseline_shims<T>(
                 })
         });
         if group.len() > 1 && contribution_uses_shim {
-            let mut maximum_ascent = None::<f32>;
-            for &(_, item_index) in group {
+            let mut maximum = None::<f32>;
+            for &(_, _, item_index) in group {
                 let item = &mut items[item_index];
                 let _ = raw_content_size(
                     tree,
@@ -675,18 +705,15 @@ fn prepare_baseline_shims<T>(
                     ContributionKind::MinContent,
                     cross_tracks,
                 );
-                if let Some(baseline) = item.measured_baselines.y {
-                    let ascent = item.margin.top + baseline;
-                    maximum_ascent =
-                        Some(maximum_ascent.map_or(ascent, |maximum| maximum.max(ascent)));
+                if let Some(extent) = extent(item, set) {
+                    maximum = Some(maximum.map_or(extent, |maximum| maximum.max(extent)));
                 }
             }
-            if let Some(maximum_ascent) = maximum_ascent {
-                for &(_, item_index) in group {
+            if let Some(maximum) = maximum {
+                for &(_, _, item_index) in group {
                     let item = &mut items[item_index];
-                    if let Some(baseline) = item.measured_baselines.y {
-                        let ascent = item.margin.top + baseline;
-                        item.baseline_shim = (maximum_ascent - ascent).max(0.0);
+                    if let Some(extent) = extent(item, set) {
+                        item.baseline_shim = (maximum - extent).max(0.0);
                     }
                 }
             }
@@ -1876,7 +1903,8 @@ mod tests {
             minimum_contribution: Size::NONE,
             min_content_contribution: Size::NONE,
             max_content_contribution: Size::NONE,
-            measured_baselines: Point::NONE,
+            measured_baseline: None,
+            measured_last_descent: None,
             baseline_shim: 0.0,
         }
     }
@@ -2064,7 +2092,7 @@ mod tests {
             None,
         );
         assert_eq!(measured, 20.0);
-        assert_eq!(item.measured_baselines.y, Some(10.0));
+        assert_eq!(item.measured_baseline, Some(10.0));
     }
 
     #[test]

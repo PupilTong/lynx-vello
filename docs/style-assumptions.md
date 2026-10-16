@@ -1295,8 +1295,10 @@ and §D.16 with what the wire format actually permits.)*
       fork is upstream (`vendor/stylo/style/tests/lynx_feature_off_parity.rs`);
       the grammar is pinned by `vendor/stylo/style/tests/lynx_anchor_positioning.rs`.
       The Lynx alignment grammar has no `normal`, `self-start`/`self-end`,
-      `left`/`right`, `last baseline`, `safe` or `unsafe` for
-      `justify-self`/`align-self`; `auto` stands for `normal`.
+      `left`/`right`, `safe` or `unsafe` for `justify-self`/`align-self`;
+      `auto` stands for `normal`. It does take `<baseline-position>`
+      (`baseline`, `first baseline`, `last baseline`) on both, by the user's
+      ruling of 2026-10-17 (fork PR PupilTong/stylo#50).
     - **Who resolves what.** `hughie`'s absolute pass owns every rule that
       turns anchor geometry into a box — `anchor()` and `anchor-size()`
       (`compute/anchor.rs`), the `position-area` grid and its default
@@ -1479,8 +1481,8 @@ and §D.16 with what the wire format actually permits.)*
       containing block and aligns the margin box in it — `start`/`end` by
       the containing block's direction, `self-*` by the box's, `left`/`right`
       physically, `baseline`/`last baseline` as their `self-start`/`self-end`
-      fallbacks (`self-*`, `left`/`right` and `last baseline` exist only
-      inside the engine; the Lynx grammar has none of them). It applies only with both insets and both margins
+      fallbacks (`self-*` and `left`/`right` exist only inside the
+      engine; the Lynx grammar has neither). It applies only with both insets and both margins
       non-`auto`: one `auto` inset places the box by the other, `auto`
       margins win. Overflow: `unsafe` (only §4.1's single-`auto` rule
       produces it) honours the alignment; everything else follows §4.4.1.2

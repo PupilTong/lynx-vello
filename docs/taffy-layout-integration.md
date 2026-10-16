@@ -44,7 +44,7 @@ Requirements this design satisfies (user directive, 2026-08-12):
 | CSS containment / `content-visibility` | **No** |
 | `min-content`/`max-content`/`fit-content()` as width/height values | **No** — `Dimension` is length/percent/auto/calc only (intrinsic tags exist only for grid track sizing functions) |
 | Percentage-definiteness separate from `known_dimensions` (Flexbox §9.8 nuance) | **No** — definiteness is the `Option`-ness of `known_dimensions`/`parent_size` |
-| Last-baseline alignment | No (first baseline only — parity with hughie today) |
+| Last-baseline alignment | No (first baseline only) — and no longer parity: hughie gained `last baseline` alignment in flexbox and grid on 2026-10-16, which a taffy-backed Flex/Grid would have to add |
 | DPR-aware rounding | No — `round_layout` rounds to integer CSS px, origin fixed at (0,0) |
 | Subgrid | No (parity with hughie today) |
 | Masonry | No — and no longer parity: hughie gained CSS Grid Level 3 `display: grid-lanes` on 2026-09-18, so this would become another hughie-side algorithm taffy does not replace |
@@ -137,8 +137,10 @@ machinery (no functional loss, but the code cannot be deleted).
 - **C5. `display: contents`** — taffy has no contents box-generation mode;
   dom flattens (§4), which is requirement 5 anyway.
 
-Parity items (absent on both sides, no change): last-baseline alignment,
-subgrid. Masonry was one until 2026-09-18, when hughie landed CSS Grid Level 3
+Parity items (absent on both sides, no change): subgrid. Last-baseline
+alignment was one until 2026-10-16, when hughie's flexbox and grid began
+aligning by last baselines; taffy has no `LastBaseline` variant. Masonry was
+one until 2026-09-18, when hughie landed CSS Grid Level 3
 `display: grid-lanes`; taffy has none, so grid lanes joins Linear and Relative
 as a hughie algorithm the migration would have to keep.
 

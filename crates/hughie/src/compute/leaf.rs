@@ -196,17 +196,16 @@ where
     );
 
     let content_size = padding_box_end(size.zip_map(measured_border_box, f32::max), border);
-    let first_baselines = Point::new(
-        measurement
-            .first_baselines
-            .x
-            .map(|baseline| content_origin.x + baseline),
-        measurement
-            .first_baselines
-            .y
-            .map(|baseline| content_origin.y + baseline),
-    );
-    LayoutOutput::new(size, content_size).with_first_baselines(first_baselines)
+    // Content-box baselines become border-box ones, as the output reports them.
+    let from_border_box = |baselines: Point<Option<f32>>| {
+        Point::new(
+            baselines.x.map(|baseline| content_origin.x + baseline),
+            baselines.y.map(|baseline| content_origin.y + baseline),
+        )
+    };
+    LayoutOutput::new(size, content_size)
+        .with_first_baselines(from_border_box(measurement.first_baselines))
+        .with_last_baselines(from_border_box(measurement.last_baselines))
 }
 
 #[cfg(feature = "layout-test-utils")]
@@ -326,8 +325,9 @@ pub struct LeafMetrics {
     pub size: Size<f32>,
     pub first_baselines: Point<Option<f32>>,
     /// The content's last baselines, in the same content-box coordinates as
-    /// `first_baselines`: a paragraph's last line box's baseline. Carried as
-    /// far as the leaf wrapper, which does not hand it on yet.
+    /// `first_baselines`: a paragraph's last line box's baseline. The leaf
+    /// wrapper moves both onto the border box for
+    /// [`LayoutOutput::last_baselines`].
     pub last_baselines: Point<Option<f32>>,
 }
 
@@ -1054,6 +1054,46 @@ mod tests {
         let explicit_output =
             compute_leaf_layout(LayoutInput::default(), &explicit, NaturalSize::NONE);
         assert_eq!(explicit_output.size, Size::new(100.0, 50.0));
+    }
+
+    #[test]
+    fn both_baseline_sets_move_onto_the_border_box_and_block_containment_drops_them() {
+        let paragraph = |_input: LeafMeasureInput| {
+            LeafMetrics::new(Size::new(30.0, 40.0))
+                .with_first_baselines(Point::new(Some(3.0), Some(8.0)))
+                .with_last_baselines(Point::new(Some(27.0), Some(38.0)))
+        };
+        let padded = BoxStyle::new(Size::new(StyleSize::auto(), StyleSize::auto()))
+            .with_padding_and_border_box(10.0);
+
+        let output = compute_leaf_layout_with_measurement(
+            LayoutInput::default(),
+            &padded,
+            None,
+            true,
+            paragraph,
+        );
+        assert_eq!(output.size, Size::new(50.0, 60.0));
+        assert_eq!(output.first_baselines, Point::new(Some(13.0), Some(18.0)));
+        assert_eq!(output.last_baselines, Point::new(Some(37.0), Some(48.0)));
+
+        // Block-size containment forbids the contents to speak for the block
+        // axis, which is what a baseline is; inline-size containment does not.
+        for (containment, kept) in [(Contain::BLOCK_SIZE, false), (Contain::INLINE_SIZE, true)] {
+            let contained = BoxStyle {
+                containment,
+                ..BoxStyle::new(Size::new(StyleSize::auto(), StyleSize::auto()))
+            };
+            let output = compute_leaf_layout_with_measurement(
+                LayoutInput::default(),
+                &contained,
+                None,
+                true,
+                paragraph,
+            );
+            assert_eq!(output.first_baselines.y.is_some(), kept, "{containment:?}");
+            assert_eq!(output.last_baselines.y.is_some(), kept, "{containment:?}");
+        }
     }
 
     #[test]

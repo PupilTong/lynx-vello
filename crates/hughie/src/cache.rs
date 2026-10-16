@@ -52,13 +52,33 @@ const EXACT_INPUT_FLAGS: u32 =
     OPTIONAL_SIZE_PRESENCE | IGNORE_SIZE_STYLES | DEFINITE_WIDTH | DEFINITE_HEIGHT;
 const BASELINE_X_PRESENT: u32 = 1 << 13;
 const BASELINE_Y_PRESENT: u32 = 1 << 14;
-const BASELINE_PRESENCE: u32 = BASELINE_X_PRESENT | BASELINE_Y_PRESENT;
 /// The independence a `LayoutGoal::Commit` carries, per axis. Like the
 /// baseline-presence bits these ride in `flags` but stay out of `INPUT_FLAGS`
 /// and `EXACT_INPUT_FLAGS`: independence never changes computed geometry, so
 /// two commits that differ only in it answer each other from the cache.
 const INDEPENDENT_WIDTH: u32 = 1 << 15;
 const INDEPENDENT_HEIGHT: u32 = 1 << 16;
+/// The presence of the last baselines, beside the first ones' above: output
+/// facts, outside every key mask like them.
+const LAST_BASELINE_X_PRESENT: u32 = 1 << 17;
+const LAST_BASELINE_Y_PRESENT: u32 = 1 << 18;
+/// The output carried more baselines than its two baseline slots hold (see
+/// [`PackedLayoutOutput`]): the entry answers no request. Also an output fact,
+/// outside every key mask.
+const BASELINES_INCOMPLETE: u32 = 1 << 19;
+/// The input's [`LayoutInput::reads_last_baseline`] request. An input fact
+/// that is not part of the key either: an entry computed with the request
+/// answers a lookup without it, but an entry computed without it answers no
+/// lookup that carries it, unless it is a commit, whose last baseline is
+/// exact whatever the request (see [`packed_inputs_match`]).
+const READS_LAST_BASELINE: u32 = 1 << 20;
+/// The four baselines in the order they take the two baseline slots.
+const BASELINE_ORDER: [u32; 4] = [
+    BASELINE_X_PRESENT,
+    BASELINE_Y_PRESENT,
+    LAST_BASELINE_X_PRESENT,
+    LAST_BASELINE_Y_PRESENT,
+];
 const INPUT_FLAGS: u32 = EXACT_INPUT_FLAGS
     | (AVAILABLE_TAG_MASK << AVAILABLE_WIDTH_SHIFT)
     | (AVAILABLE_TAG_MASK << AVAILABLE_HEIGHT_SHIFT)
@@ -141,6 +161,9 @@ impl PackedLayoutInput {
         if input.definite_dimensions.height {
             flags |= DEFINITE_HEIGHT;
         }
+        if input.reads_last_baseline {
+            flags |= READS_LAST_BASELINE;
+        }
 
         Self { values, flags }
     }
@@ -181,12 +204,15 @@ impl PackedLayoutInput {
                 unpack_available_space(self.values[4], self.flags, AVAILABLE_WIDTH_SHIFT),
                 unpack_available_space(self.values[5], self.flags, AVAILABLE_HEIGHT_SHIFT),
             ),
+            reads_last_baseline: self.flags & READS_LAST_BASELINE != 0,
         }
     }
 
-    #[inline]
+    /// Records which first baselines a paired output carries; the cache
+    /// itself sets the presence bits in [`MeasurementSlot::new`].
+    #[cfg(test)]
     fn with_baseline_presence(mut self, baselines: Point<Option<f32>>) -> Self {
-        self.flags &= !BASELINE_PRESENCE;
+        self.flags &= !(BASELINE_X_PRESENT | BASELINE_Y_PRESENT);
         if baselines.x.is_some() {
             self.flags |= BASELINE_X_PRESENT;
         }
@@ -194,6 +220,13 @@ impl PackedLayoutInput {
             self.flags |= BASELINE_Y_PRESENT;
         }
         self
+    }
+
+    /// Whether the paired output is complete, so the entry may answer a
+    /// request.
+    #[inline]
+    const fn answers(self) -> bool {
+        self.flags & BASELINES_INCOMPLETE == 0
     }
 
     #[inline]
@@ -238,36 +271,74 @@ fn unpack_available_space(value: f32, flags: u32, shift: u32) -> AvailableSpace 
     }
 }
 
-/// A dense representation of all six layout output values.
+/// A dense representation of the layout output: the size, the content size,
+/// and two **baseline slots**.
+///
+/// An output has four baselines — first and last, each in `x` and `y` — and
+/// the slots hold the present ones in that order (first `x`, first `y`, last
+/// `x`, last `y`), their presence riding in the paired input's `flags`. Every
+/// producer in this engine reports vertical-axis baselines only (`x` is for a
+/// vertical writing mode, which nothing lays out), so an output carries at
+/// most a first and a last `y` and always fits. One that carries more is
+/// marked [`BASELINES_INCOMPLETE`] and answers no request, which keeps the
+/// cache exact at the price of recomputing such an output; the last
+/// baselines therefore cost no entry any bytes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PackedLayoutOutput {
     values: [f32; 6],
 }
 
 impl PackedLayoutOutput {
+    /// The packed output and the presence flags of its baselines.
     #[inline]
-    fn new(output: LayoutOutput) -> Self {
-        Self {
-            values: [
-                output.size.width,
-                output.size.height,
-                output.content_size.width,
-                output.content_size.height,
-                output.first_baselines.x.unwrap_or(0.0),
-                output.first_baselines.y.unwrap_or(0.0),
-            ],
+    fn new(output: LayoutOutput) -> (Self, u32) {
+        let mut values = [
+            output.size.width,
+            output.size.height,
+            output.content_size.width,
+            output.content_size.height,
+            0.0,
+            0.0,
+        ];
+        let baselines = [
+            output.first_baselines.x,
+            output.first_baselines.y,
+            output.last_baselines.x,
+            output.last_baselines.y,
+        ];
+        let mut flags = 0;
+        let mut slot = 4;
+        for (baseline, present) in baselines.into_iter().zip(BASELINE_ORDER) {
+            let Some(baseline) = baseline else {
+                continue;
+            };
+            flags |= present;
+            if slot < values.len() {
+                values[slot] = baseline;
+                slot += 1;
+            } else {
+                flags |= BASELINES_INCOMPLETE;
+            }
         }
+        (Self { values }, flags)
     }
 
     #[inline]
     fn unpack(self, input_flags: u32) -> LayoutOutput {
+        let mut baselines = [None; 4];
+        let mut slot = 4;
+        for (baseline, present) in baselines.iter_mut().zip(BASELINE_ORDER) {
+            if input_flags & present != 0 && slot < self.values.len() {
+                *baseline = Some(self.values[slot]);
+                slot += 1;
+            }
+        }
+        let [first_x, first_y, last_x, last_y] = baselines;
         LayoutOutput {
             size: Size::new(self.values[0], self.values[1]),
             content_size: Size::new(self.values[2], self.values[3]),
-            first_baselines: Point::new(
-                (input_flags & BASELINE_X_PRESENT != 0).then_some(self.values[4]),
-                (input_flags & BASELINE_Y_PRESENT != 0).then_some(self.values[5]),
-            ),
+            first_baselines: Point::new(first_x, first_y),
+            last_baselines: Point::new(last_x, last_y),
         }
     }
 }
@@ -282,9 +353,12 @@ struct MeasurementSlot {
 impl MeasurementSlot {
     #[inline]
     fn new(input: LayoutInput, output: LayoutOutput) -> Self {
+        let (packed, presence) = PackedLayoutOutput::new(output);
+        let mut input = PackedLayoutInput::new(input);
+        input.flags |= presence;
         Self {
-            input: PackedLayoutInput::new(input).with_baseline_presence(output.first_baselines),
-            output: PackedLayoutOutput::new(output),
+            input,
+            output: packed,
         }
     }
 
@@ -322,16 +396,22 @@ impl Cache {
         self.committed.map(|slot| slot.input.unpack())
     }
 
+    /// The committed output, unless it carried more baselines than an entry
+    /// holds (see [`PackedLayoutOutput`]); its input is kept either way.
     #[must_use]
     pub fn committed_output(&self) -> Option<LayoutOutput> {
-        self.committed.map(MeasurementSlot::unpack_output)
+        self.committed
+            .filter(|slot| slot.input.answers())
+            .map(MeasurementSlot::unpack_output)
     }
 
-    /// Returns a cached output.
+    /// Returns a cached output. An entry whose output did not fit answers
+    /// nothing, so the caller computes it again.
     #[must_use]
     pub fn get(&self, input: LayoutInput) -> Option<LayoutOutput> {
         let requested = PackedLayoutInput::new(input);
         if let Some(slot) = self.committed
+            && slot.input.answers()
             && packed_inputs_match(slot.input, requested)
         {
             return Some(slot.unpack_output());
@@ -343,7 +423,7 @@ impl Cache {
 
         self.measurements
             .iter()
-            .find(|slot| packed_inputs_match(slot.input, requested))
+            .find(|slot| slot.input.answers() && packed_inputs_match(slot.input, requested))
             .map(|slot| slot.unpack_output())
     }
 
@@ -403,7 +483,14 @@ fn packed_inputs_match(stored: PackedLayoutInput, requested: PackedLayoutInput) 
     } else {
         stored_goal == requested_goal
     };
+    // A request for an exact last baseline is answered by a commit or by a
+    // measurement that was itself asked for one; a precise answer may serve
+    // an imprecise request, never the reverse.
+    let last_baseline_exact = stored_goal == GOAL_COMMIT
+        || stored.flags & READS_LAST_BASELINE != 0
+        || requested.flags & READS_LAST_BASELINE == 0;
     if !goal_matches
+        || !last_baseline_exact
         || (stored.flags ^ requested.flags) & EXACT_INPUT_FLAGS != 0
         || stored.values[0] != requested.values[0]
         || stored.values[1] != requested.values[1]
@@ -491,7 +578,10 @@ fn inputs_match(stored: LayoutInput, requested: LayoutInput) -> bool {
         (LayoutGoal::Measure(stored), LayoutGoal::Measure(requested)) => stored == requested,
         _ => false,
     };
+    let last_baseline_exact =
+        stored.goal.commits() || stored.reads_last_baseline || !requested.reads_last_baseline;
     if !goal_matches
+        || !last_baseline_exact
         || stored.sizing_mode != requested.sizing_mode
         || stored.known_dimensions != requested.known_dimensions
         || stored.definite_dimensions != requested.definite_dimensions
@@ -603,6 +693,7 @@ mod tests {
         assert_option_bits_eq(left.parent_size.height, right.parent_size.height);
         assert_available_bits_eq(left.available_space.width, right.available_space.width);
         assert_available_bits_eq(left.available_space.height, right.available_space.height);
+        assert_eq!(left.reads_last_baseline, right.reads_last_baseline);
     }
 
     fn assert_output_bits_eq(left: LayoutOutput, right: LayoutOutput) {
@@ -618,6 +709,8 @@ mod tests {
         );
         assert_option_bits_eq(left.first_baselines.x, right.first_baselines.x);
         assert_option_bits_eq(left.first_baselines.y, right.first_baselines.y);
+        assert_option_bits_eq(left.last_baselines.x, right.last_baselines.x);
+        assert_option_bits_eq(left.last_baselines.y, right.last_baselines.y);
     }
 
     fn assert_packed_match_agrees_with_oracle(stored: LayoutInput, requested: LayoutInput) {
@@ -675,6 +768,7 @@ mod tests {
                                     ),
                                     parent_size: Size::new(option(2), option(3)),
                                     available_space: Size::new(available_width, available_height),
+                                    reads_last_baseline: false,
                                 };
                                 assert_input_bits_eq(input, PackedLayoutInput::new(input).unpack());
                             }
@@ -696,9 +790,111 @@ mod tests {
                     (presence & 1 != 0).then_some(f32::from_bits(0x7fc0_5678)),
                     (presence & 2 != 0).then_some(-0.0),
                 ),
+                ..LayoutOutput::HIDDEN
             };
             assert_output_bits_eq(output, MeasurementSlot::new(input, output).unpack_output());
         }
+    }
+
+    /// The two baseline slots hold any two of the four baselines; an output
+    /// with more is kept out of every answer, its committed input excepted.
+    #[test]
+    fn baseline_slots_hold_any_two_baselines_and_a_third_makes_the_entry_silent() {
+        let measured = measurement(Size::NONE, Size::MAX_CONTENT);
+        let committed = LayoutInput::commit(
+            Size::NONE,
+            Size::new(Some(320.0), Some(240.0)),
+            Size::MAX_CONTENT,
+            Size::new(true, true),
+        );
+        for presence in 0_u8..16 {
+            let output = LayoutOutput::new(Size::new(30.0, 40.0), Size::new(30.0, 40.0))
+                .with_first_baselines(Point::new(
+                    (presence & 1 != 0).then_some(-0.0),
+                    (presence & 2 != 0).then_some(12.5),
+                ))
+                .with_last_baselines(Point::new(
+                    (presence & 4 != 0).then_some(f32::from_bits(0x7fc0_9abc)),
+                    (presence & 8 != 0).then_some(36.25),
+                ));
+            let fits = presence.count_ones() <= 2;
+
+            let slot = MeasurementSlot::new(measured, output);
+            // The presence bits are output facts: the key is untouched.
+            assert!(slot.input.key_eq(PackedLayoutInput::new(measured)));
+            assert_input_bits_eq(measured, slot.input.unpack());
+            assert_eq!(slot.input.answers(), fits, "{presence:04b}");
+
+            let mut cache = Cache::new();
+            cache.store(measured, output);
+            cache.store(committed, output);
+            assert_eq!(cache.get(committed).is_some(), fits, "{presence:04b}");
+            assert_eq!(cache.committed_output().is_some(), fits, "{presence:04b}");
+            assert_eq!(cache.get(measured).is_some(), fits, "{presence:04b}");
+            assert_input_bits_eq(cache.committed_input().expect("kept"), committed);
+            if fits {
+                assert_output_bits_eq(output, cache.get(measured).expect("answered"));
+                assert_output_bits_eq(output, cache.committed_output().expect("answered"));
+            }
+        }
+    }
+
+    /// A last-baseline request is answered by an entry computed with it or
+    /// by a commit, never by a measurement computed without it; an entry
+    /// computed with it answers a request without it. The request is not
+    /// part of the key: a requested measurement replaces an unrequested one
+    /// of the same input.
+    #[test]
+    fn a_last_baseline_request_is_answered_only_by_an_exact_entry() {
+        let plain = measurement(Size::NONE, Size::MAX_CONTENT);
+        let requested = plain.reading_last_baseline(true);
+        assert_input_bits_eq(requested, PackedLayoutInput::new(requested).unpack());
+        assert!(PackedLayoutInput::new(plain).key_eq(PackedLayoutInput::new(requested)));
+        let synthesized = LayoutOutput::new(Size::new(20.0, 30.0), Size::new(20.0, 30.0))
+            .with_last_baselines(Point::new(None, Some(30.0)));
+        let exact = synthesized.with_last_baselines(Point::new(None, Some(25.0)));
+
+        let mut cache = Cache::new();
+        cache.store(plain, synthesized);
+        assert_eq!(cache.get(plain), Some(synthesized));
+        assert_eq!(cache.get(requested), None);
+        for (left, right) in [(plain, requested), (requested, plain)] {
+            assert_packed_match_agrees_with_oracle(left, right);
+        }
+
+        cache.store(requested, exact);
+        assert_eq!(
+            cache.measurements.len(),
+            1,
+            "the request is not part of the key"
+        );
+        assert_eq!(cache.get(requested), Some(exact));
+        assert_eq!(cache.get(plain), Some(exact));
+
+        let committed = LayoutInput::commit(
+            Size::NONE,
+            Size::new(Some(320.0), Some(240.0)),
+            Size::MAX_CONTENT,
+            Size::new(false, false),
+        );
+        let mut cache = Cache::new();
+        cache.store(committed, exact);
+        let both = LayoutInput::measure(
+            Size::NONE,
+            Size::new(Some(320.0), Some(240.0)),
+            Size::MAX_CONTENT,
+            RequestedAxis::Both,
+        );
+        assert_eq!(cache.get(both.reading_last_baseline(true)), Some(exact));
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn last_baselines_cost_the_cache_no_bytes() {
+        // Pinned as the budget test pins it; restated here because the
+        // baseline slots are what keep it.
+        assert_eq!(core::mem::size_of::<PackedLayoutOutput>(), 24);
+        assert_eq!(core::mem::size_of::<MeasurementSlot>(), 52);
     }
 
     #[test]
@@ -748,6 +944,7 @@ mod tests {
                                                         stored_available,
                                                         AvailableSpace::MaxContent,
                                                     ),
+                                                    reads_last_baseline: false,
                                                 };
                                                 let requested = LayoutInput {
                                                     goal: requested_goal,
@@ -765,6 +962,7 @@ mod tests {
                                                         requested_available,
                                                         AvailableSpace::MaxContent,
                                                     ),
+                                                    reads_last_baseline: false,
                                                 };
                                                 assert_packed_match_agrees_with_oracle(
                                                     stored, requested,
