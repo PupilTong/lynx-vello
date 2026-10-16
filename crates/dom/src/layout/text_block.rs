@@ -26,15 +26,15 @@
 
 use hughie::geometry::{Edges, Point, Size};
 use hughie::style::{CoreStyle, PositionProperty};
-use hughie::text::TextContext;
 use hughie::text::block::{
-    BlockConstraint, BlockStyle, InlineBoxSpec, InlineItem, RunStyle, TextBlock, TextRunItem,
-    VerticalAlign, WhiteSpaceCollapse,
+    BlockStyle, InlineBoxSpec, InlineItem, RunStyle, TextBlock, TextRunItem, VerticalAlign,
 };
-use stylo::properties::ComputedValues;
-use stylo::values::computed::{Content, ContentItem};
 
-use crate::layout::style::{DisplayMode, StyleView, TextRunView, display_mode, inline_style_of};
+use crate::layout::paragraph::{
+    Collected, OwnedItem, TextStore, collect_generated, context_and_store, generated_content,
+    hash_flow, run_white_space,
+};
+use crate::layout::style::{DisplayMode, StyleView, TextRunView, display_mode};
 use crate::tree::document::{DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 
@@ -187,23 +187,6 @@ pub(crate) fn inline_source_range<T>(
         });
     }
     range
-}
-
-/// One flattened item and the node behind it, before ownership is taken.
-struct Collected {
-    item: OwnedItem,
-    source: NodeSlot,
-}
-
-enum OwnedItem {
-    Run {
-        text: String,
-        style: RunStyle,
-        white_space: WhiteSpaceCollapse,
-    },
-    Atom {
-        vertical_align: VerticalAlign,
-    },
 }
 
 /// The establishing element's subtree, split into the two flows a paragraph
@@ -373,92 +356,6 @@ fn collect_content<T>(
     collected
 }
 
-/// The supported content list replaces rendered children, including when its
-/// strings resolve to empty. Unsupported lists fall back to ordinary children
-/// as a whole; never render only a supported prefix of a list.
-fn generated_content<T>(node: &Node<T>) -> Option<(&ComputedValues, &[ContentItem])> {
-    if node.is_replaced() {
-        return None;
-    }
-    let style = node.layout_computed_style()?;
-    let Content::Items(content) = &style.get_counters().content else {
-        return None;
-    };
-    let items = &content.items[..content.alt_start];
-    items
-        .iter()
-        .all(|item| matches!(item, ContentItem::String(_)))
-        .then_some((style, items))
-}
-
-/// Whether this scope suppresses descendants during the later positioning walk.
-/// `contents` only consumes text content when it belongs to a text paragraph.
-pub(super) fn replaces_children<T>(node: &Node<T>) -> bool {
-    let Some(style) = node.layout_computed_style() else {
-        return false;
-    };
-    match display_mode(*style.get_display()) {
-        DisplayMode::Text => generated_content(node).is_some(),
-        DisplayMode::Contents => {
-            generated_content(node).is_some()
-                && crate::layout::style::box_parent(node).is_some_and(|parent| {
-                    parent.layout_computed_style().is_some_and(|style| {
-                        display_mode(*style.get_display()) == DisplayMode::Text
-                    })
-                })
-        }
-        _ => false,
-    }
-}
-
-/// Returns whether generated text replaced this scope's rendered children.
-fn collect_generated<T>(tree: &TreeArenas<T>, slot: NodeSlot, out: &mut Vec<Collected>) -> bool {
-    let node = tree.at(slot);
-    let Some((style, items)) = generated_content(node) else {
-        return false;
-    };
-    let mut text = String::new();
-    for item in items {
-        match item {
-            ContentItem::String(value) => text.push_str(value),
-            _ => unreachable!("generated_content validated the list"),
-        }
-    }
-    if !text.is_empty() {
-        out.push(Collected {
-            item: OwnedItem::Run {
-                text,
-                style: RunStyle::from_run_style(&TextRunView::from_values(style)),
-                white_space: style_white_space(style),
-            },
-            source: slot,
-        });
-    }
-    true
-}
-
-/// Which of its whitespace a run keeps.
-///
-/// Read from computed style, so no tag is named: a raw-text carrier's UA
-/// rule sets `white-space-collapse: preserve-breaks`, an author's `pre` or
-/// `white-space: pre` sets `preserve`, and either inherits into text runs.
-fn run_white_space<T>(node: &Node<T>) -> WhiteSpaceCollapse {
-    style_white_space(inline_style_of(node))
-}
-
-/// The paragraph's three modes over the fork's four keywords.
-/// `break-spaces` stays collapsed, as it always has been here: it would need
-/// a wrap opportunity after every preserved space and spaces that never
-/// hang, neither of which the paragraph models.
-fn style_white_space(style: &ComputedValues) -> WhiteSpaceCollapse {
-    use stylo::computed_values::white_space_collapse::T as Collapse;
-    match *style.get_inherited_text().get_white_space_collapse() {
-        Collapse::Preserve => WhiteSpaceCollapse::Preserve,
-        Collapse::PreserveBreaks => WhiteSpaceCollapse::PreserveBreaks,
-        Collapse::Collapse | Collapse::BreakSpaces => WhiteSpaceCollapse::Collapse,
-    }
-}
-
 /// A cheap structural identity of the flattened content.
 ///
 /// Not a correctness mechanism — the eviction paths are — but a backstop that
@@ -471,20 +368,7 @@ fn fingerprint(flat: &Flattened) -> u64 {
     // the marker's mere presence suppresses the dots.
     flat.markers.hash(&mut hasher);
     for collected in [&flat.content, &flat.truncation] {
-        collected.len().hash(&mut hasher);
-        for entry in collected {
-            entry.source.hash(&mut hasher);
-            match &entry.item {
-                OwnedItem::Run {
-                    text, white_space, ..
-                } => {
-                    0_u8.hash(&mut hasher);
-                    text.hash(&mut hasher);
-                    white_space.hash(&mut hasher);
-                }
-                OwnedItem::Atom { .. } => 1_u8.hash(&mut hasher),
-            }
-        }
+        hash_flow(collected, &mut hasher);
     }
     hasher.finish()
 }
@@ -573,14 +457,14 @@ pub(crate) fn refresh<T>(
             .iter()
             .map(|entry| tree.at(entry.source).id())
             .collect();
-        let (context, slot) = state.text_block_parts(element);
-        let rebuilds = slot.as_deref().map_or(0, |store| store.rebuilds + 1);
+        let (context, slot) = state.text_store_parts(element);
+        let rebuilds = slot.as_deref().map_or(0, |store| store.rebuilds() + 1);
         // The marker's *presence* is the input, not its content: an empty
         // `inline-truncation` still suppresses the dots, which is what the web
         // reference does with the same subtree.
         let truncation = (!flat.markers.is_empty()).then_some(&truncation_items[..]);
         let block = TextBlock::new(context, style.clone(), &items, truncation);
-        *slot = Some(Box::new(TextBlockStore {
+        *slot = Some(Box::new(TextStore::Block(TextBlockStore {
             block,
             source_ids,
             truncation_source_ids,
@@ -588,8 +472,10 @@ pub(crate) fn refresh<T>(
             style,
             run_styles,
             rebuilds,
-        }));
-    } else if let Some((_, store)) = context_and_block(state, element) {
+        })));
+    } else if let Some((_, store)) = context_and_store(state, element)
+        && let Some(store) = store.as_block_mut()
+    {
         // Same paragraph, possibly different alignment or truncation.
         store.block.set_style(style.clone());
         store.style = style;
@@ -605,25 +491,6 @@ fn atoms_of(collected: &[Collected], id_offset: usize) -> Vec<(NodeSlot, u64)> {
         .filter(|(_, entry)| matches!(entry.item, OwnedItem::Atom { .. }))
         .map(|(index, entry)| (entry.source, (id_offset + index) as u64))
         .collect()
-}
-
-/// Resolves `text-indent` against the definite inline size, which is the
-/// caller's to know — the block only ever sees a break width.
-pub(crate) fn constraint_for<T>(
-    tree: &TreeArenas<T>,
-    element: NodeSlot,
-    max_advance: Option<f32>,
-    basis: Option<f32>,
-) -> BlockConstraint {
-    use hughie::style::TextContainerStyle;
-    use stylo::values::generics::text::GenericTextIndent;
-
-    let view = StyleView::of(tree.at(element));
-    let indent: GenericTextIndent<_> = view.text_indent();
-    let resolved = indent
-        .length
-        .to_used_value(app_units::Au::from_f32_px(basis.unwrap_or(0.0)));
-    BlockConstraint::new(max_advance, resolved.to_f32_px())
 }
 
 /// A text block never asks its atoms to reflow: their measured margin box is a
@@ -697,14 +564,6 @@ fn margin_box(border_box: Size<f32>, margin: Edges<f32>) -> Size<f32> {
     )
 }
 
-pub(crate) fn context_and_block(
-    state: &mut DocumentLayoutState,
-    element: NodeSlot,
-) -> Option<(&mut TextContext, &mut TextBlockStore)> {
-    let (context, slot) = state.text_block_parts(element);
-    slot.as_deref_mut().map(|store| (context, store))
-}
-
 /// Lays `element` out as one flattened paragraph.
 ///
 /// Three phases, borrow-disjoint by construction: child layout needs the whole
@@ -725,7 +584,7 @@ pub(crate) fn compute_text_block_layout<T>(
     element: NodeSlot,
     input: hughie::tree::LayoutInput,
 ) -> hughie::tree::LayoutOutput {
-    use hughie::compute::{LeafMetrics, compute_text_block_layout as compute_block_box};
+    use hughie::compute::compute_text_block_layout as compute_block_box;
     use hughie::tree::LayoutTree;
 
     let atoms = refresh(tree, state, element);
@@ -755,7 +614,9 @@ pub(crate) fn compute_text_block_layout<T>(
             )
         };
         let margin = hughie::compute::used_margins(&tree.style(atom), input.parent_size.width);
-        if let Some((_, store)) = context_and_block(state, element) {
+        if let Some((_, store)) = context_and_store(state, element)
+            && let Some(store) = store.as_block_mut()
+        {
             // A baseline is measured from the border box's top edge, so it
             // moves down with the margin box's. Without one the block's own
             // fallback puts the box's bottom edge on the baseline — which, the
@@ -780,30 +641,7 @@ pub(crate) fn compute_text_block_layout<T>(
     let basis = input.known_dimensions.width.or(input.parent_size.width);
     let view = crate::layout::style::StyleView::of(tree.at(element));
     let output = compute_block_box(input, &view, |measure_input| {
-        let width = match measure_input.available_space.width {
-            hughie::tree::AvailableSpace::Definite(value) => Some(value),
-            hughie::tree::AvailableSpace::MaxContent => None,
-            hughie::tree::AvailableSpace::MinContent => {
-                // Min-content needs a width before a constraint exists, so
-                // it is the one answer the memo cannot key on.
-                let Some((context, store)) = context_and_block(state, element) else {
-                    return LeafMetrics::new(Size::ZERO);
-                };
-                Some(store.block.min_content_width(context))
-            }
-        };
-        let width = measure_input.known_dimensions.width.or(width);
-        let constraint = constraint_for(tree, element, width, basis);
-        let Some((context, store)) = context_and_block(state, element) else {
-            return LeafMetrics::new(Size::ZERO);
-        };
-        let metrics = if measure_input.goal.commits() {
-            store.block.commit(context, constraint)
-        } else {
-            store.block.probe(context, constraint)
-        };
-        LeafMetrics::new(metrics.size)
-            .with_first_baselines(hughie::geometry::Point::new(None, metrics.first_baseline))
+        crate::layout::paragraph::measure(tree, state, element, basis, measure_input)
     });
 
     if input.goal.commits() {

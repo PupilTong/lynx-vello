@@ -27,14 +27,20 @@
 //!   them with the same `background::paint` an element box uses.
 //! - The whole painter works in the text item's local space (origin at the text box's top-left,
 //!   which is also the Parley layout origin); `transform` already includes the device scale.
+//! - Lines are placed through the paragraph's `LineGeometry`: everything parley positioned on a
+//!   line — glyphs, decoration bands, background fragments, gradient tiles — moves down by that
+//!   line's `shift`. The Lynx block's shifts are all zero; a CSS inline formatting context's move
+//!   parley's baselines onto its CSS 2.2 §10.8 line boxes.
 
 use hughie::text::block::PlacedBox;
+use hughie::text::paragraph::LineGeometry;
 use parley::{GlyphRun, Layout, PositionedLayoutItem};
 use smallvec::SmallVec;
 use stylo::computed_values::text_decoration_style::T as TextDecorationStyle;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{ColorPropertyValue, Image, TextDecorationLine};
 
+use crate::layout::paragraph::PaintedParagraph;
 use crate::paint::background::{GradientBrush, gradient_brush};
 use crate::paint::convert;
 use crate::vello::kurbo::{Affine, BezPath, Diagonal2, Line, Rect, Stroke};
@@ -151,7 +157,7 @@ impl<'doc> RunPaints<'doc> {
     pub(crate) fn resolve<T>(
         document: &'doc crate::Document<T>,
         element: crate::NodeId,
-        block: &hughie::text::block::TextBlock,
+        paragraph: &PaintedParagraph<'_>,
         gradient_box: Option<Rect>,
     ) -> Self {
         use hughie::text::block::SourceItem;
@@ -171,10 +177,8 @@ impl<'doc> RunPaints<'doc> {
         // `LynxTextRenderer.m overrideTruncatedAttrIfNeed`). web-core inverts
         // the default; the 2026-09-15 ruling follows native.
         let convert_tail = crate::layout::converts_tail_color(block_style);
-        let sources = document.text_block_sources(element).unwrap_or_default();
-        let truncation_sources = document
-            .text_block_truncation_sources(element)
-            .unwrap_or_default();
+        let sources = paragraph.sources;
+        let truncation_sources = paragraph.truncation_sources;
         let mut by_style = Vec::new();
         // The style indices a nested element's own ramp paints, with that
         // element. Empty for every paragraph whose runs are solid-coloured or
@@ -182,11 +186,11 @@ impl<'doc> RunPaints<'doc> {
         // never runs for them.
         let mut nested: SmallVec<[(usize, crate::NodeId); 2]> = SmallVec::new();
         let mut backgrounds: SmallVec<[(usize, BackgroundChain); 2]> = SmallVec::new();
-        for index in 0..block.style_count() {
+        for index in 0..paragraph.style_count() {
             // The dots are shaped in the run holding the last visible byte, so
             // that run's element answers for them exactly as it answers for its
             // own glyphs — unless `tail-color-convert` reclaims the fill below.
-            let source = block.source_of(u16::try_from(index).unwrap_or(u16::MAX));
+            let source = paragraph.source_of(u16::try_from(index).unwrap_or(u16::MAX));
             let converted = convert_tail && matches!(source, SourceItem::Ellipsis { .. });
             let resolved = match source {
                 SourceItem::Content(item) | SourceItem::Ellipsis { item } => sources
@@ -227,13 +231,13 @@ impl<'doc> RunPaints<'doc> {
             });
         }
         if !nested.is_empty() {
-            assign_nested_tiles(block.display(), &mut by_style, &nested);
+            assign_nested_tiles(paragraph, &mut by_style, &nested);
         }
         // An atom is a box of its own, so its *own* background already paints
         // through the element-box path; what it can still sit inside is a
         // backgrounded scope, which is why the walk starts at its parent.
         let mut atom_backgrounds: SmallVec<[(u64, BackgroundChain); 1]> = SmallVec::new();
-        for placed in block.boxes() {
+        for placed in paragraph.boxes() {
             let PlacedBox::Visible { id, .. } = *placed else {
                 continue;
             };
@@ -358,7 +362,7 @@ fn paints_background(style: &ComputedValues) -> bool {
 /// inner scope spans the outer one, which is the shape the reference's fixtures
 /// take.
 fn assign_nested_tiles(
-    layout: &Layout<crate::layout::TextBrush>,
+    paragraph: &PaintedParagraph<'_>,
     by_style: &mut [RunPaint<'_>],
     nested: &[(usize, crate::NodeId)],
 ) {
@@ -368,10 +372,11 @@ fn assign_nested_tiles(
     // ramp. Linear scans over a list that is as long as the paragraph has
     // gradient elements.
     let mut tiles: SmallVec<[(crate::NodeId, Rect); 2]> = SmallVec::new();
-    for line in layout.lines() {
+    for (index, line) in paragraph.layout.lines().enumerate() {
         let metrics = line.metrics();
-        let top = f64::from(metrics.block_min_coord);
-        let bottom = f64::from(metrics.block_max_coord);
+        let shift = paragraph.shift(index);
+        let top = shifted(metrics.block_min_coord, shift);
+        let bottom = shifted(metrics.block_max_coord, shift);
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                 continue;
@@ -433,8 +438,7 @@ fn assign_nested_tiles(
 ///   lets the atom overflow it. The union is what keeps a scope whose only content *is* an atom —
 ///   which has no glyph run to take metrics from — painting anything at all.
 pub(crate) fn inline_background_fragments(
-    layout: &Layout<crate::layout::TextBrush>,
-    block: &hughie::text::block::TextBlock,
+    paragraph: &PaintedParagraph<'_>,
     runs: &RunPaints<'_>,
     out: &mut Vec<(crate::NodeId, Rect)>,
 ) {
@@ -443,8 +447,9 @@ pub(crate) fn inline_background_fragments(
     // ancestor is always pushed before the scope nested in it.
     let mut scopes: SmallVec<[(crate::NodeId, Rect); 4]> = SmallVec::new();
     let atoms = !runs.atom_backgrounds.is_empty();
-    for (index, line) in layout.lines().enumerate() {
+    for (index, line) in paragraph.layout.lines().enumerate() {
         scopes.clear();
+        let shift = paragraph.shift(index);
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                 continue;
@@ -459,7 +464,7 @@ pub(crate) fn inline_background_fragments(
                 continue;
             }
             let metrics = glyph_run.run().metrics();
-            let baseline = f64::from(glyph_run.baseline());
+            let baseline = shifted(glyph_run.baseline(), shift);
             let x = f64::from(glyph_run.offset());
             union_into(
                 &mut scopes,
@@ -474,7 +479,7 @@ pub(crate) fn inline_background_fragments(
         }
         if atoms {
             let line_index = u32::try_from(index).unwrap_or(u32::MAX);
-            for placed in block.boxes() {
+            for placed in paragraph.boxes() {
                 let PlacedBox::Visible {
                     id,
                     line: placed_line,
@@ -522,20 +527,39 @@ fn union_into(
 
 pub(crate) fn paint(
     scene: &mut Scene,
-    layout: &Layout<crate::layout::TextBrush>,
+    paragraph: &PaintedParagraph<'_>,
     transform: Affine,
     runs: &RunPaints<'_>,
 ) {
     // Two sweeps, not one per run: every shadow in the paragraph paints under
     // every glyph in it, which is what a single-run block already did and what
     // keeps one run's ink from landing under the next run's shadow.
-    paint_shadows(scene, layout, transform, runs);
-    paint_pass(scene, layout, transform, runs, Layer::Ink);
+    paint_shadows(scene, paragraph, transform, runs);
+    paint_pass(scene, paragraph, transform, runs, Layer::Ink);
+}
+
+/// `y` moved by a line's `shift`. A zero shift — every Lynx block line —
+/// leaves parley's coordinate exactly as it was.
+fn shifted(y: f32, shift: f32) -> f64 {
+    if shift == 0.0 {
+        f64::from(y)
+    } else {
+        f64::from(y + shift)
+    }
+}
+
+/// `transform` moved down by a line's `shift`, unchanged for a zero one.
+fn on_line(transform: Affine, shift: f32) -> Affine {
+    if shift == 0.0 {
+        transform
+    } else {
+        transform * Affine::translate((0.0, f64::from(shift)))
+    }
 }
 
 fn paint_shadows(
     scene: &mut Scene,
-    layout: &Layout<crate::layout::TextBrush>,
+    paragraph: &PaintedParagraph<'_>,
     transform: Affine,
     runs: &RunPaints<'_>,
 ) {
@@ -548,7 +572,7 @@ fn paint_shadows(
         .max()
         .unwrap_or(0);
     for level in (0..depth).rev() {
-        paint_pass(scene, layout, transform, runs, Layer::Shadow(level));
+        paint_pass(scene, paragraph, transform, runs, Layer::Shadow(level));
     }
 }
 
@@ -648,10 +672,12 @@ fn text_stroke(style: &ComputedValues) -> Option<(f64, Color)> {
 pub(crate) fn paint_silhouette(
     scene: &mut Scene,
     layout: &Layout<crate::layout::TextBrush>,
+    lines: &[LineGeometry],
     transform: Affine,
 ) {
     let fill = TextFill::Solid(Color::BLACK);
-    for line in layout.lines() {
+    for (index, line) in layout.lines().enumerate() {
+        let transform = on_line(transform, lines.get(index).map_or(0.0, |line| line.shift));
         for item in line.items() {
             if let PositionedLayoutItem::GlyphRun(glyph_run) = item {
                 draw_glyph_run(scene, &glyph_run, transform, Fill::NonZero.into(), &fill);
@@ -662,12 +688,13 @@ pub(crate) fn paint_silhouette(
 
 fn paint_pass(
     scene: &mut Scene,
-    layout: &Layout<()>,
+    paragraph: &PaintedParagraph<'_>,
     transform: Affine,
     runs: &RunPaints<'_>,
     layer: Layer,
 ) {
-    for line in layout.lines() {
+    for (index, line) in paragraph.layout.lines().enumerate() {
+        let transform = on_line(transform, paragraph.shift(index));
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                 continue;
@@ -923,6 +950,54 @@ fn wavy_path(band: &DecorationBand) -> BezPath {
 mod tests {
     use super::*;
     use crate::vello::kurbo::{CubicBez, ParamCurve, PathEl, Point};
+
+    const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
+
+    /// Every glyph `scene` encodes, as `(x, y)` in the scene's space.
+    fn glyph_origins(scene: &Scene) -> Vec<(f32, f32)> {
+        let resources = &scene.encoding().resources;
+        resources
+            .glyph_runs
+            .iter()
+            .flat_map(|run| {
+                resources.glyphs[run.glyphs.clone()].iter().map(|glyph| {
+                    (
+                        run.transform.translation[0] + glyph.x,
+                        run.transform.translation[1] + glyph.y,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_inline_formatting_context_paints_its_glyphs_on_the_css_baseline() {
+        // A 20px Ahem block holding 10px Ahem text: the strut puts the line's
+        // baseline at 16 (CSS 2.2 §10.8.1), where parley alone puts it at 8.
+        let mut doc = crate::Document::new(crate::tree::document::tests::device(), "page", ());
+        doc.register_fonts(crate::FontBlob::from_static(AHEM));
+        doc.add_stylesheet(
+            "page { display: flex; align-items: flex-start; width: 200px; height: 200px;
+                    font-family: Ahem; font-size: 20px; }
+             small { display: contents; font-size: 10px; }",
+            crate::StylesheetOrigin::Author,
+        );
+        let block = doc.create_element("anonymous", ());
+        doc.append_child(doc.document_element().id(), block);
+        let small = doc.create_element("small", ());
+        doc.append_child(block, small);
+        let text = doc.create_text_node("aa", ());
+        doc.append_child(small, text);
+        doc.layout();
+        doc.make_anonymous_block(block);
+        doc.layout();
+
+        let paragraph = doc.painted_paragraph(block).expect("a committed flow");
+        let runs = RunPaints::resolve(&doc, block, &paragraph, None);
+        let mut scene = Scene::new();
+        paint(&mut scene, &paragraph, Affine::IDENTITY, &runs);
+        assert_eq!(glyph_origins(&scene), [(0.0, 16.0), (10.0, 16.0)]);
+    }
 
     fn assert_near(actual: f64, expected: f64) {
         assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");

@@ -281,10 +281,11 @@ fn open_text_clip_ops(
         level_shape(fragment, BoxLevel::Border),
     );
     let scene = sink.scene_for(space);
-    for (offset, layout) in &text_clip.runs {
+    for (offset, layout, lines) in &text_clip.runs {
         crate::paint::text::paint_silhouette(
             scene,
             layout,
+            lines,
             fragment.transform * Affine::translate(*offset),
         );
     }

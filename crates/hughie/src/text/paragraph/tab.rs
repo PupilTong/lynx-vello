@@ -31,8 +31,9 @@
 //! - A tab is shaped as a space, so `text-align: justify` stretches it like one; stops are decided
 //!   before alignment.
 
-use parley::{Layout, PositionedLayoutItem};
+use parley::{BreakReason, Layout, PositionedLayoutItem};
 
+use super::style::IndentKeywords;
 use crate::style::TextBrush;
 
 /// The `tab-size` every preserved tab uses: the property's initial value, in
@@ -87,6 +88,7 @@ pub(in crate::text) fn resolve(
     spacing: &[f32],
     min: &[f32],
     indent: f32,
+    keywords: IndentKeywords,
 ) -> Option<Vec<f32>> {
     if tabs.is_empty() {
         return None;
@@ -95,10 +97,10 @@ pub(in crate::text) fn resolve(
     debug_assert_eq!(tabs.len(), min.len());
     let mut wanted = spacing.to_vec();
     for (index, line) in layout.lines().enumerate() {
-        // The first line starts at the `text-indent` parley applies to it
-        // alone (`IndentOptions::default()`); stops are measured from the
-        // content edge, so the indent counts toward the position.
-        let mut x = if index == 0 { indent } else { 0.0 };
+        // An indented line starts at the `text-indent` parley applied to it;
+        // stops are measured from the content edge, so the indent counts
+        // toward the position.
+        let mut x = applied_indent(layout, index, indent, keywords);
         // A shaping run is split into one glyph run per style; its clusters
         // are walked once, from its first glyph run.
         let mut walked_run = None;
@@ -132,6 +134,28 @@ pub(in crate::text) fn resolve(
         .zip(spacing)
         .all(|(wanted, held)| (wanted - held).abs() < SETTLED);
     (!settled).then_some(wanted)
+}
+
+/// The indent parley applied to line `index` of `layout`: `amount` on the
+/// first line, and with `each-line` on every line after a forced break, the
+/// two sets swapped by `hanging` — parley's own rule
+/// (`BreakLines::resolve_indent`), read back from the committed lines.
+pub(in crate::text) fn applied_indent(
+    layout: &Layout<TextBrush>,
+    index: usize,
+    amount: f32,
+    keywords: IndentKeywords,
+) -> f32 {
+    let starts_scope = index == 0
+        || (keywords.each_line
+            && layout
+                .get(index - 1)
+                .is_some_and(|previous| previous.break_reason() == BreakReason::Explicit));
+    if starts_scope == keywords.hanging {
+        0.0
+    } else {
+        amount
+    }
 }
 
 #[cfg(test)]

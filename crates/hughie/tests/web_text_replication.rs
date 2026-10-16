@@ -1200,7 +1200,7 @@ fn a_leading_image_survives_a_cut_that_retreats_only_trailing_content() {
             `item.style_index` before flushing the pending item, and \
             parley-0.11.0/src/layout/data.rs:435-436 reads the run's \
             line-height through it; reached from \
-            crates/hughie/src/text/paragraph/shape.rs:74-81)"]
+            crates/hughie/src/text/paragraph/shape.rs:83-90)"]
 fn a_runs_line_height_is_not_taken_from_the_span_after_it() {
     let body = ahem_at_line_height(24.0, 32.0);
     let more = ahem_at_line_height(14.0, 22.0);
@@ -1624,7 +1624,7 @@ fn word_break_policy_at_a_hundred_pixel_width() {
 #[test]
 #[ignore = "GAP: a leading collapsible whitespace span emits its space instead \
             of being removed at the start of the line \
-            (crates/hughie/src/text/paragraph/content.rs:435)"]
+            (crates/hughie/src/text/paragraph/content.rs:460)"]
 fn collapsible_whitespace_is_removed_at_the_start_of_a_line() {
     let base = ahem_at(10.0);
     let items = [run(&base, "  Step 1 of 4")];

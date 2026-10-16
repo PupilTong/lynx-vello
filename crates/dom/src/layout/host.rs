@@ -29,6 +29,8 @@ use hughie::tree::{
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
+use super::inline_flow::compute_inline_flow_layout;
+use super::paragraph::{establishes_paragraph, replaces_children};
 use super::style::{DisplayMode, StyleView, box_parent, display_mode, resolve_position};
 use super::text_block::compute_text_block_layout;
 use super::{anchors, committed_box, hoisted};
@@ -259,7 +261,7 @@ impl<T> LayoutTree for TreeArenas<T> {
             // number rather than against a guess.
             if input.goal.commits()
                 && state.interleaves_containers()
-                && display != DisplayMode::Text
+                && !establishes_paragraph(display)
             {
                 let view = tree.style(node);
                 let id = tree.at(node).id();
@@ -277,6 +279,7 @@ impl<T> LayoutTree for TreeArenas<T> {
                 }
                 DisplayMode::Flex => compute_flexbox_layout(tree, state, node, input),
                 DisplayMode::Text => compute_text_block_layout(tree, state, node, input),
+                DisplayMode::BlockFlow => compute_inline_flow_layout(tree, state, node, input),
                 DisplayMode::Grid => compute_grid_layout(tree, state, node, input),
                 DisplayMode::GridLanes => compute_grid_lanes_layout(tree, state, node, input),
                 DisplayMode::Linear => compute_linear_layout(tree, state, node, input),
@@ -909,7 +912,7 @@ fn pre_position<T: Sync>(
     if display == DisplayMode::Contents {
         tree.layout_mut(state, node_id)
             .set_unrounded(Layout::default());
-        return !super::text_block::replaces_children(node);
+        return !replaces_children(node);
     }
     if node
         .flat_parent_id()
@@ -928,7 +931,7 @@ fn pre_position<T: Sync>(
     }
     display != DisplayMode::Leaf
         && !style.skips_contents()
-        && !(display == DisplayMode::Text && super::text_block::replaces_children(node))
+        && !(establishes_paragraph(display) && replaces_children(node))
 }
 
 /// Places an out-of-flow box whose containing block is the initial

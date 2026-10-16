@@ -23,6 +23,8 @@ use crate::text::TextContext;
 pub(in crate::text) struct ShapeSpan<'block, S> {
     pub(in crate::text) bytes: Range<usize>,
     pub(in crate::text) style: &'block RunStyle,
+    /// The line-breaking values written into this span's parley style.
+    pub(in crate::text) breaking: BreakStyle,
     pub(in crate::text) source: S,
     /// Added to the run's `letter-spacing` for this span alone. Zero except
     /// on a preserved tab's one-space span, where it widens the space to the
@@ -38,9 +40,13 @@ pub(in crate::text) struct ShapeSpan<'block, S> {
 /// Fully empty content short-circuits to an empty layout: parley shapes a
 /// substitute space for an empty build, whose glyph run would carry a style
 /// index this module never pushed.
+///
+/// The line-break override is one decision per parley builder, so it cannot
+/// follow each span's `word-break`: the paragraph takes it unless a span is
+/// `break-all`, whose opportunities between ASCII letters the override's
+/// pair table would suppress.
 pub(in crate::text) fn shape<S: Copy>(
     context: &mut TextContext,
-    breaking: BreakStyle,
     text: &str,
     spans: &[ShapeSpan<'_, S>],
     boxes: Vec<InlineBox>,
@@ -67,12 +73,15 @@ pub(in crate::text) fn shape<S: Copy>(
     // `white-space-collapse: preserve` needs nothing from parley beyond it:
     // the normalizer keeps every space, and the tab stops are `super::tab`'s.
     let mut builder = layout_context.style_run_builder(font_context, text, 1.0, false);
-    if breaking.word_break != WordBreak::BreakAll {
+    if spans
+        .iter()
+        .all(|span| span.breaking.word_break != WordBreak::BreakAll)
+    {
         builder.set_line_break_override(Some(LINE_BREAK_OVERRIDE));
     }
     builder.reserve(spans.len(), spans.len());
     for span in spans {
-        let mut style = super::style::parley_style(span.style, breaking);
+        let mut style = super::style::parley_style(span.style, span.breaking);
         style.letter_spacing += span.extra_spacing;
         let index = builder.push_style(style);
         debug_assert_eq!(usize::from(index), sources.len());

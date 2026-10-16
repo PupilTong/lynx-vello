@@ -373,7 +373,48 @@ consequential choice about whether to follow the spec or the quirk.
   byte ranges, so the current implementation retains Parley's automatic bidi
   shaping and records this as an integration limitation. Revisit when Parley
   exposes its base-level input (or if a narrowly-scoped upstream patch is
-  adopted).
+  adopted). The limit applies to both paragraph kinds: the CSS block
+  container's inline formatting context (`hughie::text::inline`) resolves
+  `text-align` from `direction` the same way and keeps the same first-strong
+  paragraph level, where css-writing-modes-3 takes it from the block's
+  `direction` (`unicode-bidi: plaintext`, the one content-detected case, is not
+  compiled under `lynx`).
+- **Inline formatting context: one line-break override per paragraph** —
+  `word-break` is a per-run value there, and parley honours it per style, but
+  the Chromium line-break override (a wrap opportunity after every space
+  sequence, an ASCII pair table) is one decision per parley builder. A
+  paragraph with any `break-all` run is therefore analysed without the
+  override, because the pair table would suppress the opportunities between
+  ASCII letters `break-all` adds; the other runs of that paragraph fall back
+  to the UAX #14 opportunities alone (`crates/hughie/src/text/paragraph/shape.rs`,
+  `shape`). A paragraph without `break-all` keeps the override, as `<text>`
+  always has.
+- **Inline formatting context: `line-height: normal` and fallback fonts** —
+  CSS 2.2 §10.8.1 leaves `normal` to the user agent. The context follows
+  Chrome: a run's first available font — the first `font-family` entry with
+  a U+0020 glyph, found by shaping one space — gives ascent + descent + line
+  gap, and every font the run's glyphs on a line actually use contributes its
+  own ascent, descent and half line gap as well. With a numeric or length
+  `line-height` only the first available font sets the run's box, and glyphs
+  from a fallback font overflow the line box. Metrics are not rounded to whole
+  pixels as Chrome rounds them (`crates/hughie/src/text/inline/line_boxes.rs`).
+- **Inline formatting context: gradient tiles follow parley's line extent** —
+  a nested run's gradient `color` tile spans the line's extent as parley laid
+  it out, moved onto the CSS baseline by the line's shift, not the CSS line
+  box. Only a `display: contents` element inside an anonymous block could
+  carry such a run; `<text>` is unaffected, its shifts all being zero
+  (`crates/dom/src/paint/text.rs`, `assign_nested_tiles`).
+- **Inline formatting context: not implemented** — `text-overflow`, which
+  applies only to a block whose `overflow` is not `visible` (css-overflow-3)
+  and so never to the anonymous block, the one producer; it would go per
+  overflowing line box after the line boxes are built
+  (`crates/hughie/src/text/inline/mod.rs`). `white-space-collapse:
+  break-spaces`, read as `collapse` as in `<text>`: it needs a wrap opportunity
+  after every preserved space and spaces that never hang, and parley has
+  neither. A last baseline for `align-items: last baseline`, which no box in
+  this engine reports. And any box-generating child: the content is text runs
+  only, every other child is hidden, which the anonymous block producer never
+  puts there (`crates/dom/src/layout/inline_flow.rs`).
 
 - **`hughie::text::block` ellipsis algorithm** — the standalone Lynx
   text-block module implements the web reference's *slow path*

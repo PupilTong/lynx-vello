@@ -18,7 +18,7 @@ use parley::setting::Tag;
 use parley::{
     Alignment, FontFamily as ParleyFontFamily, FontFamilyName as ParleyFontFamilyName, FontFeature,
     FontFeatures, FontStyle as ParleyFontStyle, FontVariation, FontVariations,
-    FontWeight as ParleyFontWeight, GenericFamily as ParleyGenericFamily,
+    FontWeight as ParleyFontWeight, GenericFamily as ParleyGenericFamily, IndentOptions,
     LineHeight as ParleyLineHeight, OverflowWrap as ParleyOverflowWrap,
     TextStyle as ParleyTextStyle, TextWrapMode as ParleyTextWrapMode, WordBreak as ParleyWordBreak,
 };
@@ -174,6 +174,27 @@ pub enum TextIndent {
 impl Default for TextIndent {
     fn default() -> Self {
         Self::Px(0.0)
+    }
+}
+
+/// The `text-indent` keywords (css-text-3 §8.1): which lines the indent
+/// applies to. Both off is the first line only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IndentKeywords {
+    /// `each-line`: also every line after a forced line break.
+    pub each_line: bool,
+    /// `hanging`: the lines the indent would apply to are the ones it skips,
+    /// and the other way round.
+    pub hanging: bool,
+}
+
+impl IndentKeywords {
+    /// The same choice in parley's vocabulary.
+    pub(in crate::text) const fn options(self) -> IndentOptions {
+        IndentOptions {
+            each_line: self.each_line,
+            hanging: self.hanging,
+        }
     }
 }
 

@@ -146,7 +146,7 @@ use stylo::properties::ComputedValues;
 use stylo::values::computed::Length;
 use stylo::values::generics::NonNegative;
 
-use super::style::{DisplayMode, StyleView, display_mode, skips_contents};
+use super::style::{StyleView, display_mode, skips_contents};
 use crate::tree::document::{NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 
@@ -617,19 +617,22 @@ pub(crate) fn note_container_estimate<T>(
 /// `debug_assert`: it costs a release build nothing and tells a debug one that
 /// a page just paid the extra pass.
 ///
-/// `display: -lynx-text` is exempt: the text block algorithm
-/// ([`crate::layout::text_block`]) implements no size containment at all, so a
-/// text element that is also a size query container really does answer to its
-/// contents. [`container_estimate`] never fires for one either — the host
-/// leaves that display mode out — and both halves of that pair are the same
-/// recorded deviation.
+/// `display: -lynx-text` is exempt, and so is a block container: the paragraph
+/// algorithms ([`crate::layout::text_block`], [`crate::layout::inline_flow`])
+/// implement no size containment at all, so a paragraph element that is also
+/// a size query container really does answer to its contents.
+/// [`container_estimate`] never fires for one either — the host leaves those
+/// display modes out — and both halves of that pair are the same recorded
+/// deviation.
 fn debug_assert_estimate_agrees<T>(
     view: &StyleView<'_, T>,
     input: LayoutInput,
     is_container: bool,
     inner: Size<f32>,
 ) {
-    if !cfg!(debug_assertions) || !is_container || display_mode(view.display()) == DisplayMode::Text
+    if !cfg!(debug_assertions)
+        || !is_container
+        || crate::layout::paragraph::establishes_paragraph(display_mode(view.display()))
     {
         return;
     }

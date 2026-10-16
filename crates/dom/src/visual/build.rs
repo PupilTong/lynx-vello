@@ -859,7 +859,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         let mut inner_seed = seed;
         inner_seed.current.space = box_space;
         let ctx = self.enter_element(root, values, &world, inner_seed, own_scroll);
-        if mode == DisplayMode::Text && visible {
+        if crate::layout::paragraph::establishes_paragraph(mode) && visible {
             // A text block paints its whole subtree as one paragraph, over its
             // own box and under whatever the collection walk below still finds
             // — an atomic inline box, an out-of-flow child. Same order as the
@@ -1069,7 +1069,8 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         })
     }
 
-    /// Emits the one item a `display: -lynx-text` element paints its whole
+    /// Emits the one item a paragraph-establishing element — a
+    /// `display: -lynx-text` element or a block container — paints its whole
     /// paragraph through.
     ///
     /// The walk still descends past a text block, to reach an atomic inline
@@ -1230,7 +1231,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                     outer.current.space,
                 ),
             );
-            if child.mode == DisplayMode::Text {
+            if crate::layout::paragraph::establishes_paragraph(child.mode) {
                 // A second record, after the element's own box, so the glyphs
                 // paint over the background and border the block draws.
                 //

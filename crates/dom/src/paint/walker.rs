@@ -1572,24 +1572,25 @@ fn paint_item<T>(
             let Some(style) = document.paint_style(element) else {
                 return;
             };
-            let Some(block) = document.text_block(item.node) else {
+            let Some(paragraph) = document.painted_paragraph(item.node) else {
                 return;
             };
-            let layout = block.display();
             let gradient_box = text::needs_gradient_box(style)
                 .then(|| color_gradient_box(document, item, element));
             // One entry per parley style index, so a glyph run resolves its own
             // element's paint in O(1). A nested scope carries its own colour,
             // shadow, stroke and decorations; the establishing element answers
             // for the synthesized ellipsis and for anything unresolvable.
-            let runs = text::RunPaints::resolve(document, element, block, gradient_box);
+            let runs = text::RunPaints::resolve(document, element, &paragraph, gradient_box);
             // A nested scope has no box of its own, so its background is an
             // inline box's: one fragment per line, under every shadow and
             // every glyph in the paragraph. Only paragraphs that have one pay.
             if runs.has_inline_backgrounds() {
-                paint_inline_backgrounds(sink, space, document, block, &runs, transform, images);
+                paint_inline_backgrounds(
+                    sink, space, document, &paragraph, &runs, transform, images,
+                );
             }
-            text::paint(sink.scene_for(space), layout, transform, &runs);
+            text::paint(sink.scene_for(space), &paragraph, transform, &runs);
         }
     }
 }
@@ -1610,13 +1611,13 @@ fn paint_inline_backgrounds<T>(
     sink: &mut WalkSink<'_>,
     space: Option<u32>,
     document: &Document<T>,
-    block: &hughie::text::block::TextBlock,
+    paragraph: &crate::layout::paragraph::PaintedParagraph<'_>,
     runs: &text::RunPaints<'_>,
     transform: Affine,
     images: &ImageRegistry,
 ) {
     let mut fragments = Vec::new();
-    text::inline_background_fragments(block.display(), block, runs, &mut fragments);
+    text::inline_background_fragments(paragraph, runs, &mut fragments);
     for (node, rect) in fragments {
         let size = crate::Size2D::new(rect.width() as f32, rect.height() as f32);
         if size.width <= 0.0 || size.height <= 0.0 {
@@ -1705,12 +1706,12 @@ fn collect_text_clip_under<'doc, T>(
         )
     });
     if visible
-        && let Some(block) = document.text_block(node)
-        && !block.lines().is_empty()
+        && let Some(paragraph) = document.painted_paragraph(node)
+        && !paragraph.lines.is_empty()
     {
         // An element with no runs still establishes a paragraph; it just has
         // no ink, and a silhouette of nothing would clip everything away.
-        clip.runs.push((offset, block.display()));
+        clip.runs.push((offset, paragraph.layout, paragraph.lines));
     }
 
     for child in node_ref.flat_children_iter() {
