@@ -205,8 +205,14 @@ impl Default for PageConfig {
 /// ([`super::popover`]). The overlay's is one more, after it: only an
 /// overlay's first child renders, which web-core itself pins and native's
 /// measurement of child 0 alone agrees with ([`super::overlay`] carries the
-/// argument). `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions`
-/// pins the set to exactly those twenty rules.
+/// argument). An editing host's `display: -lynx-text` and `white-space:
+/// pre-wrap` are the last ([`EDITING_HOST_RULE`]): a `contenteditable`
+/// element is laid out as one paragraph that shows its text byte for byte,
+/// whatever its tag's `display` or an author's `white-space` says, because
+/// the editor addresses that paragraph's layout in the offsets of the text
+/// it edits.
+/// `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions`
+/// pins the set to exactly those twenty-one rules.
 #[must_use]
 pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     let component_tags = format!(
@@ -259,6 +265,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          {overlays}\
          {markdowns}\
          {text}\
+         {EDITING_HOST_RULE}\n\
          {inheritance}\
          {carriers}\
          {frames}\
@@ -282,6 +289,23 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     )
 }
 
+/// HTML's `contenteditable` editing host, laid out as one plain-text
+/// paragraph (`docs/editable-text-design.md`, "Editing host"): `dom`'s
+/// editor places its caret and selection in that paragraph's layout, and
+/// `pre-wrap`'s `white-space-collapse: preserve` keeps the layout's text
+/// byte for byte the text being edited, as a browser's plain-text editing
+/// relies on. Both declarations are `!important`: an editing host is a
+/// paragraph by what it is, not by a default a page may override, so unlike
+/// a `text`'s plain `-lynx-text` its `display` does not yield to an author
+/// `display: none`; and an author `white-space: normal` that collapsed
+/// `"a  b"` to `"a b"` would put every editor offset after the collapse in
+/// the wrong place (`dom` refuses value changes over a paragraph that does
+/// not show the value, so the host would become read-only instead). Both
+/// apply to every value but an ASCII case-insensitive `"false"`, which is
+/// HTML's reading of the attribute and `dom::Document::is_editing_host`'s.
+pub(super) const EDITING_HOST_RULE: &str = "[contenteditable]:not([contenteditable=\"false\" i]) \
+     { display: -lynx-text !important; white-space: pre-wrap !important; }";
+
 #[cfg(test)]
 mod tests {
     use dom::stylo::computed_values::{box_sizing, position};
@@ -296,11 +320,11 @@ mod tests {
         X_FOLDVIEW_HEADER_TAG, X_FOLDVIEW_SLOT_DRAG_TAG, X_FOLDVIEW_SLOT_TAG, X_FOLDVIEW_TAG,
         X_FOLDVIEW_TOOLBAR_TAG,
     };
-    use super::super::test_support::{child, document, overflow, style_of, with_config};
+    use super::super::test_support::{child, display, document, overflow, style_of, with_config};
     use super::{
-        BLUR_VIEW_TAG, DIALOG_TAG, PageConfig, REFRESH_FOOTER_TAG, REFRESH_HEADER_TAG,
-        SWIPER_ITEM_TAG, SWIPER_TAG, VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_BLUR_VIEW_TAG,
-        X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG, ua_stylesheet,
+        BLUR_VIEW_TAG, DIALOG_TAG, EDITING_HOST_RULE, PageConfig, REFRESH_FOOTER_TAG,
+        REFRESH_HEADER_TAG, SWIPER_ITEM_TAG, SWIPER_TAG, VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG,
+        X_BLUR_VIEW_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG, ua_stylesheet,
     };
 
     /// The tags that get `web-elements`' common container block and keep
@@ -652,6 +676,47 @@ mod tests {
         assert!(!sheet.contains(INHERITANCE_RULE));
     }
 
+    /// A `contenteditable` element is one paragraph that keeps its white
+    /// space, whatever its tag or an author `!important` `display` or
+    /// `white-space` says, for every value but HTML's `"false"`, which the
+    /// selector's `i` flag matches in any case.
+    #[test]
+    fn an_editing_host_is_one_preserving_paragraph() {
+        use dom::stylo::computed_values::white_space_collapse::T as Collapse;
+
+        let mut document = document();
+        let hosts: Vec<(dom::NodeId, bool)> = [
+            ("", true),
+            ("true", true),
+            ("plaintext-only", true),
+            ("FALSE", false),
+            ("false", false),
+        ]
+        .into_iter()
+        .map(|(value, editable)| {
+            let view = child(
+                &mut document,
+                "view",
+                "display: flex !important; white-space: normal !important;",
+            );
+            document.set_attribute(view, "contenteditable", value);
+            (view, editable)
+        })
+        .collect();
+        document.layout();
+        for (view, editable) in hosts {
+            assert_eq!(display(&document, view) == Display::LynxText, editable);
+            assert_eq!(
+                *style_of(&document, view)
+                    .get_inherited_text()
+                    .get_white_space_collapse()
+                    == Collapse::Preserve,
+                editable
+            );
+            assert_eq!(document.is_editing_host(view), editable);
+        }
+    }
+
     /// `enableCSSInheritance` adds its one rule and changes nothing else:
     /// taking that line back out leaves the sheet the switch-off config
     /// builds. The rule follows the text block, whose `color: initial` it
@@ -739,9 +804,17 @@ mod tests {
     /// !important`, and native measures child 0 alone, so an author
     /// `display` on a second child must not bring it back.
     /// [`super::super::overlay`] carries the argument.
+    ///
+    /// The editing host's follows the overlay's, with two important
+    /// declarations in its one rule: `display: -lynx-text` and `white-space:
+    /// pre-wrap`. `dom`'s editor addresses the host's paragraph in the
+    /// offsets of the text it edits, which holds only while the paragraph is
+    /// one and keeps every character; an author `white-space: normal` that
+    /// collapsed spaces would make the host read-only.
+    /// [`EDITING_HOST_RULE`] carries the argument.
     #[test]
     fn the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions() {
-        const ALLOWED: [&str; 20] = [
+        const ALLOWED: [&str; 21] = [
             "viewpager, x-viewpager-ng { flex-direction: row !important; \
              linear-direction: row !important; flex-wrap: nowrap !important; }",
             "viewpager-item, x-viewpager-item-ng { position: relative !important; }",
@@ -777,6 +850,7 @@ mod tests {
             "text > image, text > wrapper > image, inline-text > image, \
              inline-text > wrapper > image, text > inline-truncation > image, \
              text > inline-truncation > wrapper > image { padding: 0 !important; }",
+            EDITING_HOST_RULE,
         ];
 
         for config in [

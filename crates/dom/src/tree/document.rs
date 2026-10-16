@@ -80,6 +80,10 @@ pub struct Document<T> {
     /// [`TreeArenas`] table: nothing in style, layout or paint reads it, and
     /// its one reader, the update, holds the document mutably.
     pub(crate) intersections: crate::visual::intersection::IntersectionObservers<T>,
+    /// The focused element, its selection and composition, and the focus
+    /// events not yet taken ([`crate::editing`]). A field, not a
+    /// [`TreeArenas`] table: it names at most one element.
+    pub(crate) editing: crate::editing::EditingState,
     pending_snapshots: SnapshotMap,
     relayout_roots: Vec<PendingRelayout>,
     relayout_root_ids: FxHashSet<NodeId>,
@@ -134,6 +138,7 @@ impl<T> Document<T> {
             images: crate::render::image::ImageRegistry::default(),
             content_visibility_changes: Vec::new(),
             intersections: crate::visual::intersection::IntersectionObservers::default(),
+            editing: crate::editing::EditingState::default(),
             pending_snapshots: SnapshotMap::new(),
             relayout_roots: Vec::new(),
             relayout_root_ids: FxHashSet::default(),
@@ -721,6 +726,8 @@ impl<T> Document<T> {
         // HTML's removing steps: an element that left the document leaves
         // the top layer with it (`tree::top_layer`, "Removal").
         self.drop_disconnected_top_layer_entries();
+        // ...and is no longer focused (the focus fixup rule, `editing`).
+        self.fix_up_focus();
     }
 
     /// Frees `id`, returning its payload. Its element children are unlinked

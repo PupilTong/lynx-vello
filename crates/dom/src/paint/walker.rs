@@ -1589,7 +1589,22 @@ fn paint_item<T>(
             if runs.has_inline_backgrounds() {
                 paint_inline_backgrounds(sink, space, document, block, &runs, transform, images);
             }
+            // The focused editing host's selection sits over its backgrounds
+            // and under its glyphs; its caret and composition underline over
+            // them. One `Option` test for every other paragraph.
+            let editing = text::EditingPaint::of(document, element, layout, style);
+            if let Some(editing) = &editing {
+                text::paint_selection(sink.scene_for(space), layout, transform, editing);
+            }
             text::paint(sink.scene_for(space), layout, transform, &runs);
+            if let Some(editing) = &editing {
+                text::paint_caret_and_composition(
+                    sink.scene_for(space),
+                    layout,
+                    transform,
+                    editing,
+                );
+            }
         }
     }
 }
