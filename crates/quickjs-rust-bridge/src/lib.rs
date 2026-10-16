@@ -4593,6 +4593,168 @@ mod implementation {
             );
         }
 
+        /// Registers `test:root`, whose source is `root`, and the modules it
+        /// forms an import cycle with. `root` imports `test:peer` first,
+        /// which imports `test:root` back, so `test:peer` resolves its
+        /// imports — one of them the `export * as` of `test:ns` — and
+        /// records its exports, then stays on the linking stack until
+        /// `test:root` completes. Whatever `root` imports after `test:peer`
+        /// is where the link can fail.
+        fn register_link_cycle(runtime: &mut Runtime, root: &str) {
+            for (name, source) in [
+                ("test:root", root),
+                (
+                    "test:peer",
+                    "import { root } from 'test:root';\n\
+                     import { ns } from 'test:ns';\n\
+                     export const peer = 'peer';\n\
+                     export function readRoot() { return root + ns.leaf; }",
+                ),
+                ("test:ns", "export * as ns from 'test:leaf';"),
+                ("test:leaf", "export const leaf = '!';"),
+            ] {
+                runtime.register_module_source(name, source).unwrap();
+            }
+        }
+
+        /// A link that fails puts every module still on its stack back to
+        /// unlinked, so a second import links them again — including
+        /// `test:peer`, which had finished its own bindings, and
+        /// `test:root`, which had resolved its import of `test:peer`
+        /// before the one that fails. Linking again releases what the
+        /// failed link left in each binding; overwriting it would leave
+        /// those references held, and `JS_FreeRuntime` aborts on the
+        /// objects it then finds uncollected.
+        #[test]
+        fn a_cycle_that_fails_to_link_is_linked_again_and_freed() {
+            let (mut runtime, mut realm) = runtime_and_realm();
+            register_link_cycle(
+                &mut runtime,
+                "import { peer, readRoot } from 'test:peer';\n\
+                 import { missing } from 'test:leaf';\n\
+                 export const root = 'root';",
+            );
+            run_module(
+                &mut runtime,
+                &mut realm,
+                "entry",
+                "for (let attempt = 0; attempt < 2; attempt += 1) {\n\
+                   try { await import('test:root'); throw Error('linked'); }\n\
+                   catch (error) {\n\
+                     if (!(error instanceof SyntaxError) || !error.message.includes(\"'missing'\"))\n\
+                       throw error;\n\
+                   }\n\
+                 }",
+            )
+            .unwrap();
+            drop(realm);
+            // `JS_FreeRuntime` asserts that every object was collected.
+            drop(runtime);
+        }
+
+        /// Uses at least `depth` KiB of this thread's stack, then calls
+        /// `operation`.
+        #[cfg(not(target_arch = "wasm32"))]
+        #[inline(never)]
+        fn with_stack_used(depth: usize, operation: &mut dyn FnMut()) {
+            let frame = std::hint::black_box([0u8; 1024]);
+            if depth == 0 {
+                operation();
+            } else {
+                with_stack_used(depth - 1, operation);
+            }
+            std::hint::black_box(&frame);
+        }
+
+        /// The same cycle, failing to link for want of stack rather than
+        /// for good: `test:root` also imports a chain of modules each
+        /// importing the next, which linking walks one native frame per
+        /// module. Retried from shallower and shallower in this thread's
+        /// stack, the import first fails before anything is linked, then
+        /// in the chain — after `test:peer` finished its bindings, so each
+        /// of these attempts links it again — and then succeeds, with every
+        /// binding of the cycle in place and every reference the failed
+        /// attempts took released.
+        ///
+        /// Native only: the depth is measured against the native stack.
+        #[cfg(not(target_arch = "wasm32"))]
+        #[test]
+        fn a_cycle_that_failed_to_link_links_once_the_stack_allows() {
+            const CHAIN: usize = 200;
+            let mut runtime = Runtime::with_options(RuntimeOptions {
+                max_stack_size: Some(256 * 1024),
+                ..RuntimeOptions::default()
+            })
+            .unwrap();
+            let mut realm = runtime.create_context().unwrap();
+            register_link_cycle(
+                &mut runtime,
+                "import { peer, readRoot } from 'test:peer';\n\
+                 import 'test:chain0';\n\
+                 export function check() { return `${readRoot()},${peer}`; }\n\
+                 export const root = 'root';",
+            );
+            for index in 0..CHAIN {
+                let source = if index + 1 == CHAIN {
+                    "export {};".to_owned()
+                } else {
+                    format!("import 'test:chain{}';", index + 1)
+                };
+                runtime
+                    .register_module_source(&format!("test:chain{index}"), &source)
+                    .unwrap();
+            }
+            realm
+                .evaluate(
+                    EvalSource::new(
+                        "globalThis.attempt = () => {\n\
+                           globalThis.outcome = 'pending';\n\
+                           import('test:root').then(\n\
+                             (ns) => { outcome = ns.check(); },\n\
+                             (error) => { outcome = `${error.name}: ${error.message}`; });\n\
+                         };",
+                    ),
+                    EvalOptions::default(),
+                )
+                .unwrap();
+            let mut outcomes = Vec::new();
+            // 300 KiB is past the 256 KiB this runtime may use: the
+            // deepest attempts overflow before the import job starts.
+            for depth in (0..=300).rev() {
+                realm
+                    .evaluate(EvalSource::new("attempt();"), EvalOptions::default())
+                    .unwrap();
+                with_stack_used(depth, &mut || {
+                    // An import job that overflows reports itself here and
+                    // leaves `outcome` pending.
+                    let _ = runtime.drain_pending_jobs(&realm);
+                });
+                let outcome = realm
+                    .evaluate(EvalSource::new("outcome"), EvalOptions::default())
+                    .unwrap();
+                let outcome = String::from_utf16(&outcome.to_utf16().unwrap()).unwrap();
+                let linked = outcome == "root!,peer";
+                outcomes.push(outcome);
+                if linked {
+                    break;
+                }
+            }
+            assert_eq!(
+                outcomes.last().map(String::as_str),
+                Some("root!,peer"),
+                "{outcomes:?}"
+            );
+            assert!(
+                outcomes
+                    .iter()
+                    .any(|outcome| outcome == "InternalError: stack overflow"),
+                "{outcomes:?}"
+            );
+            drop(realm);
+            // `JS_FreeRuntime` asserts that every object was collected.
+            drop(runtime);
+        }
+
         #[test]
         fn preloaded_module_names_are_unique() {
             let mut runtime = Runtime::new().expect("runtime should initialize");
