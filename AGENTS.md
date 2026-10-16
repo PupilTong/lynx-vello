@@ -2217,10 +2217,22 @@ paragraph whatever `defaultDisplayLinear` says, `wrapper` is
 inside, or — a ruled deviation from web-core — into a tag that is not a Lynx
 tag (`div`, `span`, any other name; `tree::raw_text`'s `LYNX_TAGS`), there as
 loose text that `dom` boxes into anonymous items; under any other Lynx tag it is
-`display: none`. One `wrapper` level is looked through either way. It carries
-`white-space-collapse: preserve-breaks`, the one place Lynx keeps a literal
-newline. Sibling runs and nested text share the establishing element's
-paragraph. `text { color: initial; }` stops an ancestor's color at the text
+`display: none`. One `wrapper` level is looked through either way. A `text`
+keeps its text verbatim, as every native backend does (user ruling
+2026-10-16): the UA rule `text { --lynx-verbatim-white-space: 1; }`, a
+registered non-inherited integer on the `text` root alone, makes its paragraph
+skip CSS white-space processing (`hughie::text::paragraph`'s
+`WhiteSpaceProcessing::Verbatim`), so space runs, leading spaces, tabs (20px
+stops) and every newline stay, trailing spaces hang, a newline that ends the
+text adds an empty last line (Android's `StaticLayout`), and only
+`white-space: nowrap` stops the wrapping, showing nothing after the first
+newline — native parses no other keyword, so `pre` and the rest wrap.
+`<markdown>`'s `-lynx-text` paragraphs do not carry the flag and keep css-text-3
+collapsing. The carrier's own `white-space-collapse: preserve-breaks` decides
+its newlines where the flag is absent: as loose text in an HTML element (the
+standard inline formatting context), and in a `text` whose author CSS turned
+the flag off. Sibling runs and nested text share the establishing
+element's paragraph. `text { color: initial; }` stops an ancestor's color at the text
 root and `text > text` inherits it again, as in web-elements; a page whose
 config says `enableCSSInheritance: true` gets one more UA rule,
 `view > text, view > wrapper, view > wrapper > text { color: inherit;

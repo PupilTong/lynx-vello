@@ -154,7 +154,8 @@ pub(in crate::text) fn break_clamped(
 /// Whether a committed line renders nothing: no boxes and an empty text
 /// range. Parley commits one after a box overflows onto its own line at the
 /// end of content, and after a trailing preserved newline — cases where CSS
-/// produces no line box.
+/// produces no line box. A verbatim paragraph keeps the second as its empty
+/// last line ([`capture_lines`]).
 pub(in crate::text) fn is_blank_line(line: &parley::Line<'_, TextBrush>) -> bool {
     let range = line.text_range();
     range.start >= range.end
@@ -169,9 +170,10 @@ pub(in crate::text) struct NaturalLine {
     pub(in crate::text) start_unit: u32,
     /// End of the line's visible content — trailing collapsed whitespace
     /// excluded, matching the web reference's rect-derived line ranges, and
-    /// trailing *preserved* spaces kept, because they are content. This
-    /// is the basis for the reported range, the ellipsis arithmetic, and the
-    /// dots back-off.
+    /// trailing *preserved* spaces kept, because they are content, except in
+    /// a verbatim paragraph, whose line-end spaces all hang as native Lynx's
+    /// do. This is the basis for the reported range, the ellipsis
+    /// arithmetic, and the dots back-off.
     pub(in crate::text) end_unit: u32,
     /// Everything the line consumed, trailing whitespace included — the
     /// basis for locating a cut and for whether content remains.
@@ -182,8 +184,23 @@ pub(in crate::text) struct NaturalLine {
     pub(in crate::text) end_byte: u32,
 }
 
+impl NaturalLine {
+    /// Whether the line consumed no source at all: the empty last line a
+    /// verbatim paragraph keeps after a newline that ends its text. Every
+    /// other line consumes at least a character, a newline or a box.
+    pub(in crate::text) const fn is_empty(&self) -> bool {
+        self.start_unit == self.consumed_end
+    }
+}
+
 /// Reads the committed lines back into source space, dropping trailing blank
-/// lines.
+/// lines — except, where the source map asks for it
+/// ([`SourceMap::final_empty_line`]), the one parley commits after a newline
+/// that ends the text. That line is kept as an empty line at the end of the
+/// source: its start, end and consumed end are all the source unit after
+/// the newline, and both its bytes the text's end, so it shows no content,
+/// selects nothing in a range query, and reports `start == end` in the line
+/// list, as Android's `getLineStart`/`getLineEnd` do for it.
 ///
 /// `Line::text_range()` reports an inverted `usize::MAX..0` range for a line
 /// whose items are all inline boxes, so byte bounds fall back to the line's
@@ -197,6 +214,9 @@ pub(in crate::text) fn capture_lines(
 ) -> Vec<NaturalLine> {
     let mut lines = Vec::with_capacity(layout.len());
     let mut blank_tail = 0;
+    // Whether the last line with content ends with the newline that ends
+    // the text.
+    let mut ends_with_break = false;
     for line in layout.lines() {
         if is_blank_line(&line) {
             // Blank lines only ever trail (every interior line carries its
@@ -216,6 +236,9 @@ pub(in crate::text) fn capture_lines(
         blank_tail = 0;
         let range = line.text_range();
         let has_text = range.start <= range.end;
+        ends_with_break = has_text
+            && range.end == text.len()
+            && text.as_bytes()[..range.end].last() == Some(&b'\n');
         let mut start_unit = u32::MAX;
         let mut end_unit = 0;
         let mut consumed_end = 0;
@@ -236,7 +259,8 @@ pub(in crate::text) fn capture_lines(
             let start = u32::try_from(range.start).expect("text fits u32");
             let end = u32::try_from(range.end).expect("text fits u32");
             // Only collapsible whitespace and the break itself trail outside
-            // the line's content; a preserved space is content.
+            // the line's content; a preserved space is content, except where
+            // the map hangs every line-end space (a verbatim paragraph).
             let visible_end = map.visible_end(text, start, end);
             start_unit = start_unit.min(map.byte_to_unit(text, start));
             // End offsets go through the end-sided lookup: a box sharing the
@@ -257,6 +281,19 @@ pub(in crate::text) fn capture_lines(
             end_byte,
         });
     }
-    lines.truncate(lines.len() - blank_tail);
+    let kept = usize::from(blank_tail > 0 && ends_with_break && map.final_empty_line());
+    if kept == 1 {
+        let end = u32::try_from(text.len()).expect("text fits u32");
+        let unit = map.unit_before(text, end);
+        let index = lines.len() - blank_tail;
+        lines[index] = NaturalLine {
+            start_unit: unit,
+            end_unit: unit,
+            consumed_end: unit,
+            start_byte: end,
+            end_byte: end,
+        };
+    }
+    lines.truncate(lines.len() - blank_tail + kept);
     lines
 }

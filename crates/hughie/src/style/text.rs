@@ -5,7 +5,7 @@ use core::num::NonZeroU32;
 use std::sync::LazyLock;
 
 use style_traits::ToCss;
-use stylo::computed_values::text_wrap_mode;
+use stylo::computed_values::{text_wrap_mode, white_space_collapse};
 use stylo::custom_properties::Name;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{
@@ -19,6 +19,8 @@ static TEXT_MAXLINE: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-text-max
 static TEXT_MAXLENGTH: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-text-maxlength"));
 static TAIL_COLOR_CONVERT: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-tail-color-convert"));
 static INLINE_TRUNCATION: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-inline-truncation"));
+static VERBATIM_WHITE_SPACE: LazyLock<Name> =
+    LazyLock::new(|| Name::from("lynx-verbatim-white-space"));
 
 /// Read the UA-registered, non-inherited integer after CSS computation.
 /// Stylo has no public scalar accessor for registered values. `ToCss` exposes
@@ -41,6 +43,11 @@ style_protocol! {
                 *style.inherited_values().get_inherited_text().get_text_align(),
             text_wrap_mode -> text_wrap_mode::T =
                 *style.inherited_values().get_inherited_text().get_text_wrap_mode(),
+            // The container's own value. A run reads its own for its text;
+            // a Lynx text block reads this one only to tell `white-space: pre`
+            // from `nowrap` (`BlockStyle::from_container_style`).
+            white_space_collapse -> white_space_collapse::T =
+                *style.inherited_values().get_inherited_text().get_white_space_collapse(),
             word_break -> WordBreak =
                 *style.inherited_values().get_inherited_text().get_word_break(),
             text_indent -> TextIndent =
@@ -73,6 +80,15 @@ style_protocol! {
             // what keeps element vocabulary out of the layout host.
             is_inline_truncation -> bool =
                 paragraph_limit(style.computed_values(), &INLINE_TRUNCATION)
+                    .is_some_and(|value| value != 0),
+            // Whether this paragraph keeps its text verbatim, as native Lynx
+            // keeps a `<text>`'s: no white-space processing. A positive value
+            // is on; zero and a negative value are off. The UA sheet sets it
+            // to 1 on the `text` root alone, so a `display: -lynx-text` scope
+            // that is no `<text>` — a `<markdown>` shadow paragraph — still
+            // collapses its white space.
+            verbatim_white_space -> bool =
+                paragraph_limit(style.computed_values(), &VERBATIM_WHITE_SPACE)
                     .is_some_and(|value| value != 0),
         }
     }
@@ -155,12 +171,17 @@ mod tests {
 
         assert_eq!(style.text_align(), TextAlign::Start);
         assert_eq!(style.text_wrap_mode(), text_wrap_mode::T::Wrap);
+        assert_eq!(
+            style.white_space_collapse(),
+            white_space_collapse::T::Collapse
+        );
         assert_eq!(style.word_break(), WordBreak::Normal);
         assert!(style.text_indent().length.is_zero());
         assert_eq!(style.text_maxline(), None);
         assert_eq!(style.text_maxlength(), None);
         assert!(!style.tail_color_convert());
         assert!(!style.is_inline_truncation());
+        assert!(!style.verbatim_white_space());
         // A paragraph needs no LinearStyle implementation.
         let block = crate::text::block::BlockStyle::from_container_style(&style);
         assert_eq!(block.max_lines, None);

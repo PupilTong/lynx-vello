@@ -376,6 +376,100 @@ consequential choice about whether to follow the spec or the quirk.
   and maps onto an existing CSS property. They are plain declarations, so
   author CSS outranks the attribute the way it outranks the rest of the UA
   sheet, and the attribute's own value is never rewritten.
+- **A `<text>` keeps its text verbatim: no CSS white-space processing,
+  where web-core collapses it** — every native backend hands a `<text>`'s
+  string to its platform engine as written: the element stores the text
+  unchanged (`lynx/core/renderer/dom/fiber/raw_text_element.cc:16-46`), and
+  Android (`BaseTextShadowNode.java:494-498`), iOS
+  (`LynxBaseTextShadowNode.m:240-249`) and textra
+  (`text_layout_textra.cc:569-575`) append it to the paragraph without
+  touching spaces, tabs or newlines. The web target hands `x-text` to the
+  browser, which applies css-text-3's `white-space-collapse: collapse` to
+  every run except `raw-text`, which declares `preserve-breaks`
+  (`lynx-stack/packages/web-platform/web-elements/src/elements/XText/x-text.css:261-265`).
+  A user ruling of 2026-10-16 follows native. The UA rule
+  `text { --lynx-verbatim-white-space: 1; }` (a registered, non-inherited
+  `<integer>` on the `text` root alone, `crates/bobcat-core/src/main/tree/text.rs`)
+  selects `WhiteSpaceProcessing::Verbatim`
+  (`crates/hughie/src/text/paragraph/content.rs`) for the paragraph, so:
+  space runs and leading spaces stay; every `\n`, in a `raw-text` carrier or
+  a `text` attribute, is a forced break and the spaces after it stay; no
+  run's own `white-space-collapse` is read; a soft wrap ends a space run on
+  the line before it, and every space at a line end hangs — it adds no width
+  and is not line content, so `getTextBoundingRect` and the per-line layout
+  data exclude it, as Android's `getLineMax` does. Parley hangs only one
+  overflowing space cluster and starts the next line with the rest, so a
+  `<text>` emits each run of spaces inside one run item as one space cluster
+  widened to the whole run's advance, and shapes the spaces directly before a
+  newline with no advance, which would otherwise hang, break the line and
+  leave the newline a line of its own (`SpaceRun` in
+  `crates/hughie/src/text/paragraph/content.rs`). Two limits follow: a
+  `text-maxlength` or ellipsis cut that falls inside such a run lands before
+  the whole run, and a run of spaces split between two runs (at a nested
+  `text` boundary) hangs only its first part at a wrap. A tab advances to the
+  first multiple of 20px strictly past its position, Android's
+  `Layout.TAB_INCREMENT` (AOSP `Layout.java:3714`), by Android's own
+  `nextTab(h) = floor((h + 20) / 20) * 20` with no rounding tolerance. The
+  position is measured from the start of the line's text, after the leading
+  indent: Lynx applies `text-indent` as a `LeadingMarginSpan.Standard(indent,
+  0)` (`lynx/platform/android/lynx_android/src/main/java/com/lynx/tasm/behavior/shadow/text/TextShadowNode.java:295-298`),
+  a margin outside the text Android's `TextLine` measures tabs in, so a tab at
+  the start of a 15px-indented line runs to 35px, where css-text-3 measures
+  from the content edge and stops at 20 (`TabStops::Native` in
+  `crates/hughie/src/text/paragraph/tab.rs`). iOS and Harmony leave tabs to
+  their platform engines and are not confirmed to match. Which lines carry the
+  indent follows native too (user ruling 2026-10-17): Android gives a
+  `LeadingMarginSpan`'s first-line margin to the first line of every
+  paragraph, so a `<text>` indents its first line and every line that starts
+  after a `\n` — css-text-3's `each-line` (`BlockStyle::indent_keywords` in
+  `crates/hughie/src/text/block/style.rs`) — and no soft-wrapped line; each
+  indented line measures its tab stops from its own text start, after the
+  indent. A `<markdown>` paragraph still indents its first line only, and the
+  CSS inline formatting context follows the author's `text-indent` keywords.
+  Under
+  `white-space: nowrap` nothing after the first `\n` shows, as Android's
+  `TextRenderer.handleWhiteSpaceWrap` deletes it
+  (`TextRenderer.java:850-867`): the cut keeps the `\n` itself, so a `\n` at
+  index 0 shows one empty line (Android deletes nothing there and its one-line
+  limit leaves the same empty line); the dropped content shapes nothing, an
+  atomic inline box after the cut is hidden, the cut draws no truncation
+  marker, the dropped source units are still counted in source ranges, and
+  the first line keeps its own width cut and `text-overflow` ellipsis. iOS
+  sets `maximumNumberOfLines = 1` instead (`LynxTextRenderer.m:1024-1025`);
+  whether TextKit's tail truncation then marks the hidden lines is not
+  confirmed here. web-core keeps breaking at a `raw-text` newline under
+  `nowrap`, because `preserve-breaks` is the carrier's own declared value.
+  Only an authored `nowrap` stops the wrapping and cuts (user ruling
+  2026-10-16): native's enum parser knows `normal` and `nowrap` alone and
+  drops every other keyword (`enum_handler.cc:76-89`), so `pre`, `pre-wrap`,
+  `pre-line` and `break-spaces` on a `<text>` wrap at the box width with
+  every line shown, as `normal` does, where web-core shows `pre` unwrapped.
+  `pre` is the one other keyword that computes `text-wrap-mode: nowrap`; a
+  verbatim block tells it apart by its `white-space-collapse`, which is not
+  `collapse`, and wraps (`wrap_mode` in
+  `crates/hughie/src/text/block/style.rs`, the one place the block's wrap
+  mode is decided). A newline that ends the text adds an empty last line,
+  as Android's `StaticLayout` does and Lynx measures through
+  `Layout.getHeight` (`TextRenderer.java:720`), by the same ruling:
+  `"aaa\n"` is two lines tall. The empty line is reported in the per-line
+  layout data with `start == end ==` the source length and the height of
+  the line before it; it shows no content, so `getTextBoundingRect` gives it
+  no box (an empty range at its start answers the natives' zero box with its
+  height), and the source map is unchanged. iOS and Harmony are not
+  confirmed; the engine follows Android. Under the `nowrap` cut the text
+  already ends at its first newline, which shows as one line, so a newline
+  that ends the text adds nothing there; a `<markdown>` paragraph and the CSS
+  inline formatting context keep css-text-3's result, where a final
+  preserved newline opens no line. `text-maxlength` composes in Android's order —
+  `getUsedSpanClippedWithMaxLength` clips first and appends its ellipsis
+  (`TextRenderer.java:126-135`), the newline deletion runs after it — so a
+  length past the `\n` cuts nothing and leaves no marker (Android's appended
+  ellipsis is deleted with the rest), while a length before it cuts as usual,
+  its marker still gated on `text-overflow` (A0 in
+  `web-text-test-replication.md`). `<markdown>`'s shadow paragraphs are
+  `-lynx-text` scopes without the flag and keep css-text-3 collapsing, as
+  web-core's `x-markdown` does; author CSS can set the flag to `0` on a
+  `text` to get css-text-3 processing back.
 - **`text-align: justify` does not parse, and the declaration is dropped
   without a trace** — the vendored fork excludes `Justify` from
   `TextAlignKeyword` under its `lynx` feature
