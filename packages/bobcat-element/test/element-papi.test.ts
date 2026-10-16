@@ -570,9 +570,9 @@ describe("installation", () => {
         "__BobcatHandleOf",
       ].sort(),
     );
-    // The six every event carries; the detail numbers are a rest parameter,
-    // which `length` does not count.
-    expect(elementModule.__BobcatDispatchEvent).toHaveLength(6);
+    // The seven every event carries; the detail numbers are a rest
+    // parameter, which `length` does not count.
+    expect(elementModule.__BobcatDispatchEvent).toHaveLength(7);
   });
 
   it("creates the realm's document once, over the config it is given", () => {
@@ -1454,6 +1454,8 @@ function tree() {
  *
  * `bubbles` is the event's own, and the default is what every routed Lynx
  * event is: the two that are not are an `<image>`'s `load` and `error`.
+ * `cancelable` is the event's own too, false unless a test is about
+ * cancellation. Answers what the dispatch answers: `defaultPrevented`.
  */
 function dispatch(
   path: object[],
@@ -1461,16 +1463,18 @@ function dispatch(
   payload: DispatchPayload = {},
   targets?: object[],
   bubbles: boolean = true,
-) {
+  cancelable: boolean = false,
+): boolean {
   const nodes = path.map((handle) => __GetElementUniqueID(handle));
   const targeted = targets === undefined
     ? nodes.map(() => nodes[0])
     : targets.map((handle) => __GetElementUniqueID(handle));
-  elementModule.__BobcatDispatchEvent(
+  return elementModule.__BobcatDispatchEvent(
     nodes.join(","),
     targeted.join(","),
     name,
     bubbles,
+    cancelable,
     payload.timestamp ?? 0,
     ...extraArguments(payload),
     ...detailArguments(payload),
@@ -1482,6 +1486,9 @@ const DETAIL_POSITION = 0;
 const DETAIL_EMPTY = 2;
 const DETAIL_EXPOSURE = 3;
 const DETAIL_KEY = 4;
+const DETAIL_INPUT = 5;
+const DETAIL_COMPOSITION = 6;
+const DETAIL_FOCUS = 7;
 
 /**
  * What a test asks one dispatch's `detail` to be made of.
@@ -1519,6 +1526,18 @@ interface DispatchPayload {
    * and the modifier bitmask (alt 1, ctrl 2, meta 4, shift 8).
    */
   key?: { key: string; code: string; repeat: boolean; modifiers: number };
+  /**
+   * A `beforeinput`/`input`: the `DETAIL_INPUT` kind — `inputType`, `data`
+   * (a string or null) and `isComposing`.
+   */
+  input?: { inputType: string; data: string | null; isComposing: boolean };
+  /** A `composition*` event: the `DETAIL_COMPOSITION` kind — `data`. */
+  composition?: string;
+  /**
+   * A focus event: the `DETAIL_FOCUS` kind — the related element's node id,
+   * or null.
+   */
+  related?: number | null;
 }
 
 /**
@@ -1550,6 +1569,16 @@ function detailArguments(payload: DispatchPayload): [number, ...unknown[]] {
   if (payload.key !== undefined) {
     const { key, code, repeat, modifiers } = payload.key;
     return [DETAIL_KEY, key, code, repeat, modifiers];
+  }
+  if (payload.input !== undefined) {
+    const { inputType, data, isComposing } = payload.input;
+    return [DETAIL_INPUT, inputType, data, isComposing];
+  }
+  if (payload.composition !== undefined) {
+    return [DETAIL_COMPOSITION, payload.composition];
+  }
+  if (payload.related !== undefined) {
+    return [DETAIL_FOCUS, payload.related];
   }
   return [
     DETAIL_POSITION,
@@ -1780,6 +1809,7 @@ describe("event listeners", () => {
       new Array(4).fill(__GetElementUniqueID(inner)).join(","),
       "tap",
       true,
+      false,
       0,
       0,
       DETAIL_POSITION,
@@ -1870,6 +1900,7 @@ describe("event listeners", () => {
         "999",
         "tap",
         true,
+        false,
         0,
         0,
         DETAIL_POSITION,
@@ -3048,6 +3079,165 @@ describe("key events", () => {
   });
 });
 
+describe("editing events and cancellation", () => {
+  /** The members the editing events carry on themselves. */
+  interface EditingEvent {
+    type: string;
+    detail: Record<string, unknown>;
+    cancelable: boolean;
+    defaultPrevented: boolean;
+    preventDefault: () => void;
+    inputType?: string;
+    data?: string | null;
+    isComposing?: boolean;
+    relatedTarget?: { uid: number } | null;
+  }
+
+  it("puts InputEvent's members on a beforeinput and leaves the detail empty", () => {
+    const { inner } = tree();
+    const seen: EditingEvent[] = [];
+    __AddEventListener(inner, "beforeinput", (event: EditingEvent) => {
+      seen.push(event);
+    }, {});
+
+    dispatch([inner], "beforeinput", {
+      input: { inputType: "insertText", data: "a", isComposing: false },
+    }, undefined, true, true);
+    dispatch([inner], "beforeinput", {
+      input: { inputType: "deleteContentBackward", data: null, isComposing: true },
+    }, undefined, true, true);
+
+    expect(seen).toHaveLength(2);
+    expect(seen[0]!.detail).toEqual({});
+    expect(seen[0]!.inputType).toBe("insertText");
+    expect(seen[0]!.data).toBe("a");
+    expect(seen[0]!.isComposing).toBe(false);
+    expect(seen[0]!.cancelable).toBe(true);
+    expect(seen[1]!.inputType).toBe("deleteContentBackward");
+    expect(seen[1]!.data).toBeNull();
+    expect(seen[1]!.isComposing).toBe(true);
+  });
+
+  it("puts CompositionEvent.data on a composition event", () => {
+    const { inner } = tree();
+    const seen: EditingEvent[] = [];
+    __AddEventListener(inner, "compositionupdate", (event: EditingEvent) => {
+      seen.push(event);
+    }, {});
+
+    dispatch([inner], "compositionupdate", { composition: "にほ" });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.data).toBe("にほ");
+    expect(seen[0]!.detail).toEqual({});
+    expect("inputType" in seen[0]!).toBe(false);
+  });
+
+  it("resolves a focus event's relatedTarget to its descriptor, or null", () => {
+    const { outer, inner } = tree();
+    const seen: EditingEvent[] = [];
+    __AddEventListener(inner, "focus", (event: EditingEvent) => {
+      seen.push(event);
+    }, {});
+
+    dispatch([inner], "focus", { related: __GetElementUniqueID(outer) }, undefined, false);
+    dispatch([inner], "focus", { related: null }, undefined, false);
+    dispatch([inner], "focus", { related: 999_999 }, undefined, false);
+
+    expect(seen.map((event) => event.relatedTarget?.uid ?? null)).toEqual([
+      __GetElementUniqueID(outer),
+      null,
+      null,
+    ]);
+    expect(seen[0]!.detail).toEqual({});
+  });
+
+  it("answers defaultPrevented for a cancelable event a listener canceled", () => {
+    const { outer, inner } = tree();
+    __AddEventListener(outer, "beforeinput", (event: EditingEvent) => {
+      event.preventDefault();
+    }, {});
+    const input = { inputType: "insertText", data: "x", isComposing: false };
+
+    expect(dispatch([inner, outer], "beforeinput", { input }, undefined, true, true)).toBe(
+      true,
+    );
+    expect(dispatch([inner, outer], "keydown", {
+      key: { key: "x", code: "KeyX", repeat: false, modifiers: 0 },
+    }, undefined, true, true)).toBe(false);
+  });
+
+  it("ignores preventDefault on an event that is not cancelable", () => {
+    const { inner } = tree();
+    let seen: EditingEvent | undefined;
+    __AddEventListener(inner, "input", (event: EditingEvent) => {
+      event.preventDefault();
+      seen = event;
+    }, {});
+
+    const input = { inputType: "insertText", data: "x", isComposing: false };
+    expect(dispatch([inner], "input", { input }, undefined, true, false)).toBe(false);
+    expect(seen?.defaultPrevented).toBe(false);
+    expect(seen?.cancelable).toBe(false);
+  });
+
+  it("keeps defaultPrevented read-only and canceled through a detached preventDefault", () => {
+    const { outer, inner } = tree();
+    const read: boolean[] = [];
+    __AddEventListener(inner, "keydown", (event: EditingEvent) => {
+      read.push(event.defaultPrevented);
+      // Called off the event, as a copy or a destructuring would call it.
+      const { preventDefault } = event;
+      preventDefault();
+      read.push(event.defaultPrevented);
+      expect(() => {
+        (event as { defaultPrevented: boolean }).defaultPrevented = false;
+      }).toThrow(TypeError);
+    }, {});
+    __AddEventListener(outer, "keydown", (event: EditingEvent) => {
+      read.push(event.defaultPrevented);
+    }, {});
+
+    expect(dispatch([inner, outer], "keydown", {
+      key: { key: "x", code: "KeyX", repeat: false, modifiers: 0 },
+    }, undefined, true, true)).toBe(true);
+    expect(read).toEqual([false, true, true]);
+  });
+
+  it("answers false for a path with no step", () => {
+    expect(
+      elementModule.__BobcatDispatchEvent("", "", "keydown", true, true, 0, 0, DETAIL_EMPTY),
+    ).toBe(false);
+  });
+
+  it("publishes the editing members without cancellation to a background handler", () => {
+    const { outer, inner } = tree();
+    __AddEvent(inner, "bindEvent", "input", "3:0:bindinput");
+    __AddEvent(inner, "bindEvent", "focus", "3:0:bindfocus");
+
+    dispatch([inner], "input", {
+      input: { inputType: "insertText", data: "x", isComposing: true },
+    });
+    dispatch([inner], "focus", { related: __GetElementUniqueID(outer) }, undefined, false);
+
+    const published = mock.named("publishEvent");
+    expect(published).toHaveLength(2);
+    const input = published[0]![3] as Record<string, unknown>;
+    expect(input["inputType"]).toBe("insertText");
+    expect(input["data"]).toBe("x");
+    expect(input["isComposing"]).toBe(true);
+    for (const member of ["preventDefault", "cancelable", "defaultPrevented"]) {
+      expect(member in input, member).toBe(false);
+    }
+    const focus = published[1]![3] as Record<string, unknown>;
+    expect(focus["relatedTarget"]).toEqual({
+      dataset: {},
+      id: null,
+      uid: __GetElementUniqueID(outer),
+    });
+  });
+});
+
 describe("timestamp and params", () => {
   /** The two members every dispatched event carries, whatever its type. */
   interface StampedEvent {
@@ -3080,6 +3270,7 @@ describe("timestamp and params", () => {
       String(__GetElementUniqueID(inner)),
       String(__GetElementUniqueID(inner)),
       "tap",
+      undefined,
       undefined,
       0,
       0,

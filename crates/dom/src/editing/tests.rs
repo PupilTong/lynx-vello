@@ -247,6 +247,34 @@ fn a_detached_host_cannot_be_focused_and_a_removed_one_loses_focus_silently() {
     assert_eq!(doc.focused(), None);
 }
 
+/// The host count an embedder routes editing input by: set and removed with
+/// the attribute, kept while a host is detached, dropped when it is freed.
+#[test]
+fn the_editing_host_count_follows_the_attribute_and_the_free() {
+    let mut doc = document();
+    let page = doc.document_element().id();
+    assert!(!doc.has_editing_hosts());
+    let host = doc.create_element("view", ());
+    doc.set_attribute(host, "contenteditable", "false");
+    assert!(!doc.has_editing_hosts(), "\"false\" makes no host");
+    doc.set_attribute(host, "contenteditable", "");
+    assert!(doc.has_editing_hosts(), "a detached host counts");
+    doc.set_attribute(host, "contenteditable", "true");
+    let other = doc.create_element("view", ());
+    doc.set_attribute(other, "contenteditable", "plaintext-only");
+    doc.append_child(page, host);
+    doc.append_child(host, other);
+    doc.remove_attribute(host, "contenteditable");
+    assert!(doc.has_editing_hosts(), "one host is left");
+    doc.remove_element(other);
+    assert!(doc.has_editing_hosts(), "a removed host is still allocated");
+    doc.drop_element(other);
+    assert!(!doc.has_editing_hosts(), "the last host was freed");
+    doc.set_attribute(host, "contenteditable", "");
+    doc.set_attribute(host, "contenteditable", "FALSE");
+    assert!(!doc.has_editing_hosts());
+}
+
 // --- Commands --------------------------------------------------------------
 
 #[test]

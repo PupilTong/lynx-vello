@@ -1114,7 +1114,7 @@ The MTS table, whose events go to the view's host:
 | Module | `ScriptRunError` | no | `loading an imported module` | `load_module` |
 | Future | `ScriptRunError` | no | `settling a future` | `settle_future` |
 | Timer | `TimerFailed` | no | none | the epilogue |
-| Listener | `ListenerFailed` | no | none | an input event (`ToMain::DispatchEvent`), a batch of component events, what a worker said (`consume_worker_events`) |
+| Listener | `ListenerFailed` | no | none | an input event (`ToMain::DispatchEvent`) and its editing default action, an editing command's events (`ToMain::Edit`), a batch of component events, what a worker said (`consume_worker_events`) |
 | Frame | `ScriptRunError` | no | none | `ToMain::Vsync` |
 | HostCall | `ScriptRunError` | no | none | `ToMain::PageUpdate`, `ToMain::ModuleCallback` |
 | ShadowRealm | `ScriptRunError` | no | `in a ShadowRealm` | the epilogue: a rejection a `ShadowRealm` child left unhandled, or the realm itself beside its children |
@@ -1941,8 +1941,11 @@ and two receiving ends, and the task serving that view holds the others. A
 sibling's traffic is not on this path at all, so no message names its view and
 no receiver has to defer one.
 
-- `ToMain`, an mpsc FIFO in: `PageUpdate`, `DispatchEvent`, `Vsync`, `Posted`,
-  `ImageEvents`, `ModuleCallback`. A FIFO because the order two commands
+- `ToMain`, an mpsc FIFO in: `PageUpdate`, `DispatchEvent`, `Edit`, `Vsync`,
+  `Posted`, `ImageEvents`, `ModuleCallback`. `Edit` is one editing command
+  for the focused editing host (`LynxView::edit`: an input method's
+  composition or commit, a selection), counted and ordered with the painter's
+  routed input. A FIFO because the order two commands
   arrive in is what they mean. `LynxView` holds the one strong sender, inside
   the seat an attached `Painter` holds only a `Weak` of, so a painter can never
   keep a released view's task alive. That sender is a `CommandSender`, which
@@ -1966,7 +1969,11 @@ no receiver has to defer one.
   deliberately not a command — an unbound flush parks the job it runs in on
   this very watch, and no other job would run to read one.
 - `ViewNotice`, an mpsc FIFO back, drained by `LynxView::pump`: `Engine(event)`,
-  `RequestImages(sources)`, and `RequestSource { request, completion }`. Only
+  `RequestImages(sources)`, `RequestSource { request, completion }`, and
+  `TextInputState(state)` — the focused editing host's value, selection,
+  composition and geometry, sent from a page's epilogue after its commit when
+  it differs from the last one sent, which `pump` hands the host as
+  `EngineEvent::TextInputStateChanged` (not once the view has failed). Only
   what a host must *act* on rides here.
 - `watch<Published>`, read by any observer and by the painter in particular:
   the newest committed frame, the listener-name set, and the newest serviced

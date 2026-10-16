@@ -107,10 +107,13 @@ const TAP_EVENT: &str = "tap";
 /// realm reads the discriminator alone and the one dispatch export stays
 /// general. Mirrored by the realm's own `DETAIL_*` constants in
 /// `element-papi.ts`. (1 was a `load`'s size, which crosses as extras now.)
-const DETAIL_INPUT: f64 = 0.0;
+const DETAIL_POSITION: f64 = 0.0;
 const DETAIL_EMPTY: f64 = 2.0;
 const DETAIL_EXPOSURE: f64 = 3.0;
 const DETAIL_KEY: f64 = 4.0;
+const DETAIL_INPUT: f64 = 5.0;
+const DETAIL_COMPOSITION: f64 = 6.0;
+const DETAIL_FOCUS: f64 = 7.0;
 
 /// The bits a key event's modifiers cross as, in [`DETAIL_KEY`]'s last
 /// number. Mirrored by `element-papi.ts`.
@@ -165,10 +168,51 @@ fn push_detail_strings<'a>(
     }
 }
 
-/// Inline arguments for one dispatch: the six of the header, then an
-/// input event's discriminator and eight detail numbers. Extras and touch
-/// points spill.
-type Arguments<'a> = SmallVec<[HostArgument<'a>; 15]>;
+/// Inline arguments for one dispatch: the seven of the header (the two
+/// paths, the name, `bubbles`, `cancelable`, the timestamp and the extras
+/// count), then an input event's discriminator and eight detail numbers.
+/// Extras and touch points spill.
+type Arguments<'a> = SmallVec<[HostArgument<'a>; 16]>;
+
+/// An event's three flags, as DOM's `EventInit` has them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EventFlags {
+    pub(crate) bubbles: bool,
+    pub(crate) composed: bool,
+    pub(crate) cancelable: bool,
+}
+
+impl EventFlags {
+    /// A component's own event — an image's `load`, a dialog's `close`, a
+    /// `scroll`, `uiappear` — and the like: it neither bubbles, leaves its
+    /// tree nor can be canceled, as HTML and web-core fire every one of
+    /// them.
+    pub(crate) const COMPONENT: Self = Self {
+        bubbles: false,
+        composed: false,
+        cancelable: false,
+    };
+
+    /// A routed input event: every one bubbles and is composed, as UI
+    /// Events' are, and every one but a cancellation can be canceled
+    /// (`pointercancel` and `touchcancel` are not cancelable in their
+    /// specifications).
+    pub(crate) fn routed(name: &str) -> Self {
+        Self {
+            bubbles: true,
+            composed: true,
+            cancelable: !matches!(name, "pointercancel" | "touchcancel"),
+        }
+    }
+}
+
+/// What one dispatch answered: whether the realm published the dispatch
+/// export at all, and whether a listener canceled a cancelable event.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Dispatched {
+    pub(crate) delivered: bool,
+    pub(crate) default_prevented: bool,
+}
 
 /// Appends the extras channel: the count, then each name and its value.
 fn encode_extras<'a>(extras: Extras<'a>, arguments: &mut Arguments<'a>) {
@@ -202,9 +246,9 @@ fn pointer_type(device: dom::input::PointerKind) -> &'static str {
 /// carries; this is only how it crosses, and the object is built in the
 /// realm, because its shape is JavaScript's.
 ///
-/// - [`DETAIL_INPUT`] for a pointer, wheel or touch event, eight values: the device position; the
-///   wheel delta; W3C `button`, `buttons`, `pointerId` and `pointerType` — each `undefined` for a
-///   shape that has none, which is how the realm tells the three apart — then four numbers per
+/// - [`DETAIL_POSITION`] for a pointer, wheel or touch event, eight values: the device position;
+///   the wheel delta; W3C `button`, `buttons`, `pointerId` and `pointerType` — each `undefined` for
+///   a shape that has none, which is how the realm tells the three apart — then four numbers per
 ///   touch point. The realm puts the W3C members on the event object.
 /// - [`DETAIL_EXPOSURE`] for a `uiappear`/`uidisappear`: nothing. The realm builds web-core's
 ///   detail (`ExposureServices.ts:202-208`) from the target's own unique id and its `exposure-id`
@@ -213,6 +257,14 @@ fn pointer_type(device: dom::input::PointerKind) -> &'static str {
 /// - [`DETAIL_KEY`] for `keydown`/`keyup`: the W3C `key` and `code` strings, borrowed from the
 ///   detail, `repeat` as a boolean and the modifiers as one bitmask. The realm puts them on the
 ///   event object itself, as `KeyboardEvent` and web-core do.
+/// - [`DETAIL_INPUT`] for `beforeinput`/`input`: the W3C `inputType` string, `data` as a string or
+///   `null`, and `isComposing` as a boolean — `InputEvent`'s members, which the realm puts on the
+///   event object itself.
+/// - [`DETAIL_COMPOSITION`] for `compositionstart`/`compositionupdate`/`compositionend`: the `data`
+///   string, `CompositionEvent.data` on the event object.
+/// - [`DETAIL_FOCUS`] for `focus`/`blur`/`focusin`/`focusout`: the `relatedTarget`'s packed node
+///   id, or `null` when there is none. The realm resolves it to the element's descriptor, or to
+///   `null` for an element script holds no handle of.
 /// - [`DETAIL_EMPTY`] for everything else: nothing.
 fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut Arguments<'a>) {
     let (position, delta, pointer, points): (_, _, _, &[dom::event::TouchPoint]) = match detail {
@@ -232,6 +284,32 @@ fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut Arguments<'a>) {
         EventDetail::Touch { position, points } => (*position, None, None, points),
         EventDetail::Exposure => {
             arguments.push(HostArgument::Number(DETAIL_EXPOSURE));
+            return;
+        }
+        EventDetail::Input {
+            input_type,
+            data,
+            is_composing,
+        } => {
+            arguments.push(HostArgument::Number(DETAIL_INPUT));
+            arguments.push(HostArgument::String(input_type));
+            arguments.push(
+                data.as_deref()
+                    .map_or(HostArgument::Null, HostArgument::String),
+            );
+            arguments.push(HostArgument::Boolean(*is_composing));
+            return;
+        }
+        EventDetail::Composition { data } => {
+            arguments.push(HostArgument::Number(DETAIL_COMPOSITION));
+            arguments.push(HostArgument::String(data));
+            return;
+        }
+        EventDetail::Focus { related_target } => {
+            arguments.push(HostArgument::Number(DETAIL_FOCUS));
+            arguments.push(related_target.map_or(HostArgument::Null, |node| {
+                HostArgument::Number(packed_node_id(node))
+            }));
             return;
         }
         EventDetail::Key {
@@ -266,7 +344,7 @@ fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut Arguments<'a>) {
         }
     };
     let number = |value: Option<f64>| value.map_or(HostArgument::Undefined, HostArgument::Number);
-    arguments.push(HostArgument::Number(DETAIL_INPUT));
+    arguments.push(HostArgument::Number(DETAIL_POSITION));
     arguments.push(HostArgument::Number(f64::from(position.x)));
     arguments.push(HostArgument::Number(f64::from(position.y)));
     arguments.push(number(delta.map(|delta| f64::from(delta.x))));
@@ -289,6 +367,7 @@ fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut Arguments<'a>) {
 /// heap. Compiled `ReactLynx` records are a handful of properties.
 const INLINE_DECLARATIONS: usize = 16;
 
+mod editing;
 mod style_sheets;
 
 /// A card's MTS body as the entry `bobcat-source` registers for it:
@@ -573,6 +652,10 @@ struct DocumentSlot {
     exposure: Exposure,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
+    /// Which [`editing::EditingRoute`]s are open in the painter's name set
+    /// on the editing account, one bit per route
+    /// ([`editing::EditingRoute::bit`]).
+    editing_routes: u8,
     /// The event names the view's realms have a registration for anywhere,
     /// as their global edges said, each with how many realms hold it: the
     /// page realm and every `ShadowRealm` child a `frame` renders in, so a
@@ -620,6 +703,7 @@ impl DocumentSlot {
             autoplays: Autoplays::default(),
             exposure: Exposure::new(),
             removals: 0,
+            editing_routes: 0,
             listened: FxHashMap::default(),
             observed: FxHashSet::default(),
             scrolling: SmallVec::new(),
@@ -635,6 +719,11 @@ impl DocumentSlot {
     /// and nothing empties the slot until the realm itself is freed.
     fn document_mut(&mut self) -> &mut LynxDocument {
         self.document.as_mut().expect(DOCUMENT_EXISTS)
+    }
+
+    /// [`Self::document_mut`], shared.
+    fn document_ref(&self) -> &LynxDocument {
+        self.document.as_ref().expect(DOCUMENT_EXISTS)
     }
 
     /// Turns every `x-swiper` whose autoplay timer has come due. One test on
@@ -815,9 +904,57 @@ impl DocumentSlot {
 
     /// Whether the painter's name set must hold `name`: a realm
     /// registration or a live component element wants it
-    /// ([`Self::listens`]), or, for `click`, a `dblclick`.
+    /// ([`Self::listens`]), or, for `click`, a `dblclick`; or, on the editing
+    /// account, it is a name of an open [`editing::EditingRoute`].
     fn routes(&self, name: &str) -> bool {
-        self.listens(name) || (name == CLICK_EVENT && self.listens(DOUBLE_CLICK_EVENT))
+        self.listens(name)
+            || (name == CLICK_EVENT && self.listens(DOUBLE_CLICK_EVENT))
+            || editing::EditingRoute::ALL.into_iter().any(|route| {
+                self.editing_routes & route.bit() != 0 && route.names().contains(&name)
+            })
+    }
+
+    /// Opens or closes one [`editing::EditingRoute`] in the painter's name
+    /// set. Each of its names moves only where [`Self::routes`] changes, so a
+    /// name a realm or a component wants anyway, or another open route
+    /// holds, is not touched. Nothing at all when the route is already in that state.
+    ///
+    /// The edge is [`ViewOutbox::listener_edge`]: a `watch` write, with no
+    /// acknowledgement and no wakeup, which the painter adopts at the start
+    /// of its next routing pass ([`crate::Painter::dispatch_input`] polls
+    /// the link first). So a route opened inside a job routes every event
+    /// the painter decides after that job wrote it; one it decided before
+    /// was filtered against the old set and never crossed.
+    fn set_editing_route(&mut self, route: editing::EditingRoute, open: bool) {
+        if (self.editing_routes & route.bit() != 0) == open {
+            return;
+        }
+        let names = route.names();
+        let before: SmallVec<[bool; 4]> = names.iter().map(|name| self.routes(name)).collect();
+        if open {
+            self.editing_routes |= route.bit();
+        } else {
+            self.editing_routes &= !route.bit();
+        }
+        for (name, was) in names.iter().zip(before) {
+            if self.routes(name) != was {
+                self.outbox.listener_edge(Arc::from(*name), !was);
+            }
+        }
+    }
+
+    /// Moves the two routes the document's state decides, once per entry
+    /// from the page's epilogue: [`editing::EditingRoute::Hosts`] while
+    /// [`dom::Document::has_editing_hosts`], [`editing::EditingRoute::Focus`]
+    /// while an element is focused. One counter read and one field read when
+    /// nothing changed. The drag route is the press's own
+    /// ([`MainThreadRuntime::set_pressed`]).
+    fn sync_editing_routes(&mut self) {
+        let (hosts, focused) = self.document.as_ref().map_or((false, false), |document| {
+            (document.has_editing_hosts(), document.focused().is_some())
+        });
+        self.set_editing_route(editing::EditingRoute::Hosts, hosts);
+        self.set_editing_route(editing::EditingRoute::Focus, focused);
     }
 
     /// An exposure attribute of the live element `node` was written or
@@ -1147,6 +1284,13 @@ pub(crate) struct MainThreadRuntime {
     /// target and its timestamp. A second `click` at the same target within
     /// [`DOUBLE_CLICK_MILLISECONDS`] is a `dblclick`, and clears it.
     last_click: Option<(dom::NodeId, f64)>,
+    /// What the pointer's editing default actions remember between events:
+    /// the press a mouse drag extends, and the presses a quick second and
+    /// third one count from.
+    pointer_editing: editing::PointerEditing,
+    /// The last [`dom::editing::TextInputState`] published to the host; the
+    /// default ("nothing editable is focused") until the first focus.
+    text_input: dom::editing::TextInputState,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -1248,6 +1392,8 @@ impl MainThreadRuntime {
                 slot,
                 timeline_milliseconds: 0.0,
                 last_click: None,
+                pointer_editing: editing::PointerEditing::default(),
+                text_input: dom::editing::TextInputState::default(),
                 screen: startup.screen,
                 config,
                 entry: startup.entry,
@@ -1791,8 +1937,10 @@ impl MainThreadRuntime {
                 js_runtime,
                 target,
                 name,
-                false,
-                composed,
+                EventFlags {
+                    composed,
+                    ..EventFlags::COMPONENT
+                },
                 timestamp,
                 &EventDetail::None,
                 &extras,
@@ -1872,7 +2020,7 @@ impl MainThreadRuntime {
         name: &str,
         payload: &InputEventPayload,
         release: Option<dom::NodeId>,
-    ) -> Result<bool, MainThreadError> {
+    ) -> Result<Dispatched, MainThreadError> {
         if let Some(release) = release {
             return self.dispatch_click(js_runtime, target, release, payload);
         }
@@ -1885,8 +2033,7 @@ impl MainThreadRuntime {
             js_runtime,
             target,
             name,
-            true,
-            true,
+            EventFlags::routed(name),
             payload.timestamp,
             &payload.detail,
             &[],
@@ -1911,11 +2058,11 @@ impl MainThreadRuntime {
         down: dom::NodeId,
         release: dom::NodeId,
         payload: &InputEventPayload,
-    ) -> Result<bool, MainThreadError> {
+    ) -> Result<Dispatched, MainThreadError> {
         let (target, click, double) = {
             let slot = self.slot.borrow();
             let Some(document) = slot.document.as_ref() else {
-                return Ok(false);
+                return Ok(Dispatched::default());
             };
             (
                 document.nearest_common_event_ancestor(down, release),
@@ -1925,7 +2072,7 @@ impl MainThreadRuntime {
         };
         let Some(target) = target else {
             self.last_click = None;
-            return Ok(false);
+            return Ok(Dispatched::default());
         };
         let at = payload.timestamp;
         let clicked = if click {
@@ -1933,14 +2080,13 @@ impl MainThreadRuntime {
                 js_runtime,
                 target,
                 CLICK_EVENT,
-                true,
-                true,
+                EventFlags::routed(CLICK_EVENT),
                 at,
                 &payload.detail,
                 &[],
             )
         } else {
-            Ok(false)
+            Ok(Dispatched::default())
         };
         let completes = self
             .last_click
@@ -1955,20 +2101,22 @@ impl MainThreadRuntime {
                 js_runtime,
                 target,
                 DOUBLE_CLICK_EVENT,
-                true,
-                true,
+                EventFlags::routed(DOUBLE_CLICK_EVENT),
                 at,
                 &payload.detail,
                 &[],
             )
         } else {
-            Ok(false)
+            Ok(Dispatched::default())
         };
         // A `click` listener that threw is the failure reported; the
         // `dblclick` still ran.
         match (clicked, doubled) {
             (Err(error), _) | (Ok(_), Err(error)) => Err(error),
-            (Ok(clicked), Ok(doubled)) => Ok(clicked || doubled),
+            (Ok(clicked), Ok(doubled)) => Ok(Dispatched {
+                delivered: clicked.delivered || doubled.delivered,
+                default_prevented: clicked.default_prevented || doubled.default_prevented,
+            }),
         }
     }
 
@@ -2033,30 +2181,41 @@ impl MainThreadRuntime {
     /// The document is released before the realm's call, which is what lets
     /// a listener mutate the tree.
     ///
-    /// Returns whether the realm published the export, which is all the host
-    /// can know: nothing here says whether anything ran.
+    /// `cancelable` is the event's own flag as well, and crosses after
+    /// `bubbles`: a listener's `preventDefault()` cancels only a cancelable
+    /// event, and the realm answers whether one did
+    /// ([`Dispatched::default_prevented`]), which is what decides an editing
+    /// default action — the `beforeinput` before an edit, the `keydown` and
+    /// `pointerdown` the editing default actions follow.
+    ///
+    /// Returns whether the realm published the export and whether the event's
+    /// default was prevented: nothing here says whether any listener ran.
     #[allow(
         clippy::too_many_arguments,
-        reason = "the event's two flags, as `dom::Document::event_steps` takes them"
+        reason = "the event's three flags, the first two as `dom::Document::event_steps` takes them"
     )]
     fn dispatch(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         target: dom::NodeId,
         name: &str,
-        bubbles: bool,
-        composed: bool,
+        flags: EventFlags,
         timestamp: f64,
         detail: &EventDetail,
         extras: Extras<'_>,
-    ) -> Result<bool, MainThreadError> {
+    ) -> Result<Dispatched, MainThreadError> {
+        let EventFlags {
+            bubbles,
+            composed,
+            cancelable,
+        } = flags;
         let mut nodes = String::new();
         let mut targets = String::new();
         {
             let mut slot = self.slot.borrow_mut();
             let document = slot.document_mut();
             if document.get(target).is_none() {
-                return Ok(false);
+                return Ok(Dispatched::default());
             }
             let steps = document.event_steps(target, bubbles, composed);
             // The capture pass read backwards is the whole path, target
@@ -2084,14 +2243,15 @@ impl MainThreadRuntime {
         arguments.push(HostArgument::String(&targets));
         arguments.push(HostArgument::String(name));
         arguments.push(HostArgument::Boolean(bubbles));
+        arguments.push(HostArgument::Boolean(cancelable));
         arguments.push(HostArgument::Number(timestamp));
         encode_extras(extras, &mut arguments);
         encode_detail(detail, &mut arguments);
 
-        let called = self
+        let answer = self
             .core
             .engine
-            .call_module_export(
+            .call_module_export_for_flag(
                 js_runtime,
                 ELEMENT_MODULE_SPECIFIER,
                 EVENT_DISPATCH_EXPORT,
@@ -2101,7 +2261,10 @@ impl MainThreadRuntime {
         // Listeners remove elements too; the count they ran up is settled
         // here, at the end of the dispatch.
         self.finish_batch(js_runtime, true)?;
-        Ok(called)
+        Ok(Dispatched {
+            delivered: answer.is_some(),
+            default_prevented: answer == Some(true),
+        })
     }
 
     /// Fires a non-composed `tap` at `target` for the engine's own
@@ -2170,6 +2333,7 @@ impl MainThreadRuntime {
             },
             None,
         )
+        .map(|dispatched| dispatched.delivered)
     }
 
     /// Whether the commits since the last delivery left any
@@ -2314,8 +2478,7 @@ impl MainThreadRuntime {
                 js,
                 transition.node,
                 name,
-                false,
-                false,
+                EventFlags::COMPONENT,
                 timestamp,
                 &EventDetail::Exposure,
                 &[],
