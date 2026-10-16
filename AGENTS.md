@@ -627,7 +627,8 @@ a method its module did not declare is assembled and dropped, which releases
 its functions. No built-in module ships: `bridge`, `LynxUIMethodModule` and an
 intersection module are absent. Exposure is not a module here:
 `lynx.stopExposure`/`resumeExposure` are members of both `lynx` objects over
-the `switchExposure` host member, and `lynx.setObserverFrameRate` is accepted
+the `switchExposure(on, sendEvent, scopeHost)` host member, each realm's call
+scoped to its own tree (`0` for the page realm, its frame for a card's), and `lynx.setObserverFrameRate` is accepted
 and ignored (see the exposure paragraph under the intersection primitive).
 
 `ContainerSources` registers named CSS under container-relative resource
@@ -1647,8 +1648,12 @@ that entry. What happens is JavaScript's
 text). The per-frame state — generation, `src`, whether a load is started,
 the realm, the child's `dispose`, `updateData` and `updateGlobalProps`, and
 the frame's `data` and `global-props` as JSON text — lives on the handle; the host's calls find it through
-`bobcat:element`'s `__BobcatHandleOf`, so a frame whose handle another realm
-holds is nothing to the page realm. A `null` or `""` does nothing — the frame
+`bobcat:element`'s `__BobcatHandleOf`. A realm that holds no handle for the
+frame asks each card its frames show in turn (`bobcat:frame-boot`'s
+`frameConnection(frameId, connected)`, which runs that card's own
+`bobcat:frame` by the same rule and answers whether it held the handle), so a
+frame a nested card created hears its own connections at any depth, as
+web-core's nested `lynx-view` hears its `disconnectedCallback`. A `null` or `""` does nothing — the frame
 keeps its card, as native's `FrameElement::OnSetSrc` ignores it and web-core's
 `LynxView` keeps its running card when `url` is removed — and neither does a
 value equal to the frame's current one, which both skip. Any other tears the
@@ -1661,7 +1666,8 @@ the generation, resolves `src` once with `resolveUrl` into `U` (against
 `<U>/style-info.css` and its BTS boot at `U#background-thread`, before the
 fetch settles — and when it settles (a probe hit's `true` in a microtask, a `Future` id through
 its `then`) creates a `ShadowRealm`, imports `bobcat:frame-boot`'s `boot`, `dispose`,
-`updateData`, `updateGlobalProps` and `dispatchEvent`, and calls `boot(frameId, U, data,
+`updateData`, `updateGlobalProps`, `dispatchEvent`, `sendExposure` and
+`frameConnection`, and calls `boot(frameId, U, data,
 globalProps, JSON.stringify(SystemInfo), __BobcatNativeModuleTable())` with
 the frame's `data` and `global-props` as they stand then. The frame keeps
 `src` as written, which a later `src` is compared against and a failure
@@ -1703,7 +1709,11 @@ data, backgroundThreadURL(U))` — the card's own BTS, which the child creates
 and owns, so its messages are delivered to the child —, `__BobcatRenderPage`,
 and a flush queued one microtask later, as the page boot queues its own. It
 answers `false` for a failure it already reported. Its `dispose()` lets go of
-every card its own frames loaded (`__BobcatCloseFrames`), then starts
+every card its own frames loaded (`__BobcatCloseFrames`), posts its BTS one
+last `disexposure` list for every element it had posted an `exposure` for
+(native's final records on destroy, user ruling 2026-10-16, built
+synchronously in that same call from what the realm kept at exposure — no
+wait is added) and resumes its own exposure scope, then starts
 `__BobcatDispose()` — `__DestroyLifetime` and the BTS's `dispose`, whose app
 cleanup (ReactLynx's `destroyCard`, unmount effects) runs before the BTS
 acknowledges and the Worker is terminated — and calls `closeRealm()` only once
@@ -1719,9 +1729,7 @@ on the shared worker thread ahead of the page BTS's; their acknowledgements
 are not awaited. (`bobcat:runtime` cannot import `bobcat:frame` to do this
 itself: the cycle that closes makes QuickJS leak an object when a worker's
 `import("bobcat:element")` fails to link, which aborts the runtime's
-release.) A frame inside a
-nested card that the nested card disconnects without letting go of its
-handle keeps its card: the connection calls reach the page realm alone. No
+release.) No
 `load` event and no frame methods beyond the shared base set (native's
 surface; user ruling 2026-10-15). **Events reach the card through the realm
 of its frame** (user rulings 2026-10-16: the page realm forwards in
@@ -2020,13 +2028,29 @@ each entry into an exposed/not-exposed transition (intersecting with a ratio of
 at least the area), and the intersection delivery entry dispatches
 `uiappear`/`uidisappear` (non-bubbling, detail from the target's own
 attributes) and then one `exposure` and one `disexposure` list through the BTS
-`GlobalEventEmitter`, web-core's record shape and order. Four user rulings
+`GlobalEventEmitter`, web-core's record shape and order. **Each card's
+records reach its own BTS** (user rulings 2026-10-16), as both references
+keep exposure per card: a record carries, beside its uid, id and scene, the
+shadow hosts above its element when it was exposed, innermost first (`""`
+for the document tree, `F` for a card's node, `G,F` for a grand-card's), so a
+disexposure for an element freed or detached since still knows where it
+was; each realm keeps the records with no host and hands the rest, minus the
+outermost host, to the card that frame shows (`bobcat:frame`'s
+`forwardExposure` → `bobcat:frame-boot`'s `sendExposure`), and the card does
+the same for its own frames. A realm posts a `disexposure` only for a uid it
+posted an `exposure` for, and an `exposure` only for a uid it holds a handle
+of, so a reused frame's new card hears nothing of the old card's; a record
+whose handle is gone is built from the dataset and id read at exposure. Four user rulings
 (2026-10-11): the geometry is the primitive's (viewport root, clipped through
 every clipping ancestor, the ratio over the finally visible area), ui margins
 are gated by the switch as documented and as native does, `lynx.stopExposure`
-drops every observer and `resumeExposure` re-observes (native's semantics, with
+stops detection and `resumeExposure` restarts it (native's semantics, with
 `sendEvent` defaulting to true), and delivery is one batch per update with no
-timer. The defaults where the references differ are in
+timer. The stop is per card (user ruling 2026-10-16, both references): it
+stops the elements whose innermost shadow host is the caller's scope — an
+exposed element judged by the host it was exposed under, any other where it
+is now — and leaves the page's, other cards' and grand-cards' detected;
+observers stay armed, and a resume re-arms every live registration. The defaults where the references differ are in
 `docs/tracking/deviations.md`.
 
 `__SetCSSId` writes web-core's `l-css-id` attribute on each element (a

@@ -24,10 +24,14 @@ rstest.mockRequire("bobcat:selector-query", () => selectorQuery);
 const queryNodes = rstest.fn();
 // The record list itself is element-papi.test.ts's: here it only has to reach
 // the BTS as built.
-const exposureEvents = rstest.fn((kind: string, record: string) => [{ kind, record }]);
+const exposureEvents = rstest.fn((kind: string, record: string): unknown[] =>
+  record === "" ? [] : [{ kind, record }]);
+/** What `__BobcatTakeExposures` answers next: the exposures not yet left. */
+let lastExposures: unknown[] = [];
 rstest.mockRequire("bobcat:element", () => ({
   __BobcatQueryNodes: queryNodes,
   __BobcatExposureEvents: exposureEvents,
+  __BobcatTakeExposures: () => lastExposures.splice(0),
 }));
 
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
@@ -1128,6 +1132,25 @@ describe("runtime events and diagnostics", () => {
     emitter.removeAllListeners("disexposure");
   });
 
+  it("sends nothing for a record that names none of its own elements", () => {
+    const start = toBackground.length;
+    // Every record a card's, or nobody's: the list this realm keeps is empty.
+    mts.__BobcatSendExposure("exposure", "");
+    expect(toBackground.slice(start)).toEqual([]);
+  });
+
+  it("sends one last disexposure list of what is still exposed, and nothing when nothing is", () => {
+    const start = toBackground.length;
+    lastExposures = [{uid: 4}, {uid: 5}];
+    mts.__BobcatSendLastDisexposure();
+    mts.__BobcatSendLastDisexposure();
+    expect(toBackground.slice(start)).toEqual([
+      {bobcat: "runtime", method: "sendGlobalEvent", name: "disexposure",
+        args: [[{uid: 4}, {uid: 5}]]},
+    ]);
+    toBackground.splice(start);
+  });
+
   it("switches exposure from either thread's lynx, with web-core's sendEvent default", async () => {
     switchExposure.mockClear();
     mts.lynx.stopExposure();
@@ -1136,7 +1159,8 @@ describe("runtime events and diagnostics", () => {
     mts.lynx.resumeExposure();
     mts.lynx.setObserverFrameRate({forPageRect: 10, forExposureCheck: 10});
     const fromMain = switchExposure.mock.calls.splice(0);
-    expect(fromMain).toEqual([[0, 1], [0, 0], [0, 1], [1, 1]]);
+    // The page realm's own tree: the document tree, `0`.
+    expect(fromMain).toEqual([[0, 1, 0], [0, 0, 0], [0, 1, 0], [1, 1, 0]]);
 
     const start = toMain.length;
     bts.stopExposure();
@@ -1396,5 +1420,16 @@ describe("a frame's realm", () => {
       entry: "app:///cards/child.web.bundle#background-thread",
       nativeModuleTable: "5:Other0:",
     });
+  });
+
+  it("scopes its exposure switch to the frame it renders in, from either thread", async () => {
+    runtime.__BobcatInitializeMTS({initData: {}, globalProps: {}, frame: 42});
+    switchExposure.mockClear();
+    runtime.lynx.stopExposure({sendEvent: false});
+    runtime.lynx.resumeExposure();
+    // The card's BTS asks the same, through this realm.
+    frameWorker.dispatchEvent({type: "message",
+      data: {bobcat: "runtime", method: "switchExposure", on: false, sendEvent: true}});
+    expect(switchExposure.mock.calls).toEqual([[0, 0, 42], [1, 1, 42], [0, 1, 42]]);
   });
 });

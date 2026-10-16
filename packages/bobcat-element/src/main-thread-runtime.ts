@@ -55,7 +55,7 @@ import {
   type ContextEvent,
   createCrossThreadContext,
 } from "bobcat:cross-thread-context";
-import { __BobcatExposureEvents, __BobcatQueryNodes } from "bobcat:element";
+import { __BobcatExposureEvents, __BobcatQueryNodes, __BobcatTakeExposures } from "bobcat:element";
 // The whole PAPI as one namespace, for the binding list a named Lepus
 // chunk is called with: the export names are this module's only source of
 // truth for what `MTS_CHUNK_PREAMBLE` imports.
@@ -112,7 +112,8 @@ type FromBackground = LepusMethodCall | NodeQueryRequest
 /**
  * The BTS's `lynx.stopExposure` (`on` false) and `lynx.resumeExposure()`
  * (`on` true), with `sendEvent` already read the way [`sendsDisexposure`]
- * reads it. Booleans here; the host member takes them as `0 | 1`.
+ * reads it. Booleans here; the host member takes them as `0 | 1`, with this
+ * realm's [`exposureScope`].
  */
 type SwitchExposure = {
   bobcat: "runtime";
@@ -291,7 +292,7 @@ export function __BobcatConnectBackground(worker: Worker, data: unknown, entry?:
           });
         }
       } else if (message.method === "switchExposure") {
-        switchExposure(message.on ? 1 : 0, message.sendEvent ? 1 : 0);
+        switchExposure(message.on ? 1 : 0, message.sendEvent ? 1 : 0, exposureScope);
       }
     } else {
       jsContext.receive(message);
@@ -433,6 +434,17 @@ export function __BobcatNativeModuleTable(): string {
   return hostNativeModuleTable;
 }
 
+/**
+ * The shadow host of this realm's own tree, which its `stopExposure` and
+ * `resumeExposure` are scoped to: `0`, the document tree, for the page
+ * realm; the frame a card renders in for a frame's card, which
+ * `__BobcatInitializeMTS` is handed. So a card's stop leaves the page's
+ * exposure and every other card's running, as both references keep one
+ * switch per card (web-core's `createNativeModules.ts:19-30`, native's
+ * `LynxExposureModule.java:22-47`).
+ */
+let exposureScope = 0;
+
 export function __BobcatInitializeMTS(options: {
   initData?: unknown;
   globalProps?: Record<string, unknown>;
@@ -441,6 +453,8 @@ export function __BobcatInitializeMTS(options: {
   enableJSDataProcessor?: boolean;
   /** The native module table to post to the BTS, where the host gave none. */
   nativeModuleTable?: string;
+  /** The frame a card renders in: the host its exposure switch is scoped to. */
+  frame?: number;
 }) {
   lynx.__initData = "initData" in options ? options.initData : __BobcatInitData;
   hostGlobalPropsJson = JSON.stringify("globalProps" in options ? options.globalProps : __globalProps);
@@ -451,6 +465,7 @@ export function __BobcatInitializeMTS(options: {
   initialProcessor = options.processorName ?? hostInitialProcessor;
   jsDataProcessor = options.enableJSDataProcessor === true;
   if (options.nativeModuleTable !== undefined) hostNativeModuleTable = options.nativeModuleTable;
+  if (options.frame !== undefined) exposureScope = options.frame;
 }
 
 export function __BobcatProcessInitData(data: unknown) { return __BobcatProcessData(data, initialProcessor); }
@@ -537,14 +552,33 @@ export function __BobcatSendGlobalEvent(name: string, json: string) {
  * Sends one global exposure record list to the BTS. The host calls this from
  * its intersection delivery entry, `exposure` before `disexposure`, with
  * `kind` the list's name and `record` the `bobcat:record` payload
- * `bobcat:element`'s `__BobcatExposureEvents` builds the list out of. The
- * list is the global event's one argument, as web-core sends it
+ * `bobcat:element`'s `__BobcatExposureEvents` builds the list out of; a
+ * frame's card's realm is handed the part of it that is its card's by the
+ * realm of its frame (`bobcat:frame-boot`'s `sendExposure`). The list is
+ * the global event's one argument, as web-core sends it
  * (`sendGlobalEvent(kind, [list])`, `ExposureServices.ts:256-271`), so a BTS
- * `GlobalEventEmitter` listener for `kind` receives the array itself.
+ * `GlobalEventEmitter` listener for `kind` receives the array itself. A
+ * record that names none of this realm's own elements sends nothing.
  */
 export function __BobcatSendExposure(kind: string, record: string) {
-  sendToBackground({bobcat:"runtime", method:"sendGlobalEvent", name:kind,
-    args:[__BobcatExposureEvents(kind, record)]});
+  const list = __BobcatExposureEvents(kind, record);
+  if (list.length === 0) return;
+  sendToBackground({bobcat:"runtime", method:"sendGlobalEvent", name:kind, args:[list]});
+}
+
+/**
+ * Sends the BTS one last `disexposure` list, for every element this realm
+ * sent an `exposure` for and not yet a `disexposure`
+ * (`bobcat:element`'s `__BobcatTakeExposures`), and nothing when there is
+ * none. A frame's card calls it as it is let go of, right before
+ * `__BobcatDispose` posts `dispose`, so its BTS hears the list first, as
+ * native's card sends its exposed elements a last `disexposure` when it is
+ * torn down. The page's own disposal does not.
+ */
+export function __BobcatSendLastDisexposure() {
+  const list = __BobcatTakeExposures();
+  if (list.length === 0) return;
+  sendToBackground({bobcat:"runtime", method:"sendGlobalEvent", name:"disexposure", args:[list]});
 }
 
 /**
@@ -787,17 +821,19 @@ export const lynx = {
   loadScript,
   triggerGlobalEventFromLepus: noop,
   /**
-   * Stops exposure detection, as native does: every detection is dropped,
-   * and with `sendEvent` (the default; see [`sendsDisexposure`]) every
-   * exposed element is sent one `disexposure`. What the stop sends is
+   * Stops exposure detection for this realm's own elements, as native does
+   * for one card: their detection is dropped, and with `sendEvent` (the
+   * default; see [`sendsDisexposure`]) every exposed one is sent one
+   * `disexposure`. A frame's card's elements, and the page's for a card,
+   * are another scope's (see [`exposureScope`]). What the stop sends is
    * delivered by the host's next intersection delivery entry.
    */
   stopExposure(options?: {sendEvent?: boolean}) {
-    switchExposure(0, sendsDisexposure(options) ? 1 : 0);
+    switchExposure(0, sendsDisexposure(options) ? 1 : 0, exposureScope);
   },
-  /** Resumes exposure detection after `stopExposure`. */
+  /** Resumes exposure detection for this realm's own elements after `stopExposure`. */
   resumeExposure() {
-    switchExposure(1, 1);
+    switchExposure(1, 1, exposureScope);
   },
   /**
    * Accepted and ignored: exposure is detected by the intersection update

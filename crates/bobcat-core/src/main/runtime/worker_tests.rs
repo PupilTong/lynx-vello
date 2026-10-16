@@ -1757,8 +1757,11 @@ fn a_worker_failure_arriving_after_terminate_is_reported_to_no_one() {
 
 #[test]
 fn dropping_the_view_cancels_io_without_keeping_the_worker_thread_alive() {
-    let mut pair =
-        Pair::new("import { Worker } from 'bobcat-internal'; new Worker('./worker.js');");
+    // Held by a global: a collection the realm runs on its own may come at
+    // any allocation, and this load is the live handle's.
+    let mut pair = Pair::new(
+        "import { Worker } from 'bobcat-internal'; globalThis.worker = new Worker('./worker.js');",
+    );
     let completion = pair.source();
     pair.cancel.cancel();
     assert!(
@@ -3324,17 +3327,19 @@ fn a_message_for_a_collected_worker_handle_is_dropped() {
         r"
         import {Worker} from 'bobcat-internal';
         globalThis.received = [];
-        {
-            const worker = new Worker('./worker.js');
-            worker.onmessage = event => received.push(event.data);
-            worker.postMessage('ready');
-        }
+        // Held until the worker answered: a collection the realm runs on its
+        // own may come at any allocation, before the worker asked for its
+        // script.
+        globalThis.held = new Worker('./worker.js');
+        held.onmessage = event => received.push(event.data);
+        held.postMessage('ready');
     ",
     );
     pair.answer(
         "import 'bobcat:worker'; import 'bobcat:timers'; onmessage = () => postMessage('answer');",
     );
     let event = pair.next_event().expect("the worker answers");
+    pair.check("delete globalThis.held;");
     // QuickJS discovers the cycle in one collection and processes its weak
     // registrations in the next, so the handle is released by the second.
     for _ in 0..2 {

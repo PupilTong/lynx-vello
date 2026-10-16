@@ -414,7 +414,9 @@ export const lynx = {
   },
   /**
    * Exposure is detected on the main thread, where the document is, so these
-   * two are posts to it, which it runs as its own `lynx` members do. A stop
+   * two are posts to it, which it runs as its own `lynx` members do: for its
+   * own card's elements alone, so a frame's card's BTS stops its card and
+   * neither the page nor another card. A stop
    * sends a `disexposure` for every exposed element unless `sendEvent` is
    * false — web-core's `param.sendEvent ?? true`
    * (`background-apis/createNativeModules.ts:27-29`), behind lynx-core's
