@@ -7,13 +7,24 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Keep the self-hosted pnpm store outside the installer directory
+      if: runner.environment == 'self-hosted'
+      shell: bash
+      # pnpm/action-setup recreates ~/setup-pnpm, including its default store.
+      # pnpm 11 reads pnpm_config_* (not npm_config_*) environment settings.
+      run: echo "pnpm_config_store_dir=$HOME/.cache/lynx-vello/pnpm-store" >> "$GITHUB_ENV"
     - uses: pnpm/action-setup@v6
     - uses: actions/setup-node@v6
       with:
         node-version: 24.15.0
-        cache: pnpm
+        # The self-hosted runner keeps the store above between jobs. A remote
+        # archive restore took over two minutes in run 38881455287.
+        cache: ${{ runner.environment == 'github-hosted' && 'pnpm' || '' }}
+        package-manager-cache: false
     - shell: bash
-      run: pnpm install --frozen-lockfile
+      run: |
+        pnpm store path
+        pnpm install --frozen-lockfile
     - name: Build ReactLynx fixtures from source
       if: inputs.fixtures == 'true'
       shell: bash
