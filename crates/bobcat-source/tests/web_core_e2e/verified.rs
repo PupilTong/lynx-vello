@@ -504,4 +504,6 @@ verified! {
     api_frame_global_props => "api-frame-global-props",
     // A 300px-wide `<frame auto-height>` with no author height. A frame is `contain: strict`, so without the attribute it would be 0 tall and its paint-contained content would not show; `auto-height` relaxes that to `contain: inline-size layout paint style` (web-core's `contain: content` with its inline-size container, #425), and the frame is as tall as the nested card's three lines, which therefore show. Upstream asserts the attribute and a height above 0.
     api_frame_auto_height => "api-frame-auto-height",
+    // A `<frame auto-width>` 120px tall with a yellow background, in a column flex parent that does not stretch it (vendored rewrite, see the fixtures README): the yellow box is 85px wide, the width of the nested card's widest line `frame:ready`, because `auto-width` drops the frame's size containment and the frame takes its content's width (#425).
+    api_frame_auto_width => "api-frame-auto-width",
 }

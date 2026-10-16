@@ -5,12 +5,14 @@ import { root } from '@lynx-js/react';
 
 function App() {
   return (
-    <view>
+    <view
+      style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}
+    >
       <frame
         id='target'
         auto-width={true}
         src='/dist/api-frame-inner.web.bundle'
-        style={{ height: '120px' }}
+        style={{ height: '120px', backgroundColor: 'yellow' }}
       />
     </view>
   );

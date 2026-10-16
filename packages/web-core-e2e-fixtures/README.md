@@ -21,9 +21,10 @@ scope decision, will not. Upstream's own `dist/` is built without an
 this engine has no intention of serving. Compiled here at `4.1.0`, the same
 sources exercise the path it does.
 
-The cards, their CSS and their assets are otherwise upstream's, with four
+The cards, their CSS and their assets are otherwise upstream's, with five
 rewrites applied to the vendored text by user ruling (the first two on
-2026-09-25, the third on 2026-10-08, the fourth on 2026-10-15):
+2026-09-25, the third on 2026-10-08, the fourth on 2026-10-15, the fifth on
+2026-10-16):
 
 - **`direction: lynx-rtl` becomes `direction: rtl`** (24 files). `lynx-rtl` is
   a value the fork's grammar rejects, so upstream's own spelling left every
@@ -50,7 +51,15 @@ rewrites applied to the vendored text by user ruling (the first two on
   yellow background, the linear child a red one and two 20x20 blue children,
   so the child's main axis and its distribution of children are visible.
 
-All four are recorded here rather than absorbed silently, because a re-sync
+- **`api-frame-auto-width`'s frame gets a yellow background, and its parent
+  stops stretching it** (1 file). Upstream reads the frame's width back, and
+  nothing on the screen showed it: the frame painted nothing of its own, and
+  its parent `<view>` stretched it across the page, which a frame's
+  `auto-width` yields to on native too. The parent is now a column flex box
+  with `align-items: flex-start`, so the yellow box is as wide as the nested
+  card's widest line.
+
+All five are recorded here rather than absorbed silently, because a re-sync
 from upstream will bring the original text back.
 
 ## Building
@@ -102,6 +111,8 @@ suite would blame the engine for it.
 
 ## What is not vendored
 
+`api-frame-element-map` (user, 2026-10-16: the test is deleted).
+
 Every case that involves `enableCSSSelector: false` (user, 2026-10-13: the
 flag is no longer supported, so its cases are deleted rather than kept
 pending). That is 29 directories of upstream's `tests/reactlynx`:
@@ -117,7 +128,7 @@ Their three rspeedy config files (`config-css-selector-false.config.ts`,
 `basic-lazy-component-css-selector-false.config.ts`,
 `config-mixed-01.config.ts`) have no entry in `groups.js`. **A re-sync from
 upstream will bring the directories back; delete them again.** With them gone
-the corpus is 324 cards.
+the corpus, less `api-frame-element-map` too, is 323 cards.
 
 ## What is not built
 
