@@ -599,6 +599,7 @@ impl Page {
                     policy::report(self, Scene::Listener, error.into_script_error());
                 }
             }
+            ToMain::TextInputSource(source) => runtime.set_text_input_source(source),
             ToMain::Vsync(milliseconds) => {
                 if let Err(error) = runtime.vsync(js, milliseconds) {
                     policy::report(self, Scene::Frame, error.into_script_error());

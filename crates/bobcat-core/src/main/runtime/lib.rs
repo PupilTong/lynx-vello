@@ -1293,6 +1293,9 @@ pub(crate) struct MainThreadRuntime {
     /// The last [`dom::editing::TextInputState`] published to the host; the
     /// default ("nothing editable is focused") until the first focus.
     text_input: dom::editing::TextInputState,
+    /// Where the host's typed text comes from, which decides what a
+    /// `keydown`'s editing default action does ([`editing::key_command`]).
+    text_input_source: crate::editing::TextInputSource,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -1396,6 +1399,7 @@ impl MainThreadRuntime {
                 last_click: None,
                 pointer_editing: editing::PointerEditing::default(),
                 text_input: dom::editing::TextInputState::default(),
+                text_input_source: crate::editing::TextInputSource::default(),
                 screen: startup.screen,
                 config,
                 entry: startup.entry,

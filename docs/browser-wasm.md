@@ -401,6 +401,65 @@ the Worker answers nothing and this side cannot learn synchronously whether the
 engine consumed the scroll — the canvas owns wheel scrolling outright, as
 `touch-action: none` gives it touch panning.
 
+## Keys and text input
+
+`keydown` and `keyup` on the canvas, while the embedding page has made it
+focusable (a `tabindex`) and it has focus, cross as `bobcat-key`: the
+browser's own W3C `key` and `code`, `repeat`, and a modifier bitmask (alt 1,
+ctrl 2, meta 4, shift 8), dispatched by `BobcatRenderer::dispatchKey` through
+the same ordered queue as pointer input. A key never carries the text it
+typed, and a key the input method is composing with (`isComposing`, or
+`keyCode` 229) crosses as `key: 'Process'`, Chromium's own report.
+
+Text reaches a `contenteditable` host through one hidden `<textarea>`
+(`js/text-input.ts`), the technique Monaco, CodeMirror 5 and Flutter web use
+for the input method and the clipboard, which only a focused text control
+receives (`docs/editable-text-design.md`, E4):
+
+- **Engine → page.** `BobcatRenderer::pump` hands the newest
+  `TextInputState` of a turn to the Render Worker's `postTextInputState`
+  (the last `BobcatRenderer::create` argument) as one plain object, which
+  the Worker posts as `bobcat-text-input` (`TextInputFields` in
+  `js/protocol.d.ts`: whether a host is focused, its value, selection and
+  composition in UTF-16 units, its caret, border box and composed
+  characters in viewport CSS px, and its `inputmode`, `enterkeyhint` and
+  input type as HTML keywords). A load that replaces a view whose host was
+  focused posts one with `host: false`.
+- **The proxy.** Made the first time a host is focused and appended to the
+  canvas's document body: transparent, `position: fixed` over the caret
+  (mapped through the canvas's client box, following scrolls and resizes),
+  not hit-tested, out of the tab order, never auto-capitalized, corrected or
+  spell-checked. While a host is focused it has focus and holds the host's
+  value and selection, except during a composition, which is the browser's
+  to draw into it. When no host is focused it is blurred and hidden, and a
+  focusable canvas gets focus back.
+- **Page → engine.** Every `beforeinput` outside a composition is prevented
+  and sent as `bobcat-edit` with one `EditCommand` (`insert`,
+  `insertLineBreak`, the deletions); a composition is a `setComposition`
+  per update and, at its end, a `finishComposition` when the end's text is
+  the last update's, a `commitText` of it otherwise. The Render Worker queues the
+  command with the keys and pointers and calls `BobcatRenderer::edit`,
+  which reads it back into `dom::editing::Command` and hands it to
+  `LynxView::edit`, dropping it while the view cannot take edits (before
+  boot). The textarea's own keys go out as `bobcat-key`, and its handling of
+  the keys the engine moves the selection for (arrows, Home, End,
+  ctrl/meta-A) is prevented.
+- **One path per edit.** Every view the renderer builds is set to
+  `TextInputSource::Commands` (`LynxView::set_text_input_source`), so a
+  `keydown`'s default action in the engine is only movement and select-all:
+  a Backspace deletes once, by its `beforeinput`.
+- **Focus.** The engine's focus decides the proxy's. A state that newly
+  focuses a host focuses the textarea, and a canvas `pointerup` focuses it
+  again when the user had moved focus elsewhere in the page while the host
+  stayed focused. While it has focus the canvas's `mousedown` is prevented,
+  so a press on the canvas does not take focus from it (which would end an
+  open composition) and the engine decides whether the press blurs its host.
+  Focus that leaves the textarea for something else finishes an open
+  composition and leaves the engine's focus alone.
+
+`EditContext` is the recorded follow-up, with the limitations listed in the
+design document.
+
 ## Synchronization and rendering
 
 The private document lives on the Lynx main Worker outright, owned by the

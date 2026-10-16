@@ -100,7 +100,16 @@ export interface NativeModuleCallbackMessage {
 
 /**
  * One `keydown` or `keyup`, the browser's own W3C `key` and `code` passed
- * through. `modifiers` is a bitmask: alt 1, ctrl 2, meta 4, shift 8.
+ * through — except that a key the input method is composing with (its
+ * `isComposing`, or `keyCode` 229) is `key: 'Process'`, as Chromium reports
+ * it, whatever Safari or Firefox reported. `modifiers` is a bitmask: alt 1,
+ * ctrl 2, meta 4, shift 8.
+ *
+ * No key carries the text it typed. The view is set to
+ * `TextInputSource::Commands`: the facade's `<textarea>` proxy reports every
+ * insertion, deletion and line break as a `beforeinput`, sent as a
+ * `bobcat-edit`, and a `keydown`'s default action in the engine is then only
+ * movement and select-all, so nothing is typed or deleted twice.
  */
 export interface KeyFields {
   key: string
@@ -108,6 +117,56 @@ export interface KeyFields {
   down: boolean
   repeat: boolean
   modifiers: number
+}
+
+/** A rectangle in viewport CSS px. */
+export interface ViewportRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/**
+ * One editing command for the view's focused editing host, from the
+ * facade's `<textarea>` proxy: `dom::editing::Command`'s variants a browser's
+ * input events produce. Offsets and lengths are UTF-16 code units, as the
+ * browser's own are.
+ *
+ * - `setComposition`: a `compositionupdate`'s text, with the selection inside it relative to its
+ *   start (Chromium's `ImeSetComposition`). Empty text cancels the composition.
+ * - `commitText`: a `compositionend`'s text when it differs from the last update sent; the caret
+ *   lands `relativeCursor` units after its end.
+ * - `finishComposition`: keep the composition as it is and end it — a `compositionend` whose text
+ *   is the last update sent, or the proxy lost focus while composing and the browser did not end
+ *   the composition itself.
+ * - The rest: a `beforeinput` outside a composition — `insertText` and `insertFromPaste`
+ *   (`insert`), `insertLineBreak` and `insertParagraph`, `deleteContentBackward` and
+ *   `deleteByCut` (`deleteBackward`), `deleteContentForward`, `deleteWordBackward`,
+ *   `deleteWordForward`.
+ */
+export type EditCommand =
+  | { kind: 'setComposition'; text: string; selectionStart: number; selectionEnd: number }
+  | { kind: 'commitText'; text: string; relativeCursor: number }
+  | { kind: 'finishComposition'; keepSelection: boolean }
+  | { kind: 'insert'; text: string }
+  | {
+      kind:
+        | 'insertLineBreak'
+        | 'deleteBackward'
+        | 'deleteForward'
+        | 'deleteWordBackward'
+        | 'deleteWordForward'
+    }
+
+/**
+ * One editing command. Queued with pointer and key input, so a `keydown`
+ * posted before it reaches the engine first. The Worker answers nothing, and
+ * drops a command the view cannot take yet (before its boot) or any more.
+ */
+export interface EditMessage {
+  type: 'bobcat-edit'
+  command: EditCommand
 }
 
 /** Key input. The Worker answers nothing. */
@@ -184,6 +243,7 @@ export type RequestMessage<O extends Operation = Operation> = {
 export type FacadeMessage =
   | InitMessage
   | NativeModuleCallbackMessage
+  | EditMessage
   | KeyMessage
   | PointerMessage
   | RequestMessage
@@ -228,6 +288,71 @@ export interface NativeModuleCallMessage {
   callbacks: number[]
 }
 
+/**
+ * The view's `TextInputState`: everything the facade's `<textarea>` proxy
+ * mirrors. Geometry is viewport CSS px from the last committed layout;
+ * offsets are UTF-16 code units into `value`.
+ */
+export interface TextInputFields {
+  /**
+   * Whether an editing host is focused. When it is not, every other field
+   * is its default and the proxy hides.
+   */
+  host: boolean
+  /** HTML's `<input type>` keyword; `'text'` for a `contenteditable` host. */
+  inputType:
+    | 'text'
+    | 'password'
+    | 'search'
+    | 'email'
+    | 'number'
+    | 'tel'
+    | 'url'
+  /** The host's `inputmode` keyword, or `''` when it names none. */
+  inputMode:
+    | ''
+    | 'none'
+    | 'text'
+    | 'decimal'
+    | 'numeric'
+    | 'tel'
+    | 'search'
+    | 'email'
+    | 'url'
+  /** The host's `enterkeyhint` keyword, or `''` when it names none. */
+  enterKeyHint:
+    | ''
+    | 'enter'
+    | 'done'
+    | 'go'
+    | 'next'
+    | 'previous'
+    | 'search'
+    | 'send'
+  /** The whole value. */
+  value: string
+  /** The selection, `selectionStart <= selectionEnd`. */
+  selectionStart: number
+  selectionEnd: number
+  /** The composition range, or `null` when nothing is being composed. */
+  composition: { start: number; end: number } | null
+  /** The caret at the selection's focus, 1 CSS px wide. */
+  caret: ViewportRect
+  /** The host's border box. */
+  editableBounds: ViewportRect
+  /** One box per UTF-16 unit of the composition. */
+  compositionBounds: ViewportRect[]
+}
+
+/**
+ * The view published a new `TextInputState`: the newest of a Worker turn,
+ * and one with `host: false` when a load replaced a view that had a host
+ * focused.
+ */
+export interface TextInputMessage extends TextInputFields {
+  type: 'bobcat-text-input'
+}
+
 /** The outcome of the request with the same number. */
 export type ResponseMessage =
   | {
@@ -248,3 +373,4 @@ export type RenderWorkerMessage =
   | NativeModuleCallMessage
   | ReadyMessage
   | ResponseMessage
+  | TextInputMessage

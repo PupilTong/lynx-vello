@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::{fmt, mem};
 
+use bobcat_core::editing::{Rect, TextInputSource, TextInputState};
 use bobcat_core::input::{InputEvent, KeyPhase, Modifiers, Point2D, PointerKind, PointerPhase};
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, FontBlob, FrameSize, LynxGroup, LynxView, ModuleCall,
@@ -18,11 +19,13 @@ use bobcat_core::{
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 use bobcat_source::{PageSource, ZipSource, register_lynx_xml_response};
-use js_sys::{Array, Promise};
+use js_sys::{Array, Object, Promise, Reflect};
 use url::Url;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 use web_sys::OffscreenCanvas;
+
+use crate::text_input::{edit_command, enter_key_hint_name, input_mode_name, input_type_name};
 
 #[wasm_bindgen]
 extern "C" {
@@ -278,6 +281,15 @@ pub struct BobcatRenderer {
     /// The one bridge those modules share, kept across loads because the
     /// Render Worker's `onNativeModuleCall` is.
     module_bridge: Rc<HostModuleBridge>,
+    /// The Render Worker's `postTextInputState`: each
+    /// [`TextInputState`] the view publishes, as the `bobcat-text-input`
+    /// fields, on its way to the facade's `<textarea>` proxy.
+    on_text_input: js_sys::Function,
+    /// Whether the last state handed to [`Self::on_text_input`] had a host
+    /// focused: a view replaced while it did owes the facade a state that
+    /// says nothing is, since the next view publishes none until it focuses
+    /// a host of its own.
+    text_input_focused: bool,
     /// The group the current view belongs to, and the one thing that ends its
     /// two Workers: the Lynx-main one, and the worker-realm one after it.
     ///
@@ -327,6 +339,9 @@ impl BobcatRenderer {
         native_module_names: Vec<String>,
         native_module_methods: Vec<String>,
         on_native_module_call: js_sys::Function,
+        // Called with each published `TextInputState` as one plain object of
+        // `js/protocol.d.ts`'s `TextInputFields`.
+        on_text_input: js_sys::Function,
     ) -> Result<BobcatRenderer, JsValue> {
         FrameSize::for_viewport(width, height, device_pixel_ratio).map_err(js_error)?;
         if worker_url.is_empty() {
@@ -435,6 +450,8 @@ impl BobcatRenderer {
                     next: Cell::new(1),
                     calls: RefCell::new(HashMap::new()),
                 }),
+                on_text_input,
+                text_input_focused: false,
                 script_finished: false,
                 disposed: false,
             })
@@ -694,8 +711,12 @@ impl BobcatRenderer {
         if let Some(resources) = &self.page_resources {
             warn_notes(resources);
         }
+        // Only the newest state of a turn reaches the facade: each one is the
+        // whole of it, so an older one says nothing the newest does not.
+        let mut text_input = None;
         for event in view.pump() {
             match event {
+                EngineEvent::TextInputStateChanged(state) => text_input = Some(state),
                 EngineEvent::ScriptFinished => {
                     self.script_finished = true;
                     boot_finished = true;
@@ -743,6 +764,9 @@ impl BobcatRenderer {
                 }
                 _ => {}
             }
+        }
+        if let Some(state) = text_input {
+            self.post_text_input(&state);
         }
         if (boot_finished || fatal.is_some())
             && let Some(resources) = &self.page_resources
@@ -901,6 +925,36 @@ impl BobcatRenderer {
         Ok(())
     }
 
+    /// Apply one editing command from the facade's `<textarea>` proxy to the
+    /// view's focused editing host: a `bobcat-edit` message, flattened by
+    /// the Render Worker into the command's name, its text and two numbers
+    /// (`src/text_input.rs` lists them).
+    ///
+    /// A command the view cannot take yet — before its boot has been
+    /// observed, or after it ended — is dropped: the facade cannot know
+    /// either, and a key typed into a page that is still loading types
+    /// nothing in a browser too.
+    ///
+    /// # Errors
+    ///
+    /// A command the protocol does not describe, which is the facade's bug.
+    #[wasm_bindgen(js_name = edit)]
+    pub fn edit(
+        &mut self,
+        kind: &str,
+        text: Option<String>,
+        first: i32,
+        second: i32,
+    ) -> Result<(), JsValue> {
+        self.ensure_running()?;
+        let command = edit_command(kind, text, first, second).map_err(js_error)?;
+        if let Some(view) = self.view.as_ref() {
+            // `NotReady` is the only failure, and it is dropped (above).
+            let _ = view.edit(command);
+        }
+        Ok(())
+    }
+
     /// Answer one function argument of one host native-module call.
     ///
     /// The page's handler is the only thing that can say this, and it says it
@@ -1022,6 +1076,11 @@ impl BobcatRenderer {
         drop(self.group.take());
         self.page_resources = None;
         self.boot_urls.clear();
+        // The outgoing page's focused host went with it: the facade hides its
+        // proxy now rather than when the next page focuses one of its own.
+        if self.text_input_focused {
+            self.post_text_input(&TextInputState::default());
+        }
         // The outgoing page's unanswered native-module calls belonged to its
         // realm, which is gone: dropping them releases the JavaScript
         // functions, and the next page's calls start from an empty map.
@@ -1092,6 +1151,13 @@ impl BobcatRenderer {
         );
         warn_notes(&resources);
         let view = built.map_err(js_error)?;
+        // The facade's `<textarea>` proxy reports every insertion, deletion
+        // and line break as a `beforeinput`, which arrives as an `edit`; a
+        // `keydown` sent beside it (with no text) must not do them again.
+        // Sent before the painter can route a key, and so ahead of every
+        // one. Refused only by a view that has already ended, which takes
+        // no key either.
+        let _ = view.set_text_input_source(TextInputSource::Commands);
         if let Some(painter) = self.painter.as_mut() {
             // Attaching imposes the painter's metrics on the view, so a page
             // built at the wrapper's size lays out at the canvas's. It is
@@ -1115,6 +1181,19 @@ impl BobcatRenderer {
         // consumed their wakeup before this view was installed.
         self.events.request_event();
         Ok(())
+    }
+
+    /// Hands one published state to the Render Worker as the
+    /// `bobcat-text-input` fields: geometry in viewport CSS px, offsets in
+    /// UTF-16 units, the enumerations as HTML attribute keywords. A
+    /// `postMessage` that threw is reported and the page goes on: the proxy
+    /// is the page's input, not the view.
+    fn post_text_input(&mut self, state: &TextInputState) {
+        self.text_input_focused = state.host.is_some();
+        let fields = text_input_fields(state);
+        if let Err(error) = self.on_text_input.call1(&JsValue::NULL, &fields) {
+            console_error(&error);
+        }
     }
 
     /// Retains bytes the browser host already fetched under its URL policy,
@@ -1176,4 +1255,61 @@ fn fatal_error(event: EngineEvent) -> JsValue {
         EngineEvent::Panicked(error) => js_error(error),
         event => js_error(format!("{event:?}")),
     }
+}
+
+/// One [`TextInputState`] as `js/protocol.d.ts`'s `TextInputFields`, a plain
+/// object the Render Worker spreads into its message.
+fn text_input_fields(state: &TextInputState) -> JsValue {
+    let fields = Object::new();
+    let set = |key: &str, value: &JsValue| {
+        // Setting a data property on a fresh plain object cannot throw.
+        let _ = Reflect::set(&fields, &JsValue::from_str(key), value);
+    };
+    set("host", &JsValue::from_bool(state.host.is_some()));
+    set(
+        "inputType",
+        &JsValue::from_str(input_type_name(state.input_type)),
+    );
+    set(
+        "inputMode",
+        &JsValue::from_str(input_mode_name(state.input_mode)),
+    );
+    set(
+        "enterKeyHint",
+        &JsValue::from_str(enter_key_hint_name(state.enter_key_hint)),
+    );
+    set("value", &JsValue::from_str(&state.value));
+    set("selectionStart", &JsValue::from(state.selection.start));
+    set("selectionEnd", &JsValue::from(state.selection.end));
+    set(
+        "composition",
+        &state.composition.as_ref().map_or(JsValue::NULL, |range| {
+            let composition = Object::new();
+            let _ = Reflect::set(&composition, &"start".into(), &range.start.into());
+            let _ = Reflect::set(&composition, &"end".into(), &range.end.into());
+            composition.into()
+        }),
+    );
+    set("caret", &rect_fields(&state.caret));
+    set("editableBounds", &rect_fields(&state.editable_bounds));
+    let bounds = Array::new();
+    for rect in &state.composition_bounds {
+        bounds.push(&rect_fields(rect));
+    }
+    set("compositionBounds", &bounds);
+    fields.into()
+}
+
+/// One viewport rectangle as `{ x, y, width, height }` in CSS px.
+fn rect_fields(rect: &Rect<f32>) -> JsValue {
+    let fields = Object::new();
+    for (key, value) in [
+        ("x", rect.origin.x),
+        ("y", rect.origin.y),
+        ("width", rect.size.width),
+        ("height", rect.size.height),
+    ] {
+        let _ = Reflect::set(&fields, &JsValue::from_str(key), &JsValue::from(value));
+    }
+    fields.into()
 }
