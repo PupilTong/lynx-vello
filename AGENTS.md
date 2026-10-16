@@ -1546,7 +1546,7 @@ and the same core, installed by the same `install_realm_core`, over a timer
 table and a future table of its own and the parent's `HostOutbox`, thread and
 `ScriptSource`, and a `ShadowRealm` constructor of its own, and then its
 owner's `ChildHostModules`, installed over the child's `retired` flag, which
-`adopt` creates first and `ChildRealms::keep` stores: an MTS realm's children,
+`adopt` creates first and stores in the list with the child: an MTS realm's children,
 grandchildren included, get the page realm's document members (the
 `frame` paragraphs below) and `Worker` members over a worker owner of their
 own, so `bobcat:element` and `bobcat-internal` link in them, and a worker

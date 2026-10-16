@@ -126,30 +126,6 @@ impl ChildRealms {
         ChildKey(id)
     }
 
-    /// Keeps one child the hook was handed under the key [`Self::allocate`]
-    /// gave it, with the `retired` flag its host modules were installed over
-    /// — clear for a furnished child, set when furnishing it failed — and
-    /// what those modules keep for it. A child the hook could not furnish is
-    /// still kept, because the hook runs inside a JavaScript call, where no
-    /// realm is freed; the epilogue's release step frees it.
-    fn keep(&self, key: ChildKey, furnished: Furnished, retired: Rc<Cell<bool>>) {
-        let Furnished {
-            engine,
-            timers,
-            futures,
-            state,
-        } = furnished;
-        self.reattach(ChildRealm {
-            engine,
-            key,
-            timers,
-            futures,
-            retired,
-            in_flight: Cell::new(0),
-            state,
-        });
-    }
-
     fn keys(&self) -> Vec<ChildKey> {
         self.live.borrow().iter().map(|child| child.key).collect()
     }
@@ -176,7 +152,8 @@ impl ChildRealms {
         detached.child.as_mut().map(operation)
     }
 
-    /// Puts a detached child back where its key sorts.
+    /// Puts a child where its key sorts: a detached one back, or a new one
+    /// [`adopt`] furnished, under the key [`Self::allocate`] gave it.
     fn reattach(&self, child: ChildRealm) {
         let mut live = self.live.borrow_mut();
         let index = live
@@ -367,14 +344,6 @@ impl ChildRealm {
     }
 }
 
-/// What [`adopt`] furnished one child with, for [`ChildRealms::keep`].
-struct Furnished {
-    engine: ScriptEngine,
-    timers: Rc<TimerState>,
-    futures: Rc<FutureTable>,
-    state: Option<Box<dyn ChildHostState>>,
-}
-
 /// A child taken out of the list for one operation, put back on drop.
 struct Detached<'a> {
     list: &'a ChildRealms,
@@ -462,8 +431,8 @@ fn adopt(hook: &ShadowRealmHook, mut engine: ScriptEngine) -> Result<(), String>
         .ok_or("the realm is being released")?;
     engine.enable_module_loading();
     // Before the modules are installed, which record what the child starts
-    // under it. Nothing between here and `keep` runs JavaScript, so no other
-    // child is kept in between.
+    // under it. Nothing between here and the list runs JavaScript, so no
+    // other child is kept in between.
     let key = children.allocate();
     // First, so the members that retire the child and the list that frees
     // it read one flag.
@@ -484,27 +453,25 @@ fn adopt(hook: &ShadowRealmHook, mut engine: ScriptEngine) -> Result<(), String>
         }
         Ok(tables)
     });
-    match installed {
-        Ok((timers, futures)) => {
-            let furnished = Furnished {
-                engine,
-                timers,
-                futures,
-                state,
-            };
-            children.keep(key, furnished, retired);
-            Ok(())
-        }
+    // A child the hook could not furnish is kept all the same, retired:
+    // the hook runs inside a JavaScript call, where no realm is freed, and
+    // the epilogue's release step frees it.
+    let (timers, futures, refused) = match installed {
+        Ok((timers, futures)) => (timers, futures, None),
         Err(error) => {
             retired.set(true);
-            let furnished = Furnished {
-                engine,
-                timers: Rc::new(TimerState::new()),
-                futures: Rc::new(FutureTable::new()),
-                state,
-            };
-            children.keep(key, furnished, retired);
-            Err(error.message.to_string())
+            let unused = (Rc::new(TimerState::new()), Rc::new(FutureTable::new()));
+            (unused.0, unused.1, Some(error.message.to_string()))
         }
-    }
+    };
+    children.reattach(ChildRealm {
+        engine,
+        key,
+        timers,
+        futures,
+        retired,
+        in_flight: Cell::new(0),
+        state,
+    });
+    refused.map_or(Ok(()), Err)
 }
