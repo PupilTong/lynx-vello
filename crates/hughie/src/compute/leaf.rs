@@ -143,10 +143,7 @@ where
     let measurement = if let Some(contents) = contained.all() {
         // Both axes contained: nothing the contents could say is ever read,
         // so they are never measured at all.
-        LeafMetrics {
-            size: contents,
-            first_baselines: Point::NONE,
-        }
+        LeafMetrics::new(contents)
     } else {
         let mut measurement = measure(LeafMeasureInput::new(
             measure_known_dimensions,
@@ -159,10 +156,11 @@ where
             measurement.size.width = width;
         }
         if let Some(height) = contained.height() {
-            // A first baseline is the block axis speaking for the box, which
+            // A baseline is the block axis speaking for the box, which
             // block-size containment is exactly what forbids.
             measurement.size.height = height;
             measurement.first_baselines = Point::NONE;
+            measurement.last_baselines = Point::NONE;
         }
         measurement
     };
@@ -327,6 +325,10 @@ fn ratio_from_dimensions(width: f32, height: f32) -> Option<f32> {
 pub struct LeafMetrics {
     pub size: Size<f32>,
     pub first_baselines: Point<Option<f32>>,
+    /// The content's last baselines, in the same content-box coordinates as
+    /// `first_baselines`: a paragraph's last line box's baseline. Carried as
+    /// far as the leaf wrapper, which does not hand it on yet.
+    pub last_baselines: Point<Option<f32>>,
 }
 
 impl LeafMetrics {
@@ -335,12 +337,19 @@ impl LeafMetrics {
         Self {
             size,
             first_baselines: Point::NONE,
+            last_baselines: Point::NONE,
         }
     }
 
     #[must_use]
     pub fn with_first_baselines(mut self, first_baselines: Point<Option<f32>>) -> Self {
         self.first_baselines = first_baselines;
+        self
+    }
+
+    #[must_use]
+    pub fn with_last_baselines(mut self, last_baselines: Point<Option<f32>>) -> Self {
+        self.last_baselines = last_baselines;
         self
     }
 }

@@ -102,11 +102,11 @@ impl TextStore {
         }
     }
 
-    /// The narrowest the paragraph can be at `indent`. The Lynx block
-    /// measures it without the indent, as it always has.
+    /// The narrowest the paragraph can be at `indent`, which both kinds count
+    /// on the lines it applies to.
     fn min_content_width(&mut self, context: &mut TextContext, indent: f32) -> f32 {
         match self {
-            Self::Block(store) => store.block.min_content_width(context),
+            Self::Block(store) => store.block.min_content_width(context, indent),
             Self::Flow(store) => store.flow.min_content_width(context, indent),
         }
     }
@@ -157,10 +157,9 @@ impl TextStore {
 
 /// One committed paragraph, of either kind, as paint reads it.
 pub(crate) struct PaintedParagraph<'a> {
-    /// The laid-out glyph runs, in parley's own placement.
+    /// The laid-out glyph runs, placed on their line boxes.
     pub(crate) layout: &'a parley::Layout<TextBrush>,
-    /// Where each line sits; a line's `shift` moves what parley placed on
-    /// it.
+    /// Where each reported line sits.
     pub(crate) lines: &'a [LineGeometry],
     /// Item index → the node that contributed it, for
     /// [`SourceItem::Content`] and [`SourceItem::Ellipsis`].
@@ -186,11 +185,14 @@ impl PaintedParagraph<'_> {
     }
 
     /// The paint identity of one parley style index. Every run of an inline
-    /// formatting context is content.
+    /// formatting context is content; style 0 of either kind is the strut,
+    /// which no text is shaped in.
     pub(crate) fn source_of(&self, style_index: u16) -> SourceItem {
         match self.kind {
             PaintedKind::Block(block) => block.source_of(style_index),
-            PaintedKind::Flow(flow) => SourceItem::Content(flow.source_of(style_index)),
+            PaintedKind::Flow(flow) => flow
+                .source_of(style_index)
+                .map_or(SourceItem::Strut, SourceItem::Content),
         }
     }
 
@@ -201,12 +203,6 @@ impl PaintedParagraph<'_> {
             PaintedKind::Block(block) => block.boxes(),
             PaintedKind::Flow(_) => &[],
         }
-    }
-
-    /// The shift of line `index`: zero past the reported lines, which is
-    /// where a truncated block's renderless trailing lines are.
-    pub(crate) fn shift(&self, index: usize) -> f32 {
-        self.lines.get(index).map_or(0.0, |line| line.shift)
     }
 }
 
@@ -339,16 +335,15 @@ pub(crate) fn run_white_space<T>(node: &Node<T>) -> WhiteSpaceCollapse {
     style_white_space(inline_style_of(node))
 }
 
-/// The paragraph's three modes over the fork's four keywords.
-/// `break-spaces` stays collapsed, as it always has been here: it would need
-/// a wrap opportunity after every preserved space and spaces that never
-/// hang, neither of which the paragraph models.
+/// The fork's four keywords, one for one. A `<text>`'s verbatim paragraph
+/// reads none of them (`BlockStyle::verbatim`).
 pub(crate) fn style_white_space(style: &ComputedValues) -> WhiteSpaceCollapse {
     use stylo::computed_values::white_space_collapse::T as Collapse;
     match *style.get_inherited_text().get_white_space_collapse() {
         Collapse::Preserve => WhiteSpaceCollapse::Preserve,
         Collapse::PreserveBreaks => WhiteSpaceCollapse::PreserveBreaks,
-        Collapse::Collapse | Collapse::BreakSpaces => WhiteSpaceCollapse::Collapse,
+        Collapse::BreakSpaces => WhiteSpaceCollapse::BreakSpaces,
+        Collapse::Collapse => WhiteSpaceCollapse::Collapse,
     }
 }
 
@@ -405,5 +400,7 @@ pub(crate) fn measure<T>(
     } else {
         store.probe(context, constraint)
     };
-    LeafMetrics::new(metrics.size).with_first_baselines(Point::new(None, metrics.first_baseline))
+    LeafMetrics::new(metrics.size)
+        .with_first_baselines(Point::new(None, metrics.first_baseline))
+        .with_last_baselines(Point::new(None, metrics.last_baseline))
 }

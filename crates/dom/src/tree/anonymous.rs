@@ -1163,6 +1163,40 @@ mod tests {
         assert_eq!(rect(&doc, anonymous), (0.0, 0.0, 60.0, 20.0));
     }
 
+    /// The container's `direction` reaches its box, where it is the inline
+    /// formatting context's bidi paragraph level: parley reads it when it
+    /// shapes, so the change needs a new flow (`InlineFlow::set_style`
+    /// asserts as much in debug builds, which this runs in), and `start`
+    /// moves to the right edge.
+    #[test]
+    fn a_container_direction_change_re_shapes_the_box_at_the_new_level() {
+        let mut doc = doc("div { display: flex; flex-direction: column; width: 60px; }");
+        let root = doc.root;
+        let div = doc.el(root, "div");
+        text(&mut doc, div, "aa");
+        doc.flush();
+        let [anonymous] = boxes(&doc, div)[..] else {
+            panic!("one box")
+        };
+        let start = |doc: &Doc| {
+            let flow = doc.dom.inline_flow(anonymous).expect("a committed flow");
+            let line = flow.display().get(0).expect("a line");
+            line.items()
+                .find_map(|item| match item {
+                    parley::PositionedLayoutItem::GlyphRun(glyph_run) => Some(glyph_run.offset()),
+                    parley::PositionedLayoutItem::InlineBox(_) => None,
+                })
+                .expect("a glyph run")
+        };
+        assert_eq!(rect(&doc, anonymous).2, 60.0);
+        assert_eq!(start(&doc), 0.0);
+
+        doc.set_inline(div, "direction: rtl");
+        doc.flush();
+        assert_eq!(boxes(&doc, div), [anonymous]);
+        assert_eq!(start(&doc), 40.0, "the 60px box's right edge");
+    }
+
     #[test]
     fn a_repaint_only_restyle_of_the_container_keeps_the_box_laid_out() {
         let mut doc = doc(".red { color: red; }");

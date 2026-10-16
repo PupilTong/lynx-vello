@@ -130,8 +130,12 @@ pub fn shape_line(
     };
     for laid in layout.lines() {
         let metrics = laid.metrics();
-        line.ascent = line.ascent.max(metrics.ascent);
-        line.descent = line.descent.max(metrics.descent);
+        line.ascent = line
+            .ascent
+            .max(metrics.baseline - metrics.content_block_min_coord);
+        line.descent = line
+            .descent
+            .max(metrics.content_block_max_coord - metrics.baseline);
         for item in laid.items() {
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                 continue;
@@ -158,7 +162,11 @@ pub fn shape_line(
             line.runs.push(ShapedRun {
                 font: run.font().clone(),
                 size: run.font_size(),
-                normalized_coords: run.normalized_coords().to_vec(),
+                normalized_coords: run
+                    .normalized_coords()
+                    .iter()
+                    .map(|coord| coord.to_bits())
+                    .collect(),
                 glyphs,
             });
         }

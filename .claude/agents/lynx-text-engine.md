@@ -7,7 +7,7 @@ model: opus
 
 # Text engine (parley integration)
 
-You own `crates/hughie/src/text/` — the Lynx `<text>` block on parley 0.11 —
+You own `crates/hughie/src/text/` — the Lynx `<text>` block and the standard inline formatting context on parley 0.12 —
 and its wiring: `crates/dom/src/layout/text_block.rs` (`TextBlockStore`),
 `crates/dom/src/paint/text.rs` on the paint side, and
 `crates/bobcat-core/src/main/tree/text.rs`, which turns `<text>` attributes into

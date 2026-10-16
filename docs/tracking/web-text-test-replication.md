@@ -28,19 +28,19 @@ see [F](#f-recorded-deviations-not-gaps); and white space in a `text`, see
 
 | File | Cases | Passing | Gap-ignored |
 | --- | --- | --- | --- |
-| [`crates/hughie/tests/web_text_replication.rs`](../../crates/hughie/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 18 | 3 |
+| [`crates/hughie/tests/web_text_replication.rs`](../../crates/hughie/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 19 | 2 |
 | [`crates/bobcat-core/src/main/tree/web_text_replication.rs`](../../crates/bobcat-core/src/main/tree/web_text_replication.rs) | the `<text>` element, its UA sheet and its attributes | 46 | 4 |
 | [`crates/bobcat-core/src/main/runtime/web_text_replication.rs`](../../crates/bobcat-core/src/main/runtime/web_text_replication.rs) | the Element PAPI: content, restyle, truncation, `setNativeProps`, layout events | 15 | 6 |
 | [`crates/dom/tests/web_text_replication.rs`](../../crates/dom/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph, atom and inline-background paint | 27 | 0 |
 | [`crates/dom/tests/web_text_screenshots.rs`](../../crates/dom/tests/web_text_screenshots.rs) | golden screenshots — the originals' own oracle, for the cases whose claim is visual | 12 | 0 |
 | [`crates/bobcat-source/tests/web_text_css_replication.rs`](../../crates/bobcat-source/tests/web_text_css_replication.rs) | text CSS across the `.web.bundle` wire | 10 | 0 |
-| **Total** | | **128** | **13** |
+| **Total** | | **129** | **12** |
 
 A gap-ignored test asserts the `web-core` behavior and is marked
 `#[ignore = "GAP: …"]` naming the cause with a `file:line`. It is a real
 assertion, never weakened — run any file with `-- --ignored` and every one of
-the 13 fails on the assertion its own string names, so no ignore is masking a
-test that would now pass. Six of the 13 are marked `DEVIATION` instead: they
+the 12 fails on the assertion its own string names, so no ignore is masking a
+test that would now pass. Six of the 12 are marked `DEVIATION` instead: they
 assert `web-core` against a ruling that this engine follows native Lynx, and
 are listed in [F](#f-recorded-deviations-not-gaps).
 
@@ -442,8 +442,25 @@ reaches no second record.
 
 | # | Gap | Cause |
 | --- | --- | --- |
-| C1 | A run's `line-height` is taken from the style of the **next** span | Upstream parley: `shape/mod.rs:127-128` advances `item.style_index` before flushing the pending item, so the last span's `line-height` governs every line. Observed as a truncation flow's `line-height` rewriting lines *before* the cut. |
+| C1 | *Closed by the parley 0.12 upgrade:* a run's `line-height` was taken from the style of the **next** span | Parley 0.11's `shape/mod.rs:127-128` advanced `item.style_index` before flushing the pending item, so the last span's `line-height` governed every line — observed as a truncation flow's `line-height` rewriting lines *before* the cut. Parley 0.12 resolves each span's own box once per layout (`layout/style_metrics.rs`), so `a_runs_line_height_is_not_taken_from_the_span_after_it` (`crates/hughie/tests/web_text_replication.rs`) runs; its second half keeps the defect's own shape under a strut lower than both runs. |
 | C2 | *Ruled, not a gap (user, 2026-10-16):* a `<text>` keeps its leading spaces | A `<text>` does no CSS white-space processing, as on every native backend: its paragraph is built with `WhiteSpaceProcessing::Verbatim` (`crates/hughie/src/text/paragraph/content.rs`), selected by the UA rule `text { --lynx-verbatim-white-space: 1; }`, so leading spaces, space runs, tabs and newlines all stay. `collapsible_whitespace_is_removed_at_the_start_of_a_line` keeps asserting web-core's 110 and is ignored as a DEVIATION; `leading_spaces_stay_in_a_text_the_way_native_lynx_keeps_them` asserts the 130 (`crates/hughie/tests/web_text_replication.rs`). The emit-without-removal behaviour this row used to record survives only as `WhiteSpaceProcessing::CssKeepingLeadingSpace`, the processing of a `display: -lynx-text` paragraph that is no `<text>` — a `<markdown>` shadow paragraph. The CSS inline formatting context (`hughie::text::inline`) processes with `WhiteSpaceProcessing::Css`, which removes the sequence. See [F](#f-recorded-deviations-not-gaps) and [conflict 9](#9-white-space-in-a-text). |
+
+### Parley traps, re-checked on 0.12
+
+Every workaround the paragraph core carried for parley 0.11, read against the
+0.12 source:
+
+| Trap | 0.12 | What the core does now |
+| --- | --- | --- |
+| A trailing blank line after a final newline, or after a box overflowed onto the last line, adds height | Still committed; after a newline it now carries an empty run and counts in `Layout::height` | `capture_lines` still drops it, except the empty last line a verbatim `<text>` keeps on purpose (`SourceMap::final_empty_line`) |
+| An `InlineBox` shares its byte with the character after it | Unchanged (`index` is a byte position) | Cuts still compare in unit space; the sided `byte_to_unit`/`unit_before` lookups stay |
+| `LineMetrics::advance` stale after `align(Justify)`; content widths read justified advances | Gone: justification is a per-line amount applied as the line is read, and content widths never see it | Content widths are still read before alignment, which is now merely harmless; `text-align: justify` does not parse under `lynx` anyway |
+| An empty build shapes a substitute space with a style index nobody pushed | Unchanged (`analysis.rs` analyses `" "` for empty text and the builder pushes a default style) | The short-circuit to `Layout::default()` stays |
+| `break_lines` needs both max advances set | Unchanged (`BreakerState` defaults both to zero) | The clamp path still sets both |
+| C1, a run's `line-height` from the next span | Fixed | Closed, above |
+| Only one overflowing space hangs; the rest start the next line | Fixed: a whole sequence hangs (CSS Text 4 §4.3.2, `layout/whitespace.rs`) | The `<text>` space-run widening (`SpaceRun`) is deleted |
+| A wrap opportunity before `\n` swallows the forced break (`"a \nb"` on one line) | Fixed: a mandatory break is taken before any wrap opportunity | The custom line-break override is deleted; the paragraph takes `CHROMIUM_LINE_BREAK_OVERRIDE` as parley ships it |
+| No `vertical-align` for inline boxes; no CSS line boxes | Fixed: CSS 2.2 §10.8.1 line boxes with a strut (style 0) and inline-box alignment | The contribution and placement tables (`position.rs`) and the inline formatting context's own line boxes (`inline/line_boxes.rs`) and line `shift` are deleted |
 
 ### D. Paint — closed
 
