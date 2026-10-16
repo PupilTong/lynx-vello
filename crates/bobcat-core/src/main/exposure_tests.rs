@@ -11,11 +11,13 @@
 
 use dom::{IntersectionMargin, MarginLength, NodeId, Vector2D};
 
-use super::{Exposure, Length, Margins, Transition, fold_margins, parse_area, parse_length};
+use super::{
+    Exposure, HostChain, Length, Margins, Transition, fold_margins, parse_area, parse_length,
+};
 use crate::main::tree::test_support::{
     child, document as fresh_document, element_under, with_config,
 };
-use crate::main::tree::{LynxDocument, PageConfig};
+use crate::main::tree::{LynxDocument, PageConfig, nested_page};
 
 /// `test_support`'s viewport.
 const VIEWPORT_WIDTH: f32 = 393.0;
@@ -59,15 +61,25 @@ fn deliver(exposure: &Exposure, document: &mut LynxDocument) -> Vec<Transition> 
     exposure.take_transitions()
 }
 
-/// A record-only transition: an element with an `exposure-id` and no
-/// listener.
+/// A record-only transition of the document tree: an element with an
+/// `exposure-id` and no listener.
 fn record(node: NodeId, appeared: bool, id: &str) -> Transition {
     Transition {
         node,
         appeared,
         exposure_id: Some(id.to_owned()),
         scene: String::new(),
+        hosts: HostChain::new(),
         element_event: false,
+    }
+}
+
+/// [`record`], for an element under the shadow hosts `hosts`, innermost
+/// first.
+fn record_under(node: NodeId, appeared: bool, id: &str, hosts: &[NodeId]) -> Transition {
+    Transition {
+        hosts: hosts.to_vec(),
+        ..record(node, appeared, id)
     }
 }
 
@@ -622,6 +634,7 @@ fn removing_the_exposure_id_leaves_and_unregisters() {
             appeared: false,
             exposure_id: Some("a".to_owned()),
             scene: "feed".to_owned(),
+            hosts: HostChain::new(),
             element_event: false,
         }]
     );
@@ -642,6 +655,7 @@ fn a_listener_alone_registers_and_hears_its_element_events() {
         appeared,
         exposure_id: None,
         scene: String::new(),
+        hosts: HostChain::new(),
         element_event: true,
     };
     assert_eq!(deliver(&exposure, &mut document), vec![event(true)]);
@@ -674,6 +688,7 @@ fn a_listener_and_an_id_make_one_transition() {
             appeared: true,
             exposure_id: Some("a".to_owned()),
             scene: "feed".to_owned(),
+            hosts: HostChain::new(),
             element_event: true,
         }]
     );
@@ -690,7 +705,8 @@ fn a_listener_and_an_id_make_one_transition() {
 /// `stopExposure({sendEvent: true})` sends one `disexposure` per exposed
 /// element and forgets them as exposed; while stopped nothing is detected,
 /// a registration made then included; `resumeExposure()` exposes whatever is
-/// visible again, in `NodeId` order.
+/// visible again, in `NodeId` order. All of it for the document tree, the
+/// page realm's scope.
 #[test]
 fn stopping_with_send_event_leaves_everything_and_resuming_finds_it_again() {
     let mut document = fresh_document();
@@ -706,7 +722,7 @@ fn stopping_with_send_event_leaves_everything_and_resuming_finds_it_again() {
         vec![record(a, true, "a"), record(b, true, "b")]
     );
 
-    exposure.switch(&mut document, false, true);
+    exposure.switch(&mut document, false, true, None);
     let ids = |nodes: Vec<NodeId>, appeared| -> Vec<Transition> {
         nodes
             .into_iter()
@@ -728,7 +744,10 @@ fn stopping_with_send_event_leaves_everything_and_resuming_finds_it_again() {
         exposure.take_transitions(),
         ids(in_node_order(vec![a, b]), false)
     );
-    assert_eq!(exposure.observer_of(a), None, "every observer is dropped");
+    assert!(
+        exposure.observer_of(a).is_some(),
+        "an observer stays, and what it reports is ignored"
+    );
 
     // Stopped: `c` moving into view and `d` registering are not detected.
     document.set_inline_style(
@@ -738,16 +757,16 @@ fn stopping_with_send_event_leaves_everything_and_resuming_finds_it_again() {
     let d = boxed(&mut document, 300.0, 100.0);
     set(&mut exposure, &mut document, d, "exposure-id", "d");
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
-    exposure.switch(&mut document, false, true);
+    exposure.switch(&mut document, false, true, None);
     assert!(!exposure.has_transitions(), "a second stop does nothing");
 
-    exposure.switch(&mut document, true, true);
+    exposure.switch(&mut document, true, true, None);
     assert_eq!(
         deliver(&exposure, &mut document),
         ids(in_node_order(vec![a, b, c, d]), true)
     );
     let observer = exposure.observer_of(a);
-    exposure.switch(&mut document, true, true);
+    exposure.switch(&mut document, true, true, None);
     assert_eq!(
         exposure.observer_of(a),
         observer,
@@ -768,7 +787,7 @@ fn stopping_without_send_event_keeps_the_exposed_record() {
     set(&mut exposure, &mut document, gone, "exposure-id", "gone");
     assert_eq!(deliver(&exposure, &mut document).len(), 2);
 
-    exposure.switch(&mut document, false, false);
+    exposure.switch(&mut document, false, false, None);
     assert!(!exposure.has_transitions());
     document.set_inline_style(
         gone,
@@ -776,7 +795,7 @@ fn stopping_without_send_event_keeps_the_exposed_record() {
     );
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
 
-    exposure.switch(&mut document, true, true);
+    exposure.switch(&mut document, true, true, None);
     assert_eq!(
         deliver(&exposure, &mut document),
         vec![record(gone, false, "gone")]
@@ -809,18 +828,19 @@ fn a_freed_element_that_was_exposed_leaves_once() {
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
 
     // Freed while stopped, with the exposed record kept: the resume lets
-    // the registration go and sends what the free would have.
+    // the registration go and sends what the free would have, as native's
+    // next pass after a resume does.
     let node = boxed(&mut document, 0.0, 100.0);
     set(&mut exposure, &mut document, node, "exposure-id", "b");
     assert_eq!(deliver(&exposure, &mut document).len(), 1);
-    exposure.switch(&mut document, false, false);
+    exposure.switch(&mut document, false, false, None);
     document.remove_element(node);
     document.drop_element(node);
     assert!(
         !exposure.has_transitions(),
-        "no observer to drop while stopped"
+        "nothing is sent for it while its scope is stopped"
     );
-    exposure.switch(&mut document, true, true);
+    exposure.switch(&mut document, true, true, None);
     assert!(!exposure.is_registered(node));
     assert_eq!(exposure.take_transitions(), vec![record(node, false, "b")]);
 }
@@ -850,4 +870,300 @@ fn an_unlinked_element_leaves_through_the_primitive() {
         }]
     );
     assert!(exposure.is_registered(node));
+}
+
+// --- shadow hosts and scopes ---------------------------------------------
+
+/// A page holding, at its top left, a 200×300 frame `frame` whose nested
+/// page holds a 100×100 `card` element and, below it, a 200×150 frame
+/// `inner`, whose nested page holds a 100×100 `grand` element; and the
+/// page's own 100×100 `own` to their right. Each element is shown whole.
+struct Nested {
+    own: NodeId,
+    frame: NodeId,
+    card: NodeId,
+    inner: NodeId,
+    grand: NodeId,
+}
+
+/// The `flex-shrink:0` box every nested element is, `top` px down its
+/// nested page's flow.
+fn nested_box(height: f32, top: f32) -> String {
+    format!("flex-shrink:0;width:100px;height:{height}px;margin-top:{top}px")
+}
+
+fn nested(document: &mut LynxDocument) -> Nested {
+    let frame = child(
+        document,
+        "frame",
+        "position:absolute;left:0;top:0;width:200px;height:300px",
+    );
+    let page = nested_page(document, frame).expect("a frame has its nested page");
+    let card = element_under(document, page, "view", &nested_box(100.0, 0.0));
+    let inner = element_under(
+        document,
+        page,
+        "frame",
+        "flex-shrink:0;width:200px;height:150px",
+    );
+    let inner_page = nested_page(document, inner).expect("a frame has its nested page");
+    let grand = element_under(document, inner_page, "view", &nested_box(100.0, 0.0));
+    let own = child(
+        document,
+        "view",
+        "position:absolute;left:250px;top:0;width:100px;height:100px",
+    );
+    Nested {
+        own,
+        frame,
+        card,
+        inner,
+        grand,
+    }
+}
+
+/// [`nested`], with `exposure-id`s `card`, `grand` and `own` written in that
+/// order and the first delivery, which exposes all three, taken.
+fn nested_and_exposed(exposure: &mut Exposure, document: &mut LynxDocument) -> Nested {
+    let tree = nested(document);
+    for (node, id) in [
+        (tree.card, "card"),
+        (tree.grand, "grand"),
+        (tree.own, "own"),
+    ] {
+        set(exposure, document, node, "exposure-id", id);
+    }
+    assert_eq!(
+        deliver(exposure, document),
+        vec![
+            record_under(tree.card, true, "card", &[tree.frame]),
+            record_under(tree.grand, true, "grand", &[tree.inner, tree.frame]),
+            record(tree.own, true, "own"),
+        ]
+    );
+    tree
+}
+
+/// An exposure carries the shadow hosts above its element, innermost first:
+/// none for the document tree, the frame for a card's element, the inner
+/// frame and then the outer for a grand-card's.
+#[test]
+fn an_exposure_carries_the_shadow_hosts_above_its_element() {
+    let mut document = fresh_document();
+    let mut exposure = Exposure::new();
+    let tree = nested_and_exposed(&mut exposure, &mut document);
+    assert_eq!(exposure.exposed_hosts(tree.own), Some(Vec::new()));
+    assert_eq!(exposure.exposed_hosts(tree.card), Some(vec![tree.frame]));
+    assert_eq!(
+        exposure.exposed_hosts(tree.grand),
+        Some(vec![tree.inner, tree.frame])
+    );
+}
+
+/// The hosts are the exposure's, kept until its `disexposure`: a card
+/// element detached, a grand-card element freed, an id changed, and a stop
+/// each send the `disexposure` under the hosts it was exposed under, though
+/// the element is in no shadow tree any more, or none at all.
+#[test]
+fn the_hosts_are_kept_through_detach_free_id_change_and_stop() {
+    let mut document = fresh_document();
+    let mut exposure = Exposure::new();
+    let tree = nested_and_exposed(&mut exposure, &mut document);
+    let card_page = nested_page(&document, tree.frame).unwrap();
+
+    // Detached: the primitive reports it not intersecting.
+    document.remove_element(tree.card);
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![record_under(tree.card, false, "card", &[tree.frame])]
+    );
+
+    // Freed: the observer's drop inside the free.
+    document.remove_element(tree.grand);
+    document.drop_element(tree.grand);
+    assert_eq!(
+        exposure.take_transitions(),
+        vec![record_under(
+            tree.grand,
+            false,
+            "grand",
+            &[tree.inner, tree.frame]
+        )]
+    );
+
+    // Back in the card, then its id changed: the disexposure under the old
+    // id is the card's, and so is the exposure under the new one.
+    document.append_child(card_page, tree.card);
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![record_under(tree.card, true, "card", &[tree.frame])]
+    );
+    set(
+        &mut exposure,
+        &mut document,
+        tree.card,
+        "exposure-id",
+        "renamed",
+    );
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![
+            record_under(tree.card, false, "card", &[tree.frame]),
+            record_under(tree.card, true, "renamed", &[tree.frame]),
+        ]
+    );
+
+    // Stopped with `sendEvent`.
+    exposure.switch(&mut document, false, true, Some(tree.frame));
+    assert_eq!(
+        exposure.take_transitions(),
+        vec![record_under(tree.card, false, "renamed", &[tree.frame])]
+    );
+}
+
+/// The page's `stopExposure` stops the document tree's elements alone: its
+/// `disexposure` names the page's own element, a card's and a grand-card's
+/// elements go on being detected while it is stopped, and its resume finds
+/// only its own again.
+#[test]
+fn stopping_the_page_leaves_every_card_detected() {
+    let mut document = fresh_document();
+    let mut exposure = Exposure::new();
+    let tree = nested_and_exposed(&mut exposure, &mut document);
+
+    exposure.switch(&mut document, false, true, None);
+    assert_eq!(
+        exposure.take_transitions(),
+        vec![record(tree.own, false, "own")]
+    );
+
+    // Scrolled out of their frames: both cards are still detected.
+    document.set_inline_style(tree.card, &nested_box(100.0, 1000.0));
+    document.set_inline_style(tree.grand, &nested_box(100.0, 1000.0));
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![
+            record_under(tree.card, false, "card", &[tree.frame]),
+            record_under(tree.grand, false, "grand", &[tree.inner, tree.frame]),
+        ]
+    );
+
+    exposure.switch(&mut document, true, true, None);
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![record(tree.own, true, "own")]
+    );
+}
+
+/// A card's `stopExposure` with `sendEvent` disexposes its own element
+/// alone; the page's element and the grand-card's go on being detected; and
+/// its resume exposes its own element again and nothing else.
+#[test]
+fn stopping_a_card_disexposes_and_stops_its_own_elements_alone() {
+    let mut document = fresh_document();
+    let mut exposure = Exposure::new();
+    let tree = nested_and_exposed(&mut exposure, &mut document);
+
+    exposure.switch(&mut document, false, true, Some(tree.frame));
+    assert_eq!(
+        exposure.take_transitions(),
+        vec![record_under(tree.card, false, "card", &[tree.frame])]
+    );
+    assert_eq!(deliver(&exposure, &mut document), Vec::new());
+
+    // The grand-card's own scope and the page's are running.
+    document.set_inline_style(tree.grand, &nested_box(100.0, 1000.0));
+    document.set_inline_style(
+        tree.own,
+        "position:absolute;left:250px;top:1000px;width:100px;height:100px",
+    );
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![
+            record_under(tree.grand, false, "grand", &[tree.inner, tree.frame]),
+            record(tree.own, false, "own"),
+        ]
+    );
+
+    exposure.switch(&mut document, true, true, Some(tree.frame));
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![record_under(tree.card, true, "card", &[tree.frame])]
+    );
+}
+
+/// An element registered while detached belongs to no scope yet, and is
+/// judged by the tree it is in when it appears: one appended to a stopped
+/// card says nothing until that card resumes, one appended to the running
+/// page is exposed at once.
+#[test]
+fn an_element_registered_while_detached_is_judged_where_it_appears() {
+    let mut document = fresh_document();
+    let mut exposure = Exposure::new();
+    let tree = nested(&mut document);
+    let card_page = nested_page(&document, tree.frame).unwrap();
+    exposure.switch(&mut document, false, true, Some(tree.frame));
+
+    let late_card = document.create_element("view", ());
+    document.set_inline_style(late_card, &nested_box(50.0, 0.0));
+    set(
+        &mut exposure,
+        &mut document,
+        late_card,
+        "exposure-id",
+        "late-card",
+    );
+    let late_own = document.create_element("view", ());
+    document.set_inline_style(
+        late_own,
+        "position:absolute;left:250px;top:200px;width:50px;height:50px",
+    );
+    set(
+        &mut exposure,
+        &mut document,
+        late_own,
+        "exposure-id",
+        "late-own",
+    );
+    assert_eq!(deliver(&exposure, &mut document), Vec::new());
+
+    document.append_child(card_page, late_card);
+    let page = document.document_element().id();
+    document.append_child(page, late_own);
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![record(late_own, true, "late-own")]
+    );
+
+    exposure.switch(&mut document, true, true, Some(tree.frame));
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![record_under(late_card, true, "late-card", &[tree.frame])]
+    );
+}
+
+/// An element freed while its card is stopped with its record kept sends
+/// its `disexposure` when that card resumes — not when another scope does.
+#[test]
+fn a_card_element_freed_while_stopped_leaves_when_that_card_resumes() {
+    let mut document = fresh_document();
+    let mut exposure = Exposure::new();
+    let tree = nested_and_exposed(&mut exposure, &mut document);
+
+    exposure.switch(&mut document, false, false, Some(tree.frame));
+    exposure.switch(&mut document, false, false, None);
+    document.remove_element(tree.card);
+    document.drop_element(tree.card);
+    assert!(!exposure.has_transitions());
+
+    exposure.switch(&mut document, true, true, None);
+    assert_eq!(deliver(&exposure, &mut document), Vec::new());
+    assert!(exposure.is_registered(tree.card));
+
+    exposure.switch(&mut document, true, true, Some(tree.frame));
+    assert!(!exposure.is_registered(tree.card));
+    assert_eq!(
+        exposure.take_transitions(),
+        vec![record_under(tree.card, false, "card", &[tree.frame])]
+    );
 }

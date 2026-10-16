@@ -676,7 +676,9 @@ and, when a threshold was crossed — or when the Lynx exposure service holds
 transitions, as it does after `lynx.stopExposure`/`resumeExposure` — posted as
 one fresh entry, which runs the observers' handlers and then delivers the
 exposure transitions those handlers recorded: each `uiappear`/`uidisappear`,
-then the `exposure` and `disexposure` lists to the background thread; then the two
+then the `exposure` and `disexposure` lists to each card's own background
+thread (each realm keeps its own records and forwards a frame's card's); then
+the two
 batches of engine-decided events the entry may have
 left owing — the `contentvisibilityautostatechange` events that commit decided,
 and the component events the entry produced (an `<image>`'s `load`/`error`, a
@@ -859,7 +861,9 @@ calls them, and the only difference is the child's `retired` flag, which its
 component (`main/tree/frame.rs`) builds the nested page `page[part=page]` in
 its shadow root for the element's life and queues its connections as
 `ComponentEvent::Frame`, which the page realm hears as `bobcat:frame`'s
-`__BobcatFrameConnected`/`__BobcatFrameDisconnected`. What makes a child is
+`__BobcatFrameConnected`/`__BobcatFrameDisconnected` and, for a frame whose
+handle it does not hold, hands to each card its frames show in turn, so a
+frame a card created is that card's to load and let go of. What makes a child is
 `bobcat:frame` (`packages/bobcat-element/src/frame.ts`), when a `frame`'s
 `src` is written or a frame with a `src` is connected again: it resolves `src`
 against the view's base (`resolveUrl`), fetches that URL, creates the child,

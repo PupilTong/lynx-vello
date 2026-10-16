@@ -119,10 +119,14 @@ rstest.mockRequire("bobcat:runtime", () => ({
 
 /**
  * A stand-in for the host's `ShadowRealm`: its child's `boot`, `dispose`,
- * `updateData` and `updateGlobalProps` record their calls, each but `boot`
- * with the number of its realm.
+ * `updateData`, `updateGlobalProps`, `dispatchEvent`, `sendExposure` and
+ * `frameConnection` record their calls, each but `boot` with the number of
+ * its realm; `frameConnection` answers whether the realm's number is among
+ * those [`FakeShadowRealm.holding`] names for the frame.
  */
 class FakeShadowRealm {
+  /** Which child realms hold which frames, by frame id. */
+  static holding: Map<number, number> = new Map();
   static created = 0;
   /** What the next `importValue` settles with, if not a recording export. */
   static importFails: string | undefined;
@@ -153,6 +157,11 @@ class FakeShadowRealm {
         calls.push(["boot", ...args]);
         return FakeShadowRealm.bootAnswers;
       }
+      : name === "frameConnection"
+      ? (...args: unknown[]) => {
+        calls.push([name, this.number, ...args]);
+        return FakeShadowRealm.holding.get(args[0] as number) === this.number;
+      }
       : (...args: unknown[]) => {
         calls.push([name, this.number, ...args]);
         const failure = FakeShadowRealm.updateFails;
@@ -170,6 +179,7 @@ import {
   __BobcatFrameConnected,
   __BobcatFrameDisconnected,
   forwardEvent,
+  forwardExposure,
   frameCardOf,
   frameCards,
   frameDataChanged,
@@ -206,6 +216,7 @@ beforeEach(() => {
   FakeShadowRealm.updateFails = undefined;
   FakeShadowRealm.hold = false;
   FakeShadowRealm.held = [];
+  FakeShadowRealm.holding.clear();
   (globalThis as Record<string, unknown>)["ShadowRealm"] = FakeShadowRealm;
 });
 
@@ -234,6 +245,8 @@ describe("frameSourceChanged", () => {
       ["importValue", "bobcat:frame-boot", "updateData"],
       ["importValue", "bobcat:frame-boot", "updateGlobalProps"],
       ["importValue", "bobcat:frame-boot", "dispatchEvent"],
+      ["importValue", "bobcat:frame-boot", "sendExposure"],
+      ["importValue", "bobcat:frame-boot", "frameConnection"],
       ["boot", 3, "app:///cards/child.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE],
     ]);
 
@@ -434,10 +447,12 @@ describe("connection", () => {
   });
 
   it("ignores a frame that never had a src, or whose handle is another realm's", () => {
-    __BobcatFrameConnected(41);
-    __BobcatFrameDisconnected(41);
+    // Nobody holds 41: no card of this realm's, which has none, either.
+    expect(__BobcatFrameConnected(41)).toBe(false);
+    expect(__BobcatFrameDisconnected(41)).toBe(false);
     frameSourceChanged(frameHandle(4), 4, null);
-    __BobcatFrameConnected(4);
+    // This realm's, with nothing to load: taken all the same.
+    expect(__BobcatFrameConnected(4)).toBe(true);
     // A handle this realm does not hold, though the frame has a card.
     frameSourceChanged({}, 5, "app:///child.web.bundle");
     calls.length = 0;
@@ -445,6 +460,63 @@ describe("connection", () => {
     __BobcatFrameDisconnected(5);
     __BobcatFrameDisconnected(4);
     expect(calls).toEqual([]);
+  });
+
+  it("hands a frame it does not hold to each booted card in turn, until one takes it", async () => {
+    already.add("app:///a.web.bundle");
+    already.add("app:///b.web.bundle");
+    frameSourceChanged(frameHandle(3), 3, "app:///a.web.bundle");
+    frameSourceChanged(frameHandle(4), 4, "app:///b.web.bundle");
+    await drain();
+    // Frame 9 is the second card's: a frame it made in its own tree.
+    FakeShadowRealm.holding.set(9, 2);
+    calls.length = 0;
+
+    expect(__BobcatFrameDisconnected(9)).toBe(true);
+    expect(__BobcatFrameConnected(9)).toBe(true);
+    expect(calls).toEqual([
+      ["frameConnection", 1, 9, false],
+      ["frameConnection", 2, 9, false],
+      ["frameConnection", 1, 9, true],
+      ["frameConnection", 2, 9, true],
+    ]);
+
+    // One no card holds is asked of every card, and nobody's.
+    calls.length = 0;
+    expect(__BobcatFrameDisconnected(10)).toBe(false);
+    expect(calls).toEqual([
+      ["frameConnection", 1, 10, false],
+      ["frameConnection", 2, 10, false],
+    ]);
+
+    // A frame of this realm's own is never handed on.
+    calls.length = 0;
+    expect(__BobcatFrameDisconnected(3)).toBe(true);
+    expect(calls).toEqual([["dispose", 1], ["resetFrame", 3]]);
+  });
+
+  it("reports a card's answer that throws across the boundary, naming its src, and asks the next", async () => {
+    already.add("app:///a.web.bundle");
+    already.add("app:///b.web.bundle");
+    frameSourceChanged(frameHandle(3), 3, "app:///a.web.bundle");
+    await drain();
+    // Its boot answered after the first: its realm is the second.
+    frameSourceChanged(frameHandle(4), 4, "app:///b.web.bundle");
+    await drain();
+    FakeShadowRealm.holding.set(9, 2);
+    const first = frameCardOf(3) as { frameConnection: unknown };
+    Object.defineProperty(first, "frameConnection", {
+      value: () => {
+        throw new TypeError("the realm is gone");
+      },
+    });
+    calls.length = 0;
+
+    expect(__BobcatFrameConnected(9)).toBe(true);
+    expect(calls).toEqual([
+      ["reportError", "frame app:///a.web.bundle: the realm is gone"],
+      ["frameConnection", 2, 9, true],
+    ]);
   });
 
   it("closes every card this realm's frames hold, without touching the document", async () => {
@@ -760,6 +832,63 @@ describe("events", () => {
     calls.length = 0;
     FakeShadowRealm.updateFails = "the realm is gone";
     forward(card);
+    expect(calls.filter(call => call[0] === "reportError")).toEqual([
+      ["reportError", `frame ${CHILD}: the realm is gone`],
+    ]);
+  });
+});
+
+describe("exposure", () => {
+  const CHILD = "app:///child.web.bundle";
+  const SECOND = "app:///second.web.bundle";
+
+  /** The calls of the child's `sendExposure` so far. */
+  function sent(): unknown[][] {
+    return calls.filter(call => call[0] === "sendExposure");
+  }
+
+  it("hands a booted card its records through the child's sendExposure, whether or not its frame is in this realm's tree", async () => {
+    already.add(CHILD);
+    frameSourceChanged(frameHandle(3), 3, CHILD);
+    await drain();
+    const card = frameCardOf(3)!;
+    calls.length = 0;
+    forwardExposure(card, "exposure", "1:91:a0:0:");
+    // Out of the tree: its leaving's disexposures come before its
+    // disconnection, and still reach its card.
+    parents.set(3, null);
+    forwardExposure(card, "disexposure", "1:91:a0:0:");
+    expect(sent()).toEqual([
+      ["sendExposure", 1, "exposure", "1:91:a0:0:"],
+      ["sendExposure", 1, "disexposure", "1:91:a0:0:"],
+    ]);
+    expect(calls.filter(call => call[0] === "reportError")).toEqual([]);
+  });
+
+  it("hands nothing to a card the frame let go of", async () => {
+    already.add(CHILD);
+    already.add(SECOND);
+    const frame = frameHandle(3);
+    frameSourceChanged(frame, 3, CHILD);
+    await drain();
+    const card = frameCardOf(3)!;
+    frameSourceChanged(frame, 3, SECOND);
+    await drain();
+    calls.length = 0;
+    forwardExposure(card, "disexposure", "1:91:a0:0:");
+    expect(sent()).toEqual([]);
+    // The new card is another record.
+    forwardExposure(frameCardOf(3)!, "disexposure", "1:91:a0:0:");
+    expect(sent()).toEqual([["sendExposure", 2, "disexposure", "1:91:a0:0:"]]);
+  });
+
+  it("reports a hand-over that throws across the boundary once, naming src", async () => {
+    already.add(CHILD);
+    frameSourceChanged(frameHandle(3), 3, CHILD);
+    await drain();
+    calls.length = 0;
+    FakeShadowRealm.updateFails = "the realm is gone";
+    forwardExposure(frameCardOf(3)!, "exposure", "1:91:a0:0:");
     expect(calls.filter(call => call[0] === "reportError")).toEqual([
       ["reportError", `frame ${CHILD}: the realm is gone`],
     ]);

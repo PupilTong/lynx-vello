@@ -34,6 +34,7 @@ import { splitRecord } from "bobcat:record";
 // because nothing crosses it at evaluation.
 import {
   forwardEvent,
+  forwardExposure,
   frameCardOf,
   frameCards,
   frameDataChanged,
@@ -3302,48 +3303,77 @@ interface GlobalExposureEvent extends ExposureDetail {
 }
 
 /**
- * The descriptor of one element a global exposure record names, read now.
- *
- * Unlike an event's target, that element may be gone: a `disexposure` is owed
- * to an exposed element that was freed, and the entry that delivers it runs
- * after the free. The host refuses every read of a freed element, so a read
- * that throws for an element whose handle is gone answers what a freed
- * element has left — no dataset and no id. A live handle holds its element,
- * so a read that throws while the handle is live is something else, and is
- * thrown on. An element whose handle is gone and which the collection has not
- * freed yet still answers its attributes; its typed dataset went with the
- * handle, and what is left of it is the strings it was reflected as, as
- * [`datasetOf`] says.
+ * The descriptor of one element a global exposure record names, read now
+ * from the element through the handle this realm holds for it. A live handle
+ * holds its element, so a read that fails here is no free, and is thrown.
  */
 function exposureTarget(nodeId: number): ExposureTarget {
-  try {
-    return {
-      dataset: datasetOf(nodeId),
-      id: getAttribute(nodeId, "id") || null,
-      uid: nodeId,
-    };
-  } catch (error) {
-    if (handleOf(nodeId) !== undefined) {
-      throw error;
-    }
-    return { dataset: {}, id: null, uid: nodeId };
-  }
+  return {
+    dataset: datasetOf(nodeId),
+    id: getAttribute(nodeId, "id") || null,
+    uid: nodeId,
+  };
 }
 
 /**
- * The list one `exposure` or `disexposure` global event carries, out of the
- * host's record: three `bobcat:record` fields per element — its node id, and
- * the `exposure-id` and `exposure-scene` it was exposed under. The host copied
- * those two when the transition formed, so a `disexposure` names what the
- * element was exposed under even after its attributes changed or it was
- * freed; the `dataset` and `id` are read now, from the element as it is.
+ * One `exposure` this realm sent its BTS and has not yet sent the
+ * `disexposure` of: the `exposure-id` and scene it was sent under, and the
+ * descriptor as it was read then, which is what a `disexposure` reports
+ * once this realm holds no handle for the element any more.
+ */
+interface Exposed {
+  exposureId: string;
+  scene: string;
+  target: ExposureTarget;
+}
+
+/**
+ * The elements this realm sent an `exposure` for and not yet a
+ * `disexposure`, by node id — web-core's `#exposedElements`. A list per
+ * element, oldest first, because one delivery sends its `exposure` list
+ * before its `disexposure` list: an element that left and came back between
+ * two deliveries, or whose `exposure-id` changed, is sent its new exposure
+ * before the disexposure of the old one, which takes the oldest.
+ *
+ * A `disexposure` for an element that is not here is dropped: it is owed
+ * to an exposure this realm never sent — one of the card a frame showed
+ * before its current one, whose realm sent that card's BTS its own last
+ * list as it was let go of (`__BobcatTakeExposures`).
+ */
+const exposed: Map<number, Exposed[]> = new Map();
+
+/**
+ * The global exposure records one `exposure` or `disexposure` list carries,
+ * out of the host's record: four `bobcat:record` fields per element — its
+ * node id; the `exposure-id` and `exposure-scene` it was exposed under, which
+ * the host copied when the transition formed, so a `disexposure` names what
+ * the element was exposed under even after its attributes changed or it was
+ * freed; and the shadow hosts above it when it was exposed, innermost first,
+ * as comma-joined node ids, `""` for this realm's own tree.
+ *
+ * **Each realm sends its own BTS the records of its own tree**, as each
+ * web-core `lynx-view` and each native card has its own exposure: a record
+ * with no host is this realm's; one whose outermost host is a frame of this
+ * realm showing a booted card (`bobcat:frame`'s `frameCardOf`) is that
+ * card's, and is handed to it with that host taken off (`forwardExposure`,
+ * then the child's `bobcat:frame-boot` `sendExposure`), where the same rule
+ * runs again; any other is nobody's and dropped — a frame with no card any
+ * more, or a UA component's shadow content. The cards are handed their
+ * records before this realm's own list is answered.
+ *
+ * Of its own records, this realm keeps an `exposure` only for an element it
+ * holds a handle for — any other is not its own: an element of a card this
+ * frame no longer shows, or one already collected — and a `disexposure`
+ * only for an element it sent the `exposure` of ([`exposed`]).
  *
  * Each entry is web-core's exactly (`ExposureServices.ts:221-240`): the
  * detail's five keys at the top level beside the target's `dataset`, `type`
  * as the list's own name, one descriptor as both `target` and
- * `currentTarget`, a `detail` whose `unique-id` is `0`, and an epoch
- * `timestamp` from `Date.now()` — read once for the list, where a dispatched
- * event's is on the view's timeline.
+ * `currentTarget` — `dataset` and `id` read now through the handle, with the
+ * dataset's own keys and typed values, or for a `disexposure` of an element
+ * whose handle is gone, as they were read at its exposure — a `detail` whose
+ * `unique-id` is `0`, and an epoch `timestamp` from `Date.now()` — read once
+ * for the list, where a dispatched event's is on the view's timeline.
  *
  * `bobcat:runtime`'s `__BobcatSendExposure` is the caller, and sends the list
  * to the background thread; it lives here because the element state it reads
@@ -3356,21 +3386,107 @@ export function __BobcatExposureEvents(
   const fields = splitRecord(record);
   const timestamp = Date.now();
   const events: GlobalExposureEvent[] = [];
-  for (let at = 0; at + 2 < fields.length; at += 3) {
+  /** Each card's records, in the order the host wrote them. */
+  const forwarded: Map<object, string> = new Map();
+  for (let at = 0; at + 3 < fields.length; at += 4) {
     const uid = Number(fields[at]);
-    const detail = exposureDetail(uid, fields[at + 1]!, fields[at + 2]!);
-    const target = exposureTarget(uid);
-    events.push({
-      dataset: target.dataset,
-      ...detail,
-      type: kind,
-      target,
-      currentTarget: target,
-      detail: { ...detail, "unique-id": 0 },
-      timestamp,
-    });
+    const exposureId = fields[at + 1]!;
+    const scene = fields[at + 2]!;
+    const hosts = fields[at + 3]!;
+    if (hosts !== "") {
+      const split = hosts.lastIndexOf(",");
+      const card = frameCardOf(Number(hosts.slice(split + 1)));
+      if (card === undefined) continue;
+      const inner = split < 0 ? "" : hosts.slice(0, split);
+      forwarded.set(
+        card,
+        (forwarded.get(card) ?? "") + recordField(fields[at]!) +
+          recordField(exposureId) + recordField(scene) + recordField(inner),
+      );
+      continue;
+    }
+    let target: ExposureTarget;
+    if (kind === "disexposure") {
+      const kept = exposed.get(uid);
+      const oldest = kept?.shift();
+      if (oldest === undefined) continue;
+      if (kept!.length === 0) exposed.delete(uid);
+      target = handleOf(uid) === undefined ? oldest.target : exposureTarget(uid);
+    } else {
+      if (handleOf(uid) === undefined) continue;
+      target = exposureTarget(uid);
+      const kept = exposed.get(uid);
+      const entry = { exposureId, scene, target };
+      if (kept === undefined) exposed.set(uid, [entry]);
+      else kept.push(entry);
+    }
+    events.push(exposureEvent(kind, uid, exposureId, scene, target, timestamp));
+  }
+  for (const [card, cardRecord] of forwarded) {
+    forwardExposure(card, kind, cardRecord);
   }
   return events;
+}
+
+/**
+ * One `disexposure` for every element this realm sent an `exposure` for and
+ * not yet a `disexposure`, leaving none: what a frame's card sends its BTS
+ * as it is let go of, before its BTS is disposed of, as native's card sends
+ * its exposed elements one last `disexposure` list when it is torn down
+ * (user ruling 2026-10-16). Each is built as a `disexposure` the host asked
+ * for would be — under the `exposure-id` and scene it was exposed under,
+ * with its `dataset` and `id` read now through the handle, or as they were
+ * read at its exposure once the handle is gone or the read fails — in the
+ * order the exposures were sent.
+ *
+ * The host's own `disexposure` for those elements, which the teardown that
+ * frees them queues, then finds none of them here, and is dropped.
+ */
+export function __BobcatTakeExposures(): GlobalExposureEvent[] {
+  const timestamp = Date.now();
+  const events: GlobalExposureEvent[] = [];
+  for (const [uid, kept] of exposed) {
+    for (const { exposureId, scene, target: then } of kept) {
+      let target = then;
+      if (handleOf(uid) !== undefined) {
+        try {
+          target = exposureTarget(uid);
+        } catch {
+          // What it was read as at its exposure: a last list is never lost
+          // to one element.
+        }
+      }
+      events.push(exposureEvent("disexposure", uid, exposureId, scene, target, timestamp));
+    }
+  }
+  exposed.clear();
+  return events;
+}
+
+/** One `bobcat:record` field, as the host writes them. */
+function recordField(text: string): string {
+  return `${text.length}:${text}`;
+}
+
+/** web-core's `GlobalExposureEvent` for one element of a list. */
+function exposureEvent(
+  kind: string,
+  uid: number,
+  exposureId: string,
+  scene: string,
+  target: ExposureTarget,
+  timestamp: number,
+): GlobalExposureEvent {
+  const detail = exposureDetail(uid, exposureId, scene);
+  return {
+    dataset: target.dataset,
+    ...detail,
+    type: kind,
+    target,
+    currentTarget: target,
+    detail: { ...detail, "unique-id": 0 },
+    timestamp,
+  };
 }
 
 /**

@@ -12,10 +12,14 @@
 //   `global-props`, with the text the attribute now holds;
 // - `__BobcatFrameConnected` and `__BobcatFrameDisconnected`, which the host
 //   calls in the page realm, one call per connection and disconnection the
-//   custom element queued, out of the mutation that caused it;
+//   custom element queued, out of the mutation that caused it, and which a
+//   realm that does not hold the frame's handle hands on to its booted cards
+//   (see "Frames inside a card" below);
 // - `frameCardOf`, `frameCards` and `forwardEvent`, which `bobcat:element`'s
 //   dispatch calls to hand a booted card the steps of an event that are its
-//   own (see "Events" below).
+//   own (see "Events" below), and `forwardExposure`, which its exposure
+//   delivery calls to hand a booted card its own exposure records (see
+//   "Exposure" below).
 //
 // The steps:
 //
@@ -37,8 +41,9 @@
 //    microtask, so a start is never inside the `__SetAttribute` that asked
 //    for it.
 // 3. Once it settles, a fresh `ShadowRealm` imports `bobcat:frame-boot`'s
-//    `boot`, `dispose`, `updateData`, `updateGlobalProps` and
-//    `dispatchEvent`, and calls `boot` with primitives alone — the frame's
+//    `boot`, `dispose`, `updateData`, `updateGlobalProps`, `dispatchEvent`,
+//    `sendExposure` and `frameConnection`, and calls `boot` with primitives
+//    alone — the frame's
 //    node id, `U`, the frame's `data` and `global-props` as they stand at
 //    that moment and `SystemInfo`, each as JSON text, and the view's native
 //    module table — which renders the card under the frame's nested page
@@ -111,6 +116,33 @@
 // longer in this realm's tree — one a listener removed, whose disconnection
 // the host delivers in a later entry.
 //
+// # Exposure
+//
+// A frame's card's elements' `exposure` and `disexposure` records go to the
+// card's own BTS, as web-core's nested `lynx-view` and native's nested card
+// each keep their own exposure: the host writes, with each record, the
+// shadow hosts above its element, and `bobcat:element` hands the records
+// whose outermost host is a frame of this realm showing a booted card to
+// that card (`forwardExposure`), with that host taken off, through the
+// child's `bobcat:frame-boot` `sendExposure`, which runs the page's own
+// exposure delivery there over them, its own frames' cards included. Only a
+// card the frame let go of is skipped: a frame that left this realm's tree
+// still hands its card the `disexposure` records its leaving queued, which
+// come before its disconnection does.
+//
+// # Frames inside a card
+//
+// The host hands every frame's connection and disconnection to the page
+// realm. A realm that holds the frame's handle acts on it and answers
+// `true`; any other asks each booted card in turn
+// (`bobcat:frame-boot`'s `frameConnection`, which runs the same rule in
+// the card, so at any depth), until one answers `true`. So a card that
+// takes one of its own frames out of its tree lets go of that frame's card,
+// and one that puts it back renders it again, as each web-core nested
+// `lynx-view` hears its own `disconnectedCallback`. A frame's handle is
+// how this is decided, never the tree: a disconnection is delivered after
+// the removal, when the frame is in no card's tree any more.
+//
 // What the nested card does is the child's to report: a failure in the child
 // reports there, through the same diagnostics pair, and its `boot` answers
 // `false` for it, so nothing here reports it a second time; its update
@@ -162,6 +194,19 @@ type Boot = (
 type Dispose = () => void;
 
 /**
+ * `bobcat:frame-boot`'s `sendExposure`, as the child's wrapped function:
+ * the list's name and the card's part of the host's record.
+ */
+type SendExposure = (kind: string, record: string) => void;
+
+/**
+ * `bobcat:frame-boot`'s `frameConnection`, as the child's wrapped function:
+ * whether the card's realm, or a card of its own, took the connection or
+ * disconnection of the frame `frameId`.
+ */
+type FrameConnection = (frameId: number, connected: boolean) => boolean;
+
+/**
  * `bobcat:frame-boot`'s `updateData` or `updateGlobalProps`, as the child's
  * wrapped function: the new value as JSON text.
  */
@@ -194,6 +239,8 @@ interface Card {
   readonly state: FrameState;
   readonly frameId: number;
   readonly dispatch: Dispatch;
+  readonly sendExposure: SendExposure;
+  readonly frameConnection: FrameConnection;
 }
 
 /** One frame's card. */
@@ -345,19 +392,52 @@ function isPlainObjectText(json: string): boolean {
 
 /**
  * The host's: the frame `frameId` was connected. Loads its `src` again when
- * nothing is loaded or loading — after a disconnection let go of it.
+ * nothing is loaded or loading — after a disconnection let go of it. Answers
+ * whether this realm or one of its cards holds the frame (see "Frames
+ * inside a card").
  */
-export function __BobcatFrameConnected(frameId: number): undefined {
-  const state = stateOf(frameId);
-  if (state !== undefined && state.src !== null && !state.loaded) load(frameId, state, state.src);
-  return undefined;
+export function __BobcatFrameConnected(frameId: number): boolean {
+  return connectionChanged(frameId, true);
 }
 
-/** The host's: the frame `frameId` was disconnected. Lets go of its card. */
-export function __BobcatFrameDisconnected(frameId: number): undefined {
-  const state = stateOf(frameId);
-  if (state !== undefined && state.loaded) teardown(frameId, state);
-  return undefined;
+/**
+ * The host's: the frame `frameId` was disconnected. Lets go of its card.
+ * Answers whether this realm or one of its cards holds the frame.
+ */
+export function __BobcatFrameDisconnected(frameId: number): boolean {
+  return connectionChanged(frameId, false);
+}
+
+/**
+ * The frame `frameId` was connected (`connected`) or disconnected: acted on
+ * here when this realm holds its handle, and answered `true`, whether or not
+ * it ever had a `src`; otherwise handed to each booted card in turn until
+ * one answers `true`, and `false` when none does — another realm's frame
+ * that no card of this one holds, or one already freed.
+ */
+function connectionChanged(frameId: number, connected: boolean): boolean {
+  if (__BobcatHandleOf(frameId) !== undefined) {
+    const state = stateOf(frameId);
+    if (state === undefined) return true;
+    if (connected) {
+      if (state.src !== null && !state.loaded) load(frameId, state, state.src);
+    } else if (state.loaded) {
+      teardown(frameId, state);
+    }
+    return true;
+  }
+  for (const card of frameCards()) {
+    const { state, frameConnection } = card as Card;
+    // A card an earlier one's answer let go of is skipped.
+    if (state.card !== card) continue;
+    try {
+      // With no receiver: an object `this` cannot cross into the child.
+      if (frameConnection(frameId, connected) === true) return true;
+    } catch (error) {
+      report(state.src ?? "", error);
+    }
+  }
+  return false;
 }
 
 /**
@@ -435,7 +515,9 @@ function startFrame(
     realm.importValue("bobcat:frame-boot", "updateData"),
     realm.importValue("bobcat:frame-boot", "updateGlobalProps"),
     realm.importValue("bobcat:frame-boot", "dispatchEvent"),
-  ]).then(([boot, dispose, updateData, updateGlobalProps, dispatch]) => {
+    realm.importValue("bobcat:frame-boot", "sendExposure"),
+    realm.importValue("bobcat:frame-boot", "frameConnection"),
+  ]).then(([boot, dispose, updateData, updateGlobalProps, dispatch, sendExposure, frameConnection]) => {
     if (!current()) return;
     state.dispose = dispose as Dispose;
     const booted = (boot as Boot)(
@@ -451,7 +533,13 @@ function startFrame(
     if (booted !== true || !current()) return;
     state.updateData = updateData as Update;
     state.updateGlobalProps = updateGlobalProps as Update;
-    state.card = { state, frameId, dispatch: dispatch as Dispatch };
+    state.card = {
+      state,
+      frameId,
+      dispatch: dispatch as Dispatch,
+      sendExposure: sendExposure as SendExposure,
+      frameConnection: frameConnection as FrameConnection,
+    };
   }).catch(error => {
     if (current()) report(src, error);
   });
@@ -557,6 +645,30 @@ export function forwardEvent(
       extraCount,
       ...payload,
     );
+  } catch (error) {
+    report(state.src ?? "", error);
+  }
+  return undefined;
+}
+
+/**
+ * Hands `card` its part of one exposure record list: `kind` is the list's
+ * name, `record` the host's record of the card's own elements with this
+ * realm's frame taken off their hosts, which the child's `sendExposure`
+ * delivers as the page's own delivery does.
+ *
+ * Nothing for a card the frame let go of since — its realm sent its BTS its
+ * last list as it went — but a frame no longer in this realm's tree still
+ * hands its card what its leaving queued, which comes before the
+ * disconnection that lets go of the card. What fails in the child is
+ * reported there; a call that fails across the boundary is reported here,
+ * naming `src`.
+ */
+export function forwardExposure(card: object, kind: string, record: string): undefined {
+  const { state, sendExposure } = card as Card;
+  if (state.card !== card) return undefined;
+  try {
+    sendExposure(kind, record);
   } catch (error) {
     report(state.src ?? "", error);
   }

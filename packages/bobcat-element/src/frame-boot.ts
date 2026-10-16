@@ -38,8 +38,22 @@
 // own frames on in turn, and reports what a listener throws here: nothing
 // crosses back, so a catch or a failure here ends nothing in the parent.
 //
+// `sendExposure` takes the `exposure` and `disexposure` records of this
+// card's elements — those whose outermost shadow host is the frame — which
+// the realm of the frame hands over with that host taken off. It delivers
+// them as the page's own delivery does: this card's own elements' records
+// go to this card's BTS, and the records of a card one of its own frames
+// shows are handed on in turn.
+//
+// `frameConnection` takes the connection or disconnection of a frame whose
+// handle the realm of this card's frame does not hold, and answers whether
+// this card, or a card of its own, holds it: so a frame this card made
+// hears its own connection and disconnection, at any depth.
+//
 // `dispose` is the other half: `bobcat:frame` calls it when the frame lets
 // go of this card. It lets go of every card a frame of this card's loaded,
+// sends the card's BTS one last `disexposure` list for every element of the
+// card it was sent an `exposure` for, lets go of the card's exposure switch,
 // disposes of the card's BTS — its app cleanup runs and acknowledges — and
 // only then closes this realm.
 //
@@ -55,6 +69,8 @@ import {
   __BobcatInitializeMTS,
   __BobcatProcessInitData,
   __BobcatRenderPage,
+  __BobcatSendExposure,
+  __BobcatSendLastDisexposure,
   __BobcatUpdateData,
   __BobcatUpdateGlobalProps,
   lynx,
@@ -64,7 +80,11 @@ import {
   __BobcatUsePageRoot,
   __FlushElementTree,
 } from "bobcat:element";
-import { __BobcatCloseFrames } from "bobcat:frame";
+import {
+  __BobcatCloseFrames,
+  __BobcatFrameConnected,
+  __BobcatFrameDisconnected,
+} from "bobcat:frame";
 import { Worker } from "bobcat-internal";
 import {
   adoptStyleSheet,
@@ -73,6 +93,7 @@ import {
   hasStyleSheet,
   loadModuleSync,
   parentNode,
+  switchExposure,
 } from "bobcat-internal:host";
 import { backgroundThreadURL, bundleStyleSheetURL, sectionURL } from "bobcat:section-url";
 
@@ -117,6 +138,8 @@ export function boot(
       systemInfo: JSON.parse(systemInfoJson),
       enableJSDataProcessor: false,
       nativeModuleTable,
+      // The card's `stopExposure` stops its own elements alone.
+      frame: frameId,
     });
     // The card's `root` may clear `lynx.__initData`; boot keeps its own copy.
     let data = lynx.__initData;
@@ -232,6 +255,38 @@ export function dispatchEvent(
   }
 }
 
+/**
+ * Delivers this card's part of one exposure record list: `kind` is the
+ * list's name, and `record` the host's record of this card's elements with
+ * the frame taken off their hosts — `""` for this card's own tree. What
+ * fails is this card's and is reported here.
+ */
+export function sendExposure(kind: string, record: string): void {
+  try {
+    __BobcatSendExposure(kind, record);
+  } catch (error) {
+    _ReportError(error);
+  }
+}
+
+/**
+ * The frame `frameId` was connected (`connected`) or disconnected, and the
+ * realm of this card's frame does not hold it: acted on here when this
+ * realm, or a card of its own, holds its handle (`bobcat:frame`'s rule),
+ * and answered whether one did. What fails is reported here, and answers
+ * `false`.
+ */
+export function frameConnection(frameId: number, connected: boolean): boolean {
+  try {
+    return connected
+      ? __BobcatFrameConnected(frameId)
+      : __BobcatFrameDisconnected(frameId);
+  } catch (error) {
+    _ReportError(error);
+    return false;
+  }
+}
+
 /** The shadow root the nested page `page` sits in: its parent. */
 function shadowRootOf(page: number): number {
   const shadow = parentNode(page);
@@ -240,20 +295,40 @@ function shadowRootOf(page: number): number {
 }
 
 /**
- * Lets go of this card: every card a frame of this realm loaded first, then
- * the card's BTS — `__DestroyLifetime`, then `dispose`, whose app cleanup
- * (ReactLynx's `destroyCard`, its unmount effects) runs before the BTS
- * acknowledges and this realm terminates the Worker — and then this realm
- * itself, which the host frees outside every JavaScript call.
+ * Lets go of this card: every card a frame of this realm loaded first; then
+ * one last `disexposure` list to the card's BTS, for every element it was
+ * sent an `exposure` for and not yet a `disexposure`, as native's card sends
+ * when it is torn down (user ruling 2026-10-16), built here from what this
+ * realm holds, at once; then the card's exposure switch, so the frame's next
+ * card starts with its exposure running, as a new native or web-core card
+ * does; then the card's BTS — `__DestroyLifetime`, then `dispose`, whose app
+ * cleanup (ReactLynx's `destroyCard`, its unmount effects) runs before the
+ * BTS acknowledges and this realm terminates the Worker — and then this
+ * realm itself, which the host frees outside every JavaScript call. The
+ * BTS hears the last list before `dispose`, both posted by this call.
  *
- * Returns at once. The host keeps this realm while its BTS runs, so the
- * acknowledgement is delivered here; a BTS that never answers keeps it until
- * the view ends. What the card built under the nested page is the parent's
- * to free, with `resetFrame`, right after this returns, and this realm
- * ignores what its BTS says meanwhile.
+ * Returns at once, waiting for nothing. The host keeps this realm while its
+ * BTS runs, so the acknowledgement is delivered here; a BTS that never
+ * answers keeps it until the view ends. What the card built under the nested
+ * page is the parent's to free, with `resetFrame`, right after this returns,
+ * and this realm ignores what its BTS says meanwhile; the host's own
+ * `disexposure` for those elements reaches nobody, the frame having no card
+ * or another one, which never sent their `exposure`.
  */
 export function dispose(): void {
   __BobcatCloseFrames();
+  try {
+    __BobcatSendLastDisexposure();
+  } catch (error) {
+    _ReportError(error);
+  }
+  if (ownFrame !== undefined) {
+    try {
+      switchExposure(1, 0, ownFrame);
+    } catch (error) {
+      _ReportError(error);
+    }
+  }
   void __BobcatDispose()
     .catch(error => {
       _ReportError(error);

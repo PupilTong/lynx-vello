@@ -8016,13 +8016,14 @@ fn the_exposure_members_register_listeners_and_switch_detection() {
 
     run("exposureEvents(view, 1);");
     let first = exposure_observer(&elements, view).expect("a listener registers the element");
-    run("switchExposure(0, 1);");
+    // The document tree's scope, `0`.
+    run("switchExposure(0, 1, 0);");
     assert_eq!(
         exposure_observer(&elements, view),
-        None,
-        "stopping drops every observer"
+        Some(first),
+        "stopping keeps the observer and ignores what it reports"
     );
-    run("switchExposure(1, 1);");
+    run("switchExposure(1, 1, 0);");
     let resumed = exposure_observer(&elements, view).expect("resuming observes it again");
     assert_ne!(resumed, first, "with an observer of its own");
     run("exposureEvents(view, 0);");
@@ -8031,7 +8032,9 @@ fn the_exposure_members_register_listeners_and_switch_detection() {
     run(r"
         for (const [call, expected] of [
           [() => exposureEvents(view, true), 'exposureEvents expects 0 or 1 for argument 1'],
-          [() => switchExposure(1, 2), 'switchExposure expects 0 or 1 for argument 1'],
+          [() => switchExposure(1, 2, 0), 'switchExposure expects 0 or 1 for argument 1'],
+          [() => switchExposure(1, 1), 'switchExposure expects a number for argument 2'],
+          [() => switchExposure(1, 1, -1), 'switchExposure expects a non-negative integer node id'],
           [() => exposureEvents(987654321, 1), 'exposureEvents'],
         ]) {
           let thrown;
@@ -9016,11 +9019,10 @@ fn dropping_a_frame_frees_its_nested_page() {
             r"
         import { createElement, framePage, insertBefore } from 'bobcat-internal:host';
         const page = __CreatePage();
-        let frame = __CreateElement('frame', 0);
+        globalThis.frame = __CreateElement('frame', 0);
         __AppendElement(page, frame);
         insertBefore(framePage(__GetElementUniqueID(frame)), createElement('view'), undefined);
         __RemoveElement(page, frame);
-        frame = undefined;
     ",
             "app:///dropped-frame.js",
         )
@@ -9030,6 +9032,16 @@ fn dropping_a_frame_frees_its_nested_page() {
         let page = frame_page_of(&tree, node_id(3));
         (page, tree.get(page).unwrap().child_ids()[0])
     };
+    // Let go of only now: a collection the realm runs on its own may come at
+    // any allocation, and must not take the frame before it was read.
+    runtime
+        .evaluate_module(
+            &mut js,
+            "globalThis.frame = undefined;",
+            "app:///drop-frame.js",
+            "letting go of the frame",
+        )
+        .unwrap();
     runtime.collect_garbage(&mut js).unwrap();
     let tree = elements.tree();
     assert!(tree.get(node_id(3)).is_none(), "the frame was dropped");

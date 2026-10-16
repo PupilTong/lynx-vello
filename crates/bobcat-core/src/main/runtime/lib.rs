@@ -884,11 +884,16 @@ impl DocumentSlot {
     }
 
     /// The realm's `switchExposure`; see [`Exposure::switch`].
-    fn switch_exposure(&mut self, on: bool, send_event: bool) {
+    fn switch_exposure(&mut self, on: bool, send_event: bool, scope: Option<dom::NodeId>) {
         let Self {
             document, exposure, ..
         } = self;
-        exposure.switch(document.as_mut().expect(DOCUMENT_EXISTS), on, send_event);
+        exposure.switch(
+            document.as_mut().expect(DOCUMENT_EXISTS),
+            on,
+            send_event,
+            scope,
+        );
     }
 
     /// Adopts whatever metrics an attached painter has named, and records
@@ -1854,9 +1859,10 @@ impl MainThreadRuntime {
     /// which loads the card the frame's `src` names if none is loaded, as
     /// web-core's `LynxView` renders on `connectedCallback`, or
     /// `__BobcatFrameDisconnected(frameId)`, which disposes of it, as
-    /// `disconnectedCallback` does. What happens is the module's to decide:
-    /// a frame whose handle is another realm's, or that never had a `src`,
-    /// is nothing to it.
+    /// `disconnectedCallback` does. What happens is the module's to decide,
+    /// and which realm it happens in: a frame whose handle a card's realm
+    /// holds is handed on to that card, at any depth, and one that never had
+    /// a `src` is nothing to anyone. What the call answers is not read.
     ///
     /// After a disconnection, the children nothing needs any more are freed
     /// here, outside the call, so the child the disposal retired goes in
@@ -2314,10 +2320,11 @@ impl MainThreadRuntime {
     /// non-bubbling, non-composed dispatch at the element, with
     /// [`EventDetail::Exposure`] — then one `exposure` record list, then one
     /// `disexposure` list, each one call of `bobcat:runtime`'s
-    /// `__BobcatSendExposure` (see [`Self::send_exposure_records`]). An
-    /// element freed since its transition formed hears nothing, as a routed
-    /// event at a freed target does, and its record is still sent: the id
-    /// and scene were copied when it formed.
+    /// `__BobcatSendExposure` (see [`Self::send_exposure_records`]), in the
+    /// page realm, which hands each card its own records. An element freed
+    /// since its transition formed hears nothing, as a routed event at a
+    /// freed target does, and its record is still sent: the id, the scene
+    /// and the shadow hosts above it were copied when it was exposed.
     ///
     /// A hook or a listener may mutate the tree. Whatever it wrote is
     /// committed by the delivery entry's own epilogue, whose update then runs
@@ -2361,6 +2368,7 @@ impl MainThreadRuntime {
                 failures.push(error);
             }
         }
+        let mut hosts = String::new();
         for (kind, appeared) in [("exposure", true), ("disexposure", false)] {
             let mut record = String::new();
             for transition in transitions.iter().filter(|t| t.appeared == appeared) {
@@ -2370,6 +2378,14 @@ impl MainThreadRuntime {
                 write_record_field(&mut record, &packed_node_id(transition.node).to_string());
                 write_record_field(&mut record, id);
                 write_record_field(&mut record, &transition.scene);
+                hosts.clear();
+                for (at, host) in transition.hosts.iter().enumerate() {
+                    if at > 0 {
+                        hosts.push(',');
+                    }
+                    write!(hosts, "{}", packed_node_id(*host)).expect("writing to a String");
+                }
+                write_record_field(&mut record, &hosts);
             }
             if record.is_empty() {
                 continue;
@@ -2383,11 +2399,15 @@ impl MainThreadRuntime {
 
     /// Hands one global record list to the realm: `bobcat:runtime`'s
     /// `__BobcatSendExposure(kind, record)`, `kind` being `"exposure"` or
-    /// `"disexposure"` and `record` a `bobcat:record` payload of three fields
-    /// per element — its packed node id, its `exposure-id`, its scene. The
-    /// realm builds web-core's record objects out of them and sends the list
-    /// to the BTS as the global event of that name; nothing about their shape
-    /// is decided here.
+    /// `"disexposure"` and `record` a `bobcat:record` payload of four fields
+    /// per element — its packed node id, its `exposure-id`, its scene, and
+    /// the shadow hosts above it when it was exposed, innermost first, as
+    /// comma-joined packed ids (`""` for the document tree). The realm keeps
+    /// the elements of its own tree, hands each card one of its frames shows
+    /// the elements of that card's (`element-papi.ts`), builds web-core's
+    /// record objects out of its own and sends that list to its BTS as the
+    /// global event of that name; nothing about their shape, nor which realm
+    /// a host belongs to, is decided here.
     ///
     /// A realm that publishes no such export is a failure rather than a
     /// silent drop, as it is not for the exports a bundle may lack: this one
@@ -3644,10 +3664,12 @@ fn install_attribute_writes(
 /// has a `uiappear`/`uidisappear` handler, on each change of that answer:
 /// the registrations live in the realm, and an element with a handler is
 /// detected whether or not it carries an `exposure-id`. `switchExposure(on,
-/// sendEvent)` is `lynx.stopExposure`/`lynx.resumeExposure` as native runs
-/// them. Both flags are `0` or `1`, as every flag a tree member takes, and
-/// neither member answers anything: what they change is delivered by the
-/// next intersection delivery entry.
+/// sendEvent, scopeHost)` is `lynx.stopExposure`/`lynx.resumeExposure` as
+/// native runs them, for the elements whose innermost shadow host is
+/// `scopeHost` — the caller's own tree's host, `0` for the document tree.
+/// Both flags are `0` or `1`, as every flag a tree member takes, and neither
+/// member answers anything: what they change is delivered by the next
+/// intersection delivery entry.
 fn install_exposure_members(
     engine: &mut ScriptEngine,
     handle: &Rc<RefCell<DocumentSlot>>,
@@ -3664,11 +3686,16 @@ fn install_exposure_members(
     })?;
 
     let tree = Rc::clone(handle);
-    install(engine, "switchExposure", 2, move |arguments| {
+    install(engine, "switchExposure", 3, move |arguments| {
         const NAME: &str = "bobcat-internal:host.switchExposure";
         let on = flag_argument(NAME, arguments, 0)?;
         let send_event = flag_argument(NAME, arguments, 1)?;
-        borrow_slot(NAME, &tree)?.switch_exposure(on, send_event);
+        // A host the switch names need not be live: a scope is only a key.
+        let scope = match *argument(arguments, 2) {
+            HostValue::Number(0.0) => None,
+            _ => Some(node_id_argument(NAME, arguments, 2)?),
+        };
+        borrow_slot(NAME, &tree)?.switch_exposure(on, send_event, scope);
         Ok(HostValue::Undefined)
     })?;
 

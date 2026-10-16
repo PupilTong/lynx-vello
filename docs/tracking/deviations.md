@@ -2370,14 +2370,6 @@ consequential choice about whether to follow the spec or the quirk.
   no second engine; a custom-element ability). Native stands up a second
   `LynxTemplateRender` per frame (`LynxFrameView.java`) and web-core a nested
   `lynx-view` with an iframe realm; what follows from sharing one document:
-  - *A frame inside a nested card is disconnected for nobody but the page
-    realm.* Connections and disconnections reach `bobcat:frame` in the page
-    realm alone, which holds no handle for a frame a nested card created; so
-    a nested card that removes one of its own frames and keeps its handle
-    keeps that frame's card running. Letting go of the handle disposes of it
-    (the child's `FinalizationRegistry`), and so does the outer card going:
-    its `dispose` closes every card its frames loaded. web-core's nested
-    `lynx-view` hears its own `disconnectedCallback` at any depth.
   - *The nested card's `PageConfig` is ignored.* The nested page is styled by
     the host document's UA sheet, built from the host's
     `defaultDisplayLinear`, `defaultOverflowVisible` and the rest; native and
@@ -2458,9 +2450,6 @@ consequential choice about whether to follow the spec or the quirk.
     - *A frame's BTS reports as any BTS* (my decision): `WorkerThrew` and
       `WorkerEnded` name `worker <id> bobcat:bts`, non-fatal, so an embedder
       cannot tell it from the page's.
-    - *`lynx.stopExposure`/`resumeExposure` from a frame's BTS switch the
-      whole document's exposure* (my decision): both references scope it to
-      the nested view; here exposure is the document's.
     - *Disposal does not hold the frame* (my decision): a removal or a new
       `src` runs the old card's BTS `dispose` (ReactLynx's `destroyCard`,
       its unmount effects) and empties the nested page at once, without
@@ -2491,9 +2480,19 @@ consequential choice about whether to follow the spec or the quirk.
     - *A listener that throws in a card is a `ScriptReported`*, not a
       `ListenerFailed`: the card's `dispatchEvent` reports in the child,
       and nothing crosses the ShadowRealm boundary back.
-    - *The card's exposure records go to the page's BTS* (deferred): a
-      card's elements' `exposure`/`disexposure` lists still go to the page
-      realm's BTS, where both references keep exposure per card.
+    - *A card let go of sends its last disexposure list synchronously*
+      (user ruling 2026-10-16: native's final records, "no waiting should
+      be added"): `bobcat:frame-boot`'s `dispose` posts it just before the
+      BTS's `dispose`, built from what the realm kept at exposure. web-core
+      drops its pending records on dispose. The page's own view-end
+      disposal still sends none (native sends one on `destroy`).
+    - *An element freed while its card's exposure is stopped with
+      `sendEvent: false` sends its disexposure when that card resumes*, as
+      for the page.
+    - *A frame moved between cards splits* (my decision, unsupported):
+      its connections follow the realm that holds its handle, while its
+      events and an exposed element's records follow the tree they were
+      captured in.
   - *A relative `src` resolves against the view's base*, not the host card's
     URL: `bobcat:frame` resolves `src` with `resolveUrl`, which is the
     resolution the fetcher makes against `ViewSources::base_url`, and the

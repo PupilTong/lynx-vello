@@ -304,15 +304,19 @@ interface BobcatNative {
   exposureEvents(nodeId: number, wants: 0 | 1): void;
   /**
    * `lynx.stopExposure({sendEvent})` (`on` `0`) and `lynx.resumeExposure()`
-   * (`on` `1`), as native runs them. Stopping drops every detection; with
-   * `sendEvent` `1` every exposed element is sent one `disexposure` record
-   * and forgotten as exposed, with `0` nothing is sent and the exposed set
-   * is kept. Resuming detects every registered element again, and one that
-   * is visible and not recorded as exposed is exposed again. Stopping a
-   * stopped page and resuming a running one do nothing; `sendEvent` is read
-   * by a stop alone.
+   * (`on` `1`), as native runs them for one card: for the elements whose
+   * innermost shadow host is `scopeHost` — the caller's own tree's host,
+   * `0` for the document tree, the frame for a frame's card — the one
+   * exposed under it while recorded as exposed. Stopping drops their
+   * detection; with `sendEvent` `1` each of them that is exposed is sent
+   * one `disexposure` record and forgotten as exposed, with `0` nothing is
+   * sent and the exposed set is kept. Resuming detects every registered
+   * element again, and one that is visible and not recorded as exposed is
+   * exposed again. Each scope is its own: stopping one leaves every other
+   * running. Stopping a stopped scope and resuming a running one do
+   * nothing; `sendEvent` is read by a stop alone.
    */
-  switchExposure(on: 0 | 1, sendEvent: 0 | 1): void;
+  switchExposure(on: 0 | 1, sendEvent: 0 | 1, scopeHost: number): void;
   /**
    * Arms one timer `delayMilliseconds` from now — repeating until cleared
    * when `repeats` — and returns the id it is armed under. The delay goes

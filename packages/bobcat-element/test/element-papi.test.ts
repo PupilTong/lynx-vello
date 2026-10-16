@@ -80,7 +80,8 @@ const frameCards: Map<number, { card: string }> = new Map();
 // A frame's `src` load and its `data`/`global-props` are `bobcat:frame`'s,
 // tested in frame.test.ts; here each is the one call `__SetAttribute` makes,
 // recorded with the mock's calls. So is an event's hand-over to a card,
-// recorded as `forwardEvent` with the card's name and what it was handed.
+// recorded as `forwardEvent` with the card's name and what it was handed,
+// and an exposure record's, recorded as `forwardExposure`.
 rstest.mockRequire("bobcat:frame", () => ({
   frameCardOf(frameId: number): object | undefined {
     return frameCards.get(frameId);
@@ -113,6 +114,11 @@ rstest.mockRequire("bobcat:frame", () => ({
       extraCount,
       ...payload,
     ]);
+  },
+  forwardExposure(card: { card: string }, kind: string, record: string) {
+    const native =
+      globalThis.__bobcatTestHost as ReturnType<typeof createMockBobcat>;
+    native.calls.push(["forwardExposure", card.card, kind, record]);
   },
   frameSourceChanged(handle: object, frameId: number, src: string | null) {
     const native =
@@ -594,9 +600,11 @@ describe("installation", () => {
         ...arities.map(([name]) => name),
         "__BobcatQueryNodes",
         "__BobcatDispatchEvent",
-        // Not a PAPI member: the global exposure records `bobcat:runtime`'s
-        // `__BobcatSendExposure` sends, built where the element state is.
+        // Not PAPI members: the global exposure records `bobcat:runtime`'s
+        // `__BobcatSendExposure` sends, built where the element state is,
+        // and the last `disexposure` list a frame's card sends as it goes.
         "__BobcatExposureEvents",
+        "__BobcatTakeExposures",
         // Neither is a PAPI member: the computed-style map is the Typed OM
         // readback the realm reaches by name, and the value class is the
         // type its entries carry.
@@ -3772,9 +3780,13 @@ describe("exposure", () => {
   /** One `bobcat:record` field, as the host writes it. */
   const field = (text: string) => `${text.length}:${text}`;
 
-  /** One element of a host exposure record: its id, exposure id and scene. */
-  const recorded = (uid: number, exposureId: string, scene: string) =>
-    field(String(uid)) + field(exposureId) + field(scene);
+  /**
+   * One element of a host exposure record: its id, exposure id and scene,
+   * and the shadow hosts above it, innermost first, `""` for this realm's
+   * own tree.
+   */
+  const recorded = (uid: number, exposureId: string, scene: string, hosts = "") =>
+    field(String(uid)) + field(exposureId) + field(scene) + field(hosts);
 
   it("tells the host on an element's first exposure handler and its last, and on nothing between", () => {
     const { outer, inner } = tree();
@@ -3897,29 +3909,159 @@ describe("exposure", () => {
     expect(events[0]!.timestamp).toBeLessThanOrEqual(Date.now());
   });
 
-  it("still builds the record of an element that is gone, with no dataset and no id", () => {
-    const { inner } = tree();
-    // No handle names 9999, and the host freed it, so its reads are refused.
-    mock.dropElement(9999);
+  it("keeps a disexposure only for an element it sent the exposure of, and reads it now", () => {
+    const { outer, inner } = tree();
+    const exposed = __GetElementUniqueID(inner);
+    const never = __GetElementUniqueID(outer);
+    elementModule.__BobcatExposureEvents("exposure", recorded(exposed, "a", ""));
+    __SetID(inner, "now");
 
     const events = elementModule.__BobcatExposureEvents(
       "disexposure",
-      recorded(__GetElementUniqueID(inner), "kept", "") +
-        recorded(9999, "freed", "feed"),
+      recorded(never, "b", "") + recorded(exposed, "a", ""),
     );
 
-    expect(events.map((event) => event["exposure-id"])).toEqual([
-      "kept",
-      "freed",
+    // `outer` was never sent an exposure: the record is someone else's.
+    expect(events.map((event) => event.target)).toEqual([
+      { dataset: {}, id: "now", uid: exposed },
     ]);
-    expect(events[1]).toMatchObject({
-      dataset: {},
-      "unique-id": 9999,
-      type: "disexposure",
-      target: { dataset: {}, id: null, uid: 9999 },
-      currentTarget: { dataset: {}, id: null, uid: 9999 },
-      detail: { "unique-id": 0, exposureID: "freed", exposureScene: "feed" },
-    });
+    // Left: a second disexposure for it has no exposure left either.
+    expect(
+      elementModule.__BobcatExposureEvents("disexposure", recorded(exposed, "a", "")),
+    ).toEqual([]);
+  });
+
+  it("pairs one delivery's exposure before the disexposure of an element that left and came back", () => {
+    const { inner } = tree();
+    const uid = __GetElementUniqueID(inner);
+    elementModule.__BobcatExposureEvents("exposure", recorded(uid, "old", ""));
+    // One delivery: the new exposure list first, then the disexposure of
+    // the old id, which takes the oldest exposure.
+    elementModule.__BobcatExposureEvents("exposure", recorded(uid, "new", ""));
+    elementModule.__BobcatExposureEvents("disexposure", recorded(uid, "old", ""));
+
+    // Still exposed under the new id: its disexposure is kept.
+    expect(
+      elementModule.__BobcatExposureEvents("disexposure", recorded(uid, "new", ""))
+        .map((event) => event["exposure-id"]),
+    ).toEqual(["new"]);
+  });
+
+  it("drops an exposure for an element it holds no handle for", () => {
+    // 9999 was never created here: an element of a card this frame no
+    // longer shows, say, whose realm is another.
+    expect(
+      elementModule.__BobcatExposureEvents("exposure", recorded(9999, "a", "")),
+    ).toEqual([]);
+    expect(
+      elementModule.__BobcatExposureEvents("disexposure", recorded(9999, "a", "")),
+    ).toEqual([]);
+  });
+
+  it("hands a card's records to the card its outermost host shows, with that host taken off, and drops the rest", () => {
+    const { inner } = tree();
+    const own = __GetElementUniqueID(inner);
+    // Frame 50 shows a booted card; 70 is a UA component, or a frame with no
+    // card, which nobody hears.
+    frameCards.set(50, { card: "F" });
+
+    const events = elementModule.__BobcatExposureEvents(
+      "exposure",
+      recorded(81, "card", "", "50") +
+        recorded(own, "own", "") +
+        recorded(82, "grand", "s", "60,50") +
+        recorded(83, "hidden", "", "70"),
+    );
+
+    expect(events.map((event) => event["exposure-id"])).toEqual(["own"]);
+    // One call per card, its records in the host's order.
+    expect(mock.named("forwardExposure")).toEqual([
+      [
+        "forwardExposure",
+        "F",
+        "exposure",
+        recorded(81, "card", "") + recorded(82, "grand", "s", "60"),
+      ],
+    ]);
+  });
+
+  it("takes one last disexposure for every exposure not yet left, oldest first, and leaves none", () => {
+    const { outer, inner } = tree();
+    const first = __GetElementUniqueID(outer);
+    const second = __GetElementUniqueID(inner);
+    __SetID(outer, "o");
+    __AddDataset(outer, "n", 5);
+    elementModule.__BobcatExposureEvents(
+      "exposure",
+      recorded(first, "a", "feed") + recorded(second, "b", ""),
+    );
+    elementModule.__BobcatExposureEvents("disexposure", recorded(second, "b", ""));
+    __AddDataset(outer, "n", 6);
+
+    const events = elementModule.__BobcatTakeExposures();
+
+    // Under the id and scene it was exposed under, read now.
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "disexposure",
+        "unique-id": first,
+        "exposure-id": "a",
+        "exposure-scene": "feed",
+        target: { dataset: { n: 6 }, id: "o", uid: first },
+      }),
+    ]);
+    expect(elementModule.__BobcatTakeExposures()).toEqual([]);
+    // The host's own disexposure for it, which comes later, is dropped.
+    expect(
+      elementModule.__BobcatExposureEvents("disexposure", recorded(first, "a", "feed")),
+    ).toEqual([]);
+  });
+
+  it("builds the disexposure of an element whose handle is gone as it was read at its exposure", async () => {
+    // The registry the module captures at import, replaced with one this
+    // test can drive, as the collection test above does: a collection is
+    // what takes a handle out of the table.
+    rstest.resetModules();
+    const registered: { held: unknown }[] = [];
+    let cleanup!: (held: never) => void;
+    const real = globalThis.FinalizationRegistry;
+    globalThis.FinalizationRegistry = class {
+      constructor(callback: (held: never) => void) {
+        cleanup = callback;
+      }
+      register(_target: object, held: unknown) {
+        registered.push({ held });
+      }
+      unregister() {}
+    } as unknown as typeof FinalizationRegistry;
+    let papi: typeof elementPapi;
+    try {
+      papi = await import("../src/element-papi.ts");
+    } finally {
+      globalThis.FinalizationRegistry = real;
+    }
+    papi.__CreatePage("card", 0);
+    const kept = papi.__CreateView(0);
+    const taken = papi.__CreateView(0);
+    const keptId = papi.__GetElementUniqueID(kept);
+    const takenId = papi.__GetElementUniqueID(taken);
+    papi.__SetID(kept, "k");
+    papi.__AddDataset(kept, "n", 5);
+    papi.__SetID(taken, "t");
+    papi.__BobcatExposureEvents(
+      "exposure",
+      recorded(keptId, "a", "") + recorded(takenId, "b", ""),
+    );
+    // Both handles collected: each element is freed with it.
+    for (const { held } of registered.slice(-2)) cleanup(held as never);
+
+    const events = papi.__BobcatExposureEvents("disexposure", recorded(keptId, "a", ""));
+    expect(events.map((event) => event.target)).toEqual([
+      { dataset: { n: 5 }, id: "k", uid: keptId },
+    ]);
+    expect(papi.__BobcatTakeExposures().map((event) => event.target)).toEqual([
+      { dataset: {}, id: "t", uid: takenId },
+    ]);
   });
 
   it("throws a read that fails while the element's handle is live", () => {

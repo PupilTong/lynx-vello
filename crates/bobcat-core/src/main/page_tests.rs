@@ -1162,7 +1162,7 @@ fn an_intersection_hook_that_mutates_gets_its_own_commit_and_no_second_delivery(
 ///
 /// Each listener appends `<event>:row<index>` to the page element's
 /// `data-heard`, which [`heard`] reads back. `updatePage({on, sendEvent})`
-/// is `switchExposure(on, sendEvent)`.
+/// is `switchExposure(on, sendEvent, 0)`, for the document tree.
 fn exposure_page(exposed: Option<usize>) -> String {
     let exposed = exposed.map_or_else(|| "-1".to_owned(), |row| row.to_string());
     format!(
@@ -1193,7 +1193,7 @@ globalThis.renderPage = function () {{
   }}
 }};
 globalThis.updatePage = function (data) {{
-  switchExposure(data.on, data.sendEvent);
+  switchExposure(data.on, data.sendEvent, 0);
 }};
 "
     )
@@ -1231,7 +1231,7 @@ async fn first_page_child(page: &Rc<Page>) -> dom::NodeId {
         .expect("the card rendered its scroller")
 }
 
-/// `switchExposure(on, sendEvent)` through `updatePage`, as one command.
+/// `switchExposure(on, sendEvent, 0)` through `updatePage`, as one command.
 async fn switch_exposure(page: &Rc<Page>, on: u8, send_event: u8) {
     page.apply(vec![ToMain::PageUpdate(PageUpdate::Data {
         data: format!(r#"{{"on":{on},"sendEvent":{send_event}}}"#),
@@ -1300,11 +1300,11 @@ fn exposure_events_are_delivered_by_an_entry_after_the_update() {
     });
 }
 
-/// `switchExposure` from a script: a stop drops every observer and, for rows
-/// that have no `exposure-id`, owes nothing, so its entry posts nothing; a
-/// resume observes every row again, and the update in the resume's own
-/// epilogue posts the delivery entry that tells each visible row it
-/// appeared, since the stop forgot them as exposed.
+/// `switchExposure` from a script: a stop stops detecting every row and, for
+/// rows that have no `exposure-id`, owes nothing, so its entry posts
+/// nothing; a resume observes every row again, and the update in the
+/// resume's own epilogue posts the delivery entry that tells each visible
+/// row it appeared, since the stop forgot them as exposed.
 #[test]
 fn a_resumed_exposure_is_delivered_by_an_entry_of_its_own() {
     on_a_js_thread(|thread| async move {

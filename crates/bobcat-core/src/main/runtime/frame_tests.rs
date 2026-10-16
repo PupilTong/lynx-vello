@@ -1544,3 +1544,410 @@ fn a_page_listener_that_lets_go_of_the_frame_mid_dispatch_skips_its_card() {
         );
     }
 }
+
+// --- exposure and nested lifecycle ---------------------------------------
+
+/// The page realm's BTS for the exposure tests: it logs each `exposure` and
+/// `disexposure` list it hears as `page-bts <list> <ids>`.
+const EXPOSURE_PAGE_BTS: &str = "
+import { lynx } from 'bobcat:bts-runtime';
+const emitter = lynx.getJSModule('GlobalEventEmitter');
+for (const name of ['exposure', 'disexposure']) {
+  emitter.addListener(name, (list) => console.log(
+    'page-bts ' + name + ' ' + list.map((record) => record['exposure-id']).join(',')));
+}
+";
+
+/// What every exposure card's BTS adds to [`bts_boot`]: each `exposure` and
+/// `disexposure` list it hears, logged as `bts <card> <list> <id>:<typeof
+/// dataset.n>,…`, and an `updateCardData` whose `op` is `stop` running the
+/// card's own `lynx.stopExposure()`.
+const EXPOSURE_CARD_BTS: &str = "
+const emitter = lynx.getJSModule('GlobalEventEmitter');
+for (const name of ['exposure', 'disexposure']) {
+  emitter.addListener(name, (list) => log(name + ' ' + list.map((record) =>
+    record['exposure-id'] + ':' + typeof record.dataset.n).join(',')));
+}
+app.updateCardData = (data) => {
+  if (data.op === 'stop') {
+    lynx.stopExposure();
+    log('stopped');
+  }
+};
+";
+
+/// The host page of the exposure tests: a 50×50 `page-own` with an
+/// `exposure-id`, then a 200×300 frame showing [`CARD`]. `updatePage`'s `op`:
+/// `src` writes [`SECOND`] to the frame's `src`, `src-back` [`CARD`] again;
+/// `card` writes `{op: data.card}` to the frame's `data`, which the card's
+/// `updatePage` and its BTS take; `late` appends a second exposed element,
+/// `page-late`, and has the card add one of its own in the same update. Each
+/// logs `page-op <op>` once done.
+fn exposure_host() -> String {
+    format!(
+        r"
+        const page = __CreatePage('0', 0);
+        __SetInlineStyles(page, 'display:flex;flex-direction:column');
+        const exposed = (id) => {{
+            const view = __CreateView(0);
+            __SetInlineStyles(view, 'flex-shrink:0;width:50px;height:50px');
+            __SetAttribute(view, 'exposure-id', id);
+            __AppendElement(page, view);
+        }};
+        exposed('page-own');
+        const frame = __CreateFrame(0);
+        __SetInlineStyles(frame, 'flex-shrink:0;width:200px;height:300px');
+        __AppendElement(page, frame);
+        __SetAttribute(frame, 'src', '{CARD}');
+        __FlushElementTree();
+        globalThis.updatePage = (data) => {{
+            if (data.op === 'src') {{
+                __SetAttribute(frame, 'src', '{SECOND}');
+            }} else if (data.op === 'src-back') {{
+                __SetAttribute(frame, 'src', '{CARD}');
+            }} else if (data.op === 'card') {{
+                __SetAttribute(frame, 'data', {{ op: data.card }});
+            }} else if (data.op === 'late') {{
+                exposed('page-late');
+                __SetAttribute(frame, 'data', {{ op: 'add' }});
+            }}
+            __FlushElementTree();
+            console.log('page-op ' + (data.card ?? data.op));
+        }};
+    "
+    )
+}
+
+/// [`CARD`] for the exposure tests: a column of a 100×50 `card-cv`, exposed,
+/// with a typed `n` in its dataset, and a 200×100 frame `inner` showing
+/// [`GRAND`]. Its `updatePage` takes the `op` the host writes to its frame's
+/// `data`: `remove-cv` takes `card-cv` out of its tree, `detach-inner` the
+/// inner frame, `attach-inner` puts the inner frame back, `add` appends a
+/// `card-late` with an `exposure-id`; each keeps its handles. Every `op`,
+/// these and the ones only its BTS acts on, logs `card-op <op>` once done.
+fn exposure_card() -> String {
+    format!(
+        r"
+        let p, cv, inner;
+        globalThis.renderPage = () => {{
+            p = __CreatePage('0', 0);
+            __SetInlineStyles(p, 'display:flex;flex-direction:column');
+            cv = __CreateView(0);
+            __SetInlineStyles(cv, 'flex-shrink:0;width:100px;height:50px');
+            __AddDataset(cv, 'n', 5);
+            __SetAttribute(cv, 'exposure-id', 'card-cv');
+            __AppendElement(p, cv);
+            inner = __CreateFrame(0);
+            __SetInlineStyles(inner, 'flex-shrink:0;width:200px;height:100px');
+            __AppendElement(p, inner);
+            __SetAttribute(inner, 'src', '{GRAND}');
+        }};
+        globalThis.updatePage = (data) => {{
+            if (data.op === 'remove-cv') {{
+                __RemoveElement(p, cv);
+            }} else if (data.op === 'detach-inner') {{
+                __RemoveElement(p, inner);
+            }} else if (data.op === 'attach-inner') {{
+                __AppendElement(p, inner);
+            }} else if (data.op === 'add') {{
+                const late = __CreateView(0);
+                __SetInlineStyles(late, 'flex-shrink:0;width:100px;height:50px');
+                __SetAttribute(late, 'exposure-id', 'card-late');
+                __AppendElement(p, late);
+            }}
+            __FlushElementTree();
+            console.log('card-op ' + data.op);
+        }};
+    "
+    )
+}
+
+/// [`GRAND`] for the exposure tests: one 100×50 `grand-gv`, exposed, with a
+/// typed `n`.
+fn exposure_grand_card() -> String {
+    r"
+        globalThis.renderPage = () => {
+            const p = __CreatePage('0', 0);
+            const gv = __CreateView(0);
+            __SetInlineStyles(gv, 'width:100px;height:50px');
+            __AddDataset(gv, 'n', 7);
+            __SetAttribute(gv, 'exposure-id', 'grand-gv');
+            __AppendElement(p, gv);
+        };
+    "
+    .to_owned()
+}
+
+/// [`SECOND`] for the exposure tests: one 100×50 `second-sv`, exposed.
+fn exposure_second_card() -> String {
+    r"
+        globalThis.renderPage = () => {
+            const p = __CreatePage('0', 0);
+            const sv = __CreateView(0);
+            __SetInlineStyles(sv, 'width:100px;height:50px');
+            __SetAttribute(sv, 'exposure-id', 'second-sv');
+            __AppendElement(p, sv);
+        };
+    "
+    .to_owned()
+}
+
+/// A view running [`exposure_host`] with [`EXPOSURE_PAGE_BTS`], serving
+/// [`CARD`], [`GRAND`] and [`SECOND`] as the exposure cards, each with a
+/// BTS boot that logs with [`EXPOSURE_CARD_BTS`].
+fn exposure_view() -> TestEngine {
+    let spec = TestViewSpec::new(&exposure_host())
+        .with_background_entry(EXPOSURE_PAGE_BTS)
+        .with_fetchable(CARD)
+        .with_module(
+            &format!("{CARD}/root.js"),
+            &super::card_entry(&exposure_card()),
+        )
+        .with_fetchable(GRAND)
+        .with_module(
+            &format!("{GRAND}/root.js"),
+            &super::card_entry(&exposure_grand_card()),
+        )
+        .with_fetchable(SECOND)
+        .with_module(
+            &format!("{SECOND}/root.js"),
+            &super::card_entry(&exposure_second_card()),
+        )
+        .with_style_sheet_probe();
+    let spec = with_bts(spec, CARD, EXPOSURE_CARD_BTS);
+    let spec = with_bts(spec, GRAND, EXPOSURE_CARD_BTS);
+    with_bts(spec, SECOND, EXPOSURE_CARD_BTS).create(Arc::new(NoWakeup))
+}
+
+/// The console lines among `events` that start with `prefix`, in order.
+fn lines_with<'a>(events: &'a [EngineEvent], prefix: &str) -> Vec<&'a str> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::ConsoleMessage { message, .. } if message.starts_with(prefix) => {
+                Some(message.as_str())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every exposure line among `events`, from any of the BTSs.
+fn exposure_lines(events: &[EngineEvent]) -> Vec<&str> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::ConsoleMessage { message, .. } if message.contains("exposure ") => {
+                Some(message.as_str())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Boots [`exposure_view`] and waits until each of its three BTSs heard its
+/// own element's exposure; answers every event so far.
+fn booted_exposure_view() -> (TestEngine, Vec<EngineEvent>) {
+    let mut engine = exposure_view();
+    let mut events = Vec::new();
+    pump_until_logged(&mut engine, &mut events, "page-bts exposure page-own");
+    pump_until_logged(
+        &mut engine,
+        &mut events,
+        &format!("bts {CARD} exposure card-cv:number"),
+    );
+    pump_until_logged(
+        &mut engine,
+        &mut events,
+        &format!("bts {GRAND} exposure grand-gv:number"),
+    );
+    (engine, events)
+}
+
+/// Runs one of [`exposure_host`]'s ops and waits until it ran, collecting
+/// every event.
+fn exposure_op(engine: &mut TestEngine, events: &mut Vec<EngineEvent>, op: &str) {
+    operate(engine, op);
+    pump_until_logged(engine, events, &format!("page-op {op}"));
+}
+
+/// Runs one of [`exposure_card`]'s ops, through the frame's `data`, and
+/// waits until the card ran it.
+fn exposure_card_op(engine: &mut TestEngine, events: &mut Vec<EngineEvent>, op: &str) {
+    engine
+        .view
+        .update_data(format!(r#"{{"op":"card","card":"{op}"}}"#), String::new())
+        .expect("the view takes an update");
+    pump_until_logged(engine, events, &format!("card-op {op}"));
+}
+
+/// Each BTS hears its own card's elements' records alone — the page's BTS
+/// the page's element, the card's BTS the card's, the grand-card's BTS the
+/// grand-card's — each built from that realm's own handle, so a typed
+/// dataset value stays a number.
+#[test]
+fn each_background_thread_hears_its_own_cards_exposure_alone() {
+    let (mut engine, mut events) = booted_exposure_view();
+    events.extend(pump_for(&mut engine, Duration::from_millis(100)));
+    // Three realms' logs, each ordered only among its own lines.
+    let mut lines = exposure_lines(&events);
+    lines.sort_unstable();
+    let card = format!("bts {CARD} exposure card-cv:number");
+    let grand = format!("bts {GRAND} exposure grand-gv:number");
+    let mut expected = vec!["page-bts exposure page-own", &card, &grand];
+    expected.sort_unstable();
+    assert_eq!(lines, expected);
+    assert_eq!(reported(&events), Vec::<&str>::new());
+}
+
+/// A card taking one of its own elements out of its tree sends the card's
+/// own BTS the `disexposure`, built from the card's handle.
+#[test]
+fn a_card_removing_its_element_disexposes_it_to_its_own_background_thread() {
+    let (mut engine, mut events) = booted_exposure_view();
+    exposure_card_op(&mut engine, &mut events, "remove-cv");
+    pump_until_logged(
+        &mut engine,
+        &mut events,
+        &format!("bts {CARD} disexposure card-cv:number"),
+    );
+    events.extend(pump_for(&mut engine, Duration::from_millis(100)));
+    assert_eq!(
+        lines_with(&events, "page-bts disexposure"),
+        Vec::<&str>::new()
+    );
+    assert_eq!(reported(&events), Vec::<&str>::new());
+}
+
+/// A card that takes its own frame out of its tree, keeping the handle,
+/// lets go of that frame's card, as each web-core nested `lynx-view` hears
+/// its own `disconnectedCallback`: the grand-card's BTS hears its element's
+/// `disexposure` once, then is disposed of. Putting the frame back boots the
+/// grand-card again, with a BTS of its own that hears its element again.
+#[test]
+fn a_card_detaching_its_own_frame_lets_go_of_that_frames_card() {
+    let (mut engine, mut events) = booted_exposure_view();
+    exposure_card_op(&mut engine, &mut events, "detach-inner");
+    let destroyed = format!("bts {GRAND} destroyed");
+    pump_until_logged(&mut engine, &mut events, &destroyed);
+    let grand = lines_with(&events, &format!("bts {GRAND} "));
+    let left = format!("bts {GRAND} disexposure grand-gv:number");
+    assert_eq!(
+        grand
+            .iter()
+            .filter(|line| **line == left || **line == destroyed)
+            .collect::<Vec<_>>(),
+        [&left.as_str(), &destroyed.as_str()],
+        "{grand:?}"
+    );
+
+    exposure_card_op(&mut engine, &mut events, "attach-inner");
+    let booted = format!("bts {GRAND} booted undefined/undefined");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while logged_times(&events, &booted) < 2 {
+        events.extend(pump_for(&mut engine, Duration::from_millis(5)));
+        assert!(Instant::now() < deadline, "no second boot: {events:?}");
+    }
+    let again = format!("bts {GRAND} exposure grand-gv:number");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while logged_times(&events, &again) < 2 {
+        events.extend(pump_for(&mut engine, Duration::from_millis(5)));
+        assert!(Instant::now() < deadline, "no second exposure: {events:?}");
+    }
+    events.extend(pump_for(&mut engine, Duration::from_millis(100)));
+    assert_eq!(logged_times(&events, &left), 1);
+    assert_eq!(logged_times(&events, &destroyed), 1);
+    assert_eq!(reported(&events), Vec::<&str>::new());
+}
+
+/// A card let go of while its elements are exposed sends its BTS one last
+/// `disexposure` list, before its BTS is disposed of — native's order, user
+/// ruling — and nothing after. Switching between two cards that are both
+/// already fetched sends neither card the other's records: the new card's
+/// BTS hears its own element alone.
+#[test]
+fn a_card_let_go_of_sends_its_last_disexposure_before_its_disposal() {
+    let (mut engine, mut events) = booted_exposure_view();
+    exposure_op(&mut engine, &mut events, "src");
+    pump_until_logged(
+        &mut engine,
+        &mut events,
+        &format!("bts {SECOND} exposure second-sv:undefined"),
+    );
+    pump_until_logged(&mut engine, &mut events, &format!("bts {CARD} destroyed"));
+
+    // Back to the first card, which is fetched as well by now.
+    exposure_op(&mut engine, &mut events, "src-back");
+    pump_until_logged(&mut engine, &mut events, &format!("bts {SECOND} destroyed"));
+    let again = format!("bts {CARD} exposure card-cv:number");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while logged_times(&events, &again) < 2 {
+        events.extend(pump_for(&mut engine, Duration::from_millis(5)));
+        assert!(Instant::now() < deadline, "no second exposure: {events:?}");
+    }
+    events.extend(pump_for(&mut engine, Duration::from_millis(200)));
+
+    // In each card's BTS's own log: its last list, then its disposal, once.
+    for (card, id) in [
+        (CARD, "card-cv:number"),
+        (GRAND, "grand-gv:number"),
+        (SECOND, "second-sv:undefined"),
+    ] {
+        let lines = lines_with(&events, &format!("bts {card} "));
+        let last = format!("bts {card} disexposure {id}");
+        let destroyed = format!("bts {card} destroyed");
+        let at = |line: &str| lines.iter().position(|seen| *seen == line);
+        assert!(
+            at(&last).is_some() && at(&last) < at(&destroyed),
+            "{card}: {lines:?}"
+        );
+        assert_eq!(logged_times(&events, &last), 1, "{card}: {lines:?}");
+    }
+    // No card heard another's element.
+    let lines = exposure_lines(&events);
+    assert!(
+        lines.iter().all(|line| {
+            (line.starts_with(&format!("bts {SECOND} ")) && line.contains("second-sv"))
+                || (line.starts_with(&format!("bts {CARD} ")) && line.contains("card-cv"))
+                || (line.starts_with(&format!("bts {GRAND} ")) && line.contains("grand-gv"))
+                || line.starts_with("page-bts ") && line.contains("page-own")
+        }),
+        "{lines:?}"
+    );
+    assert_eq!(reported(&events), Vec::<&str>::new());
+}
+
+/// A card's own `lynx.stopExposure()`, from its BTS, stops its own elements
+/// alone: its BTS hears its element's `disexposure`, an element it adds
+/// later is not detected, and the page's exposure goes on — an element the
+/// page adds in the same update is exposed to the page's BTS.
+#[test]
+fn a_cards_stop_exposure_leaves_the_pages_exposure_running() {
+    let (mut engine, mut events) = booted_exposure_view();
+    exposure_card_op(&mut engine, &mut events, "stop");
+    pump_until_logged(&mut engine, &mut events, &format!("bts {CARD} stopped"));
+    pump_until_logged(
+        &mut engine,
+        &mut events,
+        &format!("bts {CARD} disexposure card-cv:number"),
+    );
+
+    exposure_op(&mut engine, &mut events, "late");
+    pump_until_logged(&mut engine, &mut events, "page-bts exposure page-late");
+    events.extend(pump_for(&mut engine, Duration::from_millis(200)));
+    assert_eq!(
+        lines_with(&events, &format!("bts {CARD} exposure card-late")),
+        Vec::<&str>::new(),
+        "the card's own elements are not detected while it is stopped"
+    );
+    assert_eq!(
+        lines_with(&events, "page-bts disexposure"),
+        Vec::<&str>::new()
+    );
+    // The grand-card is its own scope: still exposed, never disexposed.
+    assert_eq!(
+        lines_with(&events, &format!("bts {GRAND} disexposure")),
+        Vec::<&str>::new()
+    );
+    assert_eq!(reported(&events), Vec::<&str>::new());
+}
