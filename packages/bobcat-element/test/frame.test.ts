@@ -1,7 +1,9 @@
 // `bobcat:frame`: what a frame's `src`, `data`, `global-props`, connection and
-// disconnection do in the realm that holds its handle, over stand-ins for the
-// host members it reaches (`resolveUrl`, `fetchResource`, `resetFrame` and the
-// `Future` trio), for the diagnostics pair, and for `ShadowRealm`.
+// disconnection do in the realm that holds its handle, and how an event's
+// steps reach a booted card, over stand-ins for the host members it reaches
+// (`resolveUrl`, `fetchResource`, `resetFrame`, `parentNode`,
+// `callElementMethod` and the `Future` trio), for the diagnostics pair, and
+// for `ShadowRealm`.
 //
 // The `Future` class is the real one; its settle is driven through its own
 // `__BobcatSettleFuture`, as the host's epilogue drives it. The child half —
@@ -21,6 +23,18 @@ let nextFuture = 1;
 /** The view's base URL the stand-in `resolveUrl` resolves against. */
 const BASE = "app:///cards/";
 
+/** The page root `__GetPageElement` answers, by node id. */
+const PAGE = 1;
+
+/**
+ * Each node's parent, which the stand-in `parentNode` answers: every frame a
+ * test makes is a child of [`PAGE`] unless the test moves it.
+ */
+const parents: Map<number, number | null> = new Map();
+
+/** The border-box origin `boundingClientRect` answers, by node id. */
+const origins: Map<number, [number, number]> = new Map();
+
 rstest.mockRequire("bobcat-internal:host", () => ({
   // The host's: URL rules against the view's base, throwing for a URL that
   // does not resolve, as `HostOutbox::resolve` does.
@@ -37,6 +51,15 @@ rstest.mockRequire("bobcat-internal:host", () => ({
     calls.push(["resetFrame", frame]);
     return undefined;
   },
+  parentNode(node: number): number | null {
+    return parents.get(node) ?? null;
+  },
+  // The base set's record: the code, then `left`, `top`, `width`, `height`.
+  callElementMethod(node: number, method: string, params: string): string | number {
+    if (method !== "boundingClientRect" || params !== "") return 3;
+    const [left, top] = origins.get(node) ?? [0, 0];
+    return [0, left, top, 100, 50].map(field => `${String(field).length}:${field}`).join("");
+  },
   settleFuture(id: number): undefined {
     calls.push(["settleFuture", id]);
     return undefined;
@@ -51,6 +74,8 @@ rstest.mockRequire("bobcat-internal:host", () => ({
 
 import * as future from "../src/future.ts";
 rstest.mockRequire("bobcat:future", () => future);
+import * as record from "../src/record.ts";
+rstest.mockRequire("bobcat:record", () => record);
 
 rstest.mockRequire("bobcat:diagnostics", () => ({
   reportError(error: unknown) {
@@ -61,16 +86,26 @@ rstest.mockRequire("bobcat:diagnostics", () => ({
 /** The handles `bobcat:element`'s table resolves, by node id. */
 const handles: Map<number, object> = new Map();
 
-/** A frame handle this realm holds under `frameId`. */
+/** The page root's handle, which `__GetPageElement` answers. */
+const pageHandle = { page: PAGE };
+
+/** A frame handle this realm holds under `frameId`, a child of the page. */
 function frameHandle(frameId: number): object {
   const handle = {};
   handles.set(frameId, handle);
+  parents.set(frameId, PAGE);
   return handle;
 }
 
 rstest.mockRequire("bobcat:element", () => ({
   __BobcatHandleOf(nodeId: number): object | undefined {
     return handles.get(nodeId);
+  },
+  __GetPageElement(): object {
+    return pageHandle;
+  },
+  __GetElementUniqueID(handle: object): number {
+    return handle === pageHandle ? PAGE : -1;
   },
 }));
 
@@ -134,6 +169,9 @@ import {
   __BobcatCloseFrames,
   __BobcatFrameConnected,
   __BobcatFrameDisconnected,
+  forwardEvent,
+  frameCardOf,
+  frameCards,
   frameDataChanged,
   frameSourceChanged,
 } from "../src/frame.ts";
@@ -160,6 +198,8 @@ beforeEach(() => {
   calls.length = 0;
   already.clear();
   handles.clear();
+  parents.clear();
+  origins.clear();
   FakeShadowRealm.created = 0;
   FakeShadowRealm.importFails = undefined;
   FakeShadowRealm.bootAnswers = true;
@@ -193,6 +233,7 @@ describe("frameSourceChanged", () => {
       ["importValue", "bobcat:frame-boot", "dispose"],
       ["importValue", "bobcat:frame-boot", "updateData"],
       ["importValue", "bobcat:frame-boot", "updateGlobalProps"],
+      ["importValue", "bobcat:frame-boot", "dispatchEvent"],
       ["boot", 3, "app:///cards/child.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE],
     ]);
 
@@ -594,4 +635,133 @@ describe("data and global-props", () => {
       });
     });
   }
+});
+
+describe("events", () => {
+  const CHILD = "app:///child.web.bundle";
+  const SECOND = "app:///second.web.bundle";
+
+  /** The steps and the event a test hands a card, as `bobcat:element` would. */
+  const PAYLOAD = [0, 0, 120, 70, undefined, undefined, 0, 0, 1, "touch"];
+
+  function forward(card: object, nodes = "9,8", hosts = "3,3"): void {
+    forwardEvent(card, nodes, "9,9", hosts, "tap", true, 12.5, PAYLOAD[0], PAYLOAD.slice(1));
+  }
+
+  /** The calls of the child's `dispatchEvent` so far. */
+  function dispatched(): unknown[][] {
+    return calls.filter(call => call[0] === "dispatchEvent");
+  }
+
+  /** Boots `src` in the frame `frameId`, which this realm holds. */
+  async function booted(frameId: number, src = CHILD): Promise<object> {
+    already.add(src);
+    const frame = handles.get(frameId) ?? frameHandle(frameId);
+    frameSourceChanged(frame, frameId, src);
+    await drain();
+    return frame;
+  }
+
+  it("has no card for a frame until its card booted, nor for one whose boot failed", async () => {
+    FakeShadowRealm.hold = true;
+    already.add(CHILD);
+    frameSourceChanged(frameHandle(3), 3, CHILD);
+    await drain();
+    // Fetched and importing: no card yet.
+    expect(frameCardOf(3)).toBeUndefined();
+    expect(frameCards()).toEqual([]);
+    FakeShadowRealm.release();
+    await drain();
+    expect(frameCardOf(3)).toBeDefined();
+    expect(frameCards()).toEqual([frameCardOf(3)]);
+
+    FakeShadowRealm.hold = false;
+    FakeShadowRealm.bootAnswers = false;
+    await booted(4);
+    expect(frameCardOf(4)).toBeUndefined();
+    // Nor is a node this realm holds no frame handle for anything's.
+    expect(frameCardOf(5)).toBeUndefined();
+  });
+
+  it("hands a card its steps through the child's dispatchEvent, with the frame's border-box origin", async () => {
+    await booted(3);
+    origins.set(3, [20, 30]);
+    const card = frameCardOf(3)!;
+    calls.length = 0;
+    forward(card);
+    // Every argument a primitive: the origin, the three id lists, the event
+    // and its payload as this realm received them.
+    expect(dispatched()).toEqual([
+      ["dispatchEvent", 1, 20, 30, "9,8", "9,9", "3,3", "tap", true, 12.5, ...PAYLOAD],
+    ]);
+    expect(calls.filter(call => call[0] === "reportError")).toEqual([]);
+  });
+
+  it("hands nothing to a card the frame let go of since the event was split", async () => {
+    const frame = await booted(3);
+    const card = frameCardOf(3)!;
+    // A listener wrote a new `src`: the first card is torn down.
+    already.add(SECOND);
+    frameSourceChanged(frame, 3, SECOND);
+    calls.length = 0;
+    forward(card);
+    expect(dispatched()).toEqual([]);
+    // The new card is another record, which hears what it is handed.
+    await drain();
+    const second = frameCardOf(3)!;
+    expect(second).not.toBe(card);
+    forward(second);
+    expect(dispatched()).toHaveLength(1);
+    expect(dispatched()[0]![1]).toBe(2);
+
+    // A disconnection lets go of it too.
+    __BobcatFrameDisconnected(3);
+    calls.length = 0;
+    forward(second);
+    expect(dispatched()).toEqual([]);
+    expect(frameCardOf(3)).toBeUndefined();
+    expect(frameCards()).toEqual([]);
+  });
+
+  it("hands nothing to the card of a frame no longer in this realm's tree, without a report", async () => {
+    await booted(3);
+    // Under a wrapper that a listener took out of the page: the host
+    // delivers the disconnection in a later entry, so the card still runs.
+    parents.set(3, 7);
+    parents.set(7, null);
+    const card = frameCardOf(3)!;
+    calls.length = 0;
+    forward(card);
+    expect(dispatched()).toEqual([]);
+    expect(calls).toEqual([]);
+    // Back under the page through the wrapper, it hears again.
+    parents.set(7, PAGE);
+    forward(card);
+    expect(dispatched()).toHaveLength(1);
+  });
+
+  it("lists every booted card for a key event, in load order", async () => {
+    await booted(3);
+    await booted(4, SECOND);
+    expect(frameCards()).toEqual([frameCardOf(3), frameCardOf(4)]);
+    calls.length = 0;
+    for (const card of frameCards()) {
+      forwardEvent(card, "", "", "", "keydown", true, 0, 0, [4, "a", "KeyA", false, 0]);
+    }
+    expect(dispatched()).toEqual([
+      ["dispatchEvent", 1, 0, 0, "", "", "", "keydown", true, 0, 0, 4, "a", "KeyA", false, 0],
+      ["dispatchEvent", 2, 0, 0, "", "", "", "keydown", true, 0, 0, 4, "a", "KeyA", false, 0],
+    ]);
+  });
+
+  it("reports a hand-over that throws across the boundary once, naming src", async () => {
+    await booted(3);
+    const card = frameCardOf(3)!;
+    calls.length = 0;
+    FakeShadowRealm.updateFails = "the realm is gone";
+    forward(card);
+    expect(calls.filter(call => call[0] === "reportError")).toEqual([
+      ["reportError", `frame ${CHILD}: the realm is gone`],
+    ]);
+  });
 });

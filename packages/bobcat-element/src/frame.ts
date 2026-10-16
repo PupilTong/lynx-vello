@@ -12,7 +12,10 @@
 //   `global-props`, with the text the attribute now holds;
 // - `__BobcatFrameConnected` and `__BobcatFrameDisconnected`, which the host
 //   calls in the page realm, one call per connection and disconnection the
-//   custom element queued, out of the mutation that caused it.
+//   custom element queued, out of the mutation that caused it;
+// - `frameCardOf`, `frameCards` and `forwardEvent`, which `bobcat:element`'s
+//   dispatch calls to hand a booted card the steps of an event that are its
+//   own (see "Events" below).
 //
 // The steps:
 //
@@ -34,12 +37,13 @@
 //    microtask, so a start is never inside the `__SetAttribute` that asked
 //    for it.
 // 3. Once it settles, a fresh `ShadowRealm` imports `bobcat:frame-boot`'s
-//    `boot`, `dispose`, `updateData` and `updateGlobalProps`, and calls
-//    `boot` with primitives alone — the frame's node id, `U`, the frame's
-//    `data` and `global-props` as they stand at that moment and `SystemInfo`,
-//    each as JSON text, and the view's native module table — which renders
-//    the card under the frame's nested page and connects the card's own BTS
-//    Worker, which the child realm creates and owns.
+//    `boot`, `dispose`, `updateData`, `updateGlobalProps` and
+//    `dispatchEvent`, and calls `boot` with primitives alone — the frame's
+//    node id, `U`, the frame's `data` and `global-props` as they stand at
+//    that moment and `SystemInfo`, each as JSON text, and the view's native
+//    module table — which renders the card under the frame's nested page
+//    and connects the card's own BTS Worker, which the child realm creates
+//    and owns.
 // 4. A frame keeps its `data` and `global-props` as JSON text, `{}` until
 //    one is written. A write takes a plain object alone — a non-null,
 //    non-array object, which `bobcat:element` hands over as its JSON text,
@@ -83,6 +87,30 @@
 // teardown bumps the frame's generation, and a fetch or an import that
 // settles for an earlier one starts nothing.
 //
+// # Events
+//
+// A frame's card hears the events inside its frame, as web-core's nested
+// `lynx-view` does: `bobcat:element` gives the steps of a path whose tree
+// is a frame's shadow tree — and every shadow tree inside that one — to
+// the card that frame shows (`frameCardOf`), runs its own steps first, and
+// then hands each card its steps (`forwardEvent`) through the child's
+// `bobcat:frame-boot` `dispatchEvent`, a wrapped function imported with the
+// others once the card booted. Every argument is a primitive: the steps as
+// the three comma-joined id strings the host wrote, the event's name,
+// `bubbles`, timestamp, extras and detail values as this realm received
+// them, and the frame's border-box origin in the viewport, read here
+// (`callElementMethod`'s `boundingClientRect`, the last layout pass's,
+// transforms ignored), so the card's `x`/`y` are frame-local. The child
+// dispatches them as its own and reports what its listeners throw there.
+// A `keydown` or `keyup` is handed to every booted card (`frameCards`), with
+// no steps, for its `global-bindkey*` handlers.
+//
+// What a listener of this realm did before the card's turn is checked
+// first: a card the frame let go of meanwhile (a new `src`, a teardown) is a
+// stale record and hears nothing, and neither does the card of a frame no
+// longer in this realm's tree — one a listener removed, whose disconnection
+// the host delivers in a later entry.
+//
 // What the nested card does is the child's to report: a failure in the child
 // reports there, through the same diagnostics pair, and its `boot` answers
 // `false` for it, so nothing here reports it a second time; its update
@@ -99,11 +127,22 @@
 // load started are also in `loaded`, for `__BobcatCloseFrames`; a state holds
 // no handle, so neither keeps one alive.
 
-import { fetchResource, resetFrame, resolveUrl } from "bobcat-internal:host";
+import {
+  callElementMethod,
+  fetchResource,
+  parentNode,
+  resetFrame,
+  resolveUrl,
+} from "bobcat-internal:host";
 // Read only when the host calls in, never as this module evaluates:
 // `bobcat:element` imports this module.
-import { __BobcatHandleOf } from "bobcat:element";
+import {
+  __BobcatHandleOf,
+  __GetElementUniqueID,
+  __GetPageElement,
+} from "bobcat:element";
 import { reportError } from "bobcat:diagnostics";
+import { splitRecord } from "bobcat:record";
 import { Future } from "bobcat:future";
 // Read when a load starts, never as this module evaluates: `bobcat:runtime`
 // imports `bobcat:element`, which imports this module.
@@ -128,6 +167,35 @@ type Dispose = () => void;
  */
 type Update = (json: string) => void;
 
+/**
+ * `bobcat:frame-boot`'s `dispatchEvent`, as the child's wrapped function:
+ * the frame's border-box origin in the viewport, then the card's steps and
+ * the event as `__BobcatDispatchEvent` takes them.
+ */
+type Dispatch = (
+  originX: number,
+  originY: number,
+  nodes: string,
+  targets: string,
+  hosts: string,
+  name: unknown,
+  bubbles: unknown,
+  timestamp: unknown,
+  extraCount: unknown,
+  ...payload: unknown[]
+) => void;
+
+/**
+ * A booted card, as an event's steps are handed to it: made by the boot
+ * that answered `true` and dropped by the teardown, so a record an event
+ * was split for before a listener let go of the card is stale by then.
+ */
+interface Card {
+  readonly state: FrameState;
+  readonly frameId: number;
+  readonly dispatch: Dispatch;
+}
+
 /** One frame's card. */
 interface FrameState {
   /** Bumped by every load and every teardown; a load of an earlier one is stale. */
@@ -151,6 +219,8 @@ interface FrameState {
   updateData: Update | undefined;
   /** The current child's `updateGlobalProps`, once it booted. */
   updateGlobalProps: Update | undefined;
+  /** The current child's card, once it booted, which events are handed to. */
+  card: Card | undefined;
 }
 
 const stateSymbol = Symbol("frameState");
@@ -194,6 +264,7 @@ function stateFor(handle: object): FrameState {
       globalProps: "{}",
       updateData: undefined,
       updateGlobalProps: undefined,
+      card: undefined,
     };
     frame[stateSymbol] = state;
     collected.register(handle, state);
@@ -363,7 +434,8 @@ function startFrame(
     realm.importValue("bobcat:frame-boot", "dispose"),
     realm.importValue("bobcat:frame-boot", "updateData"),
     realm.importValue("bobcat:frame-boot", "updateGlobalProps"),
-  ]).then(([boot, dispose, updateData, updateGlobalProps]) => {
+    realm.importValue("bobcat:frame-boot", "dispatchEvent"),
+  ]).then(([boot, dispose, updateData, updateGlobalProps, dispatch]) => {
     if (!current()) return;
     state.dispose = dispose as Dispose;
     const booted = (boot as Boot)(
@@ -379,6 +451,7 @@ function startFrame(
     if (booted !== true || !current()) return;
     state.updateData = updateData as Update;
     state.updateGlobalProps = updateGlobalProps as Update;
+    state.card = { state, frameId, dispatch: dispatch as Dispatch };
   }).catch(error => {
     if (current()) report(src, error);
   });
@@ -413,6 +486,7 @@ function close(state: FrameState): void {
   state.dispose = undefined;
   state.updateData = undefined;
   state.updateGlobalProps = undefined;
+  state.card = undefined;
   state.realm = undefined;
   if (dispose === undefined) return;
   try {
@@ -420,6 +494,100 @@ function close(state: FrameState): void {
   } catch (error) {
     report(state.src ?? "", error);
   }
+}
+
+/**
+ * The booted card the frame `frameId` shows, when this realm holds the
+ * frame's handle: what the steps of an event in the frame's shadow tree are
+ * handed to. Undefined for a node that is no such frame — one with no card,
+ * one whose card is loading, another realm's, or no frame at all.
+ */
+export function frameCardOf(frameId: number): object | undefined {
+  return stateOf(frameId)?.card;
+}
+
+/** Every booted card this realm's frames show, for a key event. */
+export function frameCards(): object[] {
+  const cards: object[] = [];
+  for (const state of loaded) {
+    if (state.card !== undefined) cards.push(state.card);
+  }
+  return cards;
+}
+
+/**
+ * Hands `card` the steps of one event that are its own — `nodes`, `targets`
+ * and `hosts` as `__BobcatDispatchEvent` reads them, empty for a key event's
+ * card — with the rest of the event as this realm received it (`payload`:
+ * the extras and the detail values), and the frame's border-box origin, so
+ * the card's `x`/`y` are frame-local.
+ *
+ * Nothing for a card the frame let go of since the event was split — a
+ * listener of this realm wrote a new `src`, or disposed of it — nor for a
+ * frame a listener took out of this realm's tree, whose disconnection the
+ * host delivers in a later entry. What the card's listeners throw is
+ * reported in the card; a call that fails across the boundary is reported
+ * here, naming `src`.
+ */
+export function forwardEvent(
+  card: object,
+  nodes: string,
+  targets: string,
+  hosts: string,
+  name: unknown,
+  bubbles: unknown,
+  timestamp: unknown,
+  extraCount: unknown,
+  payload: unknown[],
+): undefined {
+  const { state, frameId, dispatch } = card as Card;
+  if (state.card !== card) return undefined;
+  try {
+    if (!inPageTree(frameId)) return undefined;
+    const [originX, originY] = borderBoxOrigin(frameId);
+    dispatch(
+      originX,
+      originY,
+      nodes,
+      targets,
+      hosts,
+      name,
+      bubbles,
+      timestamp,
+      extraCount,
+      ...payload,
+    );
+  } catch (error) {
+    report(state.src ?? "", error);
+  }
+  return undefined;
+}
+
+/**
+ * Whether `node` is in this realm's page tree: its page root is an
+ * inclusive ancestor of it. The page realm's page is the document element,
+ * a card's the nested page in its frame's shadow root.
+ */
+function inPageTree(node: number): boolean {
+  const page = __GetPageElement();
+  if (page === undefined) return false;
+  const root = __GetElementUniqueID(page);
+  for (let at: number | null = node; at !== null; at = parentNode(at)) {
+    if (at === root) return true;
+  }
+  return false;
+}
+
+/**
+ * The frame's border-box origin in the viewport, from the base set's
+ * `boundingClientRect`: the last layout pass's, ancestor scroll offsets
+ * applied and transforms ignored. A frame with no box answers zeros.
+ */
+function borderBoxOrigin(frameId: number): [number, number] {
+  const answer = callElementMethod(frameId, "boundingClientRect", "");
+  if (typeof answer === "number") return [0, 0];
+  const fields = splitRecord(answer);
+  return [Number(fields[1] ?? 0), Number(fields[2] ?? 0)];
 }
 
 function report(src: string, error: unknown): void {

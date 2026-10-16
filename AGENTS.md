@@ -1661,7 +1661,7 @@ the generation, resolves `src` once with `resolveUrl` into `U` (against
 `<U>/style-info.css` and its BTS boot at `U#background-thread`, before the
 fetch settles — and when it settles (a probe hit's `true` in a microtask, a `Future` id through
 its `then`) creates a `ShadowRealm`, imports `bobcat:frame-boot`'s `boot`, `dispose`,
-`updateData` and `updateGlobalProps`, and calls `boot(frameId, U, data,
+`updateData`, `updateGlobalProps` and `dispatchEvent`, and calls `boot(frameId, U, data,
 globalProps, JSON.stringify(SystemInfo), __BobcatNativeModuleTable())` with
 the frame's `data` and `global-props` as they stand then. The frame keeps
 `src` as written, which a later `src` is compared against and a failure
@@ -1722,9 +1722,39 @@ itself: the cycle that closes makes QuickJS leak an object when a worker's
 release.) A frame inside a
 nested card that the nested card disconnects without letting go of its
 handle keeps its card: the connection calls reach the page realm alone. No
-`load` event, no events into the frame (so a handler inside the card never
-runs) and no frame methods beyond the shared base set (native's surface; user
-ruling 2026-10-15). The card's BTS is a BTS like the page's, on the group's
+`load` event and no frame methods beyond the shared base set (native's
+surface; user ruling 2026-10-15). **Events reach the card through the realm
+of its frame** (user rulings 2026-10-16: the page realm forwards in
+JavaScript, no Rust record of which realm owns a tree; web-core's catch and
+keyboard). The host hands every realm call each step's tree host (below);
+`element-papi.ts`'s `splitPath` reads the steps from the root and gives each
+one to this realm when its host is this realm's own tree (`0` for the page
+realm, the frame for a card's realm), to the card `bobcat:frame` holds for its
+host when the host is a frame of this realm showing a booted card, to the
+owner of the host's own step when the host is a node of such a card (a UA
+component or a frame inside it; a non-composed path, which carries no step
+for its host, asks `cardAbove`, the nearest such frame up the host's
+parents), and to nobody otherwise — a UA component's shadow content, hidden
+as before. Ownership is never decided by whether a handle exists, so an own
+target with none still fails loudly. The realm runs its own steps
+(capture, bubble, global) first, then forwards each card's steps in path
+order through `bobcat:frame`'s `forwardEvent` to the child's
+`bobcat:frame-boot` `dispatchEvent(originX, originY, nodes, targets, hosts,
+…)` (primitives only; it catches and reports in the child), which runs
+`__BobcatDispatchCardEvent` there, and the card does the same for its own
+frames. A catch or a stop ends one card's walk alone, as each web-core
+`lynx-view` walks its own shadow root (native's single propagation across
+both pages is not adopted), and a listener that throws in the forwarding
+realm is rethrown once the cards had their steps. A card is skipped when it
+was let go of or its frame has left this realm's page tree in the meantime.
+The page's handlers on the frame hear it as the target, at page
+coordinates; the card's `detail.x/y` and pointer, wheel and touch `x/y` are
+relative to the frame's border box (its `boundingClientRect`, so no
+transforms), while `clientX/Y`/`pageX/Y` stay the viewport's. A
+`keydown`/`keyup` is also handed to every booted card with no steps, so each
+card's `global-bindkey*` hears every key, as web-core's nested bindings listen
+on `document`. Non-composed events at a card's node (`scroll`, image
+`load`/`error`, `uiappear`) carry card steps alone and reach only the card. The card's BTS is a BTS like the page's, on the group's
 worker runtime, with the parent's `SystemInfo`; it shares the group's
 `sharedData` with every other BTS and has the view's `NativeModules` (both
 native's, where web-core gives a frame its own `sharedData` and none; user
@@ -1875,11 +1905,15 @@ document, releases it, and makes one call to the Element module's
 `__BobcatDispatchEvent` export through
 `quickjs::ScriptEngine::call_module_export`, the one Rust-to-JS path in the
 tree, carrying the whole path: the standard's bubble steps, target-first, as
-two comma-joined decimal id strings — the nodes, and position for position each
-step's shadow-retargeted target, less every step at a UA shadow tree's
-content, which script names none of, so an event at shadow chrome starts at
-its host (routed input events are composed, the components' events are not,
-as HTML and web-core fire them) — plus the name and then primitives alone: the
+three comma-joined decimal id strings — the nodes, position for position each
+step's shadow-retargeted target, and each step's tree host (the host of the
+shadow root the node is in, `0` for the document tree; shadow-root steps
+themselves are left out) — so the realm, not the host, decides which steps
+are its own, which a frame's card runs and which are a UA shadow tree's
+content that script names none of, so that an event at shadow chrome starts
+at its host (routed input events are composed, the components' events are
+not, as HTML and web-core fire them; see the frame paragraphs) — plus the
+name and then primitives alone: the
 `timestamp` (milliseconds on the view's timeline); the extras channel
 (`extraCount`, then name/value pairs: what a Lynx handler reads beside the W3C
 payload, such as a `load`'s size or a `scroll`'s metrics, which the realm makes
@@ -3033,8 +3067,10 @@ of the element path in the same file.
   `api-frame-data-update` as `react-frame-data-update`, whose button's tap
   re-renders the frame's card through that card's own BTS, beside
   `react-frame-global-props-update`, the same for `global-props` (no upstream
-  case); all rendered end to end by `crates/bobcat-source/tests/frame.rs`) is
-  in that
+  case); `react-frame-tap` and its card `react-frame-tap-inner` (no upstream
+  case), a tap inside the frame that runs the card's `catchtap` and
+  `main-thread:bindtap` and the host's `bindtap` on the frame's wrapper; all
+  rendered end to end by `crates/bobcat-source/tests/frame.rs`) is in that
   package's `NOTICE.lynx-stack`. Native builds use the shared
   `scripts/lynx-bytecode.ts` hook to disable BTS manifest bytecode. MTS keeps
   the compiler's default encoding. The fixture-only source repack remains

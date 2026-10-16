@@ -5241,6 +5241,79 @@ fn an_event_at_shadow_content_reaches_script_retargeted_to_its_host() {
     expect_seen(&mut js_runtime, &mut runtime, "");
 }
 
+/// The path a realm is handed keeps every step inside a shadow tree, each
+/// naming the host of its tree — a UA component's for its shadow content, a
+/// frame's for its nested page and what is under it — beside `0` for the
+/// document tree, and leaves out the steps at shadow roots themselves.
+/// Which steps a realm runs is the realm's rule over these hosts.
+#[test]
+fn a_realm_is_handed_the_host_of_each_steps_tree() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const outer = __CreateView(0);
+                  const frame = __CreateFrame(0);
+                  __AppendElement(page, outer);
+                  __AppendElement(outer, frame);
+                  globalThis.held = [page, outer, frame];
+                };
+                ",
+            "app:///event-path.js",
+        )
+        .expect("main-thread script");
+    let mut tree = elements.tree();
+    let page = tree.document_element().id();
+    let document = tree.get(page).and_then(dom::Node::parent_id);
+    let outer = tree.get(page).expect("the page").child_ids()[0];
+    let frame = tree.get(outer).expect("the outer view").child_ids()[0];
+    let nested = frame_page_of(&tree, frame);
+    // What a frame's card would build: a UA component under its page.
+    let swiper = tree.create_element("x-swiper", ());
+    tree.insert_before(nested, swiper, None);
+    let root = tree.shadow_root(swiper).expect("the swiper's shadow root");
+    let content = tree.get(root).expect("the shadow root").child_ids()[0];
+
+    let steps = tree.event_steps(content, true, true);
+    let path = EventPath::of(&tree, &steps);
+
+    let ids = |nodes: &[Option<dom::NodeId>]| {
+        nodes
+            .iter()
+            .map(|node| node.map_or(0.0, packed_node_id).to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let on_path = [
+        Some(content),
+        Some(swiper),
+        Some(nested),
+        Some(frame),
+        Some(outer),
+        Some(page),
+    ];
+    let mut nodes = on_path.to_vec();
+    nodes.extend(document.map(Some));
+    assert_eq!(path.nodes, ids(&nodes));
+    let (in_swiper, in_frame) = (Some(swiper), Some(frame));
+    let mut targets = vec![
+        Some(content),
+        in_swiper,
+        in_swiper,
+        in_frame,
+        in_frame,
+        in_frame,
+    ];
+    targets.extend(document.map(|_| in_frame));
+    assert_eq!(path.targets, ids(&targets));
+    let mut hosts = vec![in_swiper, in_frame, in_frame, None, None, None];
+    hosts.extend(document.map(|_| None));
+    assert_eq!(path.hosts, ids(&hosts));
+}
+
 /// A tap on a shown, blocking `<x-overlay-ng>` outside its content hits the
 /// overlay's shadow dialog, the box that fills the viewport, and reaches
 /// script as a browser reports it: at the overlay, retargeted, through its
