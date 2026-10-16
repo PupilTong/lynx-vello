@@ -498,4 +498,10 @@ verified! {
     basic_element_scroll_view_event_scroll => "basic-element-scroll-view-event-scroll",
     // The same scroll-view; upstream sets `scrollTop` to 200 by script, here the wheel is turned 200px over it, and the card logs one `scrollend` event with `scrollTop` 200 and the other three detail fields upstream asserts (#407). The frame shows the last 100px of red, then green and blue; the `display:none` text that keeps the event is hidden (#423).
     basic_element_scroll_view_event_scrollend => "basic-element-scroll-view-event-scrollend",
+    // A `<frame data={{label: 'from-data'}}>`: the nested card reads the frame's `data` as its init data and prints `data:from-data`, what upstream asserts (#425).
+    api_frame_data => "api-frame-data",
+    // A `<frame global-props={{message: 'from-global-props'}}>`: the nested card's `lynx.__globalProps` is the frame's, and it prints `global:from-global-props`, what upstream asserts (#425).
+    api_frame_global_props => "api-frame-global-props",
+    // A 300px-wide `<frame auto-height>` with no author height. A frame is `contain: strict`, so without the attribute it would be 0 tall and its paint-contained content would not show; `auto-height` relaxes that to `contain: inline-size layout paint style` (web-core's `contain: content` with its inline-size container, #425), and the frame is as tall as the nested card's three lines, which therefore show. Upstream asserts the attribute and a height above 0.
+    api_frame_auto_height => "api-frame-auto-height",
 }

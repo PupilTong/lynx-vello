@@ -26,20 +26,14 @@ pending! {
         "a BTS-only throw, same shape: upstream asserts `fileName` (`app-service.js`), where this engine names the realm instead",
     "api-error-mts" =>
         "an MTS-only throw: blank is consistent and the view surviving to `ScriptFinished` is #330 working; upstream asserts the report's `fileName` (`lepus.js`), which this engine does not carry",
-    "api-frame-auto-height" =>
-        "a `<frame auto-height>` must take its height from the nested card. `<frame>` exists since #409 and renders its nested card's main-thread script into its shadow root (see `api-frame-src`), but the minimal frame has no `auto-height`, by the ruling recorded with #409 (MTS only; no `load` event, no `data`, no `global-props`, no `auto-*`)",
     "api-frame-auto-width" =>
-        "upstream asserts only attributes of web-core's host element for a `<frame auto-width>`, which no capture carries. `<frame>` exists since #409 and renders its nested card's main-thread script into its shadow root (see `api-frame-src`), but the minimal frame has no `auto-width`, by the ruling recorded with #409 (MTS only; no `load` event, no `data`, no `global-props`, no `auto-*`)",
+        "`auto-width` is built (#425, native's semantics by the user's ruling), and upstream asserts only that web-core's host element carries the attribute and no `width: auto`. A capture cannot tell either way: the frame has no background, and the nested card's text shows the same whether the frame is as wide as its content or stretched across the page, which is what it would be without the attribute",
     "api-frame-bindload" =>
-        "`bindload` on a `<frame>` must deliver `statusCode: 0`, `success` and the bundle URL, printed in three texts. `<frame>` exists since #409 and renders its nested card's main-thread script into its shadow root (see `api-frame-src`), but the minimal frame has no `load` event, by the ruling recorded with #409 (MTS only; no `load` event, no `data`, no `global-props`, no `auto-*`)",
-    "api-frame-data" =>
-        "a `<frame data=...>` must hand its `data` to the nested card, which prints `data:from-data`. `<frame>` exists since #409 and renders its nested card's main-thread script into its shadow root (see `api-frame-src`), but the minimal frame has no `data`, by the ruling recorded with #409 (MTS only; no `load` event, no `data`, no `global-props`, no `auto-*`), so it prints `data:`",
+        "`bindload` on a `<frame>` must deliver `statusCode: 0`, `success` and the bundle URL, printed in three texts. A frame has no `load` event (the ruling recorded with #409, unchanged by #425), so the texts keep `-1` and two empty strings",
     "api-frame-data-update" =>
-        "a tap changes a `<frame>`'s `data` and the nested card must go from `data:before` to `data:after`. `<frame>` exists since #409 and renders its nested card's main-thread script into its shadow root (see `api-frame-src`), but the minimal frame has no `data`, by the ruling recorded with #409 (MTS only; no `load` event, no `data`, no `global-props`, no `auto-*`)",
+        "a tap changes a `<frame>`'s `data` and the nested card must go from `data:before` to `data:after`. The first `data` reaches the nested card's first render (#425; see `api-frame-data`), and after the tap it still reads `data:before`: ReactLynx re-renders on a data update from the card's background thread, and a frame's card has none yet. PR #426 (open) gives it one",
     "api-frame-element-map" =>
         "upstream asserts that web-core realizes `<frame>` as a `LYNX-VIEW` DOM element, a fact about web-core's tag map that no capture carries. The frame itself renders its nested card here since #409, as `api-frame-src` shows",
-    "api-frame-global-props" =>
-        "a `<frame global-props=...>` must reach the nested card's `lynx.__globalProps`, which prints `global:from-global-props`. `<frame>` exists since #409 and renders its nested card's main-thread script into its shadow root (see `api-frame-src`), but the minimal frame has no `global-props`, by the ruling recorded with #409 (MTS only; no `load` event, no `data`, no `global-props`, no `auto-*`)",
     "api-get-path-info" =>
         "awaiting a ruling: the card reads `res.path` in the `path()` callback and expects `id: undefined` for an element with none. web-core answers `{path: […]}` with `id: undefined`; native answers the node array itself with `id: \"\"`, and this engine follows native (`__BobcatQueryNodes`, `nodeFields` in `packages/bobcat-element/src/element-papi.ts`), so `res.path` is undefined and `#result` stays pink",
     "api-global-disallowed-vars" =>
