@@ -46,7 +46,13 @@ impl BlockConstraint {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BlockMetrics {
     pub size: Size<f32>,
+    /// The first line box's baseline, from the paragraph's top; `None`
+    /// without a line box.
     pub first_baseline: Option<f32>,
+    /// The last line box's baseline, from the paragraph's top; `None`
+    /// without a line box. For a Lynx `<text>`, the last *reported* line's:
+    /// a line a clamp or a cut removed is no line box.
+    pub last_baseline: Option<f32>,
 }
 
 /// How many already-answered constraints one block remembers.
@@ -82,8 +88,10 @@ pub(in crate::text) struct BreakMemo {
     /// broken, which makes that layout stale at every constraint.
     boxes_dirty: bool,
     /// `content_widths.min` from a layout that had box sizes written in,
-    /// never from construction (where no atom has a size yet).
-    min_content: Option<f32>,
+    /// never from construction (where no atom has a size yet), with the
+    /// `text-indent` that layout was broken at: the indent counts toward the
+    /// width on the lines it applies to, so it keys the answer.
+    min_content: Option<MinContent>,
     /// How many times parley has actually broken these lines. The memo is
     /// only worth its state if a caller can see it working.
     breaks: u32,
@@ -196,13 +204,23 @@ impl BreakMemo {
         self.boxes_dirty || retained.is_none_or(|retained| retained != committed)
     }
 
-    pub(in crate::text) const fn min_content(&self) -> Option<f32> {
+    /// The min-content width remembered for `indent`, if any.
+    pub(in crate::text) fn min_content(&self, indent: f32) -> Option<f32> {
         self.min_content
+            .filter(|entry| entry.indent.to_bits() == indent.to_bits())
+            .map(|entry| entry.width)
     }
 
-    pub(in crate::text) const fn set_min_content(&mut self, width: f32) {
-        self.min_content = Some(width);
+    pub(in crate::text) const fn set_min_content(&mut self, indent: f32, width: f32) {
+        self.min_content = Some(MinContent { indent, width });
     }
+}
+
+/// One remembered min-content width and the indent it was measured at.
+#[derive(Debug, Clone, Copy)]
+struct MinContent {
+    indent: f32,
+    width: f32,
 }
 
 /// The probe/commit protocol over a [`BreakMemo`], written once for every

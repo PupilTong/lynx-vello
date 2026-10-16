@@ -171,7 +171,7 @@ mod tests {
         assert!(!style.tail_color_convert());
         assert!(!style.is_inline_truncation());
         // A paragraph needs no LinearStyle implementation.
-        let block = crate::text::block::BlockStyle::from_container_style(&style);
+        let block = crate::text::block::BlockStyle::from_container_style(&style, &style);
         assert_eq!(block.max_lines, None);
         assert_eq!(block.max_chars, None);
         assert_eq!(style.font_size(), 16.0);

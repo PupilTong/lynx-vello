@@ -27,13 +27,11 @@
 //!   them with the same `background::paint` an element box uses.
 //! - The whole painter works in the text item's local space (origin at the text box's top-left,
 //!   which is also the Parley layout origin); `transform` already includes the device scale.
-//! - Lines are placed through the paragraph's `LineGeometry`: everything parley positioned on a
-//!   line — glyphs, decoration bands, background fragments, gradient tiles — moves down by that
-//!   line's `shift`. The Lynx block's shifts are all zero; a CSS inline formatting context's move
-//!   parley's baselines onto its CSS 2.2 §10.8 line boxes.
+//! - Everything parley positioned on a line — glyphs, decoration bands, background fragments,
+//!   gradient tiles — is already on that line's box: parley 0.12 builds CSS 2.2 §10.8.1 line boxes
+//!   for both paragraph kinds.
 
 use hughie::text::block::PlacedBox;
-use hughie::text::paragraph::LineGeometry;
 use parley::{GlyphRun, Layout, PositionedLayoutItem};
 use smallvec::SmallVec;
 use stylo::computed_values::text_decoration_style::T as TextDecorationStyle;
@@ -193,6 +191,8 @@ impl<'doc> RunPaints<'doc> {
             let source = paragraph.source_of(u16::try_from(index).unwrap_or(u16::MAX));
             let converted = convert_tail && matches!(source, SourceItem::Ellipsis { .. });
             let resolved = match source {
+                // The strut: no glyph run carries it.
+                SourceItem::Strut => None,
                 SourceItem::Content(item) | SourceItem::Ellipsis { item } => sources
                     .get(item as usize)
                     .copied()
@@ -372,19 +372,18 @@ fn assign_nested_tiles(
     // ramp. Linear scans over a list that is as long as the paragraph has
     // gradient elements.
     let mut tiles: SmallVec<[(crate::NodeId, Rect); 2]> = SmallVec::new();
-    for (index, line) in paragraph.layout.lines().enumerate() {
+    for line in paragraph.layout.lines() {
         let metrics = line.metrics();
-        let shift = paragraph.shift(index);
-        let top = shifted(metrics.block_min_coord, shift);
-        let bottom = shifted(metrics.block_max_coord, shift);
+        let top = f64::from(metrics.block_min_coord);
+        let bottom = f64::from(metrics.block_max_coord);
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                 continue;
             };
-            let Some(glyph) = glyph_run.glyphs().next() else {
+            if glyph_run.glyphs().next().is_none() {
                 continue;
-            };
-            let index = glyph.style_index();
+            }
+            let index = usize::from(glyph_run.style_index());
             let Some(&(_, node)) = nested.iter().find(|(wanted, _)| *wanted == index) else {
                 continue;
             };
@@ -449,22 +448,22 @@ pub(crate) fn inline_background_fragments(
     let atoms = !runs.atom_backgrounds.is_empty();
     for (index, line) in paragraph.layout.lines().enumerate() {
         scopes.clear();
-        let shift = paragraph.shift(index);
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                 continue;
             };
-            // parley splits a run at every style change, so the first glyph
-            // answers for the whole run — the same lookup `paint_pass` makes.
-            let Some(glyph) = glyph_run.glyphs().next() else {
+            // parley splits a run at every style change, so the glyph run's
+            // style index answers for the whole run — the same lookup
+            // `paint_pass` makes.
+            if glyph_run.glyphs().next().is_none() {
                 continue;
-            };
-            let chain = runs.background_chain(glyph.style_index());
+            }
+            let chain = runs.background_chain(usize::from(glyph_run.style_index()));
             if chain.is_empty() {
                 continue;
             }
-            let metrics = glyph_run.run().metrics();
-            let baseline = shifted(glyph_run.baseline(), shift);
+            let metrics = glyph_run.run().font_metrics();
+            let baseline = f64::from(glyph_run.baseline());
             let x = f64::from(glyph_run.offset());
             union_into(
                 &mut scopes,
@@ -536,25 +535,6 @@ pub(crate) fn paint(
     // keeps one run's ink from landing under the next run's shadow.
     paint_shadows(scene, paragraph, transform, runs);
     paint_pass(scene, paragraph, transform, runs, Layer::Ink);
-}
-
-/// `y` moved by a line's `shift`. A zero shift — every Lynx block line —
-/// leaves parley's coordinate exactly as it was.
-fn shifted(y: f32, shift: f32) -> f64 {
-    if shift == 0.0 {
-        f64::from(y)
-    } else {
-        f64::from(y + shift)
-    }
-}
-
-/// `transform` moved down by a line's `shift`, unchanged for a zero one.
-fn on_line(transform: Affine, shift: f32) -> Affine {
-    if shift == 0.0 {
-        transform
-    } else {
-        transform * Affine::translate((0.0, f64::from(shift)))
-    }
 }
 
 fn paint_shadows(
@@ -672,12 +652,10 @@ fn text_stroke(style: &ComputedValues) -> Option<(f64, Color)> {
 pub(crate) fn paint_silhouette(
     scene: &mut Scene,
     layout: &Layout<crate::layout::TextBrush>,
-    lines: &[LineGeometry],
     transform: Affine,
 ) {
     let fill = TextFill::Solid(Color::BLACK);
-    for (index, line) in layout.lines().enumerate() {
-        let transform = on_line(transform, lines.get(index).map_or(0.0, |line| line.shift));
+    for line in layout.lines() {
         for item in line.items() {
             if let PositionedLayoutItem::GlyphRun(glyph_run) = item {
                 draw_glyph_run(scene, &glyph_run, transform, Fill::NonZero.into(), &fill);
@@ -693,20 +671,18 @@ fn paint_pass(
     runs: &RunPaints<'_>,
     layer: Layer,
 ) {
-    for (index, line) in paragraph.layout.lines().enumerate() {
-        let transform = on_line(transform, paragraph.shift(index));
+    for line in paragraph.layout.lines() {
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                 continue;
             };
-            // parley splits a glyph run at every style-index change, so every
-            // glyph here shares one, and the first answers for the run. The
-            // index is only reachable through a glyph — `GlyphRun` exposes the
-            // brush but not the index, and the brush carries no identity.
-            let run = glyph_run.glyphs().next().map_or_else(
-                || runs.block_style_run(),
-                |glyph| runs.at(glyph.style_index()),
-            );
+            // parley splits a glyph run at every style-index change, so the
+            // glyph run's style index answers for every glyph in it.
+            let run = if glyph_run.glyphs().next().is_some() {
+                runs.at(usize::from(glyph_run.style_index()))
+            } else {
+                runs.block_style_run()
+            };
             let (transform, fill, stroke, decorations) = match layer {
                 Layer::Shadow(level) => {
                     let shadows = &run.style.get_inherited_text().text_shadow.0;
@@ -738,7 +714,7 @@ fn paint_pass(
                 ),
             };
             let (fill, decorations) = (&fill, &decorations[..]);
-            let metrics = *glyph_run.run().metrics();
+            let metrics = *glyph_run.run().font_metrics();
             let baseline = f64::from(glyph_run.baseline());
             let x = f64::from(glyph_run.offset());
             let width = f64::from(glyph_run.advance());
@@ -802,6 +778,13 @@ fn draw_glyph_run(
     fill: &TextFill,
 ) {
     let run = glyph_run.run();
+    // vello takes the coordinates as raw F2Dot14 bits; parley hands them out
+    // typed. Empty for every font that is not variable.
+    let normalized_coords: SmallVec<[i16; 4]> = run
+        .normalized_coords()
+        .iter()
+        .map(|coord| coord.to_bits())
+        .collect();
     let synthesis = run.synthesis();
     let embolden = if synthesis.embolden() {
         let amount = f64::from(run.font_size()) / 48.0;
@@ -818,7 +801,7 @@ fn draw_glyph_run(
         .transform(transform)
         .glyph_transform(glyph_transform)
         .font_embolden(embolden)
-        .normalized_coords(run.normalized_coords())
+        .normalized_coords(&normalized_coords)
         .hint(false)
         .brush(fill.brush())
         .brush_transform(fill.brush_transform())

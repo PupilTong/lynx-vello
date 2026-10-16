@@ -48,7 +48,8 @@ cross-platform engine built on:
 
 - **[stylo](https://github.com/servo/stylo)** — CSS parsing/cascade/computed-style engine (Servo's)
 - **[vello](https://github.com/linebender/vello)** — GPU vector rendering
-- **[parley](https://github.com/linebender/parley)** — text layout & shaping
+- **[parley](https://github.com/linebender/parley)** (0.12) — text layout & shaping, including
+  the CSS 2.2 §10.8.1 line boxes both paragraph kinds report
 
 The from-scratch layout engine (successor to the C++ engine's `starlight`) is
 `crates/hughie` — its host protocol, shared layout machinery, and CSS
@@ -3436,23 +3437,27 @@ byte↔UTF-16 source map (`content.rs`, its white-space processing chosen per
 consumer), the run-style vocabulary and its Parley translation (`style.rs`,
 with each run's `BreakStyle`), shaping, breaking and line capture
 (`shape.rs`), tab stops (`tab.rs`, following the `text-indent` keywords), atom
-`vertical-align` (`position.rs`), the probe/commit break memo and the
-`Retained` trait both consumers run the protocol through (`memo.rs`), the
-per-cluster extent walk (`extent.rs`), `LineGeometry` — where each laid-out
-line sits, and the `shift` every reader moves parley's placement by — and
-`Paragraph`, which owns one shaped natural layout and re-breaks it in place.
+`vertical-align` in parley's vocabulary (`position.rs`), the probe/commit break
+memo and the `Retained` trait both consumers run the protocol through
+(`memo.rs`, whose `BlockMetrics` carries the first and last line boxes'
+baselines), the per-cluster extent walk (`extent.rs`), `LineGeometry` — where
+each laid-out line sits, parley 0.12's own CSS 2.2 §10.8.1 line box — and
+`Paragraph`, which owns one shaped natural layout and re-breaks it in place,
+starting every line with its root inline box (`ParagraphRoot`: the strut, which
+is parley's style 0, and the base direction).
 `src/text/block` is the Lynx `<text>` layer on it: `BlockStyle` with the
 `text-maxline`/`text-maxlength` limits, the truncation in `truncate.rs` (which
 lays an `<inline-truncation>` subtree in at the clamp; the painter applies
 `tail-color-convert`'s native semantics), the `layout` event's line reports,
-hidden-box outcomes, and the Lynx range and hit answers; its line geometry is
-parley's own, every shift zero. `src/text/inline` is the CSS block
-container's inline formatting context over text runs only (`InlineFlow`,
-CSS-only `InlineFlowStyle`): css-text-3 §4.1 white space in full, per-run
-`text-wrap-mode`/`word-break`/`overflow-wrap`, the `text-indent` keywords
-counted in the intrinsic widths, CSS 2.2 §10.8.1 line boxes — the strut plus
-each run's half-leading — in `line_boxes.rs`, and the fit-content width for a
-definite available width.
+hidden-box outcomes, and the Lynx range and hit answers; its strut is the
+establishing element's own font (`BlockStyle::strut`) and its bidi paragraph
+level stays first-strong. `src/text/inline` is the CSS block container's inline
+formatting context over text runs only (`InlineFlow`, CSS-only
+`InlineFlowStyle`): css-text-3 §4.1 white space in full (`break-spaces`
+included), per-run `text-wrap-mode`/`word-break`/`overflow-wrap`, the
+`text-indent` keywords counted in the intrinsic widths, the container's
+`direction` as the bidi paragraph level, its own font as the strut of parley's
+line boxes, and the fit-content width for a definite available width.
 
 **css-anchor-position-1** is in the absolute pass: `anchor()`/`anchor-size()`
 resolution, the `position-area` grid, `anchor-center`, the css-position-3

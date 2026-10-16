@@ -60,7 +60,7 @@ num-traits = "0.2.19"
 pulldown-cmark = { version = "0.13", default-features = false }
 # Bare URL and email autolinking for `<markdown>`, markdown-it's `linkify`.
 linkify = "0.11"
-parley = { version = "0.11", default-features = false, features = [
+parley = { version = "0.12", default-features = false, features = [
     "std",
     "system",
 ] }

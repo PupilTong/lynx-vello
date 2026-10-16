@@ -104,9 +104,8 @@ pub enum TextWrap {
 
 /// css-text-4 `white-space-collapse`, per run.
 ///
-/// The three values the paragraph implements. `break-spaces` (the fork's
-/// fourth keyword) is read as [`Self::Collapse`] by the host, as it always
-/// was; `discard` and `preserve-spaces` do not parse in the fork at all.
+/// The four values the fork parses; `discard` and `preserve-spaces` do not
+/// parse there at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum WhiteSpaceCollapse {
     /// Spaces, tabs and segment breaks collapse (css-text-3 §4.1.1).
@@ -121,6 +120,11 @@ pub enum WhiteSpaceCollapse {
     /// source space, and a preserved tab advances to the next tab stop
     /// (`super::tab`).
     Preserve,
+    /// Preserved like [`Self::Preserve`], except that a wrap opportunity
+    /// follows every preserved space and tab and none of them hangs at a
+    /// line end: trailing spaces take width and wrap like content
+    /// (css-text-3 §4.1.3, §5.1).
+    BreakSpaces,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
