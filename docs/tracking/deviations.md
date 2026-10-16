@@ -430,8 +430,8 @@ consequential choice about whether to follow the spec or the quirk.
   marker here than under `web-core`. The wiring is one registered custom
   property, `--lynx-tail-color-convert`
   (`crates/bobcat-core/src/main/tree/text.rs:26-39`, `:116`), read back by
-  `TextContainerStyle::tail_color_convert`
-  (`crates/hughie/src/style/text.rs:55`) and applied by `RunPaint::fill_style`
+  `LynxTextStyle::tail_color_convert`
+  (`crates/hughie/src/style/text.rs:67`) and applied by `RunPaint::fill_style`
   (`crates/dom/src/paint/text.rs:116`), so reversing the ruling is a change to
   the painter and the default, not to shaping.
 - **`hughie::text::block` vertical alignment of atomic inlines** — parley 0.11

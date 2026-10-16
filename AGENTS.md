@@ -2232,7 +2232,7 @@ sets `--lynx-tail-color-convert: 1`, otherwise its registered default is zero.
 A `text > inline-truncation` subtree carries `--lynx-inline-truncation` so
 `crates/dom` can lay it in at the clamp without naming a Lynx tag.
 DOM's borrowed `StyleView` reads their computed values
-through `TextContainerStyle`, and `BlockStyle::from_container_style` consumes
+through `LynxTextStyle`, and `BlockStyle::from_container_style` consumes
 those inputs. Normal and animated style refreshes merge effective limit changes
 into layout damage to re-break the retained glyphs through existing box
 invalidation. Original attribute strings remain available to selectors. No text
@@ -3366,9 +3366,12 @@ each carry what only their own algorithm reads and are demanded at that
 algorithm's entry point; `GridLanesStyle: GridStyle` is the one that extends
 another algorithm's trait rather than `CoreStyle`, adding `flow_tolerance` and
 the computed `font_size` that `flow-tolerance: normal`'s `1em` resolves
-against. `TextContainerStyle` supplies paragraph-wide
-`text_maxline` and `text_maxlength` inputs from non-inherited integer custom
-properties, defaulting to unlimited. `LayoutTree::flattened_children` is the
+against. `TextContainerStyle` supplies a paragraph container's CSS
+(`text-align`, `text-wrap-mode`, `word-break`, `text-indent`,
+`text-overflow`); `LynxTextStyle: TextContainerStyle` adds the Lynx `<text>`
+inputs read from non-inherited integer custom properties — `text_maxline` and
+`text_maxlength` (defaulting to unlimited), `tail_color_convert` and
+`is_inline_truncation`. `LayoutTree::flattened_children` is the
 box-tree view every algorithm collects items through, flattening `display:
 contents` subtrees. Leaf content is deliberately closed: replaced content uses
 the `NaturalSize` value path, text the crate's concrete
@@ -3390,9 +3393,19 @@ grouping, stacking-axis self-alignment, baseline alignment/sharing, subgrid and
 fragmentation; do not add any of those without a user decision
 (`docs/style-assumptions.md` §24). Text shaping, line breaking,
 intrinsic/height-for-width measurement, baselines, and retained Parley layouts
-are unconditional crate behavior, in `src/text/block` — including
-`truncate.rs`, which lays an `<inline-truncation>` subtree in at the clamp and
-applies `tail-color-convert`'s native semantics.
+are unconditional crate behavior, in two modules. `src/text/paragraph` is the
+shared Parley core with no Lynx semantics: whitespace normalization and the
+byte↔UTF-16 source map (`content.rs`), the run-style vocabulary and its Parley
+translation (`style.rs`), shaping, breaking and line capture (`shape.rs`), tab
+stops (`tab.rs`), atom `vertical-align` (`position.rs`), the
+probe/commit break memo (`memo.rs`), the per-cluster extent walk
+(`extent.rs`), and `Paragraph`, which owns one shaped natural layout and
+re-breaks it in place. `src/text/block` is the Lynx `<text>` layer on it:
+`BlockStyle` with the `text-maxline`/`text-maxlength` limits, the truncation
+in `truncate.rs` (which lays an `<inline-truncation>` subtree in at the clamp;
+the painter applies `tail-color-convert`'s native semantics), the `layout`
+event's line reports, hidden-box outcomes, and the Lynx range and hit
+answers.
 
 **css-anchor-position-1** is in the absolute pass: `anchor()`/`anchor-size()`
 resolution, the `position-area` grid, `anchor-center`, the css-position-3
@@ -3543,7 +3556,7 @@ would host it:
   catalog — answers code 3, `METHOD_NOT_FOUND`. The rect itself ignores
   transforms and never flushes.
 - **The text `layout` event.** The per-line ranges `hughie`'s
-  `text/block/content.rs` computes have no delivery path.
+  `TextBlock::lines` reports have no delivery path.
 - **`rpx`-aware view/device policy** and the rest of the `<list>` component
   (scroll and threshold events, sticky cells and snapping; the
   layout mapping and virtualization are UA rules already, and five UI methods

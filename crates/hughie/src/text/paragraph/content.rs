@@ -8,12 +8,10 @@
 //! boxes, collapse events), never a second copy of the text: intra-segment
 //! queries re-decode the one normalized `String` the paragraph needs anyway.
 //!
-//! The collapse rules are the ones `crate::text::content` implements for the
-//! measurement path, restated here with two additions that path has no concept
-//! of: source-unit accounting, and boxes as content (an atomic box flushes
-//! pending whitespace and resets the after-break state, the way parley's tree
-//! builder treats an inline box). The nontrivial segment-break predicate is
-//! shared, not copied.
+//! The collapse rules are css-text-3 §4.1's, with two additions: source-unit
+//! accounting, and boxes as content (an atomic box flushes pending whitespace
+//! and resets the after-break state, the way parley's tree builder treats an
+//! inline box).
 //!
 //! `white-space-collapse` is per run. Under `preserve` nothing collapses:
 //! every space, tab and carriage return emits one byte and every segment
@@ -67,43 +65,43 @@ pub struct InlineBoxSpec {
 
 /// Whitespace-normalized paragraph content with its source map.
 #[derive(Debug)]
-pub(in crate::text::block) struct NormalizedBlock {
-    pub(in crate::text::block) text: String,
+pub(in crate::text) struct NormalizedBlock {
+    pub(in crate::text) text: String,
     /// Contiguous, non-overlapping, covering `0..text.len()` — the
     /// `style_run_builder` precondition. `item` indexes the input slice.
-    pub(in crate::text::block) ranges: Vec<StyledRange>,
-    pub(in crate::text::block) boxes: Vec<BoxAt>,
-    pub(in crate::text::block) map: SourceMap,
+    pub(in crate::text) ranges: Vec<StyledRange>,
+    pub(in crate::text) boxes: Vec<BoxAt>,
+    pub(in crate::text) map: SourceMap,
     /// Each input item's source units, indexed like the input slice.
     ///
     /// Every source character counts on arrival, whatever collapsing later
     /// makes of it, so these are contiguous, cover `0..map.source_len()`, and
     /// a run's span is its whole pre-collapse text even where none of it
     /// survived; a box's is its one unit.
-    pub(in crate::text::block) item_units: Vec<Range<u32>>,
+    pub(in crate::text) item_units: Vec<Range<u32>>,
     /// The byte of every preserved tab, ascending. Each is one space in
     /// `text`, a cluster of its own, whose advance the block widens to the
     /// next tab stop at break time.
-    pub(in crate::text::block) tabs: Vec<u32>,
+    pub(in crate::text) tabs: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::text::block) struct StyledRange {
-    pub(in crate::text::block) bytes: Range<u32>,
-    pub(in crate::text::block) item: u32,
+pub(in crate::text) struct StyledRange {
+    pub(in crate::text) bytes: Range<u32>,
+    pub(in crate::text) item: u32,
 }
 
 /// One atomic box's place in both offset spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::text::block) struct BoxAt {
-    pub(in crate::text::block) byte: u32,
-    pub(in crate::text::block) unit: u32,
-    pub(in crate::text::block) item: u32,
+pub(in crate::text) struct BoxAt {
+    pub(in crate::text) byte: u32,
+    pub(in crate::text) unit: u32,
+    pub(in crate::text) item: u32,
 }
 
 /// Piecewise mapping between normalized UTF-8 bytes and source UTF-16 units.
 #[derive(Debug, Default)]
-pub(in crate::text::block) struct SourceMap {
+pub(in crate::text) struct SourceMap {
     segments: Vec<Segment>,
     source_len: u32,
 }
@@ -135,7 +133,7 @@ enum SegmentKind {
 }
 
 impl SourceMap {
-    pub(in crate::text::block) const fn source_len(&self) -> u32 {
+    pub(in crate::text) const fn source_len(&self) -> u32 {
         self.source_len
     }
 
@@ -143,7 +141,7 @@ impl SourceMap {
     /// of the character at that byte. A box or a dropped whitespace span
     /// sharing the byte lies before that character and is not part of what
     /// starts here.
-    pub(in crate::text::block) fn byte_to_unit(&self, text: &str, byte: u32) -> u32 {
+    pub(in crate::text) fn byte_to_unit(&self, text: &str, byte: u32) -> u32 {
         let segment = self
             .segments
             .iter()
@@ -164,7 +162,7 @@ impl SourceMap {
     /// box at it, whether the byte is mid-text or the text end. A box at the
     /// boundary is content of whatever follows, and a caller whose range
     /// includes the box accounts for its unit separately.
-    pub(in crate::text::block) fn unit_before(&self, text: &str, byte: u32) -> u32 {
+    pub(in crate::text) fn unit_before(&self, text: &str, byte: u32) -> u32 {
         let mut result = 0;
         for segment in &self.segments {
             if segment.norm.end < byte || (segment.norm.end == byte && segment.norm.start < byte) {
@@ -190,7 +188,7 @@ impl SourceMap {
     /// *collapsible* spaces dropped — the line-end whitespace that belongs to
     /// no line's content. A preserved space is content and stops the walk,
     /// wherever it sits.
-    pub(in crate::text::block) fn visible_end(&self, text: &str, start: u32, end: u32) -> u32 {
+    pub(in crate::text) fn visible_end(&self, text: &str, start: u32, end: u32) -> u32 {
         let mut visible = end;
         for (offset, character) in text[start as usize..end as usize].char_indices().rev() {
             let byte = start + u32::try_from(offset).expect("text fits u32");
@@ -225,7 +223,7 @@ impl SourceMap {
     /// start; a unit inside a collapsed span lands on the span's emitted
     /// byte; a unit on a box lands on the box's byte (cutting there hides
     /// the box).
-    pub(in crate::text::block) fn unit_to_byte(&self, text: &str, unit: u32) -> Option<u32> {
+    pub(in crate::text) fn unit_to_byte(&self, text: &str, unit: u32) -> Option<u32> {
         if unit >= self.source_len {
             return None;
         }
@@ -295,7 +293,7 @@ struct Normalizer {
 const OBJECT_REPLACEMENT: char = '\u{FFFC}';
 
 /// Collapses whitespace across the flattened items and builds the source map.
-pub(in crate::text::block) fn normalize(items: &[InlineItem<'_>]) -> NormalizedBlock {
+pub(in crate::text) fn normalize(items: &[InlineItem<'_>]) -> NormalizedBlock {
     let mut state = Normalizer {
         text: String::new(),
         ranges: Vec::new(),

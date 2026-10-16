@@ -66,7 +66,7 @@ pub use stylo::values::computed::{
 pub use stylo::values::generics::position::TreeScoped;
 pub use stylo::values::specified::align::AlignFlags;
 use stylo::values::specified::position::PositionAnchorKeyword;
-pub use text::{TextBrush, TextContainerStyle, TextRun, TextRunStyle};
+pub use text::{LynxTextStyle, TextBrush, TextContainerStyle, TextRunStyle};
 
 pub const RELATIVE_REFERENCE_NONE: RelativeReference = -1;
 pub const RELATIVE_REFERENCE_PARENT: RelativeReference = 0;

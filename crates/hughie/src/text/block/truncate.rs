@@ -16,10 +16,10 @@
 
 use parley::{Layout, PositionedLayoutItem};
 
-use super::content::{SourceMap, StyledRange};
-use super::shape::NaturalLine;
 use super::style::{BlockStyle, TextOverflow};
 use crate::style::TextBrush;
+use crate::text::paragraph::content::{SourceMap, StyledRange};
+use crate::text::paragraph::shape::NaturalLine;
 
 /// How many units the dots-form ellipsis backs the maxline cut off, and how
 /// many dots it appends.

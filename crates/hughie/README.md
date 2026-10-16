@@ -43,8 +43,10 @@ properties exactly one algorithm reads, demanded by that algorithm's entry
 point (`T::Style<'tree>: GridStyle`) rather than by the `Style` GAT bound.
 `GridLanesStyle` extends `GridStyle` with `flow-tolerance` and the element's
 computed font size, which is what `flow-tolerance: normal` resolves against.
-`TextContainerStyle` supplies the paragraph's `text_maxline` and
-`text_maxlength` inputs, defaulting to unlimited. The DOM style view reads
+`TextContainerStyle` supplies a paragraph container's CSS, and
+`LynxTextStyle: TextContainerStyle` the Lynx `<text>` inputs on top: the
+`text_maxline` and `text_maxlength` limits, defaulting to unlimited,
+`tail_color_convert` and `is_inline_truncation`. The DOM style view reads
 these from the establishing element's non-inherited integer custom properties
 when building `BlockStyle`; the paragraph requires no `LinearStyle` bound.
 `calc()` needs no protocol plumbing: stylo's `LengthPercentage` carries and

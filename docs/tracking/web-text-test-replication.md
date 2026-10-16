@@ -268,8 +268,8 @@ shared name-keyed dispatcher (user ruling, 2026-09-21), so the reflection is a
 `attribute_changed_callback` reaction raised by the `__SetAttribute` write
 itself (`crates/bobcat-core/src/main/tree/text.rs`, the `Text` component and
 `UA_RULES`);
-`TextContainerStyle::tail_color_convert` reads it back
-(`crates/hughie/src/style/text.rs:56`); `SourceItem::Ellipsis` names the content
+`LynxTextStyle::tail_color_convert` reads it back
+(`crates/hughie/src/style/text.rs:67`); `SourceItem::Ellipsis` names the content
 run the dots were shaped in (`crates/hughie/src/text/block/mod.rs:65`), so the
 painter resolves them through that run's element and redirects only
 `RunPaint::fill_style` when the block converts
@@ -442,7 +442,7 @@ reaches no second record.
 | # | Gap | Cause |
 | --- | --- | --- |
 | C1 | A run's `line-height` is taken from the style of the **next** span | Upstream parley: `shape/mod.rs:127-128` advances `item.style_index` before flushing the pending item, so the last span's `line-height` governs every line. Observed as a truncation flow's `line-height` rewriting lines *before* the cut. |
-| C2 | Leading collapsible whitespace is emitted, not removed | `crates/hughie/src/text/block/content.rs:435` — `PendingKind::Space => true` emits unconditionally with no start-of-line suppression. |
+| C2 | Leading collapsible whitespace is emitted, not removed | `crates/hughie/src/text/paragraph/content.rs:435` — `PendingKind::Space => true` emits unconditionally with no start-of-line suppression. |
 
 ### D. Paint — closed
 
@@ -671,7 +671,7 @@ the image's intrinsic size (`css-text.md`).
 
 Native's textra applies `line-height` paragraph-wide; the web applies it
 per-run. This engine follows the web
-(`crates/hughie/src/text/block/style.rs`).
+(`crates/hughie/src/text/paragraph/style.rs`).
 
 ### 6. The `text` attribute with children present
 

@@ -1,4 +1,5 @@
-//! Text measurement style protocol.
+//! Text style protocol: the CSS a paragraph container and a text run read,
+//! and the Lynx `<text>` inputs a text block reads on top.
 
 use core::num::NonZeroU32;
 use std::sync::LazyLock;
@@ -46,6 +47,16 @@ style_protocol! {
                 style.inherited_values().get_inherited_text().slow_clone_text_indent(),
             text_overflow -> TextOverflow =
                 style.inherited_values().get_text().slow_clone_text_overflow(),
+        }
+    }
+}
+
+// The Lynx `<text>` inputs that are attributes rather than CSS. The UA sheet
+// carries each as a registered, non-inherited integer custom property, so a
+// host view reads them from the same computed values as the CSS above.
+style_protocol! {
+    pub trait LynxTextStyle: TextContainerStyle {
+        defaults(style) {
             text_maxline -> Option<NonZeroU32> =
                 paragraph_limit(style.computed_values(), &TEXT_MAXLINE).and_then(NonZeroU32::new),
             text_maxlength -> Option<u32> =
@@ -108,22 +119,6 @@ style_protocol! {
     }
 }
 
-/// One borrowed text/style run assembled by the host.
-#[derive(Debug)]
-pub struct TextRun<'a, R: TextRunStyle> {
-    pub text: &'a str,
-    pub style: &'a R,
-    pub preserve_newlines: bool,
-}
-
-impl<R: TextRunStyle> Clone for TextRun<'_, R> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<R: TextRunStyle> Copy for TextRun<'_, R> {}
-
 pub type TextBrush = ();
 
 #[cfg(test)]
@@ -146,6 +141,7 @@ mod tests {
         }
     }
     impl TextContainerStyle for Defaults {}
+    impl LynxTextStyle for Defaults {}
 
     impl TextRunStyle for Defaults {
         fn font_family(&self) -> FontFamily {
@@ -182,9 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn reference_forwarding_preserves_run_values_and_copy_runs() {
-        fn assert_copy<T: Copy>() {}
-
+    fn reference_forwarding_preserves_run_values() {
         let style = Defaults;
         let view = &style;
         assert_eq!(TextRunStyle::font_size(&view), 16.0);
@@ -211,14 +205,5 @@ mod tests {
             TextRunStyle::font_variation_settings(&view),
             FontVariationSettings::normal()
         );
-
-        let run = TextRun {
-            text: "hello",
-            style: view,
-            preserve_newlines: true,
-        };
-        assert_eq!(run.text, "hello");
-        assert!(run.preserve_newlines);
-        assert_copy::<TextRun<'_, Defaults>>();
     }
 }

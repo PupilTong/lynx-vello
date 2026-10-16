@@ -1,0 +1,392 @@
+//! The shared parley paragraph core: one shaped, breakable paragraph of
+//! styled text runs and atomic inline boxes, with no consumer's own
+//! semantics.
+//!
+//! Every paragraph this crate lays out goes through these modules:
+//!
+//! - `content` collapses whitespace across the flattened items and maps normalized UTF-8 bytes to
+//!   source UTF-16 units and back.
+//! - `style` holds the run-level value vocabulary and its translation into parley styles.
+//! - `shape` builds the parley layout, breaks it, and reads the committed lines back into source
+//!   space, dropping the blank trailing lines parley commits.
+//! - `tab` widens each preserved tab to its tab stop at break time.
+//! - `position` places atomic boxes by `vertical-align`.
+//! - `memo` remembers the constraints a paragraph has already answered and the one it committed.
+//! - `extent` walks a laid-out line cluster by cluster in source units.
+//!
+//! `Paragraph` owns one shaped natural layout over one flow of items and
+//! re-breaks it in place: a new constraint, or a resized atomic box, never
+//! re-shapes, except where a break moves a preserved tab to a different stop.
+//! What a consumer does with the broken lines — alignment, truncation, line
+//! reports, box placement — is the consumer's. The Lynx `<text>` block
+//! ([`crate::text::block`]) is the one consumer today.
+//!
+//! White-space processing is decided in one place: `content::normalize`,
+//! called only from `Flow::build`, which applies css-text-3 §4.1 per run
+//! today. Everything after it reads only the `NormalizedBlock` it returns —
+//! the normalized text, the styled ranges, the box positions, the list of
+//! tabs to widen, and the source map — so a consumer that processes white
+//! space differently needs a different normalizer behind that one call, not
+//! a different shaping or breaking path.
+
+pub(in crate::text) mod content;
+mod extent;
+pub(in crate::text) mod memo;
+pub(in crate::text) mod position;
+pub(in crate::text) mod shape;
+pub(in crate::text) mod style;
+mod tab;
+
+use core::ops::Range;
+
+pub use content::{InlineBoxSpec, InlineItem, TextRunItem};
+use content::{NormalizedBlock, normalize};
+pub use memo::{BlockConstraint, BlockMetrics};
+use parley::{ContentWidths, IndentOptions, InlineBox, InlineBoxKind, Layout};
+use shape::{NaturalLine, ShapeSpan};
+pub use style::{
+    BreakStyle, Direction, LineHeight, OverflowWrap, RunStyle, TextAlign, TextIndent, TextWrap,
+    VerticalAlign, WhiteSpaceCollapse, WordBreak,
+};
+
+use crate::style::TextBrush;
+use crate::text::TextContext;
+
+/// One owned flattened item.
+#[derive(Debug)]
+pub(in crate::text) enum OwnedItem {
+    Run(RunStyle),
+    Box(InlineBoxSpec),
+}
+
+/// One owned flattened flow: the main content, or the truncation content.
+#[derive(Debug)]
+pub(in crate::text) struct Flow {
+    pub(in crate::text) items: Vec<OwnedItem>,
+    pub(in crate::text) block: NormalizedBlock,
+    /// The extra letter-spacing each preserved tab's space is shaped with,
+    /// indexed like `block.tabs`. Zero — one plain space — until the tab pass
+    /// settles it (`tab::resolve`).
+    pub(in crate::text) tab_spacing: Vec<f32>,
+    /// Each preserved tab's `0.5ch`, the shortest shift it takes; indexed
+    /// like `block.tabs`. Measured once, for the content flow only.
+    pub(in crate::text) tab_min: Vec<f32>,
+}
+
+impl Flow {
+    pub(in crate::text) fn build(items: &[InlineItem<'_>]) -> Self {
+        let block = normalize(items);
+        let tabs = block.tabs.len();
+        Self {
+            items: items
+                .iter()
+                .map(|item| match item {
+                    InlineItem::Run(run) => OwnedItem::Run(run.style.clone()),
+                    InlineItem::Box(spec) => OwnedItem::Box(*spec),
+                })
+                .collect(),
+            block,
+            tab_spacing: vec![0.0; tabs],
+            tab_min: vec![0.0; tabs],
+        }
+    }
+
+    /// The run item holding byte `byte` of the normalized text.
+    fn item_at(&self, byte: u32) -> u32 {
+        let ranges = &self.block.ranges;
+        ranges[ranges.partition_point(|range| range.bytes.end <= byte)].item
+    }
+
+    pub(in crate::text) fn run_style(&self, item: u32) -> &RunStyle {
+        match &self.items[item as usize] {
+            OwnedItem::Run(style) => style,
+            OwnedItem::Box(_) => unreachable!("styled ranges only reference run items"),
+        }
+    }
+
+    pub(in crate::text) fn box_spec(&self, item: u32) -> &InlineBoxSpec {
+        match &self.items[item as usize] {
+            OwnedItem::Box(spec) => spec,
+            OwnedItem::Run(_) => unreachable!("box slots only reference box items"),
+        }
+    }
+
+    /// The shaper spans for this flow, offset into a combined display string.
+    ///
+    /// One span per styled range, except that every preserved tab's space is
+    /// a span of its own carrying its tab spacing — the only way to give one
+    /// cluster an advance of its own in parley.
+    pub(in crate::text) fn spans<S>(
+        &self,
+        byte_offset: u32,
+        source: fn(u32) -> S,
+    ) -> Vec<ShapeSpan<'_, S>> {
+        let tabs = &self.block.tabs;
+        let mut spans = Vec::with_capacity(self.block.ranges.len() + 2 * tabs.len());
+        let mut push = |bytes: core::ops::Range<u32>, item: u32, extra_spacing: f32| {
+            spans.push(ShapeSpan {
+                bytes: (bytes.start + byte_offset) as usize..(bytes.end + byte_offset) as usize,
+                style: self.run_style(item),
+                source: source(item),
+                extra_spacing,
+            });
+        };
+        let mut next_tab = 0;
+        for range in &self.block.ranges {
+            let mut start = range.bytes.start;
+            while let Some(&tab) = tabs.get(next_tab)
+                && tab < range.bytes.end
+            {
+                if start < tab {
+                    push(start..tab, range.item, 0.0);
+                }
+                push(tab..tab + 1, range.item, self.tab_spacing[next_tab]);
+                start = tab + 1;
+                next_tab += 1;
+            }
+            if start < range.bytes.end {
+                push(start..range.bytes.end, range.item, 0.0);
+            }
+        }
+        spans
+    }
+}
+
+/// One paragraph's content flow, shaped once into its natural layout.
+///
+/// `S` is the consumer's paint identity for a parley style index; the
+/// natural layout records [`Self::source`] of each content item.
+pub(in crate::text) struct Paragraph<S> {
+    pub(in crate::text) content: Flow,
+    /// The content shaped as one paragraph, broken at the constraint the last
+    /// [`Self::break_lines`] was given.
+    pub(in crate::text) natural: Layout<TextBrush>,
+    /// The natural layout's style-index → paint-identity table.
+    pub(in crate::text) natural_sources: Vec<S>,
+    /// The paint identity of content item `n`.
+    source: fn(u32) -> S,
+}
+
+/// What one natural break reports, in the content's own offset spaces.
+pub(in crate::text) struct NaturalBreak {
+    /// The committed lines, trailing blank lines dropped.
+    pub(in crate::text) lines: Vec<NaturalLine>,
+    /// The source unit of each atomic box slot, in slot order.
+    pub(in crate::text) slot_units: Vec<u32>,
+    /// Min- and max-content widths of the full content, read off the
+    /// unjustified, pre-alignment layout with the current box sizes written
+    /// in, so a justified alignment can never leak into them.
+    pub(in crate::text) content_widths: ContentWidths,
+}
+
+impl<S: Copy> Paragraph<S> {
+    /// Builds and shapes the content flow of `items`.
+    ///
+    /// `breaking` is the line-breaking style every span is shaped with, and
+    /// `source` the paint identity a content item's spans record.
+    pub(in crate::text) fn new(
+        context: &mut TextContext,
+        breaking: BreakStyle,
+        items: &[InlineItem<'_>],
+        source: fn(u32) -> S,
+    ) -> Self {
+        let mut flow = Flow::build(items);
+        flow.tab_min = tab_minimums(context, breaking, &flow, source);
+        let spans = flow.spans(0, source);
+        let boxes = parley_boxes(&flow, 0, 0);
+        let mut natural_sources = Vec::new();
+        let natural = shape::shape(
+            context,
+            breaking,
+            &flow.block.text,
+            &spans,
+            boxes,
+            &mut natural_sources,
+        );
+        drop(spans);
+        Self {
+            content: flow,
+            natural,
+            natural_sources,
+            source,
+        }
+    }
+
+    /// Breaks the natural layout at `constraint`, committing at most
+    /// `max_lines` lines, and reads the committed lines back.
+    ///
+    /// The atomic boxes' current sizes and `vertical-align` line
+    /// contributions are written in first. Shaping is not re-run, except
+    /// that a paragraph with preserved tabs re-shapes when a break moved a
+    /// tab to a different stop (`tab`), at most `tab::MAX_ROUNDS` times;
+    /// `breaking` is what such a re-shape uses.
+    pub(in crate::text) fn break_lines(
+        &mut self,
+        context: &mut TextContext,
+        breaking: BreakStyle,
+        constraint: BlockConstraint,
+        max_lines: Option<u32>,
+    ) -> NaturalBreak {
+        let width = constraint.max_advance();
+
+        // Box widths and vertical-align line contributions feed the breaker.
+        for (slot, entry) in self.natural.inline_boxes_mut().iter_mut().enumerate() {
+            let spec = self.content.box_spec(self.content.block.boxes[slot].item);
+            entry.width = spec.size.width;
+            entry.height = position::line_contribution(spec);
+        }
+
+        let indent = constraint.indent;
+        let mut tab_rounds = 0;
+        loop {
+            self.natural
+                .set_text_indent(indent, IndentOptions::default());
+            shape::break_clamped(&mut self.natural, width, max_lines);
+            if tab_rounds == tab::MAX_ROUNDS {
+                break;
+            }
+            // Empty-checked first thing: a paragraph without preserved tabs
+            // leaves here on its first break.
+            let Some(spacing) = tab::resolve(
+                &self.natural,
+                &self.content.block.tabs,
+                &self.content.tab_spacing,
+                &self.content.tab_min,
+                indent,
+            ) else {
+                break;
+            };
+            self.content.tab_spacing = spacing;
+            self.reshape(context, breaking);
+            tab_rounds += 1;
+        }
+        // Content widths are read off the just-unjustified, pre-alignment
+        // layout, with the current box sizes written in.
+        let content_widths = self.natural.calculate_content_widths();
+
+        let slot_bytes: Vec<u32> = self
+            .content
+            .block
+            .boxes
+            .iter()
+            .map(|entry| entry.byte)
+            .collect();
+        let slot_units: Vec<u32> = self
+            .content
+            .block
+            .boxes
+            .iter()
+            .map(|entry| entry.unit)
+            .collect();
+        let lines = shape::capture_lines(
+            &self.natural,
+            &self.content.block.text,
+            &self.content.block.map,
+            &slot_bytes,
+            &slot_units,
+        );
+        NaturalBreak {
+            lines,
+            slot_units,
+            content_widths,
+        }
+    }
+
+    /// Shapes the natural layout again, at the content's current tab
+    /// spacing and box sizes. Only the tab pass needs this: nothing else a
+    /// layout changes is a shaping input.
+    fn reshape(&mut self, context: &mut TextContext, breaking: BreakStyle) {
+        let spans = self.content.spans(0, self.source);
+        let boxes = parley_boxes(&self.content, 0, 0);
+        self.natural = shape::shape(
+            context,
+            breaking,
+            &self.content.block.text,
+            &spans,
+            boxes,
+            &mut self.natural_sources,
+        );
+    }
+}
+
+impl<S> Paragraph<S> {
+    /// The source units content item `item` contributed: a run's whole
+    /// pre-collapse text, an atomic box's one unit. Fixed when the paragraph
+    /// is built.
+    ///
+    /// `None` when `item` is past the content items.
+    pub(in crate::text) fn item_source_range(&self, item: u32) -> Option<Range<u32>> {
+        self.content
+            .block
+            .item_units
+            .get(usize::try_from(item).ok()?)
+            .cloned()
+    }
+}
+
+/// Each preserved tab's `0.5ch` — half the advance of `0` in the tab's own
+/// run, without its letter-spacing (`ch` is a font metric).
+///
+/// One shaping per distinct run item holding a tab, at construction: `ch`
+/// never changes without a rebuild, and a paragraph without preserved tabs
+/// shapes nothing here.
+fn tab_minimums<S: Copy>(
+    context: &mut TextContext,
+    breaking: BreakStyle,
+    flow: &Flow,
+    source: fn(u32) -> S,
+) -> Vec<f32> {
+    const ZERO: &str = "0";
+    let mut measured: Vec<(u32, f32)> = Vec::new();
+    flow.block
+        .tabs
+        .iter()
+        .map(|&byte| {
+            let item = flow.item_at(byte);
+            if let Some(&(_, half)) = measured.iter().find(|(seen, _)| *seen == item) {
+                return half;
+            }
+            let style = flow.run_style(item);
+            let spans = [ShapeSpan {
+                bytes: 0..ZERO.len(),
+                style,
+                source: source(item),
+                extra_spacing: -style.letter_spacing,
+            }];
+            let mut probe =
+                shape::shape(context, breaking, ZERO, &spans, Vec::new(), &mut Vec::new());
+            probe.break_all_lines(None);
+            let half = probe.width() * 0.5;
+            measured.push((item, half));
+            half
+        })
+        .collect()
+}
+
+/// The parley boxes of one flow, sized from the current specs and carrying
+/// their vertical-align line contribution as the height.
+pub(in crate::text) fn parley_boxes(
+    flow: &Flow,
+    byte_offset: u32,
+    base_slot: usize,
+) -> Vec<InlineBox> {
+    flow.block
+        .boxes
+        .iter()
+        .enumerate()
+        .map(|(slot, entry)| {
+            let spec = flow.box_spec(entry.item);
+            sized_box(spec, base_slot + slot, (entry.byte + byte_offset) as usize)
+        })
+        .collect()
+}
+
+pub(in crate::text) fn sized_box(spec: &InlineBoxSpec, slot: usize, index: usize) -> InlineBox {
+    InlineBox {
+        id: slot as u64,
+        kind: InlineBoxKind::InFlow,
+        index,
+        width: spec.size.width,
+        height: position::line_contribution(spec),
+    }
+}

@@ -31,13 +31,19 @@ subtree is inline content rather than child boxes.
 
 ## Where things are
 
-- `crates/hughie/src/text/block/`: `mod.rs` (`TextBlock::probe`/`commit`),
-  `content.rs` (flattened paragraph, inline atomic boxes), `shape.rs`,
-  `position.rs`, `style.rs`, `truncate.rs`, `range.rs`
-  (`TextBlock::range_boxes`, a source UTF-16 range to per-line boxes). `crates/hughie/src/text/context.rs`
-  and `font.rs` hold `TextContext` and `FontBlob`, both re-exported by `dom`.
-- `TextContainerStyle` (`crates/hughie/src/style/text.rs`) supplies
-  paragraph-wide `text_maxline`/`text_maxlength`, defaulting to unlimited.
+- `crates/hughie/src/text/paragraph/`: the shared parley paragraph core with
+  no Lynx semantics — `content.rs` (white-space normalization, inline atomic
+  boxes, the source map), `shape.rs`, `tab.rs`, `position.rs`, `style.rs`
+  (`RunStyle` and the run-level values), `memo.rs` (the probe/commit memo),
+  `extent.rs` (the per-cluster line walk).
+- `crates/hughie/src/text/block/`: the Lynx layer on that core — `mod.rs`
+  (`TextBlock::probe`/`commit`), `style.rs` (`BlockStyle`), `truncate.rs`,
+  `range.rs` (`TextBlock::range_boxes`, a source UTF-16 range to per-line
+  boxes). `crates/hughie/src/text/context.rs` and `font.rs` hold
+  `TextContext` and `FontBlob`, both re-exported by `dom`.
+- `LynxTextStyle` (`crates/hughie/src/style/text.rs`, on top of the CSS-only
+  `TextContainerStyle`) supplies paragraph-wide `text_maxline`/`text_maxlength`,
+  defaulting to unlimited.
 - Attribute wiring: `crates/bobcat-core/src/main/tree/text.rs` maps
   `text-maxline` → `--lynx-text-maxline` and `text-maxlength` →
   `--lynx-text-maxlength`, registered `@property` integers, set through
@@ -87,7 +93,7 @@ Shorthand `lynx/`, `lynx-stack/`, `Paws/`; absolute paths live once in AGENTS.md
   way. Surface a *new* conflict to the **user**; do not pick a side silently.
 - Behavioral compatibility (same wrap points, same truncation, same line counts
   for a width), not identical glyph metrics.
-- Parley trap recorded in `crates/hughie/src/text/block/shape.rs`: never ask
+- Parley trap recorded in `crates/hughie/src/text/paragraph/shape.rs`: never ask
   the breaker whether content remains. It leaves `is_done` false while only an
   empty final line is pending, which misreports fully consumed content as
   overflowing; decide from the captured lines' consumed units instead.

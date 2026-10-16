@@ -6,8 +6,8 @@ use hughie::geometry::Size;
 use hughie::style::containment::effective_containment;
 use hughie::style::{
     Contain, ContainIntrinsicSize, ContentVisibility, CoreStyle, Display, FlexboxStyle,
-    GridLanesStyle, GridStyle, LinearStyle, PositionProperty, RelativeStyle, TextContainerStyle,
-    TextRunStyle,
+    GridLanesStyle, GridStyle, LinearStyle, LynxTextStyle, PositionProperty, RelativeStyle,
+    TextContainerStyle, TextRunStyle,
 };
 use stylo::properties::ComputedValues;
 use stylo::values::computed::motion::OffsetPath;
@@ -29,12 +29,9 @@ pub(crate) enum DisplayMode {
     GridLanes,
     Linear,
     Relative,
-    /// The `display: -lynx-text` block: one flattened Lynx paragraph.
-    ///
-    /// The value exists in the cascade and computes here today, but the
-    /// [`hughie::text::block`] paragraph it names is not wired yet, so the
-    /// box it produces is still the flex container `text` has always been —
-    /// the mode is a distinct arm precisely so that swap is one place.
+    /// The `display: -lynx-text` block: one flattened Lynx paragraph, laid
+    /// out by [`hughie::text::block`] through
+    /// [`crate::layout::text_block`].
     Text,
     Leaf,
 }
@@ -318,6 +315,8 @@ impl<T> LinearStyle for StyleView<'_, T> {}
 
 impl<T> TextContainerStyle for StyleView<'_, T> {}
 
+impl<T> LynxTextStyle for StyleView<'_, T> {}
+
 impl<T> RelativeStyle for StyleView<'_, T> {}
 
 /// Whether a restyle changed anything Parley *shapes* from, and therefore
@@ -372,6 +371,8 @@ impl CoreStyle for ParagraphStyle<'_> {
 }
 
 impl TextContainerStyle for ParagraphStyle<'_> {}
+
+impl LynxTextStyle for ParagraphStyle<'_> {}
 
 /// Stylo gives custom-property changes repaint damage. Compare the effective
 /// values the paragraph actually consumes to account for their layout dependency.

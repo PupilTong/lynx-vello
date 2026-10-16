@@ -2081,7 +2081,7 @@ mod tests {
         reason = "explicit line heights have exact pixel metrics"
     )]
     fn interpolated_integer_paragraph_limits_relayout_without_reshaping() {
-        use hughie::style::TextContainerStyle;
+        use hughie::style::LynxTextStyle;
 
         for (property, initial, limit, samples) in [
             (

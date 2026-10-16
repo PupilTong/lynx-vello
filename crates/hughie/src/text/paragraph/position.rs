@@ -31,7 +31,7 @@ const SUPER_BASELINE_FACTOR: f32 = 0.34;
 /// the full height. `Super`'s raise depends on line metrics that do not exist
 /// until the line is assembled, so it contributes like `Baseline` and the
 /// raise is placement-only.
-pub(in crate::text::block) fn line_contribution(spec: &InlineBoxSpec) -> f32 {
+pub(in crate::text) fn line_contribution(spec: &InlineBoxSpec) -> f32 {
     let above_baseline = spec.baseline.unwrap_or(spec.size.height);
     match spec.vertical_align {
         VerticalAlign::Baseline | VerticalAlign::Sub | VerticalAlign::Super => above_baseline,
@@ -48,7 +48,7 @@ pub(in crate::text::block) fn line_contribution(spec: &InlineBoxSpec) -> f32 {
 
 /// Per-line reference metrics for text-anchored alignment values.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::text::block) struct LineRefs {
+pub(in crate::text) struct LineRefs {
     ascent: f32,
     descent: f32,
     x_height: f32,
@@ -58,7 +58,7 @@ pub(in crate::text::block) struct LineRefs {
 /// Collects the reference metrics from the line's glyph runs; a box-only line
 /// falls back to the line box itself, degrading the text-anchored values to
 /// baseline-anchored behavior.
-pub(in crate::text::block) fn line_refs(line: &Line<'_, TextBrush>) -> LineRefs {
+pub(in crate::text) fn line_refs(line: &Line<'_, TextBrush>) -> LineRefs {
     let mut refs = LineRefs {
         ascent: 0.0,
         descent: 0.0,
@@ -84,11 +84,7 @@ pub(in crate::text::block) fn line_refs(line: &Line<'_, TextBrush>) -> LineRefs 
 
 /// The placement table: the box's top edge, overriding parley's
 /// bottom-on-baseline position for every value.
-pub(in crate::text::block) fn box_top(
-    spec: &InlineBoxSpec,
-    metrics: &LineMetrics,
-    refs: LineRefs,
-) -> f32 {
+pub(in crate::text) fn box_top(spec: &InlineBoxSpec, metrics: &LineMetrics, refs: LineRefs) -> f32 {
     let height = spec.size.height;
     let above_baseline = spec.baseline.unwrap_or(height);
     match spec.vertical_align {

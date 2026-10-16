@@ -339,7 +339,7 @@ fn a_view_child_of_a_text_is_drawn_as_an_atomic_box() {
 /// The vertical placement *is* part of this picture, and it is the reference's.
 /// An atom's top edge comes out of hughie's placement table as
 /// `line baseline - the atom's own first baseline`
-/// (`crates/hughie/src/text/block/position.rs:93-95`), the atom's baseline
+/// (`crates/hughie/src/text/paragraph/position.rs:89-91`), the atom's baseline
 /// being the one its own layout reported
 /// (`crates/dom/src/layout/text_block.rs:564`) — which for this flex container
 /// is its first item's synthesized baseline, 2px of margin plus a 22px border
@@ -386,7 +386,7 @@ fn a_flex_view_atom_is_drawn_after_the_run_on_the_same_line() {
 /// deviation, and shows it holding: the inner 30px run and the 20px runs
 /// outside the atom sit on one baseline, because the atom's top comes out of
 /// hughie's placement table as `line baseline - the atom's own first baseline`
-/// (`crates/hughie/src/text/block/position.rs:93-95`) and that baseline is the
+/// (`crates/hughie/src/text/paragraph/position.rs:89-91`) and that baseline is the
 /// inner paragraph's, carried up through
 /// `crates/dom/src/layout/text_block.rs:564`. The deviation
 /// (`docs/tracking/deviations.md:213-220`) is that the line is not grown by the
