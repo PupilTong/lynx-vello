@@ -11,7 +11,11 @@ runs:
     - uses: actions/setup-node@v6
       with:
         node-version: 24.15.0
-        cache: pnpm
+        # The walltime runner already retains its pnpm store on disk. Restoring
+        # the same store from GitHub took 102s for 148 MB in run 38868065519,
+        # while the following locked install took 1.7s.
+        cache: ${{ runner.environment == 'github-hosted' && 'pnpm' || '' }}
+        package-manager-cache: false
     - shell: bash
       run: pnpm install --frozen-lockfile
     - name: Build ReactLynx fixtures from source

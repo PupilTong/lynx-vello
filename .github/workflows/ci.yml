@@ -410,11 +410,25 @@ jobs:
         with:
           tool: cargo-codspeed@5
 
+      - name: Cache Rust compilation by content
+        # rust-cache removes path dependencies under the checkout, including
+        # vendor/stylo. sccache can reuse their compilation even when Cargo
+        # rebuilds after a fresh checkout. Benchmark linking remains uncached.
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.18.0
+
       - name: Build benchmarks (CodSpeed, memory)
         # `cargo build --benches` underneath, in the bench profile: thin LTO
         # and one codegen unit per crate, so every library sets `bench = false`
         # to keep this to the `benches/` targets and their dependencies.
         run: cargo codspeed build -m memory
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          # Keep the existing main-only cache-write policy; PR merge-ref
+          # caches cannot seed other PRs and would compete for cache space.
+          SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
 
       - name: Run benchmarks (CodSpeed, memory)
         uses: CodSpeedHQ/action@v4
