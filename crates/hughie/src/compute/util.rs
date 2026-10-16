@@ -79,8 +79,11 @@ impl Axis {
     }
 }
 
+/// `LAST_BASELINE` keeps `last baseline` for an algorithm that implements
+/// last-baseline self-alignment; without it the value is replaced by `end`,
+/// its fallback alignment's direction, before the algorithm reads it.
 #[inline]
-fn normalize_alignment<const CONTENT: bool>(
+fn normalize_alignment<const CONTENT: bool, const LAST_BASELINE: bool>(
     flags: AlignFlags,
     inline_axis: bool,
     rtl: bool,
@@ -90,7 +93,11 @@ fn normalize_alignment<const CONTENT: bool>(
         return None;
     }
     if !CONTENT && value == AlignFlags::LAST_BASELINE {
-        return Some(AlignFlags::END);
+        return Some(if LAST_BASELINE {
+            AlignFlags::LAST_BASELINE
+        } else {
+            AlignFlags::END
+        });
     }
     // css-anchor-position-1 §4.2: "If the box is not absolutely positioned,
     // … this value behaves as center" — every in-flow item is not.
@@ -125,13 +132,28 @@ fn normalize_alignment<const CONTENT: bool>(
     }
 }
 
+/// A self-alignment value for an algorithm with no last-baseline alignment:
+/// `last baseline` becomes `end`.
 #[inline]
 pub(super) fn normalize_item_alignment(
     flags: AlignFlags,
     inline_axis: bool,
     rtl: bool,
 ) -> Option<AlignFlags> {
-    normalize_alignment::<false>(flags, inline_axis, rtl)
+    normalize_alignment::<false, false>(flags, inline_axis, rtl)
+}
+
+/// A self-alignment value for flexbox and grid, which implement
+/// last-baseline alignment (css-align-3 §9.3): `last baseline` stays
+/// `LAST_BASELINE`, and everything else normalizes as
+/// [`normalize_item_alignment`] does.
+#[inline]
+pub(super) fn normalize_item_alignment_with_last_baseline(
+    flags: AlignFlags,
+    inline_axis: bool,
+    rtl: bool,
+) -> Option<AlignFlags> {
+    normalize_alignment::<false, true>(flags, inline_axis, rtl)
 }
 
 #[inline]
@@ -140,7 +162,49 @@ pub(super) fn normalize_content_alignment(
     inline_axis: bool,
     rtl: bool,
 ) -> Option<AlignFlags> {
-    normalize_alignment::<true>(flags, inline_axis, rtl)
+    normalize_alignment::<true, false>(flags, inline_axis, rtl)
+}
+
+/// A box's first or last baseline set (css-align-3 §9.1): which one an item
+/// aligns by in its baseline-sharing group, or a container exports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum BaselineSet {
+    First,
+    Last,
+}
+
+impl BaselineSet {
+    pub(super) const BOTH: [Self; 2] = [Self::First, Self::Last];
+
+    #[inline]
+    pub(super) const fn other(self) -> Self {
+        match self {
+            Self::First => Self::Last,
+            Self::Last => Self::First,
+        }
+    }
+
+    /// The baseline-sharing group a self-alignment value joins, if it is
+    /// `baseline` or `last baseline`.
+    #[inline]
+    pub(super) fn of_alignment(alignment: AlignFlags) -> Option<Self> {
+        if alignment == AlignFlags::BASELINE {
+            Some(Self::First)
+        } else if alignment == AlignFlags::LAST_BASELINE {
+            Some(Self::Last)
+        } else {
+            None
+        }
+    }
+
+    /// The index of this set in a `[first, last]` pair.
+    #[inline]
+    pub(super) const fn index(self) -> usize {
+        match self {
+            Self::First => 0,
+            Self::Last => 1,
+        }
+    }
 }
 
 /// Node handle and order-modified paint index retained by resolved item
@@ -1574,6 +1638,19 @@ mod tests {
             "self start": A::SELF_START, true, false => Some(A::START);
             "self end": A::SELF_END, false, false => Some(A::START);
             "anchor-center in flow": A::ANCHOR_CENTER, true, false => Some(A::CENTER);
+        }
+    }
+
+    #[test]
+    fn last_baseline_survives_only_for_the_algorithms_that_align_by_it() {
+        use AlignFlags as A;
+
+        assert_alignment_cases! { normalize_item_alignment_with_last_baseline;
+            "last baseline": A::LAST_BASELINE, false, false => Some(A::LAST_BASELINE);
+            "safe last baseline": A::SAFE | A::LAST_BASELINE, true, true => Some(A::LAST_BASELINE);
+            "first baseline": A::BASELINE, false, false => Some(A::BASELINE);
+            "auto": A::AUTO, true, false => None;
+            "physical left rtl": A::LEFT, true, true => Some(A::END);
         }
     }
 

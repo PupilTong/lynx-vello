@@ -34,10 +34,10 @@ use tracks::{ExpandedTemplate, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expan
 use types::{Axis, GridItem, TrackSet, TrackSizingFunction};
 
 use super::util::{
-    IntrinsicTag, ItemKey, OrderedItem, PendingLayoutItem, ResolvedContainerBox,
+    BaselineSet, IntrinsicTag, ItemKey, OrderedItem, PendingLayoutItem, ResolvedContainerBox,
     accumulate_scrollable_overflow, apply_aspect_ratio, axis_has_intrinsic_style, box_inset_size,
     clamp, clamp_axis, container_content_independence, is_scroll_container, item_end_margin,
-    item_value_stability, normalize_content_alignment, normalize_item_alignment,
+    item_value_stability, normalize_content_alignment, normalize_item_alignment_with_last_baseline,
     own_scrollable_overflow, resolve_container_box, resolve_gap, resolve_insets,
     resolve_item_geometry, sort_and_assign_layout_order,
 };
@@ -224,10 +224,18 @@ where
         key,
         area,
         position: style.position(),
-        align_self: normalize_item_alignment(style.align_self().0, false, defaults.rtl)
-            .unwrap_or(used_align),
-        justify_self: normalize_item_alignment(style.justify_self().0, true, defaults.rtl)
-            .unwrap_or(used_justify),
+        align_self: normalize_item_alignment_with_last_baseline(
+            style.align_self().0,
+            false,
+            defaults.rtl,
+        )
+        .unwrap_or(used_align),
+        justify_self: normalize_item_alignment_with_last_baseline(
+            style.justify_self().0,
+            true,
+            defaults.rtl,
+        )
+        .unwrap_or(used_justify),
         direction: style.direction(),
         preferred_behaves_auto_or_depends: Size::new(
             behaves_auto_or_depends(raw_size.width),
@@ -243,7 +251,8 @@ where
         minimum_contribution: Size::NONE,
         min_content_contribution: Size::NONE,
         max_content_contribution: Size::NONE,
-        measured_baselines: Point::NONE,
+        measured_baseline: None,
+        measured_last_descent: None,
         baseline_shim: 0.0,
     }
 }
@@ -650,15 +659,157 @@ fn container_prologue<S: CoreStyle>(style: &S, input: LayoutInput) -> ContainerP
     }
 }
 
+/// An item in a row's baseline-sharing group, held back from commit until
+/// its group is aligned.
 #[derive(Debug)]
 struct PendingBaselineItem<N> {
     node: N,
-    area_row: i32,
-    area_column: i32,
+    /// The item's position in order-modified document order.
+    index: usize,
+    set: BaselineSet,
+    area: GridArea,
     area_top: f32,
+    area_bottom: f32,
+    /// The item's box, its location before any relative offset; the group
+    /// pass moves it, and the commit adds `relative`.
     layout: Layout,
-    baseline: Option<f32>,
+    relative: Point<f32>,
+    /// The item's first and last baselines, the one it aligns by synthesized
+    /// from its border box's bottom edge when it has none.
+    baselines: [Option<f32>; 2],
     overflow: Point<Overflow>,
+    sticky_area: Option<Edges<f32>>,
+}
+
+impl<N> PendingBaselineItem<N> {
+    /// The baseline the item aligns by, from its border-box top edge.
+    fn aligned_baseline(&self) -> f32 {
+        self.baselines[self.set.index()].unwrap_or(self.layout.size.height)
+    }
+}
+
+/// The candidates of css-grid-1 §10.6 steps 3 and 4, kept while the items are
+/// placed: the first item in grid order whose span starts in the first
+/// non-empty row, and the last whose span ends in the last one, with the
+/// baseline each gives — its own, or one synthesized from its border box's
+/// bottom edge. Steps 3 and 4 are taken together, as the first baseline always
+/// took them: that item's baseline, rather than the first (last) item that
+/// has one.
+///
+/// Grid order visits cells row by row, an item at its first cell, and items
+/// that meet at once in order-modified document order (`index`).
+#[derive(Debug, Default)]
+struct GridOrderCandidates {
+    /// `(row start, column start, index)`, smallest first.
+    first: Option<((i32, i32, usize), f32)>,
+    /// `(row end, row start, column start, index)`, largest last.
+    last: Option<((i32, i32, i32, usize), f32)>,
+}
+
+impl GridOrderCandidates {
+    /// Offers one item at its aligned border-box top, before any relative
+    /// offset: relative positioning moves no other box's baseline
+    /// (css-position-3 §2), its container's included.
+    fn offer(
+        &mut self,
+        index: usize,
+        area: GridArea,
+        top: f32,
+        height: f32,
+        baselines: [Option<f32>; 2],
+    ) {
+        let first_key = (area.row.start, area.column.start, index);
+        if self.first.is_none_or(|(key, _)| first_key < key) {
+            self.first = Some((first_key, top + baselines[0].unwrap_or(height)));
+        }
+        let last_key = (area.row.end, area.row.start, area.column.start, index);
+        if self.last.is_none_or(|(key, _)| last_key > key) {
+            self.last = Some((last_key, top + baselines[1].unwrap_or(height)));
+        }
+    }
+}
+
+/// Aligns each row's baseline-sharing groups (css-align-3 §9.3): the
+/// `baseline` items whose areas start in the row, their first baselines
+/// lined up and the group flush with the row's start edge, and the `last
+/// baseline` items whose areas end in it, their last baselines lined up and
+/// the group flush with the row's end edge. Rows run top to bottom in this
+/// engine, so no reversal applies. A group taller than its areas overflows
+/// the other edge: as in browsers, no `safe` alignment moves it back.
+fn align_baseline_groups<N>(pending: &mut [PendingBaselineItem<N>]) {
+    // A group is one set at one row line: the start line for first
+    // baselines, the end line for last ones.
+    let groups = pending
+        .iter()
+        .map(|item| match item.set {
+            BaselineSet::First => (item.set, item.area.row.start),
+            BaselineSet::Last => (item.set, item.area.row.end),
+        })
+        .collect::<Vec<_>>();
+    let mut order = (0..pending.len()).collect::<Vec<_>>();
+    order.sort_by_key(|&index| groups[index]);
+    for group in order.chunk_by(|&a, &b| groups[a] == groups[b]) {
+        let set = groups[group[0]].0;
+        // The shared baseline: for a start-flush group, as low as the member
+        // whose outer top edge rests on its area's start puts it; for an
+        // end-flush group, as high as the member whose outer bottom edge rests
+        // on its area's end puts it.
+        let shared = group
+            .iter()
+            .map(|&index| {
+                let item = &pending[index];
+                let baseline = item.aligned_baseline();
+                match set {
+                    BaselineSet::First => item.area_top + item.layout.margin.top + baseline,
+                    BaselineSet::Last => {
+                        item.area_bottom - item.layout.margin.bottom - item.layout.size.height
+                            + baseline
+                    }
+                }
+            })
+            .reduce(match set {
+                BaselineSet::First => f32::max,
+                BaselineSet::Last => f32::min,
+            })
+            .expect("a group has a member");
+        for &index in group {
+            let item = &mut pending[index];
+            item.layout.location.y = shared - item.aligned_baseline();
+        }
+    }
+}
+
+/// The container's first and last baselines (css-grid-1 §10.6): a shared
+/// baseline of the first (last) non-empty row's baseline-sharing groups — the
+/// matching set's first, then the other set's — else the grid-order
+/// candidate's. A spanning item belongs to the row its span starts in for a
+/// first baseline and ends in for a last one, the other way round for the
+/// other set's group.
+fn grid_container_baselines<N>(
+    pending: &[PendingBaselineItem<N>],
+    candidates: &GridOrderCandidates,
+) -> [Option<f32>; 2] {
+    let shared = |set: BaselineSet, row_start: Option<i32>, row_end: Option<i32>| {
+        pending
+            .iter()
+            .find(|item| {
+                item.set == set
+                    && row_start.is_none_or(|row| item.area.row.start == row)
+                    && row_end.is_none_or(|row| item.area.row.end == row)
+            })
+            .map(|item| item.layout.location.y + item.aligned_baseline())
+    };
+    let first = candidates.first.map(|((row, _, _), fallback)| {
+        shared(BaselineSet::First, Some(row), None)
+            .or_else(|| shared(BaselineSet::Last, None, Some(row + 1)))
+            .unwrap_or(fallback)
+    });
+    let last = candidates.last.map(|((row_end, _, _, _), fallback)| {
+        shared(BaselineSet::Last, None, Some(row_end))
+            .or_else(|| shared(BaselineSet::First, Some(row_end - 1), None))
+            .unwrap_or(fallback)
+    });
+    [first, last]
 }
 
 fn refresh_item_basis<T>(
@@ -839,7 +990,8 @@ fn contribution_is_content_free<N>(item: &GridItem<N>, axis: Axis) -> bool {
     let automatic_minimum_measures = axis.size(item.minimum_is_auto)
         && axis.size(item.min_size).is_none()
         && !axis.point(item.overflow).is_scrollable();
-    let baseline_shim_measures = axis == Axis::Vertical && item.align_self == AlignFlags::BASELINE;
+    let baseline_shim_measures =
+        axis == Axis::Vertical && BaselineSet::of_alignment(item.align_self).is_some();
     axis.size(item.preferred_size).is_some()
         && !axis.size(item.preferred_behaves_auto_or_depends)
         && !automatic_minimum_measures
@@ -859,26 +1011,43 @@ fn layout_in_flow_items<T>(
     // a commit carries the independence the container can vouch for, which
     // each item narrows per axis.
     goal: LayoutGoal,
+    // The container's own measurement was asked for an exact last baseline
+    // (`LayoutInput::reads_last_baseline`); never set on a commit.
+    last_baseline_requested: bool,
     rtl: bool,
     scroll_container: bool,
-) -> (Size<f32>, Point<Option<f32>>)
+) -> (Size<f32>, [Option<f32>; 2])
 where
     T: LayoutTree,
 {
     let baseline_item_count = items
         .iter()
-        .filter(|item| {
-            item.align_self == AlignFlags::BASELINE
-                && !item.margin_auto.start(Axis::Vertical)
-                && !item.margin_auto.end(Axis::Vertical)
-        })
+        .filter(|item| item.baseline_participation().is_some())
         .count();
-    let needs_baseline_pass = baseline_item_count != 0;
+    // The item §10.6 steps 3 and 4 read the container's last baseline from
+    // (`GridOrderCandidates::last`): the last in grid order of the items whose
+    // spans end in the last non-empty row. Placement already decided it.
+    let last_candidate = last_baseline_requested
+        .then(|| {
+            items
+                .iter()
+                .enumerate()
+                .max_by_key(|(index, item)| {
+                    (
+                        item.area.row.end,
+                        item.area.row.start,
+                        item.area.column.start,
+                        *index,
+                    )
+                })
+                .map(|(index, _)| index)
+        })
+        .flatten();
     let mut pending = Vec::with_capacity(baseline_item_count);
     let mut content_size = Size::ZERO;
-    let mut direct_baseline_candidate = None::<(i32, i32, f32)>;
+    let mut candidates = GridOrderCandidates::default();
 
-    for item in items {
+    for (index, item) in items.iter_mut().enumerate() {
         let (area_offset, area_size) = physical_area(item, columns, rows, inner_size, rtl);
         refresh_item_basis(
             tree,
@@ -920,7 +1089,14 @@ where
                 ),
             },
         };
-        let input = LayoutInput::new(item_goal, known, area, available);
+        // A measurement reads the last baseline of a row's last-baseline group
+        // member, and of the item a requested container last baseline comes
+        // from; a commit is exact without asking.
+        let reads_last_baseline = !goal.commits()
+            && (item.baseline_participation() == Some(BaselineSet::Last)
+                || last_candidate == Some(index));
+        let input = LayoutInput::new(item_goal, known, area, available)
+            .reading_last_baseline(reads_last_baseline);
         let output = tree.compute_layout(state, item.key.node, input);
 
         let mut margin = item.margin;
@@ -949,12 +1125,14 @@ where
         let offset_x = item_alignment_offset(free_x, item.justify_self, rtl, item_rtl);
         let offset_y = item_alignment_offset(free_y, item.align_self, false, false);
         let relative = relative_item_offset(item);
-        let location = Point::new(
-            content_origin.x + area_offset.x + margin.left + offset_x + relative.x,
-            content_origin.y + area_offset.y + margin.top + offset_y + relative.y,
+        // Aligned in its area; a relative offset moves it afterwards without
+        // moving anything aligned against it.
+        let aligned = Point::new(
+            content_origin.x + area_offset.x + margin.left + offset_x,
+            content_origin.y + area_offset.y + margin.top + offset_y,
         );
         let mut layout = Layout::with_order(item.key.layout_order);
-        layout.location = location;
+        layout.location = Point::new(aligned.x + relative.x, aligned.y + relative.y);
         layout.size = output.size;
         layout.content_size = output.content_size;
         layout.border = item.border;
@@ -969,25 +1147,14 @@ where
             top: content_origin.y + area_offset.y,
             bottom: content_origin.y + area_offset.y + area_size.height,
         });
+        let participation = item.baseline_participation();
         let item_baseline = output
             .first_baselines
             .y
             .or_else(|| (item.align_self == AlignFlags::BASELINE).then_some(output.size.height));
-        item.measured_baselines = Point::new(output.first_baselines.x, item_baseline);
-        let participates_in_baseline = item.align_self == AlignFlags::BASELINE
-            && !item.margin_auto.start(Axis::Vertical)
-            && !item.margin_auto.end(Axis::Vertical);
-        if !participates_in_baseline {
-            let candidate = (
-                item.area.row.start,
-                item.area.column.start,
-                layout.location.y + item_baseline.unwrap_or(output.size.height),
-            );
-            if direct_baseline_candidate
-                .is_none_or(|current| (candidate.0, candidate.1) < (current.0, current.1))
-            {
-                direct_baseline_candidate = Some(candidate);
-            }
+        let baselines = [item_baseline, output.last_baselines.y];
+        let Some(set) = participation else {
+            candidates.offer(index, item.area, aligned.y, output.size.height, baselines);
             accumulate_scrollable_overflow(
                 &mut content_size,
                 layout.location,
@@ -1001,96 +1168,47 @@ where
                 tree.set_sticky_containing_block(state, item.key.node, sticky_area);
             }
             continue;
-        }
+        };
+        layout.location = aligned;
         pending.push(PendingBaselineItem {
             node: item.key.node,
-            area_row: item.area.row.start,
-            area_column: item.area.column.start,
+            index,
+            set,
+            area: item.area,
             area_top: content_origin.y + area_offset.y,
+            area_bottom: content_origin.y + area_offset.y + area_size.height,
             layout,
-            baseline: item_baseline,
+            relative,
+            baselines,
             overflow: item.overflow,
+            sticky_area,
         });
     }
 
-    if !needs_baseline_pass {
+    if pending.is_empty() {
         return (
             content_size,
-            Point::new(None, direct_baseline_candidate.map(|candidate| candidate.2)),
+            [
+                candidates.first.map(|(_, baseline)| baseline),
+                candidates.last.map(|(_, baseline)| baseline),
+            ],
         );
     }
 
-    let mut baseline_candidates = Vec::<(i32, f32)>::new();
+    align_baseline_groups(&mut pending);
     for item in &pending {
-        let Some(baseline) = item.baseline else {
-            continue;
-        };
-        let ascent = item.layout.location.y + baseline - item.area_top;
-        baseline_candidates.push((item.area_row, ascent));
+        candidates.offer(
+            item.index,
+            item.area,
+            item.layout.location.y,
+            item.layout.size.height,
+            item.baselines,
+        );
     }
-    baseline_candidates.sort_unstable_by_key(|&(row, _)| row);
-    let mut baseline_groups = Vec::<(i32, f32)>::with_capacity(baseline_candidates.len());
-    for (row, ascent) in baseline_candidates {
-        if let Some((last_row, maximum)) = baseline_groups.last_mut()
-            && *last_row == row
-        {
-            *maximum = maximum.max(ascent);
-            continue;
-        }
-        baseline_groups.push((row, ascent));
-    }
-    for item in &mut pending {
-        if let (Some(baseline), Ok(index)) = (
-            item.baseline,
-            baseline_groups.binary_search_by_key(&item.area_row, |&(row, _)| row),
-        ) {
-            let target = baseline_groups[index].1;
-            let ascent = item.layout.location.y + baseline - item.area_top;
-            item.layout.location.y += target - ascent;
-        }
-    }
-
-    let first_row = pending
-        .iter()
-        .map(|item| item.area_row)
-        .chain(direct_baseline_candidate.map(|candidate| candidate.0))
-        .min();
-    let first_baseline = first_row.and_then(|first_row| {
-        pending
-            .iter()
-            .find(|item| item.area_row == first_row)
-            .and_then(|item| {
-                item.baseline
-                    .map(|baseline| item.layout.location.y + baseline)
-            })
-            .or_else(|| {
-                let pending_candidate = pending
-                    .iter()
-                    .filter(|item| item.area_row == first_row)
-                    .min_by_key(|item| item.area_column)
-                    .map(|item| {
-                        (
-                            item.area_column,
-                            item.layout.location.y
-                                + item.baseline.unwrap_or(item.layout.size.height),
-                        )
-                    });
-                let direct_candidate = direct_baseline_candidate
-                    .filter(|candidate| candidate.0 == first_row)
-                    .map(|candidate| (candidate.1, candidate.2));
-                match (pending_candidate, direct_candidate) {
-                    (Some(pending), Some(direct)) => Some(if pending.0 <= direct.0 {
-                        pending.1
-                    } else {
-                        direct.1
-                    }),
-                    (Some(pending), None) => Some(pending.1),
-                    (None, Some(direct)) => Some(direct.1),
-                    (None, None) => None,
-                }
-            })
-    });
-    for item in pending {
+    let baselines = grid_container_baselines(&pending, &candidates);
+    for mut item in pending {
+        item.layout.location.x += item.relative.x;
+        item.layout.location.y += item.relative.y;
         accumulate_scrollable_overflow(
             &mut content_size,
             item.layout.location,
@@ -1101,9 +1219,10 @@ where
         );
         if goal.commits() {
             tree.set_unrounded_layout(state, item.node, item.layout);
+            tree.set_sticky_containing_block(state, item.node, item.sticky_area);
         }
     }
-    (content_size, Point::new(None, first_baseline))
+    (content_size, baselines)
 }
 
 fn absolute_axis_lines(
@@ -1410,8 +1529,10 @@ where
         .unwrap_or(AlignFlags::STRETCH);
     let justify_content = normalize_content_alignment(style.justify_content().primary(), true, rtl)
         .unwrap_or(AlignFlags::STRETCH);
-    let align_items = normalize_item_alignment(style.align_items().0, false, rtl);
-    let justify_items = normalize_item_alignment(style.justify_items().computed.0.0, true, rtl);
+    let align_items =
+        normalize_item_alignment_with_last_baseline(style.align_items().0, false, rtl);
+    let justify_items =
+        normalize_item_alignment_with_last_baseline(style.justify_items().computed.0.0, true, rtl);
     let item_defaults = ItemDefaults {
         align_items: align_items.unwrap_or(AlignFlags::STRETCH),
         align_items_normal: align_items.is_none(),
@@ -1646,6 +1767,7 @@ where
                 content_independent,
             },
         ),
+        input.reads_last_baseline && !commits_layout,
         rtl,
         is_scroll_container(style.overflow()),
     );
@@ -1693,12 +1815,15 @@ where
         content_size = content_size.zip_map(absolute_content_size, f32::max);
     }
     let content_size = own_scrollable_overflow(&style, outer_size, metrics.border, content_size);
-    let baselines = if layout_contained {
-        Point::NONE
+    // Layout containment exports no baseline (css-contain-2 §3.2).
+    let [first, last] = if layout_contained {
+        [None, None]
     } else {
         baselines
     };
-    LayoutOutput::new(outer_size, content_size).with_first_baselines(baselines)
+    LayoutOutput::new(outer_size, content_size)
+        .with_first_baselines(Point::new(None, first))
+        .with_last_baselines(Point::new(None, last))
 }
 
 #[cfg(test)]

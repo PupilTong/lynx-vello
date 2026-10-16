@@ -227,6 +227,95 @@ consequential choice about whether to follow the spec or the quirk.
     area, so the box is shifted
     back to end at the padding edge; WPT `grid-position-area-basic.html`'s
     reference leaves it overflowing (unverified in browsers).
+- **`first baseline` / `last baseline` self-alignment (user rulings,
+  2026-10-16 and 2026-10-17)** — `hughie` aligns flex and grid items by
+  their last baselines (css-align-3 §9.3; css-flexbox-1 §8.3, §9.4 step 8
+  and §8.5; css-grid-1 §10.6 and §11.5 step 1), and every box reports
+  `LayoutOutput::last_baselines` beside its first baselines. The stylo
+  fork's `lynx` grammar parses css-align-3's `<baseline-position>` —
+  `baseline`, `first baseline`, `last baseline` — for `align-items`,
+  `align-self`, `justify-items` and `justify-self` (fork PR
+  PupilTong/stylo#50; `ItemPlacement` and `SelfAlignment` in
+  `vendor/stylo/style/values/specified/align.rs`), as web-core's browser
+  does. **Native** has neither: `FlexAlignType`
+  (`lynx/core/renderer/starlight/style/css_type.h`) ends at `kBaseline`, and
+  `JustifyType` (`css_type.h:28`) has no baseline value at all, so
+  `justify-items`/`justify-self: baseline` — accepted now because
+  `first baseline` serializes as `baseline` (css-align-3 §4.2) and has to
+  parse back — is a native-vs-web difference resolved toward web-core.
+  `last_baseline_lines_anonymous_text_up_on_its_last_line` in
+  `crates/dom/src/tree/anonymous.rs` drives both through anonymous text
+  items. What is decided:
+  - **Where a group sits in its flex line (user ruling, 2026-10-17: as
+    browsers do).** The first-baseline group sits against the line's
+    cross-start edge and the last-baseline group against its cross-end edge
+    (css-flexbox-1 §8.3), so `wrap-reverse`, which makes cross-start the
+    bottom edge, moves each group to the other edge. WPT
+    `css/css-flexbox/multiline-reverse-wrap-baseline.html` checks this, and
+    Chromium does it (`FlexLayoutAlgorithm::BaselineAscent`, baseline groups
+    by line side). css-align-3 §9.3 step 3 places a group by its fallback
+    alignment "resolved to physical directions", which would keep the first
+    group at the top under `wrap-reverse`; that reading, which this engine
+    followed for the first-baseline group until this ruling, is not used.
+    Grid rows run top to bottom with no reversal, so grid has nothing to
+    change.
+  - **A group taller than its line or row overflows.** A first-baseline
+    group overflows the end edge and a last-baseline group the start edge;
+    nothing moves it back. css-align-3 gives `last baseline` the fallback
+    alignment `safe self-end`, which would put an overflowing last-baseline
+    group at the start; Chromium applies `safe` only when the author writes
+    it, in flex and grid alike, and this engine follows Chromium.
+  - **An item that shares no baseline takes the `safe` fallback.** This is
+    a different rule from the one above: it is about one item that joins no
+    group — a column container's item, whose inline axis is the cross axis,
+    or an absolutely positioned child's static position — not about a group
+    taller than its line. Such an item takes css-align-3 §4.2's fallback
+    alignment, `safe self-start` for `baseline` and `safe self-end` for
+    `last baseline`: its own start or end edge, by its own `direction`, and
+    the container's start edge once it overflows the line. Flex and grid
+    both do this (`item_alignment_offset` in
+    `crates/hughie/src/compute/flexbox.rs` and
+    `crates/hughie/src/compute/grid/alignment.rs`). In flex this replaced
+    plain `end` for `last baseline` and the line's cross-start edge for
+    `baseline`, so under `wrap-reverse` an unshared `baseline` item now sits
+    at the start edge rather than at the cross-start edge, as Chromium's
+    `CrossAxisStaticPositionEdge` also places a static position.
+  - **The container's first and last baselines under `wrap-reverse`.**
+    css-flexbox-1 §8.5 takes them from the startmost and endmost line, and
+    its "startmost" is css-writing-modes-4 §6.2's "start": the line nearest
+    the block-start (top) edge in a row container and the inline-start edge
+    in a column container, whatever the wrap direction — not the line
+    nearest the cross-start edge, which `wrap-reverse` moves to the other
+    side (csswg-drafts#995; WPT
+    `css/css-flexbox/flex-order-wrap-reverse-baseline.html`). This engine
+    does the same. Within that line §8.5 prefers the first-baseline group for
+    the first baseline and the last-baseline group for the last, and this
+    engine follows that text. Chromium's `BaselineAccumulator` instead
+    prefers the group flush with the line's top edge for the first baseline
+    and the one flush with its bottom edge for the last, which differs from
+    §8.5 only when one `wrap-reverse` line holds both groups: §8.5 then gives
+    a first baseline below the last. No WPT covers that case.
+  - **Container baselines, §8.5 and §10.6 steps 3 and 4.** Taken together,
+    as the first baseline always was: the first (last) item gives its
+    baseline, or one synthesized from its border box, where the steps would
+    take the first (last) item that has a baseline.
+  - **Lynx `linear` and `relative` containers report no last baseline
+    (user ruling, 2026-10-17: as native).** Starlight has no last baseline,
+    so a `last baseline` parent synthesizes one from their border box's
+    bottom edge. web-core differs: there a `linear` view is a CSS flex box
+    (`lynx-stack/packages/web-platform/web-elements/src/elements/common-css/linear.css`)
+    with a last baseline
+    of its own, so a `<view>` that keeps the default `display: linear`
+    aligns by its last line under web-core and by its bottom edge here.
+  - **Grid shares baselines along rows only.** Baselines are horizontal in
+    this engine, so `justify-self: baseline`/`last baseline` take their
+    fallbacks, `safe self-start`/`safe self-end`. css-grid-1 §10.3 and §10.4
+    exclude an item whose size depends on an intrinsically sized track from
+    baseline alignment; that exclusion is not implemented for either set.
+  - **grid-lanes** aligns by no baseline (`style-assumptions.md` §24):
+    `last baseline` takes `end` in the grid axis, as `baseline` takes
+    `start`, and the container's last baseline is the lowest among the items
+    placed last in each track (css-grid-3 §6.5).
 
 ## CSS visual/paint & animation (see [css-visual.md](css-visual.md), [css-animation.md](css-animation.md))
 
@@ -535,10 +624,6 @@ consequential choice about whether to follow the spec or the quirk.
   so the property is unreachable there and is not implemented, by the user's
   ruling of 2026-10-16; a non-anonymous block container would apply it per
   overflowing line box after the break (`crates/hughie/src/text/inline/mod.rs`).
-  `last baseline` alignment: both paragraph kinds report their last line box's
-  baseline (`BlockMetrics::last_baseline`, handed on as
-  `LeafMetrics::last_baselines`), but the leaf wrapper does not put it in
-  `LayoutOutput` yet, so no flex or grid item aligns by it.
   And any box-generating child: the content is text runs
   only, every other child is hidden, which the anonymous block producer never
   puts there (`crates/dom/src/layout/inline_flow.rs`).

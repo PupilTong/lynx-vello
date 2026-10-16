@@ -3421,7 +3421,12 @@ root/leaf/cache/positioned/rounding machinery, CSS Flexbox Level 1, numeric CSS
 Grid Level 2 (excluding subgrid/named areas), CSS Grid Level 3
 `display: grid-lanes` on that Grid machinery, id-constrained Starlight Relative
 Layout Level 1, and Lynx's `display: linear` algorithm and `linear-*`
-style/source protocol are live. Grid lanes is a **user-directed W3C extension
+style/source protocol are live. `LayoutOutput` carries a box's first and
+last baselines; flexbox and grid align items by either (`baseline`, and
+`last baseline` by the user's ruling of 2026-10-16), Linear exports a first
+baseline only and Relative none, and the fork's `lynx` grammar parses
+`baseline`, `first baseline` and `last baseline` for the item and self
+alignment properties (`docs/tracking/deviations.md`). Grid lanes is a **user-directed W3C extension
 beyond Lynx parity** (2026-09-18) rather than a compat obligation — native
 Lynx has no such `display` value and no `flow-tolerance` property — and it
 excludes `inline-grid-lanes`, the orientation property and

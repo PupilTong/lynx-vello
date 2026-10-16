@@ -761,6 +761,7 @@ pub(super) enum TestMeasure {
         min_content_size: Size<f32>,
         max_content_size: Size<f32>,
         first_baseline: Option<f32>,
+        last_baseline: Option<f32>,
     },
     Function(fn(LeafMeasureInput) -> LeafMetrics),
     ConstraintFunction {
@@ -926,6 +927,7 @@ impl TestMeasure {
                 min_content_size,
                 max_content_size,
                 first_baseline,
+                last_baseline,
             } => {
                 let size = Size::new(
                     if input.available_space.width == AvailableSpace::MinContent {
@@ -939,7 +941,9 @@ impl TestMeasure {
                         max_content_size.height
                     },
                 );
-                LeafMetrics::new(size).with_first_baselines(Point::new(None, first_baseline))
+                LeafMetrics::new(size)
+                    .with_first_baselines(Point::new(None, first_baseline))
+                    .with_last_baselines(Point::new(None, last_baseline))
             }
             Self::Function(measure) => measure(input),
             Self::ConstraintFunction { measure, baseline } => {
@@ -1012,7 +1016,8 @@ impl TestMeasure {
                     .height
                     .unwrap_or(measured.size.height),
             ))
-            .with_first_baselines(measured.first_baselines),
+            .with_first_baselines(measured.first_baselines)
+            .with_last_baselines(measured.last_baselines),
             None,
         )
     }
@@ -1523,6 +1528,29 @@ impl TestTree {
                 min_content_size: intrinsic_size,
                 max_content_size: intrinsic_size,
                 first_baseline,
+                last_baseline: None,
+            },
+        })
+    }
+
+    /// A leaf of one fixed size with both baselines, as a paragraph reports
+    /// them: from its content box's top edge.
+    pub(super) fn push_baseline_leaf(
+        &mut self,
+        style: TestStyle,
+        intrinsic_size: Size<f32>,
+        first_baseline: Option<f32>,
+        last_baseline: Option<f32>,
+    ) -> TestId {
+        self.push(TestSourceNode {
+            display: TestDisplay::Leaf,
+            style,
+            children: Vec::new(),
+            measure: TestMeasure::Intrinsic {
+                min_content_size: intrinsic_size,
+                max_content_size: intrinsic_size,
+                first_baseline,
+                last_baseline,
             },
         })
     }
@@ -1541,6 +1569,7 @@ impl TestTree {
                 min_content_size,
                 max_content_size,
                 first_baseline: None,
+                last_baseline: None,
             },
         })
     }
@@ -1573,6 +1602,7 @@ impl TestTree {
                 min_content_size: Size::ZERO,
                 max_content_size: Size::ZERO,
                 first_baseline: None,
+                last_baseline: None,
             },
         })
     }
@@ -1586,6 +1616,7 @@ impl TestTree {
                 min_content_size: Size::ZERO,
                 max_content_size: Size::ZERO,
                 first_baseline: None,
+                last_baseline: None,
             },
         })
     }
@@ -1599,6 +1630,7 @@ impl TestTree {
                 min_content_size: Size::ZERO,
                 max_content_size: Size::ZERO,
                 first_baseline: None,
+                last_baseline: None,
             },
         })
     }
@@ -1612,6 +1644,7 @@ impl TestTree {
                 min_content_size: Size::ZERO,
                 max_content_size: Size::ZERO,
                 first_baseline: None,
+                last_baseline: None,
             },
         })
     }
@@ -1625,6 +1658,7 @@ impl TestTree {
                 min_content_size: Size::ZERO,
                 max_content_size: Size::ZERO,
                 first_baseline: None,
+                last_baseline: None,
             },
         })
     }
@@ -1642,6 +1676,7 @@ impl TestTree {
                 min_content_size: Size::ZERO,
                 max_content_size: Size::ZERO,
                 first_baseline: None,
+                last_baseline: None,
             },
         })
     }

@@ -6,8 +6,8 @@ use stylo::values::specified::align::AlignFlags;
 
 use super::placement::GridArea;
 pub(super) use crate::compute::util::Axis;
-use crate::compute::util::{ItemGeometry, ItemKey};
-use crate::geometry::{Edges, Point, Size};
+use crate::compute::util::{BaselineSet, ItemGeometry, ItemKey};
+use crate::geometry::{Edges, Size};
 
 /// The normalized `minmax()` halves of one track sizing function.
 #[derive(Debug, Clone, PartialEq)]
@@ -79,7 +79,13 @@ pub(super) struct GridItem<N> {
     pub(super) minimum_contribution: Size<Option<f32>>,
     pub(super) min_content_contribution: Size<Option<f32>>,
     pub(super) max_content_contribution: Size<Option<f32>>,
-    pub(super) measured_baselines: Point<Option<f32>>,
+    /// For a `baseline` item, its measured first baseline, from its border
+    /// box's top edge: what its baseline shim is computed from.
+    pub(super) measured_baseline: Option<f32>,
+    /// For a `last baseline` item, the distance from its measured last
+    /// baseline down to its border box's bottom edge: what its baseline shim
+    /// is computed from.
+    pub(super) measured_last_descent: Option<f32>,
     pub(super) baseline_shim: f32,
 }
 crate::compute::util::impl_item_geometry!(GridItem);
@@ -94,6 +100,19 @@ impl<N> GridItem<N> {
         usize::try_from(span.end - span.start).unwrap_or(1).max(1)
     }
 
+    /// The row's baseline-sharing group the item joins (css-align-3 §9.2),
+    /// if any: its `align-self` is `baseline` or `last baseline` and neither
+    /// block-axis margin is `auto`, which would take the alignment instead.
+    /// Baselines are horizontal in this engine, so `justify-self` baseline
+    /// values share nothing and take their fallback alignment.
+    #[inline]
+    pub(super) fn baseline_participation(&self) -> Option<BaselineSet> {
+        if self.margin_auto.start(Axis::Vertical) || self.margin_auto.end(Axis::Vertical) {
+            return None;
+        }
+        BaselineSet::of_alignment(self.align_self)
+    }
+
     #[inline]
     pub(super) fn clear_contribution_cache(&mut self, axis: Axis) {
         axis.set_size(&mut self.minimum_contribution, None);
@@ -102,7 +121,8 @@ impl<N> GridItem<N> {
         axis.set_size(&mut self.raw_min_content, None);
         axis.set_size(&mut self.raw_max_content, None);
         if axis == Axis::Vertical {
-            self.measured_baselines.y = None;
+            self.measured_baseline = None;
+            self.measured_last_descent = None;
             self.baseline_shim = 0.0;
         }
     }
