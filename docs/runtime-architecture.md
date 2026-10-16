@@ -1837,7 +1837,9 @@ reflects its value into one text node, updating that node in place and
 carrying none at all for an empty value. The UA sheet supplies the display
 policy the reflection needs: `text` is a flex container, `wrapper` is
 `display: contents`, and a `raw-text` dissolves into the `text` it is written
-inside and generates no box anywhere else.
+inside, into a tag that is not a Lynx tag as loose text (boxed into anonymous
+items, a ruled deviation from web-core), and generates no box under any other
+Lynx tag.
 
 `image` is the same shape of join for pictures: Lynx names one as an attribute
 (`__CreateImage` then `src`), while everything downstream speaks replaced

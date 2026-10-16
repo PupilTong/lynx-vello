@@ -52,8 +52,16 @@ impl<T> LayoutTree for TreeArenas<T> {
     where
         Self: 'tree;
 
+    /// The flat children, except where loose text sits among them: there the
+    /// anonymous boxes that wrap it replace it (`tree::anonymous`).
     fn children(&self, node: NodeSlot) -> Self::ChildIter<'_> {
-        self.at(node).flat_children().iter().copied()
+        let node_ref = self.at(node);
+        if node_ref.may_override_children
+            && let Some(children) = self.anonymous().layout_children(node)
+        {
+            return children.iter().copied();
+        }
+        node_ref.flat_children().iter().copied()
     }
 
     fn style(&self, node: NodeSlot) -> Self::Style<'_> {
@@ -286,10 +294,10 @@ impl<T> LayoutTree for TreeArenas<T> {
                 DisplayMode::Relative => compute_relative_layout(tree, state, node, input),
                 DisplayMode::Leaf => {
                     let node_ref = tree.at(node);
-                    // A text node is content of the block above it, never a
-                    // box of its own. One outside a text block lays out
-                    // nothing at all: in Lynx text exists only inside a
-                    // `display: -lynx-text` container.
+                    // A text node is content of the paragraph above it, never
+                    // a box of its own: loose text among items reaches layout
+                    // through the anonymous box that wraps it
+                    // (`tree::anonymous`), never as an item itself.
                     let output = if node_ref.is_text_node() {
                         LayoutOutput::HIDDEN
                     } else {

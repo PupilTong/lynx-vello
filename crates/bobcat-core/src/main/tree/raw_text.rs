@@ -1,14 +1,113 @@
 //! `raw-text` is a CSS text carrier. Its attribute supplies generated content
-//! to the enclosing paragraph; no custom element or DOM text child is needed.
+//! to the box that holds it; no custom element or DOM text child is needed.
+//!
+//! # Where a carrier renders
+//!
+//! - **Inside Lynx text** (`text`, `inline-text`, directly or through one `wrapper`): its text is a
+//!   run of the paragraph, as in both references.
+//! - **Inside any other Lynx tag** (`view`, `scroll-view`, `list`, …): nothing. Native Lynx drops a
+//!   raw-text there (a virtual node never laid out or painted,
+//!   `lynx/core/renderer/dom/fiber/fiber_element.cc:4099-4131`), and web-core hides every carrier
+//!   outside `x-text` (`raw-text { display: none }`,
+//!   `lynx-stack/packages/web-platform/web-elements/src/elements/ XText/x-text.css:261-265`).
+//! - **Inside a tag that is not a Lynx tag** — an HTML element such as `div` or `span`, or any
+//!   other name — directly or through one `wrapper`: its text is loose text of that element, laid
+//!   out the way CSS lays out the text children of a flex, grid or grid-lanes container: each
+//!   contiguous sequence in one anonymous block box, which is one item (`dom`'s `tree::anonymous`).
+//!   A ruled deviation from web-core, which hides it there too (`docs/tracking/deviations.md`);
+//!   native has no such tags.
+//!
+//! A tag is a Lynx tag when [`LYNX_TAGS`] lists it. `wrapper` is not one: it
+//! generates no box, so the tag that matters is the one holding the wrapper —
+//! one wrapper level, as inside Lynx text.
 
-/// Carriers dissolve only inside Lynx text. Their own style supplies the
-/// newline policy, and author CSS may override or suppress their content.
-pub(super) const UA_RULES: &str = "\
-raw-text { display: none; white-space-collapse: preserve-breaks; }
+use std::sync::LazyLock;
+
+/// Every Lynx tag: Lynx's JSX intrinsic elements
+/// (`lynx/js_libraries/types/types/common/element/element.d.ts:56-90`),
+/// web-core's tag-map keys (`lynx-stack/packages/web-platform/web-core/ts/
+/// constants.ts:93-123`), and web-core's element names, which compiled cards
+/// write verbatim and this engine defines (`x-swiper`, `x-refresh-view`, …;
+/// `lynx-stack/packages/web-platform/web-elements/src/elements/`).
+const LYNX_TAGS: &[&str] = &[
+    "blur-view",
+    "component",
+    "filter-image",
+    "frame",
+    "image",
+    "inline-image",
+    "inline-text",
+    "inline-truncation",
+    "input",
+    "list",
+    "list-item",
+    "list-row",
+    "lynx-wrapper",
+    "markdown",
+    "overlay",
+    "page",
+    "raw-text",
+    "refresh",
+    "refresh-header",
+    "scroll-coordinator",
+    "scroll-coordinator-header",
+    "scroll-coordinator-slot",
+    "scroll-coordinator-slot-drag",
+    "scroll-coordinator-toolbar",
+    "scroll-view",
+    "svg",
+    "text",
+    "textarea",
+    "title-bar-view",
+    "video",
+    "view",
+    "viewpager",
+    "viewpager-item",
+    "webview",
+    "x-audio-tt",
+    "x-blur-view",
+    "x-canvas",
+    "x-foldview-header-ng",
+    "x-foldview-ng",
+    "x-foldview-slot-drag-ng",
+    "x-foldview-slot-ng",
+    "x-foldview-toolbar-ng",
+    "x-image",
+    "x-input",
+    "x-input-ng",
+    "x-list",
+    "x-markdown",
+    "x-overlay-ng",
+    "x-refresh-footer",
+    "x-refresh-header",
+    "x-refresh-view",
+    "x-svg",
+    "x-swiper",
+    "x-swiper-item",
+    "x-text",
+    "x-textarea",
+    "x-textarea-ng",
+    "x-view",
+    "x-viewpager-item-ng",
+    "x-viewpager-ng",
+    "x-webview",
+];
+
+/// Carriers are hidden unless the box holding them renders their text (module
+/// doc). Their own style supplies the newline policy, and author CSS may
+/// override or suppress their content.
+pub(super) static UA_RULES: LazyLock<String> = LazyLock::new(|| {
+    let lynx = LYNX_TAGS.join(", ");
+    format!(
+        "raw-text {{ display: none; white-space-collapse: preserve-breaks; }}
 text > raw-text, text > wrapper > raw-text,
-inline-text > raw-text, inline-text > wrapper > raw-text { display: contents; }
-raw-text { content: attr(text); }
-";
+inline-text > raw-text, inline-text > wrapper > raw-text,
+:not({lynx}, wrapper) > raw-text,
+:not({lynx}, wrapper) > wrapper > raw-text {{ display: contents; }}
+raw-text {{ content: attr(text); }}
+"
+    )
+});
 
 #[cfg(test)]
 mod tests {
@@ -115,7 +214,104 @@ mod tests {
         assert_eq!(
             display(&document, stray),
             Display::None,
-            "a carrier written outside a `text` renders nothing, as in web-core"
+            "a carrier written under a `view` renders nothing, as in both references"
+        );
+    }
+
+    #[test]
+    fn a_carrier_renders_under_a_tag_that_is_not_a_lynx_tag() {
+        use dom::stylo::values::computed::Display;
+
+        let mut document = document();
+        let page = document.document_element().id();
+        let under = |document: &mut LynxDocument, parents: &[&str]| {
+            let mut parent = page;
+            for tag in parents {
+                let element = document.create_element(tag, ());
+                document.append_child(parent, element);
+                parent = element;
+            }
+            raw_text(document, parent, "text")
+        };
+        let cases = [
+            (under(&mut document, &["div"]), Display::Contents, "div"),
+            (under(&mut document, &["span"]), Display::Contents, "span"),
+            (
+                under(&mut document, &["my-box"]),
+                Display::Contents,
+                "any other name",
+            ),
+            (
+                under(&mut document, &["div", "wrapper"]),
+                Display::Contents,
+                "one wrapper",
+            ),
+            (
+                under(&mut document, &["div", "wrapper", "wrapper"]),
+                Display::None,
+                "two wrappers",
+            ),
+            (under(&mut document, &["view"]), Display::None, "view"),
+            (
+                under(&mut document, &["view", "wrapper"]),
+                Display::None,
+                "view > wrapper",
+            ),
+            (
+                under(&mut document, &["x-swiper"]),
+                Display::None,
+                "a web-core element name",
+            ),
+            (
+                under(&mut document, &["view", "div"]),
+                Display::Contents,
+                "a div inside a view",
+            ),
+            (
+                under(&mut document, &["div", "view"]),
+                Display::None,
+                "a view inside a div",
+            ),
+        ];
+        document.layout();
+        for (carrier, expected, case) in cases {
+            assert_eq!(display(&document, carrier), expected, "{case}");
+        }
+    }
+
+    #[test]
+    fn carriers_in_a_div_are_one_item_across_a_wrapper() {
+        let mut document = document();
+        assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+        let div = child(
+            &mut document,
+            "div",
+            "font-family: Ahem; font-size: 20px; display: flex; align-self: flex-start",
+        );
+        raw_text(&mut document, div, "Hello ");
+        let wrapper = document.create_element("wrapper", ());
+        document.append_child(div, wrapper);
+        raw_text(&mut document, wrapper, "Bob");
+        let view = child(
+            &mut document,
+            "view",
+            "font-family: Ahem; font-size: 20px; align-self: flex-start",
+        );
+        raw_text(&mut document, view, "hidden");
+        document.layout();
+
+        // One anonymous item holding "Hello Bob": nine 20px em squares on
+        // one 20px line.
+        let div_box = document.rounded_layout(div).expect("laid out");
+        assert_eq!(
+            (div_box.size.width, div_box.size.height),
+            (180.0, 20.0),
+            "{div_box:?}"
+        );
+        let view_box = document.rounded_layout(view).expect("laid out");
+        assert!(
+            view_box.size.width.abs() < f32::EPSILON,
+            "a view renders no carrier: {view_box:?}"
         );
     }
 

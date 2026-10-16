@@ -318,6 +318,8 @@ impl<T> Document<T> {
         self.note_shadow_root_added();
         self.assign_slots(root);
         self.mark_subtree_dirty(host);
+        // The host's flat children are its shadow root's children now.
+        self.note_loose_text_change(host);
         self.invalidate_layout(host);
         self.invalidate_hoisted_under(host);
         root
@@ -444,6 +446,7 @@ impl<T> Document<T> {
                 self.live_node_mut(node).clear_assigned_slot();
             }
             self.live_node_mut(slot).links_mut().assigned_nodes.clear();
+            self.note_loose_text_change(slot);
             self.mark_subtree_dirty(slot);
         }
         self.invalidate_slot_cache(root);
@@ -512,6 +515,7 @@ impl<T> Document<T> {
             .push(child_slot);
         self.live_node_mut(child).links_mut().assigned_slot = Some(slot_slot);
         self.mark_ancestors_dirty_descendants(child);
+        self.note_loose_text_change(slot);
         self.signal_slot_change(slot);
     }
 
@@ -530,6 +534,7 @@ impl<T> Document<T> {
             links.assigned_nodes.remove(index);
         }
         self.live_node_mut(child).clear_assigned_slot();
+        self.note_loose_text_change(slot);
         self.signal_slot_change(slot);
     }
 
@@ -664,6 +669,7 @@ impl<T> Document<T> {
             if node.assigned_node_slots() != nodes.as_slice() {
                 node.links_mut().assigned_nodes = nodes;
                 changed = true;
+                self.note_loose_text_change(slot);
                 // *assign slottables*: "If slottables and slot's assigned
                 // nodes are not identical, then run signal a slot change".
                 self.signal_slot_change(slot);

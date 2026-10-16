@@ -560,6 +560,11 @@ impl<T> Document<T> {
         // is now box-caches only, so the re-shape is asked for explicitly.
         self.invalidate_text_artifact(id);
         self.invalidate_layout(id);
+        if is_text_node {
+            // White space only, or not: whether the run renders at all
+            // outside a paragraph (`tree::anonymous`).
+            self.note_loose_text_change(id);
+        }
     }
 
     pub fn set_text_node_data(&mut self, id: NodeId, text: impl Into<String>) {

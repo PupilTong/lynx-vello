@@ -31,7 +31,7 @@ use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
 
 pub(crate) use self::style::{
-    DisplayMode, StyleView, box_parent, converts_tail_color, display_mode,
+    DisplayMode, StyleView, block_flow_display, box_parent, converts_tail_color, display_mode,
     establishes_absolute_containing_block, establishes_fixed_containing_block, generates_no_box,
     paragraph_limits_changed, shaping_inputs_changed, skips_contents,
 };
@@ -1034,6 +1034,11 @@ impl<T> Document<T> {
     /// runs end at it. The walk stops there.
     fn paragraph_container(&self, id: crate::NodeId) -> Option<crate::NodeId> {
         use stylo::values::computed::Display;
+        // Loose text is not under the anonymous box that lays it out
+        // (`tree::anonymous`), so no walk up from it finds the box.
+        if let Some(anonymous) = self.arenas().anonymous().box_of(id) {
+            return Some(anonymous);
+        }
         let start = self.get(id)?;
         // Its own display may just have become none. The old run still
         // belongs to the surrounding paragraph and must be removed from it.

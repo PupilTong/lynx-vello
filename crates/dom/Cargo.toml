@@ -39,6 +39,7 @@ selectors = { workspace = true }
 app_units = { workspace = true }
 cssparser = { workspace = true }
 euclid = { workspace = true }
+num-traits = { workspace = true }
 url = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -52,7 +53,6 @@ divan = { workspace = true }
 flashbulb = { workspace = true, features = ["render"] }
 html5ever = { workspace = true }
 markup5ever_rcdom = { workspace = true }
-num-traits = { workspace = true }
 png = { workspace = true }
 
 [[bench]]

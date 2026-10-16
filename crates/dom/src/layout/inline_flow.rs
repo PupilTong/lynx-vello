@@ -242,7 +242,6 @@ mod tests {
 
     use hughie::geometry::Size;
 
-    use crate::layout::style::block_flow_display;
     use crate::tree::document::{Document, NodeId};
     use crate::visual::PaintItemKind;
     use crate::{FontBlob, Point2D, StylesheetOrigin};
@@ -255,33 +254,29 @@ mod tests {
         /// initial (CSS 2.2 §9.2.1.1), and the internal block container
         /// display.
         ///
-        /// The test stand-in for the anonymous-box producer, which builds the
-        /// same style itself. It writes through `replace_pseudo_style`, the
+        /// The producer's own style ([`Document::anonymous_block_style`]) on
+        /// an ordinary element, so these tests reach the inline formatting
+        /// context without the loose-text grouping in front of it
+        /// (`tree::anonymous`). It writes through `replace_pseudo_style`, the
         /// writer for engine-built styles, so it survives every flush that
         /// does not restyle `id` — none of these tests restyles it.
         pub(crate) fn make_anonymous_block(&mut self, id: NodeId) {
-            use stylo::properties::StyleBuilder;
-
             let style = {
                 let parent = self
                     .get(id)
                     .and_then(crate::tree::node::Node::flat_parent)
                     .and_then(crate::tree::node::Node::layout_computed_style)
                     .expect("an anonymous block's parent is styled");
-                let stylist = self.style_engine().stylist();
-                let mut builder = StyleBuilder::for_inheritance(
-                    stylist.device(),
-                    Some(stylist),
-                    Some(parent),
-                    None,
-                );
-                builder.mutate_box().set_display(block_flow_display());
-                builder.build()
+                self.anonymous_block_style(parent)
             };
             self.arenas_mut()
                 .get_mut(id)
                 .expect("a live element")
                 .replace_pseudo_style(style);
+            // The record the style harvest leaves for a changed `display`,
+            // which this write bypasses: loose text the element boxed as a
+            // flex container is its paragraph's content now.
+            self.note_loose_text_change(id);
             self.invalidate_layout(id);
         }
     }

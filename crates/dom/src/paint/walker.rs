@@ -1714,14 +1714,21 @@ fn collect_text_clip_under<'doc, T>(
         clip.runs.push((offset, paragraph.layout, paragraph.lines));
     }
 
-    for child in node_ref.flat_children_iter() {
-        if child.is_element() {
-            let child_offset = document
-                .rounded_layout(child.id())
-                .map_or(offset, |layout| {
-                    offset + Vec2::new(f64::from(layout.location.x), f64::from(layout.location.y))
-                });
-            collect_text_clip_under(document, child.id(), child_offset, clip);
+    // The children layout reads: loose text is laid out by the anonymous
+    // boxes that replace it among them, and those boxes hold its paragraph
+    // (`tree::anonymous`).
+    let tree = document.arenas();
+    let children = node_ref
+        .may_override_children
+        .then(|| tree.anonymous().layout_children(node))
+        .flatten()
+        .unwrap_or_else(|| node_ref.flat_children());
+    for &child in children {
+        if tree.at(child).is_element() {
+            let child_offset = document.rounded_layout(child).map_or(offset, |layout| {
+                offset + Vec2::new(f64::from(layout.location.x), f64::from(layout.location.y))
+            });
+            collect_text_clip_under(document, child, child_offset, clip);
         }
     }
 }
@@ -2508,6 +2515,37 @@ mod tests {
         cultured_bounds: Vec<Rect>,
         uncultured_bounds: Vec<Rect>,
         painted: usize,
+    }
+
+    /// `background-clip: text` clips to the glyphs of loose text too: the
+    /// silhouette walk reaches the anonymous box that lays it out, at the
+    /// box's own offset.
+    #[test]
+    fn a_text_clip_collects_the_paragraph_of_loose_text() {
+        const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
+        let mut doc = Doc::with_css(
+            "page { display: flex; width: 800px; height: 600px; align-items: flex-start;
+                    font-family: Ahem; font-size: 10px; }
+             view { width: 20px; height: 20px; }
+             div { display: flex; background: linear-gradient(red, blue);
+                   background-clip: text; }",
+        );
+        assert_eq!(
+            doc.dom.register_fonts(crate::FontBlob::from_static(AHEM)),
+            1
+        );
+        let div = doc.el(doc.root, "div");
+        doc.el(div, "view");
+        let text = doc.dom.create_text_node("hello", ());
+        doc.dom.append_child(div, text);
+        doc.flush();
+
+        let clip = super::collect_text_clip(&doc.dom, div);
+        let [(offset, _, lines)] = clip.runs[..] else {
+            panic!("one paragraph, the anonymous box's")
+        };
+        assert_eq!((offset.x, offset.y), (20.0, 0.0), "after the 20px view");
+        assert_eq!(lines.len(), 1);
     }
 
     fn walk_twice(doc: &mut Doc) -> Frames {

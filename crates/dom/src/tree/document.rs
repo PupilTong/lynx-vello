@@ -528,6 +528,7 @@ impl<T> Document<T> {
         self.note_moved_subtree(child);
         self.note_slot_assignment_inserted(parent, child, appended);
         self.note_child_list_change(parent, index);
+        self.note_loose_text_change(parent);
         self.invalidate_layout(child);
         self.invalidate_hoisted_under(child);
         let connected = contains_custom_elements && self.is_connected(child);
@@ -717,6 +718,7 @@ impl<T> Document<T> {
             "only the permanent document element parents to the document node"
         );
         self.note_child_list_change(parent, removed_index);
+        self.note_loose_text_change(parent);
         self.note_custom_elements_removed(child, was_connected);
         // HTML's removing steps: an element that left the document leaves
         // the top layer with it (`tree::top_layer`, "Removal").
@@ -768,6 +770,7 @@ impl<T> Document<T> {
             PayloadSlot::Node(payload) => payload,
             PayloadSlot::ShadowRoot => unreachable!("a shadow root is refused above"),
             PayloadSlot::Backdrop => unreachable!("a `::backdrop` node is never handed out"),
+            PayloadSlot::Anonymous => unreachable!("an anonymous box's node is never handed out"),
             PayloadSlot::Document => unreachable!("the document node is refused above"),
             PayloadSlot::Reserved => unreachable!("no id resolves to the reservation"),
         };
@@ -813,6 +816,9 @@ impl<T> Document<T> {
                 PayloadSlot::Node(payload) => removed.push(payload),
                 PayloadSlot::ShadowRoot => {}
                 PayloadSlot::Backdrop => unreachable!("a `::backdrop` node has no parent"),
+                PayloadSlot::Anonymous => {
+                    unreachable!("an anonymous box's node is in no child list")
+                }
                 PayloadSlot::Document => unreachable!("the document node cannot be removed"),
                 PayloadSlot::Reserved => unreachable!("no id resolves to the reservation"),
             }
@@ -876,6 +882,11 @@ impl<T> Document<T> {
         if !self.intersections.is_empty() {
             self.intersections.forget_node(id);
         }
+        // A container takes the anonymous boxes it generated with it; a
+        // source or a node whose layout children were overridden leaves its
+        // entry, which names a dead node from here on. One test when no
+        // loose text was ever boxed.
+        self.forget_anonymous_boxes(id);
         let (node, payload) = self.tree.remove_node(id);
         // The image registry names replaced nodes so a completed load knows
         // whose natural size to set, and this is the one place a name stops
@@ -1040,8 +1051,8 @@ impl<T> Document<T> {
         let mut containing_blocks = Vec::new();
         let mut anchor_restyled = Vec::new();
         while let Some(current) = stack.pop() {
-            let harvested = {
-                let (harvested, descend, anchor_restyle) = {
+            let (harvested, refresh) = {
+                let (harvested, refresh, descend, anchor_restyle) = {
                     let Some(node) = self.tree.get_mut(current) else {
                         continue;
                     };
@@ -1072,7 +1083,8 @@ impl<T> Document<T> {
                     );
                     let dirty = node.styling.dirty_descendants.get_mut();
                     (
-                        harvested.map(|damage| (damage, refresh)),
+                        harvested,
+                        refresh,
                         std::mem::replace(dirty, false) || refresh.changed,
                         anchor_restyle,
                     )
@@ -1096,9 +1108,17 @@ impl<T> Document<T> {
                             .map(|&slot| arenas.at(slot).id()),
                     );
                 }
-                harvested
+                (harvested, refresh)
             };
-            let Some((damage, refresh)) = harvested else {
+            // Before the damage test: a first or a last style carries no
+            // damage at all, and it still decides whether the element's text
+            // is boxed.
+            self.note_box_restyle(
+                current,
+                refresh,
+                harvested.is_some_and(StyleDamage::needs_relayout),
+            );
+            let Some(damage) = harvested else {
                 continue;
             };
             if refresh.containing_block_changed {
