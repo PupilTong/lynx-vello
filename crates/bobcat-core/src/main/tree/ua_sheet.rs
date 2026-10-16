@@ -58,7 +58,7 @@ use super::swiper::{SWIPER_ITEM_TAG, SWIPER_TAG};
 use super::viewpager::{VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG};
 use super::{
     dialog, frame, image, list, markdown, overlay, popover, raw_text, refresh_view,
-    scroll_container, scroll_coordinator, svg, swiper, text, viewpager,
+    scroll_container, scroll_coordinator, svg, swiper, text, text_field, viewpager,
 };
 
 /// Page configuration for the Lynx runtime and UA cascade.
@@ -205,10 +205,11 @@ impl Default for PageConfig {
 /// ([`super::popover`]). The overlay's is one more, after it: only an
 /// overlay's first child renders, which web-core itself pins and native's
 /// measurement of child 0 alone agrees with ([`super::overlay`] carries the
-/// argument). An editing host's `display: -lynx-text` and `white-space:
-/// pre-wrap` are the last ([`EDITING_HOST_RULE`]): a `contenteditable`
-/// element is laid out as one paragraph that shows its text byte for byte,
-/// whatever its tag's `display` or an author's `white-space` says, because
+/// argument). An editing host's `display: -lynx-text` and
+/// `white-space-collapse: preserve` are the last ([`EDITING_HOST_RULE`]): a
+/// `contenteditable` element is laid out as one paragraph that shows its
+/// text byte for byte, whatever its tag's `display` or an author's
+/// `white-space` says, because
 /// the editor addresses that paragraph's layout in the offsets of the text
 /// it edits.
 /// `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions`
@@ -246,7 +247,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     };
     format!(
         "page, view, scroll-view, list, list-item, {component_tags}, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG}, \
-         {MARKDOWN_TAG}, {X_MARKDOWN_TAG}, text, image, svg, frame {{ box-sizing: border-box; border-width: 0; border-style: solid; \
+         {MARKDOWN_TAG}, {X_MARKDOWN_TAG}, {text_fields}, text, image, svg, frame {{ box-sizing: border-box; border-width: 0; border-style: solid; \
          position: relative; overflow: clip; min-width: 0; min-height: 0; }}\n\
          {display}\
          {overflow}\
@@ -264,6 +265,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          :where({DIALOG_TAG}:popover-open) {{ display: {block}; }}\n\
          {overlays}\
          {markdowns}\
+         {text_field_rules}\
          {text}\
          {EDITING_HOST_RULE}\n\
          {inheritance}\
@@ -281,6 +283,13 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
         popovers = popover::UA_RULES,
         overlays = overlay::UA_RULES,
         markdowns = markdown::UA_RULES,
+        text_field_rules = text_field::UA_RULES,
+        text_fields = text_field::INPUT_TAGS
+            .iter()
+            .chain(&text_field::TEXTAREA_TAGS)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", "),
         text = text::UA_RULES,
         carriers = raw_text::UA_RULES,
         frames = frame::UA_RULES,
@@ -292,7 +301,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
 /// HTML's `contenteditable` editing host, laid out as one plain-text
 /// paragraph (`docs/editable-text-design.md`, "Editing host"): `dom`'s
 /// editor places its caret and selection in that paragraph's layout, and
-/// `pre-wrap`'s `white-space-collapse: preserve` keeps the layout's text
+/// `white-space-collapse: preserve` keeps the layout's text
 /// byte for byte the text being edited, as a browser's plain-text editing
 /// relies on. Both declarations are `!important`: an editing host is a
 /// paragraph by what it is, not by a default a page may override, so unlike
@@ -303,8 +312,16 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
 /// not show the value, so the host would become read-only instead). Both
 /// apply to every value but an ASCII case-insensitive `"false"`, which is
 /// HTML's reading of the attribute and `dom::Document::is_editing_host`'s.
+///
+/// Only the `white-space-collapse` half of `pre-wrap` is pinned: the
+/// invariant is that no character is collapsed, and wrapping cannot break
+/// it, so `text-wrap-mode` keeps cascading (`wrap` by inheritance unless
+/// something says otherwise). That is what lets `x-input`'s single-line
+/// editor be `white-space: pre` from its shadow sheet ([`super::text_field`]),
+/// and a `contenteditable` under an inherited `nowrap` stay on one line, as
+/// it does in a browser.
 pub(super) const EDITING_HOST_RULE: &str = "[contenteditable]:not([contenteditable=\"false\" i]) \
-     { display: -lynx-text !important; white-space: pre-wrap !important; }";
+     { display: -lynx-text !important; white-space-collapse: preserve !important; }";
 
 #[cfg(test)]
 mod tests {
@@ -806,8 +823,8 @@ mod tests {
     /// [`super::super::overlay`] carries the argument.
     ///
     /// The editing host's follows the overlay's, with two important
-    /// declarations in its one rule: `display: -lynx-text` and `white-space:
-    /// pre-wrap`. `dom`'s editor addresses the host's paragraph in the
+    /// declarations in its one rule: `display: -lynx-text` and
+    /// `white-space-collapse: preserve`. `dom`'s editor addresses the host's paragraph in the
     /// offsets of the text it edits, which holds only while the paragraph is
     /// one and keeps every character; an author `white-space: normal` that
     /// collapsed spaces would make the host read-only.

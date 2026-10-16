@@ -23,6 +23,7 @@ dom = { workspace = true }
 linkify = { workspace = true }
 pulldown-cmark = { workspace = true }
 quickjs-rust-bridge = { workspace = true }
+regex-lite = { workspace = true }
 rustc-hash = { workspace = true }
 # Only for `serde::de::Visitor`: `<markdown>`'s `markdown-style` is read in
 # its own key order, which `serde_json::Value` (a sorted map without the

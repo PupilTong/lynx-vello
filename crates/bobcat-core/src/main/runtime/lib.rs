@@ -50,7 +50,8 @@ use crate::main::exposure::{Exposure, is_exposure_attribute};
 use crate::main::record::write_record_field;
 use crate::main::tree::{
     Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, LynxDocument, MAX_FRAME_DEPTH,
-    PageConfig, frame_depth, invoke_base_method, is_svg, nested_page, new_document,
+    PageConfig, TextFieldDetail, frame_depth, invoke_base_method, is_svg, nested_page,
+    new_document,
 };
 use crate::realm::child::{ChildHostModules, ChildHostState, ChildKey};
 use crate::realm::policy::context_of;
@@ -124,12 +125,13 @@ const MODIFIER_SHIFT: u8 = 8;
 
 /// One value of the extras channel: what a Lynx handler reads beside a W3C
 /// event's own payload, when it is cheap to compute here (a `load`'s size,
-/// a `scroll`'s metrics). The kernel's events stay W3C-shaped
-/// ([`EventDetail`]); the realm's Lynx layer turns a dispatch's extras into
-/// the Lynx `detail`.
+/// a `scroll`'s metrics, an `x-input`'s `value`). The kernel's events stay
+/// W3C-shaped ([`EventDetail`]); the realm's Lynx layer turns a dispatch's
+/// extras into the Lynx `detail`.
 ///
 /// `Str` borrows a component's string for the length of the dispatch: a
-/// [`ComponentDetail`]'s url, content or content id.
+/// [`ComponentDetail`]'s url, content or content id, or a text field's
+/// value.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Extra<'a> {
     Number(f64),
@@ -228,6 +230,43 @@ fn encode_extras<'a>(extras: Extras<'a>, arguments: &mut Arguments<'a>) {
             Extra::Bool(flag) => HostArgument::Boolean(flag),
             Extra::Str(text) => HostArgument::String(text),
         });
+    }
+}
+
+/// An `x-input`'s or `x-textarea`'s detail as extras, in web-core's member
+/// order (`XInputEvents.ts`): `input`'s `textLength` is the value's UTF-16
+/// length and its deprecated `cursor` the selection's start.
+fn text_field_extras<'a>(
+    detail: &'a TextFieldDetail,
+    extras: &mut SmallVec<[(&'static str, Extra<'a>); 7]>,
+) {
+    let unit = |offset: u32| Extra::Number(f64::from(offset));
+    match detail {
+        TextFieldDetail::Value(value) => extras.push(("value", Extra::Str(value))),
+        TextFieldDetail::Input {
+            value,
+            selection,
+            is_composing,
+        } => {
+            let length: usize = value.chars().map(char::len_utf16).sum();
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a field's length, far inside an f64's integers"
+            )]
+            let length = length as f64;
+            extras.extend([
+                ("value", Extra::Str(value)),
+                ("textLength", Extra::Number(length)),
+                ("cursor", unit(selection.start)),
+                ("isComposing", Extra::Bool(*is_composing)),
+                ("selectionStart", unit(selection.start)),
+                ("selectionEnd", unit(selection.end)),
+            ]);
+        }
+        TextFieldDetail::Selection(selection) => extras.extend([
+            ("selectionStart", unit(selection.start)),
+            ("selectionEnd", unit(selection.end)),
+        ]),
     }
 }
 
@@ -1816,7 +1855,12 @@ impl MainThreadRuntime {
     /// another dialog, so a delivery entry can leave the queue non-empty for
     /// an entry of its own.
     pub(crate) fn has_component_events(&self) -> bool {
-        !self.slot.borrow().component_events.is_empty()
+        let slot = self.slot.borrow();
+        !slot.component_events.is_empty()
+            || slot
+                .document
+                .as_ref()
+                .is_some_and(LynxDocument::has_focus_events)
     }
 
     /// Dispatches everything [`Self::apply_image_events`], the `image`,
@@ -1845,9 +1889,13 @@ impl MainThreadRuntime {
         &mut self,
         js_runtime: &mut ScriptRuntime,
     ) -> Vec<MainThreadError> {
-        let events = self.slot.borrow().component_events.take();
         let timestamp = self.timeline_milliseconds;
-        let mut failures = Vec::new();
+        // Focus events a UI method's `focus()` or `blur()` left in `dom`
+        // first: they formed inside the JavaScript call, before anything
+        // queued after it, and the component events they produce (an
+        // `x-input`'s `focus`) join the queue for a turn of their own.
+        let mut failures = self.dispatch_focus_events(js_runtime, timestamp);
+        let events = self.slot.borrow().component_events.take();
         for event in &events {
             // Every one of them is W3C-shaped, with no payload of its own:
             // what a Lynx handler reads in its `detail` crosses as extras.
@@ -1870,7 +1918,9 @@ impl MainThreadRuntime {
             //
             // A detailed event carries the strings its component read when it
             // queued it, as extras borrowed from the queue for the call, one
-            // per key the component had a value for.
+            // per key the component had a value for. An `x-input`'s or
+            // `x-textarea`'s events carry web-core's detail the same way
+            // ([`crate::main::tree::text_field`]).
             let mut extras: SmallVec<[(&'static str, Extra<'_>); 7]> = SmallVec::new();
             let (target, name, composed) = match *event {
                 ComponentEvent::Image(dom::ImageOutcome::Loaded {
@@ -1907,6 +1957,14 @@ impl MainThreadRuntime {
                         failures.push(error);
                     }
                     continue;
+                }
+                ComponentEvent::TextField {
+                    node,
+                    name,
+                    ref detail,
+                } => {
+                    text_field_extras(detail, &mut extras);
+                    (node, name, false)
                 }
                 ComponentEvent::Scroll { node, name, delta } => {
                     let scroll_box = self.slot.borrow_mut().document_mut().scroll_box(node);

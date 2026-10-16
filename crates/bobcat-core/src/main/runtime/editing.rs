@@ -47,7 +47,8 @@ use super::{
 };
 use crate::editing::TextInputSource;
 use crate::link::{InputEventPayload, ViewNotice};
-use crate::main::tree::LynxDocument;
+use crate::main::tree::text_field::SELECTION_CHANGE;
+use crate::main::tree::{LynxDocument, focus_delegate};
 
 /// One group of event names the painter routes to this thread on the
 /// editing account, whether or not the realm listens for them, each while
@@ -122,6 +123,17 @@ fn editing_host_of(document: &LynxDocument, node: dom::NodeId) -> Option<dom::No
         current = node.parent_id();
     }
     host.filter(|&host| document.is_editing_host(host))
+}
+
+/// Whether `node` is inside a shadow tree. Every shadow tree here is a UA
+/// one, built by a component (no script can attach one), and an editing
+/// host inside one is that component's own editor: an `x-input`'s
+/// `contenteditable`, whose input, composition and focus events stay in its
+/// tree as a browser's `<input>` keeps its inner editor's, and which the
+/// component re-fires at its host in Lynx's shape
+/// ([`crate::main::tree::text_field`]).
+fn is_shadow_content(document: &LynxDocument, node: dom::NodeId) -> bool {
+    document.shadow_root_of(node).is_some()
 }
 
 /// Whether the text a key typed is text to insert: non-empty and free of
@@ -419,7 +431,10 @@ impl MainThreadRuntime {
             if document.get(target).is_none() {
                 return;
             }
-            let host = editing_host_of(document, target);
+            // A press in a text field outside its editor — its padding,
+            // above or below its line — focuses the editor.
+            let host =
+                editing_host_of(document, target).or_else(|| focus_delegate(document, target));
             match host {
                 Some(host) => {
                     document.focus(host);
@@ -566,6 +581,21 @@ impl MainThreadRuntime {
                 failures.push(error);
             }
         }
+        // The engine's own `selectionchange` at the host, after every
+        // command that applied: no realm hears it (`selectionchange` is not
+        // built for script); the text field component reads its `selection`
+        // event from it. One set lookup when no component observes it.
+        self.slot
+            .borrow_mut()
+            .document_mut()
+            .dispatch_element_event(
+                host,
+                SELECTION_CHANGE,
+                &EventDetail::None,
+                false,
+                false,
+                timestamp,
+            );
         failures
     }
 
@@ -589,8 +619,10 @@ impl MainThreadRuntime {
 
     /// One edit event at `host`: bubbling and composed, as Input Events and
     /// UI Events fire all five, cancelable as [`EditEvent::cancelable`]
-    /// says. Answers whether a listener canceled it; an event nothing hears
-    /// is not dispatched at all.
+    /// says — except that a host inside a UA shadow tree (an `x-input`'s
+    /// editor) dispatches it non-composed ([`is_shadow_content`]). Answers
+    /// whether a listener canceled it; an event nothing hears is not
+    /// dispatched at all.
     fn dispatch_edit_event(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -604,7 +636,7 @@ impl MainThreadRuntime {
         }
         let flags = EventFlags {
             bubbles: true,
-            composed: true,
+            composed: !is_shadow_content(self.slot.borrow().document_ref(), host),
             cancelable: event.cancelable(),
         };
         let detail = edit_detail(event);
@@ -615,9 +647,13 @@ impl MainThreadRuntime {
     /// Dispatches the focus events `dom` has queued, in the order they
     /// formed: `blur` and `focusout` at the element that lost focus, then
     /// `focus` and `focusin` at the one that gained it, each naming the
-    /// other as its `relatedTarget`. All four are composed and none is
+    /// other as its `relatedTarget`. All four are composed — but for an
+    /// element inside a UA shadow tree ([`is_shadow_content`]) — and none is
     /// cancelable; `focusin` and `focusout` bubble. An event nothing hears
     /// is not dispatched.
+    ///
+    /// Called right after a press, and from the entry that delivers
+    /// component events, for the focus a UI method moved.
     pub(crate) fn dispatch_focus_events(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -632,7 +668,7 @@ impl MainThreadRuntime {
             }
             let flags = EventFlags {
                 bubbles: event.kind.bubbles(),
-                composed: true,
+                composed: !is_shadow_content(self.slot.borrow().document_ref(), event.target),
                 cancelable: false,
             };
             let detail = EventDetail::Focus {
