@@ -1880,6 +1880,7 @@ fn a_key_event_reaches_the_page_with_its_keyboard_members() {
                 alt: true,
                 ..dom::input::Modifiers::default()
             },
+            text: None,
         },
         timestamp: 0.0,
     };

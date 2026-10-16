@@ -174,6 +174,18 @@ pub enum InputKind {
         /// The key is held and this is an auto-repeat.
         repeat: bool,
         modifiers: Modifiers,
+        /// The text the key typed, as the platform reports it with the key
+        /// (winit's `KeyEvent.text`), or `None` when the key typed none or
+        /// the platform delivers typed text another way — through its input
+        /// method, as a browser's `beforeinput` or an `insertText:` that
+        /// reaches the host as an input-method commit. A `keydown`'s
+        /// editing default action inserts this text, never `key`: a host
+        /// whose platform sends the text both with the key and through the
+        /// input method sends it here as `None` and as one
+        /// [`Command::CommitText`](crate::editing::Command::CommitText), so
+        /// it is inserted once. W3C's `KeyboardEvent` has no such member,
+        /// and no realm sees it.
+        text: Option<Arc<str>>,
     },
 }
 
@@ -263,7 +275,9 @@ impl InputEvent {
     /// A key event: `phase` names `keydown` or `keyup`; `key` and `code` are
     /// the W3C UI Events strings, which the embedder maps from its platform
     /// (a browser passes its own through). The position is the origin and
-    /// unused: a key event is not hit-tested.
+    /// unused: a key event is not hit-tested. It types no text; a host whose
+    /// platform reports the text a key typed with the key says so with
+    /// [`Self::with_text`].
     #[must_use]
     pub fn key(
         phase: KeyPhase,
@@ -280,9 +294,20 @@ impl InputEvent {
                 code: code.into(),
                 repeat,
                 modifiers,
+                text: None,
             },
             default_prevented: false,
         }
+    }
+
+    /// This key event with the text the key typed (see
+    /// [`InputKind::Key`]'s `text`); any other event is returned unchanged.
+    #[must_use]
+    pub fn with_text(mut self, typed: Option<Arc<str>>) -> Self {
+        if let InputKind::Key { text, .. } = &mut self.kind {
+            *text = typed;
+        }
+        self
     }
 
     /// This event with [`Self::default_prevented`] set as given — the
