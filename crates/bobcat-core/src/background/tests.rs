@@ -1835,6 +1835,7 @@ fn a_worker_realm_declares_these_host_members() {
         "reportScriptError",
         "requestScriptFrame",
         "resolveModuleUrl",
+        "resolveUrl",
         "setTimer",
         "settleFuture",
         "takeFuture",

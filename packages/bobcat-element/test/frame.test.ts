@@ -1,7 +1,7 @@
 // `bobcat:frame`: what a frame's `src`, `data`, `global-props`, connection and
 // disconnection do in the realm that holds its handle, over stand-ins for the
-// host members it reaches (`fetchResource`, `resetFrame` and the `Future`
-// trio), for the diagnostics pair, and for `ShadowRealm`.
+// host members it reaches (`resolveUrl`, `fetchResource`, `resetFrame` and the
+// `Future` trio), for the diagnostics pair, and for `ShadowRealm`.
 //
 // The `Future` class is the real one; its settle is driven through its own
 // `__BobcatSettleFuture`, as the host's epilogue drives it. The child half —
@@ -18,7 +18,16 @@ const calls: unknown[][] = [];
 const already = new Set<string>();
 let nextFuture = 1;
 
+/** The view's base URL the stand-in `resolveUrl` resolves against. */
+const BASE = "app:///cards/";
+
 rstest.mockRequire("bobcat-internal:host", () => ({
+  // The host's: URL rules against the view's base, throwing for a URL that
+  // does not resolve, as `HostOutbox::resolve` does.
+  resolveUrl(url: string): string {
+    calls.push(["resolveUrl", url]);
+    return new URL(url, BASE).href;
+  },
   fetchResource(url: string): number | true {
     calls.push(["fetchResource", url]);
     if (already.has(url)) return true;
@@ -65,8 +74,12 @@ rstest.mockRequire("bobcat:element", () => ({
   },
 }));
 
+/** The view's native module table, as the page realm holds it. */
+const MODULE_TABLE = "4:Echo4:ping";
+
 rstest.mockRequire("bobcat:runtime", () => ({
   SystemInfo: { platform: "headless", pixelRatio: 2 },
+  __BobcatNativeModuleTable: () => MODULE_TABLE,
 }));
 
 /**
@@ -157,13 +170,14 @@ beforeEach(() => {
 });
 
 describe("frameSourceChanged", () => {
-  it("fetches src as written, and boots it in a fresh realm once the fetch settles", async () => {
+  it("resolves src against the view's base once, fetches that, and boots it in a fresh realm once the fetch settles", async () => {
     const frame = {};
     frameSourceChanged(frame, 3, "child.web.bundle");
     const [id] = futures();
     // A frame with no card yet has nothing to release.
     expect(calls).toEqual([
-      ["fetchResource", "child.web.bundle"],
+      ["resolveUrl", "child.web.bundle"],
+      ["fetchResource", "app:///cards/child.web.bundle"],
       ["settleFuture", id],
     ]);
     await drain();
@@ -172,25 +186,43 @@ describe("frameSourceChanged", () => {
     future.__BobcatSettleFuture(id!, false, undefined);
     await drain();
     expect(FakeShadowRealm.created).toBe(1);
-    expect(calls.slice(2)).toEqual([
+    // The card boots at the resolved URL, with the view's module table for
+    // its BTS.
+    expect(calls.slice(3)).toEqual([
       ["importValue", "bobcat:frame-boot", "boot"],
       ["importValue", "bobcat:frame-boot", "dispose"],
       ["importValue", "bobcat:frame-boot", "updateData"],
       ["importValue", "bobcat:frame-boot", "updateGlobalProps"],
-      ["boot", 3, "child.web.bundle", "{}", "{}", SYSTEM_INFO],
+      ["boot", 3, "app:///cards/child.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE],
     ]);
+
+    // The frame keeps `src` as written: the same string again is unchanged.
+    calls.length = 0;
+    frameSourceChanged(frame, 3, "child.web.bundle");
+    expect(calls).toEqual([]);
+  });
+
+  it("reports a src that does not resolve once, naming it, and fetches nothing", async () => {
+    frameSourceChanged({}, 3, "http://[");
+    await drain();
+    expect(calls.filter(call => call[0] === "fetchResource")).toEqual([]);
+    expect(FakeShadowRealm.created).toBe(0);
+    const reports = calls.filter(call => call[0] === "reportError");
+    expect(reports).toHaveLength(1);
+    expect(reports[0]![1]).toMatch(/^frame http:\/\/\[: /);
   });
 
   it("defers a probe hit to a microtask", async () => {
     already.add("app:///cached.web.bundle");
     frameSourceChanged({}, 3, "app:///cached.web.bundle");
     expect(calls).toEqual([
+      ["resolveUrl", "app:///cached.web.bundle"],
       ["fetchResource", "app:///cached.web.bundle"],
     ]);
     expect(FakeShadowRealm.created).toBe(0);
     await drain();
     expect(FakeShadowRealm.created).toBe(1);
-    expect(calls.at(-1)).toEqual(["boot", 3, "app:///cached.web.bundle", "{}", "{}", SYSTEM_INFO]);
+    expect(calls.at(-1)).toEqual(["boot", 3, "app:///cached.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE]);
   });
 
   it("starts nothing for a stale generation", async () => {
@@ -206,7 +238,7 @@ describe("frameSourceChanged", () => {
     await drain();
     expect(FakeShadowRealm.created).toBe(1);
     expect(calls.filter(call => call[0] === "boot")).toEqual([
-      ["boot", 3, "app:///second.web.bundle", "{}", "{}", SYSTEM_INFO],
+      ["boot", 3, "app:///second.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE],
     ]);
   });
 
@@ -241,7 +273,7 @@ describe("frameSourceChanged", () => {
     await drain();
     expect(FakeShadowRealm.created).toBe(1);
     expect(calls.filter(call => call[0] === "boot")).toEqual([
-      ["boot", 3, "app:///child.web.bundle", "{}", "{}", SYSTEM_INFO],
+      ["boot", 3, "app:///child.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE],
     ]);
 
     // Nor does a removal undo what the next write compares against: the
@@ -268,11 +300,12 @@ describe("frameSourceChanged", () => {
     expect(calls).toEqual([
       ["dispose", 1],
       ["resetFrame", 3],
+      ["resolveUrl", "app:///second.web.bundle"],
       ["fetchResource", "app:///second.web.bundle"],
     ]);
     await drain();
     expect(FakeShadowRealm.created).toBe(2);
-    expect(calls.at(-1)).toEqual(["boot", 3, "app:///second.web.bundle", "{}", "{}", SYSTEM_INFO]);
+    expect(calls.at(-1)).toEqual(["boot", 3, "app:///second.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE]);
   });
 
   it("does nothing for the src the frame already has, as native and web-core skip it", () => {
@@ -334,8 +367,11 @@ describe("connection", () => {
     __BobcatFrameConnected(3);
     await drain();
     expect(FakeShadowRealm.created).toBe(2);
-    expect(calls[0]).toEqual(["fetchResource", "app:///child.web.bundle"]);
-    expect(calls.at(-1)).toEqual(["boot", 3, "app:///child.web.bundle", "{}", "{}", SYSTEM_INFO]);
+    expect(calls.slice(0, 2)).toEqual([
+      ["resolveUrl", "app:///child.web.bundle"],
+      ["fetchResource", "app:///child.web.bundle"],
+    ]);
+    expect(calls.at(-1)).toEqual(["boot", 3, "app:///child.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE]);
   });
 
   it("does not start a second load for a frame connected while its first is in flight", async () => {
@@ -410,7 +446,7 @@ describe("data and global-props", () => {
     frameSourceChanged(frame, 3, CHILD);
     await drain();
     expect(boots()).toEqual([
-      ["boot", 3, CHILD, '{"label":"first"}', '{"theme":"dark"}', SYSTEM_INFO],
+      ["boot", 3, CHILD, '{"label":"first"}', '{"theme":"dark"}', SYSTEM_INFO, MODULE_TABLE],
     ]);
     expect(updates()).toEqual([]);
   });
@@ -420,8 +456,8 @@ describe("data and global-props", () => {
       /** `boot`'s call for `src` with `json` as this attribute and `{}` as the other. */
       function booted(src: string, json: string): unknown[] {
         return name === "data"
-          ? ["boot", 3, src, json, "{}", SYSTEM_INFO]
-          : ["boot", 3, src, "{}", json, SYSTEM_INFO];
+          ? ["boot", 3, src, json, "{}", SYSTEM_INFO, MODULE_TABLE]
+          : ["boot", 3, src, "{}", json, SYSTEM_INFO, MODULE_TABLE];
       }
 
       it("hands every write after boot to the card's update, equal or not, and boots nothing", async () => {

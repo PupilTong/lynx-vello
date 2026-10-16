@@ -1274,6 +1274,22 @@ it("waits for the JS disposal acknowledgement before terminating the Worker", as
   mts.lynx.getEngine().dispatchEvent({type: "__DestroyLifetime"});
   expect(toBackground).toEqual([{bobcat: "runtime", method: "dispose"}]);
   expect(worker.terminate).not.toHaveBeenCalled();
+  // While it disposes, this realm hears nothing its BTS says but the
+  // acknowledgement: a Context event, a Lepus call and an exposure switch
+  // are all dropped.
+  const late = rstest.fn();
+  mts.lynx.getJSContext().addEventListener("late", late);
+  const lepusCalls = rstest.fn();
+  (scope as unknown as Record<string, unknown>)["lateLepusMethod"] = lepusCalls;
+  const switches = switchExposure.mock.calls.length;
+  worker.dispatchEvent({type: "message", data: {type: "late", data: 1}});
+  worker.dispatchEvent({type: "message", data: {bobcat: "runtime", method: "callLepusMethod", name: "lateLepusMethod"}});
+  worker.dispatchEvent({type: "message", data: {bobcat: "runtime", method: "switchExposure", on: false, sendEvent: true}});
+  await Promise.resolve();
+  expect(late).not.toHaveBeenCalled();
+  expect(lepusCalls).not.toHaveBeenCalled();
+  expect(switchExposure.mock.calls).toHaveLength(switches);
+  delete (scope as unknown as Record<string, unknown>)["lateLepusMethod"];
   await deliverToBackground();
   expect(calls).toEqual(["hook", "job"]);
   expect(worker.terminate).not.toHaveBeenCalled();
@@ -1346,5 +1362,39 @@ describe("a BTS Worker that ended", () => {
     await runtime.__BobcatDispose();
     expect(endedWorker.postMessage).toHaveBeenCalledTimes(2);
     expect(endedWorker.terminate).toHaveBeenCalledTimes(1);
+  });
+});
+
+// A frame's card runs this module in a child realm, whose host answers no
+// startup member: what it posts its own BTS is what `bobcat:frame-boot` hands
+// `__BobcatInitializeMTS`. Its own MTS instance, for the reason the suite
+// above has one.
+describe("a frame's realm", () => {
+  let runtime: typeof mtsRuntime;
+  const frameWorker = Object.assign(new eventTarget.EventTarget(), {
+    terminate: rstest.fn(),
+    postMessage: rstest.fn(),
+  });
+
+  beforeAll(async () => {
+    rstest.resetModules();
+    runtime = await import("../src/main-thread-runtime.ts");
+  });
+
+  it("posts the native module table it was handed, which it also answers", () => {
+    // The host's own, until a boot hands it another.
+    expect(runtime.__BobcatNativeModuleTable()).toBe("4:Echo4:ping");
+    runtime.__BobcatInitializeMTS({initData: {}, globalProps: {}, nativeModuleTable: "5:Other0:"});
+    expect(runtime.__BobcatNativeModuleTable()).toBe("5:Other0:");
+    // An initialization that names none leaves it.
+    runtime.__BobcatInitializeMTS({initData: {}, globalProps: {}});
+    expect(runtime.__BobcatNativeModuleTable()).toBe("5:Other0:");
+    runtime.__BobcatConnectBackground(frameWorker as unknown as Worker, {label: "x"},
+      "app:///cards/child.web.bundle#background-thread");
+    expect(frameWorker.postMessage.mock.calls[0]![0]).toMatchObject({
+      bobcat: "runtime", method: "initialize", updateData: {label: "x"},
+      entry: "app:///cards/child.web.bundle#background-thread",
+      nativeModuleTable: "5:Other0:",
+    });
   });
 });

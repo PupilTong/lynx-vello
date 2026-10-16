@@ -852,7 +852,12 @@ mod tests {
             Some("https://example.test/card.web.bundle"),
             "`__Card__` is the container, not its entry"
         );
-        assert!(sources.background_entry.is_none());
+        // A card with no manifest still names a BTS boot, which registers
+        // the container and loads nothing.
+        assert_eq!(
+            sources.background_entry.as_deref(),
+            Some("https://example.test/card.web.bundle#background-thread")
+        );
         assert!(sources.style_sheets.is_empty());
 
         let resources = resources();

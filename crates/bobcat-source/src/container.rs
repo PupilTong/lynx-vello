@@ -29,7 +29,7 @@
 //! | a manifest path `p` | `P/<p> S`, no `.js` appended, a `?`/`#` inside `p` escaped | the same choice by name |
 //! | a named stylesheet `k` | `P/custom_section/<k>.css S` | a [`PreparsedStyleSheet`] |
 //! | the container's own non-empty `StyleInfo` | `P/style-info.css S` | a lowered [`PreparsedStyleSheet`] |
-//! | the BTS boot script (an entry and a non-empty manifest) | `U` with its fragment replaced by `#background-thread` | `background_boot_source` |
+//! | the BTS boot script (every container with an entry) | `U` with its fragment replaced by `#background-thread` | `background_boot_source` |
 //!
 //! Who asks for each: a page's boot imports `root.js`; MTS's
 //! `__LoadLepusChunk` a Lepus chunk and its `lynx.loadScript` (a lazy
@@ -194,7 +194,11 @@ impl ContainerSources {
             scripts.insert(bundle_path_url(url, path), body_source(target, path, body))?;
         }
         let entry = entry_name.map(|_| named_chunk_url(url, ROOT));
-        let background_entry = if entry.is_some() && !template.manifest.is_empty() {
+        // Every container a view or a `<frame>` can boot has a BTS boot, so
+        // whoever boots it connects a BTS to an entry that exists: a card with
+        // no manifest gets one that registers the container and loads
+        // nothing.
+        let background_entry = if entry.is_some() {
             let boot = background_boot_url(url);
             scripts.insert(
                 boot.clone(),
@@ -264,7 +268,7 @@ impl ContainerSources {
     }
 
     /// The BTS boot script, `U#background-thread`, for a container with an
-    /// entry and a non-empty manifest.
+    /// entry.
     #[must_use]
     pub const fn background_entry(&self) -> Option<&Url> {
         self.background_entry.as_ref()
@@ -559,7 +563,7 @@ fn bundle_style_url(container: &Url) -> Url {
 }
 
 /// `U#background-thread`: the BTS boot script, the container URL with its
-/// fragment replaced.
+/// fragment replaced — `backgroundThreadURL` in `section-url.ts`.
 fn background_boot_url(container: &Url) -> Url {
     let mut url = container.clone();
     url.set_fragment(Some("background-thread"));
@@ -727,6 +731,18 @@ mod tests {
             background_boot_url(&with("?rev=1#f")).as_str(),
             at("?rev=1#background-thread")
         );
+        assert_eq!(
+            background_boot_url(&with("?rev=1")).as_str(),
+            at("?rev=1#background-thread")
+        );
+        assert_eq!(
+            background_boot_url(&with("#a#b")).as_str(),
+            at("#background-thread")
+        );
+        assert_eq!(
+            background_boot_url(&with("/")).as_str(),
+            at("/#background-thread")
+        );
     }
 
     /// The root is the entry, as the module a page boots: the entry's own
@@ -821,7 +837,16 @@ mod tests {
             script(&sources, &format!("{BUNDLE}/card__main-thread.js")),
             main_thread_source("boot();")
         );
-        assert!(sources.background_entry().is_none(), "no manifest, no boot");
+        // No manifest still boots a BTS: one that registers the container
+        // and loads nothing.
+        assert_eq!(
+            sources.background_entry().map(Url::as_str),
+            Some(format!("{BUNDLE}#background-thread").as_str())
+        );
+        assert_eq!(
+            script(&sources, &format!("{BUNDLE}#background-thread")),
+            background_boot_source(&url(BUNDLE), false)
+        );
 
         let missing = ContainerSources::from_template(
             &url(BUNDLE),

@@ -4169,14 +4169,14 @@ fn a_worker_realms_children_have_no_document_members() {
         try { await realm.importValue('bobcat:element', '__CreatePage'); } catch (error) { failed = error; }
         postMessage(failed instanceof TypeError ? 'refused' : 'linked ' + failed);
         postMessage(await new Promise(resolve => realm.evaluate(`report => {
-            import('bobcat-internal:host').then(H => report(typeof H.framePage));
+            import('bobcat-internal:host').then(H => report(typeof H.framePage + ' ' + typeof H.createWorker));
         }`)(resolve)));
     ",
     );
     pair.deliver();
     pair.deliver();
     pair.check(
-        r#"if (JSON.stringify(results) !== '["refused","undefined"]') throw Error(JSON.stringify(results));
+        r#"if (JSON.stringify(results) !== '["refused","undefined undefined"]') throw Error(JSON.stringify(results));
         worker.terminate();"#,
     );
     assert!(worker_failures(pair.notices()).is_empty());
@@ -4215,4 +4215,138 @@ fn a_worker_realm_has_shadow_realms_its_epilogue_services() {
         worker_failures(pair.notices()).is_empty(),
         "the child's timer failed nothing"
     );
+}
+
+/// Makes a `ShadowRealm` child of the page realm, the page's `realm`, whose
+/// card is `app:///nested/main.js` — its `__Card__`, set the way
+/// `bobcat:frame-boot` sets it — and in it a `./worker.js` worker, the
+/// child's `worker`. What reaches that `Worker` object — a message, an
+/// error, its end — the child hands the page realm's `heard` through a
+/// wrapped callback, so the page can tell what reached the child; and the
+/// child's `bobcat-internal:host` is its `H`.
+const CHILD_WORKER: &str = r"
+globalThis.heard = [];
+globalThis.realm = new ShadowRealm();
+await new Promise((resolve, reject) => realm.evaluate(`(record, resolve, reject) => {
+    import('bobcat:runtime').then(runtime => Promise.all([
+        import('bobcat-internal'),
+        import('bobcat-internal:host'),
+    ]).then(([internal, host]) => {
+        globalThis.H = host;
+        runtime.__BobcatInitEntry('app:///nested/main.js');
+        const worker = new internal.Worker('./worker.js');
+        worker.onmessage = event => record('message ' + event.data);
+        worker.onerror = event => record('error ' + event.message);
+        worker.addEventListener('__bobcat:close', () => record('closed'));
+        globalThis.worker = worker;
+        resolve();
+    })).catch(error => reject(String(error && error.message || error)));
+}`)(text => { heard.push(text); }, resolve, reject));
+";
+
+/// A worker a `ShadowRealm` child creates is the child's: its URL resolves
+/// against the child's `__Card__`, what it posts reaches the child's
+/// `Worker` object and not the page realm's `bobcat-internal`, and its
+/// failure is reported to the embedder by the source the child's side
+/// recorded, before the child's `error` event. The page realm's own side
+/// holds only its BTS.
+#[test]
+fn a_childs_worker_talks_to_the_child() {
+    let mut pair = Pair::new(&format!(
+        "{CHILD_WORKER} realm.evaluate(`worker.postMessage('ping')`);"
+    ));
+    pair.answer(
+        "import 'bobcat:worker'; \
+         onmessage = event => { postMessage('pong ' + event.data); throw Error('worker boom'); };",
+    );
+    pair.deliver();
+    pair.deliver();
+    pair.check(
+        r"if (heard.length !== 2 || heard[0] !== 'message pong ping' || !heard[1].startsWith('error ')
+            || !heard[1].includes('worker boom')) throw Error(heard.join('|'));",
+    );
+    assert_eq!(
+        pair.live_workers(),
+        1,
+        "the page realm's own side holds its BTS alone"
+    );
+    let events = worker_events(pair.notices());
+    assert!(
+        matches!(
+            &events[..],
+            [crate::EngineEvent::WorkerThrew { source, error }]
+                if *source == worker_label(1, WORKER_URL) && error.message.contains("worker boom")
+        ),
+        "{events:?}"
+    );
+}
+
+/// A child with a worker of its own running is still needed, whoever refers
+/// to it: the release step keeps it while the worker runs — a frame's card
+/// waiting for its BTS's disposal acknowledgement — and frees it once the
+/// worker has ended and the child heard so.
+#[test]
+fn a_child_is_kept_while_its_worker_runs() {
+    // The child posts before the worker's script has loaded, so the worker
+    // takes it once the test answers that script; then nothing refers to
+    // the child.
+    let mut pair = Pair::new(&format!(
+        "{CHILD_WORKER} realm.evaluate(`worker.postMessage('close')`); globalThis.realm = null;"
+    ));
+    let runtime = pair.runtime.as_mut().unwrap();
+    runtime.collect_garbage(&mut pair.js).unwrap();
+    assert_eq!(runtime.core().children.release_unneeded(), 0);
+    assert_eq!(runtime.child_realms(), 1, "its worker runs");
+
+    pair.answer("import 'bobcat:worker'; onmessage = () => close();");
+    pair.deliver();
+    pair.check("if (heard.join('|') !== 'closed') throw Error(heard.join('|'));");
+    let runtime = pair.runtime.as_mut().unwrap();
+    assert_eq!(runtime.core().children.release_unneeded(), 1);
+    assert_eq!(runtime.child_realms(), 0);
+    assert!(worker_failures(pair.notices()).is_empty());
+}
+
+/// A retired child is freed though its worker still runs, and freeing it
+/// ends that worker: the child's side goes with it, closing the worker's
+/// channel, so the worker stops, and what it said last reaches no realm.
+#[test]
+fn freeing_a_child_ends_its_workers() {
+    let mut pair = Pair::new(CHILD_WORKER);
+    pair.answer(
+        "import 'bobcat:worker'; import 'bobcat:timers'; \
+         setInterval(() => postMessage('tick'), 5);",
+    );
+    pair.deliver();
+    pair.check(
+        r"if (heard[0] !== 'message tick') throw Error(heard.join('|'));
+        realm.evaluate('H.closeRealm()');",
+    );
+    let runtime = pair.runtime.as_mut().unwrap();
+    assert_eq!(runtime.core().children.release_unneeded(), 1);
+    assert_eq!(runtime.child_realms(), 0);
+    // What the worker posted before its channel closed is still delivered,
+    // to no realm: the page realm's `bobcat-internal` never held its key.
+    let deadline = ClockInstant::now() + PATIENCE;
+    let mut quiet = 0;
+    while quiet < 20 {
+        if let Ok(event) = pair.events.try_recv() {
+            quiet = 0;
+            assert!(
+                matches!(event.payload, WorkerPayload::Message(_)),
+                "the freed child's worker said something other than a tick"
+            );
+            pair.runtime
+                .as_mut()
+                .unwrap()
+                .dispatch_worker_event(&mut pair.js, event.key, event.payload)
+                .unwrap();
+        } else {
+            quiet += 1;
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ClockInstant::now() < deadline, "the worker went on ticking");
+    }
+    pair.check("if (heard.length !== 1) throw Error(heard.join('|'));");
+    assert!(worker_failures(pair.notices()).is_empty());
 }

@@ -833,7 +833,8 @@ members for an MTS realm, `bobcat-internal:worker` for a worker realm, and
 `bobcat-internal:native-modules` for both, which `native_module::install`
 installs with the same one member in each. So is what the realm's
 `ShadowRealm` children get beyond the core, a `ChildHostModules`: an MTS
-realm passes its document members, a worker realm nothing. The
+realm passes its document members and `Worker` members over a worker owner of
+each child's own, a worker realm nothing. The
 constructor names no realm kind. It is told two things: the key the realm's
 display-frame demand is reported under, `None` for an MTS realm and the
 worker's key for a worker realm, and the `ScriptSource` its `ScriptReported`
@@ -848,9 +849,11 @@ is a child realm that `realm/child.rs` furnishes with the same core over
 tables of its own and then its owner's `ChildHostModules`, keeps in the realm
 core's `ChildRealms` and leaves to the owner's epilogue to service (see
 below). An MTS realm's child therefore has the page realm's document members
-over the same document — every one but the `Worker` members, with its startup
-strings answering `undefined` and no `bobcat-internal:native-modules` — as
-the same code: `createPage` and `flushElementTree` do not know which realm
+over the same document — with its startup strings answering `undefined` and
+no `bobcat-internal:native-modules` — as the same code, and `Worker` members
+of its own, whose workers report on the view's one worker channel and are
+delivered to the child (`main/workers.rs`'s routes, read by
+`dispatch_worker_event`) and end when the child is freed: `createPage` and `flushElementTree` do not know which realm
 calls them, and the only difference is the child's `retired` flag, which its
 `closeRealm` sets. A `frame` is a custom-element ability: the `frame`
 component (`main/tree/frame.rs`) builds the nested page `page[part=page]` in
@@ -858,15 +861,19 @@ its shadow root for the element's life and queues its connections as
 `ComponentEvent::Frame`, which the page realm hears as `bobcat:frame`'s
 `__BobcatFrameConnected`/`__BobcatFrameDisconnected`. What makes a child is
 `bobcat:frame` (`packages/bobcat-element/src/frame.ts`), when a `frame`'s
-`src` is written or a frame with a `src` is connected again: it fetches `src`
-as written, creates the child, and calls `bobcat:frame-boot`'s `boot` in it,
-which reads the nested page (`framePage`), makes it the child's page root
-(`__BobcatUsePageRoot`), mounts the card's sheet on the frame's shadow root
-(`adoptStyleSheet(url, shadowRoot)`) and runs the card's `root` with the
-frame's `data` and `global-props`, whose later writes `bobcat:frame` hands
-the running child as its `updateData`/`updateGlobalProps`. A new `src`
-or a disconnection calls the child's `dispose` (`closeRealm`) and then
-`resetFrame`, which frees the nested page's children and the shadow root's
+`src` is written or a frame with a `src` is connected again: it resolves `src`
+against the view's base (`resolveUrl`), fetches that URL, creates the child,
+and calls `bobcat:frame-boot`'s `boot` in it, which reads the nested page
+(`framePage`), makes it the child's page root (`__BobcatUsePageRoot`), mounts
+the card's sheet on the frame's shadow root (`adoptStyleSheet(url,
+shadowRoot)`), runs the card's `root` with the frame's `data` and
+`global-props` and connects the card's own BTS — a `Worker` at `bobcat:bts`
+the child creates, its entry `U#background-thread` — whose `initialize`
+carries the view's native module table; later writes `bobcat:frame` hands the
+running child as its `updateData`/`updateGlobalProps`, which post to that BTS
+too. A new `src` or a disconnection calls the child's `dispose` (its BTS's
+`dispose`, then `closeRealm` once that is acknowledged; the child is kept while
+its worker runs) and then, without waiting, `resetFrame`, which frees the nested page's children and the shadow root's
 sheets (see AGENTS.md, "The frame's lifecycle"). A worker realm's child has
 the core alone.
 
@@ -890,9 +897,9 @@ difference.
 | Opened by | `Page::open_realm`, the view's first job | `Worker::boot`, the worker's first job, queued as its `Start` is served |
 | Root module | `bobcat:boot`, which Rust generates: the page configuration, the screen and the BTS entry's URL as literals, the `Document`, `try { await import(<entry URL>) } catch`, then the BTS, the render and the first flush | the module at its URL itself, loaded the way `import(<URL>)` loads one, with nothing written around it and no global scope installed first. The BTS's URL is `bobcat:bts`, which imports `bobcat:worker` and `bobcat:timers` first; a script at any other URL imports them itself when it uses them |
 | Entry completed by | `load_entry`, from the answer `create_lynx_view` asked for | the driver's `load_module`, as every import is: the load of the root module in `Worker::boot` raises the request, and that job's epilogue asks the host through the worker's `HostOutbox`. A URL under the engine prefixes never becomes a request: the realm's own loader loads it or refuses it. `bobcat:bts` is such a URL, and it imports the BTS entry the `initialize` message names once that message has arrived, as an ordinary import |
-| Core members on `bobcat-internal:host` | `requestScriptFrame`, `setTimer`/`clearTimer`, `waitFuture`/`takeFuture`/`settleFuture`, `fetchResource`, `resolveModuleUrl`/`loadModuleSync`, `reportScriptError`/`logScriptMessage`, and the global `ShadowRealm`, whose children get the same members (`requestScriptFrame` a no-op) | the same |
+| Core members on `bobcat-internal:host` | `requestScriptFrame`, `setTimer`/`clearTimer`, `waitFuture`/`takeFuture`/`settleFuture`, `fetchResource`, `resolveUrl`, `resolveModuleUrl`/`loadModuleSync`, `reportScriptError`/`logScriptMessage`, and the global `ShadowRealm`, whose children get the same members (`requestScriptFrame` a no-op) | the same |
 | Host members of its kind | on `bobcat-internal:host`: the document, tree, attribute, readback, stylesheet (`hasStyleSheet`, `preloadStyleSheet`, `adoptStyleSheet`), event-name, startup-string, nested-page (`framePage`, `resetFrame`, `closeRealm`) and `Worker` members | `bobcat-internal:worker`: `postWorkerMessage`, `closeWorker`, `workerName`, the same members at every URL |
-| `ShadowRealm` children's host members | the page realm's but the `Worker` members, over the same document and as the same code; startup strings `undefined`, no `bobcat-internal:native-modules`; `closeRealm` retires the child, after which its `dropElement` is silent | the core alone |
+| `ShadowRealm` children's host members | the page realm's, over the same document and as the same code, the `Worker` members over a worker owner of the child's own (its workers are delivered to it, keep it while they run and end with it); startup strings `undefined`, no `bobcat-internal:native-modules`; `closeRealm` retires the child, after which its `dropElement` is silent | the core alone |
 | Startup strings | `initData`, `globalProps`, `initialProcessor` and `nativeModuleTable`, one-shot members `bobcat:runtime` reads as it is evaluated | none. The `initialize` message the MTS realm's `__BobcatConnectBackground` posts to the BTS carries `initData`, `updateData`, `processorName`, `cacheData` and `globalProps` as the MTS realm processed them, the BTS entry's URL, the MTS realm's `SystemInfo` and the view's native module table. A worker at any other URL is posted no `initialize` |
 | `SystemInfo` | `ViewSources::screen`, written into the boot module as three number literals: a `bobcat:runtime` export and `lynx.SystemInfo` | the BTS's is the MTS realm's own, from `initialize`: `bobcat:bts-runtime` builds its export, `lynx.SystemInfo` and a global `SystemInfo` out of it before the BTS entry is imported, so both realms report the numbers boot's literals read as. A worker at any other URL is posted no `initialize`, and a `bobcat:bts-runtime` it imports reports the runtime constants alone |
 | `NativeModules` | `bobcat-internal:native-modules` with `invokeNativeModule` alone; `NativeModules` is `undefined`, and there is no native module API over the transport (see `docs/tracking/deviations.md`). The view's module table is the startup member `nativeModuleTable`, which `bobcat:runtime` posts to the BTS unread | the same host module. The BTS's table is the one `initialize` carries, which `bobcat:bts-runtime` builds `NativeModules` from before the BTS entry is imported; a worker at any other URL is posted none, and its `NativeModules` is empty |
@@ -1023,8 +1030,9 @@ realm alone and leaves a child's queued for the child, and the owner's beside
 them because a child's operation can leave one in the parent — an
 `importValue` that rejects when the child's module load completes. Step 13
 frees a child once no `ShadowRealm`, wrapped function or pending
-`importValue` of another realm refers to it, no timer of its is armed and no
-load or settle of its is in flight; it is the only place a child is freed
+`importValue` of another realm refers to it, no timer of its is armed, no
+load or settle of its is in flight and no worker of its own is running (a
+retired child goes all the same); it is the only place a child is freed
 while its owner lives, because freeing a realm collects the whole runtime and
 no JavaScript call may be under it. A child the hook could not furnish is kept
 retired until that step. Otherwise the children go with the realm core, after

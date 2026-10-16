@@ -3,9 +3,10 @@
 //! Every realm is opened by [`open_realm`]: a view's MTS realm on
 //! `bobcat-main`, and the BTS and every plain `Worker` on `bobcat-workers`.
 //! Each gets the same core under `bobcat-internal:host` — `requestScriptFrame`,
-//! the timer pair, the `Future` members, `fetchResource`, the two members
-//! `bobcat:module` is written over, and the two `bobcat:diagnostics` is written
-//! over — installed here and nowhere else, and the TC39 `ShadowRealm` global,
+//! the timer pair, the `Future` members, `fetchResource` and `resolveUrl`, the
+//! two members `bobcat:module` is written over, and the two
+//! `bobcat:diagnostics` is written over — installed here and nowhere else, and
+//! the TC39 `ShadowRealm` global,
 //! every `new ShadowRealm()` of which is a child realm furnished with that
 //! same core over tables of its own ([`child`]) and kept in the
 //! [`RealmCore`]'s list for the owner's epilogue to service.
@@ -13,8 +14,8 @@
 //! What differs between realm kinds is the host modules installed after the
 //! core, and those are the caller's: [`open_realm`] takes them as a closure,
 //! and the ones its `ShadowRealm` children get beyond the core as a
-//! [`ChildHostModules`] (an MTS realm's document members, `None` for a
-//! worker).
+//! [`ChildHostModules`] (an MTS realm's document and `Worker` members,
+//! `None` for a worker).
 //! An MTS realm's are its document, style, startup and `Worker` members; a
 //! worker realm's are the members of `bobcat-internal:worker`. Both kinds
 //! also install `bobcat-internal:native-modules` through
@@ -165,7 +166,7 @@ fn install_realm_core(
     crate::future::install(engine, &futures, host.token().clone(), thread.clone())
         .map_err(|error| context_of("installing Future", error))?;
     // Over the table above rather than a wait of its own: what a fetch hands
-    // JavaScript is a future of this realm's.
+    // JavaScript is a future of this realm's. `resolveUrl` beside it.
     crate::fetch::install(engine, host, &futures)
         .map_err(|error| context_of("installing fetchResource", error))?;
     crate::require::install(engine, host.clone(), thread.clone())

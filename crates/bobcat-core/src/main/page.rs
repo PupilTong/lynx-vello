@@ -1361,11 +1361,13 @@ async fn load_font_face(page: Rc<Page>, request: dom::FontFaceRequest) {
     .await;
 }
 
-/// The one ordered consumer of everything this view's workers say.
+/// The one ordered consumer of everything this view's workers say — the page
+/// realm's and its `ShadowRealm` children's alike, each event handed to the
+/// realm that created its worker by `dispatch_worker_event`.
 ///
-/// The channel's senders are the realm's `WorkerOwner` and this view's worker
-/// tasks, so it closes only once the realm is gone — which is to say, with
-/// the view.
+/// The channel's senders are the realms' worker owners and this view's
+/// worker tasks, so it closes only once the realm is gone — which is to say,
+/// with the view.
 async fn consume_worker_events(page: Rc<Page>) {
     loop {
         let event = tokio::select! {
