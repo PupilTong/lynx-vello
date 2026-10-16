@@ -11,6 +11,13 @@ repository = "https://github.com/akiwah/lynx-vello"
 rust-version = "1.95"
 
 [workspace.dependencies]
+async-trait = "0.1.92"
+base64 = "0.23.1"
+crc64fast = "1.1.0"
+hmac = "0.13.0"
+sha2 = "0.11.1"
+uuid = { version = "1.28.0", features = ["v4"] }
+ve-tos-rust-sdk = { version = "2.9.20", features = ["tokio-runtime"] }
 bobcat-core = { path = "crates/bobcat-core" }
 bobcat-resources = { path = "crates/bobcat-resources" }
 bobcat-source = { path = "crates/bobcat-source" }

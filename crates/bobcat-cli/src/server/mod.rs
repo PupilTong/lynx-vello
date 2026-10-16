@@ -10,5 +10,7 @@ mod capture;
 mod form;
 mod http;
 mod remote;
+mod tos;
 
 pub use http::{ServerError, serve};
+pub use tos::TosConfigError;

@@ -5,10 +5,13 @@
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use axum::extract::multipart::{Multipart, MultipartError};
+use axum::extract::multipart::{Field, Multipart, MultipartError};
 use axum::extract::{DefaultBodyLimit, FromRequest, Request};
 use axum::http::StatusCode;
 use axum::http::header::CONTENT_LENGTH;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use serde::Serialize;
 use serde_json::Value;
 
 use super::http::ApiError;
@@ -26,6 +29,7 @@ const MAX_REMOTE_URL_BYTES: usize = 8 * 1024;
 
 #[derive(Debug)]
 pub(super) struct ScreenshotForm {
+    pub(super) parameters: ScreenshotParameters,
     pub(super) entry: ScreenshotEntry,
     pub(super) viewport: ScreenshotViewport,
     pub(super) global_props: Option<Value>,
@@ -33,6 +37,22 @@ pub(super) struct ScreenshotForm {
     pub(super) source: Vec<u8>,
     pub(super) screenshot_settle: Duration,
     pub(super) timeout: Duration,
+}
+
+/// Original request inputs archived alongside the screenshot, before URL downloads.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ScreenshotParameters {
+    entry: String,
+    width: usize,
+    height: usize,
+    global_props: Option<Value>,
+    init_data: Option<Value>,
+    screenshot_settle_ms: u64,
+    timeout_ms: u64,
+    url: Option<String>,
+    source: Option<String>,
+    file_base64: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -268,24 +288,11 @@ async fn parse_screenshot_form(
                 format!("{name} must be provided exactly once."),
             ));
         }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = field
-            .chunk()
-            .await
-            .map_err(|error| multipart_error(&error))?
-        {
-            total_bytes = total_bytes.saturating_add(chunk.len());
-            if total_bytes > MAX_SCREENSHOT_FORM_BYTES {
-                return Err(screenshot_form_too_large());
-            }
-            if name == "url" && bytes.len().saturating_add(chunk.len()) > MAX_REMOTE_URL_BYTES {
-                return Err(remote_url_too_large());
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        *slot = Some(bytes);
+        *slot = Some(read_form_field(&mut field, &name, &mut total_bytes).await?);
     }
-    let entry = ScreenshotEntry::parse(form_text("entry", &required_form_field("entry", entry)?)?)?;
+    let entry_bytes = required_form_field("entry", entry)?;
+    let entry_text = form_text("entry", &entry_bytes)?;
+    let entry = ScreenshotEntry::parse(entry_text)?;
     let viewport = ScreenshotViewport::new(
         form_dimension("width", width, DEFAULT_SCREENSHOT_WIDTH)?,
         form_dimension("height", height, DEFAULT_SCREENSHOT_HEIGHT)?,
@@ -305,23 +312,64 @@ async fn parse_screenshot_form(
             "timeoutMs must be greater than zero.",
         ));
     }
+    let screenshot_settle_ms = form_duration(
+        "screenshotSettleMs",
+        screenshot_settle_ms,
+        if page_options {
+            DEFAULT_SCREENSHOT_SETTLE_MS
+        } else {
+            500
+        },
+    )?;
+    let parameters = ScreenshotParameters {
+        entry: entry_text.to_owned(),
+        width: viewport.width,
+        height: viewport.height,
+        global_props: global_props.clone(),
+        init_data: init_data.clone(),
+        screenshot_settle_ms,
+        timeout_ms,
+        url: (source_name == "url")
+            .then(|| form_text("url", &source).map(str::to_owned))
+            .transpose()?,
+        source: (source_name == "source")
+            .then(|| form_text("source", &source).map(str::to_owned))
+            .transpose()?,
+        file_base64: (source_name == "file").then(|| STANDARD.encode(&source)),
+    };
     Ok(ScreenshotForm {
+        parameters,
         entry,
         viewport,
         global_props,
         init_data,
         source,
-        screenshot_settle: Duration::from_millis(form_duration(
-            "screenshotSettleMs",
-            screenshot_settle_ms,
-            if page_options {
-                DEFAULT_SCREENSHOT_SETTLE_MS
-            } else {
-                500
-            },
-        )?),
+        screenshot_settle: Duration::from_millis(screenshot_settle_ms),
         timeout: Duration::from_millis(timeout_ms),
     })
+}
+
+async fn read_form_field(
+    field: &mut Field<'_>,
+    name: &str,
+    total_bytes: &mut usize,
+) -> Result<Vec<u8>, ApiError> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|error| multipart_error(&error))?
+    {
+        *total_bytes = total_bytes.saturating_add(chunk.len());
+        if *total_bytes > MAX_SCREENSHOT_FORM_BYTES {
+            return Err(screenshot_form_too_large());
+        }
+        if name == "url" && bytes.len().saturating_add(chunk.len()) > MAX_REMOTE_URL_BYTES {
+            return Err(remote_url_too_large());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 fn required_form_field(name: &str, value: Option<Vec<u8>>) -> Result<Vec<u8>, ApiError> {
