@@ -2603,8 +2603,14 @@ surface: `GET /health` and multipart `POST /screenshot/lynxml`,
 and `/screenshot/zip/url`. There is no JSON `/screenshot` route. All routes
 require a safe `entry` path and route-specific `source`, `url`, or `file` part.
 Viewports default to 800×600 at DPR 1, accept dimensions up to 8192 with at
-most 2,621,440 pixels, and return raw `image/bmp` with
-`Cache-Control: no-store`; BMP output matches UI Judge's top-down 32-bit
+most 2,621,440 pixels, and return JSON `{"url":"..."}` with
+`Cache-Control: no-store` after uploading the BMP and original request parameters
+to TOS as `{prefix}/{uuid}/screenshot.bmp` and `screenshot.json`. The server
+requires `TOS_ACCESS_KEY`, `TOS_SECRET_KEY`, `TOS_BUCKET`, and `TOS_REGION` at
+startup; optional endpoint, prefix, token, and internal V1 authentication settings
+match UI Judge. Uploads run asynchronously after encoding, outside the capture
+thread, with a 100-second deadline; upload failures return sanitized 502 errors.
+Stored BMP output matches UI Judge's top-down 32-bit
 BITMAPV4HEADER/BI_BITFIELDS layout, preserving alpha without a second white
 composite. Multipart fields share a 10 MiB bound plus 64 KiB framing and a
 10-second upload deadline; remote URLs are bounded to 8 KiB.
@@ -2630,7 +2636,7 @@ main thread, QuickJS runtime and Stylo pool; no runtime is shared across jobs.
 BMP encoding runs on Tokio's blocking pool after the view is gone, so it cannot
 retain the view or hold the GPU lane. Queue saturation and an unavailable
 worker are 503, input/render failures 422, encoding failures 500, and
-capture/upload timeouts 408. Of the engine's events, only one for which
+capture/multipart upload timeouts 408. Of the engine's events, only one for which
 `EngineEvent::is_fatal` holds fails a capture with 422: `StartupFailed` as a
 start failure, `Panicked` as a script failure. A `ScriptRunError`, a BTS or
 `Worker` realm's `WorkerThrew` or `WorkerEnded`, a listener or timer failure

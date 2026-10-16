@@ -17,7 +17,21 @@ bench = false
 [features]
 default = ["cli", "server"]
 cli = ["dep:flume", "dep:png", "dep:pollster", "dep:winit"]
-server = ["dep:axum", "dep:reqwest", "dep:serde", "dep:serde_json", "dep:socket2", "dep:tokio"]
+server = [
+    "dep:async-trait",
+    "dep:axum",
+    "dep:base64",
+    "dep:chrono",
+    "dep:hmac",
+    "dep:reqwest",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:socket2",
+    "dep:tokio",
+    "dep:uuid",
+    "dep:ve-tos-rust-sdk",
+]
 
 [[bin]]
 name = "bobcat"
@@ -36,6 +50,13 @@ name = "headless_cli"
 required-features = ["cli"]
 
 [dependencies]
+async-trait = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+ve-tos-rust-sdk = { workspace = true, optional = true }
 bobcat-core = { workspace = true }
 bobcat-resources = { workspace = true }
 bobcat-source = { workspace = true }
@@ -55,6 +76,7 @@ tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread"
 winit = { workspace = true, optional = true }
 
 [dev-dependencies]
+crc64fast = { workspace = true }
 image = { workspace = true, features = ["bmp"] }
 zip = { workspace = true }
 flashbulb = { workspace = true, features = ["render"] }

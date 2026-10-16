@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::StatusCode;
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use axum::http::header::CACHE_CONTROL;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -19,6 +19,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{oneshot, watch};
 use url::Url;
 
+use super::tos::{ScreenshotStore, TosConfigError};
 use crate::server::capture::{
     CaptureExecutor, CaptureFailure, CaptureInput, CaptureQueueError, CaptureRequest,
     WorkerPanicked,
@@ -29,6 +30,8 @@ const TCP_BACKLOG: i32 = 1_024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
+    #[error("Bobcat screenshot storage configuration failed: {0}")]
+    TosConfig(#[from] TosConfigError),
     #[error("LYNX_USE_PORT must be an integer from 1 through 65535, got {port:?}: {source}")]
     InvalidPort {
         port: String,
@@ -52,6 +55,7 @@ impl From<WorkerPanicked> for ServerError {
 #[derive(Clone)]
 struct AppState {
     headless: Arc<CaptureExecutor>,
+    screenshot_store: ScreenshotStore,
 }
 
 #[derive(Debug)]
@@ -137,12 +141,13 @@ impl IntoResponse for ApiError {
 /// queue to the thread that owns the non-`Send` Bobcat view handle.
 pub async fn serve(port: &str) -> Result<(), ServerError> {
     let port = parse_port(port)?;
+    let screenshot_store = ScreenshotStore::from_env()?;
     let (ipv4_listener, ipv6_listener) = bind_listeners(port)?;
     let headless = Arc::new(CaptureExecutor::new()?);
     let worker_failure = headless
         .take_failure_receiver()
         .map_err(|error| ServerError::HeadlessWorkerUnavailable(error.to_string()))?;
-    let app = router(Arc::clone(&headless));
+    let app = router(Arc::clone(&headless), screenshot_store);
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let worker_failure_task = tokio::spawn(trigger_shutdown_on_worker_failure(
         worker_failure,
@@ -170,7 +175,7 @@ pub async fn serve(port: &str) -> Result<(), ServerError> {
     result.map(|_| ()).map_err(ServerError::from)
 }
 
-fn router(headless: Arc<CaptureExecutor>) -> Router {
+fn router(headless: Arc<CaptureExecutor>, screenshot_store: ScreenshotStore) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/screenshot/template", post(screenshot_template))
@@ -179,7 +184,10 @@ fn router(headless: Arc<CaptureExecutor>) -> Router {
         .route("/screenshot/zip/upload", post(screenshot_zip_upload))
         .route("/screenshot/zip/url", post(screenshot_zip_url))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
-        .with_state(AppState { headless })
+        .with_state(AppState {
+            headless,
+            screenshot_store,
+        })
 }
 
 fn parse_port(port: &str) -> Result<u16, ServerError> {
@@ -341,11 +349,23 @@ async fn capture_form(
     let bmp = tokio::task::spawn_blocking(move || crate::server::bmp::encode(&screenshot))
         .await
         .map_err(|error| ApiError::internal(format!("BMP worker failed: {error}")))??;
-    Ok((
-        [(CONTENT_TYPE, "image/bmp"), (CACHE_CONTROL, "no-store")],
-        bmp,
-    )
-        .into_response())
+    let parameters = serde_json::to_vec_pretty(&form.parameters).map_err(|error| {
+        ApiError::internal(format!(
+            "Screenshot parameters could not be encoded: {error}"
+        ))
+    })?;
+    let url = state
+        .screenshot_store
+        .put_bmp(bmp, parameters)
+        .await
+        .map_err(|error| {
+            eprintln!("[bobcat-server] screenshot upload failed: {error}");
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "The screenshot could not be uploaded to TOS.",
+            )
+        })?;
+    Ok(([(CACHE_CONTROL, "no-store")], Json(json!({ "url": url }))).into_response())
 }
 
 fn remote_fetch_api_error(error: &super::remote::HttpFetchError) -> ApiError {
@@ -400,6 +420,7 @@ mod tests {
 
     use axum::body::{Body, to_bytes};
     use axum::http::Method;
+    use axum::http::header::CONTENT_TYPE;
     use bobcat_core::{FrameSize, Screenshot};
     use tower::ServiceExt;
 
@@ -426,7 +447,7 @@ mod tests {
     use crate::server::form::tests::multipart_request;
 
     #[tokio::test]
-    async fn screenshot_returns_bmp_bytes_and_reference_headers() {
+    async fn screenshot_uploads_bmp_and_parameters_and_returns_url() {
         let frame = Screenshot {
             size: FrameSize {
                 width: 2,
@@ -450,7 +471,8 @@ mod tests {
                 b"zip".as_slice(),
             ),
         ] {
-            let response = router(Arc::clone(&headless))
+            let store = ScreenshotStore::in_memory();
+            let response = router(Arc::clone(&headless), store.clone())
                 .oneshot(multipart_request(
                     path,
                     &[
@@ -463,16 +485,118 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(response.headers()[CONTENT_TYPE], "image/bmp");
+            assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
             assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            let result: Value = serde_json::from_slice(&body).unwrap();
+            let objects = store.stored_objects();
+            assert_eq!(objects.len(), 2);
+            assert_eq!(result, json!({ "url": objects[0].0 }));
+            assert_eq!(objects[0].1, expected);
             assert_eq!(
-                response.headers()[axum::http::header::CONTENT_LENGTH],
-                expected.len().to_string()
+                objects[1].0,
+                objects[0].0.replace("screenshot.bmp", "screenshot.json")
             );
-            let body = to_bytes(response.into_body(), expected.len())
-                .await
-                .unwrap();
-            assert_eq!(body.as_ref(), expected);
+            let parameters: Value = serde_json::from_slice(&objects[1].1).unwrap();
+            assert_eq!(
+                parameters,
+                json!({
+                    "entry": entry, "width": 2, "height": 2,
+                    "globalProps": null, "initData": null,
+                    "screenshotSettleMs": if source_name == "source" { 16 } else { 500 },
+                    "timeoutMs": 60000, "url": null,
+                    "source": if source_name == "source" { Some("<lynx/>") } else { None },
+                    "fileBase64": if source_name == "file" { Some("emlw") } else { None },
+                })
+            );
+        }
+        headless.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn upload_failures_return_a_sanitized_502() {
+        let headless = scripted_executor(Screenshot {
+            size: FrameSize {
+                width: 1,
+                height: 1,
+            },
+            pixels: vec![0; 4],
+        });
+        let store = ScreenshotStore::failing_with_status(403);
+        let response = router(Arc::clone(&headless), store.clone())
+            .oneshot(multipart_request(
+                "/screenshot/lynxml",
+                &[("entry", b"index.lynxml"), ("source", b"<lynx/>")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({
+                "error": {"message": "The screenshot could not be uploaded to TOS."}
+            })
+        );
+        assert!(store.stored_objects().is_empty());
+        headless.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn downloaded_sources_archive_the_original_url_for_every_remote_route() {
+        let headless = scripted_executor(Screenshot {
+            size: FrameSize {
+                width: 1,
+                height: 1,
+            },
+            pixels: vec![0; 4],
+        });
+        for (path, page_options, zip) in [
+            ("/screenshot/template", true, false),
+            ("/screenshot/template/url", false, false),
+            ("/screenshot/zip/url", false, true),
+        ] {
+            let mut form = super::super::form::read(
+                multipart_request(
+                    path,
+                    &[
+                        ("entry", b"template.js"),
+                        ("url", b"https://cdn.example.com/source"),
+                    ],
+                ),
+                "url",
+                page_options,
+            )
+            .await
+            .unwrap();
+            // Same handoff as screenshot_remote, without a public network dependency.
+            form.source = b"downloaded source bytes".to_vec();
+            let store = ScreenshotStore::in_memory();
+            let response = capture_form(
+                AppState {
+                    headless: Arc::clone(&headless),
+                    screenshot_store: store.clone(),
+                },
+                form,
+                zip,
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            let objects = store.stored_objects();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap(),
+                json!({"url": objects[0].0})
+            );
+            let parameters: Value = serde_json::from_slice(&objects[1].1).unwrap();
+            assert_eq!(parameters["url"], "https://cdn.example.com/source");
+            assert!(parameters["source"].is_null());
+            assert!(parameters["fileBase64"].is_null());
+            assert_eq!(
+                parameters["screenshotSettleMs"],
+                if page_options { 16 } else { 500 }
+            );
         }
         headless.shutdown().unwrap();
     }
@@ -498,7 +622,8 @@ mod tests {
             .unwrap(),
         );
         let source = b"<lynx/>";
-        let response = router(Arc::clone(&headless))
+        let store = ScreenshotStore::in_memory();
+        let response = router(Arc::clone(&headless), store.clone())
             .oneshot(multipart_request(
                 "/screenshot/lynxml",
                 &[
@@ -514,6 +639,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let objects = store.stored_objects();
+        let parameters: Value = serde_json::from_slice(&objects[1].1).unwrap();
+        assert_eq!(
+            parameters,
+            json!({
+                "entry": "zip:///pages/index.lynxml", "width": 375, "height": 812,
+                "globalProps": null, "initData": {}, "screenshotSettleMs": 0,
+                "timeoutMs": 2345, "url": null, "source": "<lynx/>", "fileBase64": null,
+            })
+        );
         let request = requests.try_recv().unwrap();
         assert_eq!(request.url.as_str(), "zip:///pages/index.lynxml");
         assert_eq!((request.width, request.height), (375, 812));
@@ -532,7 +667,8 @@ mod tests {
             },
             pixels: vec![0; 4],
         });
-        let app = router(Arc::clone(&headless));
+        let store = ScreenshotStore::in_memory();
+        let app = router(Arc::clone(&headless), store.clone());
         let response = app
             .clone()
             .oneshot(
@@ -621,6 +757,7 @@ mod tests {
             let error: Value = serde_json::from_slice(&body).unwrap();
             assert!(error["error"]["message"].is_string());
         }
+        assert!(store.stored_objects().is_empty());
         headless.shutdown().unwrap();
     }
 
@@ -647,7 +784,7 @@ mod tests {
                 ("http://127.0.0.1/private", StatusCode::FORBIDDEN),
                 ("HTTP://[::1]/private", StatusCode::FORBIDDEN),
             ] {
-                let response = router(Arc::clone(&headless))
+                let response = router(Arc::clone(&headless), ScreenshotStore::in_memory())
                     .oneshot(multipart_request(
                         path,
                         &[("entry", b"template.js"), ("url", url.as_bytes())],
@@ -688,7 +825,8 @@ mod tests {
             ("/screenshot/lynxml", "source", xml.as_slice()),
             ("/screenshot/zip/upload", "file", archive.as_slice()),
         ] {
-            let response = router(Arc::clone(&headless))
+            let store = ScreenshotStore::in_memory();
+            let response = router(Arc::clone(&headless), store.clone())
                 .oneshot(multipart_request(
                     path,
                     &[
@@ -708,7 +846,13 @@ mod tests {
                 "{path}: {}",
                 String::from_utf8_lossy(&bytes)
             );
-            let image = image::load_from_memory(&bytes).unwrap().to_rgba8();
+            let response: Value = serde_json::from_slice(&bytes).unwrap();
+            let objects = store.stored_objects();
+            let (_, bmp) = objects
+                .iter()
+                .find(|(url, _)| response["url"] == *url)
+                .unwrap();
+            let image = image::load_from_memory(bmp).unwrap().to_rgba8();
             assert_eq!(image.dimensions(), (37, 23));
             assert_eq!(image.get_pixel(18, 11).0, [0, 255, 0, 255]);
         }
@@ -726,6 +870,7 @@ mod tests {
         });
         let response = health(State(AppState {
             headless: Arc::clone(&headless),
+            screenshot_store: ScreenshotStore::in_memory(),
         }))
         .await
         .expect("healthy executor");

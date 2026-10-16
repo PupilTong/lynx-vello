@@ -2,10 +2,27 @@
 
 `bobcat-server` is the `bobcat-cli` crate's `server`-gated HTTP embedder for
 `bobcat-core`. Its screenshot protocol follows
-[UI Judge at 83ad08f44eb5](https://github.com/PupilTong/lynx-stack/blob/83ad08f44eb5ed7c430e15fce6edc5121bc58495/packages/genui/ui-judge/src/server.rs).
+[UI Judge](https://github.com/PupilTong/lynx-stack/blob/f833c2e3b7cb086319184f127ba59a677ffd945a/packages/genui/ui-judge/src/server.rs).
 `GET /health` returns `{"status":"ok"}` when the capture worker is ready.
 
-Start it with:
+Configure screenshot storage before starting the server. Missing required
+variables or invalid TOS configuration cause startup to fail before binding
+HTTP listeners.
+
+| Environment variable | Purpose |
+| --- | --- |
+| `TOS_ACCESS_KEY` | Required access key |
+| `TOS_SECRET_KEY` | Required secret key |
+| `TOS_BUCKET` | Required bucket name |
+| `TOS_REGION` | Required region |
+| `TOS_ENDPOINT` | Optional HTTP(S) origin or hostname; defaults to `tos-{region}.volces.com` over HTTPS |
+| `TOS_SCREENSHOT_STORAGE_PREFIX` | Optional object prefix; defaults to `screenshot` |
+| `TOS_SECURITY_TOKEN` | Optional temporary credential token |
+| `TOS_OVERRIDE_REQUEST_HEADER` | Set to `true` or `1` for internal TOS V1 authentication; defaults to SDK V4 authentication |
+
+Use the same storage settings as UI Judge. Object reads follow the bucket's
+access policy; the returned URL is unsigned. Supply credentials through the
+deployment environment, then start it with:
 
 ```sh
 LYNX_USE_PORT=8080 cargo run -p bobcat-cli --no-default-features --features server --bin bobcat-server
@@ -54,7 +71,7 @@ curl --request POST http://127.0.0.1:8080/screenshot/lynxml \
   --form-string 'height=812' \
   --form-string 'screenshotSettleMs=16' \
   --form 'source=@/absolute/path/to/index.lynxml' \
-  --output screenshot.bmp
+  --output screenshot-response.json
 ```
 
 Capture a template or ZIP:
@@ -63,17 +80,37 @@ Capture a template or ZIP:
 curl --request POST http://127.0.0.1:8080/screenshot/template \
   --form-string 'entry=template.js' \
   --form-string 'url=https://cdn.example.com/card.web.bundle' \
-  --output screenshot.bmp
+  --output screenshot-response.json
 
 curl --request POST http://127.0.0.1:8080/screenshot/zip/upload \
   --form-string 'entry=pages/index.lynxml' \
   --form 'file=@/absolute/path/to/page.zip;type=application/zip' \
-  --output screenshot.bmp
+  --output screenshot-response.json
 ```
 
-A successful response contains raw BMP bytes, `Content-Type: image/bmp`,
-`Cache-Control: no-store`, and the corresponding `Content-Length`. The BMP
-matches UI Judge's runner: a 14-byte file header plus a 108-byte
+All five screenshot routes return HTTP 200 with `Content-Type: application/json`,
+`Cache-Control: no-store`, and a JSON object containing the uploaded BMP URL:
+
+```json
+{"url":"https://bucket.tos-region.volces.com/screenshot/UUID/screenshot.bmp"}
+```
+
+Download that URL to obtain the image. For example, with `jq` installed:
+
+```sh
+curl --fail --output screenshot.bmp "$(jq -r .url screenshot-response.json)"
+```
+
+Each capture stores `screenshot.json` and `screenshot.bmp` under
+`{prefix}/{uuid}/`, with `Cache-Control: public, max-age=1800`. The JSON sidecar
+records the original entry, dimensions, page data, effective timing values,
+and source: `url` for remote input, `source` for LynXML, or `fileBase64` for an
+uploaded ZIP. The other source fields are null. Parameters upload first; the
+server returns a URL only after both uploads succeed. Uploads use the official
+TOS SDK with at most two retries and a 100-second deadline for both objects.
+Any upload failure, including timeout, returns a sanitized `502` JSON error.
+
+The stored BMP matches UI Judge's runner: a 14-byte file header plus a 108-byte
 `BITMAPV4HEADER`, 32-bit BGRA pixels, negative height (top-down rows),
 `BI_BITFIELDS` with explicit RGBA masks, sRGB, and 2835 pixels per metre.
 The encoder preserves the RGBA readback's alpha and does not composite it
@@ -97,11 +134,13 @@ remain 4096 entries and 128 MiB expanded data.
 
 Axum accepts HTTP requests concurrently. An eight-item bounded queue feeds
 one dedicated capture thread; each capture owns a fresh group, a view with its
-resource registry, and an offscreen painter attached to that view. BMP encoding runs on Tokio's blocking pool.
+resource registry, and an offscreen painter attached to that view. BMP encoding
+runs on Tokio's blocking pool; TOS uploads run asynchronously after capture
+and encoding, without holding the capture thread.
 A full/unavailable queue returns `503`; invalid multipart or ZIP input returns
 `400`; a page source that cannot be loaded, a view that cannot start, an engine
-panic and render failures return `422`; capture/upload timeouts return `408`;
-BMP encoding failures return `500`. Errors use `{"error":{"message":"…"}}`.
+panic and render failures return `422`; capture and multipart upload timeouts
+return `408`; BMP encoding failures return `500`. Errors use `{"error":{"message":"…"}}`.
 Only the engine events that end a view (`EngineEvent::is_fatal`) fail a
 capture. A script error that leaves the view running — an entry or later
 main-thread code that throws (`ScriptRunError`), a worker exception or a worker
