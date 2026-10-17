@@ -100,16 +100,17 @@
 /// text's inline-ness is structural (`TextElement::ConvertToInlineElement`,
 /// `core/renderer/dom/fiber/text_element.cc:196-205`), so native ignores
 /// `display: flex` on a text. `contents` on a text has no Lynx behaviour to
-/// follow and acts as computed. web-core lets the author's value take over the
-/// `x-text` host (`x-text { display: flex }` is author-origin,
+/// follow: it is undefined behaviour (user ruling, 2026-10-17), which acts as
+/// computed only so that it does not crash. web-core lets the author's value
+/// take over the `x-text` host (`x-text { display: flex }` is author-origin,
 /// `x-text.css:7-13`) while its shadow tree keeps the text, so the host's box
-/// differs there (`docs/tracking/deviations.md`). The stylo fork's adjuster
-/// still computes these three tags' `display` back to `-lynx-text`
-/// (`StyleAdjuster::adjust_for_lynx_text`); layout no longer reads that value.
+/// differs there (`docs/tracking/deviations.md`).
 ///
 /// Until 2026-10-15 the sheet declared `display: -lynx-text !important`,
 /// which also outranked the author's `display: none`, and until 2026-10-17 a
-/// plain `display: -lynx-text`. Without the `!important`, a UA rule that hides
+/// plain `display: -lynx-text`, which the stylo fork's style adjuster
+/// restored on the three tags under any author value but `none`. The value
+/// was removed on 2026-10-17. Without the `!important`, a UA rule that hides
 /// an element's children hides a `text` among them too, as a browser would:
 /// `list > *:not(list-item):not(wrapper)`, `x-swiper > :not(x-swiper-item,
 /// wrapper)`, `image > *` and `svg > *`. The rule for anything written
@@ -720,7 +721,7 @@ mod tests {
     /// Every native backend hands a `text`'s string to its platform engine
     /// unchanged (`raw_text_element.cc:16-46`, Android
     /// `BaseTextShadowNode.java:494-498`, iOS `LynxBaseTextShadowNode.m:240-249`),
-    /// and so does every `-lynx-text` paragraph: leading spaces and space runs
+    /// and so does every Lynx paragraph: leading spaces and space runs
     /// stay, every newline breaks the line and the spaces after it stay,
     /// trailing spaces hang.
     #[test]
@@ -1057,8 +1058,13 @@ mod tests {
         for (label, scope) in [("first", marker), ("second", second)] {
             assert_eq!(
                 display(&document, scope),
-                Display::LynxText,
-                "a text's own inline-truncation child is a text scope: {label}",
+                Display::Flex,
+                "a text's own inline-truncation child keeps the initial display: {label}",
+            );
+            assert_eq!(
+                document.paragraph_of(scope),
+                Some(text),
+                "and is a text scope of the paragraph around it: {label}",
             );
             assert_eq!(
                 custom_value(&document, scope, "lynx-inline-truncation", "0"),
@@ -1095,8 +1101,13 @@ mod tests {
         for (tag, scope) in [("text", nested), ("inline-text", nested_inline)] {
             assert_eq!(
                 display(&document, scope),
-                Display::LynxText,
-                "a nested text scope is part of the paragraph, not a box in it: {tag}"
+                Display::Flex,
+                "a nested text scope keeps the initial display: {tag}"
+            );
+            assert_eq!(
+                document.paragraph_of(scope),
+                Some(text),
+                "and is part of the paragraph, not a box in it: {tag}"
             );
         }
         assert_eq!(display(&document, wrapper), Display::Contents);
@@ -1114,22 +1125,25 @@ mod tests {
     }
 
     /// A text tag — a block `text`, a nested run, an `inline-text`, a text's
-    /// own `inline-truncation` — is a text scope or nothing: an author
-    /// `display: none` hides it, and every other value leaves it a text scope.
+    /// own `inline-truncation` — keeps the author's `display` as its computed
+    /// value and lays out by its kind: `none` hides it, and every other value
+    /// but `contents`
+    /// (`a_text_with_display_contents_is_undefined_and_only_does_not_crash`)
+    /// leaves it a Lynx paragraph, or a text scope of the paragraph around it.
     #[test]
     fn an_author_display_hides_a_text_scope_only_with_none() {
-        for author in [
-            "display: none",
-            "display: flex",
-            "display: contents",
-            "display: grid",
-            "display: -lynx-text",
+        for (author, computed) in [
+            ("display: none", Display::None),
+            ("display: flex", Display::Flex),
+            ("display: grid", Display::Grid),
+            ("display: linear", Display::Linear),
         ] {
             let mut document = document();
             let text = child(&mut document, "text", author);
+            let run = document.create_text_node("ab", ());
+            document.append_child(text, run);
             let host = child(&mut document, "text", "");
             let scopes = [
-                ("text", text),
                 (
                     "nested text",
                     element_under(&mut document, host, "text", author),
@@ -1143,17 +1157,57 @@ mod tests {
                     element_under(&mut document, host, "inline-truncation", author),
                 ),
             ];
+            for (_, scope) in scopes {
+                let run = document.create_text_node("ab", ());
+                document.append_child(scope, run);
+            }
             document.layout();
 
-            let expected = if author == "display: none" {
-                Display::None
-            } else {
-                Display::LynxText
-            };
+            assert_eq!(display(&document, text), computed, "text, {author}");
+            let hidden = computed == Display::None;
+            assert_eq!(
+                document.text_block_size(text).is_none(),
+                hidden,
+                "a text establishes its paragraph unless it is hidden: {author}"
+            );
             for (label, scope) in scopes {
-                assert_eq!(display(&document, scope), expected, "{label}, {author}");
+                assert_eq!(display(&document, scope), computed, "{label}, {author}");
+                assert_eq!(
+                    document.paragraph_of(scope),
+                    (!hidden).then_some(host),
+                    "a scope is part of its host's paragraph unless it is hidden: \
+                     {label}, {author}"
+                );
             }
         }
+    }
+
+    /// `<text style="display: contents">` is undefined behaviour, by the
+    /// user's ruling of 2026-10-17: Lynx gives a text no `contents` behaviour
+    /// to follow, and the engine handles the value only so that it does not
+    /// crash. What this test observes is **not a supported behaviour**, and
+    /// nothing may rely on it. Today `contents` acts as computed, as on every
+    /// element, before the element's kind is read
+    /// (`dom::layout::style::display_mode`): the text generates no box and
+    /// establishes no paragraph, and its run is loose text of the `view`
+    /// around it.
+    #[test]
+    fn a_text_with_display_contents_is_undefined_and_only_does_not_crash() {
+        let mut document = document();
+        let view = child(&mut document, "view", "");
+        let text = element_under(&mut document, view, "text", "display: contents");
+        let run = document.create_text_node("hello", ());
+        document.append_child(text, run);
+        document.layout();
+        document.render();
+
+        assert_eq!(display(&document, text), Display::Contents);
+        assert_eq!(
+            document.bounding_client_rect(text),
+            None,
+            "the text element has no box"
+        );
+        assert_eq!(document.text_block_size(text), None);
     }
 
     /// Runs `getTextBoundingRect` (or `name`) on `text` with `params`.

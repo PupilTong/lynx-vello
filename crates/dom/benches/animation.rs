@@ -229,8 +229,19 @@ fn tick_width(bencher: divan::Bencher<'_, '_>, animating: usize) {
 /// gives each card's animated subtree a clip node. The clip only has to
 /// exist — the export used to refuse any subtree holding one — and no op
 /// pushes it: an in-flow `<text>` that is no stacking context records its
-/// run under its parent's clip.
-const TEXT_UA_CSS: &str = "text { display: -lynx-text; overflow: clip; }";
+/// run under its parent's clip. The `<text>` itself is a Lynx text element by
+/// its definition ([`TextKind`]).
+const TEXT_UA_CSS: &str = "text { overflow: clip; }";
+
+/// The definition `crates/bobcat-core` gives `<text>`, minus its method: a
+/// Lynx text element, which lays out as a Lynx paragraph.
+struct TextKind;
+
+impl dom::CustomElement<()> for TextKind {
+    fn is_lynx_text(&self) -> bool {
+        true
+    }
+}
 
 /// Each card's label: narrower than its run. Only a `.clip` card's own
 /// `overflow: hidden` cuts the glyphs.
@@ -371,6 +382,7 @@ fn commit_running(dom: &mut Document<()>) -> std::sync::Arc<CommittedFrame> {
 /// commits it running.
 fn card_text_page(animating: usize, animation: &str) -> Document<()> {
     let mut dom = Document::new(device(), "page", ());
+    dom.define("text", Box::new(TextKind));
     dom.add_stylesheet(TEXT_UA_CSS, StylesheetOrigin::UserAgent);
     dom.add_stylesheet(PAGE_CSS, StylesheetOrigin::Author);
     dom.add_stylesheet(LABEL_CSS, StylesheetOrigin::Author);

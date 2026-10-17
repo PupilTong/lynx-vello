@@ -429,9 +429,9 @@ fn display_contents_works_across_every_container_algorithm() {
 #[test]
 fn display_contents_inherits_to_its_children_without_boxing_them() {
     let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
+    common::define_lynx_text(&mut dom, "page");
     dom.add_stylesheet(
-        "page { display: -lynx-text; width: 200px; height: 100px;
-                font-family: Ahem; font-size: 16px; }
+        "page { width: 200px; height: 100px; font-family: Ahem; font-size: 16px; }
          .wrapper { display: contents; font-size: 8px; }",
         dom::StylesheetOrigin::Author,
     );
@@ -1004,11 +1004,11 @@ fn omitted_display_uses_flex_and_lays_out_children() {
 #[test]
 fn text_nodes_use_parley_with_their_parents_inherited_style() {
     let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
+    common::define_lynx_text(&mut dom, "text");
     dom.add_stylesheet(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
                 font-family: Ahem; font-size: 16px; }
-         .sibling { width: 50px; height: 10px; }
-         .label { display: -lynx-text; }",
+         .sibling { width: 50px; height: 10px; }",
         dom::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
@@ -1016,7 +1016,7 @@ fn text_nodes_use_parley_with_their_parents_inherited_style() {
     let sibling = dom.create_element("view", ());
     dom.add_class(sibling, "sibling");
     dom.append_child(root, sibling);
-    let label = dom.create_element("view", ());
+    let label = dom.create_element("text", ());
     dom.add_class(label, "label");
     dom.append_child(root, label);
     let text = dom.create_text_node("hello", ());
@@ -1035,9 +1035,9 @@ fn text_nodes_use_parley_with_their_parents_inherited_style() {
 #[test]
 fn embedder_default_family_shapes_text_without_an_authored_font_family() {
     let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
+    common::define_lynx_text(&mut dom, "page");
     dom.add_stylesheet(
-        "page { display: -lynx-text; width: 200px; height: 100px;
-                font-size: 16px; }",
+        "page { width: 200px; height: 100px; font-size: 16px; }",
         dom::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
@@ -1056,9 +1056,9 @@ fn embedder_default_family_shapes_text_without_an_authored_font_family() {
 #[test]
 fn inherited_text_style_change_remeasures_text_child() {
     let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
+    common::define_lynx_text(&mut dom, "page");
     dom.add_stylesheet(
-        "page { display: -lynx-text; width: 200px; height: 100px;
-                font-family: Ahem; font-size: 16px; }",
+        "page { width: 200px; height: 100px; font-family: Ahem; font-size: 16px; }",
         dom::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
@@ -1079,15 +1079,16 @@ fn inherited_text_style_change_remeasures_text_child() {
 #[test]
 fn inherited_text_style_change_remeasures_nested_text_child() {
     let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
+    common::define_lynx_text(&mut dom, "text");
     dom.add_stylesheet(
         "page { display: flex; width: 200px; height: 100px;
                 font-family: Ahem; font-size: 16px; }
-         view { display: -lynx-text; width: 200px; height: 100px; }",
+         text { width: 200px; height: 100px; }",
         dom::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = dom.document_element().id();
-    let parent = dom.create_element("view", ());
+    let parent = dom.create_element("text", ());
     dom.append_child(root, parent);
     let text = dom.create_text_node("hello", ());
     dom.append_child(parent, text);
@@ -1484,9 +1485,9 @@ fn a_removed_boundary_does_not_replay_onto_the_node_that_replaces_it() {
 #[test]
 fn color_only_change_preserves_text_geometry() {
     let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
+    common::define_lynx_text(&mut dom, "page");
     dom.add_stylesheet(
-        "page { display: -lynx-text; width: 200px; height: 100px;
-                font-family: Ahem; font-size: 16px; }",
+        "page { width: 200px; height: 100px; font-family: Ahem; font-size: 16px; }",
         dom::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
@@ -1792,16 +1793,17 @@ fn two_damaged_nodes_under_one_boundary_both_relayout() {
 #[test]
 fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
     let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
+    common::define_lynx_text(&mut dom, "text");
     dom.add_stylesheet(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
                 font-family: Ahem; font-size: 16px; }
-         .container { display: -lynx-text; width: 60px; height: 80px; }
+         .container { width: 60px; height: 80px; }
          .fixed { position: fixed; left: 10px; top: 20px; width: 30px; height: 40px; }",
         dom::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = dom.document_element().id();
-    let container = dom.create_element("view", ());
+    let container = dom.create_element("text", ());
     dom.add_class(container, "container");
     dom.set_inline_style(container, "content-visibility: hidden");
     dom.append_child(root, container);
@@ -2297,15 +2299,15 @@ fn text_children_of_contents_measure_as_container_items() {
         "page { display: flex; width: 800px; height: 100px;
                 font-family: Ahem; font-size: 20px; }
          .wrap { display: contents; }
-         .label { display: -lynx-text; }
          .cell { display: flex; width: 100px; height: 100px; }",
     );
+    h.doc.define_lynx_text("text");
     h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
     let root = h.doc.root;
     let wrap = h.doc.el(root, "view.wrap");
     // Text needs a block to live in, so what `display: contents` flattens into
     // the container's item list is that block — which is the subject here.
-    let label = h.doc.el(wrap, "view.label");
+    let label = h.doc.el(wrap, "text.label");
     let text = h.doc.dom.create_text_node("hi", ());
     h.doc.dom.append_child(label, text);
     let after = h.doc.el(root, "view.cell");
@@ -2667,8 +2669,9 @@ fn bounding_client_rect_is_the_border_box_of_a_padded_text_element() {
     let mut h = Harness::new(
         "page { display: flex; align-items: flex-start; width: 400px; height: 300px;
                 font-family: Ahem; font-size: 20px; }
-         .label { display: -lynx-text; padding: 10px; margin-left: 30px; }",
+         .label { padding: 10px; margin-left: 30px; }",
     );
+    h.doc.define_lynx_text("text");
     assert_eq!(h.doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = h.doc.root;
     let label = h.doc.el(root, "text.label");

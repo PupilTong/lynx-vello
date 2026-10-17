@@ -70,8 +70,9 @@ Landed and not to be regressed:
   matches native; for `maxlength` it matches *neither* reference, deliberately.
 - `text-maxline="1"` is a one-line clamp of the wrapped paragraph, not a
   `nowrap` plus fill-available pair.
-- `display: none` on a `<text>` is unsupported; editable text controls are out
-  of scope.
+- `display: none` hides a `<text>`; `display: contents` on one is undefined
+  behaviour (user ruling 2026-10-17), handled only so that it does not crash.
+  Editable text controls are out of scope.
 - Per-line data for the Lynx `layout` event is produced but not yet wired to a
   dispatched event.
 - `getTextBoundingRect({start, end})` is the `text` component's UI method
@@ -81,7 +82,7 @@ Landed and not to be regressed:
   (no selection model).
 - Relayout damage on an element evicts its direct text children's measurement
   caches and retained artifacts, because text nodes carry no stylo damage record.
-- Every `-lynx-text` paragraph keeps its white space verbatim, as native does
+- Every Lynx paragraph keeps its white space verbatim, as native does
   for a `<text>` (`WhiteSpaceProcessing::Verbatim`, no switch): only
   `white-space: nowrap` stops wrapping and cuts at the first newline, and a
   newline that ends the text adds an empty last line; `<markdown>` paragraphs,

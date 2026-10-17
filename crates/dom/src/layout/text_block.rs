@@ -1,4 +1,4 @@
-//! `display: -lynx-text`: one element, one flattened paragraph.
+//! A Lynx text element: one element, one flattened paragraph.
 //!
 //! A text block swallows its subtree. The element that establishes it owns the
 //! shaped paragraph; every text node and nested text scope inside it is
@@ -8,17 +8,20 @@
 //!
 //! # Classifying a child
 //!
-//! By computed display alone — never by tag. `crates/dom` must not contain
-//! Lynx element vocabulary, and it does not need to: the Lynx UA sheet already
-//! encodes the structure as display values, so the rules below reproduce it
-//! without naming `text`, `wrapper`, `raw-text` or `view`.
+//! By the child's kind and computed display ([`crate::layout::style::display_mode`]),
+//! never by tag name. `crates/dom` must not contain Lynx element vocabulary,
+//! and it does not need to: the host defines the Lynx text tags as Lynx text
+//! elements ([`crate::CustomElement::is_lynx_text`]), and the Lynx UA sheet
+//! encodes the rest of the structure as display values, so the rules below
+//! reproduce it without naming `text`, `wrapper`, `raw-text` or `view`. The
+//! rows are checked in order.
 //!
-//! | computed display | role |
+//! | child | role |
 //! |---|---|
 //! | (text node) | a run, carrying its innermost element ancestor's style |
-//! | `-lynx-text` | a nested scope: recurse, its runs carry *its* style |
-//! | `contents` | transparent: recurse, contributing no scope of its own |
-//! | `none` | skipped, and hidden |
+//! | `display: none` | skipped, and hidden |
+//! | `display: contents` | transparent: recurse, contributing no scope of its own |
+//! | a Lynx text element | a nested scope: recurse, its runs carry *its* style |
 //! | anything else | exactly one atomic inline box, never recursed into |
 //!
 //! The last row is what makes an inline `<view>` atomic: its inner text can
@@ -581,10 +584,11 @@ mod generated_content_tests {
 
     fn document(css: &str) -> (Document<()>, NodeId) {
         let mut doc = Document::new(crate::tree::document::tests::device(), "page", ());
+        crate::test_common::define_lynx_text(&mut doc, "text");
         doc.register_fonts(FontBlob::from_static(include_bytes!(
             "../../../hughie/tests/fixtures/Ahem.ttf"
         )));
-        doc.add_stylesheet("page { display: flex; } text { display: -lynx-text; font-family: Ahem; font-size: 20px; } scope { display: contents; }", StylesheetOrigin::Author);
+        doc.add_stylesheet("page { display: flex; } text { font-family: Ahem; font-size: 20px; } scope { display: contents; }", StylesheetOrigin::Author);
         doc.add_stylesheet(css, StylesheetOrigin::Author);
         let text = doc.create_element("text", ());
         doc.append_child(doc.document_element().id(), text);
@@ -836,7 +840,7 @@ mod generated_content_tests {
         doc.set_attribute(text, "text", "A B C");
         doc.layout();
         assert!(doc.text_block_size(text).unwrap().height >= 60.0);
-        // A `-lynx-text` paragraph keeps its text verbatim: a wider box still
+        // A Lynx paragraph keeps its text verbatim: a wider box still
         // breaks at the newline, and `white-space-collapse` is not read.
         doc.set_attribute(text, "text", "AB\nCD");
         doc.add_stylesheet(
@@ -876,13 +880,13 @@ mod range_box_tests {
     #[test]
     fn a_laid_out_paragraph_answers_its_range_boxes_in_content_box_coordinates() {
         let mut doc = Document::new(crate::tree::document::tests::device(), "page", ());
+        crate::test_common::define_lynx_text(&mut doc, "text");
         doc.register_fonts(FontBlob::from_static(include_bytes!(
             "../../../hughie/tests/fixtures/Ahem.ttf"
         )));
         doc.add_stylesheet(
             "page { display: flex; align-items: flex-start; } \
-             text { display: -lynx-text; font-family: Ahem; font-size: 10px; } \
-             text > text { display: -lynx-text; }",
+             text { font-family: Ahem; font-size: 10px; }",
             StylesheetOrigin::Author,
         );
         let text = doc.create_element("text", ());
@@ -934,13 +938,15 @@ mod hit_tests {
     /// A 10px Ahem paragraph, `text`, styled by `inline`, under the page.
     fn paragraph(inline: &str) -> (Document<()>, NodeId) {
         let mut doc = Document::new(crate::tree::document::tests::device(), "page", ());
+        for tag in ["text", "a", "strong", "span"] {
+            crate::test_common::define_lynx_text(&mut doc, tag);
+        }
         doc.register_fonts(FontBlob::from_static(include_bytes!(
             "../../../hughie/tests/fixtures/Ahem.ttf"
         )));
         doc.add_stylesheet(
             "page { display: flex; align-items: flex-start; } \
-             text { display: -lynx-text; font-family: Ahem; font-size: 10px; } \
-             a, strong, span { display: -lynx-text; } \
+             text { font-family: Ahem; font-size: 10px; } \
              view { display: flex; }",
             StylesheetOrigin::Author,
         );

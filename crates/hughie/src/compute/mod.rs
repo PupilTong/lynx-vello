@@ -19,7 +19,7 @@ pub use leaf::compute_leaf_layout_with_measurement_for_testing;
 pub use leaf::{LeafMeasureInput, LeafMetrics, NaturalSize, compute_leaf_layout};
 
 /// The box-model wrapper a paragraph-establishing box lays out through: a
-/// `display: -lynx-text` block ([`crate::text::block`]) or a block container's
+/// Lynx text element's block ([`crate::text::block`]) or a block container's
 /// inline formatting context ([`crate::text::inline`]).
 ///
 /// Not a general host-measurer door: leaf content stays closed, and this exists

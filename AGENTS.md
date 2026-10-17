@@ -2222,7 +2222,7 @@ tag (`div`, `span`, any other name; `tree::raw_text`'s `LYNX_TAGS`), there as
 loose text that `dom` boxes into anonymous items; under any other Lynx tag it is
 `display: none`. One `wrapper` level is looked through either way. A `text`
 keeps its text verbatim, as every native backend does (user ruling
-2026-10-16): every `display: -lynx-text` paragraph skips CSS white-space
+2026-10-16): every Lynx paragraph (a Lynx text element's) skips CSS white-space
 processing (`hughie::text::paragraph`'s `WhiteSpaceProcessing::Verbatim`; no
 switch, user ruling 2026-10-17), so space runs, leading spaces, tabs (20px
 stops) and every newline stay, trailing spaces hang, a newline that ends the
@@ -3105,7 +3105,8 @@ Subsystems:
   last remembered size (`remembered.rs`). Two kinds of box lay their content
   out as one paragraph: a Lynx text element (`Node::is_lynx_text`, from its
   custom element definition, under any `display` but `none` and `contents`;
-  `display: -lynx-text` too, which no engine sheet writes any more) (`text_block.rs`, the flattened Lynx paragraph) and the
+  the fork's `display: -lynx-text` value that did this until 2026-10-17 is
+  removed) (`text_block.rs`, the flattened Lynx paragraph) and the
   `(block, flow)` block container
   (`DisplayMode::BlockFlow`, `inline_flow.rs`, a CSS inline formatting
   context; no author style produces it — `block` and `inline` parse only in

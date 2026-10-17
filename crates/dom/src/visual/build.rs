@@ -1079,9 +1079,8 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         })
     }
 
-    /// Emits the one item a paragraph-establishing element — a
-    /// `display: -lynx-text` element or a block container — paints its whole
-    /// paragraph through.
+    /// Emits the one item a paragraph-establishing element — a Lynx text
+    /// element or a block container — paints its whole paragraph through.
     ///
     /// The walk still descends past a text block, to reach an atomic inline
     /// box or an out-of-flow child; what keeps the glyphs from being painted

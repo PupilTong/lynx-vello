@@ -766,13 +766,13 @@ fn asset_basenames(directory: &Path, extension: &str) -> BTreeSet<String> {
 
 /// The `text-block` class really reaches the fixtures.
 ///
-/// The goldens above pass byte-identically because `DisplayMode::Text` still
-/// dispatches to flexbox — not because the class is inert. If the harness ever
-/// stopped applying it, every text case would keep passing here and then break
-/// the moment text layout actually moves onto `-lynx-text`. This is the test
-/// that tells those two states apart.
+/// `support/html.rs` creates every element that wears the class as a Lynx text
+/// element, and the text goldens above depend on that. This test pins it
+/// directly: the fixture's text holder keeps its own inline `display: flex` as
+/// its computed value, and still establishes a committed Lynx paragraph,
+/// which only a Lynx text element does under `display: flex`.
 #[test]
-fn the_text_block_class_gives_a_fixture_the_lynx_text_display() {
+fn the_text_block_class_makes_a_fixture_element_a_lynx_paragraph() {
     use dom::stylo::values::computed::Display;
 
     let case = generated::CASES
@@ -804,7 +804,11 @@ fn the_text_block_class_gives_a_fixture_the_lynx_text_display() {
         .get_display();
     assert_eq!(
         display,
-        Display::LynxText,
-        "the harness sheet must beat the fixture's own inline `display:flex`"
+        Display::Flex,
+        "the fixture's own inline `display:flex` is the computed value"
+    );
+    assert!(
+        doc.dom.text_block_size(inner).is_some(),
+        "the text holder establishes a committed Lynx paragraph"
     );
 }

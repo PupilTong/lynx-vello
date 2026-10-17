@@ -9,7 +9,7 @@
 //! keeps. `Document::layout`'s loop — lay out, mark the readers under every
 //! container whose recorded box moved, lay out again, up to
 //! `CONTAINER_PASSES` times — is the fallback for what that cannot predict
-//! (`inline-size` containers and `display: -lynx-text` ones). Both are gated
+//! (`inline-size` containers and Lynx text elements that are containers). Both are gated
 //! on a sticky document bit set when a cascaded style resolved a
 //! container-relative unit, so a page with query containers and no `cqw`/`cqh`
 //! pays one emptiness test and one bit test for them.

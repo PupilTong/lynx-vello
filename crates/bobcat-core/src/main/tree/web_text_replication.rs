@@ -364,7 +364,8 @@ fn a_text_nested_in_a_text_is_an_inline_run_that_scopes_only_its_own_colour() {
     literal(&mut document, joined_run, "and red");
     document.layout();
 
-    assert_eq!(display(&document, nested), Display::LynxText);
+    assert_eq!(display(&document, nested), Display::Flex);
+    assert_eq!(document.paragraph_of(nested), Some(text));
     assert_eq!(
         ink(&document, text),
         (ink(&document, joined).0 + 24.0, 24.0),
@@ -403,7 +404,8 @@ fn a_nested_text_run_keeps_the_markup_s_newlines_in_a_text() {
     literal(&mut document, text, "\n  ");
     document.layout();
 
-    assert_eq!(display(&document, nested), Display::LynxText);
+    assert_eq!(display(&document, nested), Display::Flex);
+    assert_eq!(document.paragraph_of(nested), Some(text));
     assert_eq!(
         ink(&document, text),
         (13.0 * 24.0, 4.0 * 24.0),
@@ -448,7 +450,8 @@ fn a_wrapper_between_a_text_and_its_nested_run_changes_nothing() {
     document.layout();
 
     assert_eq!(display(&document, wrapper), Display::Contents);
-    assert_eq!(display(&document, through), Display::LynxText);
+    assert_eq!(display(&document, through), Display::Flex);
+    assert_eq!(document.paragraph_of(through), Some(wrapped));
     assert_eq!(
         ink(&document, wrapped),
         ink(&document, plain),
@@ -1104,10 +1107,15 @@ fn truncation_content_is_skipped_entirely_when_no_maxline_is_declared() {
 
     assert_eq!(
         display(&document, truncation),
-        Display::LynxText,
-        "a text's own inline-truncation child is always a text scope here; \
+        Display::Flex,
+        "a text's own inline-truncation child is shown by the cascade; \
          whether its content is shown is the paragraph's decision, not the \
          cascade's"
+    );
+    assert_eq!(
+        document.paragraph_of(truncation),
+        Some(text),
+        "and it is a text scope of that paragraph"
     );
     assert_eq!(
         ink(&document, text),
@@ -1169,9 +1177,14 @@ fn truncation_content_is_laid_in_at_the_clamp_a_maxline_overflows() {
 
     assert_eq!(
         display(&document, truncation),
-        Display::LynxText,
-        "the truncation subtree is a text scope, and the paragraph overflows \
-         the one line it is allowed, so its content is laid in"
+        Display::Flex,
+        "the truncation subtree is shown by the cascade"
+    );
+    assert_eq!(
+        document.paragraph_of(truncation),
+        Some(text),
+        "it is a text scope, and the paragraph overflows the one line it is \
+         allowed, so its content is laid in"
     );
     assert_eq!(
         placement(&document, icon),
@@ -1233,9 +1246,13 @@ fn a_custom_truncation_s_content_replaces_the_clamp_marker_at_every_maxline() {
     for (limit, block, truncation) in clamped {
         assert_eq!(
             display(&document, truncation),
-            Display::LynxText,
-            "clamp {limit}: the block's own inline-truncation child is a text \
-             scope"
+            Display::Flex,
+            "clamp {limit}: the block's own inline-truncation child is shown"
+        );
+        assert_eq!(
+            document.paragraph_of(truncation),
+            Some(block),
+            "clamp {limit}: and is a text scope of the block"
         );
         assert_eq!(
             ink(&document, block),
@@ -1248,10 +1265,15 @@ fn a_custom_truncation_s_content_replaces_the_clamp_marker_at_every_maxline() {
 
     assert_eq!(
         display(&document, unclamped_truncation),
-        Display::LynxText,
-        "the block that declared no clamp holds the same text scope as the \
-         clamped ones — what differs is whether the paragraph lays its content \
-         in, which the two measures below report"
+        Display::Flex,
+        "the block that declared no clamp shows its truncation child as the \
+         clamped ones do"
+    );
+    assert_eq!(
+        document.paragraph_of(unclamped_truncation),
+        Some(unclamped),
+        "and holds the same text scope — what differs is whether the paragraph \
+         lays its content in, which the two measures below report"
     );
     assert_eq!(
         ink(&document, unclamped),
@@ -2094,8 +2116,8 @@ fn a_compiled_maxline_card_clamps_one_two_and_unlimited_lines() {
 /// `lynx/core/renderer/dom/fiber/text_element.cc:196-205`), while web-core
 /// spells it as ordinary author-origin CSS (`x-text { display: flex }`,
 /// `x-text.css:7-13`, with no `!important`), so the card's inline
-/// `display: none` outranks it there. This engine writes `display:
-/// -lynx-text` as a plain UA declaration too, so the declaration the card
+/// `display: none` outranks it there. This engine fixes it by the element's
+/// kind and writes no `display` for a text, so the declaration the card
 /// writes hides a text here as well.
 #[test]
 fn display_none_removes_a_text_block_and_an_inline_run_alike() {

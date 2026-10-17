@@ -89,9 +89,11 @@ none; }`. That last one merely *ties* on specificity with `view`'s,
 `wrapper`'s, `scroll-view`'s and `list`'s own `display` rules, so it wins by
 being assembled last in the sheet and `nothing_inside_an_image_generates_a_box`
 is the tripwire for that ordering. A `text`/`inline-text` child
-is the one exception the sheet cannot reach, because `display: -lynx-text` is
-UA-important; a `src` masks it, since `dom` hides every child of a replaced
-box. Two enabling changes landed with it: `hughie`'s `compute_leaf_layout`
+was the one exception the sheet could not reach while `display: -lynx-text`
+was UA-important, until 2026-10-15 (the value was removed on 2026-10-17, and a
+text is a paragraph by its element kind); it is hidden like any other child
+now, and a `src` masks every child anyway, since `dom` hides every child of a
+replaced box. Two enabling changes landed with it: `hughie`'s `compute_leaf_layout`
 suppresses the natural aspect ratio under size containment (it otherwise fills
 a missing axis before containment is consulted), and `dom`'s `free_node`
 unbinds a freed node from the image registry — without which a load completing

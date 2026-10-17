@@ -29,9 +29,9 @@ pub(crate) enum DisplayMode {
     GridLanes,
     Linear,
     Relative,
-    /// A Lynx text element ([`Node::is_lynx_text`]), or a `display:
-    /// -lynx-text` box: one flattened Lynx paragraph, laid out by
-    /// [`hughie::text::block`] through [`crate::layout::text_block`].
+    /// A Lynx text element ([`Node::is_lynx_text`]): one flattened Lynx
+    /// paragraph, laid out by [`hughie::text::block`] through
+    /// [`crate::layout::text_block`].
     Text,
     /// A block container: inner display `flow` (`display: block`), whose
     /// content is laid out as a CSS inline formatting context by
@@ -77,7 +77,6 @@ fn mode_of(display: Display, lynx_text: bool) -> DisplayMode {
         Display::GridLanes => DisplayMode::GridLanes,
         Display::Linear => DisplayMode::Linear,
         Display::LynxRelative => DisplayMode::Relative,
-        Display::LynxText => DisplayMode::Text,
         // Inner display `flow`: a block container, or an inline box that
         // lays its own content out because no inline formatting context
         // around it took it in (`crate::layout::inline_flow`).
@@ -504,7 +503,6 @@ mod tests {
         assert_eq!(mode_of(Display::GridLanes, false), DisplayMode::GridLanes);
         assert_eq!(mode_of(Display::Linear, false), DisplayMode::Linear);
         assert_eq!(mode_of(Display::LynxRelative, false), DisplayMode::Relative);
-        assert_eq!(mode_of(Display::LynxText, false), DisplayMode::Text);
         assert_eq!(mode_of(Display::Block, false), DisplayMode::BlockFlow);
         assert_eq!(mode_of(Display::Inline, false), DisplayMode::BlockFlow);
     }
@@ -519,7 +517,6 @@ mod tests {
             Display::GridLanes,
             Display::Linear,
             Display::LynxRelative,
-            Display::LynxText,
             Display::Block,
             Display::Inline,
         ] {

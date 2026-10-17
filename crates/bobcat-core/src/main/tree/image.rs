@@ -131,8 +131,8 @@
 //! ever be a snapshot.
 //!
 //! **A `text` child is suppressed like any other.** `text` and `inline-text`
-//! carry `display: -lynx-text` as a plain declaration ([`super::text`]), so the
-//! `image > *` rule, later in the sheet at the same specificity, hides a `text`
+//! are Lynx text elements by their kind, and the sheet gives them no `display`
+//! of its own ([`super::text`]), so the `image > *` rule hides a `text`
 //! written inside an `image` too. A `src`
 //! would hide it regardless: an element with one is replaced, and `dom` hides
 //! every child of a replaced box outright, whatever the cascade said.
@@ -609,8 +609,8 @@ mod tests {
         }
     }
 
-    /// `text`'s `display: -lynx-text` is a plain declaration, so the
-    /// `image > *` rule reaches a `text` child like any other. With a `src` the
+    /// The sheet gives a `text` no `display` of its own, so the `image > *`
+    /// rule reaches a `text` child like any other. With a `src` the
     /// image is replaced, and `dom` hides its children on top of the cascade.
     #[test]
     fn a_text_inside_an_image_is_suppressed_like_any_other_child() {

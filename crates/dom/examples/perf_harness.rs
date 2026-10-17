@@ -34,6 +34,17 @@ const CSS: &str = r#"
     .row:nth-child(2n) { background-color: rgb(245, 245, 245); }
 "#;
 
+/// `text` as `crates/bobcat-core` defines it, minus its method: a Lynx text
+/// element ([`dom::CustomElement::is_lynx_text`]), so each label lays out as
+/// a Lynx paragraph.
+struct TextKind;
+
+impl dom::CustomElement<()> for TextKind {
+    fn is_lynx_text(&self) -> bool {
+        true
+    }
+}
+
 const ROWS: usize = 1024;
 const NB: usize = 256;
 
@@ -95,6 +106,7 @@ fn main() {
         // Loop: flip one row's height, commit. For profiler attribution.
         let device = Device::new(390.0, 844.0, 3.0);
         let mut doc = Document::new(device, "page", ());
+        doc.define("text", Box::new(TextKind));
         doc.add_stylesheet(CSS, StylesheetOrigin::Author);
         let root = doc.document_element().id();
         let list = doc.create_element("scroll-view", ());
@@ -136,6 +148,7 @@ fn main() {
         // a mutation changes one subtree out of a thousand.
         let device = Device::new(390.0, 844.0, 3.0);
         let mut doc = Document::new(device, "page", ());
+        doc.define("text", Box::new(TextKind));
         doc.add_stylesheet(CSS, StylesheetOrigin::Author);
         let root = doc.document_element().id();
         let list = doc.create_element("scroll-view", ());
@@ -185,6 +198,7 @@ fn main() {
     for _ in 0..iterations {
         let device = Device::new(390.0, 844.0, 3.0);
         let mut doc = Document::new(device, "page", ());
+        doc.define("text", Box::new(TextKind));
         doc.add_stylesheet(CSS, StylesheetOrigin::Author);
 
         let mut rows = Vec::with_capacity(ROWS);

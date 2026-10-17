@@ -549,9 +549,8 @@ impl<T> TreeArenas<T> {
 #[derive(Default)]
 pub(crate) struct NodeLayoutState {
     pub(crate) slot: LayoutSlot,
-    /// The paragraph a `display: -lynx-text` element or a block container
-    /// owns. A text node holds none: it is content of the paragraph above
-    /// it, not a box.
+    /// The paragraph a Lynx text element or a block container owns. A text node holds none: it is
+    /// content of the paragraph above it, not a box.
     pub(crate) text: Option<Box<TextStore>>,
     pub(crate) scroll_offset: euclid::default::Vector2D<f32>,
 }

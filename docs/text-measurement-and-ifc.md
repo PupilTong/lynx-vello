@@ -4,7 +4,8 @@
 > measurement path described in §1–§4 has been deleted.**
 >
 > A Lynx text block is now one flattened paragraph owned by the element that
-> establishes it (`display: -lynx-text`), laid out by
+> establishes it (a Lynx text element, `CustomElement::is_lynx_text`, since
+> 2026-10-17; the since-removed `display: -lynx-text` value before), laid out by
 > `crates/hughie/src/text/block/` and driven by `crates/dom/src/layout/text_block.rs`.
 > Text nodes generate no boxes; sibling runs share a line; a glyph run paints
 > in its own element's style.

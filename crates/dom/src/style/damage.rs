@@ -144,9 +144,9 @@ mod tests {
             ("--lynx-text-maxlength", "-1"),
         ] {
             let mut doc = Doc::with_css(&format!(
-                "@property {property} {{ syntax: '<integer>'; inherits: false; initial-value: {initial}; }}
-                 .label {{ display: -lynx-text; }}"
+                "@property {property} {{ syntax: '<integer>'; inherits: false; initial-value: {initial}; }}"
             ));
+            doc.define_lynx_text("text");
             let label = doc.el(doc.root, "text.label");
             flush(&mut doc);
 

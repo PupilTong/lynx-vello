@@ -94,8 +94,8 @@ const LYNX_TAGS: &[&str] = &[
 ];
 
 /// Carriers are hidden unless the box holding them renders their text (module
-/// doc), and author CSS may override or suppress their content. A
-/// `-lynx-text` paragraph keeps every run verbatim (`text.rs`), so a
+/// doc), and author CSS may override or suppress their content. A Lynx
+/// paragraph keeps every run verbatim (`text.rs`), so a
 /// carrier's own `preserve-breaks` decides its newlines only as loose text in
 /// an HTML element.
 pub(super) static UA_RULES: LazyLock<String> = LazyLock::new(|| {
@@ -209,7 +209,11 @@ mod tests {
         let stray = raw_text(&mut document, view, "stray");
         document.layout();
 
-        assert_eq!(display(&document, text), Display::LynxText);
+        assert_eq!(display(&document, text), Display::Flex);
+        assert!(
+            document.text_block_size(text).is_some(),
+            "the text lays out as a Lynx paragraph by its kind"
+        );
         assert_eq!(display(&document, wrapper), Display::Contents);
         assert_eq!(display(&document, direct), Display::Contents);
         assert_eq!(display(&document, inside), Display::Contents);
