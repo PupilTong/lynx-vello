@@ -171,9 +171,10 @@ impl Builder<'_> {
                 self.inlines(line, children);
                 line
             }
-            // A text node of the container, as in the browser's tree: it
-            // lays out nothing outside a paragraph, and is counted in the
-            // rendered text.
+            // A text node of the container, as in the browser's tree: white
+            // space only, so it generates no box among the container's
+            // items (css-flexbox-1 §4), and it is counted in the rendered
+            // text.
             Block::HtmlSpace { text, .. } => {
                 let node = self.document.create_text_node(text.as_str(), ());
                 self.document.append_child(parent, node);

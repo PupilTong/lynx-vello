@@ -2374,12 +2374,13 @@ mod tests {
     }
 
     /// Only element children are items: a text node between two items does
-    /// not shift the index.
+    /// not shift the index. White space, so it generates no box of its own
+    /// either (css-flexbox-1 §4) and the offsets stay the pages' alone.
     #[test]
     fn scroll_to_counts_element_children_only() {
         let mut document = document();
         let (swiper, _) = build(&mut document, "width: 200px; height: 100px", &[], 1);
-        let text = document.create_text_node("between", ());
+        let text = document.create_text_node(" \n ", ());
         document.append_child(swiper, text);
         for _ in 0..2 {
             element_under(&mut document, swiper, SWIPER_ITEM_TAG, "");

@@ -870,6 +870,62 @@ fn frame_without_text_runs(bencher: divan::Bencher<'_, '_>) {
     });
 }
 
+/// The glyphs of `frame_with_text_runs`, each paragraph's text loose in a
+/// `display: flex` box: dom wraps it in an anonymous block box laid out as a
+/// CSS inline formatting context, so the repeated encode goes through the
+/// anonymous boxes.
+#[divan::bench]
+fn frame_with_loose_text_runs(bencher: divan::Bencher<'_, '_>) {
+    let (page, banner) = loose_text_page();
+    bench_frames(
+        bencher.counter(ItemsCount::new(PARAGRAPHS * PARAGRAPH_CHARS)),
+        page,
+        Staleness::Repaints,
+        move |dom, phase| {
+            dom.set_inline_style_property(banner, "background-color", flip_color(phase));
+        },
+    );
+}
+
+/// `paragraph_page(true)` with each paragraph a shrink-to-fit
+/// `display: flex` box around its text node, which is then loose text.
+fn loose_text_page() -> (Document<()>, NodeId) {
+    let mut dom = page_document(&format!(
+        "{PARAGRAPH_CSS}
+         .paragraph.loose {{ display: flex; width: auto; align-self: flex-start; }}"
+    ));
+    assert!(
+        dom.register_fonts(dom::FontBlob::from_static(AHEM)) >= 1,
+        "the text cases need Ahem registered before the first layout"
+    );
+    let root = dom.document_element().id();
+    let banner = dom.create_element("view", ());
+    dom.add_class(banner, "banner");
+    dom.append_child(root, banner);
+    let line = "e".repeat(PARAGRAPH_CHARS);
+    let mut holders = Vec::with_capacity(PARAGRAPHS);
+    for _ in 0..PARAGRAPHS {
+        let holder = dom.create_element("view", ());
+        dom.add_class(holder, "paragraph");
+        dom.add_class(holder, "loose");
+        dom.append_child(root, holder);
+        let text = dom.create_text_node(line.clone(), ());
+        dom.append_child(holder, text);
+        holders.push(holder);
+    }
+    // A shrink-to-fit holder is exactly as wide as its anonymous box: one
+    // 16px Ahem glyph per character.
+    dom.layout();
+    for holder in holders {
+        assert_eq!(
+            dom.rounded_layout(holder).map(|layout| layout.size.width),
+            Some(f32::from(u8::try_from(PARAGRAPH_CHARS).expect("a short line")) * 16.0),
+            "every holder must lay its loose text out"
+        );
+    }
+    (dom, banner)
+}
+
 // ---------------------------------------------------------------------------
 // Image frames
 // ---------------------------------------------------------------------------

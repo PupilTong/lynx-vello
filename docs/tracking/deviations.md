@@ -51,6 +51,39 @@ consequential choice about whether to follow the spec or the quirk.
   encode window covers the new offset and the offset main adopts is not yet
   `recenter_due`. List `sticky-top`/`sticky-bottom`
   attribute rules remain a separate component integration task.
+- **Loose text: anonymous items, and `raw-text` outside Lynx tags (user
+  ruling, 2026-10-16)** — css-flexbox-1 §4 and css-grid-1 §6 wrap each
+  contiguous sequence of a container's child text in an anonymous block
+  container that is one item, and render nothing for a white-space-only
+  sequence. `dom` builds those boxes (`crates/dom/src/tree/anonymous.rs`)
+  for `flex`, `grid` and `grid-lanes` and, by ruling, for Lynx's `linear`
+  and `relative`, which have no such rule of their own; each box is the
+  internal `(block, flow)` container laid out as a CSS inline formatting
+  context (`crates/dom/src/layout/inline_flow.rs`), never a `-lynx-text`
+  paragraph. On the Lynx side a `raw-text` renders as such text inside a tag
+  that is not a Lynx tag (`div`, `span`, any other name), directly or
+  through one `wrapper` (`crates/bobcat-core/src/main/tree/raw_text.rs`).
+  **Native:** a raw-text under a `view` is a virtual node, never laid out or
+  painted (`lynx/core/renderer/dom/fiber/fiber_element.cc:4099-4131`); an
+  unknown tag such as `div` has no platform UI, and creating it throws
+  (Android `BehaviorRegistry.java:71-84`, iOS `LynxUIOwner.m:556-562`).
+  **web-core:** `div` is a real `HTMLDivElement`, but
+  `raw-text { display: none }` hides every carrier outside `x-text`
+  (`lynx-stack/packages/web-platform/web-elements/src/elements/XText/x-text.css:261-265`),
+  so `<div>hello</div>` renders nothing. **This engine renders it** — a
+  deviation from both references. What follows from it:
+  - a DOM text node renders wherever its container lays children out as
+    items, a Lynx tag included — the W3C behavior; Lynx script never
+    creates one (a `raw-text` carries its text as generated content), and a
+    text node no longer lays out as an empty item that took a `gap` and a
+    grid cell;
+  - a `div` keeps the Lynx initial `display: flex` row, not HTML's `block`;
+  - a sequence ends at every element that generates a box, out-of-flow ones
+    included, and `display: none` ends none;
+  - a hit on the text targets the container, as a hit on a paragraph
+    targets its element;
+  - `linear` measures items at max-content on its main axis
+    (`crates/hughie/src/compute/linear.rs`), so text there does not wrap.
 - **`overflow: auto` omitted** — CSS has it; this engine does not.
   **Decision (user, 2026-07-29): leave it out.** Nothing here paints
   scrollbars, so `auto` ("scrollbars only when needed") would behave exactly
@@ -534,9 +567,8 @@ consequential choice about whether to follow the spec or the quirk.
   `lynx/core/renderer/dom/fiber/text_element.cc:196-205`). **web-core** lets
   the author's value take over the `x-text` host (`x-text { display: flex }`
   is author-origin, `x-text.css:7-13`), so the host is a flex box there while
-  its shadow tree keeps the text. Here no layout mode lays text out outside
-  `-lynx-text` (`crates/dom/src/layout/host.rs`: a text node outside a text
-  block lays out nothing), and the computed style reports `-lynx-text`.
+  its shadow tree keeps the text. Here the computed style reports
+  `-lynx-text`, so the text stays one Lynx paragraph.
 - **`position: relative` insets on an atomic inline box inside a `<text>` are
   ignored** — **ruled by the user on 2026-09-17**, following native Lynx
   against `web-core`. The atom is still ordinary in-flow content: it advances

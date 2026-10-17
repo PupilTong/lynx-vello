@@ -91,13 +91,18 @@ impl TextBlockStore {
 /// itself), and every scope that encloses it lies on this chain. The painter
 /// reads it for inline backgrounds, the source-range query for which items an
 /// element owns, so the two can never disagree about what is inside what.
+///
+/// An anonymous box's runs carry the style of its container or of a
+/// box-less element inside it, none of which is under the box
+/// ([`crate::tree::anonymous`]), so for one the walk ends at the container.
 pub(crate) fn inline_scopes<T>(
     tree: &TreeArenas<T>,
     node: NodeId,
     paragraph: NodeId,
 ) -> impl Iterator<Item = NodeId> + '_ {
+    let container = tree.anonymous_container(paragraph);
     std::iter::successors(Some(node), |&id| tree.get(id)?.flat_parent_id())
-        .take_while(move |&id| id != paragraph && tree.get(id).is_some())
+        .take_while(move |&id| id != paragraph && Some(id) != container && tree.get(id).is_some())
 }
 
 /// The element establishing the committed paragraph whose content `node` is

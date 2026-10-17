@@ -62,7 +62,6 @@ pub(crate) fn is_block_flow(display: Display) -> bool {
 
 /// The internal block container display, built from its public bit layout:
 /// the display of the anonymous box styles the engine computes.
-#[cfg(test)]
 pub(crate) fn block_flow_display() -> Display {
     use num_traits::FromPrimitive;
 

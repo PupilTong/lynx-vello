@@ -275,7 +275,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
         overlays = overlay::UA_RULES,
         markdowns = markdown::UA_RULES,
         text = text::UA_RULES,
-        carriers = raw_text::UA_RULES,
+        carriers = raw_text::UA_RULES.as_str(),
         frames = frame::UA_RULES,
         images = image::UA_RULES,
         svgs = svg::UA_RULES,

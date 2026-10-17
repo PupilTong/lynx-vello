@@ -127,6 +127,11 @@ pub struct Node<T> {
     pub(crate) custom_definition: Option<DefinitionId>,
     pub(crate) custom_state: CustomElementState,
     custom_subtree_may_contain: bool,
+    /// Whether `tree::anonymous` may hold an override of this node's layout
+    /// children — the one test `LayoutTree::children` makes before it looks
+    /// one up. Set with the override; a stale `true` costs a lookup that
+    /// finds nothing, so only clearing it is best effort.
+    pub(crate) may_override_children: bool,
 
     pub(crate) parsed_inline_style: Option<Arc<Locked<PropertyDeclarationBlock>>>,
     pub(crate) presentational_hints: Option<Arc<Locked<PropertyDeclarationBlock>>>,
@@ -161,6 +166,12 @@ pub(crate) struct StyleRefresh {
     /// does not reach a positioned box deeper than a child, so the harvest
     /// hands this to [`crate::Document::invalidate_containing_block`].
     pub(crate) containing_block_changed: bool,
+    /// Whether the boxes the element generates may have changed shape: a
+    /// first or last style, or a different `display` or `content`. Either
+    /// decides whether the element is loose text of its parent's items, a
+    /// transparent box, or a box of its own, so the anonymous boxes on both
+    /// sides of it are re-derived ([`crate::tree::anonymous`]).
+    pub(crate) box_tree_changed: bool,
 }
 
 impl StyleRefresh {
@@ -169,6 +180,7 @@ impl StyleRefresh {
         shaping_changed: false,
         paragraph_limits_changed: false,
         containing_block_changed: false,
+        box_tree_changed: false,
     };
 }
 
@@ -237,6 +249,7 @@ impl<T> Node<T> {
             custom_definition: None,
             custom_state: CustomElementState::default(),
             custom_subtree_may_contain: false,
+            may_override_children: false,
             parsed_inline_style: None,
             presentational_hints: None,
             shadow: None,
@@ -511,6 +524,7 @@ impl<T> Node<T> {
             ("element_state", size_of::<ElementState>(), true),
             ("custom_definition", size_of::<Option<DefinitionId>>(), true),
             ("custom_state", size_of::<CustomElementState>(), true),
+            ("may_override_children", size_of::<bool>(), false),
             (
                 "parsed_inline_style",
                 size_of::<Option<Arc<Locked<PropertyDeclarationBlock>>>>(),
@@ -546,6 +560,9 @@ impl<T> Node<T> {
                     PayloadSlot::Node(payload) => payload,
                     PayloadSlot::Backdrop => {
                         panic!("a `::backdrop` node has no payload and is never handed out")
+                    }
+                    PayloadSlot::Anonymous => {
+                        panic!("an anonymous box's node has no payload and is never handed out")
                     }
                     PayloadSlot::Document | PayloadSlot::ShadowRoot | PayloadSlot::Reserved => {
                         unreachable!("payload-less sentinels belong to non-element nodes")
@@ -626,6 +643,8 @@ impl<T> Node<T> {
                         shaping_changed: crate::layout::shaping_inputs_changed(old, new),
                         paragraph_limits_changed: crate::layout::paragraph_limits_changed(old, new),
                         containing_block_changed: false,
+                        box_tree_changed: *old.get_display() != *new.get_display()
+                            || old.get_counters().content != new.get_counters().content,
                     }
                 }
             }
@@ -636,6 +655,7 @@ impl<T> Node<T> {
                 shaping_changed: true,
                 paragraph_limits_changed: false,
                 containing_block_changed: false,
+                box_tree_changed: true,
             },
         };
         if !refresh.changed {
@@ -657,6 +677,17 @@ impl<T> Node<T> {
             refresh.containing_block_changed = role(&old) != role(new);
         }
         refresh
+    }
+
+    /// [`Self::layout_computed_style`] as the `Arc` the snapshot holds, for a
+    /// reader that keeps it or compares it by pointer.
+    pub(crate) fn layout_computed_style_arc(&self) -> Option<&Arc<ComputedValues>> {
+        // Its divergence check.
+        self.layout_computed_style()?;
+        let NodeData::Element(snapshot) = &self.data else {
+            return None;
+        };
+        snapshot.as_ref()
     }
 
     pub(crate) fn layout_computed_style(&self) -> Option<&ComputedValues> {
@@ -681,19 +712,22 @@ impl<T> Node<T> {
         snapshot.as_deref()
     }
 
-    /// Stores a lazily cascaded pseudo-element style as this node's computed
-    /// style — Stylo's primary style and the layout snapshot together, so the
-    /// snapshot's divergence check above holds — and returns the old one.
+    /// Stores a style the cascade did not produce for this node — a lazily
+    /// cascaded pseudo-element style, or an anonymous box's inherited one —
+    /// as its computed style: Stylo's primary style and the layout snapshot
+    /// together, so the snapshot's divergence check above holds. Returns the
+    /// old one.
     ///
-    /// Only for a `::backdrop` node ([`crate::tree::top_layer`]): it is never
-    /// in a parent's child list, so no traversal reaches it and no harvest
-    /// swaps its style; this is the one writer.
+    /// Only for a `::backdrop` node ([`crate::tree::top_layer`]) or an
+    /// anonymous box's ([`crate::tree::anonymous`]): neither is ever in a
+    /// parent's child list, so no traversal reaches it and no harvest swaps
+    /// its style; this is the one writer.
     pub(crate) fn replace_pseudo_style(
         &mut self,
         style: Arc<ComputedValues>,
     ) -> Option<Arc<ComputedValues>> {
         let NodeData::Element(snapshot) = &mut self.data else {
-            unreachable!("a pseudo-element node is an element node");
+            unreachable!("a generated box's node is an element node");
         };
         *self.stylo_data_present.get_mut() = true;
         self.style_data.borrow_mut().styles.primary = Some(style.clone());

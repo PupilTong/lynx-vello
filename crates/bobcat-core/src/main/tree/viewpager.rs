@@ -1069,13 +1069,14 @@ mod tests {
     }
 
     /// Only element children are pages: a text node between two pages does
-    /// not shift the index.
+    /// not shift the index. White space, so it generates no box of its own
+    /// either (css-flexbox-1 §4) and the offsets stay the pages' alone.
     #[test]
     fn select_tab_counts_element_children_only() {
         let mut document = document();
         let pager = child(&mut document, VIEWPAGER_TAG, "width: 200px; height: 100px");
         element_under(&mut document, pager, VIEWPAGER_ITEM_TAG, "");
-        let text = document.create_text_node("between", ());
+        let text = document.create_text_node(" \n ", ());
         document.append_child(pager, text);
         for _ in 0..2 {
             element_under(&mut document, pager, VIEWPAGER_ITEM_TAG, "");

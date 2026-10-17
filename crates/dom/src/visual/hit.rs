@@ -74,7 +74,8 @@ impl PaintOrder {
 
     /// Items whose node died since the frame was built are skipped, not
     /// answered as their id: the frame's geometry for them is gone, and the
-    /// id names nothing a caller could do anything with.
+    /// id names nothing a caller could do anything with. A hit on an
+    /// anonymous box answers its container (`tree::anonymous`).
     fn hits_at<'frame, T>(
         &'frame self,
         document: &'frame Document<T>,
@@ -86,6 +87,7 @@ impl PaintOrder {
             .rev()
             .filter_map(move |item| self.item_hit(item, point, samples))
             .filter(move |&node| document.contains_node(node))
+            .map(move |node| document.hit_target(node))
     }
 
     pub(super) fn item_hit(

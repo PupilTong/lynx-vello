@@ -2214,7 +2214,10 @@ style shapes and paints its run; attribute changes invalidate the paragraph,
 and unchanged text/style reuse its shaping. `text` establishes one flattened
 paragraph whatever `defaultDisplayLinear` says, `wrapper` is
 `display: contents`, and `raw-text` dissolves into the `text` it is written
-inside (`display: none` anywhere else) with
+inside, or — a ruled deviation from web-core — into a tag that is not a Lynx
+tag (`div`, `span`, any other name; `tree::raw_text`'s `LYNX_TAGS`), there as
+loose text that `dom` boxes into anonymous items; under any other Lynx tag it is
+`display: none`. One `wrapper` level is looked through either way. It carries
 `white-space-collapse: preserve-breaks`, the one place Lynx keeps a literal
 newline. Sibling runs and nested text share the establishing element's
 paragraph. `text { color: initial; }` stops an ancestor's color at the text
@@ -3069,8 +3072,17 @@ embedder cascade policy in the UA sheet.
 Subsystems:
 
 - `tree/` — the boxed `TreeArenas<T>`, `Node`, `Document`, shadow roots, the
-  flat tree, custom-element definitions and reactions, and the document's
-  top layer with its `::backdrop` nodes (`tree/top_layer.rs`).
+  flat tree, custom-element definitions and reactions, the document's
+  top layer with its `::backdrop` nodes (`tree/top_layer.rs`), and the
+  anonymous block boxes around loose text (`tree/anonymous.rs`): each
+  contiguous sequence of text among the children of a `flex`, `grid`,
+  `grid-lanes`, `linear` or `relative` element — text nodes, and
+  `display: contents` elements whose `content` replaces their children —
+  becomes one item, a detached node with the internal block container
+  display; a white-space-only sequence becomes none (css-flexbox-1 §4,
+  css-grid-1 §6). `LayoutTree::children` answers the boxes in place of the
+  text, they are re-derived after each style flush from what mutations
+  recorded, and a hit on one targets its container.
 - `style/` — the per-document `StyleEngine` (`Stylist`, cascade pipeline,
   device, stylesheet set, `SharedRwLock`), flush, invalidation, `StyleDamage`.
 - `layout/` — the concrete `hughie` host: `Document::layout`, the `LayoutTree`

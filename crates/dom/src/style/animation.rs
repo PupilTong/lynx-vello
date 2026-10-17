@@ -1249,8 +1249,8 @@ impl<T: Sync> Document<T> {
         let mut anchor_restyled = Vec::new();
         let mut stack = vec![root];
         while let Some(current) = stack.pop() {
-            let harvested = {
-                let (harvested, descend, anchor_restyle) = {
+            let (harvested, refresh) = {
+                let (harvested, refresh, descend, anchor_restyle) = {
                     let Some(node) = self.arenas_mut().get_mut(current) else {
                         continue;
                     };
@@ -1273,7 +1273,8 @@ impl<T: Sync> Document<T> {
                         refresh.paragraph_limits_changed,
                     );
                     (
-                        harvested.map(|damage| (damage, refresh)),
+                        harvested,
+                        refresh,
                         node.has_animation_dirty_descendants() || refresh.changed,
                         anchor_restyle,
                     )
@@ -1295,9 +1296,15 @@ impl<T: Sync> Document<T> {
                             .map(|&slot| arenas.at(slot).id()),
                     );
                 }
-                harvested
+                (harvested, refresh)
             };
-            let Some((damage, refresh)) = harvested else {
+            // As in the style harvest: before the damage test.
+            self.note_box_restyle(
+                current,
+                refresh,
+                harvested.is_some_and(StyleDamage::needs_relayout),
+            );
+            let Some(damage) = harvested else {
                 continue;
             };
             tick.restyled += 1;
@@ -1326,6 +1333,8 @@ impl<T: Sync> Document<T> {
         let backdrops = self.restyle_backdrops();
         tick.restyled += backdrops.restyled;
         tick.relayout |= backdrops.relayout;
+        // And one an anonymous box inherits from its container.
+        tick.relayout |= self.rebuild_anonymous_boxes();
         tick
     }
 }

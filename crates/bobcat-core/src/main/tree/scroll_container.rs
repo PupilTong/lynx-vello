@@ -968,7 +968,9 @@ mod tests {
             SCROLL_VIEW_TAG,
             "width: 100px; height: 100px",
         );
-        let text = document.create_text_node("between", ());
+        // White space, so it generates no box of its own (css-flexbox-1
+        // §4) and the offsets stay the elements' alone.
+        let text = document.create_text_node(" \n ", ());
         document.append_child(view, text);
         for style in [
             "height: 40px",

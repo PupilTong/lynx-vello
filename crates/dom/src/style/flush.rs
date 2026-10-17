@@ -147,6 +147,9 @@ impl<T: Sync> Document<T> {
             if self.backdrops_need_restyle() {
                 self.restyle_backdrops();
             }
+            // A removal or a text edit restyles nothing, but the loose text
+            // around it may group differently now.
+            self.rebuild_anonymous_boxes();
             return;
         }
         let root = root.id();
@@ -198,6 +201,11 @@ impl<T: Sync> Document<T> {
         // style the harvest just published (`tree::top_layer`). One test on
         // a page with an empty top layer.
         self.restyle_backdrops();
+        // The anonymous boxes around loose text, for the same reason and
+        // after the same harvest: their grouping reads `display` and
+        // `content`, and their style inherits from the container
+        // (`tree::anonymous`). One test when nothing changed.
+        self.rebuild_anonymous_boxes();
         // The flush is where animations start and stop; the timeline has to
         // learn what it now owns before the next frame asks whether to tick.
         self.sync_animation_state();

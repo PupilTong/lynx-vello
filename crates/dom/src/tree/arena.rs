@@ -25,6 +25,7 @@ use crate::layout::paragraph::TextStore;
 use crate::layout::relevance::{Relevance, RelevanceTable};
 use crate::layout::text_block::TextBlockStore;
 use crate::scroll::{AutoScrollRequest, ScrollRequest};
+use crate::tree::anonymous::AnonymousBoxes;
 use crate::tree::node::Node;
 use crate::tree::top_layer::TopLayer;
 
@@ -145,6 +146,10 @@ pub(crate) enum PayloadSlot<T> {
     /// node no embedder created, so it carries no payload. The variant is
     /// also the mark that tells a backdrop node from every other element.
     Backdrop,
+    /// An anonymous block box's node ([`crate::tree::anonymous`]): an
+    /// element node the box tree generated around loose text, with no
+    /// payload for the same reason, and marked by this variant the same way.
+    Anonymous,
     Node(T),
 }
 
@@ -194,6 +199,11 @@ pub(crate) struct TreeArenas<T> {
     /// because the layer is almost always empty and every reader tests
     /// `is_empty` first; see [`crate::tree::top_layer`].
     top_layer: TopLayer,
+    /// The anonymous boxes loose text generates, and the layout children
+    /// they replace that text with. Here because `LayoutTree::children`, the
+    /// one reader on the layout path, reaches nothing but these arenas; see
+    /// [`crate::tree::anonymous`].
+    anonymous: AnonymousBoxes,
 }
 
 impl<T> TreeArenas<T> {
@@ -206,7 +216,44 @@ impl<T> TreeArenas<T> {
             committed_boxes: CommittedBoxTable::default(),
             anchors: AnchorRegistry::default(),
             top_layer: TopLayer::default(),
+            anonymous: AnonymousBoxes::default(),
         }
+    }
+
+    /// The anonymous boxes around loose text; see
+    /// [`crate::tree::anonymous`].
+    #[inline]
+    pub(crate) fn anonymous(&self) -> &AnonymousBoxes {
+        &self.anonymous
+    }
+
+    #[inline]
+    pub(crate) fn anonymous_mut(&mut self) -> &mut AnonymousBoxes {
+        &mut self.anonymous
+    }
+
+    /// Whether `id` names an anonymous block box's node.
+    #[inline]
+    pub(crate) fn is_anonymous_box(&self, id: NodeId) -> bool {
+        self.slot_is_current(id)
+            && matches!(
+                self.payloads.get(id.arena_key()),
+                Some(PayloadSlot::Anonymous)
+            )
+    }
+
+    /// The container of the anonymous box `id`: its parent, or the host of
+    /// the shadow root it parents to; `None` when `id` is no anonymous box.
+    ///
+    /// Read from the box's own link, not through the flat tree: a shadow root
+    /// attached to the container since the box was derived turns its flat
+    /// parent into `None` until the next flush re-derives it.
+    pub(crate) fn anonymous_container(&self, id: NodeId) -> Option<NodeId> {
+        if !self.is_anonymous_box(id) {
+            return None;
+        }
+        let parent = self.get(self.get(id)?.parent_id()?)?;
+        Some(parent.shadow_host_id().unwrap_or_else(|| parent.id()))
     }
 
     /// The document's top layer; see [`crate::tree::top_layer`].
