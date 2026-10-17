@@ -30,7 +30,12 @@ use crate::visual::CornerRadii;
 /// Descendant glyph silhouettes used by `background-clip: text`.
 #[derive(Debug, Default)]
 pub(crate) struct TextClip<'doc> {
-    pub runs: Vec<(Vec2, &'doc parley::Layout<TextBrush>)>,
+    /// Each paragraph's offset, glyph runs and line placement.
+    pub runs: Vec<(
+        Vec2,
+        &'doc parley::Layout<TextBrush>,
+        &'doc [hughie::text::paragraph::LineGeometry],
+    )>,
 }
 
 impl TextClip<'_> {

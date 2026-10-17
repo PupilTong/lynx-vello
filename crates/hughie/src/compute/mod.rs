@@ -18,11 +18,13 @@ pub use grid::{compute_grid_lanes_layout, compute_grid_layout};
 pub use leaf::compute_leaf_layout_with_measurement_for_testing;
 pub use leaf::{LeafMeasureInput, LeafMetrics, NaturalSize, compute_leaf_layout};
 
-/// The box-model wrapper a `display: -lynx-text` block lays out through.
+/// The box-model wrapper a paragraph-establishing box lays out through: a
+/// `display: -lynx-text` block ([`crate::text::block`]) or a block container's
+/// inline formatting context ([`crate::text::inline`]).
 ///
 /// Not a general host-measurer door: leaf content stays closed, and this exists
-/// because a text block's content is a paragraph the host owns rather than a
-/// natural size it can report. `requires_known_measurement` is `true` and
+/// because a paragraph is content the host owns rather than a natural size it
+/// can report. `requires_known_measurement` is `true` and
 /// chosen here, where the reason lives — a paragraph must be laid out even when
 /// both dimensions are known, because its line breaks are what paint reads.
 pub fn compute_text_block_layout<Style, Measure>(

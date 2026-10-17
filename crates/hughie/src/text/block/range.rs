@@ -61,22 +61,22 @@ impl TextBlock {
             return None;
         }
         let lines = self.lines();
+        let geometry = self.line_geometry();
         if start == end {
             let line = lines
                 .iter()
-                .rev()
-                .find(|line| line.source_start <= start)
-                .or_else(|| lines.first())?;
+                .rposition(|line| line.source_start <= start)
+                .or_else(|| (!lines.is_empty()).then_some(0))?;
             return Some(vec![Rect::new(
                 Point::new(0.0, 0.0),
-                Size::new(0.0, line.height),
+                Size::new(0.0, geometry[line].height),
             )]);
         }
 
         let mut boxes = Vec::new();
         // The display layout's lines are the reported lines, index for
         // index: `assemble` builds one from the other.
-        for (line, info) in self.display().lines().zip(lines) {
+        for ((line, info), place) in self.display().lines().zip(lines).zip(geometry) {
             // Clipping to the line's own range is what drops its trailing
             // collapsible whitespace, which the range excludes.
             let low = start.max(info.source_start);
@@ -94,8 +94,8 @@ impl TextBlock {
             });
             if let Some((left, right)) = extent {
                 boxes.push(Rect::new(
-                    Point::new(left, info.top),
-                    Size::new(right - left, info.height),
+                    Point::new(left, place.top),
+                    Size::new(right - left, place.height),
                 ));
             }
         }
@@ -145,7 +145,9 @@ impl TextBlock {
             .display()
             .lines()
             .zip(self.lines())
-            .find(|(_, info)| info.top <= point.y && point.y < info.top + info.height)?;
+            .zip(self.line_geometry())
+            .find(|(_, place)| place.top <= point.y && point.y < place.top + place.height)
+            .map(|(pair, _)| pair)?;
         let mut hit = None;
         self.for_each_extent(&line, |units, left, right| {
             if hit.is_none()

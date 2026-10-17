@@ -1109,6 +1109,7 @@ dependencies = [
  "html5ever",
  "hughie",
  "markup5ever_rcdom",
+ "num-traits",
  "parley",
  "png",
  "pollster",

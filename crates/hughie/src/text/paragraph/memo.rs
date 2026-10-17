@@ -11,6 +11,7 @@
 //! runs the same probe/commit protocol over it.
 
 use crate::geometry::Size;
+use crate::text::TextContext;
 
 /// Everything a block's line breaking depends on.
 ///
@@ -201,5 +202,72 @@ impl BreakMemo {
 
     pub(in crate::text) const fn set_min_content(&mut self, width: f32) {
         self.min_content = Some(width);
+    }
+}
+
+/// The probe/commit protocol over a [`BreakMemo`], written once for every
+/// retained paragraph.
+///
+/// A consumer supplies its memo, the constraint its current result was laid
+/// out at, the layout itself and the metrics a result reports; the protocol
+/// — when the memo answers, when parley is re-entered, what a commit records
+/// and how a probe is undone — is these provided methods. Each consumer's
+/// public `probe`, `commit`, `is_probe_dirty` and `restore_committed` call
+/// them by their trait path, so the two paragraph kinds cannot drift.
+pub(in crate::text) trait Retained {
+    fn memo(&self) -> &BreakMemo;
+
+    fn memo_mut(&mut self) -> &mut BreakMemo;
+
+    /// The constraint the current result was laid out at, `None` without
+    /// one.
+    fn retained(&self) -> Option<BlockConstraint>;
+
+    /// Lays the paragraph out at `constraint`, re-entering parley only when
+    /// the retained result is not already the answer.
+    fn layout_at(&mut self, context: &mut TextContext, constraint: BlockConstraint);
+
+    /// What the current result reports.
+    fn reported(&self) -> BlockMetrics;
+
+    /// Answers `constraint` from the memo when it can, and from a layout
+    /// otherwise, recording the answer.
+    fn probe(&mut self, context: &mut TextContext, constraint: BlockConstraint) -> BlockMetrics {
+        if let Some(remembered) = self.memo().remembered(constraint) {
+            return remembered;
+        }
+        self.layout_at(context, constraint);
+        self.remember(constraint)
+    }
+
+    /// Lays the paragraph out for real and records `constraint` as the one
+    /// paint reads.
+    fn commit(&mut self, context: &mut TextContext, constraint: BlockConstraint) -> BlockMetrics {
+        self.layout_at(context, constraint);
+        let metrics = self.remember(constraint);
+        self.memo_mut().set_committed(constraint);
+        metrics
+    }
+
+    fn remember(&mut self, constraint: BlockConstraint) -> BlockMetrics {
+        let metrics = self.reported();
+        self.memo_mut().remember(constraint, metrics)
+    }
+
+    fn is_probe_dirty(&self) -> bool {
+        self.memo().is_probe_dirty(self.retained())
+    }
+
+    /// Lays the paragraph out at the committed constraint again when a probe
+    /// moved it. Answers whether parley was re-entered.
+    fn restore_committed(&mut self, context: &mut TextContext) -> bool {
+        let Some(committed) = self.memo().committed() else {
+            return false;
+        };
+        if !Retained::is_probe_dirty(self) {
+            return false;
+        }
+        self.layout_at(context, committed);
+        true
     }
 }

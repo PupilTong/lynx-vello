@@ -442,7 +442,7 @@ reaches no second record.
 | # | Gap | Cause |
 | --- | --- | --- |
 | C1 | A run's `line-height` is taken from the style of the **next** span | Upstream parley: `shape/mod.rs:127-128` advances `item.style_index` before flushing the pending item, so the last span's `line-height` governs every line. Observed as a truncation flow's `line-height` rewriting lines *before* the cut. |
-| C2 | Leading collapsible whitespace is emitted, not removed | `crates/hughie/src/text/paragraph/content.rs:435` — `PendingKind::Space => true` emits unconditionally with no start-of-line suppression. |
+| C2 | Leading collapsible whitespace is emitted, not removed | `crates/hughie/src/text/paragraph/content.rs:460` — `PendingKind::Space => true` emits unconditionally with no start-of-line suppression under `WhiteSpaceProcessing::CssKeepingLeadingSpace`, the `<text>` block's processing. The CSS inline formatting context (`hughie::text::inline`) processes with `WhiteSpaceProcessing::Css`, which removes the sequence; `<text>` keeps the gap until its own white-space processing changes. |
 
 ### D. Paint — closed
 

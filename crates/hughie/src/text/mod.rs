@@ -1,9 +1,11 @@
-//! Parley text layout: the shared paragraph core, the Lynx text block built
-//! on it, and the context they shape in.
+//! Parley text layout: the shared paragraph core, the two paragraph kinds
+//! built on it — the Lynx text block and a CSS block container's inline
+//! formatting context — and the context they shape in.
 
 pub mod block;
 mod context;
 mod font;
+pub mod inline;
 mod line;
 pub mod paragraph;
 

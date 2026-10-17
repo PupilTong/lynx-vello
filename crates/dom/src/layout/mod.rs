@@ -4,6 +4,8 @@ pub(crate) mod anchors;
 pub(crate) mod committed_box;
 mod hoisted;
 mod host;
+pub(crate) mod inline_flow;
+pub(crate) mod paragraph;
 pub(crate) mod relevance;
 mod style;
 pub(crate) mod text_block;
@@ -744,36 +746,6 @@ impl<T> Document<T> {
         text_block::paragraph_of(self.arenas(), self.layout_state(), slot)
     }
 
-    /// The nodes behind `id`'s paragraph items, indexed the way
-    /// [`SourceItem::Content`](hughie::text::block::SourceItem) indexes them.
-    ///
-    /// How a glyph run finds the element whose style painted it.
-    #[must_use]
-    pub(crate) fn text_block_sources(&self, id: crate::NodeId) -> Option<&[crate::NodeId]> {
-        let slot = self.slot(id)?;
-        Some(&self.layout_state().get(slot)?.text.as_deref()?.source_ids)
-    }
-
-    /// The nodes behind `id`'s custom truncation content, indexed the way
-    /// [`SourceItem::Truncation`](hughie::text::block::SourceItem) indexes
-    /// them — so the marker paints in its own subtree's colours rather than
-    /// the establishing element's.
-    #[must_use]
-    pub(crate) fn text_block_truncation_sources(
-        &self,
-        id: crate::NodeId,
-    ) -> Option<&[crate::NodeId]> {
-        let slot = self.slot(id)?;
-        Some(
-            &self
-                .layout_state()
-                .get(slot)?
-                .text
-                .as_deref()?
-                .truncation_source_ids,
-        )
-    }
-
     /// The paragraph `id` established, if a commit has produced one.
     ///
     /// `None` keeps every reader fail-closed: a block no commit laid out is
@@ -781,7 +753,40 @@ impl<T> Document<T> {
     #[must_use]
     pub(crate) fn text_block(&self, id: crate::NodeId) -> Option<&hughie::text::block::TextBlock> {
         let slot = self.slot(id)?;
-        self.layout_state().get(slot)?.text.as_deref()?.committed()
+        self.layout_state()
+            .get(slot)?
+            .text
+            .as_deref()?
+            .as_block()?
+            .committed()
+    }
+
+    /// The committed paragraph `id` establishes, of either kind, as paint
+    /// and the `background-clip: text` silhouette read it.
+    #[must_use]
+    pub(crate) fn painted_paragraph(
+        &self,
+        id: crate::NodeId,
+    ) -> Option<paragraph::PaintedParagraph<'_>> {
+        let slot = self.slot(id)?;
+        self.layout_state().get(slot)?.text.as_deref()?.painted()
+    }
+
+    /// The inline formatting context `id` establishes, if a commit has
+    /// produced one.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn inline_flow(
+        &self,
+        id: crate::NodeId,
+    ) -> Option<&hughie::text::inline::InlineFlow> {
+        let slot = self.slot(id)?;
+        self.layout_state()
+            .get(slot)?
+            .text
+            .as_deref()?
+            .as_flow()?
+            .committed()
     }
 
     /// How many times `id`'s paragraph has been shaped from scratch.
@@ -789,7 +794,7 @@ impl<T> Document<T> {
     #[must_use]
     pub(crate) fn text_block_rebuilds(&self, id: crate::NodeId) -> Option<u32> {
         let slot = self.slot(id)?;
-        Some(self.layout_state().get(slot)?.text.as_deref()?.rebuilds)
+        Some(self.layout_state().get(slot)?.text.as_deref()?.rebuilds())
     }
 
     /// Whether a probe left `id`'s paragraph off its committed break.
@@ -799,7 +804,7 @@ impl<T> Document<T> {
         self.slot(id)
             .and_then(|slot| self.layout_state().get(slot))
             .and_then(|state| state.text.as_deref())
-            .is_some_and(|store| store.block.is_probe_dirty())
+            .is_some_and(paragraph::TextStore::is_probe_dirty)
     }
 
     #[must_use]
@@ -1023,15 +1028,22 @@ impl<T> Document<T> {
 
     /// Generated runs have no box cache of their own. Reach the paragraph
     /// through transparent/nested scopes before using normal layout invalidation.
+    ///
+    /// A block container establishes a paragraph too, but never nests in
+    /// one: inside a `-lynx-text` subtree it is an atomic box, and its own
+    /// runs end at it. The walk stops there.
     fn paragraph_container(&self, id: crate::NodeId) -> Option<crate::NodeId> {
         use stylo::values::computed::Display;
         let start = self.get(id)?;
         // Its own display may just have become none. The old run still
         // belongs to the surrounding paragraph and must be removed from it.
-        let mut paragraph = start
+        let own = start
             .layout_computed_style()
-            .filter(|style| *style.get_display() == Display::LynxText)
-            .map(|_| id);
+            .map(|style| *style.get_display());
+        if own.is_some_and(style::is_block_flow) {
+            return Some(id);
+        }
+        let mut paragraph = (own == Some(Display::LynxText)).then_some(id);
         let mut current = start.flat_parent();
         while let Some(node) = current {
             let Some(style) = node.layout_computed_style() else {
@@ -1040,6 +1052,7 @@ impl<T> Document<T> {
             match *style.get_display() {
                 Display::LynxText => paragraph = Some(node.id()),
                 Display::Contents => {}
+                display if style::is_block_flow(display) => return Some(node.id()),
                 _ => break,
             }
             current = node.flat_parent();

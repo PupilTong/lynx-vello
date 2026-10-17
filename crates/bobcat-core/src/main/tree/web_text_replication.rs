@@ -33,7 +33,7 @@
 //! One divergence cuts across most of these fixtures and belongs to none of
 //! them: the markup indents its content, and a browser removes collapsible
 //! whitespace at the start of a line while this engine emits it as a space
-//! (`crates/hughie/src/text/paragraph/content.rs:352-383` resolves an open
+//! (`crates/hughie/src/text/paragraph/content.rs:377-408` resolves an open
 //! whitespace span against the following character, with no start-of-line
 //! suppression). Wherever a case's own claim survives that divergence the
 //! replica keeps the fixture's indentation and pins the claim against a
@@ -208,7 +208,7 @@ fn a_text_attribute_on_a_text_element_carries_the_paragraph_s_run() {
 /// unwritten zero size into the placed layout. #227 needed committed geometry
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:540-548`).
+/// (`crates/dom/src/layout/text_block.rs:596-603`).
 #[test]
 fn a_view_child_of_a_text_is_one_atomic_inline_box_laid_out_on_its_own() {
     let mut document = ahem_document();
@@ -270,7 +270,7 @@ fn a_view_child_of_a_text_is_one_atomic_inline_box_laid_out_on_its_own() {
 /// unwritten zero size into the placed layout. #227 needed committed geometry
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:540-548`).
+/// (`crates/dom/src/layout/text_block.rs:596-603`).
 #[test]
 fn a_container_nested_inside_an_inline_atom_sizes_itself_without_re_entering_the_line() {
     const BOX: &str = "width: 50px; height: 20px; border: 1px solid red";
@@ -554,7 +554,7 @@ fn runs_of_different_size_share_a_baseline_while_sibling_text_blocks_do_not() {
 /// unwritten zero size into the placed layout. #227 needed committed geometry
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:540-548`).
+/// (`crates/dom/src/layout/text_block.rs:596-603`).
 #[test]
 fn an_image_child_of_a_text_advances_the_line_by_its_used_size() {
     let mut document = ahem_document();
@@ -783,7 +783,7 @@ fn adjacent_text_siblings_are_separate_blocks_and_collapse_their_own_newlines() 
 /// unwritten zero size into the placed layout. #227 needed committed geometry
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:540-548`).
+/// (`crates/dom/src/layout/text_block.rs:596-603`).
 #[test]
 fn a_flex_view_inside_a_text_shrinks_to_fit_and_stays_on_the_line() {
     let mut document = ahem_document();
@@ -832,7 +832,7 @@ fn a_flex_view_inside_a_text_shrinks_to_fit_and_stays_on_the_line() {
 /// unwritten zero size into the placed layout. #227 needed committed geometry
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:540-548`).
+/// (`crates/dom/src/layout/text_block.rs:596-603`).
 #[test]
 fn a_raw_text_carrier_contributes_a_run_and_no_box_of_its_own() {
     let mut document = ahem_document();
@@ -920,7 +920,7 @@ fn a_wrapper_between_a_text_and_a_raw_text_carrier_changes_nothing() {
 /// unwritten zero size into the placed layout. #227 needed committed geometry
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
-/// (`crates/dom/src/layout/text_block.rs:540-548`).
+/// (`crates/dom/src/layout/text_block.rs:596-603`).
 #[test]
 fn the_image_beside_a_wrapped_carrier_is_a_real_box_on_the_line() {
     let mut document = ahem_document();

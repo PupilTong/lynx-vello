@@ -1250,7 +1250,7 @@ mod tests {
         // A text node never gains a paragraph slot: it is content of the
         // block above it, and the block lives on the element that
         // establishes it.
-        let (_, slot) = document.layout_state_mut().text_block_parts(text_slot);
+        let (_, slot) = document.layout_state_mut().text_store_parts(text_slot);
         assert!(slot.is_none());
     }
 }

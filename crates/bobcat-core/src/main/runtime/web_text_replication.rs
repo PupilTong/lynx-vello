@@ -1399,7 +1399,7 @@ const COUNTDOWN_PUSH: &str = r"
             children: `text[text] { content: attr(text) }` \
             (crates/bobcat-core/src/main/tree/text.rs:126) is a CSS content \
             list, and a content list replaces rendered children \
-            (crates/dom/src/layout/text_block.rs:246-248), where web-core's \
+            (crates/dom/src/layout/paragraph.rs:259-261), where web-core's \
             `RawTextAttributes` appends the attribute's text node after them \
             (web-elements/src/elements/XText/RawText.ts:19-26)"]
 fn a_native_props_text_push_replaces_the_leading_raw_text_run() {
@@ -1460,7 +1460,7 @@ fn a_native_props_text_push_replaces_the_leading_raw_text_run() {
             children rather than appending to them \
             (`text[text] { content: attr(text) }`, \
             crates/bobcat-core/src/main/tree/text.rs:126, through \
-            crates/dom/src/layout/text_block.rs:246-248)"]
+            crates/dom/src/layout/paragraph.rs:259-261)"]
 fn a_maxlength_clamps_the_text_a_native_props_push_delivers() {
     let mut pair = background_pair(&countdown_card(true, "5"), COUNTDOWN_PUSH);
     pair.deliver();
@@ -1507,7 +1507,7 @@ fn a_maxlength_clamps_the_text_a_native_props_push_delivers() {
             `text[text] { content: attr(text) }` \
             (crates/bobcat-core/src/main/tree/text.rs:126) is a CSS content \
             list, and a content list replaces rendered children \
-            (crates/dom/src/layout/text_block.rs:246-248), so the push leaves \
+            (crates/dom/src/layout/paragraph.rs:259-261), so the push leaves \
             the paragraph holding nothing but the pushed string — where \
             web-core's `RawTextAttributes` appends the attribute's text node \
             after the children it found \
@@ -1569,7 +1569,7 @@ fn a_native_props_text_push_appends_where_there_is_no_leading_run() {
             And the attribute it writes instead replaces the element's \
             children — `text[text] { content: attr(text) }` \
             (crates/bobcat-core/src/main/tree/text.rs:126) through \
-            crates/dom/src/layout/text_block.rs:246-248 — so the re-rendered \
+            crates/dom/src/layout/paragraph.rs:259-261 — so the re-rendered \
             slots stop rendering at all, where web-core appends the pushed \
             string after them \
             (web-elements/src/elements/XText/RawText.ts:19-26)"]

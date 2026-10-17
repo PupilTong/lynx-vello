@@ -3077,7 +3077,15 @@ Subsystems:
   impl, per-node `LayoutSlot`s in `DocumentLayoutState`, and the two
   per-element facts a `StyleView` answers with that no computed value carries:
   `content-visibility: auto` relevance (`relevance.rs`) and the css-sizing-4
-  last remembered size (`remembered.rs`).
+  last remembered size (`remembered.rs`). Two displays lay their content out
+  as one paragraph: `-lynx-text` (`text_block.rs`, the flattened Lynx
+  paragraph) and the internal `(block, flow)` block container
+  (`DisplayMode::BlockFlow`, `inline_flow.rs`, a CSS inline formatting
+  context of text runs; no author style produces it — the anonymous block box
+  around loose text is its producer). `paragraph.rs` holds what both share:
+  the `TextStore` a node's layout state keeps, either kind, the probe/restore
+  routing, the measure closure, and the `PaintedParagraph` the painter
+  reads.
 - `visual/` — stacking contexts, CSS2 Appendix E paint order, transforms,
   `RenderLayer` group effects, reverse-paint-order hit testing, and
   `content-visibility: auto` relevance determination (`relevance.rs`), which
@@ -3399,19 +3407,29 @@ grouping, stacking-axis self-alignment, baseline alignment/sharing, subgrid and
 fragmentation; do not add any of those without a user decision
 (`docs/style-assumptions.md` §24). Text shaping, line breaking,
 intrinsic/height-for-width measurement, baselines, and retained Parley layouts
-are unconditional crate behavior, in two modules. `src/text/paragraph` is the
+are unconditional crate behavior, in three modules. `src/text/paragraph` is the
 shared Parley core with no Lynx semantics: whitespace normalization and the
-byte↔UTF-16 source map (`content.rs`), the run-style vocabulary and its Parley
-translation (`style.rs`), shaping, breaking and line capture (`shape.rs`), tab
-stops (`tab.rs`), atom `vertical-align` (`position.rs`), the
-probe/commit break memo (`memo.rs`), the per-cluster extent walk
-(`extent.rs`), and `Paragraph`, which owns one shaped natural layout and
-re-breaks it in place. `src/text/block` is the Lynx `<text>` layer on it:
-`BlockStyle` with the `text-maxline`/`text-maxlength` limits, the truncation
-in `truncate.rs` (which lays an `<inline-truncation>` subtree in at the clamp;
-the painter applies `tail-color-convert`'s native semantics), the `layout`
-event's line reports, hidden-box outcomes, and the Lynx range and hit
-answers.
+byte↔UTF-16 source map (`content.rs`, its white-space processing chosen per
+consumer), the run-style vocabulary and its Parley translation (`style.rs`,
+with each run's `BreakStyle`), shaping, breaking and line capture
+(`shape.rs`), tab stops (`tab.rs`, following the `text-indent` keywords), atom
+`vertical-align` (`position.rs`), the probe/commit break memo and the
+`Retained` trait both consumers run the protocol through (`memo.rs`), the
+per-cluster extent walk (`extent.rs`), `LineGeometry` — where each laid-out
+line sits, and the `shift` every reader moves parley's placement by — and
+`Paragraph`, which owns one shaped natural layout and re-breaks it in place.
+`src/text/block` is the Lynx `<text>` layer on it: `BlockStyle` with the
+`text-maxline`/`text-maxlength` limits, the truncation in `truncate.rs` (which
+lays an `<inline-truncation>` subtree in at the clamp; the painter applies
+`tail-color-convert`'s native semantics), the `layout` event's line reports,
+hidden-box outcomes, and the Lynx range and hit answers; its line geometry is
+parley's own, every shift zero. `src/text/inline` is the CSS block
+container's inline formatting context over text runs only (`InlineFlow`,
+CSS-only `InlineFlowStyle`): css-text-3 §4.1 white space in full, per-run
+`text-wrap-mode`/`word-break`/`overflow-wrap`, the `text-indent` keywords
+counted in the intrinsic widths, CSS 2.2 §10.8.1 line boxes — the strut plus
+each run's half-leading — in `line_boxes.rs`, and the fit-content width for a
+definite available width.
 
 **css-anchor-position-1** is in the absolute pass: `anchor()`/`anchor-size()`
 resolution, the `position-area` grid, `anchor-center`, the css-position-3

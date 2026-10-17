@@ -63,6 +63,23 @@ pub struct InlineBoxSpec {
     pub vertical_align: VerticalAlign,
 }
 
+/// How a paragraph's white space is processed before shaping.
+///
+/// The choice is the paragraph consumer's: [`normalize`] is the one place it
+/// is read, and everything after it sees only the normalized block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::text) enum WhiteSpaceProcessing {
+    /// css-text-3 §4.1 per run, including §4.1.2 rule 1 at the start of the
+    /// paragraph: a collapsible whitespace sequence there is removed, as it
+    /// is after a preserved break.
+    Css,
+    /// css-text-3 §4.1 per run, except that a collapsible whitespace
+    /// sequence at the start of the paragraph is kept as one space — what
+    /// the Lynx `<text>` block does today (gap C2 in
+    /// `docs/tracking/web-text-test-replication.md`).
+    CssKeepingLeadingSpace,
+}
+
 /// Whitespace-normalized paragraph content with its source map.
 #[derive(Debug)]
 pub(in crate::text) struct NormalizedBlock {
@@ -267,7 +284,9 @@ enum PendingKind {
     /// A collapsible segment break: a space, unless the segment-break
     /// transformation removes it.
     SegmentBreak,
-    /// Whitespace after a preserved newline: always removed.
+    /// Whitespace at the start of a line — after a preserved newline, and
+    /// at the start of the paragraph under [`WhiteSpaceProcessing::Css`]:
+    /// always removed (css-text-3 §4.1.2 rule 1).
     Suppressed,
 }
 
@@ -284,7 +303,10 @@ struct Normalizer {
     segments: Vec<Segment>,
     units: u32,
     pending: Option<Pending>,
-    after_preserved_break: bool,
+    /// Whether nothing but removed whitespace has been emitted since the
+    /// last line start that normalization can see: a preserved break, or the
+    /// paragraph start when the processing removes leading whitespace there.
+    at_line_start: bool,
     tabs: Vec<u32>,
 }
 
@@ -293,7 +315,10 @@ struct Normalizer {
 const OBJECT_REPLACEMENT: char = '\u{FFFC}';
 
 /// Collapses whitespace across the flattened items and builds the source map.
-pub(in crate::text) fn normalize(items: &[InlineItem<'_>]) -> NormalizedBlock {
+pub(in crate::text) fn normalize(
+    items: &[InlineItem<'_>],
+    processing: WhiteSpaceProcessing,
+) -> NormalizedBlock {
     let mut state = Normalizer {
         text: String::new(),
         ranges: Vec::new(),
@@ -301,7 +326,7 @@ pub(in crate::text) fn normalize(items: &[InlineItem<'_>]) -> NormalizedBlock {
         segments: Vec::new(),
         units: 0,
         pending: None,
-        after_preserved_break: false,
+        at_line_start: processing == WhiteSpaceProcessing::Css,
         tabs: Vec::new(),
     };
 
@@ -331,7 +356,7 @@ impl Normalizer {
                 _ => {
                     self.flush_pending(character);
                     self.emit_verbatim(character, item);
-                    self.after_preserved_break = false;
+                    self.at_line_start = false;
                 }
             }
         }
@@ -346,7 +371,7 @@ impl Normalizer {
             item,
         });
         self.push_segment(SegmentKind::Box, byte..byte, 1);
-        self.after_preserved_break = false;
+        self.at_line_start = false;
     }
 
     /// A collapsible space, tab, or carriage return joins the open whitespace
@@ -357,7 +382,7 @@ impl Normalizer {
             self.pending = Some(Pending {
                 unit_start: self.units,
                 item,
-                kind: if self.after_preserved_break {
+                kind: if self.at_line_start {
                     PendingKind::Suppressed
                 } else {
                     PendingKind::Space
@@ -381,7 +406,7 @@ impl Normalizer {
                 self.pending = Some(Pending {
                     unit_start: self.units,
                     item,
-                    kind: if self.after_preserved_break {
+                    kind: if self.at_line_start {
                         PendingKind::Suppressed
                     } else {
                         PendingKind::SegmentBreak
@@ -406,7 +431,7 @@ impl Normalizer {
             self.tabs.push(self.byte_len());
         }
         self.emit_verbatim(' ', item);
-        self.after_preserved_break = false;
+        self.at_line_start = false;
     }
 
     /// A preserved newline drops the open whitespace span and emits itself.
@@ -420,7 +445,7 @@ impl Normalizer {
             self.close_collapsed(pending.unit_start, 0);
         }
         self.emit_verbatim(character, item);
-        self.after_preserved_break = true;
+        self.at_line_start = true;
     }
 
     /// Resolves the open whitespace span against the next piece of content.
@@ -615,6 +640,16 @@ pub(in crate::text) const fn is_east_asian_without_word_separators(character: ch
 mod tests {
     use super::*;
     use crate::geometry::Size;
+
+    /// The Lynx block's processing, which every test below that names no
+    /// processing was written against.
+    fn normalize(items: &[InlineItem<'_>]) -> NormalizedBlock {
+        super::normalize(items, WhiteSpaceProcessing::CssKeepingLeadingSpace)
+    }
+
+    fn css(items: &[InlineItem<'_>]) -> NormalizedBlock {
+        super::normalize(items, WhiteSpaceProcessing::Css)
+    }
 
     fn run<'src>(style: &'src RunStyle, text: &'src str) -> InlineItem<'src> {
         InlineItem::Run(TextRunItem {
@@ -972,5 +1007,38 @@ mod tests {
         let kept = normalize(&[run(&style, "你"), atom(1), run(&style, "\n好")]);
         assert_eq!(kept.text, "你 好");
         assert_eq!(kept.boxes[0].byte, 3);
+    }
+
+    #[test]
+    fn css_processing_removes_the_collapsible_whitespace_a_paragraph_starts_with() {
+        let style = RunStyle::default();
+        // Spaces, a tab and a segment break, split across two runs.
+        let items = [run(&style, " \t"), run(&style, "\n  a b ")];
+        let block = css(&items);
+        assert_eq!(block.text, "a b ");
+        // Every source unit is still counted, the removed ones included.
+        assert_eq!(block.map.source_len(), 9);
+        assert_eq!(block.map.byte_to_unit(&block.text, 0), 5);
+
+        let kept = normalize(&items);
+        assert_eq!(kept.text, " a b ", "the Lynx block keeps one space");
+    }
+
+    #[test]
+    fn css_processing_keeps_preserved_spaces_at_the_paragraph_start() {
+        let style = RunStyle::default();
+        assert_eq!(css(&[pre(&style, "  a")]).text, "  a");
+        // A collapsible span before a preserved one is still at the line
+        // start, and goes.
+        assert_eq!(css(&[run(&style, " "), pre(&style, " a")]).text, " a");
+    }
+
+    #[test]
+    fn css_processing_removes_whitespace_after_a_preserved_break_as_before() {
+        let style = RunStyle::default();
+        assert_eq!(css(&[raw(&style, "a\n  b")]).text, "a\nb");
+        assert_eq!(css(&[raw(&style, "a\n"), run(&style, "  b")]).text, "a\nb");
+        // Only whitespace: nothing at all.
+        assert!(css(&[run(&style, " \n\t ")]).text.is_empty());
     }
 }

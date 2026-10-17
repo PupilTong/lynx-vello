@@ -21,6 +21,7 @@ use smallvec::SmallVec;
 
 use crate::layout::anchors::{AnchorBuckets, AnchorRegistry, AnchoredBox, PendingReads};
 use crate::layout::committed_box::{CommittedBox, CommittedBoxTable};
+use crate::layout::paragraph::TextStore;
 use crate::layout::relevance::{Relevance, RelevanceTable};
 use crate::layout::text_block::TextBlockStore;
 use crate::scroll::{AutoScrollRequest, ScrollRequest};
@@ -501,9 +502,10 @@ impl<T> TreeArenas<T> {
 #[derive(Default)]
 pub(crate) struct NodeLayoutState {
     pub(crate) slot: LayoutSlot,
-    /// The paragraph a `display: -lynx-text` element owns. A text node
-    /// holds none: it is content of the block above it, not a box.
-    pub(crate) text: Option<Box<TextBlockStore>>,
+    /// The paragraph a `display: -lynx-text` element or a block container
+    /// owns. A text node holds none: it is content of the paragraph above
+    /// it, not a box.
+    pub(crate) text: Option<Box<TextStore>>,
     pub(crate) scroll_offset: euclid::default::Vector2D<f32>,
 }
 
@@ -768,10 +770,10 @@ impl DocumentLayoutState {
     /// Disjoint field borrows: laying a paragraph out needs the context and
     /// the block at once, and child layout needs the whole state, so the two
     /// can never be live together by construction.
-    pub(crate) fn text_block_parts(
+    pub(crate) fn text_store_parts(
         &mut self,
         slot: NodeId,
-    ) -> (&mut TextContext, &mut Option<Box<TextBlockStore>>) {
+    ) -> (&mut TextContext, &mut Option<Box<TextStore>>) {
         self.ensure_covers(slot.arena_key() + 1);
         let Self {
             nodes,
@@ -798,10 +800,16 @@ impl DocumentLayoutState {
         (context, &mut nodes[slot.arena_key()].text)
     }
 
-    pub(crate) fn text_block(&self, slot: NodeId) -> Option<&TextBlockStore> {
+    /// The retained paragraph `slot` owns, of either kind.
+    pub(crate) fn text_store(&self, slot: NodeId) -> Option<&TextStore> {
         self.nodes
             .get(slot.arena_key())
             .and_then(|node| node.text.as_deref())
+    }
+
+    /// The Lynx paragraph `slot` owns, if it owns one.
+    pub(crate) fn text_block(&self, slot: NodeId) -> Option<&TextBlockStore> {
+        self.text_store(slot).and_then(TextStore::as_block)
     }
 
     /// Records that `slot`'s probe left its retained text layout off the
@@ -813,7 +821,7 @@ impl DocumentLayoutState {
             .nodes
             .get(slot.arena_key())
             .and_then(|node| node.text.as_deref())
-            .is_some_and(|store| store.block.is_probe_dirty())
+            .is_some_and(TextStore::is_probe_dirty)
         {
             self.probed_text.push(slot);
         }
@@ -857,7 +865,7 @@ impl DocumentLayoutState {
                 .get_mut(slot.arena_key())
                 .and_then(|node| node.text.as_deref_mut())
             {
-                store.block.restore_committed(context);
+                store.restore_committed(context);
             }
         }
         self.probed_text = probed;
@@ -869,7 +877,7 @@ impl DocumentLayoutState {
                 .nodes
                 .iter()
                 .filter_map(|node| node.text.as_deref())
-                .any(|store| store.block.is_probe_dirty()),
+                .any(TextStore::is_probe_dirty),
             "a probed text block never reached the restore queue"
         );
     }
