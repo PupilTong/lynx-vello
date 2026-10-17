@@ -28,6 +28,9 @@ jobs:
         uses: ./.github/actions/setup-javascript
         with:
           fixtures: true
+          # This job is the one that runs tests, so it is the one that needs
+          # the corpus `crates/bobcat-source/tests/web_core_e2e.rs` boots.
+          corpus: true
 
       - name: Install pinned toolchain
         run: rustup toolchain install
