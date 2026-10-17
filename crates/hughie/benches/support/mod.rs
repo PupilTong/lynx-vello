@@ -86,6 +86,9 @@ pub(super) struct LayoutFixture {
     node_count: usize,
     expected_display: Display,
     text_fonts_registered: bool,
+    /// The text leaves: each one that renders must lay its text out as a
+    /// paragraph.
+    paragraphs: Vec<NodeId>,
 }
 
 impl LayoutFixture {
@@ -112,6 +115,7 @@ impl LayoutFixture {
             node_count: 1,
             expected_display,
             text_fonts_registered: false,
+            paragraphs: Vec::new(),
         }
     }
 
@@ -156,12 +160,15 @@ impl LayoutFixture {
         match content {
             LeafContent::Synthetic => self.leaf(parent, style, intrinsic, first_baseline),
             LeafContent::Text => {
+                // The leaf is the paragraph: a text node lays out only inside
+                // a `display: -lynx-text` box.
                 let font_size = 12 + sample_index % 4 * 2;
                 let style = format!(
-                    "display:flex; align-items:flex-start; font-family:Ahem; font-size:{font_size}px; {style}"
+                    "display:-lynx-text; font-family:Ahem; font-size:{font_size}px; {style}"
                 );
                 let node = self.container(parent, &style);
                 self.text(node, TEXT_SAMPLES[sample_index % TEXT_SAMPLES.len()]);
+                self.paragraphs.push(node);
                 node
             }
         }
@@ -211,6 +218,21 @@ impl LayoutFixture {
             display, self.expected_display,
             "the benchmark root's display declaration must reach dom"
         );
+        for &paragraph in &self.paragraphs {
+            let hidden = self
+                .document
+                .get(paragraph)
+                .and_then(Node::computed_style)
+                .is_some_and(|style| style.get_display().is_none());
+            assert!(
+                hidden
+                    || self
+                        .document
+                        .text_block_size(paragraph)
+                        .is_some_and(|size| size.width > 0.0),
+                "a text leaf that renders must lay its text out as a paragraph"
+            );
+        }
 
         let mut nodes = Vec::with_capacity(self.node_count);
         nodes.push(self.root);

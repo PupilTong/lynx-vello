@@ -414,7 +414,7 @@ fn list_page_with(rows: usize, skip_offscreen: bool) -> ListPage {
 const PARAGRAPH_CSS: &str = "page { display: flex; flex-direction: column; position: relative;
                 width: 800px; height: 600px; overflow: hidden;
                 font-family: Ahem; font-size: 16px; color: #202020; }
-         .paragraph { display: flex; flex-shrink: 0; width: 760px; height: 24px;
+         .paragraph { display: -lynx-text; flex-shrink: 0; width: 760px; height: 24px;
                       background-color: #fbfbfd; }
          .banner { display: flex; flex-shrink: 0; width: 760px; height: 24px;
                    background-color: #2255aa; }";
@@ -437,6 +437,7 @@ fn paragraph_page(with_text: bool) -> (Document<()>, NodeId) {
     dom.add_class(banner, "banner");
     dom.append_child(root, banner);
     let line = "e".repeat(PARAGRAPH_CHARS);
+    let mut paragraphs = Vec::with_capacity(PARAGRAPHS);
     for _ in 0..PARAGRAPHS {
         let paragraph = dom.create_element("view", ());
         dom.add_class(paragraph, "paragraph");
@@ -444,6 +445,19 @@ fn paragraph_page(with_text: bool) -> (Document<()>, NodeId) {
         if with_text {
             let text = dom.create_text_node(line.clone(), ());
             dom.append_child(paragraph, text);
+        }
+        paragraphs.push(paragraph);
+    }
+    if with_text {
+        // A text node lays out only inside a `display: -lynx-text` box: a
+        // paragraph that measured nothing would leave no glyph to encode.
+        dom.layout();
+        for paragraph in paragraphs {
+            assert!(
+                dom.text_block_size(paragraph)
+                    .is_some_and(|size| size.width > 0.0),
+                "every paragraph must lay its text out"
+            );
         }
     }
     (dom, banner)
