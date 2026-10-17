@@ -773,3 +773,74 @@ async fn a_flush_after_the_painter_detached_does_not_park() {
     }
     assert_eq!(flushed.as_deref(), Some("flushed 7"));
 }
+
+const GREEN: [u8; 4] = [0, 255, 0, 255];
+
+/// A red box that a timer armed from a timer the page armed logs `after
+/// boot` for and turns green.
+///
+/// Nested because a realm runs the timers that are due before it reports the
+/// boot it finished, so the outer one may run ahead of `ScriptFinished`; the
+/// one it arms comes due in a later turn of the view's, after boot's end.
+fn after_boot_page() -> Vec<u8> {
+    br"
+globalThis.renderPage = function renderPage() {
+  const page = __CreatePage('card', 0);
+  const box = __CreateView(0);
+  __SetInlineStyles(box, 'width:32px;height:24px;background-color:#ff0000');
+  __AppendElement(page, box);
+  setTimeout(() => {
+    setTimeout(() => {
+      console.log('after boot');
+      __SetInlineStyles(box, 'width:32px;height:24px;background-color:#00ff00');
+      __FlushElementTree();
+    }, 0);
+  }, 0);
+};
+"
+    .to_vec()
+}
+
+/// A host that took no turn while boot finished and the page went on gets
+/// both in its next turn, and `wait_for_script` answers with what that turn
+/// reported after boot's end rather than dropping it.
+///
+/// A test thread the OS leaves unscheduled under parallel load takes that
+/// turn. Here the painter's turns stand in for the time it spent: they take
+/// none of the view's, so the view's reports wait in its channel until the
+/// green box says the inner timer has run, and only then does the wait take
+/// the view's first turn.
+#[tokio::test]
+async fn wait_for_script_answers_with_what_the_turn_that_ended_boot_reported_after_it() {
+    let group = group().await;
+    let mut view = group
+        .create_lynx_view(
+            32.0,
+            24.0,
+            1.0,
+            |_reports| Rc::new(FetcherDouble::card(after_boot_page()).resolving_to(SCRIPT_URL)),
+            Vec::new(),
+            ViewSources::new("app:///", SCRIPT_URL, SCREEN),
+        )
+        .expect("the view is built");
+    let mut painter = offscreen_painter().await;
+    painter.attach(&view).expect("a fresh view takes a painter");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !(tick(&mut painter, true).expect("a frame the view committed")
+        && top_left(&mut painter) == GREEN)
+    {
+        assert!(Instant::now() < deadline, "the inner timer never ran");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let after_boot = wait_for_script(&mut view).expect("the entry module boots");
+    let logged: Vec<String> = after_boot
+        .into_iter()
+        .filter_map(|event| match event {
+            bobcat_core::EngineEvent::ConsoleMessage { message, .. } => Some(message),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(logged, ["after boot"]);
+}

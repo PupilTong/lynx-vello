@@ -34,7 +34,9 @@ async fn view(
 /// `bobcat-source` registers for a card's root.
 async fn run(source: &str, resolved_url: &str) -> Result<(), LynxViewError> {
     let (mut view, _painter) = view(FetcherDouble::card(source), resolved_url).await?;
-    wait_for_script(&mut view)
+    // Boot is the whole question: what the view did after it goes with it.
+    wait_for_script(&mut view)?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -151,23 +153,31 @@ async fn the_requested_entry_url_is_preserved_in_errors() {
 }
 
 /// Pumps a view until boot settles, collecting every failure it reported.
+///
+/// The turn that reports boot settling is read to its end, so a failure the
+/// view reported after it in that same turn is collected too rather than
+/// dropped: a host that took no turn for a while gets them together.
 fn failures_until_boot_settles(
     view: &mut LynxView<Rc<FetcherDouble>>,
 ) -> Vec<bobcat_core::EngineEvent> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut failures = Vec::new();
+    let mut settled = false;
     loop {
         for event in view.pump() {
             match event {
-                bobcat_core::EngineEvent::ScriptFinished => return failures,
+                bobcat_core::EngineEvent::ScriptFinished => settled = true,
                 event @ (bobcat_core::EngineEvent::StartupFailed(_)
                 | bobcat_core::EngineEvent::Panicked(_)) => {
                     failures.push(event);
-                    return failures;
+                    settled = true;
                 }
                 event @ bobcat_core::EngineEvent::ScriptRunError(_) => failures.push(event),
                 _ => {}
             }
+        }
+        if settled {
+            return failures;
         }
         assert!(std::time::Instant::now() < deadline, "boot did not settle");
         std::thread::sleep(std::time::Duration::from_millis(1));

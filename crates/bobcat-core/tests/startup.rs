@@ -521,9 +521,29 @@ async fn a_resolution_failure_is_one_event_whatever_else_failed() {
         3,
         "creation hands over both sheets and the entry, before any turn"
     );
-    let error = wait_for_script(&mut view).expect_err("the entry cannot be resolved");
-    let bobcat_core::LynxViewError::Resource(error) = error else {
-        panic!("the fetcher's own error: {error}");
+    // Every event, the turn that reported the failure read to its end: a
+    // second report could share that turn, which `wait_for_script` stops in
+    // the middle of.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut events = Vec::new();
+    while !events.iter().any(EngineEvent::is_fatal) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the failure was never reported"
+        );
+        events.extend(view.pump());
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let fatal = events
+        .iter()
+        .position(EngineEvent::is_fatal)
+        .expect("the loop ran until one was there");
+    let after = events.split_off(fatal + 1);
+    assert!(after.is_empty(), "failure is delivered once: {after:?}");
+    let Some(EngineEvent::StartupFailed(bobcat_core::LynxViewError::Resource(error))) =
+        events.last()
+    else {
+        panic!("the fetcher's own error: {events:?}");
     };
     assert_eq!(error.locator.as_deref(), Some("app:///main.js"), "{error}");
     assert!(
