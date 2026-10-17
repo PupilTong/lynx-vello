@@ -563,7 +563,7 @@ impl<T> Document<T> {
         if is_text_node {
             // White space only, or not: whether the run renders at all
             // outside a paragraph (`tree::anonymous`).
-            self.note_loose_text_change(id);
+            self.note_text_data_change(id);
         }
     }
 

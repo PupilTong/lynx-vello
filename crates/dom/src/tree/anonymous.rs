@@ -72,11 +72,23 @@
 //! container the records resolve to:
 //!
 //! - a node's child list or slot assignment changed (the node);
-//! - a text node's data changed (the text node);
+//! - a source's text data changed (the text node);
 //! - an element was styled for the first or the last time, or its `display` or `content` changed
 //!   (the element and its flat parent: the text on both sides of it may group differently);
 //! - an element that is a container, an overridden node or a source was restyled at all (the
 //!   element: the box style may have moved with it).
+//!
+//! Every styled item container with a source has a derivation, so while no
+//! container has one, only a mutation that can give a container its first
+//! source records:
+//!
+//! - a text node, or a styled `display: contents` element, inserted under a node that may hold
+//!   loose text — not a styled paragraph, replaced element or `display: none` box;
+//! - an element styled for the first time, or with a new `display` or `content`, that holds loose
+//!   text itself, or that is a `display: contents` element passing text or generated content up to
+//!   such a node.
+//!
+//! A removal records nothing then: it can neither split nor end a sequence.
 //!
 //! A record resolves to the nearest item container at or above it, through
 //! box-less ancestors, when the boxes are re-derived rather than when it is
@@ -94,14 +106,17 @@
 //!
 //! # Cost
 //!
-//! Every document pays one push per child-list change, text edit and
-//! box-shape restyle, and one flag test per `LayoutTree::children` call (a
-//! node's `may_override_children`; only a node that holds loose text looks
-//! its override up). After a flush that recorded anything it pays one walk up
-//! per record and, for each container the records resolve to, one pass over
-//! its flat children — which ends there unless one is a text node or a
-//! `display: contents` element. A document that never boxed loose text
-//! pays one emptiness test per freed node.
+//! A document whose text is all in paragraphs records nothing: per mutation
+//! it pays an emptiness test and, for an inserted text node or a box-shape
+//! restyle, a look at one style, plus for a restyled item container one pass
+//! over its flat children. Every document pays one flag test per
+//! `LayoutTree::children` call (a node's `may_override_children`; only a node
+//! that holds loose text looks its override up) and one emptiness test per
+//! freed node. Once a container has sources, the document pays one push per
+//! child-list change and box-shape restyle, and per edit of a source; after a
+//! flush that recorded anything, one walk up per record and, for each
+//! container the records resolve to, one pass over its flat children — which
+//! ends there unless one is a text node or a `display: contents` element.
 
 use std::sync::LazyLock;
 
@@ -284,6 +299,67 @@ fn item_container<T>(tree: &TreeArenas<T>, node: NodeId) -> Option<NodeId> {
     }
 }
 
+/// Whether text whose parent is `node` can be loose text: `node` is not a
+/// styled element — its display is unknown yet, or it is a shadow root whose
+/// host decides — or it is an item container or `display: contents`. Text in
+/// a paragraph, in a replaced element or under a box that renders nothing
+/// never is.
+fn may_hold_loose_text<T>(node: &Node<T>) -> bool {
+    if !node.is_element() {
+        return true;
+    }
+    let Some(style) = node.layout_computed_style() else {
+        return true;
+    };
+    !node.is_replaced()
+        && matches!(
+            display_mode(*style.get_display()),
+            DisplayMode::Contents
+                | DisplayMode::Flex
+                | DisplayMode::Grid
+                | DisplayMode::GridLanes
+                | DisplayMode::Linear
+                | DisplayMode::Relative
+        )
+}
+
+/// Whether `element`, just styled for the first time or with a new
+/// `display` or `content`, can have given an item container its first
+/// source while no container had any: it holds loose text itself — a text
+/// child, or a `display: contents` child that may hold some — or it is a
+/// `display: contents` element with such children or generated content,
+/// under a node that may hold loose text. Its record resolves to the
+/// container either way.
+fn brings_loose_text<T>(tree: &TreeArenas<T>, element: NodeId) -> bool {
+    let Some(node) = tree.get(element) else {
+        return false;
+    };
+    let Some(style) = node.layout_computed_style() else {
+        return false;
+    };
+    // The children's styles are read live: the harvest that calls this
+    // refreshes an element's layout snapshot before its children's.
+    let holds_text = || {
+        node.flat_children().iter().any(|&child| {
+            let child = tree.at(child);
+            child.is_text_node()
+                || (child.is_element()
+                    && child.borrow_computed_style().is_none_or(|data| {
+                        data.styles
+                            .primary
+                            .as_ref()
+                            .is_none_or(|style| style.get_display().is_contents())
+                    }))
+        })
+    };
+    if style.get_display().is_contents() {
+        node.flat_parent().is_some_and(may_hold_loose_text)
+            && (generated_content(node).is_some() || holds_text())
+    } else {
+        may_hold_loose_text(node) && holds_text()
+    }
+}
+
 /// Whether `text` holds a character css-flexbox-1 §4 does not count as white
 /// space.
 fn has_rendered_character(text: &str) -> bool {
@@ -361,6 +437,39 @@ impl<T> Document<T> {
         self.arenas_mut().anonymous_mut().pending.push((node, true));
     }
 
+    /// The record for `child` inserted under `parent` (module doc, "When the
+    /// boxes are re-derived").
+    pub(crate) fn note_child_inserted(&mut self, parent: NodeId, child: NodeId) {
+        let tree = self.arenas();
+        let records = !tree.anonymous().is_empty() || {
+            let child = tree.at(child);
+            (child.is_text_node()
+                || child
+                    .layout_computed_style()
+                    .is_some_and(|style| style.get_display().is_contents()))
+                && may_hold_loose_text(tree.at(parent))
+        };
+        if records {
+            self.note_loose_text_change(parent);
+        }
+    }
+
+    /// The record for a child removed from `parent`: none while no container
+    /// has sources, since a removal can then neither split nor end one.
+    pub(crate) fn note_child_removed(&mut self, parent: NodeId) {
+        if !self.arenas().anonymous().is_empty() {
+            self.note_loose_text_change(parent);
+        }
+    }
+
+    /// The record for a text node whose data changed: only a source's edit
+    /// can make its sequence start or stop rendering.
+    pub(crate) fn note_text_data_change(&mut self, text: NodeId) {
+        if self.arenas().anonymous().sources.contains_key(&text) {
+            self.note_loose_text_change(text);
+        }
+    }
+
     /// The harvest's record for an element it visited (module doc, "When the
     /// boxes are re-derived"). `relayout` is whether its damage reaches
     /// layout. Called whatever the damage: a first or a last style carries
@@ -375,6 +484,12 @@ impl<T> Document<T> {
             return;
         }
         if refresh.box_tree_changed {
+            if self.arenas().anonymous().is_empty() {
+                if brings_loose_text(self.arenas(), element) {
+                    self.note_loose_text_change(element);
+                }
+                return;
+            }
             let parent = self.get(element).and_then(Node::flat_parent_id);
             let pending = &mut self.arenas_mut().anonymous_mut().pending;
             pending.push((element, true));
@@ -1235,5 +1350,67 @@ mod tests {
             Some(host)
         );
         assert_eq!(rect(&doc, anonymous).2, 20.0);
+    }
+
+    /// The records waiting for the next derivation.
+    fn pending(doc: &Doc) -> usize {
+        doc.dom.arenas().anonymous().pending.len()
+    }
+
+    #[test]
+    fn a_document_with_its_text_in_paragraphs_records_nothing() {
+        let mut doc = doc("p { display: -lynx-text; }");
+        let root = doc.root;
+        let paragraph = doc.el(root, "p");
+        text(&mut doc, paragraph, "abc");
+        let view = doc.el(root, "view");
+        doc.flush();
+        assert!(boxes(&doc, root).is_empty());
+
+        // An element inserted, text inserted into a paragraph and edited
+        // there, and a removal: none can give a container a source.
+        let more = text(&mut doc, paragraph, "def");
+        doc.el(root, "view");
+        doc.dom.set_text_node_data(more, "ghi");
+        doc.dom.remove_element(view);
+        assert_eq!(pending(&doc), 0);
+        doc.flush();
+        assert!(boxes(&doc, root).is_empty());
+    }
+
+    #[test]
+    fn a_paragraph_restyled_to_a_container_boxes_its_text() {
+        let mut doc = doc(".paragraph { display: -lynx-text; }");
+        let root = doc.root;
+        let div = doc.el(root, "div.paragraph");
+        text(&mut doc, div, "abc");
+        doc.flush();
+        assert!(boxes(&doc, div).is_empty());
+
+        doc.remove_class(div, "paragraph");
+        doc.flush();
+        let [anonymous] = boxes(&doc, div)[..] else {
+            panic!("the restyle records the new container")
+        };
+        assert_eq!(rect(&doc, anonymous).2, 30.0);
+    }
+
+    #[test]
+    fn a_styled_contents_element_moved_out_of_a_paragraph_brings_its_text() {
+        let mut doc = doc("p { display: -lynx-text; } span { display: contents; }");
+        let root = doc.root;
+        let paragraph = doc.el(root, "p");
+        let carrier = doc.el(paragraph, "span");
+        let data = text(&mut doc, carrier, "abc");
+        doc.flush();
+        assert!(boxes(&doc, root).is_empty());
+
+        doc.dom.remove_element(carrier);
+        doc.dom.append_child(root, carrier);
+        doc.flush();
+        let [anonymous] = boxes(&doc, root)[..] else {
+            panic!("the insertion of a styled contents element records")
+        };
+        assert_eq!(sources(&doc, anonymous), [data]);
     }
 }

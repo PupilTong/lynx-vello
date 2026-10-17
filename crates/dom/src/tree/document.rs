@@ -528,7 +528,7 @@ impl<T> Document<T> {
         self.note_moved_subtree(child);
         self.note_slot_assignment_inserted(parent, child, appended);
         self.note_child_list_change(parent, index);
-        self.note_loose_text_change(parent);
+        self.note_child_inserted(parent, child);
         self.invalidate_layout(child);
         self.invalidate_hoisted_under(child);
         let connected = contains_custom_elements && self.is_connected(child);
@@ -718,7 +718,7 @@ impl<T> Document<T> {
             "only the permanent document element parents to the document node"
         );
         self.note_child_list_change(parent, removed_index);
-        self.note_loose_text_change(parent);
+        self.note_child_removed(parent);
         self.note_custom_elements_removed(child, was_connected);
         // HTML's removing steps: an element that left the document leaves
         // the top layer with it (`tree::top_layer`, "Removal").
