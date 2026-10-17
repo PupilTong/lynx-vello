@@ -189,6 +189,10 @@ pub(crate) type TestView = LynxView<Rc<InlineFetcher>>;
 pub(crate) struct TestEngine {
     pub(crate) view: TestView,
     pub(crate) painter: Painter,
+    /// What a turn [`wait_for_boot`] took reported after boot's
+    /// `ScriptFinished`: the test's, not the wait's, so the next
+    /// [`Self::pump`] hands it back first.
+    after_boot: Vec<EngineEvent>,
 }
 
 impl TestEngine {
@@ -198,7 +202,9 @@ impl TestEngine {
         self.painter
             .pump()
             .expect("an in-crate painter's target does not fail");
-        self.view.pump()
+        let mut events = std::mem::take(&mut self.after_boot);
+        events.extend(self.view.pump());
+        events
     }
 
     pub(crate) fn tick(&mut self, force: bool) -> Result<bool, crate::view::EngineError> {
@@ -428,6 +434,7 @@ impl TestViewSpec {
         TestEngine {
             view,
             painter: painter.expect("a painter was asked for"),
+            after_boot: Vec::new(),
         }
     }
 
@@ -524,16 +531,26 @@ impl TestViewSpec {
 }
 
 /// Drives ordinary turns until the entry finishes.
+///
+/// What the view reported before `ScriptFinished` is boot's, and this wait
+/// takes it. What the same turn reported after it is not: one turn hands
+/// over everything since the last, so a host that took no turn for a while —
+/// a test thread the OS left unscheduled under parallel load — gets boot's
+/// end and whatever the view did next in one batch, a background thread's
+/// first answers included. That rest goes back to the engine, which the next
+/// [`TestEngine::pump`] returns first.
 pub(crate) fn wait_for_boot(engine: &mut TestEngine) {
     let deadline = Instant::now() + PATIENCE;
     loop {
-        for event in engine.pump() {
+        let mut events = engine.pump().into_iter();
+        while let Some(event) = events.next() {
             match event {
                 EngineEvent::ScriptFinished => {
                     assert!(
                         engine.published_frame().is_some(),
                         "boot's flush publishes before ScriptFinished is pumped"
                     );
+                    engine.after_boot.extend(events);
                     return;
                 }
                 EngineEvent::StartupFailed(error) => panic!("the view did not boot: {error}"),
@@ -620,5 +637,70 @@ impl dom::CustomElement<()> for IntersectionWatcher {
         if self.mutate.swap(false, Ordering::Relaxed) {
             document.set_inline_style_property(element, "opacity", "0.5");
         }
+    }
+}
+
+mod tests {
+    use super::*;
+
+    /// A host that took no turn while boot finished and the view went on gets
+    /// both in its next turn, and [`wait_for_boot`] takes boot's end alone:
+    /// what came after it reaches the test's next [`TestEngine::pump`].
+    ///
+    /// A test thread the OS leaves unscheduled under parallel load takes that
+    /// turn, with a card's background thread answering behind
+    /// `ScriptFinished`. The wait used to return from the middle of it and
+    /// drop the rest.
+    ///
+    /// The log is armed from a timer the entry armed: an epilogue runs the
+    /// timers that are due before it reports the boot it finished, so the
+    /// outer one may run ahead of `ScriptFinished`, and the one it arms comes
+    /// due in a later epilogue. No turn is taken until that one has run — a
+    /// probe and the attribute it sets are what say so — so the first turn
+    /// the wait takes reports boot's end and then the log.
+    #[test]
+    fn what_the_turn_that_finished_boot_reported_after_it_reaches_the_next_pump() {
+        let mut engine = TestViewSpec::new(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              globalThis.held = [page];
+              setTimeout(() => {
+                setTimeout(() => {
+                  console.log('after boot');
+                  __SetAttribute(page, 'logged', 'yes');
+                  __FlushElementTree();
+                }, 0);
+              }, 0);
+              __FlushElementTree();
+            };
+            ",
+        )
+        .create(Arc::new(NoWakeup));
+        let deadline = Instant::now() + PATIENCE;
+        while engine
+            .probe_document(|document| {
+                let page = document.document_element().id();
+                document
+                    .get(page)
+                    .and_then(|node| node.attribute("logged"))
+                    .is_none()
+            })
+            .expect("the view's task answers probes")
+        {
+            assert!(Instant::now() < deadline, "the inner timer never ran");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        wait_for_boot(&mut engine);
+        let logged: Vec<String> = engine
+            .pump()
+            .into_iter()
+            .filter_map(|event| match event {
+                EngineEvent::ConsoleMessage { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(logged, ["after boot"]);
     }
 }
