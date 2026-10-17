@@ -52,7 +52,6 @@ markup5ever_rcdom = "0.39"
 # `dom` builds stylo's internal `(block, flow)` display — which the `lynx`
 # grammar never parses — from its public bit layout through the
 # `FromPrimitive` that `stylo::values::specified::box_::Display` derives.
-num-traits = "0.2.19"
 # `<markdown>`'s source parser (`bobcat-core`'s `tree::markdown::parse`):
 # CommonMark plus GFM tables and strikethrough. No default feature: the
 # `html` writer and the `getopts` binary are not used, and `simd` only

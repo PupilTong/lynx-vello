@@ -1198,3 +1198,33 @@ fn a_shadow_scroller_snaps_to_and_starts_on_its_slotted_children() {
         pages[1]
     );
 }
+
+/// A sheet the engine wrote can give its shadow content the flow layout the
+/// `lynx` grammar keeps from authors; an author's shadow sheet cannot.
+#[test]
+fn an_engine_shadow_sheet_writes_block_and_inline_and_an_author_one_does_not() {
+    let mut harness = Harness::new();
+    let authored = harness.shadow_el(harness.shadow, "authored");
+    let block = harness.shadow_el(harness.shadow, "engine-block");
+    let inline = harness.shadow_el(block, "engine-inline");
+    harness
+        .doc
+        .dom
+        .add_shadow_stylesheet(harness.shadow, "authored { display: block; }");
+    harness.doc.dom.add_engine_shadow_stylesheet(
+        harness.shadow,
+        "engine-block { display: block; } engine-inline { display: inline; }",
+    );
+    harness.doc.flush();
+
+    let display = |id| {
+        harness
+            .doc
+            .dom
+            .computed_style_text(id, "display", false)
+            .expect("a styled element")
+    };
+    assert_eq!(display(authored), "flex", "the author's `block` is dropped");
+    assert_eq!(display(block), "block");
+    assert_eq!(display(inline), "inline");
+}

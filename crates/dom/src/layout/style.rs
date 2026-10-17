@@ -29,43 +29,22 @@ pub(crate) enum DisplayMode {
     GridLanes,
     Linear,
     Relative,
-    /// The `display: -lynx-text` block: one flattened Lynx paragraph, laid
-    /// out by [`hughie::text::block`] through
-    /// [`crate::layout::text_block`].
+    /// A Lynx text element ([`Node::is_lynx_text`]), or a `display:
+    /// -lynx-text` box: one flattened Lynx paragraph, laid out by
+    /// [`hughie::text::block`] through [`crate::layout::text_block`].
     Text,
-    /// A block container: the internal `(block, flow)` display
-    /// ([`block_flow_display`]), whose text runs are laid out as a CSS inline
-    /// formatting context by [`hughie::text::inline`] through
-    /// [`crate::layout::inline_flow`].
+    /// A block container: inner display `flow` (`display: block`), whose
+    /// content is laid out as a CSS inline formatting context by
+    /// [`hughie::text::inline`] through [`crate::layout::inline_flow`].
     ///
-    /// No author style produces it: the `lynx` grammar parses no `block` or
-    /// `inline` keyword. It is the display of the anonymous block box CSS
-    /// wraps around loose text in a flex, grid, grid-lanes, linear or
-    /// relative container (CSS 2.2 §9.2.1.1, css-flexbox-1 §4,
-    /// css-grid-1 §6), a style the engine builds itself.
+    /// No author style produces it: the `lynx` grammar parses `block`,
+    /// `flow` and `inline` only in the engine's own sheets. It is the display
+    /// of the anonymous block box CSS wraps around loose text in a flex,
+    /// grid, grid-lanes, linear or relative container (CSS 2.2 §9.2.1.1,
+    /// css-flexbox-1 §4, css-grid-1 §6), a style the engine builds itself,
+    /// and of the block containers of the HTML content the engine builds.
     BlockFlow,
     Leaf,
-}
-
-/// The bits of the internal block container display, `(block, flow)`: what
-/// CSS calls `display: block`. Under `lynx` stylo constructs that value only
-/// internally (`Display::internal_block` in
-/// `vendor/stylo/style/values/specified/box.rs`) and serializes it as `block`.
-const BLOCK_FLOW: u16 = ((stylo::values::specified::box_::DisplayOutside::Block as u16)
-    << Display::OUTSIDE_SHIFT)
-    | stylo::values::specified::box_::DisplayInside::Flow as u16;
-
-/// Whether `display` is the internal block container display.
-pub(crate) fn is_block_flow(display: Display) -> bool {
-    display.to_u16() == BLOCK_FLOW
-}
-
-/// The internal block container display, built from its public bit layout:
-/// the display of the anonymous box styles the engine computes.
-pub(crate) fn block_flow_display() -> Display {
-    use num_traits::FromPrimitive;
-
-    Display::from_u16(BLOCK_FLOW).expect("every u16 is a display value")
 }
 
 /// The layout algorithm `node` runs: from its kind first, then from its
@@ -94,7 +73,10 @@ fn mode_of(display: Display, lynx_text: bool) -> DisplayMode {
         Display::Linear => DisplayMode::Linear,
         Display::LynxRelative => DisplayMode::Relative,
         Display::LynxText => DisplayMode::Text,
-        display if is_block_flow(display) => DisplayMode::BlockFlow,
+        // Inner display `flow`: a block container, or an inline box that
+        // lays its own content out because no inline formatting context
+        // around it took it in (`crate::layout::inline_flow`).
+        Display::Block | Display::Inline => DisplayMode::BlockFlow,
         // No `lynx` grammar path produces any other display today: the fork
         // blockifies every `display: contents` fixup (root and top layer) to
         // `flex`, never to Stylo's internal block/flow display. The panic
@@ -506,7 +488,7 @@ mod tests {
 
     use hughie::style::Display;
 
-    use super::{DisplayMode, StyleView, TextRunView, block_flow_display, mode_of};
+    use super::{DisplayMode, StyleView, TextRunView, mode_of};
 
     #[test]
     fn supported_lynx_displays_map_to_layout_modes() {
@@ -518,7 +500,8 @@ mod tests {
         assert_eq!(mode_of(Display::Linear, false), DisplayMode::Linear);
         assert_eq!(mode_of(Display::LynxRelative, false), DisplayMode::Relative);
         assert_eq!(mode_of(Display::LynxText, false), DisplayMode::Text);
-        assert_eq!(mode_of(block_flow_display(), false), DisplayMode::BlockFlow);
+        assert_eq!(mode_of(Display::Block, false), DisplayMode::BlockFlow);
+        assert_eq!(mode_of(Display::Inline, false), DisplayMode::BlockFlow);
     }
 
     #[test]
@@ -532,21 +515,11 @@ mod tests {
             Display::Linear,
             Display::LynxRelative,
             Display::LynxText,
-            block_flow_display(),
+            Display::Block,
+            Display::Inline,
         ] {
             assert_eq!(mode_of(display, true), DisplayMode::Text, "{display:?}");
         }
-    }
-
-    #[test]
-    fn the_block_flow_display_is_stylos_internal_block() {
-        use stylo::values::specified::box_::{DisplayInside, DisplayOutside};
-        use stylo_traits::ToCss;
-
-        let display = block_flow_display();
-        assert_eq!(display.outside(), DisplayOutside::Block);
-        assert_eq!(display.inside(), DisplayInside::Flow);
-        assert_eq!(display.to_css_string(), "block");
     }
 
     #[test]
