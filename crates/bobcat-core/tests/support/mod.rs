@@ -57,20 +57,30 @@ where
     Ok((view, painter))
 }
 
-/// Drives normal view turns until the terminal boot event arrives.
+/// Drives normal view turns until the terminal boot event arrives, and
+/// answers with what the turn that reported `ScriptFinished` reported after
+/// it.
 ///
 /// The view alone: booting needs the resource protocol serviced, which is
 /// `LynxView::pump`'s and nobody else's.
+///
+/// One turn hands over everything since the last, so a host that took no turn
+/// for a while — a test thread the OS left unscheduled under parallel load —
+/// gets boot's end and whatever the view did next in one batch. That rest is
+/// not boot's: it is handed back rather than dropped, for a test that reads
+/// what the view did after boot. A failure ends the wait where it is, and a
+/// test about what follows a failure pumps the view itself.
 pub fn wait_for_script<F: ResourceFetcher + 'static>(
     view: &mut LynxView<F>,
-) -> Result<(), LynxViewError> {
+) -> Result<Vec<EngineEvent>, LynxViewError> {
     // Generous: a debug-build boot takes about two seconds on its own, so a
     // tight deadline only ever fires spuriously under parallel test load.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        for event in view.pump() {
+        let mut events = view.pump().into_iter();
+        while let Some(event) = events.next() {
             match event {
-                EngineEvent::ScriptFinished => return Ok(()),
+                EngineEvent::ScriptFinished => return Ok(events.collect()),
                 EngineEvent::ScriptRunError(error) | EngineEvent::Panicked(error) => {
                     return Err(error.into());
                 }
