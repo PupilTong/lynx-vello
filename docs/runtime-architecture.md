@@ -1542,7 +1542,9 @@ imports its native operations directly; nothing is installed as
 card's entry carries its runtime and Element-PAPI import declarations because
 `bobcat-source` wrote them in front of its body. Event delivery travels back
 through the loaded `bobcat:element` namespace's `__BobcatDispatchEvent` export, once per
-dispatch, carrying the whole event path as two comma-joined id strings and
+dispatch, carrying the whole event path as three comma-joined id strings
+(the nodes, each step's retargeted target and each step's tree host, so the
+realm can keep its own steps and forward a frame's card's to that card) and
 everything else as primitives: whether the event bubbles — which decides how
 much of that path the bind pass runs on, and whether the `global-bindEvent`
 pass runs at all — the event's `timestamp`, and a numeric detail kind followed

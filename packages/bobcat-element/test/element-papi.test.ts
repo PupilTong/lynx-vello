@@ -70,10 +70,50 @@ rstest.mockRequire("bobcat:runtime", () => ({
   },
 }));
 
+/**
+ * The booted cards the `bobcat:frame` stand-in reports, by the node id of
+ * the frame each is shown in: a test that is about which steps a card is
+ * handed installs them, and every other test has none.
+ */
+const frameCards: Map<number, { card: string }> = new Map();
+
 // A frame's `src` load and its `data`/`global-props` are `bobcat:frame`'s,
 // tested in frame.test.ts; here each is the one call `__SetAttribute` makes,
-// recorded with the mock's calls.
+// recorded with the mock's calls. So is an event's hand-over to a card,
+// recorded as `forwardEvent` with the card's name and what it was handed.
 rstest.mockRequire("bobcat:frame", () => ({
+  frameCardOf(frameId: number): object | undefined {
+    return frameCards.get(frameId);
+  },
+  frameCards(): object[] {
+    return [...frameCards.values()];
+  },
+  forwardEvent(
+    card: { card: string },
+    nodes: string,
+    targets: string,
+    hosts: string,
+    name: unknown,
+    bubbles: unknown,
+    timestamp: unknown,
+    extraCount: unknown,
+    payload: unknown[],
+  ) {
+    const native =
+      globalThis.__bobcatTestHost as ReturnType<typeof createMockBobcat>;
+    native.calls.push([
+      "forwardEvent",
+      card.card,
+      nodes,
+      targets,
+      hosts,
+      name,
+      bubbles,
+      timestamp,
+      extraCount,
+      ...payload,
+    ]);
+  },
   frameSourceChanged(handle: object, frameId: number, src: string | null) {
     const native =
       globalThis.__bobcatTestHost as ReturnType<typeof createMockBobcat>;
@@ -480,6 +520,7 @@ let elementModule: typeof elementPapi;
 
 beforeEach(async () => {
   rstest.resetModules();
+  frameCards.clear();
   mock = createMockBobcat();
   globalThis.__bobcatTestHost = mock;
   Reflect.deleteProperty(globalThis, "bobcat");
@@ -564,15 +605,17 @@ describe("installation", () => {
         // Not a PAPI member: the lifecycle export the boot module
         // constructs, which `MTS_CHUNK_PREAMBLE` does not import.
         "Document",
-        // Nor these two: `bobcat:frame-boot` chooses a frame realm's page
-        // root, and `bobcat:frame` finds a frame's handle by its id.
+        // Nor these three: `bobcat:frame-boot` chooses a frame realm's page
+        // root and dispatches a frame's card's steps, and `bobcat:frame`
+        // finds a frame's handle by its id.
         "__BobcatUsePageRoot",
+        "__BobcatDispatchCardEvent",
         "__BobcatHandleOf",
       ].sort(),
     );
-    // The six every event carries; the detail numbers are a rest parameter,
-    // which `length` does not count.
-    expect(elementModule.__BobcatDispatchEvent).toHaveLength(6);
+    // The seven every event carries; the detail numbers are a rest
+    // parameter, which `length` does not count.
+    expect(elementModule.__BobcatDispatchEvent).toHaveLength(7);
   });
 
   it("creates the realm's document once, over the config it is given", () => {
@@ -1443,14 +1486,15 @@ function tree() {
 
 /**
  * Dispatches one event the way the host does: one call carrying the whole
- * path as two comma-joined id strings, target-first and root-last, and every
- * other fact as a number.
+ * path as three comma-joined id strings, target-first and root-last, and
+ * every other fact as a number.
  *
  * `targets` is that step's own target — the same node for every step unless a
  * test is exercising shadow retargeting — so it defaults to the path's first
- * entry, the node the event happened at. The payload defaults to the origin
- * with no wheel delta and no touch points, which is what a test that is not
- * about the payload wants.
+ * entry, the node the event happened at. `hosts` is the shadow host of each
+ * step's tree, by node id, and defaults to the document tree's `0` for
+ * every step. The payload defaults to the origin with no wheel delta and no
+ * touch points, which is what a test that is not about the payload wants.
  *
  * `bubbles` is the event's own, and the default is what every routed Lynx
  * event is: the two that are not are an `<image>`'s `load` and `error`.
@@ -1461,6 +1505,7 @@ function dispatch(
   payload: DispatchPayload = {},
   targets?: object[],
   bubbles: boolean = true,
+  hosts?: number[],
 ) {
   const nodes = path.map((handle) => __GetElementUniqueID(handle));
   const targeted = targets === undefined
@@ -1469,6 +1514,7 @@ function dispatch(
   elementModule.__BobcatDispatchEvent(
     nodes.join(","),
     targeted.join(","),
+    (hosts ?? nodes.map(() => 0)).join(","),
     name,
     bubbles,
     payload.timestamp ?? 0,
@@ -1778,6 +1824,7 @@ describe("event listeners", () => {
         __GetElementUniqueID(page)
       }`,
       new Array(4).fill(__GetElementUniqueID(inner)).join(","),
+      "0,0,0,0",
       "tap",
       true,
       0,
@@ -1868,6 +1915,7 @@ describe("event listeners", () => {
       elementModule.__BobcatDispatchEvent(
         String(uid),
         "999",
+        "0",
         "tap",
         true,
         0,
@@ -3048,6 +3096,388 @@ describe("key events", () => {
   });
 });
 
+describe("a frame's card's steps", () => {
+  /** What one listener of this realm saw: its own label, target and phase. */
+  function noting(seen: string[], label: string) {
+    return (event: ListenerEvent) => {
+      seen.push(`${label}:${event.target.uid}`);
+      mock.calls.push(["listener", label]);
+    };
+  }
+
+  /** The `forwardEvent` calls so far, without the payload. */
+  function forwarded(): unknown[][] {
+    return mock.named("forwardEvent").map(call => call.slice(1, 8));
+  }
+
+  /**
+   * A page with a wrapper holding a frame this realm shows a booted card in,
+   * `A`, and the card's own nodes: its page root and a view in it, ids no
+   * handle here names.
+   */
+  function framed() {
+    const page = __CreatePage("0", 0);
+    const wrapper = __CreateView(0);
+    const frame = __CreateFrame(0);
+    __AppendElement(page, wrapper);
+    __AppendElement(wrapper, frame);
+    const F = __GetElementUniqueID(frame);
+    frameCards.set(F, { card: "A" });
+    return { page, wrapper, frame, F, cardPage: 901, cardView: 900 };
+  }
+
+  /** Dispatches a path given as raw ids, as the host writes it. */
+  function dispatchIds(
+    nodes: number[],
+    targets: number[],
+    hosts: number[],
+    name = "tap",
+    payload: DispatchPayload = { x: 130, y: 60 },
+    bubbles = true,
+  ) {
+    elementModule.__BobcatDispatchEvent(
+      nodes.join(","),
+      targets.join(","),
+      hosts.join(","),
+      name,
+      bubbles,
+      7,
+      ...extraArguments(payload),
+      ...detailArguments(payload),
+    );
+  }
+
+  it("runs this realm's steps first, at the frame, then hands the card the steps in its frame's tree", () => {
+    const { page, wrapper, F, cardPage, cardView } = framed();
+    const seen: string[] = [];
+    __AddEventListener(page, "tap", noting(seen, "page-capture"), { capture: true });
+    __AddEventListener(wrapper, "tap", noting(seen, "wrapper"), {});
+    const [P, W] = [__GetElementUniqueID(page), __GetElementUniqueID(wrapper)];
+
+    dispatchIds(
+      [cardView, cardPage, F, W, P],
+      [cardView, cardView, F, F, F],
+      [F, F, 0, 0, 0],
+    );
+
+    expect(seen).toEqual([`page-capture:${F}`, `wrapper:${F}`]);
+    expect(forwarded()).toEqual([
+      ["A", `${cardView},${cardPage}`, `${cardView},${cardView}`, `${F},${F}`, "tap", true, 7],
+    ]);
+    // The card's turn is after every listener here, and carries the payload
+    // as this realm received it.
+    expect(
+      mock.calls.map(call => call[0]).filter(name => name === "listener" || name === "forwardEvent"),
+    ).toEqual([
+      "listener",
+      "listener",
+      "forwardEvent",
+    ]);
+    expect(mock.named("forwardEvent")[0]!.slice(8)).toEqual([
+      ...extraArguments({ x: 130, y: 60 }),
+      ...detailArguments({ x: 130, y: 60 }),
+    ]);
+  });
+
+  it("hands the card its steps whatever ended this realm's walk", () => {
+    const { page, wrapper, F, cardPage, cardView } = framed();
+    const [P, W] = [__GetElementUniqueID(page), __GetElementUniqueID(wrapper)];
+    globalThis.runWorklet = () => {};
+    // A `capture-catch` on the wrapper ends this realm's walk only.
+    __AddEvent(wrapper, "capture-catch", "tap", { type: "worklet", value: {} });
+    const seen: string[] = [];
+    __AddEventListener(page, "tap", noting(seen, "page"), {});
+    dispatchIds([cardView, cardPage, F, W, P], [cardView, cardView, F, F, F], [F, F, 0, 0, 0]);
+    expect(seen).toEqual([]);
+    expect(forwarded()).toHaveLength(1);
+
+    // A listener that throws is reported once the card had its turn.
+    __AddEventListener(page, "tap", () => {
+      throw new Error("a page listener failed");
+    }, { capture: true });
+    expect(() =>
+      dispatchIds([cardView, cardPage, F, W, P], [cardView, cardView, F, F, F], [F, F, 0, 0, 0])
+    ).toThrow("a page listener failed");
+    expect(forwarded()).toHaveLength(2);
+  });
+
+  it("keeps a UA component's shadow content nobody's, without asking for a handle", () => {
+    const { page, wrapper } = framed();
+    const swiper = __CreateElement("x-swiper", 0);
+    __AppendElement(wrapper, swiper);
+    const P = __GetElementUniqueID(page);
+    const W = __GetElementUniqueID(wrapper);
+    const S = __GetElementUniqueID(swiper);
+    const seen: string[] = [];
+    __AddEventListener(swiper, "tap", noting(seen, "swiper"), {});
+
+    dispatchIds([800, S, W, P], [800, S, S, S], [S, 0, 0, 0]);
+
+    expect(seen).toEqual([`swiper:${S}`]);
+    expect(forwarded()).toEqual([]);
+  });
+
+  it("hands a card a UA component inside it whole, its shadow content included", () => {
+    const { page, wrapper, F, cardPage } = framed();
+    const [P, W] = [__GetElementUniqueID(page), __GetElementUniqueID(wrapper)];
+    const [content, cardSwiper] = [800, 700];
+
+    dispatchIds(
+      [content, cardSwiper, cardPage, F, W, P],
+      [content, cardSwiper, cardSwiper, F, F, F],
+      [cardSwiper, F, F, 0, 0, 0],
+    );
+
+    expect(forwarded()).toEqual([[
+      "A",
+      `${content},${cardSwiper},${cardPage}`,
+      `${content},${cardSwiper},${cardSwiper}`,
+      `${cardSwiper},${F},${F}`,
+      "tap",
+      true,
+      7,
+    ]]);
+  });
+
+  it("hands a card a frame inside it whole, the grand-card's steps included", () => {
+    const { page, wrapper, F, cardPage } = framed();
+    const [P, W] = [__GetElementUniqueID(page), __GetElementUniqueID(wrapper)];
+    const [grandView, grandPage, innerFrame] = [600, 601, 500];
+
+    dispatchIds(
+      [grandView, grandPage, innerFrame, cardPage, F, W, P],
+      [grandView, grandView, innerFrame, innerFrame, F, F, F],
+      [innerFrame, innerFrame, F, F, 0, 0, 0],
+    );
+
+    expect(forwarded()).toEqual([[
+      "A",
+      `${grandView},${grandPage},${innerFrame},${cardPage}`,
+      `${grandView},${grandView},${innerFrame},${innerFrame}`,
+      `${innerFrame},${innerFrame},${F},${F}`,
+      "tap",
+      true,
+      7,
+    ]]);
+  });
+
+  it("hands nobody the steps of a frame showing no booted card", () => {
+    const { page, wrapper, F, cardPage, cardView } = framed();
+    frameCards.clear();
+    const [P, W] = [__GetElementUniqueID(page), __GetElementUniqueID(wrapper)];
+    const seen: string[] = [];
+    __AddEventListener(wrapper, "tap", noting(seen, "wrapper"), {});
+
+    dispatchIds([cardView, cardPage, F, W, P], [cardView, cardView, F, F, F], [F, F, 0, 0, 0]);
+
+    expect(seen).toEqual([`wrapper:${F}`]);
+    expect(forwarded()).toEqual([]);
+  });
+
+  it("runs nothing here for an event with only card steps, and hands the card all of them", () => {
+    const { page, F, cardPage, cardView } = framed();
+    const seen: string[] = [];
+    __AddEventListener(page, "scroll", noting(seen, "page"), { capture: true });
+
+    dispatchIds([cardView, cardPage], [cardView, cardView], [F, F], "scroll", { empty: true }, false);
+
+    expect(seen).toEqual([]);
+    expect(forwarded()).toEqual([
+      ["A", `${cardView},${cardPage}`, `${cardView},${cardView}`, `${F},${F}`, "scroll", false, 7],
+    ]);
+  });
+
+  it("hands a non-composed event in a grand-card to the card whose frame is above it", () => {
+    const { F, cardPage } = framed();
+    // The card's nodes as the host's tree has them: the inner frame under
+    // the card's page, whose parent is the frame's shadow root, whose
+    // parent is the frame.
+    const [innerFrame, grandPage, grandView, frameShadow] = [500, 601, 600, 902];
+    mock.insertBefore(F, frameShadow, null);
+    mock.insertBefore(frameShadow, cardPage, null);
+    mock.insertBefore(cardPage, innerFrame, null);
+
+    dispatchIds(
+      [grandView, grandPage],
+      [grandView, grandView],
+      [innerFrame, innerFrame],
+      "uiappear",
+      { exposure: true },
+      false,
+    );
+
+    expect(forwarded()).toEqual([[
+      "A",
+      `${grandView},${grandPage}`,
+      `${grandView},${grandView}`,
+      `${innerFrame},${innerFrame}`,
+      "uiappear",
+      false,
+      7,
+    ]]);
+  });
+
+  it("hands nobody a non-composed event in a UA component of its own", () => {
+    const { wrapper } = framed();
+    const swiper = __CreateElement("x-swiper", 0);
+    __AppendElement(wrapper, swiper);
+    const S = __GetElementUniqueID(swiper);
+
+    dispatchIds([800], [800], [S], "scroll", { empty: true }, false);
+
+    expect(forwarded()).toEqual([]);
+  });
+
+  it("hands a key event to every booted card with no steps, after this realm's own", () => {
+    const { page } = framed();
+    frameCards.set(9999, { card: "B" });
+    const P = __GetElementUniqueID(page);
+    const seen: string[] = [];
+    __AddEventListener(page, "keydown", noting(seen, "page"), {});
+    const key = { key: { key: "a", code: "KeyA", repeat: false, modifiers: 0 } };
+
+    dispatchIds([P], [P], [0], "keydown", key);
+
+    expect(seen).toEqual([`page:${P}`]);
+    expect(forwarded()).toEqual([
+      ["A", "", "", "", "keydown", true, 7],
+      ["B", "", "", "", "keydown", true, 7],
+    ]);
+    // A pointer event at the page hands no card anything.
+    dispatchIds([P], [P], [0], "tap");
+    expect(forwarded()).toHaveLength(2);
+  });
+
+  describe("in a card's realm", () => {
+    /** The frame this realm's tree is in, and where its border box sits. */
+    const FRAME = 4242;
+
+    it("runs its own steps, those in its frame's tree, with x/y relative to the frame's border box", () => {
+      const { page, outer, inner } = tree();
+      const ids = [inner, outer, page].map(handle => __GetElementUniqueID(handle));
+      const seen: Record<string, unknown>[] = [];
+      __AddEventListener(page, "touchstart", (event: Record<string, unknown>) => {
+        seen.push(event);
+      }, {});
+
+      elementModule.__BobcatDispatchCardEvent(
+        FRAME,
+        100,
+        40,
+        ids.join(","),
+        ids.map(() => ids[0]).join(","),
+        ids.map(() => FRAME).join(","),
+        "touchstart",
+        true,
+        0,
+        ...extraArguments({}),
+        ...detailArguments({ x: 130, y: 60, touchNumbers: [1, 130, 60, 7] }),
+      );
+
+      expect(seen).toHaveLength(1);
+      const event = seen[0]!;
+      expect(event["detail"]).toEqual({ x: 30, y: 20 });
+      expect((event["touches"] as Record<string, number>[])[0]).toEqual({
+        identifier: 1,
+        x: 30,
+        y: 20,
+        pageX: 130,
+        pageY: 60,
+        clientX: 130,
+        clientY: 60,
+      });
+
+      seen.length = 0;
+      __AddEventListener(page, "tap", (event: Record<string, unknown>) => {
+        seen.push(event);
+      }, {});
+      elementModule.__BobcatDispatchCardEvent(
+        FRAME,
+        100,
+        40,
+        ids.join(","),
+        ids.map(() => ids[0]).join(","),
+        ids.map(() => FRAME).join(","),
+        "tap",
+        true,
+        0,
+        ...extraArguments({}),
+        ...detailArguments({ x: 130, y: 60, button: 0, buttons: 0 }),
+      );
+      expect(seen[0]!["detail"]).toEqual({ x: 30, y: 20 });
+      expect([seen[0]!["x"], seen[0]!["y"]]).toEqual([30, 20]);
+      expect([seen[0]!["clientX"], seen[0]!["clientY"]]).toEqual([130, 60]);
+      expect([seen[0]!["pageX"], seen[0]!["pageY"]]).toEqual([130, 60]);
+    });
+
+    it("still refuses a step of its own that no handle names", () => {
+      expect(() =>
+        elementModule.__BobcatDispatchCardEvent(
+          FRAME,
+          0,
+          0,
+          "999",
+          "999",
+          String(FRAME),
+          "tap",
+          true,
+          0,
+          ...extraArguments({}),
+          ...detailArguments({}),
+        )
+      ).toThrow("ownership graph");
+    });
+
+    it("runs a pathless key event's global pass alone, each target its own element", () => {
+      const { outer, inner } = tree();
+      const seen: string[] = [];
+      globalThis.runWorklet = (value: unknown, params: unknown[]) => {
+        const event = params[0] as ListenerEvent;
+        seen.push(
+          `${(value as { label: string }).label}:${event.target.uid}:${event.currentTarget.uid}:${event.eventPhase}`,
+        );
+      };
+      __AddEvent(inner, "global-bindEvent", "keydown", { type: "worklet", value: { label: "inner" } });
+      __AddEvent(outer, "global-bindEvent", "keydown", { type: "worklet", value: { label: "outer" } });
+      __AddEvent(outer, "bindEvent", "keydown", { type: "worklet", value: { label: "bound" } });
+      const key = { key: { key: "a", code: "KeyA", repeat: false, modifiers: 0 } };
+      const [I, O] = [inner, outer].map(handle => __GetElementUniqueID(handle));
+
+      elementModule.__BobcatDispatchCardEvent(
+        FRAME,
+        0,
+        0,
+        "",
+        "",
+        "",
+        "keydown",
+        true,
+        0,
+        ...extraArguments(key),
+        ...detailArguments(key),
+      );
+
+      expect(seen).toEqual([`inner:${I}:${I}:0`, `outer:${O}:${O}:0`]);
+      // Nor does a pathless event that does not bubble run anything.
+      seen.length = 0;
+      elementModule.__BobcatDispatchCardEvent(
+        FRAME,
+        0,
+        0,
+        "",
+        "",
+        "",
+        "keydown",
+        false,
+        0,
+        ...extraArguments(key),
+        ...detailArguments(key),
+      );
+      expect(seen).toEqual([]);
+    });
+  });
+});
+
 describe("timestamp and params", () => {
   /** The two members every dispatched event carries, whatever its type. */
   interface StampedEvent {
@@ -3079,6 +3509,7 @@ describe("timestamp and params", () => {
     elementModule.__BobcatDispatchEvent(
       String(__GetElementUniqueID(inner)),
       String(__GetElementUniqueID(inner)),
+      "0",
       "tap",
       undefined,
       0,

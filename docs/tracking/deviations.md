@@ -2471,10 +2471,29 @@ consequential choice about whether to follow the spec or the quirk.
       acknowledgements. web-core awaits its nested instance's dispose RPC
       before terminating the Worker; native destroys the nested render with
       the frame.
-  - *The nested card gets no events.* Input dispatch does not enter a
-    frame (`MainThreadRuntime::dispatch` drops the steps in a shadow tree),
-    so a handler inside the card never runs; native and web-core dispatch
-    into the nested view.
+  - *Events reach the card through the realm of its frame* (user rulings
+    2026-10-16): the page realm forwards the card's steps in JavaScript
+    after its own dispatch. Where the references disagree:
+    - *A catch stops one card's walk alone* (web-core): a `catchtap` in the
+      card does not stop the page's `bindtap` on the frame's ancestors, and a
+      page `capture-catch` does not stop the card, as each web-core
+      `lynx-view` walks its own shadow root (`event_apis.rs:406-432`).
+      Native runs one propagation across both pages
+      (`LynxEventEmitter.java:118-158`, `touch_event_handler.cc:1537-1931`),
+      where either catch ends it.
+    - *Every card hears every key* (web-core): a card's
+      `global-bindkeydown`/`keyup` fires for each key, as web-core's nested
+      binding listens on `document`; native Android/iOS have no `keydown`.
+    - *The card's `detail.x/y` is frame-local* (my decision; both references
+      agree): relative to the frame's border box, from the layout walk, so
+      transforms are ignored; `clientX/Y`/`pageX/Y` stay the viewport's,
+      as web-core's `clientX/Y` are.
+    - *A listener that throws in a card is a `ScriptReported`*, not a
+      `ListenerFailed`: the card's `dispatchEvent` reports in the child,
+      and nothing crosses the ShadowRealm boundary back.
+    - *The card's exposure records go to the page's BTS* (deferred): a
+      card's elements' `exposure`/`disexposure` lists still go to the page
+      realm's BTS, where both references keep exposure per card.
   - *A relative `src` resolves against the view's base*, not the host card's
     URL: `bobcat:frame` resolves `src` with `resolveUrl`, which is the
     resolution the fetcher makes against `ViewSources::base_url`, and the

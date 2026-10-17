@@ -165,10 +165,56 @@ fn push_detail_strings<'a>(
     }
 }
 
-/// Inline arguments for one dispatch: the six of the header, then an
+/// Inline arguments for one dispatch: the seven of the header, then an
 /// input event's discriminator and eight detail numbers. Extras and touch
 /// points spill.
-type Arguments<'a> = SmallVec<[HostArgument<'a>; 15]>;
+type Arguments<'a> = SmallVec<[HostArgument<'a>; 16]>;
+
+/// The path one dispatch hands the realm: three comma-joined lists of packed
+/// node ids, position for position, in the standard's event-path order
+/// (target first, root last).
+///
+/// - `nodes`: each step's node — the standard's invocation target.
+/// - `targets`: the event's `target` as that step sees it, shadow-retargeted by
+///   [`dom::Document::event_steps`].
+/// - `hosts`: the shadow host of the tree the step's node is in, `0` for the document tree (a
+///   detached tree included): which tree the step belongs to, and nothing more. Which realm runs a
+///   step is the realms' own rule (`element-papi.ts`), over this list.
+///
+/// A step at a shadow root itself is left out: a shadow root is no element,
+/// and nothing a realm holds names one. Every other step is kept, the steps
+/// inside a shadow tree included.
+#[derive(Debug, Default)]
+struct EventPath {
+    nodes: String,
+    targets: String,
+    hosts: String,
+}
+
+impl EventPath {
+    /// The path `steps` make over `document`: its capture pass read
+    /// backwards, which is the whole path, whatever `bubbles` cut from the
+    /// bubble pass.
+    fn of(document: &LynxDocument, steps: &dom::event::EventSteps) -> Self {
+        let mut path = Self::default();
+        for step in steps.steps().iter().rev().filter(|step| step.capture) {
+            let host = match document.shadow_root_of(step.node) {
+                None => 0.0,
+                Some(root) if root == step.node => continue,
+                Some(root) => document.shadow_host(root).map_or(0.0, packed_node_id),
+            };
+            if !path.nodes.is_empty() {
+                path.nodes.push(',');
+                path.targets.push(',');
+                path.hosts.push(',');
+            }
+            write!(path.nodes, "{}", packed_node_id(step.node)).expect("writing to a String");
+            write!(path.targets, "{}", packed_node_id(step.target)).expect("writing to a String");
+            write!(path.hosts, "{host}").expect("writing to a String");
+        }
+        path
+    }
+}
 
 /// Appends the extras channel: the count, then each name and its value.
 fn encode_extras<'a>(extras: Extras<'a>, arguments: &mut Arguments<'a>) {
@@ -1991,14 +2037,16 @@ impl MainThreadRuntime {
     ///
     /// **The realm's dispatch** is handed the path as the standard's event
     /// path — every step, in target-first, root-last order, each with its
-    /// shadow-retargeted target, which is the capture pass of the steps read
-    /// backwards — encoded as two comma-joined decimal id strings, which is
-    /// how `childElementIds` carries a list already: the boundary takes
+    /// shadow-retargeted target and the shadow host of the tree it is in,
+    /// which is the capture pass of the steps read backwards — encoded as
+    /// three comma-joined decimal id strings ([`EventPath`]), which is how
+    /// `childElementIds` carries a list already: the boundary takes
     /// primitives and structured clones only, a clone can be minted by the
     /// realm alone, and a decimal id cannot contain the separator. One call
     /// carries the whole dispatch, and what the realm then runs over it —
-    /// the passes, whether any listener exists at all — is the realm's
-    /// business, because every registration lives there.
+    /// the passes, whether any listener exists at all, which steps are its
+    /// own and which a `frame`'s card hears (`bobcat:frame`) — is the
+    /// realm's business, because every registration lives there.
     ///
     /// `bubbles` crosses as itself rather than as a shortened path, because
     /// the passes narrow differently: a non-bubbling event still captures down
@@ -2011,14 +2059,18 @@ impl MainThreadRuntime {
     ///
     /// `composed` is the event's own flag too, and it shapes the path here,
     /// where the tree is: a non-composed event's path ends at the root of the
-    /// tree its target is in (DOM's *get the parent*). The realm's path then
-    /// loses every step at a UA shadow tree's content, because script names
-    /// no node of one — no handle, no listener — and a browser reports
-    /// exactly that to every listener outside the tree: the host, retargeted,
-    /// as the first step that remains says. An event at shadow content
-    /// therefore starts at its host there, and a non-composed one there
-    /// reaches no step at all. The Rust walk keeps those steps: a component's
-    /// shadow tree is its own.
+    /// tree its target is in (DOM's *get the parent*). The realm's path keeps
+    /// every step inside a shadow tree, each naming its tree's host, and
+    /// loses only the steps at shadow roots themselves. Which tree is whose
+    /// is the realms' rule, not this one's: the page realm runs the document
+    /// tree's steps, hands a `frame`'s shadow tree to the card that frame
+    /// shows, and runs nobody's steps at a UA component's shadow content,
+    /// which script names no node of — no handle, no listener — so a browser
+    /// reports exactly that to every listener outside the tree: the host,
+    /// retargeted, as the first step a realm runs says. An event at UA
+    /// shadow content therefore starts at its host there, and a non-composed
+    /// one reaches no step at all. The Rust walk runs every step: a
+    /// component's shadow tree is its own.
     ///
     /// Everything else crosses as primitives, and the realm builds the
     /// objects, in this order: the `timestamp`; the extras channel
@@ -2050,38 +2102,24 @@ impl MainThreadRuntime {
         detail: &EventDetail,
         extras: Extras<'_>,
     ) -> Result<bool, MainThreadError> {
-        let mut nodes = String::new();
-        let mut targets = String::new();
-        {
+        let path = {
             let mut slot = self.slot.borrow_mut();
             let document = slot.document_mut();
             if document.get(target).is_none() {
                 return Ok(false);
             }
             let steps = document.event_steps(target, bubbles, composed);
-            // The capture pass read backwards is the whole path, target
-            // first, whatever `bubbles` cut from the bubble pass.
-            for step in steps
-                .steps()
-                .iter()
-                .rev()
-                .filter(|step| step.capture && document.shadow_root_of(step.node).is_none())
-            {
-                if !nodes.is_empty() {
-                    nodes.push(',');
-                    targets.push(',');
-                }
-                write!(nodes, "{}", packed_node_id(step.node)).expect("writing to a String");
-                write!(targets, "{}", packed_node_id(step.target)).expect("writing to a String");
-            }
+            let path = EventPath::of(document, &steps);
             document.dispatch_element_event_over(&steps, name, detail, timestamp);
-        }
+            path
+        };
 
         // The detail last, because a touch event's points make it the one
         // part of variable length besides the extras before it.
         let mut arguments = Arguments::new();
-        arguments.push(HostArgument::String(&nodes));
-        arguments.push(HostArgument::String(&targets));
+        arguments.push(HostArgument::String(&path.nodes));
+        arguments.push(HostArgument::String(&path.targets));
+        arguments.push(HostArgument::String(&path.hosts));
         arguments.push(HostArgument::String(name));
         arguments.push(HostArgument::Boolean(bubbles));
         arguments.push(HostArgument::Number(timestamp));

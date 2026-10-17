@@ -28,11 +28,17 @@ import {
 import type { NodeQueryRequest, QueryNode } from "bobcat:selector-query";
 import { __BobcatPublishEvent } from "bobcat:runtime";
 import { splitRecord } from "bobcat:record";
-// Read only when a frame's `src`, `data` or `global-props` is written, never
-// as this module evaluates: `bobcat:frame` imports `bobcat:runtime`, which
-// imports this module, so the cycle is safe exactly because nothing crosses
-// it at evaluation.
-import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
+// Read only when a frame's `src`, `data` or `global-props` is written, or an
+// event is dispatched, never as this module evaluates: `bobcat:frame` imports
+// `bobcat:runtime`, which imports this module, so the cycle is safe exactly
+// because nothing crosses it at evaluation.
+import {
+  forwardEvent,
+  frameCardOf,
+  frameCards,
+  frameDataChanged,
+  frameSourceChanged,
+} from "bobcat:frame";
 
 // The Lynx Element PAPI runtime.
 //
@@ -137,16 +143,41 @@ import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 // capture behave as `addEventListener`'s do.
 //
 // **The whole walk is this file's.** The host computes the event path while
-// it holds the document, releases it, and makes one call:
-// `__BobcatDispatchEvent(nodes, targets, name, bubbles, timestamp,
+// it holds the document, releases it, and makes one call, in the page realm:
+// `__BobcatDispatchEvent(nodes, targets, hosts, name, bubbles, timestamp,
 // extraCount, ...extraNameValuePairs, detailKind, ...detailValues)`, where
-// `nodes` is the path in target-first order as comma-joined decimal node ids
-// and `targets` carries, position for position, the shadow-retargeted target
-// of that step. Two strings because the boundary takes primitives and
-// structured clones only, a clone can be minted by the realm alone, and a
-// decimal id cannot contain the separator — the same encoding
+// `nodes` is the path in target-first order as comma-joined decimal node ids,
+// `targets` carries, position for position, the shadow-retargeted target of
+// that step, and `hosts` the shadow host of the tree that step's node is in,
+// `0` for the document tree. Three strings because the boundary takes
+// primitives and structured clones only, a clone can be minted by the realm
+// alone, and a decimal id cannot contain the separator — the same encoding
 // `childElementIds` uses. Releasing the document before the call is what
 // lets a listener mutate the tree.
+//
+// **Which steps are this realm's** is decided here, reading the path from
+// its root (`splitPath`), never by whether a handle exists: a step is this
+// realm's when its tree is this realm's own — the document tree for the page
+// realm, the shadow tree of the frame a card renders in for a frame's card;
+// a step is a card's when its host is a frame of this realm showing a booted
+// card (`bobcat:frame`), or a node whose own step went to a card (a UA
+// component or a frame inside that card), or — for a non-composed path,
+// which carries no step of its host — a node below such a frame; every
+// other step is nobody's — a UA component's shadow content, which script
+// names no node of, so an event there starts at its host, retargeted, as a
+// browser reports it to every listener outside the shadow tree. This realm
+// runs its whole dispatch over
+// its own steps first, then hands each card its steps, in path order
+// (`bobcat:frame`'s `forwardEvent`, then `bobcat:frame-boot`'s
+// `dispatchEvent` in the card's realm, which applies the same rule to its
+// own frames). Nothing that ends one realm's walk — a `catch` form,
+// `stopPropagation`, a listener that throws — ends another's: web-core's
+// nested `lynx-view`, where each card's binding walks its own shadow root.
+// A `keydown` or `keyup` (`DETAIL_KEY`) is also handed to every booted card
+// with no steps at all, so a card's `global-bindkeydown`/`keyup` hears every
+// key, as each web-core card listens on `document`. A card's pointer and
+// touch `x`/`y` and its `detail.x`/`y` are relative to its frame's border
+// box; `clientX`/`clientY` and `pageX`/`pageY` stay the viewport's.
 //
 // **Kernel events are W3C; this file is the Lynx layer** (user ruling,
 // 2026-10-13). The host dispatches every event whose name exists in W3C with
@@ -2769,11 +2800,14 @@ export function __UpdateListCallbacks(
  * event cannot name what it happened to, and nothing this file could return
  * would be better than saying so.
  *
- * The one node kind that is connected and yet unnameable is a UA component's
- * shadow content, which script never sees. The host never sends one: it
- * drops every step at shadow content from the path, so an event at a shadow
- * node starts at its host, retargeted, which is also what a browser reports
- * as the target to every listener outside the shadow tree.
+ * The node kinds that are connected and yet unnameable here are a UA
+ * component's shadow content, which script never sees, and a frame's card's
+ * nodes, which its own realm names. Neither is ever a step of this realm's
+ * own: `splitPath` gives the first to nobody and the second to the card,
+ * reading which tree each step is in rather than whether a handle exists, so
+ * an event at a shadow node starts at its host, retargeted, which is also
+ * what a browser reports as the target to every listener outside the shadow
+ * tree, and a step of this realm's own with no handle still fails here.
  */
 function targetInfo(
   nodeId: number,
@@ -2983,10 +3017,27 @@ function extrasOf(pairs: unknown[]): EventDetail {
 }
 
 /**
+ * Where a realm's own page sits in the viewport, in CSS px: `0, 0` for the
+ * page realm, whose page is the view, and a frame's border-box origin for
+ * that frame's card. `x` and `y` — a pointer's, a touch point's, a
+ * position `detail`'s — are relative to it, as both references make them
+ * lynx-view-local (web-core's `createCrossThreadEvent`, native's frame-local
+ * point); `clientX`/`clientY` and `pageX`/`pageY` stay the viewport's.
+ */
+interface PageOrigin {
+  x: number;
+  y: number;
+}
+
+const VIEW_ORIGIN: PageOrigin = { x: 0, y: 0 };
+
+/**
  * The W3C members a position detail puts on the event object itself, by
  * which shape the host's values make — never by the event's name, save the
- * one `PointerEvent` pair. Every coordinate is the one viewport CSS px the
- * `detail` reports: this runtime has no separate client or page space.
+ * one `PointerEvent` pair. `clientX`/`clientY` and `pageX`/`pageY` are the
+ * viewport CSS px the host sends, which this runtime has no separate page
+ * space for; `x`/`y` are the same point relative to the realm's page
+ * (`origin`), which is the viewport for the page realm.
  *
  * - A pointer shape (`button` sent): `x`, `y`, `clientX`, `clientY`, `pageX`,
  *   `pageY`, `button` and `buttons` — `MouseEvent`'s, which every event a
@@ -3000,10 +3051,18 @@ function extrasOf(pairs: unknown[]): EventDetail {
 function positionMembers(
   name: string,
   values: unknown[],
+  origin: PageOrigin,
 ): Record<string, number | string> | undefined {
   const x = Number(values[0]);
   const y = Number(values[1]);
-  const coordinates = { x, y, clientX: x, clientY: y, pageX: x, pageY: y };
+  const coordinates = {
+    x: x - origin.x,
+    y: y - origin.y,
+    clientX: x,
+    clientY: y,
+    pageX: x,
+    pageY: y,
+  };
   if (values[2] !== undefined) {
     return {
       ...coordinates,
@@ -3062,12 +3121,18 @@ function keyMembers(values: unknown[]): {
  * read off `target` itself — the event's own target, which the host resolved
  * before it called, so its attributes answer — and is the only kind that
  * reads the target at all.
- * `DETAIL_POSITION` is `{x, y}` for a pointer or touch shape and `{}` for a
- * wheel (native's); its other values are the event's own members
- * ([`positionMembers`]) and the touch numbers ([`touchLists`]). Extras,
- * when the host sends any, replace all of this.
+ * `DETAIL_POSITION` is `{x, y}` for a pointer or touch shape, relative to
+ * the realm's page (`origin`), and `{}` for a wheel (native's); its other
+ * values are the event's own members ([`positionMembers`]) and the touch
+ * numbers ([`touchLists`]). Extras, when the host sends any, replace all of
+ * this.
  */
-function detailOf(kind: number, numbers: unknown[], target: number): EventDetail {
+function detailOf(
+  kind: number,
+  numbers: unknown[],
+  target: number,
+  origin: PageOrigin,
+): EventDetail {
   if (kind === DETAIL_EMPTY || kind === DETAIL_KEY) {
     return {};
   }
@@ -3083,18 +3148,23 @@ function detailOf(kind: number, numbers: unknown[], target: number): EventDetail
   if (numbers[2] !== undefined) {
     return {};
   }
-  return { x: Number(numbers[0]), y: Number(numbers[1]) };
+  return {
+    x: Number(numbers[0]) - origin.x,
+    y: Number(numbers[1]) - origin.y,
+  };
 }
 
 /**
  * One entry of a touch event's lists.
  *
- * Every coordinate is the same viewport CSS pixel the raw pointer events
- * report, under all three of the standard's names: web-core's `x`/`y` are
- * lynx-view-local rather than native Lynx's element-local, and this runtime
- * has no separate screen space to report. `identifier` is the host's pointer
- * id. `screenX`/`screenY`, `radiusX`/`radiusY`, `force` and `rotationAngle`
- * are recorded gaps, not values withheld.
+ * `clientX`/`clientY` and `pageX`/`pageY` are the viewport CSS px the raw
+ * pointer events report, and `x`/`y` the same point relative to the realm's
+ * page — web-core's lynx-view-local `x`/`y` rather than native Lynx's
+ * element-local — which is the viewport for the page realm and the frame's
+ * border box for a frame's card. This runtime has no separate screen space
+ * to report. `identifier` is the host's pointer id. `screenX`/`screenY`,
+ * `radiusX`/`radiusY`, `force` and `rotationAngle` are recorded gaps, not
+ * values withheld.
  */
 interface TouchPointValues {
   identifier: number;
@@ -3121,7 +3191,7 @@ const TOUCH_CHANGED = 4;
  * finger — nothing observes the identity, and one object per finger is what
  * the lists mean.
  */
-function touchLists(numbers: unknown[]): {
+function touchLists(numbers: unknown[], origin: PageOrigin): {
   touches: TouchPointValues[];
   targetTouches: TouchPointValues[];
   changedTouches: TouchPointValues[];
@@ -3137,8 +3207,8 @@ function touchLists(numbers: unknown[]): {
     const y = Number(numbers[at + 2]);
     const point: TouchPointValues = {
       identifier: Number(numbers[at]),
-      x,
-      y,
+      x: x - origin.x,
+      y: y - origin.y,
       pageX: x,
       pageY: y,
       clientX: x,
@@ -3350,34 +3420,157 @@ function runEventHandler(handler: unknown, event: DispatchedEvent): undefined {
 }
 
 /**
- * One step of the event path: the node visited, and the target the standard
+ * One step of the event path: the node visited, the target the standard
  * reports there — the two differ only across a shadow boundary, where
- * retargeting hands the steps above it the node they can name.
+ * retargeting hands the steps above it the node they can name — and the
+ * shadow host of the tree the node is in, `0` for the document tree.
  */
 interface PathStep {
   node: number;
   target: number;
+  host: number;
 }
 
 /**
- * The path the host computed, from its two comma-joined id strings.
+ * The path the host computed, from its three comma-joined id strings.
  *
  * Target-first, root-last: the bubble order, which the capture pass reads
- * backwards. Two strings rather than one structure because the boundary
+ * backwards. Three strings rather than one structure because the boundary
  * carries primitives and structured clones only, and a decimal id cannot
  * contain the separator — `childElementIds` encodes a list the same way.
+ * A step with no host listed is in the document tree.
  */
-function pathSteps(pathIds: unknown, targetIds: unknown): PathStep[] {
+function pathSteps(
+  pathIds: unknown,
+  targetIds: unknown,
+  hostIds: unknown,
+): PathStep[] {
   const path = String(pathIds ?? "");
   if (path === "") {
     return [];
   }
   const targets = String(targetIds ?? "").split(",");
+  const hosts = String(hostIds ?? "").split(",");
   return path.split(",").map((field, index): PathStep => {
     const node = Number(field);
     const target = targets[index];
-    return { node, target: target === undefined ? node : Number(target) };
+    const host = hosts[index];
+    return {
+      node,
+      target: target === undefined ? node : Number(target),
+      host: host === undefined || host === "" ? 0 : Number(host),
+    };
   });
+}
+
+/** The three id strings `pathSteps` reads, written back for a card. */
+function pathIdsOf(steps: PathStep[]): [string, string, string] {
+  return [
+    steps.map((step) => step.node).join(","),
+    steps.map((step) => step.target).join(","),
+    steps.map((step) => step.host).join(","),
+  ];
+}
+
+/**
+ * The steps of one path this realm runs, and the steps each card one of its
+ * frames shows runs, in the order the cards first appear reading the path
+ * from its root.
+ */
+interface SplitPath {
+  own: PathStep[];
+  cards: Map<object, PathStep[]>;
+}
+
+/** The owner of a step this realm runs itself, beside a card's record. */
+const OWN_STEP = Symbol("own step");
+
+/**
+ * Splits `steps` (target-first) between this realm and the cards its frames
+ * show, reading them from the root, so that a host's own step is decided
+ * before the steps inside its shadow tree. A step's owner is:
+ *
+ * - this realm, when its host is `ownHost`, this realm's own tree: `0`, the
+ *   document tree, for the page realm; the frame a card renders in, for that
+ *   card's realm;
+ * - the card `bobcat:frame` reports for its host, when the host is a frame
+ *   of this realm showing a booted card;
+ * - the card the host's own step went to, when the host is a node of such a
+ *   card — a UA component or a frame inside it — whose step came earlier;
+ *   or, when the host has no step — a non-composed path ends at the root of
+ *   its target's tree — the card of the nearest frame of this realm above
+ *   the host (`cardAbove`);
+ * - nobody otherwise: a UA component's shadow content, inside this realm's
+ *   tree, which script names no node of, so an event there starts at its
+ *   host as a browser reports it outside the shadow tree.
+ *
+ * Never by whether a handle exists, so a step of this realm's own that has
+ * no handle still fails loudly in `targetInfo`. Light content slotted into a
+ * UA component is in its own tree, and keeps that tree's owner.
+ */
+function splitPath(steps: PathStep[], ownHost: number): SplitPath {
+  const cards: Map<object, PathStep[]> = new Map();
+  // Nearly every path is in this realm's own tree alone.
+  if (steps.every((step) => step.host === ownHost)) {
+    return { own: steps, cards };
+  }
+  const own: PathStep[] = [];
+  // The owner each host's tree went to, decided once per host.
+  const owners: Map<number, object | typeof OWN_STEP | null> = new Map();
+  // The owner of each step decided so far, by node.
+  const decided: Map<number, object | typeof OWN_STEP | null> = new Map();
+  const ownerOfStep: (object | typeof OWN_STEP | null)[] = new Array(
+    steps.length,
+  );
+  for (let at = steps.length - 1; at >= 0; at -= 1) {
+    const step = steps[at]!;
+    let owner = owners.get(step.host);
+    if (owner === undefined) {
+      if (step.host === ownHost) {
+        owner = OWN_STEP;
+      } else {
+        const hostOwner = decided.get(step.host);
+        owner = frameCardOf(step.host) ??
+          (decided.has(step.host)
+            ? (hostOwner === OWN_STEP ? undefined : hostOwner)
+            : cardAbove(step.host, ownHost)) ??
+          null;
+      }
+      owners.set(step.host, owner);
+    }
+    ownerOfStep[at] = owner;
+    decided.set(step.node, owner);
+    if (owner !== null && owner !== OWN_STEP && !cards.has(owner)) {
+      cards.set(owner, []);
+    }
+  }
+  steps.forEach((step, at) => {
+    const owner = ownerOfStep[at];
+    if (owner === OWN_STEP) own.push(step);
+    else if (owner !== null && owner !== undefined) cards.get(owner)!.push(step);
+  });
+  return { own, cards };
+}
+
+/**
+ * The card the tree hosted by `host` is handed to when `host` has no step on
+ * the path: the card of the nearest frame of this realm showing a booted
+ * card above `host`, walking parents — a shadow root's is its host — until
+ * this realm's own tree's host; undefined when there is none, as for a UA
+ * component of this realm's own. Only a non-composed path, which ends at the
+ * root of its target's tree, ever asks: a composed one carries every host on
+ * the way up.
+ */
+function cardAbove(host: number, ownHost: number): object | undefined {
+  for (
+    let at = parentNode(host);
+    at !== null && at !== ownHost;
+    at = parentNode(at)
+  ) {
+    const card = frameCardOf(at);
+    if (card !== undefined) return card;
+  }
+  return undefined;
 }
 
 /**
@@ -3394,7 +3587,129 @@ function handlerInPass(
 }
 
 /**
- * One whole dispatch, the single call the host makes per event.
+ * One whole dispatch, the single call the host makes per event, in the page
+ * realm: `dispatchIn` over the document tree, at the viewport's origin.
+ */
+function dispatchEvent(
+  pathIds: unknown,
+  targetIds: unknown,
+  hostIds: unknown,
+  eventName: unknown,
+  bubbles: unknown,
+  timestamp: unknown,
+  extraCount: unknown,
+  ...rest: unknown[]
+): undefined {
+  return dispatchIn(
+    0,
+    VIEW_ORIGIN,
+    pathIds,
+    targetIds,
+    hostIds,
+    eventName,
+    bubbles,
+    timestamp,
+    extraCount,
+    rest,
+  );
+}
+
+/**
+ * One whole dispatch in a frame's card's realm, which `bobcat:frame-boot`'s
+ * `dispatchEvent` makes for the steps the realm of the frame handed it:
+ * `dispatchIn` over the shadow tree of the frame `frameId`, the card's own
+ * tree, with `x`/`y` relative to the frame's border box at `originX`,
+ * `originY` in the viewport. The rest is `__BobcatDispatchEvent`'s, as that
+ * realm received it.
+ */
+export function __BobcatDispatchCardEvent(
+  frameId: unknown,
+  originX: unknown,
+  originY: unknown,
+  pathIds: unknown,
+  targetIds: unknown,
+  hostIds: unknown,
+  eventName: unknown,
+  bubbles: unknown,
+  timestamp: unknown,
+  extraCount: unknown,
+  ...rest: unknown[]
+): undefined {
+  const x = Number(originX);
+  const y = Number(originY);
+  return dispatchIn(
+    Number(frameId),
+    { x: Number.isNaN(x) ? 0 : x, y: Number.isNaN(y) ? 0 : y },
+    pathIds,
+    targetIds,
+    hostIds,
+    eventName,
+    bubbles,
+    timestamp,
+    extraCount,
+    rest,
+  );
+}
+
+/**
+ * One event in this realm, whose own tree is the one `ownHost` hosts (`0`,
+ * the document tree, for the page realm) and whose page sits at `origin`:
+ * the steps `splitPath` gives this realm are dispatched here
+ * (`dispatchSteps`), then each card's steps are handed to it, in path order,
+ * through `bobcat:frame`'s `forwardEvent`, with the extras and detail values
+ * as this realm received them. A `keydown` or `keyup` (`DETAIL_KEY`) is also
+ * handed to every other booted card with no steps, so its global pass hears
+ * it.
+ *
+ * The cards are handed theirs whatever this realm's own dispatch did: a
+ * `catch`, a stop, or a listener that threw (rethrown once the cards had
+ * theirs) ends this realm's walk alone, as web-core's nested `lynx-view`
+ * walks each card's own shadow root.
+ */
+function dispatchIn(
+  ownHost: number,
+  origin: PageOrigin,
+  pathIds: unknown,
+  targetIds: unknown,
+  hostIds: unknown,
+  eventName: unknown,
+  bubbles: unknown,
+  timestamp: unknown,
+  extraCount: unknown,
+  rest: unknown[],
+): undefined {
+  const { own, cards } = splitPath(
+    pathSteps(pathIds, targetIds, hostIds),
+    ownHost,
+  );
+  if (Number(rest[Number(extraCount ?? 0) * 2]) === DETAIL_KEY) {
+    for (const card of frameCards()) {
+      if (!cards.has(card)) cards.set(card, []);
+    }
+  }
+  try {
+    dispatchSteps(own, origin, eventName, bubbles, timestamp, extraCount, rest);
+  } finally {
+    for (const [card, steps] of cards) {
+      const [nodes, targets, hosts] = pathIdsOf(steps);
+      forwardEvent(
+        card,
+        nodes,
+        targets,
+        hosts,
+        eventName,
+        bubbles,
+        timestamp,
+        extraCount,
+        rest,
+      );
+    }
+  }
+  return undefined;
+}
+
+/**
+ * One realm's own dispatch over its own `steps` (target-first).
  *
  * The host computed the path while it held the document and released it
  * before calling, which is what lets a listener mutate the tree. Everything
@@ -3404,6 +3719,11 @@ function handlerInPass(
  *
  * `bubbles` narrows the last two and never the first: a non-bubbling event
  * binds on its at-target steps alone and runs no global pass. See the header.
+ *
+ * With no steps — a key handed to a frame's card — only the global pass
+ * runs, if the event bubbles, and each delivery's `target` is its own
+ * `currentTarget`: web-core's `publishEvent`, which falls back to the
+ * registering element when the path has none.
  *
  * One event object serves all three, so a property one listener writes is
  * there for the next. Whatever ends the dispatch — the passes finishing, a
@@ -3422,14 +3742,14 @@ function handlerInPass(
  * per point that follow. An event with no touch points carries no such keys
  * at all.
  */
-function dispatchEvent(
-  pathIds: unknown,
-  targetIds: unknown,
+function dispatchSteps(
+  steps: PathStep[],
+  origin: PageOrigin,
   eventName: unknown,
   bubbles: unknown,
   timestamp: unknown,
   extraCount: unknown,
-  ...rest: unknown[]
+  rest: unknown[],
 ): undefined {
   // The extras' name/value pairs first, then the detail kind and its values,
   // which run to the end because a touch event's points have no fixed count.
@@ -3437,26 +3757,31 @@ function dispatchEvent(
   const extras = pairs > 0 ? extrasOf(rest.slice(0, pairs)) : undefined;
   const detailKind = rest[pairs];
   const detailNumbers = rest.slice(pairs + 1);
-  const steps = pathSteps(pathIds, targetIds);
   const first = steps[0];
-  if (first === undefined) {
+  // A pathless dispatch has a global pass to run, or nothing at all.
+  if (first === undefined && !bubbles) {
     return undefined;
   }
   const name = String(eventName).toLowerCase();
   let stopped = false;
   let immediate = false;
-  let targetNodeId = first.target;
+  // No node yet for a pathless dispatch: its first delivery names one.
+  let targetNodeId = first?.target ?? NaN;
   // A reading the host could not take — a detached painter's, say — reports
   // the time origin rather than `NaN`.
   const stamp = Number(timestamp ?? 0);
   const kind = Number(detailKind);
   // The Lynx `detail`: the extras when the host sent any, the default
   // shaping of the W3C payload otherwise.
-  const detail = extras ?? detailOf(kind, detailNumbers, targetNodeId);
+  const detail = extras ?? detailOf(kind, detailNumbers, targetNodeId, origin);
   const event: DispatchedEvent = {
     type: name,
     eventPhase: NONE,
-    target: targetInfo(targetNodeId),
+    // A pathless dispatch's is set by its first delivery, before any
+    // listener reads it.
+    target: first === undefined
+      ? (null as unknown as DispatchedEvent["target"])
+      : targetInfo(targetNodeId),
     currentTarget: null,
     detail,
     timestamp: Number.isNaN(stamp) ? 0 : stamp,
@@ -3475,13 +3800,13 @@ function dispatchEvent(
   // position detail can have any: its first eight values are the position,
   // the wheel delta and the pointer members, and the points follow them.
   const lists = kind === DETAIL_POSITION
-    ? touchLists(detailNumbers.slice(8))
+    ? touchLists(detailNumbers.slice(8), origin)
     : undefined;
   if (lists !== undefined) {
     Object.assign(event, lists);
   }
   if (kind === DETAIL_POSITION) {
-    const members = positionMembers(name, detailNumbers);
+    const members = positionMembers(name, detailNumbers, origin);
     if (members !== undefined) {
       Object.assign(event, members);
     }
@@ -3588,7 +3913,8 @@ function dispatchEvent(
   // `common_event_handler` does when it calls `dispatch_global_bind_event`
   // unconditionally. It runs no closures: `__AddEventListener` carries no
   // Lynx form and so never files globally. `eventPhase` is `NONE`, since no
-  // step of any path produced the delivery, and `target` is the event's own.
+  // step of any path produced the delivery, and `target` is the event's own,
+  // or, with no path, the registering element itself.
   const runGlobalPass = (): undefined => {
     const registered = globalNodes.get(name);
     if (registered === undefined) {
@@ -3607,7 +3933,7 @@ function dispatchEvent(
       if (published === undefined && worklet === undefined) {
         continue;
       }
-      aim(nodeId, first.target, NONE);
+      aim(nodeId, first?.target ?? nodeId, NONE);
       if (published !== undefined) {
         runEventHandler(published.handler, event);
       }

@@ -5,13 +5,15 @@
 //! `ShadowRealm` child of the host's main-thread realm, and whose background
 //! thread runs in a Worker of that child.
 //!
-//! Every host card embeds the same card, `react-frame-inner`: `react-frame`
+//! Most host cards embed the same card, `react-frame-inner`: `react-frame`
 //! a plain 100px frame, `react-frame-data` one given `data` and
 //! `global-props`, `react-frame-auto-height` a 300px-wide `auto-height`
 //! frame with no height, and `react-frame-data-update` and
 //! `react-frame-global-props-update` a 100px frame whose `data` or
 //! `global-props` the host's state writes, above a 100px yellow square whose
-//! tap changes that state.
+//! tap changes that state. `react-frame-tap` embeds `react-frame-tap-inner`,
+//! whose views take a tap in the card's own threads, inside a wrapper whose
+//! own tap handler logs.
 // These integration tests use native threads and GPU capture.
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -34,9 +36,9 @@ const HEIGHT: u16 = 852;
 const SCREEN: bobcat_core::ScreenMetrics =
     bobcat_core::ScreenMetrics::for_viewport(393.0, 852.0, 1.0);
 
-/// Where every host card's frame `src`, `./react-frame-inner.web.bundle`,
-/// resolves to, against [`host_url`].
-const INNER: &str = "app:///cards/react-frame-inner.web.bundle";
+/// The card most host cards' frame `src`, `./react-frame-inner.web.bundle`,
+/// names.
+const INNER_CARD: &str = "react-frame-inner";
 
 /// What the inner card's component body logs first, on each of its threads.
 const RENDERED: &str = "react-frame-inner-rendered";
@@ -54,18 +56,20 @@ const RED: [u8; 4] = [255, 0, 0, 255];
 const GREEN: [u8; 4] = [0, 255, 0, 255];
 const BLUE: [u8; 4] = [0, 0, 255, 255];
 const YELLOW: [u8; 4] = [255, 255, 0, 255];
+const MAGENTA: [u8; 4] = [255, 0, 255, 255];
 
-/// Where the host card `host` is served from: beside [`INNER`], so its
-/// frame's relative `src` names it.
-fn host_url(host: &str) -> Url {
-    Url::parse(&format!("app:///cards/{host}.web.bundle")).expect("a page URL")
+/// Where the card `card` is served from: every card sits beside the others,
+/// so a host card's frame's relative `src`, `./<card>.web.bundle`, names
+/// the card it embeds.
+fn card_url(card: &str) -> Url {
+    Url::parse(&format!("app:///cards/{card}.web.bundle")).expect("a page URL")
 }
 
 /// The host card `host` and a resource system that installs containers;
-/// with `inner`, the inner card is registered where the frame's `src`
+/// with `inner`, that inner card is registered where the frame's `src`
 /// resolves.
-fn registered(host: &str, inner: bool) -> (bobcat_core::ViewSources, Resources) {
-    let input = host_url(host);
+fn registered(host: &str, inner: Option<&str>) -> (bobcat_core::ViewSources, Resources) {
+    let input = card_url(host);
     let page = PageSource::from_bytes(&input, fixtures::fixture(host).page)
         .expect("the host card decodes");
     let resources = Resources::new(
@@ -80,9 +84,13 @@ fn registered(host: &str, inner: bool) -> (bobcat_core::ViewSources, Resources) 
         || {},
     );
     page.register_with(&resources);
-    if inner {
+    if let Some(inner) = inner {
         resources
-            .register(INNER, fixtures::fixture("react-frame-inner").page, None)
+            .register(
+                card_url(inner).as_str(),
+                fixtures::fixture(inner).page,
+                None,
+            )
             .expect("the inner card's URL is a URL");
     }
     (page.view_sources(SCREEN), resources)
@@ -133,8 +141,9 @@ struct Host {
 
 impl Host {
     /// Boots the host card `name` in a group of its own, with the inner card
-    /// registered when `inner`, and attaches an offscreen painter.
-    async fn boot(name: &'static str, inner: bool) -> Self {
+    /// `inner` registered where its frame's `src` resolves, and attaches an
+    /// offscreen painter.
+    async fn boot(name: &'static str, inner: Option<&'static str>) -> Self {
         let (sources, resources) = registered(name, inner);
         let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto)
             .await
@@ -256,7 +265,7 @@ struct Run {
 /// ([`Host::settle`]).
 async fn run(
     host: &'static str,
-    inner: bool,
+    inner: Option<&'static str>,
     ready: impl Fn(&[String], &[String]) -> bool,
     expected: &[(u16, u16, [u8; 4])],
 ) -> Run {
@@ -278,7 +287,7 @@ async fn run(
 async fn a_compiled_frame_renders_the_card_its_src_names() {
     let run = run(
         "react-frame",
-        true,
+        Some(INNER_CARD),
         |logged, _| logged.iter().any(|message| message.contains(RENDERED)),
         &[
             (50, 50, BLUE),
@@ -314,7 +323,7 @@ async fn a_compiled_frame_hands_its_card_data_and_global_props() {
     let four = |logged: &[String], _: &[String]| page_data_lines(logged).len() >= 4;
     let both = run(
         "react-frame-data",
-        true,
+        Some(INNER_CARD),
         four,
         &[(50, 50, BLUE), (150, 150, RED)],
     )
@@ -332,7 +341,7 @@ async fn a_compiled_frame_hands_its_card_data_and_global_props() {
     );
     assert_eq!(both.reported, Vec::<String>::new());
 
-    let none = run("react-frame", true, four, &[(50, 50, BLUE)]).await;
+    let none = run("react-frame", Some(INNER_CARD), four, &[(50, 50, BLUE)]).await;
     assert_eq!(
         page_data_lines(&none.logged),
         [
@@ -368,7 +377,7 @@ async fn a_compiled_auto_height_frame_takes_its_cards_height() {
     ];
     let run = run(
         "react-frame-auto-height",
-        true,
+        Some(INNER_CARD),
         |logged, _| logged.iter().any(|message| message.contains(RENDERED)),
         &expected,
     )
@@ -410,7 +419,7 @@ const BUTTON_PROBE: (u16, u16) = (50, 150);
 async fn re_renders_after_the_tap(host: &'static str, host_hydrated: &str, line: &str) {
     let before = format!("{line}before");
     let after = format!("{line}after");
-    let mut host = Host::boot(host, true).await;
+    let mut host = Host::boot(host, Some(INNER_CARD)).await;
     host.settle(
         |logged, _| {
             count(logged, INNER_HYDRATED) > 0
@@ -486,7 +495,7 @@ async fn a_compiled_frames_card_re_renders_when_its_global_props_change() {
 async fn a_frame_whose_src_does_not_fetch_is_one_diagnostic() {
     let run = run(
         "react-frame",
-        false,
+        None,
         |_, reported| !reported.is_empty(),
         &[(50, 50, RED), (150, 150, RED)],
     )
@@ -498,5 +507,231 @@ async fn a_frame_whose_src_does_not_fetch_is_one_diagnostic() {
         run.reported[0].contains("frame ./react-frame-inner.web.bundle: "),
         "the diagnostic names src: {:?}",
         run.reported
+    );
+}
+
+/// The card `react-frame-tap`'s frame shows.
+const TAP_CARD: &str = "react-frame-tap-inner";
+
+/// What `react-frame-tap`'s mount effect logs, once its background thread
+/// rendered, so the wrapper's tap has a handler to reach.
+const TAP_HOST_HYDRATED: &str = "react-frame-tap-hydrated";
+
+/// What the tap card's mount effect logs, once its own background thread
+/// rendered, so `#tap-me`'s `catchtap` has a handler to reach.
+const TAP_CARD_HYDRATED: &str = "react-frame-tap-inner-hydrated";
+
+/// What the tap card's component body logs, before the count, on each of
+/// its threads' renders.
+const TAP_COUNT: &str = "react-frame-tap-inner-count:";
+
+/// What the host wrapper's `bindtap` logs, before the target's id and the
+/// page's `detail.y`.
+const TAP_HOST_LINE: &str = "react-frame-tap-host:";
+
+/// What `#tap-me`'s `catchtap` logs, before its frame-local `detail.x`,
+/// `detail.y`, on the card's background thread.
+const TAP_CARD_LINE: &str = "react-frame-tap-inner-at:";
+
+/// What `#tap-me-on-main-thread`'s `main-thread:bindtap` worklet logs,
+/// before its frame-local `detail.x`, `detail.y`, in the card's main-thread
+/// realm.
+const TAP_CARD_MAIN_THREAD_LINE: &str = "react-frame-tap-inner-main-thread-at:";
+
+/// `react-frame-tap`'s yellow spacer, (0, 0) to (100, 100), above the frame.
+const SPACER_PROBE: (u16, u16) = (50, 50);
+
+/// The centre of the tap card's blue `#tap-me`, the frame's first 100px
+/// square: the frame is (0, 100) to (100, 300), so this is (50, 50) in the
+/// frame. Green once the card's background thread counted a tap.
+const TAP_ME_PROBE: (u16, u16) = (50, 150);
+
+/// The centre of the tap card's magenta `#tap-me-on-main-thread`, the
+/// frame's second 100px square, (50, 150) in the frame. Green once the
+/// card's main-thread worklet painted it.
+const TAP_ME_ON_MAIN_THREAD_PROBE: (u16, u16) = (50, 250);
+
+/// Right of the frame, on the red page.
+const BESIDE_THE_FRAME_PROBE: (u16, u16) = (150, 150);
+
+/// How many console messages of `logged` start with `prefix`.
+fn count_starting(logged: &[String], prefix: &str) -> usize {
+    logged
+        .iter()
+        .filter(|seen| seen.starts_with(prefix))
+        .count()
+}
+
+/// Boots `react-frame-tap` with its card, and settles once both background
+/// threads hydrated and the card's first screen shows: the spacer yellow,
+/// `#tap-me` blue, `#tap-me-on-main-thread` magenta, red beside the frame.
+async fn boot_tap_host() -> Host {
+    let mut host = Host::boot("react-frame-tap", Some(TAP_CARD)).await;
+    host.settle(
+        |logged, _| count(logged, TAP_HOST_HYDRATED) > 0 && count(logged, TAP_CARD_HYDRATED) > 0,
+        &[
+            (SPACER_PROBE.0, SPACER_PROBE.1, YELLOW),
+            (TAP_ME_PROBE.0, TAP_ME_PROBE.1, BLUE),
+            (
+                TAP_ME_ON_MAIN_THREAD_PROBE.0,
+                TAP_ME_ON_MAIN_THREAD_PROBE.1,
+                MAGENTA,
+            ),
+            (BESIDE_THE_FRAME_PROBE.0, BESIDE_THE_FRAME_PROBE.1, RED),
+        ],
+    )
+    .await;
+    let logged = &host.logged;
+    assert_eq!(
+        count_starting(logged, TAP_HOST_LINE) + count_starting(logged, TAP_CARD_LINE),
+        0,
+        "no tap handler ran before the tap: {logged:?}"
+    );
+    host
+}
+
+/// A tap on `#tap-me`, inside the frame, runs both cards' handlers (the
+/// user's ruling, web-core's nested `lynx-view`): the host's `bindtap` on
+/// the frame's wrapper hears it retargeted to the frame — `e.target.id` is
+/// the frame's, `target` — at the page's `detail.y`, 150; the card's
+/// `catchtap` hears it at `#tap-me`, at the frame-local `detail` (50, 50),
+/// on the card's own background thread, whose `setCount` re-renders
+/// `#tap-me` green. The card's `catchtap` ends the card's walk alone, so it
+/// does not keep the host's handler from running.
+///
+/// Each handler ran once, the card booted once (its mount effect logged
+/// once), and its count went 0 — once per thread for the first screen — to
+/// 1, from the background thread's re-render alone.
+///
+/// The two lines' order is not asserted. The page realm does post the tap to
+/// its background thread before the card's realm posts it to the card's
+/// (`frame_tests.rs` checks that order across the realms), but the two
+/// background threads are two Workers, and the order their consumer tasks
+/// are polled in on `bobcat-workers` is tokio's `LocalSet` queue, which no
+/// contract fixes.
+#[tokio::test]
+async fn a_tap_inside_a_frame_runs_the_cards_handler_and_the_pages() {
+    let host_line = format!("{TAP_HOST_LINE}target:150");
+    let card_line = format!("{TAP_CARD_LINE}50,50");
+    let counted = format!("{TAP_COUNT}1");
+    let mut host = boot_tap_host().await;
+
+    host.tap(f32::from(TAP_ME_PROBE.0), f32::from(TAP_ME_PROBE.1));
+    host.settle(
+        |logged, _| count(logged, &counted) > 0 && count(logged, &host_line) > 0,
+        &[
+            (TAP_ME_PROBE.0, TAP_ME_PROBE.1, GREEN),
+            (
+                TAP_ME_ON_MAIN_THREAD_PROBE.0,
+                TAP_ME_ON_MAIN_THREAD_PROBE.1,
+                MAGENTA,
+            ),
+            (SPACER_PROBE.0, SPACER_PROBE.1, YELLOW),
+        ],
+    )
+    .await;
+
+    assert_eq!(host.reported, Vec::<String>::new());
+    let logged = &host.logged;
+    assert_eq!(
+        count(logged, &host_line),
+        1,
+        "the page's handler: {logged:?}"
+    );
+    assert_eq!(
+        count_starting(logged, TAP_HOST_LINE),
+        1,
+        "nothing else reached the page's handler: {logged:?}"
+    );
+    assert_eq!(
+        count(logged, &card_line),
+        1,
+        "the card's handler: {logged:?}"
+    );
+    assert_eq!(
+        count_starting(logged, TAP_CARD_LINE),
+        1,
+        "nothing else reached the card's handler: {logged:?}"
+    );
+    assert_eq!(
+        count_starting(logged, TAP_CARD_MAIN_THREAD_LINE),
+        0,
+        "the other view's worklet did not run: {logged:?}"
+    );
+    assert_eq!(count(logged, TAP_HOST_HYDRATED), 1, "{logged:?}");
+    assert_eq!(count(logged, TAP_CARD_HYDRATED), 1, "one boot: {logged:?}");
+    assert_eq!(
+        count(logged, &format!("{TAP_COUNT}0")),
+        2,
+        "one per thread: {logged:?}"
+    );
+    assert_eq!(count(logged, &counted), 1, "the BTS re-render: {logged:?}");
+}
+
+/// A tap on `#tap-me-on-main-thread`, inside the frame, runs the card's
+/// `main-thread:bindtap` worklet in the card's own main-thread realm — the
+/// frame's `ShadowRealm` child — at the frame-local `detail` (50, 150), and
+/// its `setStyleProperty` paints the view green with no background thread
+/// involved; the host's `bindtap` on the frame's wrapper hears the same tap
+/// retargeted to the frame, at the page's `detail.y`, 250.
+///
+/// The card's state never changed (no `count:1`) and `#tap-me` stays blue.
+/// The two lines' order is not asserted: one is logged on the card's main
+/// thread, the other on the host's background thread.
+#[tokio::test]
+async fn a_tap_inside_a_frame_runs_the_cards_main_thread_handler_and_the_pages() {
+    let host_line = format!("{TAP_HOST_LINE}target:250");
+    let card_line = format!("{TAP_CARD_MAIN_THREAD_LINE}50,150");
+    let mut host = boot_tap_host().await;
+
+    host.tap(
+        f32::from(TAP_ME_ON_MAIN_THREAD_PROBE.0),
+        f32::from(TAP_ME_ON_MAIN_THREAD_PROBE.1),
+    );
+    host.settle(
+        |logged, _| count(logged, &card_line) > 0 && count(logged, &host_line) > 0,
+        &[
+            (
+                TAP_ME_ON_MAIN_THREAD_PROBE.0,
+                TAP_ME_ON_MAIN_THREAD_PROBE.1,
+                GREEN,
+            ),
+            (TAP_ME_PROBE.0, TAP_ME_PROBE.1, BLUE),
+        ],
+    )
+    .await;
+
+    assert_eq!(host.reported, Vec::<String>::new());
+    let logged = &host.logged;
+    assert_eq!(
+        count(logged, &host_line),
+        1,
+        "the page's handler: {logged:?}"
+    );
+    assert_eq!(
+        count_starting(logged, TAP_HOST_LINE),
+        1,
+        "nothing else reached the page's handler: {logged:?}"
+    );
+    assert_eq!(
+        count(logged, &card_line),
+        1,
+        "the card's worklet: {logged:?}"
+    );
+    assert_eq!(
+        count_starting(logged, TAP_CARD_MAIN_THREAD_LINE),
+        1,
+        "nothing else reached the card's worklet: {logged:?}"
+    );
+    assert_eq!(
+        count_starting(logged, TAP_CARD_LINE),
+        0,
+        "the other view's handler did not run: {logged:?}"
+    );
+    assert_eq!(count(logged, TAP_CARD_HYDRATED), 1, "one boot: {logged:?}");
+    assert_eq!(
+        count(logged, &format!("{TAP_COUNT}1")),
+        0,
+        "the card's state did not change: {logged:?}"
     );
 }

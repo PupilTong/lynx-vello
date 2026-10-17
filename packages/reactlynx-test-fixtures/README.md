@@ -5,7 +5,8 @@ compiled ReactLynx integration tests, decoder tests and benchmarks. The five
 `basic-*` cards, the `react-frame*` cards (web-core-e2e's `api-frame-src`,
 `api-frame-inner`, `api-frame-data`, `api-frame-global-props`,
 `api-frame-auto-height` and `api-frame-data-update`, whose `global-props`
-twin `react-frame-global-props-update` has no upstream case) and the
+twin `react-frame-global-props-update` has no upstream case, nor do
+`react-frame-tap` and its `react-frame-tap-inner`) and the
 `react-set-shared-data`/
 `react-get-shared-data` pair (web-core-e2e's `api-setSharedData`/
 `api-getSharedData`) come from lynx-stack; see `NOTICE.lynx-stack` for
@@ -27,7 +28,7 @@ Both commands set `NODE_ENV` explicitly so the fixture matrix and compiler
 use the same mode.
 
 The default build produces eight native production pages, three native development
-variants and twenty-six web pages. Each native environment has its own
+variants and twenty-eight web pages. Each native environment has its own
 compilation, so its lazy chunks cannot be shared with another test page.
 
 | Environment | Fixture behavior |
@@ -59,6 +60,7 @@ compilation, so its lazy chunks cannot be shared with another test page.
 | `web-react-frame-auto-height` | A red page whose `display: flex` column holds a 300px-wide green `<frame auto-height src="./react-frame-inner.web.bundle">` with no height, which takes the inner card's 140px content height (a column does not stretch it). Adapted from web-core-e2e's `api-frame-auto-height`, plus the green background that shows the frame's box; `crates/bobcat-source/tests/frame.rs` samples the pixels |
 | `web-react-frame-data-update` | web-core-e2e's `api-frame-data-update`: a red page whose `display: flex` column puts a 100px `<frame src="./react-frame-inner.web.bundle" data={{ label }}>` at the top-left and a yellow 100px `#update-frame-data` square right below it, (0, 100) to (100, 200), whose tap sets `label` from `before` to `after`; a mount effect logs `react-frame-data-update-hydrated` from the BTS. The inner card turns green on its BTS's re-render; `crates/bobcat-source/tests/frame.rs` taps the square and samples the pixels |
 | `web-react-frame-global-props-update` | `web-react-frame-data-update` for `global-props={{ message }}`, with an `#update-frame-global-props` square and a `react-frame-global-props-update-hydrated` log; no upstream case. The inner card turns green on its BTS's reactive global-props re-render; `crates/bobcat-source/tests/frame.rs` taps the square and samples the pixels |
+| `web-react-frame-tap`, `web-react-frame-tap-inner` | No upstream case: a tap inside a `<frame>` runs the card's own handlers and the host's. A red page whose `display: flex` column puts a yellow 100px spacer at the top-left and, below it, a `#frame-wrapper` view whose `bindtap` logs `react-frame-tap-host:<e.target.id>:<detail.y>` around a 100px-wide, 200px-tall `<frame id="target" src="./react-frame-tap-inner.web.bundle">`, (0, 100) to (100, 300); a mount effect logs `react-frame-tap-hydrated` from the BTS. The inner card is two 100px views in a column: a blue `#tap-me` whose `catchtap` logs `react-frame-tap-inner-at:<detail.x>,<detail.y>` and counts the tap in state on the card's own BTS (green from then on), and a magenta `#tap-me-on-main-thread` whose `main-thread:bindtap` worklet logs `react-frame-tap-inner-main-thread-at:<detail.x>,<detail.y>` and paints itself green with `setStyleProperty`; its component body logs `react-frame-tap-inner-count:<n>` on each thread's render and its mount effect `react-frame-tap-inner-hydrated` once. `crates/bobcat-source/tests/frame.rs` taps each view and samples the pixels |
 | `web-react-set-shared-data`, `web-react-get-shared-data` | web-core-e2e's `api-setSharedData` and `api-getSharedData`, copied: the first card's effect stores `green` under `color` with `lynx.setSharedData` and paints its own `getSharedData`; a tap on the second, an orange 100px view, paints what `getSharedData('color')` reads. Booted as two views of one group by `crates/bobcat-source/tests/reactlynx_runtime.rs`, which is web-core-e2e's `api-shared-context` |
 | `web-css-custom-sections` | A 100px red `.page` card whose bundle also carries two `encoding: 'CSS'` custom sections, `CSS` (`CSS.css`) and `A &/中` (`named.css`). No ReactLynx build writes such a web card today (a lazy bundle's CSS goes into its `StyleInfo` on the web target), so `scripts/css-custom-sections.ts` adds them through the template plugin's public `beforeEncode` hook; `@lynx-js/web-core/encode` then writes them as the `CustomSectionsStyleInfo` section (label 7, lynx-stack#4138). Decoded by `crates/bobcat-source/tests/decode_web_bundle.rs` |
 

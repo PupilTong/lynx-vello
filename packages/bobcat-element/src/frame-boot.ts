@@ -30,6 +30,14 @@
 // `update_data` and `update_global_props`, the BTS's `updateCardData` and
 // `updateGlobalProps` included.
 //
+// `dispatchEvent` takes the steps of an event that are this card's own —
+// the steps in the frame's shadow tree, and in the shadow trees inside it —
+// which the realm of the frame hands over once its own dispatch ran, with
+// the frame's border-box origin, so `x`/`y` are frame-local here. It
+// dispatches them as this realm's own, which hands the steps of this card's
+// own frames on in turn, and reports what a listener throws here: nothing
+// crosses back, so a catch or a failure here ends nothing in the parent.
+//
 // `dispose` is the other half: `bobcat:frame` calls it when the frame lets
 // go of this card. It lets go of every card a frame of this card's loaded,
 // disposes of the card's BTS — its app cleanup runs and acknowledges — and
@@ -51,7 +59,11 @@ import {
   __BobcatUpdateGlobalProps,
   lynx,
 } from "bobcat:runtime";
-import { __BobcatUsePageRoot, __FlushElementTree } from "bobcat:element";
+import {
+  __BobcatDispatchCardEvent,
+  __BobcatUsePageRoot,
+  __FlushElementTree,
+} from "bobcat:element";
 import { __BobcatCloseFrames } from "bobcat:frame";
 import { Worker } from "bobcat-internal";
 import {
@@ -63,6 +75,12 @@ import {
   parentNode,
 } from "bobcat-internal:host";
 import { backgroundThreadURL, bundleStyleSheetURL, sectionURL } from "bobcat:section-url";
+
+/**
+ * The frame this card renders in, once `boot` chose its nested page: the
+ * host of this realm's own tree, which `dispatchEvent` names.
+ */
+let ownFrame: number | undefined;
 
 /**
  * Boots the card at `url` into the frame `frameId`, and answers whether boot
@@ -92,6 +110,7 @@ export function boot(
     // Refused past eight frames deep, so a card that embeds itself stops.
     const page = framePage(frameId);
     __BobcatUsePageRoot(page);
+    ownFrame = frameId;
     __BobcatInitializeMTS({
       initData: JSON.parse(initDataJson),
       globalProps: JSON.parse(globalPropsJson),
@@ -163,6 +182,51 @@ export function updateData(json: string): void {
 export function updateGlobalProps(json: string): void {
   try {
     __BobcatUpdateGlobalProps(json);
+  } catch (error) {
+    _ReportError(error);
+  }
+}
+
+/**
+ * Dispatches the steps of one event that are this card's: `nodes`, `targets`
+ * and `hosts` as the host wrote them for the page realm, empty for a key
+ * event handed to every card, then the event's name, `bubbles`, timestamp,
+ * extras and detail values as that realm received them. `originX`,
+ * `originY` is the frame's border-box origin in the viewport, which this
+ * card's `x`/`y` are relative to.
+ *
+ * Every argument is a primitive, which is all a `ShadowRealm`'s wrapped
+ * function takes. What a listener throws is this card's and is reported
+ * here, so nothing crosses back and the next realm's turn is untouched.
+ * Before `boot` chose a page there is nothing to dispatch to.
+ */
+export function dispatchEvent(
+  originX: number,
+  originY: number,
+  nodes: string,
+  targets: string,
+  hosts: string,
+  name: unknown,
+  bubbles: unknown,
+  timestamp: unknown,
+  extraCount: unknown,
+  ...payload: unknown[]
+): void {
+  if (ownFrame === undefined) return;
+  try {
+    __BobcatDispatchCardEvent(
+      ownFrame,
+      originX,
+      originY,
+      nodes,
+      targets,
+      hosts,
+      name,
+      bubbles,
+      timestamp,
+      extraCount,
+      ...payload,
+    );
   } catch (error) {
     _ReportError(error);
   }
