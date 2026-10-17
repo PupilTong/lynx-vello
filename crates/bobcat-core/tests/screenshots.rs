@@ -417,10 +417,6 @@ async fn raw_text_reaches_the_private_painter_as_glyphs() {
 /// two-column table after it, and a `markdown-style` that recolours the
 /// inline code.
 #[tokio::test]
-#[ignore = "GAP: markdown's shadow paragraphs are `-lynx-text` paragraphs, which keep their white \
-            space verbatim, so soft breaks render as line breaks and the code block wraps; the \
-            golden holds again once markdown moves to the standard inline formatting context \
-            (docs/tracking/deviations.md)"]
 async fn markdown_renders_its_content_in_its_shadow_tree() {
     const ROBOTO: &[u8] = include_bytes!("../../hughie/tests/fixtures/Roboto-Regular.ttf");
     const SOURCE: &str = r"

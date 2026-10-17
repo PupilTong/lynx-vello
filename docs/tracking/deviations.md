@@ -508,8 +508,8 @@ consequential choice about whether to follow the spec or the quirk.
   after a `\n` — css-text-3's `each-line` (`BlockStyle::indent_keywords` in
   `crates/hughie/src/text/block/style.rs`) — and no soft-wrapped line; each
   indented line measures its tab stops from its own text start, after the
-  indent. The CSS inline formatting context follows the author's
-  `text-indent` keywords.
+  indent. A `<markdown>` paragraph, a CSS inline formatting context, follows
+  the author's `text-indent` keywords (its first line only by default).
   Under
   `white-space: nowrap` nothing after the first `\n` shows, as Android's
   `TextRenderer.handleWhiteSpaceWrap` deletes it
@@ -542,27 +542,17 @@ consequential choice about whether to follow the spec or the quirk.
   height), and the source map is unchanged. iOS and Harmony are not
   confirmed; the engine follows Android. Under the `nowrap` cut the text
   already ends at its first newline, which shows as one line, so a newline
-  that ends the text adds nothing there; the CSS inline formatting context
-  keeps css-text-3's result, where a final preserved newline opens no line. `text-maxlength` composes in Android's order —
+  that ends the text adds nothing there; a `<markdown>` paragraph, a CSS
+  inline formatting context, keeps css-text-3's result, where a final
+  preserved newline opens no line. `text-maxlength` composes in Android's order —
   `getUsedSpanClippedWithMaxLength` clips first and appends its ellipsis
   (`TextRenderer.java:126-135`), the newline deletion runs after it — so a
   length past the `\n` cuts nothing and leaves no marker (Android's appended
   ellipsis is deleted with the rest), while a length before it cuts as usual,
   its marker still gated on `text-overflow` (A0 in
-  `web-text-test-replication.md`).
-- **GAP: `<markdown>`'s paragraphs keep their white space verbatim, where
-  web-core's `x-markdown` collapses it** — its shadow paragraphs (`p`,
-  `h1`-`h6`, `td`, `pre code`, …) are `display: -lynx-text` scopes, and every
-  such paragraph is verbatim (previous entry). Until markdown moves to the
-  standard inline formatting context (the 2026-10-17 node-kind plan), a soft
-  break is a line break instead of a space, and a code block wraps under its
-  `pre` and shows an empty last line after the code's final newline instead of
-  keeping one unwrapped line per source line. Pinned by the ignored
-  `a_paragraph_s_soft_break_collapses_to_a_space` and
-  `a_code_block_keeps_its_lines_and_indentation_without_wrapping`
-  (`crates/bobcat-core/src/main/tree/markdown/tests.rs`) and the ignored golden
-  `markdown_renders_its_content_in_its_shadow_tree`
-  (`crates/bobcat-core/tests/screenshots.rs`).
+  `web-text-test-replication.md`). `<markdown>`'s shadow paragraphs are
+  CSS inline formatting contexts and keep css-text-3 collapsing, as
+  web-core's `x-markdown` does.
 - **`text-align: justify` does not parse, and the declaration is dropped
   without a trace** — the vendored fork excludes `Justify` from
   `TextAlignKeyword` under its `lynx` feature
@@ -2849,14 +2839,18 @@ consequential choice about whether to follow the spec or the quirk.
   followed — a UA shadow tree whose `#markdown-root` holds the elements
   markdown-it renders — and where it cannot be, or where web-core, native and
   the typings disagree:
-  - *The shadow tree is HTML-named elements over `-lynx-text` paragraphs.*
-    The elements are markdown-it's (`p`, `h1`-`h6`, `ul`/`ol`/`li`,
-    `blockquote`, `pre > code`, `table`, `a`, `strong`, …) so
-    `markdown-style`'s selectors match as in web-core, but there is no block
-    or inline flow: every text holder is a `display: -lynx-text` paragraph,
-    every inline element a nested run, every block container a column flex
-    box. Margins between blocks therefore add up where a browser collapses
-    them (a heading after a paragraph is 0.75em + 0.8em apart, not 0.8em).
+  - *The shadow tree is HTML-named elements over standard inline formatting
+    contexts, but no block flow.* The elements are markdown-it's (`p`,
+    `h1`-`h6`, `ul`/`ol`/`li`, `blockquote`, `pre > code`, `table`, `a`,
+    `strong`, …) so `markdown-style`'s selectors match as in web-core. Every
+    text holder is `display: block`, one CSS inline formatting context, and
+    every phrasing element `display: inline`, an inline box with the full
+    inline box model (the engine's own shadow sheet can write those values;
+    `markdown-style`, an author sheet, cannot). Block-in-block flow is not
+    built, so every block container is a column flex box: margins between
+    blocks add up where a browser collapses them (a heading after a
+    paragraph is 0.75em + 0.8em apart, not 0.8em), and an image, which
+    web-core makes `display: block`, is an atomic inline in its line.
     Two element kinds are the engine's own: a line holder for text
     markdown-it writes straight into a container (a tight list item's text),
     and a list marker.

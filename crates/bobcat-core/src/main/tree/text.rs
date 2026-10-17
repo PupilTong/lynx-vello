@@ -75,13 +75,11 @@
 /// `Layout` does; a newline that ends the text adds an empty last line, as
 /// Android's `StaticLayout` does; only `white-space: nowrap` stops the
 /// wrapping, and then nothing after the first newline shows — native parses
-/// no other `white-space` keyword, so `pre` and the rest wrap. Every
-/// `display: -lynx-text` paragraph does this, so `<markdown>`'s shadow
-/// paragraphs, which are `-lynx-text` scopes too, keep their soft breaks as
-/// line breaks until they move to the standard inline formatting context — a
-/// known gap (`docs/tracking/deviations.md`). This is a ruled deviation from
-/// web-core, whose `x-text` hands its text to the browser's CSS white-space
-/// processing.
+/// no other `white-space` keyword, so `pre` and the rest wrap. Every Lynx
+/// paragraph does this; `<markdown>`'s shadow paragraphs are standard inline
+/// formatting contexts, not Lynx paragraphs, and keep css-text-3. This is a
+/// ruled deviation from web-core, whose `x-text` hands its text to the
+/// browser's CSS white-space processing.
 ///
 /// An `inline-truncation` is content wherever it is written *directly* inside
 /// a `text`, and generates no box anywhere else — the same scope web-core's

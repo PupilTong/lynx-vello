@@ -88,8 +88,8 @@ Landed and not to be regressed:
 - Every `-lynx-text` paragraph keeps its white space verbatim, as native does
   for a `<text>` (`WhiteSpaceProcessing::Verbatim`, no switch): only
   `white-space: nowrap` stops wrapping and cuts at the first newline, and a
-  newline that ends the text adds an empty last line. `<markdown>` paragraphs
-  are verbatim too, a known gap until they move to the standard IFC.
+  newline that ends the text adds an empty last line; `<markdown>` paragraphs,
+  standard inline formatting contexts, keep css-text-3.
 
 ## Reference repos
 

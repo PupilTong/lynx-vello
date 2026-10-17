@@ -2132,7 +2132,9 @@ elements — `parse.rs` replicates markdown-it 15 as web-core configures it
 over `pulldown-cmark` and `linkify`, `style.rs` turns `markdown-style` into
 a second shadow sheet the component replaces in place with
 `Document::replace_shadow_stylesheet`, `build.rs` builds the elements,
-paragraphs as `-lynx-text`, blocks as column flex boxes, list markers as
+text holders as `display: block` (each one standard inline formatting
+context) with phrasing elements as `display: inline` boxes in it, blocks as
+column flex boxes, list markers as
 absolutely placed glyph elements, tables as grids; a render reparses and
 keeps the elements of the equal prefix of top-level blocks; bubbling
 `parseEnd` per render, and `link`/`imageTap` from a `tap` it observes at its
@@ -2227,11 +2229,10 @@ stops) and every newline stay, trailing spaces hang, a newline that ends the
 text adds an empty last line (Android's `StaticLayout`), and only
 `white-space: nowrap` stops the wrapping, showing nothing after the first
 newline — native parses no other keyword, so `pre` and the rest wrap.
-`<markdown>`'s `-lynx-text` paragraphs are verbatim too, a known gap until
-markdown moves to the standard inline formatting context
-(`docs/tracking/deviations.md`). The carrier's own `white-space-collapse:
-preserve-breaks` decides its newlines only as loose text in an HTML element
-(the standard inline formatting context). Sibling runs and nested text share the establishing
+`<markdown>`'s paragraphs are standard inline formatting contexts, not Lynx
+paragraphs, and keep css-text-3 collapsing. The carrier's own
+`white-space-collapse: preserve-breaks` decides its newlines only as loose text
+in an HTML element (the standard inline formatting context). Sibling runs and nested text share the establishing
 element's paragraph. `text { color: initial; }` stops an ancestor's color at the text
 root and `text > text` inherits it again, as in web-elements; a page whose
 config says `enableCSSInheritance: true` gets one more UA rule,
@@ -3104,8 +3105,7 @@ Subsystems:
   last remembered size (`remembered.rs`). Two kinds of box lay their content
   out as one paragraph: a Lynx text element (`Node::is_lynx_text`, from its
   custom element definition, under any `display` but `none` and `contents`;
-  `display: -lynx-text` too, which `<markdown>`'s shadow paragraphs still
-  use) (`text_block.rs`, the flattened Lynx paragraph) and the
+  `display: -lynx-text` too, which no engine sheet writes any more) (`text_block.rs`, the flattened Lynx paragraph) and the
   `(block, flow)` block container
   (`DisplayMode::BlockFlow`, `inline_flow.rs`, a CSS inline formatting
   context; no author style produces it — `block` and `inline` parse only in

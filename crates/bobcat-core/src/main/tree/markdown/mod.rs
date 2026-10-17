@@ -53,14 +53,15 @@
 //! gets for free (heading sizes, bold, italic, the list indent), each rule
 //! with its source. In outline:
 //!
-//! - **Paragraphs.** There is no block or inline flow here. A block-level text holder (`p`,
-//!   `h1`-`h6`, `th`, `td`, `pre > code`, the line holder, the list marker) is `display:
-//!   -lynx-text`, one paragraph each; an inline element (`a`, `strong`, `em`, `s`, `code`, `span`)
-//!   is `display: -lynx-text` too, and inside a paragraph that makes it a nested run. One rule
-//!   covers both: whether an element establishes a paragraph is decided by its parent, so `code` is
-//!   a paragraph in `pre` and a run in `p`. Plain declarations, unlike the `text` tag's
-//!   `!important` (`docs/style-assumptions.md` §D.15), so a `markdown-style` `display` still
-//!   applies.
+//! - **Paragraphs** are the standard CSS inline formatting context, as in a browser, and never a
+//!   Lynx `<text>` paragraph. A block-level text holder (`p`, `h1`-`h6`, `th`, `td`, `pre > code`,
+//!   the line holder, the list marker) is `display: block`, a block container whose content is one
+//!   inline formatting context; a phrasing element (`a`, `strong`, `em`, `s`, `code`, `span`, `br`)
+//!   is `display: inline`, an inline box with the full inline box model inside it, and a flex
+//!   parent blockifies one written straight into a container into a block container of its own; an
+//!   image, and a slotted inline view, is an atomic inline. Those two values parse only in an
+//!   engine sheet, which [`SHADOW_RULES`] is; `markdown-style` is an author sheet, so a `display`
+//!   there other than `block` or `inline` still applies, as before.
 //! - **Blocks.** `#markdown-root`, `blockquote`, `ul`, `ol`, `li` and `pre` are column flex boxes,
 //!   the block containers a browser makes them. Flex items' margins do not collapse, so the gap
 //!   between a paragraph (`margin-bottom: 0.75em`) and a heading after it (`margin-top: 0.8em`) is
@@ -82,12 +83,13 @@
 //!   (this engine has no `auto`), and its code is HTML's `pre`: `white-space-collapse: preserve`
 //!   keeps every space, tab (to 8-column stops) and line break, and `text-wrap-mode: nowrap` keeps
 //!   each line whole, so the paragraph sizes to its longest line and `pre` scrolls it.
-//! - **Images** are atomic boxes in the line, sized from their bitmap by `auto-size` (whose UA rule
-//!   already caps the width at 100%) where web-core makes an `<img>` `display: block`: an image
-//!   with text beside it in one paragraph shares that text's line.
-//! - **`br`** generates its line break (`content: "\A"` with breaks preserved), as `raw-text`
-//!   generates its run ([`super::raw_text`]); the `"\n"` text node markdown-it writes after it then
-//!   collapses at the start of the next line.
+//! - **Images** are atomic inlines in the line, sized from their bitmap by `auto-size` (whose UA
+//!   rule already caps the width at 100%) where web-core makes an `<img>` `display: block`: an
+//!   image with text beside it in one paragraph shares that text's line (block-in-inline is not
+//!   built, `docs/tracking/deviations.md`).
+//! - **`br`** is an inline box that generates its line break (`content: "\A"` with breaks
+//!   preserved); the `"\n"` text node markdown-it writes after it then collapses at the start of
+//!   the next line.
 //!
 //! The host's own box is `x-markdown.css`: [`UA_RULES`] make both tags a
 //! column flex box that stretches the root and inherits `color`; they keep
@@ -259,6 +261,10 @@ markdown::part(root), x-markdown::part(root) { width: 100%; }
 /// after the HTML rendering defaults it relies on. See the module
 /// documentation for the outline; each rule says where it comes from.
 ///
+/// It is the engine's own sheet ([`dom::Document::add_engine_shadow_stylesheet`]),
+/// so it can write the flow layout `display: block` and `inline` that the
+/// `lynx` grammar keeps from authors, `markdown-style` included.
+///
 /// The HTML defaults are a browser's UA sheet under web-core, below every
 /// template rule by origin. Here they share the template's origin, so they
 /// are written with their selectors in `:where()`, at zero specificity, and
@@ -289,18 +295,21 @@ const SHADOW_RULES: &str = r#"
    shrink it to nothing. */
 :where(hr) { display: flex; height: 0; margin: 0.5em 0; border: 1px inset; color: gray; }
 
-/* The boxes: block containers are column flex boxes, text holders and
-   inline elements -lynx-text (a paragraph where the parent is a container,
-   a nested run inside a paragraph), the table a grid of its cells. */
+/* The boxes: block containers are column flex boxes; text holders are
+   block containers, one inline formatting context each; phrasing elements
+   are inline boxes in it (a flex parent blockifies one into a block
+   container of its own), an image an atomic inline; the table a grid of
+   its cells. */
 :where(blockquote, ul, ol, li, pre) { display: flex; flex-direction: column; }
-:where(p, h1, h2, h3, h4, h5, h6, th, td, code, a, strong, em, s, span, md-line, md-marker) { display: -lynx-text; }
+:where(p, h1, h2, h3, h4, h5, h6, th, td, md-line, md-marker) { display: block; }
+:where(a, strong, em, s, code, span, image) { display: inline; }
 :where(table) { display: grid; align-self: flex-start; gap: 2px; padding: 2px; }
 :where(thead, tbody, tr, slot) { display: contents; }
 /* The marker: the browser's outside ::marker, at the item's start edge. */
 :where(li) { position: relative; }
 :where(md-marker) { position: absolute; top: 0; right: 100%; padding-right: 0.5em; text-wrap-mode: nowrap; }
 /* br: its line break, generated as raw-text generates its run. */
-:where(br) { display: -lynx-text; content: "\A"; white-space-collapse: preserve-breaks; }
+:where(br) { display: inline; content: "\A"; white-space-collapse: preserve-breaks; }
 
 /* htmlTemplates.ts:284-290; display: block is a column flex box. */
 .markdown-body {
@@ -323,19 +332,20 @@ const SHADOW_RULES: &str = r#"
 .markdown-body code {
   font-family: ui-monospace, SFMono-Regular, SFMono, Menlo, Consolas, "Liberation Mono", monospace;
 }
-/* :317-320; display: block is the paragraph, under HTML's pre
-   (white-space: pre, here its two longhands), which keeps the code's
-   spaces, tabs and line breaks and sizes to its longest line so pre scrolls
-   it. */
+/* :317-320; display: block, under HTML's pre (white-space: pre, here its
+   two longhands), which keeps the code's spaces, tabs and line breaks and
+   sizes to its longest line so pre scrolls it. */
 .markdown-body pre code {
-  display: -lynx-text; padding: 0;
+  display: block; padding: 0;
   white-space-collapse: preserve; text-wrap-mode: nowrap; align-self: flex-start;
 }
-/* :321-325, for the engine's image: height: auto is the default and
-   display: block is not built (an image is an atomic box in its line). */
+/* :321-325, for the engine's image: height: auto is the default, and
+   web-core's display: block is not taken (block-in-inline is not built, so
+   an image stays an atomic box in its line). */
 .markdown-body image { max-width: 100%; }
-/* :326-329; inline-block is the run the slotted view sits in. */
-.markdown-body .md-inline-view { display: -lynx-text; vertical-align: baseline; }
+/* :326-329; web-core's inline-block is an inline box here, whose slotted
+   view, a block-level box among inline content, is the atomic inline. */
+.markdown-body .md-inline-view { display: inline; vertical-align: baseline; }
 /* :358-361. */
 .markdown-body a { color: #0366d6; text-decoration: underline; }
 "#;
@@ -511,7 +521,7 @@ impl CustomElement<()> for Markdown {
 
     fn constructed(&self, document: &mut LynxDocument, element: NodeId) {
         let shadow = document.attach_shadow(element, ShadowRootMode::Open);
-        document.add_shadow_stylesheet(shadow, SHADOW_RULES);
+        document.add_engine_shadow_stylesheet(shadow, SHADOW_RULES);
         document.add_shadow_stylesheet(shadow, "");
         let root = document.create_element("div", ());
         document.set_id_attribute(root, Some(ROOT_ID));

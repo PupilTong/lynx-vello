@@ -338,6 +338,35 @@ fn markdown_style_styles_the_link_and_inline_code_and_is_replaced_on_change() {
     assert_eq!(value(&document, link, "text-decoration-line"), "underline");
 }
 
+/// Inline code is an inline box in its paragraph's inline formatting
+/// context, as web-core's `<code>` is in the browser: `markdown-style`'s
+/// inline padding on it takes room in the line, once at each end.
+#[test]
+fn markdown_style_padding_on_inline_code_takes_room_in_the_line() {
+    let measure = |style: Option<&str>| {
+        let (mut document, _events, element) = markdown(AHEM_HOST);
+        document.set_attribute(element, "content", "a `bc` d");
+        if let Some(style) = style {
+            document.set_attribute(element, "markdown-style", style);
+        }
+        document.layout();
+        let paragraph = first(&document, element, "p");
+        let code = first(&document, element, "code");
+        (
+            document
+                .text_block_size(paragraph)
+                .expect("a paragraph")
+                .width,
+            document.bounding_client_rect(code).expect("a box").width(),
+        )
+    };
+    let (line, code) = measure(None);
+    let (padded_line, padded_code) =
+        measure(Some(r#"{"inlineCode":{"paddingLeft":4,"paddingRight":4}}"#));
+    assert_eq!(padded_line - line, 8.0, "both edges widen the line");
+    assert_eq!(padded_code - code, 8.0, "and the code's own box");
+}
+
 /// The paragraphs are not `text`, so they wear the host's colour, as
 /// web-core's `.markdown-body { color: inherit }` does.
 #[test]
@@ -933,10 +962,6 @@ fn a_tap_on_a_link_or_an_image_queues_web_cores_events() {
 /// spaces (HTML's `pre`, `white-space-collapse: preserve`), does not wrap,
 /// and scrolls sideways in its `pre`.
 #[test]
-#[ignore = "GAP: a markdown code block is a `-lynx-text` paragraph, which wraps under `pre` and \
-            shows an empty last line after the code's final newline, as a native `<text>` does; \
-            it keeps its lines again once markdown moves to the standard inline formatting \
-            context (docs/tracking/deviations.md)"]
 fn a_code_block_keeps_its_lines_and_indentation_without_wrapping() {
     let (mut document, _events, element) = markdown(AHEM_HOST);
     document.set_attribute(
@@ -997,13 +1022,11 @@ fn a_freed_host_drops_its_state() {
     assert_eq!(count(&mut document), "1");
 }
 
-/// A markdown paragraph's soft line break is a `"\n"` text node that
-/// css-text-3 collapses to one space, as the browser does with web-core's
-/// `<p>`.
+/// A markdown paragraph is a block container's inline formatting context,
+/// never a Lynx `text` paragraph, so it keeps css-text-3: its soft line
+/// break is a `"\n"` text node that collapses to one space, as the browser
+/// does with web-core's `<p>`.
 #[test]
-#[ignore = "GAP: a markdown paragraph is a `-lynx-text` paragraph, which keeps its white space \
-            verbatim, so its soft break is a line break; it collapses again once markdown moves \
-            to the standard inline formatting context (docs/tracking/deviations.md)"]
 fn a_paragraph_s_soft_break_collapses_to_a_space() {
     let (document, _events, element) = rendered("a\nb");
     let paragraph = first(&document, element, "p");
