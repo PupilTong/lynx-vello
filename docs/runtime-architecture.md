@@ -1636,7 +1636,12 @@ The bridge retains the original promise continuation on its owning context and
 releases it when the context is destroyed. Loaded module code is not replayed
 when another dependency arrives. Fetch/encoding errors reject with `TypeError`;
 parse and evaluation failures preserve their JavaScript exception. A handled
-rejection leaves the realm usable.
+rejection leaves the realm usable. A link failure (an import of a name a module
+does not export, a host-module member a realm lacks) is not remembered: as
+ECMA-262 `Link()` does, the modules left on the linking stack go back to
+unlinked and the next import links them again, and the fork releases the
+bindings the failed attempt took before it fills them again, so a graph that
+fails to link any number of times is still freed whole with its realm.
 
 Boot stays pending while top-level await needs resources or timers. A host
 `LynxView::pump` keeps the resources moving; the timers need nothing from a
