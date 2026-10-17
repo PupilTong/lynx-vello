@@ -265,6 +265,19 @@ fn disjoint_cycles_with_text_cold(bencher: divan::Bencher<'_, '_>, item_count: u
     );
 }
 
+/// [`disjoint_cycles_with_text_cold`] with each leaf's text loose: dom boxes
+/// it in an anonymous block box, an item of the leaf's flex layout.
+#[divan::bench(args = [256, 4_096])]
+fn disjoint_cycles_with_loose_text_cold(bencher: divan::Bencher<'_, '_>, item_count: usize) {
+    bench_graph(
+        bencher,
+        item_count,
+        true,
+        GraphKind::DisjointCycles,
+        LeafContent::LooseText,
+    );
+}
+
 #[divan::bench(args = [256, 4_096])]
 fn duplicate_ids_cold(bencher: divan::Bencher<'_, '_>, item_count: usize) {
     bench_graph(

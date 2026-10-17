@@ -58,6 +58,12 @@ text context per document and retained artifacts per text node. Shaping,
 rebreaking, baseline propagation, and box layout therefore share the same
 timed layout call.
 
+`relative`'s `disjoint_cycles_with_loose_text_cold` puts the same text directly
+in a `display: flex` leaf instead. There it is loose text, which dom wraps in a
+CSS anonymous block box (`dom::tree::anonymous`) laid out as a flex item, so the
+benchmark times the anonymous-box path. Its setup asserts that every rendered
+leaf boxed its text.
+
 Benchmarks measure representative layout and cache workloads. They do not
 prove correctness or compatibility. Exact geometry, measurement traces,
 baselines, static positions, and cache results belong in the engine-native

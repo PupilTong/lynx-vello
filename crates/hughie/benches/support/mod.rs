@@ -34,11 +34,14 @@ pub(super) const AHEM: &[u8] = include_bytes!("../../tests/fixtures/Ahem.ttf");
 pub(super) enum LeafContent {
     Synthetic,
     Text,
+    /// The text sample directly in a `display: flex` leaf: loose text, which
+    /// dom lays out in a CSS anonymous block box.
+    LooseText,
 }
 
 impl LeafContent {
     pub(super) const fn is_text(self) -> bool {
-        matches!(self, Self::Text)
+        matches!(self, Self::Text | Self::LooseText)
     }
 }
 
@@ -89,6 +92,8 @@ pub(super) struct LayoutFixture {
     /// The text leaves: each one that renders must lay its text out as a
     /// paragraph.
     paragraphs: Vec<NodeId>,
+    /// The loose-text leaves: each one that renders must box its text.
+    loose_text_holders: Vec<NodeId>,
 }
 
 impl LayoutFixture {
@@ -116,6 +121,7 @@ impl LayoutFixture {
             expected_display,
             text_fonts_registered: false,
             paragraphs: Vec::new(),
+            loose_text_holders: Vec::new(),
         }
     }
 
@@ -169,6 +175,15 @@ impl LayoutFixture {
                 let node = self.container(parent, &style);
                 self.text(node, TEXT_SAMPLES[sample_index % TEXT_SAMPLES.len()]);
                 self.paragraphs.push(node);
+                node
+            }
+            LeafContent::LooseText => {
+                let font_size = 12 + sample_index % 4 * 2;
+                let style =
+                    format!("display:flex; font-family:Ahem; font-size:{font_size}px; {style}");
+                let node = self.container(parent, &style);
+                self.text(node, TEXT_SAMPLES[sample_index % TEXT_SAMPLES.len()]);
+                self.loose_text_holders.push(node);
                 node
             }
         }
@@ -231,6 +246,17 @@ impl LayoutFixture {
                         .text_block_size(paragraph)
                         .is_some_and(|size| size.width > 0.0),
                 "a text leaf that renders must lay its text out as a paragraph"
+            );
+        }
+        for &holder in &self.loose_text_holders {
+            let hidden = self
+                .document
+                .get(holder)
+                .and_then(Node::computed_style)
+                .is_some_and(|style| style.get_display().is_none());
+            assert!(
+                hidden || self.document.anonymous_box_count_for_testing(holder) == 1,
+                "a loose-text leaf that renders must box its text"
             );
         }
 

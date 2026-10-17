@@ -580,6 +580,18 @@ impl<T> Document<T> {
         builder.build()
     }
 
+    /// Test/benchmark-only: how many anonymous boxes `container`'s last
+    /// derivation gave its loose text.
+    #[cfg(feature = "layout-test-utils")]
+    #[doc(hidden)]
+    pub fn anonymous_box_count_for_testing(&self, container: NodeId) -> usize {
+        self.arenas()
+            .anonymous()
+            .containers
+            .get(&container)
+            .map_or(0, |generated| generated.boxes.len())
+    }
+
     /// The element a hit on `node` targets: an anonymous box's container,
     /// `node` itself otherwise.
     pub(crate) fn hit_target(&self, node: NodeId) -> NodeId {
