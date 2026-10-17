@@ -48,7 +48,8 @@ cross-platform engine built on:
 
 - **[stylo](https://github.com/servo/stylo)** — CSS parsing/cascade/computed-style engine (Servo's)
 - **[vello](https://github.com/linebender/vello)** — GPU vector rendering
-- **[parley](https://github.com/linebender/parley)** — text layout & shaping
+- **[parley](https://github.com/linebender/parley)** (0.12) — text layout & shaping, including
+  the CSS 2.2 §10.8.1 line boxes both paragraph kinds report
 
 The from-scratch layout engine (successor to the C++ engine's `starlight`) is
 `crates/hughie` — its host protocol, shared layout machinery, and CSS
@@ -3421,7 +3422,12 @@ root/leaf/cache/positioned/rounding machinery, CSS Flexbox Level 1, numeric CSS
 Grid Level 2 (excluding subgrid/named areas), CSS Grid Level 3
 `display: grid-lanes` on that Grid machinery, id-constrained Starlight Relative
 Layout Level 1, and Lynx's `display: linear` algorithm and `linear-*`
-style/source protocol are live. Grid lanes is a **user-directed W3C extension
+style/source protocol are live. `LayoutOutput` carries a box's first and
+last baselines; flexbox and grid align items by either (`baseline`, and
+`last baseline` by the user's ruling of 2026-10-16), Linear exports a first
+baseline only and Relative none, and the fork's `lynx` grammar parses
+`baseline`, `first baseline` and `last baseline` for the item and self
+alignment properties (`docs/tracking/deviations.md`). Grid lanes is a **user-directed W3C extension
 beyond Lynx parity** (2026-09-18) rather than a compat obligation — native
 Lynx has no such `display` value and no `flow-tolerance` property — and it
 excludes `inline-grid-lanes`, the orientation property and
@@ -3437,23 +3443,27 @@ byte↔UTF-16 source map (`content.rs`, its white-space processing chosen per
 consumer), the run-style vocabulary and its Parley translation (`style.rs`,
 with each run's `BreakStyle`), shaping, breaking and line capture
 (`shape.rs`), tab stops (`tab.rs`, following the `text-indent` keywords), atom
-`vertical-align` (`position.rs`), the probe/commit break memo and the
-`Retained` trait both consumers run the protocol through (`memo.rs`), the
-per-cluster extent walk (`extent.rs`), `LineGeometry` — where each laid-out
-line sits, and the `shift` every reader moves parley's placement by — and
-`Paragraph`, which owns one shaped natural layout and re-breaks it in place.
+`vertical-align` in parley's vocabulary (`position.rs`), the probe/commit break
+memo and the `Retained` trait both consumers run the protocol through
+(`memo.rs`, whose `BlockMetrics` carries the first and last line boxes'
+baselines), the per-cluster extent walk (`extent.rs`), `LineGeometry` — where
+each laid-out line sits, parley 0.12's own CSS 2.2 §10.8.1 line box — and
+`Paragraph`, which owns one shaped natural layout and re-breaks it in place,
+starting every line with its root inline box (`ParagraphRoot`: the strut, which
+is parley's style 0, and the base direction).
 `src/text/block` is the Lynx `<text>` layer on it: `BlockStyle` with the
 `text-maxline`/`text-maxlength` limits, the truncation in `truncate.rs` (which
 lays an `<inline-truncation>` subtree in at the clamp; the painter applies
 `tail-color-convert`'s native semantics), the `layout` event's line reports,
-hidden-box outcomes, and the Lynx range and hit answers; its line geometry is
-parley's own, every shift zero. `src/text/inline` is the CSS block
-container's inline formatting context over text runs only (`InlineFlow`,
-CSS-only `InlineFlowStyle`): css-text-3 §4.1 white space in full, per-run
-`text-wrap-mode`/`word-break`/`overflow-wrap`, the `text-indent` keywords
-counted in the intrinsic widths, CSS 2.2 §10.8.1 line boxes — the strut plus
-each run's half-leading — in `line_boxes.rs`, and the fit-content width for a
-definite available width.
+hidden-box outcomes, and the Lynx range and hit answers; its strut is the
+establishing element's own font (`BlockStyle::strut`) and its bidi paragraph
+level stays first-strong. `src/text/inline` is the CSS block container's inline
+formatting context over text runs only (`InlineFlow`, CSS-only
+`InlineFlowStyle`): css-text-3 §4.1 white space in full (`break-spaces`
+included), per-run `text-wrap-mode`/`word-break`/`overflow-wrap`, the
+`text-indent` keywords counted in the intrinsic widths, the container's
+`direction` as the bidi paragraph level, its own font as the strut of parley's
+line boxes, and the fit-content width for a definite available width.
 
 **css-anchor-position-1** is in the absolute pass: `anchor()`/`anchor-size()`
 resolution, the `position-area` grid, `anchor-center`, the css-position-3

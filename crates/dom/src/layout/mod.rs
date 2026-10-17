@@ -2029,6 +2029,22 @@ mod tests {
         }
     }
 
+    /// A text block's min-content width counts its `text-indent` on the
+    /// indented line, as the inline formatting context's does: a flex item
+    /// offered 5px shrinks no narrower than "a" after the 15px indent, with
+    /// "b" on the next line, so 25.
+    #[test]
+    #[expect(clippy::float_cmp, reason = "Ahem advances are exact")]
+    fn a_text_block_s_min_content_counts_its_indent() {
+        let (mut document, label, _run) = label_document_parts("a b", 5.0);
+        document.add_stylesheet(
+            ".label { font-size: 10px; text-indent: 15px; }",
+            StylesheetOrigin::Author,
+        );
+        document.layout();
+        assert_eq!(document.rounded_layout(label).unwrap().size.width, 25.0);
+    }
+
     /// The verbatim white-space switch is read when the paragraph is built,
     /// so turning it on or off rebuilds the paragraph rather than re-breaking
     /// the retained one: `"a   b"` is three advances processed by

@@ -445,9 +445,11 @@ fn display_contents_inherits_to_its_children_without_boxing_them() {
     dom.layout();
 
     // The wrapper generates no box, but its style still reaches the run
-    // inside it: the paragraph measures at 8px, not the page's 16px.
+    // inside it: the paragraph's five glyphs measure at 8px, not the page's
+    // 16px. The line box is the page's: its 16px strut starts every line
+    // (CSS 2.2 §10.8.1), and the 8px run fits inside it.
     let _ = text;
-    assert_eq!(text_ink(&dom, root), (40.0, 8.0));
+    assert_eq!(text_ink(&dom, root), (40.0, 16.0));
     assert_eq!(dom_rect(&dom, wrapper), (0.0, 0.0, 0.0, 0.0));
 }
 

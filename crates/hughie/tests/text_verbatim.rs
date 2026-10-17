@@ -398,9 +398,10 @@ fn wrapping_text_keeps_every_line() {
     assert_eq!(block.lines().len(), 2);
 }
 
-/// Parley hangs one overflowing space at a line end and starts the next line
-/// with the rest; native hangs the whole run, so no line starts with the
-/// spaces a wrap ended and no line holds only them.
+/// Native hangs every space at a line end, and so does a `<text>` here:
+/// each run is shaped with parley's `collapse` hanging, which hangs a whole
+/// sequence of overflowing spaces past the line end, before a newline too. No
+/// line starts with the spaces a wrap ended, and no line holds only them.
 #[test]
 fn a_run_of_spaces_hangs_whole_at_a_wrap() {
     let style = ahem();
@@ -425,8 +426,8 @@ fn a_run_of_spaces_hangs_whole_at_a_wrap() {
     }
 }
 
-/// A run of spaces shaped as one cluster still advances by every space in
-/// it, `letter-spacing` included, and a range inside it still answers.
+/// Every space of a run advances by its own glyph, `letter-spacing` included,
+/// and a range over the run selects all of them.
 #[test]
 fn a_run_of_spaces_keeps_its_full_advance() {
     let mut style = ahem();
@@ -442,10 +443,11 @@ fn a_run_of_spaces_keeps_its_full_advance() {
     assert_close(spaced.size().width, 6.0 * 12.0);
 }
 
-/// Two runs of spaces split by an atomic box, or by a run boundary, stay two
-/// runs: the box and the run's own style sit between them.
+/// Spaces on both sides of an atomic box are all measured, and so are spaces
+/// on both sides of a run boundary: two spaces, a 10px box and two spaces
+/// between `a` and `b` make 70, and the same spaces with no box make 60.
 #[test]
-fn a_box_or_a_run_boundary_ends_a_run_of_spaces() {
+fn spaces_on_both_sides_of_a_box_are_all_measured() {
     let style = ahem();
     let block = laid_out(
         verbatim(),
@@ -548,4 +550,36 @@ fn a_line_clamp_counts_the_empty_last_line() {
     assert_eq!(two.lines().len(), 2);
     assert!(!two.truncated());
     assert_close(two.size().height, 20.0);
+}
+
+/// `TextBlock::min_content_width` answers at the indent it is asked for, laid
+/// out at that indent when cold, and remembers each answer with its indent.
+#[test]
+fn min_content_is_measured_and_remembered_at_the_indent_asked_for() {
+    let style = ahem();
+    let mut context = text_context();
+    let mut block = TextBlock::new(&mut context, verbatim(), &[run(&style, "a b")], None);
+    assert_close(block.min_content_width(&mut context, 15.0), 25.0);
+    assert_close(block.min_content_width(&mut context, 0.0), 10.0);
+    assert_close(block.min_content_width(&mut context, 15.0), 25.0);
+    let mut block = TextBlock::new(&mut context, verbatim(), &[run(&style, "a\nb")], None);
+    assert_close(block.min_content_width(&mut context, 15.0), 25.0);
+}
+
+/// Parley 0.12's content-width pass takes the indent rule: the indent counts
+/// toward the min- and max-content widths on the lines it applies to. In a
+/// verbatim block that is the first line and every line after a `\n`, never
+/// a soft-wrapped one.
+#[test]
+fn the_intrinsic_widths_count_the_indent_on_the_indented_lines() {
+    let style = ahem();
+    // Min-content breaks "a b" into "a" on the indented first line and "b"
+    // on an unindented soft-wrapped one: 15 + 10. Max-content is one line.
+    let block = laid_out_indented(&[run(&style, "a b")], None, 15.0);
+    assert_close(block.content_widths().min, 25.0);
+    assert_close(block.content_widths().max, 45.0);
+    // After a newline the second line is indented too.
+    let block = laid_out_indented(&[run(&style, "a\nb")], None, 15.0);
+    assert_close(block.content_widths().min, 25.0);
+    assert_close(block.content_widths().max, 25.0);
 }

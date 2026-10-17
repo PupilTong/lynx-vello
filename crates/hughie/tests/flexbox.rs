@@ -2736,3 +2736,825 @@ fn leaf_content_size_ends_at_its_padding_edge() {
     // Height: nothing overflows, so the padding edge, 40.
     assert_size(output.content_size, Size::new(140.0, 40.0));
 }
+
+/// `align-self: last baseline` (css-flexbox-1 §8.3 and §9.4 step 8,
+/// css-align-3 §9.3) and the container's own last baseline (§8.5).
+mod last_baseline {
+    use super::*;
+
+    /// A fixed-size leaf reporting both baselines from its top edge.
+    fn baseline_leaf(
+        tree: &mut TestTree,
+        style: TestStyle,
+        size: Size<f32>,
+        first: Option<f32>,
+        last: Option<f32>,
+    ) -> TestId {
+        let style = TestStyle {
+            size: Size::new(size_px(size.width), size_px(size.height)),
+            flex_basis: basis_px(size.width),
+            ..style
+        };
+        tree.push_baseline_leaf(style, size, first, last)
+    }
+
+    fn row(align: AlignFlags) -> TestStyle {
+        TestStyle {
+            align_items: items(align),
+            ..TestStyle::default()
+        }
+    }
+
+    #[test]
+    fn a_single_line_aligns_its_items_last_baselines_against_the_line_end() {
+        let mut tree = TestTree::default();
+        // Two lines of text and one: the first lines differ from the last.
+        let tall = baseline_leaf(
+            &mut tree,
+            TestStyle::default(),
+            Size::new(20.0, 40.0),
+            Some(10.0),
+            Some(34.0),
+        );
+        let short = baseline_leaf(
+            &mut tree,
+            TestStyle::default(),
+            Size::new(20.0, 20.0),
+            Some(15.0),
+            Some(15.0),
+        );
+        let root = flex_container(&mut tree, row(AlignFlags::LAST_BASELINE), &[tall, short]);
+
+        let output = definite_layout(&tree, root, 100.0, 60.0);
+
+        // The group reaches 34 above its baseline and 6 below it; it sits
+        // flush with the line's bottom edge, so the baseline is at 54.
+        assert_close(tree.layout(tall).location.y, 20.0);
+        assert_close(tree.layout(short).location.y, 39.0);
+        assert_close(tree.layout(tall).location.y + 34.0, 54.0);
+        assert_close(tree.layout(short).location.y + 15.0, 54.0);
+        // With no first-baseline group on the line, the container's first
+        // baseline is the last-baseline group's (§8.5 step 2).
+        assert_eq!(output.first_baselines.y, Some(54.0));
+        assert_eq!(output.last_baselines.y, Some(54.0));
+    }
+
+    #[test]
+    fn each_line_aligns_its_own_group_and_the_last_line_gives_the_last_baseline() {
+        let mut tree = TestTree::default();
+        let leaf = |tree: &mut TestTree, height: f32, last: f32| {
+            baseline_leaf(
+                tree,
+                TestStyle::default(),
+                Size::new(20.0, height),
+                Some(4.0),
+                Some(last),
+            )
+        };
+        let a = leaf(&mut tree, 30.0, 25.0);
+        let b = leaf(&mut tree, 10.0, 8.0);
+        let c = leaf(&mut tree, 20.0, 12.0);
+        let d = leaf(&mut tree, 40.0, 30.0);
+        let root = flex_container(
+            &mut tree,
+            TestStyle {
+                flex_wrap: flex_wrap::T::WRAP,
+                ..row(AlignFlags::LAST_BASELINE)
+            },
+            &[a, b, c, d],
+        );
+
+        let output = perform_layout(
+            &tree,
+            root,
+            Size::new(Some(50.0), None),
+            Size::new(AvailableSpace::Definite(50.0), AvailableSpace::MaxContent),
+        );
+
+        // Line one is 25 + 5 tall, line two 30 + 10, each group's baseline
+        // set by its own members.
+        assert_size(output.size, Size::new(50.0, 70.0));
+        assert_close(tree.layout(a).location.y + 25.0, 25.0);
+        assert_close(tree.layout(b).location.y + 8.0, 25.0);
+        assert_close(tree.layout(c).location.y + 12.0, 60.0);
+        assert_close(tree.layout(d).location.y + 30.0, 60.0);
+        assert_eq!(output.first_baselines.y, Some(25.0));
+        assert_eq!(output.last_baselines.y, Some(60.0));
+
+        // A measurement reports the same pair as the commit.
+        let measured = measure_layout(
+            &tree,
+            root,
+            Size::new(Some(50.0), None),
+            Size::new(AvailableSpace::Definite(50.0), AvailableSpace::MaxContent),
+        );
+        assert_eq!(measured.first_baselines.y, Some(25.0));
+        assert_eq!(measured.last_baselines.y, Some(60.0));
+    }
+
+    #[test]
+    fn first_and_last_baseline_groups_share_a_line_without_sharing_a_baseline() {
+        let mut tree = TestTree::default();
+        let first = baseline_leaf(
+            &mut tree,
+            TestStyle::default(),
+            Size::new(20.0, 30.0),
+            Some(10.0),
+            Some(25.0),
+        );
+        let last = baseline_leaf(
+            &mut tree,
+            TestStyle {
+                align_self: self_align(AlignFlags::LAST_BASELINE),
+                ..TestStyle::default()
+            },
+            Size::new(20.0, 20.0),
+            Some(5.0),
+            Some(16.0),
+        );
+        let tall = baseline_leaf(
+            &mut tree,
+            TestStyle {
+                align_self: self_align(AlignFlags::FLEX_START),
+                ..TestStyle::default()
+            },
+            Size::new(20.0, 50.0),
+            None,
+            None,
+        );
+        let root = flex_container(&mut tree, row(AlignFlags::BASELINE), &[first, last, tall]);
+
+        let output = perform_layout(
+            &tree,
+            root,
+            Size::new(Some(100.0), None),
+            Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
+        );
+
+        // The 50px item decides the line; the first-baseline group sits at
+        // its top and the last-baseline group at its bottom.
+        assert_size(output.size, Size::new(100.0, 50.0));
+        assert_close(tree.layout(first).location.y, 0.0);
+        assert_close(tree.layout(last).location.y, 30.0);
+        assert_close(tree.layout(tall).location.y, 0.0);
+        assert_eq!(output.first_baselines.y, Some(10.0));
+        assert_eq!(output.last_baselines.y, Some(46.0));
+    }
+
+    #[test]
+    fn the_line_cross_size_takes_the_taller_of_the_two_groups() {
+        let mut tree = TestTree::default();
+        let first = baseline_leaf(
+            &mut tree,
+            TestStyle {
+                margin: Edges {
+                    top: margin_px(4.0),
+                    ..Edges::uniform(margin_px(0.0))
+                },
+                ..TestStyle::default()
+            },
+            Size::new(20.0, 10.0),
+            Some(8.0),
+            Some(8.0),
+        );
+        let high = baseline_leaf(
+            &mut tree,
+            TestStyle {
+                align_self: self_align(AlignFlags::LAST_BASELINE),
+                ..TestStyle::default()
+            },
+            Size::new(20.0, 30.0),
+            Some(5.0),
+            Some(28.0),
+        );
+        let low = baseline_leaf(
+            &mut tree,
+            TestStyle {
+                align_self: self_align(AlignFlags::LAST_BASELINE),
+                margin: Edges {
+                    bottom: margin_px(6.0),
+                    ..Edges::uniform(margin_px(0.0))
+                },
+                ..TestStyle::default()
+            },
+            Size::new(20.0, 10.0),
+            Some(2.0),
+            Some(4.0),
+        );
+        let root = flex_container(
+            &mut tree,
+            TestStyle {
+                flex_wrap: flex_wrap::T::WRAP,
+                ..row(AlignFlags::BASELINE)
+            },
+            &[first, high, low],
+        );
+
+        let output = perform_layout(
+            &tree,
+            root,
+            Size::new(Some(100.0), None),
+            Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
+        );
+
+        // Last-baseline group: 28 above its baseline, max(2, 6 + 6) = 12
+        // below — 40, against the first group's 12 + 2.
+        assert_size(output.size, Size::new(100.0, 40.0));
+        assert_close(tree.layout(high).location.y, 0.0);
+        assert_close(tree.layout(low).location.y + 4.0, 28.0);
+        assert_close(tree.layout(first).location.y, 4.0);
+        assert_eq!(output.last_baselines.y, Some(28.0));
+    }
+
+    #[test]
+    fn wrap_reverse_takes_the_bottom_line_for_the_last_baseline_and_the_top_for_the_first() {
+        let mut tree = TestTree::default();
+        let leaf = |tree: &mut TestTree, height: f32, last: f32| {
+            baseline_leaf(
+                tree,
+                TestStyle::default(),
+                Size::new(20.0, height),
+                Some(3.0),
+                Some(last),
+            )
+        };
+        let a = leaf(&mut tree, 30.0, 20.0);
+        let b = leaf(&mut tree, 10.0, 8.0);
+        let c = leaf(&mut tree, 20.0, 15.0);
+        let root = flex_container(
+            &mut tree,
+            TestStyle {
+                flex_wrap: flex_wrap::T::WRAP_REVERSE,
+                ..row(AlignFlags::LAST_BASELINE)
+            },
+            &[a, b, c],
+        );
+
+        let output = perform_layout(
+            &tree,
+            root,
+            Size::new(Some(50.0), None),
+            Size::new(AvailableSpace::Definite(50.0), AvailableSpace::MaxContent),
+        );
+
+        // The first line (a, b) is the bottom one. Each line is exactly as
+        // tall as its group, so the group's edge does not show here; the
+        // next test shows it.
+        assert_size(output.size, Size::new(50.0, 50.0));
+        assert_point(tree.layout(a).location, Point::new(0.0, 20.0));
+        assert_point(tree.layout(b).location, Point::new(20.0, 32.0));
+        assert_point(tree.layout(c).location, Point::new(0.0, 0.0));
+        // The startmost (top) line is the second one, the endmost (bottom)
+        // the first (css-flexbox-1 §8.5, csswg-drafts#995).
+        assert_eq!(output.first_baselines.y, Some(15.0));
+        assert_eq!(output.last_baselines.y, Some(40.0));
+    }
+
+    /// css-flexbox-1 §8.3: the first-baseline group sits against the line's
+    /// cross-start edge and the last-baseline group against its cross-end
+    /// edge; `wrap-reverse` makes the cross-start edge the bottom one (WPT
+    /// `css/css-flexbox/multiline-reverse-wrap-baseline.html`).
+    #[test]
+    fn wrap_reverse_moves_each_group_to_the_other_edge_of_its_line() {
+        for (wrap, first_y, last_y) in [
+            (flex_wrap::T::WRAP, 0.0, 30.0),
+            (flex_wrap::T::WRAP_REVERSE, 40.0, 0.0),
+        ] {
+            let mut tree = TestTree::default();
+            let first = baseline_leaf(
+                &mut tree,
+                TestStyle {
+                    align_self: self_align(AlignFlags::BASELINE),
+                    ..TestStyle::default()
+                },
+                Size::new(20.0, 20.0),
+                Some(15.0),
+                Some(15.0),
+            );
+            let last = baseline_leaf(
+                &mut tree,
+                TestStyle {
+                    align_self: self_align(AlignFlags::LAST_BASELINE),
+                    ..TestStyle::default()
+                },
+                Size::new(20.0, 30.0),
+                Some(5.0),
+                Some(25.0),
+            );
+            // One line, 30px for its groups, stretched to the container's
+            // 60px by `align-content: normal`.
+            let root = flex_container(
+                &mut tree,
+                TestStyle {
+                    flex_wrap: wrap,
+                    ..TestStyle::default()
+                },
+                &[first, last],
+            );
+
+            let output = definite_layout(&tree, root, 100.0, 60.0);
+
+            assert_close(tree.layout(first).location.y, first_y);
+            assert_close(tree.layout(last).location.y, last_y);
+            // §8.5: the first baseline comes from the first-baseline group and
+            // the last from the last-baseline group, wherever they sit.
+            assert_eq!(output.first_baselines.y, Some(first_y + 15.0));
+            assert_eq!(output.last_baselines.y, Some(last_y + 25.0));
+        }
+    }
+
+    /// A column container's baselines come from its startmost and endmost
+    /// lines' items (css-flexbox-1 §8.5): the lines nearest the inline-start
+    /// and inline-end edges (css-writing-modes-4 §6.2's "start"), whichever
+    /// way the lines are laid out. `wrap-reverse` lays them out from the
+    /// other edge, so it exchanges which logical line is which.
+    #[test]
+    fn a_wrapping_column_takes_its_baselines_from_the_lines_nearest_inline_start_and_end() {
+        use direction::T::{Ltr, Rtl};
+        // (direction, wrap, C's x, first baseline, last baseline)
+        let cases = [
+            (Ltr, flex_wrap::T::WRAP, 50.0, 5.0, 17.0),
+            (Ltr, flex_wrap::T::WRAP_REVERSE, 30.0, 7.0, 36.0),
+            (Rtl, flex_wrap::T::WRAP, 30.0, 5.0, 17.0),
+            (Rtl, flex_wrap::T::WRAP_REVERSE, 50.0, 7.0, 36.0),
+        ];
+        for (container_direction, wrap, c_x, first, last) in cases {
+            let mut tree = TestTree::default();
+            let leaf = |tree: &mut TestTree, first: f32, last: f32| {
+                baseline_leaf(
+                    tree,
+                    TestStyle::default(),
+                    Size::new(20.0, 20.0),
+                    Some(first),
+                    Some(last),
+                )
+            };
+            let a = leaf(&mut tree, 5.0, 15.0);
+            let b = leaf(&mut tree, 6.0, 16.0);
+            let c = leaf(&mut tree, 7.0, 17.0);
+            // Two lines, [a, b] and [c], each stretched to 50px wide.
+            let root = flex_container(
+                &mut tree,
+                TestStyle {
+                    flex_direction: flex_direction::T::Column,
+                    flex_wrap: wrap,
+                    direction: container_direction,
+                    align_items: items(AlignFlags::FLEX_START),
+                    ..TestStyle::default()
+                },
+                &[a, b, c],
+            );
+
+            let output = definite_layout(&tree, root, 100.0, 40.0);
+
+            let label = format!("{container_direction:?} {wrap:?}");
+            assert_close(tree.layout(c).location.x, c_x);
+            // The startmost line holds [a, b] unless `wrap-reverse` moved it
+            // to the inline-end side; then [c]'s line is the startmost.
+            assert_eq!(output.first_baselines.y, Some(first), "{label}");
+            assert_eq!(output.last_baselines.y, Some(last), "{label}");
+        }
+    }
+
+    #[test]
+    fn an_item_without_a_baseline_synthesizes_one_at_its_bottom_edge() {
+        let mut tree = TestTree::default();
+        let tall = baseline_leaf(
+            &mut tree,
+            TestStyle::default(),
+            Size::new(20.0, 30.0),
+            None,
+            None,
+        );
+        let short = baseline_leaf(
+            &mut tree,
+            TestStyle::default(),
+            Size::new(20.0, 10.0),
+            None,
+            None,
+        );
+        let root = flex_container(&mut tree, row(AlignFlags::LAST_BASELINE), &[tall, short]);
+
+        let output = definite_layout(&tree, root, 100.0, 50.0);
+
+        // Both baselines are the bottom border edges, so the items end
+        // aligned at the line's end, as `end` would put them.
+        assert_close(tree.layout(tall).location.y, 20.0);
+        assert_close(tree.layout(short).location.y, 40.0);
+        assert_eq!(output.first_baselines.y, Some(50.0));
+        assert_eq!(output.last_baselines.y, Some(50.0));
+    }
+
+    #[test]
+    fn a_group_taller_than_its_line_overflows_its_cross_start_edge() {
+        let mut tree = TestTree::default();
+        let tall = baseline_leaf(
+            &mut tree,
+            TestStyle::default(),
+            Size::new(20.0, 30.0),
+            Some(5.0),
+            Some(25.0),
+        );
+        let short = baseline_leaf(
+            &mut tree,
+            TestStyle::default(),
+            Size::new(20.0, 10.0),
+            Some(5.0),
+            Some(5.0),
+        );
+        let root = flex_container(&mut tree, row(AlignFlags::LAST_BASELINE), &[tall, short]);
+
+        definite_layout(&tree, root, 100.0, 20.0);
+
+        // 25 + 5 overflows the 20px line. The group stays flush with the
+        // line's cross-end edge and overflows the top one, as in browsers:
+        // no `safe` alignment moves it back.
+        assert_close(tree.layout(tall).location.y, -10.0);
+        assert_close(tree.layout(short).location.y, 10.0);
+    }
+
+    #[test]
+    fn a_relative_offset_moves_its_item_but_not_the_group_or_the_container_baseline() {
+        let mut tree = TestTree::default();
+        let shifted = baseline_leaf(
+            &mut tree,
+            TestStyle {
+                position: PositionProperty::Relative,
+                inset: Edges {
+                    top: support::inset_px(7.0),
+                    ..Edges::uniform(support::inset_auto())
+                },
+                ..TestStyle::default()
+            },
+            Size::new(20.0, 30.0),
+            Some(5.0),
+            Some(25.0),
+        );
+        let other = baseline_leaf(
+            &mut tree,
+            TestStyle::default(),
+            Size::new(20.0, 20.0),
+            Some(5.0),
+            Some(10.0),
+        );
+        let root = flex_container(&mut tree, row(AlignFlags::LAST_BASELINE), &[shifted, other]);
+
+        let output = definite_layout(&tree, root, 100.0, 40.0);
+
+        // Group baseline: max(25, 40 - max(5, 10)) = 30.
+        assert_close(tree.layout(shifted).location.y, 30.0 - 25.0 + 7.0);
+        assert_close(tree.layout(other).location.y, 20.0);
+        assert_eq!(output.last_baselines.y, Some(30.0));
+    }
+
+    #[test]
+    fn a_column_container_does_not_share_baselines_and_takes_end_instead() {
+        let mut tree = TestTree::default();
+        let last = baseline_leaf(
+            &mut tree,
+            TestStyle {
+                align_self: self_align(AlignFlags::LAST_BASELINE),
+                ..TestStyle::default()
+            },
+            Size::new(20.0, 10.0),
+            Some(7.0),
+            Some(8.0),
+        );
+        let first = baseline_leaf(
+            &mut tree,
+            TestStyle {
+                align_self: self_align(AlignFlags::BASELINE),
+                ..TestStyle::default()
+            },
+            Size::new(30.0, 20.0),
+            Some(5.0),
+            Some(17.0),
+        );
+        let style = TestStyle {
+            flex_direction: flex_direction::T::Column,
+            ..TestStyle::default()
+        };
+        let root = flex_container(&mut tree, style.clone(), &[last, first]);
+
+        let output = perform_layout(
+            &tree,
+            root,
+            Size::new(Some(100.0), None),
+            Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
+        );
+
+        // An item's inline axis is the cross axis here, so neither joins a
+        // group: `last baseline` takes `end` and `baseline` the cross-start.
+        assert_point(tree.layout(last).location, Point::new(80.0, 0.0));
+        assert_point(tree.layout(first).location, Point::new(0.0, 10.0));
+        // The cross-axis baseline sets: the topmost item's first baseline,
+        // the bottommost item's last.
+        assert_eq!(output.first_baselines.y, Some(7.0));
+        assert_eq!(output.last_baselines.y, Some(27.0));
+
+        let reversed = flex_container(
+            &mut tree,
+            TestStyle {
+                flex_direction: flex_direction::T::ColumnReverse,
+                ..style
+            },
+            &[last, first],
+        );
+        let output = perform_layout(
+            &tree,
+            reversed,
+            Size::new(Some(100.0), None),
+            Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
+        );
+        // `column-reverse` puts the last item on top.
+        assert_eq!(output.first_baselines.y, Some(5.0));
+        assert_eq!(output.last_baselines.y, Some(28.0));
+    }
+
+    /// An item that shares no baseline takes css-align-3 §4.2's fallback
+    /// alignment: `safe self-start` for `baseline` and `safe self-end` for
+    /// `last baseline` — its own start or end edge, and the container's start
+    /// edge once it overflows the line. A column container's items share
+    /// none: their inline axis is the cross axis.
+    #[test]
+    fn an_item_that_shares_no_baseline_takes_the_safe_self_aligned_fallback() {
+        use direction::T::{Ltr, Rtl};
+        const NOWRAP: flex_wrap::T = flex_wrap::T::NOWRAP;
+        const WRAP_REVERSE: flex_wrap::T = flex_wrap::T::WRAP_REVERSE;
+        let cases = [
+            // (alignment, item width, item direction, wrap, expected x)
+            (AlignFlags::LAST_BASELINE, 20.0, Ltr, NOWRAP, 80.0),
+            // Overflowing: `safe` puts it at the start edge, not at -40.
+            (AlignFlags::LAST_BASELINE, 140.0, Ltr, NOWRAP, 0.0),
+            (AlignFlags::BASELINE, 140.0, Ltr, NOWRAP, 0.0),
+            // The item's own direction decides self-start and self-end.
+            (AlignFlags::LAST_BASELINE, 20.0, Rtl, NOWRAP, 0.0),
+            (AlignFlags::BASELINE, 20.0, Rtl, NOWRAP, 80.0),
+            // `wrap-reverse` moves the cross-start edge, not self-start.
+            (AlignFlags::BASELINE, 20.0, Ltr, WRAP_REVERSE, 0.0),
+            (AlignFlags::LAST_BASELINE, 20.0, Ltr, WRAP_REVERSE, 80.0),
+        ];
+        for (alignment, width, item_direction, wrap, expected_x) in cases {
+            let mut tree = TestTree::default();
+            let item = baseline_leaf(
+                &mut tree,
+                TestStyle {
+                    align_self: self_align(alignment),
+                    direction: item_direction,
+                    ..TestStyle::default()
+                },
+                Size::new(width, 10.0),
+                Some(8.0),
+                Some(8.0),
+            );
+            let root = flex_container(
+                &mut tree,
+                TestStyle {
+                    flex_direction: flex_direction::T::Column,
+                    flex_wrap: wrap,
+                    ..TestStyle::default()
+                },
+                &[item],
+            );
+
+            perform_layout(
+                &tree,
+                root,
+                Size::new(Some(100.0), None),
+                Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
+            );
+
+            assert_close(tree.layout(item).location.x, expected_x);
+        }
+    }
+
+    /// The same fallbacks place an absolutely positioned child's static
+    /// position; under `wrap-reverse` that is the container's start edge for
+    /// `baseline`, not its cross-start edge, as Chromium's
+    /// `CrossAxisStaticPositionEdge` does.
+    #[test]
+    fn a_static_position_takes_the_baseline_fallbacks() {
+        for (alignment, expected_y) in [
+            (AlignFlags::BASELINE, 0.0),
+            (AlignFlags::LAST_BASELINE, 40.0),
+        ] {
+            let mut tree = TestTree::default();
+            let absolute = baseline_leaf(
+                &mut tree,
+                TestStyle {
+                    position: PositionProperty::Absolute,
+                    align_self: self_align(alignment),
+                    ..TestStyle::default()
+                },
+                Size::new(20.0, 10.0),
+                Some(8.0),
+                Some(8.0),
+            );
+            let root = flex_container(
+                &mut tree,
+                TestStyle {
+                    flex_wrap: flex_wrap::T::WRAP_REVERSE,
+                    ..TestStyle::default()
+                },
+                &[absolute],
+            );
+
+            definite_layout(&tree, root, 100.0, 50.0);
+
+            assert_close(tree.layout(absolute).location.y, expected_y);
+        }
+    }
+
+    /// A nested container that is a last-baseline group member is aligned by
+    /// the last baseline its measurement reports, which the group asks for
+    /// exactly (`LayoutInput::reads_last_baseline`): the nested container
+    /// then measures the item it comes from even where its cross pass would
+    /// not — a fixed-height last item — and both cases align by 19.
+    #[test]
+    fn a_nested_flex_container_aligns_by_the_last_baseline_of_its_last_line() {
+        for (content_height, inner_y, beside_y) in [(true, 0.0, 4.0), (false, 0.0, 4.0)] {
+            let mut tree = TestTree::default();
+            let upper = baseline_leaf(
+                &mut tree,
+                TestStyle::default(),
+                Size::new(40.0, 10.0),
+                Some(8.0),
+                Some(8.0),
+            );
+            let lower = if content_height {
+                tree.push_baseline_leaf(
+                    TestStyle {
+                        size: Size::new(size_px(40.0), size_auto()),
+                        flex_basis: basis_px(40.0),
+                        ..TestStyle::default()
+                    },
+                    Size::new(40.0, 12.0),
+                    Some(9.0),
+                    Some(9.0),
+                )
+            } else {
+                baseline_leaf(
+                    &mut tree,
+                    TestStyle::default(),
+                    Size::new(40.0, 12.0),
+                    Some(9.0),
+                    Some(9.0),
+                )
+            };
+            let inner = flex_container(
+                &mut tree,
+                TestStyle {
+                    size: Size::new(size_px(40.0), size_auto()),
+                    flex_basis: basis_px(40.0),
+                    flex_wrap: flex_wrap::T::WRAP,
+                    align_items: items(AlignFlags::FLEX_START),
+                    ..TestStyle::default()
+                },
+                &[upper, lower],
+            );
+            let beside = baseline_leaf(
+                &mut tree,
+                TestStyle::default(),
+                Size::new(20.0, 20.0),
+                Some(15.0),
+                Some(15.0),
+            );
+            let root = flex_container(&mut tree, row(AlignFlags::LAST_BASELINE), &[inner, beside]);
+
+            let output = perform_layout(
+                &tree,
+                root,
+                Size::new(Some(100.0), None),
+                Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
+            );
+
+            // The inner container's last baseline is its last line's last
+            // item's, 10 + 9 = 19 below its top; its first (8) plays no part.
+            assert_size(tree.layout(inner).size, Size::new(40.0, 22.0));
+            assert_close(tree.layout(inner).location.y, inner_y);
+            assert_close(tree.layout(beside).location.y, beside_y);
+            assert_eq!(output.last_baselines.y, Some(beside_y + 15.0));
+        }
+    }
+
+    /// A measurement takes no extra child probe for its last baseline: the
+    /// item it comes from, which the cross pass did not measure, gives one
+    /// synthesized from its border box's bottom edge, as a stretched item's
+    /// first baseline is. A commit reads the committed children and is exact.
+    #[test]
+    fn a_measurement_synthesizes_the_last_baseline_of_an_item_its_cross_pass_skipped() {
+        let mut tree = TestTree::default();
+        let first = baseline_leaf(
+            &mut tree,
+            TestStyle::default(),
+            Size::new(20.0, 10.0),
+            Some(5.0),
+            Some(7.0),
+        );
+        let last = baseline_leaf(
+            &mut tree,
+            TestStyle::default(),
+            Size::new(20.0, 30.0),
+            Some(6.0),
+            Some(25.0),
+        );
+        // Both cross sizes are fixed and nothing aligns by baseline, so the
+        // cross pass measures only the item the first baseline comes from.
+        let root = flex_container(&mut tree, row(AlignFlags::FLEX_START), &[first, last]);
+        let constraint = Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent);
+
+        let measured = measure_layout(&tree, root, Size::new(Some(100.0), None), constraint);
+        // The last item's one measurement is the main-axis min-content probe
+        // for its §4.5 automatic minimum; nothing measures it in both axes,
+        // as a cross-size or baseline probe would.
+        let probes = tree.measure_inputs(last);
+        assert_eq!(probes.len(), 1, "{probes:?}");
+        assert_eq!(
+            probes[0].goal,
+            LayoutGoal::Measure(RequestedAxis::Horizontal)
+        );
+        assert_eq!(measured.first_baselines.y, Some(5.0));
+        assert_eq!(measured.last_baselines.y, Some(30.0));
+
+        let committed = perform_layout(&tree, root, Size::new(Some(100.0), None), constraint);
+        assert_eq!(committed.first_baselines.y, Some(5.0));
+        assert_eq!(committed.last_baselines.y, Some(25.0));
+    }
+
+    /// A measurement asked for an exact last baseline measures the item it
+    /// comes from once, where the cross pass would have skipped it, and
+    /// reports that item's own last baseline.
+    #[test]
+    fn a_last_baseline_request_measures_the_skipped_item_once() {
+        let mut tree = TestTree::default();
+        let first = baseline_leaf(
+            &mut tree,
+            TestStyle::default(),
+            Size::new(20.0, 10.0),
+            Some(5.0),
+            Some(7.0),
+        );
+        let last = baseline_leaf(
+            &mut tree,
+            TestStyle::default(),
+            Size::new(20.0, 30.0),
+            Some(6.0),
+            Some(25.0),
+        );
+        let root = flex_container(&mut tree, row(AlignFlags::FLEX_START), &[first, last]);
+        let constraint = Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent);
+
+        let requested = tree.compute_layout(
+            root,
+            LayoutInput::measure(
+                Size::new(Some(100.0), None),
+                constraint.definite_values(),
+                constraint,
+                RequestedAxis::Both,
+            )
+            .reading_last_baseline(true),
+        );
+
+        // The main-axis min-content probe every measurement makes, and one
+        // measurement in both axes for the last baseline.
+        let probes = tree.measure_inputs(last);
+        assert_eq!(probes.len(), 2, "{probes:?}");
+        assert_eq!(
+            probes
+                .iter()
+                .filter(|probe| probe.goal == LayoutGoal::Measure(RequestedAxis::Both))
+                .count(),
+            1
+        );
+        assert_eq!(requested.first_baselines.y, Some(5.0));
+        assert_eq!(requested.last_baselines.y, Some(25.0));
+    }
+
+    #[test]
+    fn layout_containment_exports_neither_baseline() {
+        let mut tree = TestTree::default();
+        let child = baseline_leaf(
+            &mut tree,
+            TestStyle::default(),
+            Size::new(20.0, 20.0),
+            Some(5.0),
+            Some(15.0),
+        );
+        let root = flex_container(
+            &mut tree,
+            TestStyle {
+                containment: hughie::style::Contain::LAYOUT,
+                ..row(AlignFlags::LAST_BASELINE)
+            },
+            &[child],
+        );
+
+        let committed = definite_layout(&tree, root, 100.0, 40.0);
+        assert_eq!(committed.first_baselines, Point::NONE);
+        assert_eq!(committed.last_baselines, Point::NONE);
+        let measured = measure_layout(&tree, root, Size::NONE, Size::MAX_CONTENT);
+        assert_eq!(measured.last_baselines, Point::NONE);
+        // The item itself still aligns.
+        assert_close(tree.layout(child).location.y, 20.0);
+    }
+}

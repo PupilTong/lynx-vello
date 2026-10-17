@@ -60,6 +60,14 @@ impl TestTree {
         *first_baseline = Some(value);
     }
 
+    fn set_last_baseline(&mut self, id: TestId, value: f32) {
+        let TestMeasure::Intrinsic { last_baseline, .. } = &mut self.0.source_node_mut(id).measure
+        else {
+            panic!("baseline fixture must use intrinsic measurement");
+        };
+        *last_baseline = Some(value);
+    }
+
     fn measure_call_count(&self, id: TestId) -> usize {
         self.0.measure_inputs(id).len()
     }
@@ -3351,4 +3359,305 @@ fn fit_content_grid_with_a_contained_inline_axis_takes_its_substituted_width() {
     assert_size(layout.size, Size::new(300.0, 50.0));
     assert_point(layout.location, Point::new(250.0, 275.0));
     assert_point(tree.layout(items[1]).location, Point::new(150.0, 0.0));
+}
+
+/// `align-self: last baseline` (css-align-3 §9.3, css-grid-1 §11.5 step 1's
+/// shims) and the container's own last baseline (css-grid-1 §10.6).
+mod last_baseline {
+    use super::*;
+
+    fn leaf(tree: &mut TestTree, style: TestStyle, size: Size<f32>, last: f32) -> TestId {
+        let style = TestStyle {
+            size: Size::new(size_px(size.width), size_px(size.height)),
+            ..style
+        };
+        let id = tree.push_leaf(style, size, size);
+        tree.set_last_baseline(id, last);
+        id
+    }
+
+    fn at(column: i32, row: Line<GridLine>) -> TestStyle {
+        TestStyle {
+            grid_column: placement(line(column), line(column + 1)),
+            grid_row: row,
+            ..grid_default()
+        }
+    }
+
+    fn row(start: i32) -> Line<GridLine> {
+        placement(line(start), line(start + 1))
+    }
+
+    /// A row flex container whose last line's last item has a fixed height:
+    /// its last baseline is that item's, 10 + 9 = 19 below its top, 3 above
+    /// its 22px bottom edge. A measurement reports 19 only when it is asked
+    /// for an exact last baseline (`LayoutInput::reads_last_baseline`).
+    fn nested_flex(tree: &mut TestTree, style: TestStyle) -> TestId {
+        let line = |tree: &mut TestTree, height: f32, baseline: f32| {
+            tree.push_baseline_leaf(
+                TestStyle {
+                    size: Size::new(size_px(40.0), size_px(height)),
+                    ..TestStyle::default()
+                },
+                Size::new(40.0, height),
+                Some(baseline),
+                Some(baseline),
+            )
+        };
+        let upper = line(tree, 10.0, 8.0);
+        let lower = line(tree, 12.0, 9.0);
+        tree.push_flex(
+            TestStyle {
+                display: Display::Flex,
+                size: Size::new(size_px(40.0), size_auto()),
+                flex_wrap: stylo::computed_values::flex_wrap::T::WRAP,
+                align_items: ItemPlacement(AlignFlags::FLEX_START),
+                ..style
+            },
+            vec![upper, lower],
+        )
+    }
+
+    /// A grid that is a last-baseline group member asks the item its own last
+    /// baseline comes from (css-grid-1 §10.6) for an exact one, so a nested
+    /// flex container with a fixed-height last item gives 19, not its 22px
+    /// bottom edge.
+    #[test]
+    fn a_requested_grid_last_baseline_asks_the_item_it_comes_from() {
+        let mut tree = TestTree::default();
+        let flex = nested_flex(&mut tree, at(1, row(1)));
+        let grid = tree.push_grid(
+            TestStyle {
+                size: Size::new(size_px(40.0), size_auto()),
+                ..grid_style(&[px(40.0)], &[auto_track()])
+            },
+            vec![flex],
+        );
+        let beside = tree.push_baseline_leaf(
+            TestStyle {
+                size: Size::new(size_px(20.0), size_px(20.0)),
+                ..TestStyle::default()
+            },
+            Size::new(20.0, 20.0),
+            Some(15.0),
+            Some(15.0),
+        );
+        let root = tree.push_flex(
+            TestStyle {
+                align_items: ItemPlacement(AlignFlags::LAST_BASELINE),
+                ..TestStyle::default()
+            },
+            vec![grid, beside],
+        );
+
+        let output = support::perform_layout(
+            &tree,
+            root,
+            Size::new(Some(100.0), None),
+            Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
+        );
+
+        assert_size(tree.layout(grid).size, Size::new(40.0, 22.0));
+        assert_close(tree.layout(grid).location.y, 0.0);
+        assert_close(tree.layout(beside).location.y, 4.0);
+        assert_eq!(output.last_baselines.y, Some(19.0));
+    }
+
+    /// §11.5 step 1's shims read a last-baseline group member's last baseline
+    /// exactly: the nested flex container reaches 3 below it and the leaf 15,
+    /// so the container is shimmed 12 and the auto row is 22 + 12 = 34.
+    #[test]
+    fn last_baseline_shims_ask_a_group_member_for_an_exact_last_baseline() {
+        let mut tree = TestTree::default();
+        let flex = nested_flex(&mut tree, at(1, row(1)));
+        let leaf_member = leaf(&mut tree, at(2, row(1)), Size::new(20.0, 20.0), 5.0);
+        let mut marker_style = at(1, row(2));
+        marker_style.align_self = SelfAlignment(AlignFlags::START);
+        let marker = tree.push_leaf(
+            TestStyle {
+                size: Size::new(size_px(10.0), size_px(10.0)),
+                ..marker_style
+            },
+            Size::new(10.0, 10.0),
+            Size::new(10.0, 10.0),
+        );
+        let mut style = grid_style(&[px(40.0), px(20.0)], &[auto_track(), px(10.0)]);
+        style.align_items = ItemPlacement(AlignFlags::LAST_BASELINE);
+        style.align_content = ContentDistribution::new(AlignFlags::START);
+        style.justify_items = justify_items(AlignFlags::START);
+        let root = tree.push_grid(style, vec![flex, leaf_member, marker]);
+
+        definite_layout(&tree, root, 60.0, 60.0);
+
+        assert_close(tree.layout(marker).location.y, 34.0);
+        assert_close(tree.layout(flex).location.y, 0.0);
+        assert_close(tree.layout(leaf_member).location.y, 14.0);
+    }
+
+    #[test]
+    fn a_row_group_lines_up_its_last_baselines_against_the_row_end() {
+        let mut tree = TestTree::default();
+        let short = leaf(&mut tree, at(1, row(1)), Size::new(20.0, 20.0), 15.0);
+        let tall = leaf(&mut tree, at(2, row(1)), Size::new(20.0, 30.0), 10.0);
+        let mut style = grid_style(&[px(50.0), px(50.0)], &[px(40.0)]);
+        style.align_items = ItemPlacement(AlignFlags::LAST_BASELINE);
+        style.justify_items = justify_items(AlignFlags::START);
+        let root = tree.push_grid(style, vec![short, tall]);
+
+        let output = definite_layout(&tree, root, 100.0, 40.0);
+
+        // 20 below the baseline at most, so it sits 20 above the row's end.
+        assert_close(tree.layout(short).location.y, 5.0);
+        assert_close(tree.layout(tall).location.y, 10.0);
+        // The first row holds no first-baseline group, so the first baseline
+        // is the last-baseline group's too (§10.6 step 2).
+        assert_eq!(output.first_baselines.y, Some(20.0));
+        assert_eq!(output.last_baselines.y, Some(20.0));
+    }
+
+    #[test]
+    fn a_spanning_item_shares_the_last_baseline_of_the_row_its_span_ends_in() {
+        let mut tree = TestTree::default();
+        let mut spanning_style = at(1, placement(line(1), line(3)));
+        spanning_style.align_self = SelfAlignment(AlignFlags::LAST_BASELINE);
+        let spanning = leaf(&mut tree, spanning_style, Size::new(20.0, 45.0), 40.0);
+        let mut lower_style = at(2, row(2));
+        lower_style.align_self = SelfAlignment(AlignFlags::LAST_BASELINE);
+        let lower = leaf(&mut tree, lower_style, Size::new(20.0, 20.0), 12.0);
+        let mut upper_style = at(3, row(1));
+        upper_style.align_self = SelfAlignment(AlignFlags::BASELINE);
+        let upper = leaf(&mut tree, upper_style, Size::new(20.0, 10.0), 9.0);
+        tree.set_first_baseline(upper, 6.0);
+        let mut style = grid_style(&[px(30.0), px(30.0), px(30.0)], &[px(20.0), px(30.0)]);
+        style.justify_items = justify_items(AlignFlags::START);
+        let root = tree.push_grid(style, vec![spanning, lower, upper]);
+
+        let output = definite_layout(&tree, root, 90.0, 50.0);
+
+        // Both areas end at 50; the lower item reaches 8 below its baseline.
+        assert_close(tree.layout(spanning).location.y + 40.0, 42.0);
+        assert_close(tree.layout(lower).location.y + 12.0, 42.0);
+        assert_close(tree.layout(upper).location.y, 0.0);
+        // First row: its first-baseline group. Last row: its last-baseline
+        // group, which the spanning item joined.
+        assert_eq!(output.first_baselines.y, Some(6.0));
+        assert_eq!(output.last_baselines.y, Some(42.0));
+    }
+
+    #[test]
+    fn a_last_baseline_group_taller_than_its_row_overflows_the_row_start() {
+        let mut tree = TestTree::default();
+        let tall = leaf(&mut tree, at(1, row(1)), Size::new(20.0, 30.0), 25.0);
+        let short = leaf(&mut tree, at(2, row(1)), Size::new(20.0, 10.0), 5.0);
+        let mut style = grid_style(&[px(50.0), px(50.0)], &[px(20.0)]);
+        style.align_items = ItemPlacement(AlignFlags::LAST_BASELINE);
+        style.justify_items = justify_items(AlignFlags::START);
+        let root = tree.push_grid(style, vec![tall, short]);
+
+        definite_layout(&tree, root, 100.0, 20.0);
+
+        // 25 above the baseline and 5 below overflow the 20px row. The group
+        // stays flush with the row's end and overflows its start, as in
+        // browsers: no `safe` alignment moves it back.
+        assert_close(tree.layout(tall).location.y, -10.0);
+        assert_close(tree.layout(short).location.y, 10.0);
+    }
+
+    #[test]
+    fn baseline_shims_grow_an_intrinsic_row_for_a_last_baseline_group() {
+        let mut tree = TestTree::default();
+        let shallow = leaf(&mut tree, at(1, row(1)), Size::new(20.0, 20.0), 15.0);
+        let deep = leaf(&mut tree, at(2, row(1)), Size::new(20.0, 20.0), 5.0);
+        let mut marker_style = at(1, row(2));
+        marker_style.align_self = SelfAlignment(AlignFlags::START);
+        let marker = tree.push_leaf(
+            TestStyle {
+                size: Size::new(size_px(10.0), size_px(10.0)),
+                ..marker_style
+            },
+            Size::new(10.0, 10.0),
+            Size::new(10.0, 10.0),
+        );
+        let mut style = grid_style(&[px(50.0), px(50.0)], &[auto_track(), px(10.0)]);
+        style.align_items = ItemPlacement(AlignFlags::LAST_BASELINE);
+        style.align_content = ContentDistribution::new(AlignFlags::START);
+        style.justify_items = justify_items(AlignFlags::START);
+        let root = tree.push_grid(style, vec![shallow, deep, marker]);
+
+        definite_layout(&tree, root, 100.0, 60.0);
+
+        // The shallow item is shimmed 10 on its end side (15 - 5), so the
+        // auto row is 30, not 20, and the group fits it.
+        assert_close(tree.layout(marker).location.y, 30.0);
+        assert_close(tree.layout(shallow).location.y, 0.0);
+        assert_close(tree.layout(deep).location.y, 10.0);
+    }
+
+    #[test]
+    fn a_column_shares_no_last_baseline_and_takes_safe_self_end() {
+        let mut tree = TestTree::default();
+        let mut ltr_style = at(1, row(1));
+        ltr_style.justify_self = SelfAlignment(AlignFlags::LAST_BASELINE);
+        let ltr = leaf(&mut tree, ltr_style.clone(), Size::new(20.0, 10.0), 8.0);
+        let mut rtl_style = at(1, row(2));
+        rtl_style.justify_self = SelfAlignment(AlignFlags::LAST_BASELINE);
+        rtl_style.direction = direction::T::Rtl;
+        let rtl = leaf(&mut tree, rtl_style, Size::new(20.0, 10.0), 8.0);
+        let mut wide_style = at(1, row(3));
+        wide_style.justify_self = SelfAlignment(AlignFlags::LAST_BASELINE);
+        let wide = leaf(&mut tree, wide_style, Size::new(120.0, 10.0), 8.0);
+        let root = tree.push_grid(
+            grid_style(&[px(100.0)], &[px(20.0), px(20.0), px(20.0)]),
+            vec![ltr, rtl, wide],
+        );
+
+        definite_layout(&tree, root, 100.0, 60.0);
+
+        // Baselines here are horizontal, so a column shares none: each item
+        // takes `safe self-end` — its own end edge, and the container's
+        // start once it overflows the area.
+        assert_close(tree.layout(ltr).location.x, 80.0);
+        assert_close(tree.layout(rtl).location.x, 0.0);
+        assert_close(tree.layout(wide).location.x, 0.0);
+    }
+
+    #[test]
+    fn the_last_baseline_comes_from_the_last_item_in_grid_order_of_the_last_row() {
+        let mut tree = TestTree::default();
+        let top = leaf(&mut tree, at(1, row(1)), Size::new(10.0, 10.0), 8.0);
+        tree.set_first_baseline(top, 4.0);
+        // Listed out of grid order: the second column's item is the last one.
+        let right = leaf(&mut tree, at(2, row(2)), Size::new(10.0, 10.0), 9.0);
+        let left = leaf(&mut tree, at(1, row(2)), Size::new(10.0, 10.0), 6.0);
+        let mut style = grid_style(&[px(30.0), px(30.0)], &[px(20.0), px(20.0)]);
+        style.align_items = ItemPlacement(AlignFlags::START);
+        style.justify_items = justify_items(AlignFlags::START);
+        let root = tree.push_grid(style, vec![top, right, left]);
+
+        let output = definite_layout(&tree, root, 60.0, 40.0);
+
+        assert_eq!(output.first_baselines.y, Some(4.0));
+        assert_eq!(output.last_baselines.y, Some(29.0));
+    }
+
+    #[test]
+    fn a_relative_offset_moves_its_item_but_not_its_group_or_the_container_baseline() {
+        let mut tree = TestTree::default();
+        let mut shifted_style = at(1, row(1));
+        shifted_style.position = PositionProperty::Relative;
+        shifted_style.inset.top = inset_px(7.0);
+        let shifted = leaf(&mut tree, shifted_style, Size::new(20.0, 20.0), 15.0);
+        let other = leaf(&mut tree, at(2, row(1)), Size::new(20.0, 30.0), 10.0);
+        let mut style = grid_style(&[px(50.0), px(50.0)], &[px(40.0)]);
+        style.align_items = ItemPlacement(AlignFlags::LAST_BASELINE);
+        style.justify_items = justify_items(AlignFlags::START);
+        let root = tree.push_grid(style, vec![shifted, other]);
+
+        let output = definite_layout(&tree, root, 100.0, 40.0);
+
+        // As without the offset (the group's baseline at 20), then 7 lower.
+        assert_close(tree.layout(shifted).location.y, 5.0 + 7.0);
+        assert_close(tree.layout(other).location.y, 10.0);
+        assert_eq!(output.last_baselines.y, Some(20.0));
+    }
 }

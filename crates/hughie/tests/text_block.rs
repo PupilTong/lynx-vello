@@ -151,7 +151,9 @@ fn flattened_items_keep_source_order_and_identity() {
     assert_close(origin.x, 20.0);
     assert_close(size.width, 10.0);
     assert_close(block.size().width, 50.0);
-    assert_close(block.size().height, 10.0);
+    // The 10px box sits on the baseline, 2px above the text's 8px ascent,
+    // over the text's 2px descent: a 12px line box (CSS 2.2 §10.8.1).
+    assert_close(block.size().height, 12.0);
     assert_eq!(block.source_of(0), SourceItem::Content(0));
     assert_eq!(block.source_of(1), SourceItem::Content(2));
 
@@ -173,17 +175,17 @@ fn a_box_without_a_baseline_sits_its_bottom_edge_on_the_baseline() {
     let mut context = text_context();
     let block = laid_out(&mut context, BlockStyle::default(), &items, None, None);
 
-    // The box contributes its full height as ascent: line height 30,
-    // leading 30 − 32 = −2, half −1, baseline 29.
+    // The box is all ascent, 30 above the baseline; the text adds its 2px
+    // descent below it: line height 32, baseline 30 (CSS 2.2 §10.8.1).
     let line = block.lines()[0];
-    assert_close(line.height, 30.0);
-    assert_close(line.baseline, 29.0);
+    assert_close(line.height, 32.0);
+    assert_close(line.baseline, 30.0);
     let (_, origin, _) = visible_box(&block, 1);
     assert_close(origin.y + 30.0, line.baseline);
 }
 
 #[test]
-fn a_box_baseline_hangs_its_remainder_below_the_text_baseline() {
+fn a_box_baseline_reserves_its_remainder_below_the_text_baseline() {
     let style = ahem_style();
     let spec = InlineBoxSpec {
         id: 1,
@@ -195,68 +197,67 @@ fn a_box_baseline_hangs_its_remainder_below_the_text_baseline() {
     let mut context = text_context();
     let block = laid_out(&mut context, BlockStyle::default(), &items, None, None);
 
-    // Contribution 24: line height 24, leading −2, baseline 23. The box's
-    // below-baseline part (6) hangs without reserving descent.
+    // 24 above the baseline and 6 below it, both reserved: line height 30,
+    // baseline 24, the box flush with the line box (CSS 2.2 §10.8.1).
     let line = block.lines()[0];
-    assert_close(line.height, 24.0);
-    assert_close(line.baseline, 23.0);
+    assert_close(line.height, 30.0);
+    assert_close(line.baseline, 24.0);
     let (_, origin, _) = visible_box(&block, 1);
-    assert_close(origin.y, -1.0);
+    assert_close(origin.y, 0.0);
     assert_close(origin.y + 30.0, line.baseline + 6.0);
 }
 
+/// Where each `vertical-align` puts a box smaller than its line, against the
+/// root inline box — here the run's own style, the strut no host gave.
+///
+/// Ahem 10px at `line-height: 40px`: ascent 8, descent 2, x-height 8, and
+/// 15px of half-leading on each side, so the line box is 40 with its
+/// baseline at 23. The box is 10 by 6 and has no baseline of its own, so
+/// it is all ascent (css-inline-3 §4).
 #[test]
-fn every_vertical_align_value_lands_on_its_table_row() {
-    let style = ahem_style();
+fn every_vertical_align_value_lands_where_css_places_it() {
+    let style = RunStyle {
+        line_height: hughie::text::block::LineHeight::Px(40.0),
+        ..ahem_style()
+    };
     let mut context = text_context();
-
-    // Contribution 30 for every extent-anchored value: line height 30,
-    // baseline 29, block box −1..31, text ascent 8, descent 2.
-    let expectations = [
-        (VerticalAlign::Baseline, -1.0),
-        (VerticalAlign::Sub, 1.0),
-        (VerticalAlign::Super, -4.4),
-        (VerticalAlign::Top, -1.0),
-        (VerticalAlign::TextTop, 21.0),
-        (VerticalAlign::Bottom, 1.0),
-        (VerticalAlign::TextBottom, 1.0),
-        (VerticalAlign::Percent(0.5), -16.0),
-    ];
-    for (value, expected) in expectations {
-        let items = [run(&style, "aaaa"), atom(1, 10.0, 30.0, value)];
+    for (value, top) in [
+        (VerticalAlign::Baseline, 17.0),
+        // `sub` drops 1/5 of the root's font size, `super` raises 1/3.
+        (VerticalAlign::Sub, 19.0),
+        (VerticalAlign::Super, 23.0 - 10.0 / 3.0 - 6.0),
+        (VerticalAlign::Top, 0.0),
+        // The box's top at the root's ascent, its bottom at the descent.
+        (VerticalAlign::TextTop, 15.0),
+        (VerticalAlign::Bottom, 34.0),
+        (VerticalAlign::TextBottom, 19.0),
+        // The box's middle at half the x-height above the baseline.
+        (VerticalAlign::Middle, 16.0),
+        (VerticalAlign::Center, 16.0),
+        (VerticalAlign::Length(5.0), 12.0),
+        (VerticalAlign::Length(-5.0), 22.0),
+    ] {
+        let items = [run(&style, "aaaa"), atom(1, 10.0, 6.0, value)];
         let block = laid_out(&mut context, BlockStyle::default(), &items, None, None);
         let (_, origin, _) = visible_box(&block, 1);
-        assert_close(origin.y, expected);
+        let line = block.lines()[0];
+        assert_close(line.height, 40.0);
+        assert_close(line.baseline, 23.0);
+        assert_close(origin.y, top);
     }
 
-    // Middle centers on half the x-height above the baseline; Center is its
-    // alias. Ahem's x-height is 0.8em = 8: y = 29 − 4 − 15.
-    for value in [VerticalAlign::Middle, VerticalAlign::Center] {
-        let items = [run(&style, "aaaa"), atom(1, 10.0, 30.0, value)];
-        let block = laid_out(&mut context, BlockStyle::default(), &items, None, None);
-        let (_, origin, _) = visible_box(&block, 1);
-        assert_close(origin.y, 10.0);
-    }
-
-    // A positive raise grows the line (contribution 35 → baseline 34); a
-    // negative one drops the box without growing anything.
+    // Half the root's 40px line height is a 20px raise: the box reaches 26
+    // above the baseline, 3 past the strut, so the line box grows by 3 and
+    // the box is flush with its top.
     let items = [
         run(&style, "aaaa"),
-        atom(1, 10.0, 30.0, VerticalAlign::Length(5.0)),
+        atom(1, 10.0, 6.0, VerticalAlign::Percent(0.5)),
     ];
     let block = laid_out(&mut context, BlockStyle::default(), &items, None, None);
-    assert_close(block.lines()[0].baseline, 34.0);
     let (_, origin, _) = visible_box(&block, 1);
-    assert_close(origin.y, -1.0);
-
-    let items = [
-        run(&style, "aaaa"),
-        atom(1, 10.0, 30.0, VerticalAlign::Length(-5.0)),
-    ];
-    let block = laid_out(&mut context, BlockStyle::default(), &items, None, None);
-    assert_close(block.lines()[0].baseline, 29.0);
-    let (_, origin, _) = visible_box(&block, 1);
-    assert_close(origin.y, 4.0);
+    assert_close(block.lines()[0].baseline, 26.0);
+    assert_close(block.lines()[0].height, 43.0);
+    assert_close(origin.y, 0.0);
 }
 
 #[test]
@@ -1447,9 +1448,9 @@ fn min_content_width_accounts_for_a_resized_atom() {
     let mut context = text_context();
     let mut block = TextBlock::new(&mut context, BlockStyle::default(), &items, None);
 
-    let cold = block.min_content_width(&mut context);
+    let cold = block.min_content_width(&mut context, 0.0);
     block.set_box_size(1, Size::new(80.0, 10.0), None);
-    let after = block.min_content_width(&mut context);
+    let after = block.min_content_width(&mut context, 0.0);
 
     assert!(
         after > cold,
@@ -1744,4 +1745,97 @@ fn a_truncated_display_keeps_the_tab_stops() {
     assert_close(only_box(&block, 1, 2).origin.x, 80.0);
     // The tab, `a`, and three dots.
     assert_close(block.size().width, 120.0);
+}
+
+/// The last reported line's baseline, for the layout pass's `last baseline`
+/// alignment: the first's on one line, the last line's own on several, the
+/// last *visible* line's under a clamp, and none without a line.
+#[test]
+fn the_last_baseline_is_the_last_reported_line_s() {
+    let style = ahem_style();
+    let mut context = text_context();
+
+    let one = laid_out(
+        &mut context,
+        BlockStyle::default(),
+        &[run(&style, "aaaa")],
+        None,
+        None,
+    );
+    assert_eq!(one.last_baseline(), Some(8.0));
+    assert_eq!(one.last_baseline(), one.first_baseline());
+
+    let mut block = TextBlock::new(
+        &mut context,
+        BlockStyle::default(),
+        &[run(&style, "aaaa bbbb cccc")],
+        None,
+    );
+    let metrics = block.commit(&mut context, BlockConstraint::new(Some(50.0), 0.0));
+    assert_eq!(block.lines().len(), 3);
+    assert_eq!(metrics.first_baseline, Some(8.0));
+    assert_eq!(metrics.last_baseline, Some(28.0));
+    assert_eq!(block.last_baseline(), Some(28.0));
+
+    let clamped = laid_out(
+        &mut context,
+        BlockStyle {
+            max_lines: core::num::NonZeroU32::new(2),
+            ..BlockStyle::default()
+        },
+        &[run(&style, "aaaa bbbb cccc")],
+        None,
+        Some(50.0),
+    );
+    assert_eq!(clamped.lines().len(), 2);
+    assert_eq!(clamped.last_baseline(), Some(18.0));
+
+    let empty = laid_out(&mut context, BlockStyle::default(), &[], None, Some(50.0));
+    assert_eq!(empty.last_baseline(), None);
+}
+
+/// A host's strut is the establishing element's own font: every line box
+/// starts with it (CSS 2.2 §10.8.1), so a line of smaller text, and a line of
+/// only a box, are at least the strut's height.
+#[test]
+fn the_strut_is_the_root_inline_box_every_line_starts_with() {
+    let small = RunStyle {
+        font_size: 5.0,
+        ..ahem_style()
+    };
+    let with_strut = BlockStyle {
+        strut: Some(ahem_style()),
+        ..BlockStyle::default()
+    };
+    let mut context = text_context();
+    // 5px glyphs on the 10px strut's line: baseline 8, height 10.
+    let block = laid_out(
+        &mut context,
+        with_strut.clone(),
+        &[run(&small, "aa")],
+        None,
+        None,
+    );
+    assert_close(block.lines()[0].height, 10.0);
+    assert_close(block.lines()[0].baseline, 8.0);
+    // Without one, the first run is its own strut: a 5px line.
+    let block = laid_out(
+        &mut context,
+        BlockStyle::default(),
+        &[run(&small, "aa")],
+        None,
+        None,
+    );
+    assert_close(block.lines()[0].height, 5.0);
+
+    // A box alone: 6 above the baseline, under the strut's 2 of descent.
+    let items = [atom(1, 10.0, 6.0, VerticalAlign::Baseline)];
+    let block = laid_out(&mut context, with_strut, &items, None, None);
+    assert_close(block.lines()[0].height, 10.0);
+    assert_close(block.lines()[0].baseline, 8.0);
+    let (_, origin, _) = visible_box(&block, 1);
+    assert_close(origin.y, 2.0);
+    // Without a strut there is none: the box is the line.
+    let block = laid_out(&mut context, BlockStyle::default(), &items, None, None);
+    assert_close(block.lines()[0].height, 6.0);
 }

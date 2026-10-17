@@ -155,13 +155,17 @@ fn refresh<T>(tree: &TreeArenas<T>, state: &mut DocumentLayoutState, element: No
         })
         .collect();
 
-    // The strut is shaped from too — its first available font is measured
-    // at construction — so a strut change is a new flow, like a run change.
+    // The strut is parley's style 0 and the direction its bidi paragraph
+    // level, both read when the flow is shaped, so a change to either is a
+    // new flow, like a run change.
     let needs_build = state
         .text_store(element)
         .and_then(TextStore::as_flow)
         .is_none_or(|store| {
-            store.fingerprint != stamp || store.runs != runs || store.style.strut != style.strut
+            store.fingerprint != stamp
+                || store.runs != runs
+                || store.style.strut != style.strut
+                || store.style.direction != style.direction
         });
 
     if needs_build {
@@ -334,7 +338,7 @@ mod tests {
         let [line] = flow.line_geometry() else {
             panic!("one line expected")
         };
-        assert_eq!((line.height, line.baseline, line.shift), (20.0, 16.0, 8.0));
+        assert_eq!((line.height, line.baseline), (20.0, 16.0));
         assert_eq!(size(&doc, block), Size::new(20.0, 20.0));
     }
 

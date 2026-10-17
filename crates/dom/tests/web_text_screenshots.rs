@@ -337,17 +337,14 @@ fn a_view_child_of_a_text_is_drawn_as_an_atomic_box() {
 /// margins between them, all on one line.
 ///
 /// The vertical placement *is* part of this picture, and it is the reference's.
-/// An atom's top edge comes out of hughie's placement table as
-/// `line baseline - the atom's own first baseline`
-/// (`crates/hughie/src/text/paragraph/position.rs:89-91`), the atom's baseline
-/// being the one its own layout reported
-/// (`crates/dom/src/layout/text_block.rs:564`) — which for this flex container
-/// is its first item's synthesized baseline, 2px of margin plus a 22px border
-/// box above the atom's top. That is the CSS rule. The recorded deviation
-/// beside it (`docs/tracking/deviations.md:213-220`) is that the *line* is not
-/// grown by the atom's below-baseline part, and this fixture keeps it out of
-/// the picture: one line, no background on the block, and nothing under it, so
-/// a short line box displaces no pixel.
+/// Parley places the atom's own first baseline on the line's baseline, the
+/// baseline being the one its own layout reported (`compute_text_block_layout` in
+/// `crates/dom/src/layout/text_block.rs`) — which for this flex container is
+/// its first item's synthesized baseline, 2px of margin plus a 22px border box
+/// below the atom's top — and grows the line box by the atom's part above and
+/// below that baseline, which is CSS 2.2 §10.8.1. The golden was regenerated
+/// with the parley 0.12 upgrade, when parley began building those line boxes
+/// itself: the line's baseline moved, and the run with it.
 #[test]
 fn a_flex_view_atom_is_drawn_after_the_run_on_the_same_line() {
     const FRAGMENT: &str = r#"
@@ -382,17 +379,14 @@ fn a_flex_view_atom_is_drawn_after_the_run_on_the_same_line() {
 /// red outline around the atom, and a nested paragraph inside it whose glyphs
 /// carry a green-to-yellow ramp while the runs on either side stay black.
 ///
-/// It also shows the thing the metric replica leaves out for being a recorded
-/// deviation, and shows it holding: the inner 30px run and the 20px runs
-/// outside the atom sit on one baseline, because the atom's top comes out of
-/// hughie's placement table as `line baseline - the atom's own first baseline`
-/// (`crates/hughie/src/text/paragraph/position.rs:89-91`) and that baseline is the
-/// inner paragraph's, carried up through
-/// `crates/dom/src/layout/text_block.rs:564`. The deviation
-/// (`docs/tracking/deviations.md:213-220`) is that the line is not grown by the
-/// atom's below-baseline part — its bottom padding and border — and this
-/// fixture keeps it out of the picture the same way the flex-atom golden does:
-/// one line, no background on the block, nothing under it.
+/// It also shows the inner 30px run and the 20px runs outside the atom sitting
+/// on one baseline: parley places the atom's own first baseline — the inner
+/// paragraph's, carried up through `compute_text_block_layout` in
+/// `crates/dom/src/layout/text_block.rs` — on the line's baseline, and the line
+/// box takes in the atom's below-baseline part, its bottom padding and border
+/// (CSS 2.2 §10.8.1). The golden was regenerated with the parley 0.12 upgrade,
+/// when that below-baseline part began to grow the line: the line's baseline
+/// moved, and every run with it.
 #[test]
 fn a_padded_rounded_view_atom_draws_its_border_and_its_inner_ramp() {
     const FRAGMENT: &str = r#"

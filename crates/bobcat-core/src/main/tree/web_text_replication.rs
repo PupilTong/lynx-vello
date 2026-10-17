@@ -142,9 +142,8 @@ fn frame(document: &LynxDocument, id: NodeId) -> (f32, f32, f32, f32) {
     )
 }
 
-/// `id`'s border box without its vertical placement, which for an atomic inline
-/// box follows the recorded line-box deviation rather than the CSS
-/// ascent/descent split (`docs/tracking/deviations.md:213-220`).
+/// `id`'s border box without its vertical placement, for the cases whose claim
+/// is an atom's advance and size rather than where its line puts it.
 fn horizontal_frame(document: &LynxDocument, id: NodeId) -> (f32, f32, f32) {
     let (x, _, width, height) = frame(document, id);
     (x, width, height)
@@ -203,10 +202,9 @@ fn a_text_attribute_on_a_text_element_carries_the_paragraph_s_run() {
 /// Two things the fixture carries are deliberately left out. Its markup indents
 /// the `x-view`, and that surrounding whitespace is dropped here so the atom's
 /// advance is the atom's own and not the module-level leading-space divergence.
-/// And the line's own height is not asserted: a baseline-aligned box reserving
-/// no descent below it is a recorded deviation
-/// (`docs/tracking/deviations.md:213-220`), so the browser's line box is taller
-/// than the atom and this case is not the one that should pin the difference.
+/// And the line's own height is not asserted: this case's claim is the atom's
+/// advance, and the CSS 2.2 §10.8.1 line box parley 0.12 builds around a
+/// baseline-aligned box is pinned by `crates/hughie/tests/text_block.rs`.
 /// Held only from `d19cbea2` (#227) on: before it the paragraph ran every
 /// atom with `LayoutInput::measure`, which writes no box, and copied that
 /// unwritten zero size into the placed layout. #227 needed committed geometry
@@ -267,8 +265,7 @@ fn a_view_child_of_a_text_is_one_atomic_inline_box_laid_out_on_its_own() {
 /// As in `a_view_child_of_a_text_is_one_atomic_inline_box_laid_out_on_its_own`,
 /// the fixture's indentation around the `x-view` is dropped so the atom's
 /// advance carries no leading-space divergence, and the line's own height is
-/// left out because a baseline-aligned box reserving no descent is a recorded
-/// deviation (`docs/tracking/deviations.md:213-220`).
+/// left out as there.
 /// Held only from `d19cbea2` (#227) on: before it the paragraph ran every
 /// atom with `LayoutInput::measure`, which writes no box, and copied that
 /// unwritten zero size into the placed layout. #227 needed committed geometry
@@ -609,8 +606,7 @@ fn runs_of_different_size_share_a_baseline_while_sibling_text_blocks_do_not() {
 /// Geometry only; whether the bitmap is drawn is paint, and `crates/dom` owns
 /// it. The fixture's four-CJK run becomes four Ahem em squares, which carry the
 /// same one-glyph-per-em advance and are deterministic here. The line's own
-/// height is left out: a baseline-aligned box reserving no descent is a
-/// recorded deviation (`docs/tracking/deviations.md:213-220`), not this case.
+/// height is left out: this case's claim is the used size and the advance.
 /// Held only from `d19cbea2` (#227) on: before it the paragraph ran every
 /// atom with `LayoutInput::measure`, which writes no box, and copied that
 /// unwritten zero size into the placed layout. #227 needed committed geometry
@@ -891,11 +887,9 @@ fn adjacent_text_siblings_are_separate_blocks_that_keep_their_own_newlines() {
 ///
 /// Geometry only; the borders and backgrounds the golden shows are paint. The
 /// paragraph carries an explicit width because the fixture's viewport is wider
-/// than this document's phone. The line's own height is left out for the same
-/// reason as in the other atom replicas: a baseline-aligned box reserving no
-/// descent below it is a recorded deviation
-/// (`docs/tracking/deviations.md:213-220`), so the browser's line box is taller
-/// than the atom.
+/// than this document's phone. The line's own height is left out, as in the
+/// other atom replicas: this case's claim is the shrink-to-fit width and the
+/// line the atom stays on.
 /// Held only from `d19cbea2` (#227) on: before it the paragraph ran every
 /// atom with `LayoutInput::measure`, which writes no box, and copied that
 /// unwritten zero size into the placed layout. #227 needed committed geometry
@@ -1161,9 +1155,8 @@ const CLAMPED: &str = "width: 200px; font-size: 16px; word-break: break-all";
 /// The fixture's indentation is dropped, as in the atomic-inline replicas:
 /// this case's claim is an absolute placement, and the module-level
 /// leading-space divergence would move it. The clamped line's own *height* is
-/// left out for the same reason the inline-image replicas leave it out: a
-/// 22px-tall baseline-aligned box reserving no descent is a recorded deviation
-/// (`docs/tracking/deviations.md:213-220`), not this case.
+/// left out as the inline-image replicas leave it out: this case's claim is
+/// where the content is laid in.
 #[test]
 fn truncation_content_is_laid_in_at_the_clamp_a_maxline_overflows() {
     let mut document = ahem_document();
@@ -1348,12 +1341,14 @@ fn a_maxline_clamp_lays_its_first_inline_truncation_child_in_at_the_cut() {
 ///
 /// The fixture's CJK run becomes Ahem em squares under `word-break: break-all`,
 /// which breaks between units the way the CJK run does, and its 更多 label
-/// becomes a two-square run at the same 14px. Two things the fixture carries
-/// are left out: the leading image's 4px `margin-right`, because an atom's
-/// margin never reaching the line is a separate filed gap
-/// (`a_compiled_card_s_inline_image_takes_its_used_size_and_its_margin`), and
-/// the boxes' vertical placement, which for an atomic inline follows the
-/// recorded line-box deviation (`docs/tracking/deviations.md:213-220`).
+/// becomes a two-square run at the same 14px and the same declared 22px
+/// `line-height`. That declaration matters since the parley 0.12 upgrade,
+/// whose CSS 2.2 §10.8.1 line boxes give each span its own box: inherited at
+/// 32px, the 14px label's half-leading would reach 3px further below the
+/// baseline than the 24px run's and grow the clamp line to 35. One thing the
+/// fixture carries is left out: the leading image's 4px `margin-right`,
+/// because an atom's margin never reaching the line is a separate filed gap
+/// (`a_compiled_card_s_inline_image_takes_its_used_size_and_its_margin`).
 ///
 /// Numbers: a 300px measure at 24px, so line 1 holds the 32px image and eleven
 /// squares and the lines under it hold twelve. The truncation content is 40
@@ -1372,7 +1367,12 @@ fn a_leading_image_survives_the_retreat_that_lays_the_truncation_content_in() {
     let lead = image(&mut document, text, "width: 32px; height: 18px");
     literal(&mut document, text, &"a".repeat(60));
     let truncation = element_under(&mut document, text, "inline-truncation", "");
-    let label = element_under(&mut document, truncation, "text", "font-size: 14px");
+    let label = element_under(
+        &mut document,
+        truncation,
+        "text",
+        "font-size: 14px; line-height: 22px",
+    );
     literal(&mut document, label, "ab");
     let icon = image(&mut document, truncation, "width: 12px; height: 12px");
     set_limit(&mut document, text, "text-maxline", "3");
@@ -1943,10 +1943,9 @@ fn a_compiled_card_s_inline_image_takes_its_used_size_and_its_margin() {
 /// fixture's single line.
 ///
 /// The atom's vertical placement in the line is left out, as in the other
-/// atomic-inline replicas: a baseline-aligned box reserving no descent below it
-/// is a recorded deviation (`docs/tracking/deviations.md:213-220`), so the
-/// browser's line box and this one put the box at different `y`, and this case
-/// is not the one that should pin that difference.
+/// atomic-inline replicas: this case's claim is the advance and the shared
+/// line, and the CSS 2.2 §10.8.1 placement parley 0.12 gives a baseline-aligned
+/// box is pinned by `crates/hughie/tests/text_block.rs`.
 ///
 /// Held only from `d19cbea2` (#227) on: before it an atom's subtree was only
 /// ever measured, so a text block nested inside an atom committed no paragraph

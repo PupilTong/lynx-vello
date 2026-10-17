@@ -46,15 +46,15 @@ pub use style::{BlockStyle, TextOverflow};
 use truncate::{CutPlan, OverflowCut, Tail};
 
 use super::paragraph::memo::{BreakMemo, Retained};
-use super::paragraph::shape::{self, NaturalLine, ShapeSpan};
+use super::paragraph::shape::{self, LineRoot, NaturalLine, ShapeSpan};
 use super::paragraph::style::resolve_alignment;
 pub use super::paragraph::{
     BlockConstraint, BlockMetrics, Direction, InlineBoxSpec, InlineItem, LineHeight, RunStyle,
     TextAlign, TextIndent, TextRunItem, TextWrap, VerticalAlign, WhiteSpaceCollapse, WordBreak,
 };
 use super::paragraph::{
-    Flow, LineGeometry, NaturalBreak, OwnedItem, Paragraph, RunBreaking, parley_boxes, position,
-    sized_box,
+    Flow, LineGeometry, NaturalBreak, OwnedItem, Paragraph, ParagraphRoot, RunBreaking,
+    parley_boxes, sized_box,
 };
 use crate::geometry::{Point, Size};
 use crate::style::TextBrush;
@@ -63,6 +63,9 @@ use crate::text::TextContext;
 /// Paint identity of one parley style index or placed box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceItem {
+    /// The root inline box's strut ([`BlockStyle::strut`]): parley's style 0,
+    /// which no text is shaped in, so no glyph run carries it.
+    Strut,
     /// Index into the `items` slice the block was built from.
     Content(u32),
     /// Index into the `truncation` slice.
@@ -128,7 +131,7 @@ struct LayoutResult {
     /// the natural layout is the display.
     display: Option<DisplayPart>,
     lines: Vec<LineInfo>,
-    /// The reported lines' placement, parley's own: every `shift` is zero.
+    /// The reported lines' placement, parley's own.
     geometry: Vec<LineGeometry>,
     boxes: Vec<PlacedBox>,
     size: Size<f32>,
@@ -204,25 +207,27 @@ impl TextBlock {
         items: &[InlineItem<'_>],
         truncation: Option<&[InlineItem<'_>]>,
     ) -> Self {
+        // Native Lynx keeps a `<text>`'s bidi paragraph level first-strong
+        // (its platform engines detect it), and so does this.
+        let root = ParagraphRoot {
+            strut: block_style
+                .strut
+                .clone()
+                .map(|strut| (strut, SourceItem::Strut)),
+            direction: parley::BaseDirection::Auto,
+        };
         let paragraph = Paragraph::new(
             context,
             RunBreaking::Uniform(block_style.breaking()),
             block_style.processing(true),
             items,
             SourceItem::Content,
+            root,
         );
         let flow = &paragraph.content;
-        let truncation = truncation.map(|items| {
-            let mut flow = Flow::build(items, block_style.processing(false));
-            flow.measure_space_runs(
-                context,
-                RunBreaking::Uniform(block_style.breaking()),
-                SourceItem::Truncation,
-            );
-            TruncationFlow {
-                flow,
-                natural_width: None,
-            }
+        let truncation = truncation.map(|items| TruncationFlow {
+            flow: Flow::build(items, block_style.processing(false)),
+            natural_width: None,
         });
         debug_assert!(
             {
@@ -332,23 +337,31 @@ impl TextBlock {
         Retained::restore_committed(self, context)
     }
 
-    /// The narrowest this block's content can be, in px.
+    /// The narrowest this block's content can be, in px, at the resolved
+    /// `text-indent` `indent`, which counts on the lines it applies to — the
+    /// first, and in a verbatim block every line after a newline
+    /// ([`BlockStyle`]'s indent rule).
     ///
     /// Read off a laid-out result rather than recomputed, because parley's
-    /// `calculate_content_widths` reflects the box sizes currently written
-    /// into the layout — and at `new` no atom has a size yet. Forces one
-    /// unconstrained layout when cold.
-    pub fn min_content_width(&mut self, context: &mut TextContext) -> f32 {
-        if let Some(width) = self.memo.min_content() {
+    /// `calculate_content_widths` reflects the box sizes and the indent
+    /// currently written into the layout — and at `new` no atom has a size
+    /// yet. Forces one unconstrained layout at `indent` when no result was
+    /// laid out at it. The answer is remembered per indent.
+    pub fn min_content_width(&mut self, context: &mut TextContext, indent: f32) -> f32 {
+        if let Some(width) = self.memo.min_content(indent) {
             return width;
         }
-        if self.result.is_none() || self.memo.boxes_dirty() {
-            let constraint = BlockConstraint::new(None, 0.0);
+        let laid_out_at_indent = self
+            .result
+            .as_ref()
+            .is_some_and(|result| result.constraint.indent.to_bits() == indent.to_bits());
+        if !laid_out_at_indent || self.memo.boxes_dirty() {
+            let constraint = BlockConstraint::new(None, indent);
             self.layout_at(context, constraint);
             self.remember(constraint);
         }
         let width = self.expect_result().content_widths.min;
-        self.memo.set_min_content(width);
+        self.memo.set_min_content(indent, width);
         width
     }
 
@@ -558,7 +571,7 @@ impl TextBlock {
         let visible_advance = {
             let rendered = self.paragraph.natural.get(0)?;
             let metrics = rendered.metrics();
-            metrics.advance - metrics.trailing_whitespace
+            metrics.advance - metrics.hanging_advance
         };
         if visible_advance <= width {
             return None;
@@ -648,11 +661,19 @@ impl TextBlock {
                 bytes: 0..DOTS.len(),
                 style: self.paragraph.content.run_style(item),
                 breaking: self.style.breaking(),
+                hanging: parley::WhiteSpaceCollapse::Collapse,
                 source: SourceItem::Ellipsis { item },
                 extra_spacing: 0.0,
             }];
             let mut sources = Vec::new();
-            let mut probe = shape::shape(context, DOTS, &spans, Vec::new(), &mut sources);
+            let mut probe = shape::shape(
+                context,
+                DOTS,
+                &spans,
+                Vec::new(),
+                &mut sources,
+                LineRoot::PROBE,
+            );
             probe.break_all_lines(None);
             probe.width()
         };
@@ -673,9 +694,16 @@ impl TextBlock {
         let spans = part
             .flow
             .spans(0, SourceItem::Truncation, RunBreaking::Uniform(breaking));
-        let boxes = parley_boxes(&part.flow, 0, 0);
+        let boxes = parley_boxes(&part.flow, 0, 0, self.paragraph.percent_basis);
         let mut sources = Vec::new();
-        let mut probe = shape::shape(context, &part.flow.block.text, &spans, boxes, &mut sources);
+        let mut probe = shape::shape(
+            context,
+            &part.flow.block.text,
+            &spans,
+            boxes,
+            &mut sources,
+            LineRoot::PROBE,
+        );
         drop(spans);
         probe.break_all_lines(None);
         let width = probe.width();
@@ -719,7 +747,12 @@ impl TextBlock {
                 break;
             }
             let spec = self.paragraph.content.box_spec(entry.item);
-            boxes.push(sized_box(spec, slots.len(), entry.byte as usize));
+            boxes.push(sized_box(
+                spec,
+                slots.len(),
+                entry.byte as usize,
+                self.paragraph.percent_basis,
+            ));
             slots.push(SlotSource::Content(entry.item));
         }
 
@@ -732,6 +765,7 @@ impl TextBlock {
                     bytes: start..text.len(),
                     style: self.paragraph.content.run_style(item),
                     breaking,
+                    hanging: parley::WhiteSpaceCollapse::Collapse,
                     source: SourceItem::Ellipsis { item },
                     extra_spacing: 0.0,
                 });
@@ -751,14 +785,28 @@ impl TextBlock {
                 ));
                 for entry in &part.block.boxes {
                     let spec = part.box_spec(entry.item);
-                    boxes.push(sized_box(spec, slots.len(), (entry.byte + offset) as usize));
+                    boxes.push(sized_box(
+                        spec,
+                        slots.len(),
+                        (entry.byte + offset) as usize,
+                        self.paragraph.percent_basis,
+                    ));
                     slots.push(SlotSource::Truncation(entry.item));
                 }
             }
         }
 
         let mut sources = Vec::new();
-        let mut display = shape::shape(context, &text, &spans, boxes, &mut sources);
+        // The same root inline box as the natural layout, so the visible
+        // lines keep their line boxes.
+        let mut display = shape::shape(
+            context,
+            &text,
+            &spans,
+            boxes,
+            &mut sources,
+            self.paragraph.root.line_root(),
+        );
         drop(spans);
         // The natural layout's indent rule, so every visible line keeps the
         // indent it was broken with.
@@ -807,8 +855,9 @@ impl TextBlock {
     }
 
     /// The rendered layout — glyph geometry, decoration metrics,
-    /// justification. Box positions in here are not valid; [`Self::boxes`]
-    /// is the only box source. Valid after [`Self::commit`].
+    /// justification. Box positions in here are parley's, which
+    /// [`Self::boxes`] reports with each box's host identity; read boxes
+    /// there. Valid after [`Self::commit`].
     #[must_use]
     pub fn display(&self) -> &Layout<TextBrush> {
         let result = self.expect_result();
@@ -850,7 +899,7 @@ impl TextBlock {
     }
 
     /// Where each reported line sits: one entry per [`Self::lines`] entry,
-    /// parley's own placement, so every `shift` is zero.
+    /// parley's own placement.
     #[must_use]
     pub fn line_geometry(&self) -> &[LineGeometry] {
         &self.expect_result().geometry
@@ -874,6 +923,14 @@ impl TextBlock {
     #[must_use]
     pub fn first_baseline(&self) -> Option<f32> {
         self.expect_result().first_baseline
+    }
+
+    /// The last reported line's baseline, from the block's top; `None` when
+    /// no line is reported. A line a clamp or a cut removed is not reported,
+    /// so a clamped block's last baseline is its last visible line's.
+    #[must_use]
+    pub fn last_baseline(&self) -> Option<f32> {
+        self.expect_result().lines.last().map(|line| line.baseline)
     }
 
     /// Whether a cut was applied.
@@ -986,6 +1043,7 @@ impl Retained for TextBlock {
         BlockMetrics {
             size: result.size,
             first_baseline: result.first_baseline,
+            last_baseline: result.lines.last().map(|line| line.baseline),
         }
     }
 }
@@ -998,7 +1056,6 @@ fn parley_geometry(lines: &[LineInfo]) -> Vec<LineGeometry> {
             top: line.top,
             height: line.height,
             baseline: line.baseline,
-            shift: 0.0,
         })
         .collect()
 }
@@ -1035,8 +1092,10 @@ fn assemble(
         let line = rendered
             .or_else(|| natural_fallback.and_then(|layout| layout.get(index)))
             .expect("every visible line exists in one of the layouts");
-        let metrics = line.metrics();
-        bottom = bottom.max(metrics.block_max_coord);
+        // The one line-box definition every reader goes through, the inline
+        // formatting context's included.
+        let geometry = LineGeometry::of(&line);
+        bottom = bottom.max(geometry.top + geometry.height);
         let ellipsis_count = plan
             .filter(|plan| plan.cut_line as usize == index)
             .map_or(0, |plan| {
@@ -1046,25 +1105,23 @@ fn assemble(
             source_start: natural_line.start_unit,
             source_end: natural_line.end_unit,
             ellipsis_count,
-            top: metrics.block_min_coord,
-            baseline: metrics.baseline,
-            height: metrics.line_height,
-            advance: metrics.advance,
+            top: geometry.top,
+            baseline: geometry.baseline,
+            height: geometry.height,
+            advance: line.metrics().advance,
         });
     }
 
+    // Parley places every box by its `vertical-align` (`position`).
     for (index, line) in final_layout.lines().enumerate() {
-        let refs = position::line_refs(&line);
-        let metrics = *line.metrics();
         for item in line.items() {
             if let PositionedLayoutItem::InlineBox(inline_box) = item {
                 let slot = usize::try_from(inline_box.id).expect("slot ids are table indexes");
                 let spec = &slot_specs[slot];
-                let top = position::box_top(spec, &metrics, refs);
                 boxes.push(PlacedBox::Visible {
                     id: spec.id,
                     line: u32::try_from(index).expect("line count fits u32"),
-                    origin: Point::new(inline_box.x, top),
+                    origin: Point::new(inline_box.x, inline_box.y),
                     size: spec.size,
                 });
             }

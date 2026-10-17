@@ -18,11 +18,14 @@
 //!   run is analysed without it (`docs/tracking/deviations.md`).
 //! - **`text-indent`** honours its `each-line` and `hanging` keywords and counts toward the
 //!   min-content and max-content widths.
-//! - **Line boxes** follow CSS 2.2 §10.8.1 (`line_boxes`): every line starts with the root inline
-//!   box's strut — the container's first available font at its `line-height` — and every run on it
-//!   adds its own half-leading box around the shared baseline. Parley's own line metrics take one
-//!   leading per line instead, so each line's placement is a [`LineGeometry`] whose `shift` moves
-//!   parley's glyphs onto the CSS baseline.
+//! - **Line boxes** follow CSS 2.2 §10.8.1, as parley 0.12 builds them: every line starts with the
+//!   root inline box's strut — the container's first available font at its `line-height`, parley's
+//!   style 0 — and every run on it adds its own half-leading box around the shared baseline; with
+//!   `line-height: normal` a run shaped in a fallback font adds that font's box too.
+//! - **Direction** is the container's `direction`, handed to parley as the bidi paragraph level
+//!   (UAX #9 P3 overridden, as css-writing-modes-3 §2.1 takes it from the block): `text-align:
+//!   start` and the side trailing whitespace hangs on follow it, and a mixed line orders its runs
+//!   by it.
 //! - **Sizing** reports the CSS intrinsic widths, and for a definite available width the
 //!   fit-content size `min(max-content, max(min-content, available))` (css-sizing-3) rather than
 //!   the widest broken line.
@@ -30,15 +33,13 @@
 //! `text-overflow` is not applied: it takes effect only on a block whose
 //! `overflow` is not `visible` (css-overflow-3 `text-overflow`), and the one producer of
 //! this context — the anonymous block box around loose text — computes
-//! `overflow: visible`. A non-anonymous block container would apply it per
-//! overflowing line box, after `line_boxes`.
-
-mod line_boxes;
+//! `overflow: visible` and is unreachable by author CSS, so no value an
+//! author writes can reach it. A non-anonymous block container would apply
+//! it per overflowing line box, after the break.
 
 use core::fmt;
 
-use line_boxes::FontMetrics;
-use parley::{AlignmentOptions, Layout};
+use parley::{AlignmentOptions, BaseDirection, Layout};
 
 use crate::geometry::Size;
 use crate::style::{TextBrush, TextContainerStyle, TextRunStyle};
@@ -48,15 +49,16 @@ use crate::text::paragraph::memo::{BreakMemo, Retained};
 use crate::text::paragraph::style::resolve_alignment;
 use crate::text::paragraph::{
     BlockConstraint, BlockMetrics, BreakStyle, Direction, IndentKeywords, InlineItem, LineGeometry,
-    NaturalBreak, Paragraph, RunBreaking, RunStyle, TextAlign, TextRunItem, WhiteSpaceCollapse,
+    NaturalBreak, Paragraph, ParagraphRoot, RunBreaking, RunStyle, TextAlign, TextRunItem,
+    WhiteSpaceCollapse,
 };
 
 /// The block container's own parameters: CSS properties only.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct InlineFlowStyle {
     pub text_align: TextAlign,
-    /// Resolves `text-align: start`/`end`. The paragraph's bidi base level is
-    /// still detected from its text (`docs/tracking/deviations.md`).
+    /// The paragraph's bidi base level, which also resolves `text-align:
+    /// start`/`end`.
     pub direction: Direction,
     /// The block container's own font and `line-height`: the strut every
     /// line box starts with (CSS 2.2 §10.8.1). Its font fields and
@@ -121,14 +123,11 @@ struct Intrinsic {
 pub struct InlineFlow {
     style: InlineFlowStyle,
     /// The content flow and its natural layout; a parley style index's paint
-    /// identity is the index of the run it was shaped from.
-    paragraph: Paragraph<u32>,
+    /// identity is the index of the run it was shaped from, `None` for the
+    /// strut's.
+    paragraph: Paragraph<Option<u32>>,
     /// Each run's line-breaking values, indexed like the runs.
     breaking: Vec<BreakStyle>,
-    /// The strut's first available font, measured once.
-    strut_font: FontMetrics,
-    /// Each run's first available font, indexed like the runs.
-    run_fonts: Vec<FontMetrics>,
     result: Option<FlowResult>,
     memo: BreakMemo,
     /// The intrinsic widths at the indent last asked about. Independent of
@@ -157,24 +156,25 @@ impl InlineFlow {
             })
             .collect();
         let breaking: Vec<BreakStyle> = runs.iter().map(|run| run.breaking).collect();
+        let root = ParagraphRoot {
+            strut: Some((style.strut.clone(), None)),
+            direction: match style.direction {
+                Direction::Ltr => BaseDirection::Ltr,
+                Direction::Rtl => BaseDirection::Rtl,
+            },
+        };
         let paragraph = Paragraph::new(
             context,
             RunBreaking::PerItem(&breaking),
             WhiteSpaceProcessing::Css,
             &items,
-            core::convert::identity,
-        );
-        let (strut_font, run_fonts) = line_boxes::first_available_fonts(
-            context,
-            &style.strut,
-            runs.iter().map(|run| run.style),
+            Some,
+            root,
         );
         Self {
             style,
             paragraph,
             breaking,
-            strut_font,
-            run_fonts,
             result: None,
             memo: BreakMemo::new(),
             intrinsic: None,
@@ -183,17 +183,18 @@ impl InlineFlow {
 
     /// Replaces the parameters without re-shaping.
     ///
-    /// Sound only while the strut is unchanged: a strut with another font is
-    /// another line box and needs a new flow, which the host decides because
-    /// it holds the old style to compare. Alignment, direction and the indent
-    /// keywords are applied at break time.
+    /// Sound only while the strut and the direction are unchanged: both are
+    /// shaping inputs — the strut is parley's style 0 and the direction the
+    /// bidi paragraph level — so a change to either needs a new flow, which
+    /// the host decides because it holds the old style to compare. Alignment
+    /// and the indent keywords are applied at break time.
     pub fn set_style(&mut self, style: InlineFlowStyle) {
         if self.style == style {
             return;
         }
         debug_assert!(
-            self.style.strut == style.strut,
-            "a strut change needs a new flow"
+            self.style.strut == style.strut && self.style.direction == style.direction,
+            "a strut or direction change needs a new flow"
         );
         self.style = style;
         self.memo.forget();
@@ -263,16 +264,15 @@ impl InlineFlow {
         self.memo.breaks()
     }
 
-    /// The laid-out paragraph: glyph runs in parley's own placement, which
-    /// [`Self::line_geometry`] moves onto the CSS line boxes.
+    /// The laid-out paragraph: glyph runs placed on the CSS line boxes
+    /// [`Self::line_geometry`] reports.
     #[must_use]
     pub fn display(&self) -> &Layout<TextBrush> {
         self.expect_result();
         &self.paragraph.natural
     }
 
-    /// The CSS line boxes, one per laid-out line. A line's `shift` is what
-    /// parley's y coordinates on it need added.
+    /// The CSS line boxes, one per laid-out line.
     #[must_use]
     pub fn line_geometry(&self) -> &[LineGeometry] {
         &self.expect_result().lines
@@ -291,6 +291,12 @@ impl InlineFlow {
         self.expect_result().metrics.first_baseline
     }
 
+    /// The last line box's baseline; `None` without a line box.
+    #[must_use]
+    pub fn last_baseline(&self) -> Option<f32> {
+        self.expect_result().metrics.last_baseline
+    }
+
     /// How many parley style indices the layout has: the range
     /// [`Self::source_of`] is defined over.
     #[must_use]
@@ -299,9 +305,10 @@ impl InlineFlow {
         self.paragraph.natural_sources.len()
     }
 
-    /// The run a parley `style_index` of [`Self::display`] was shaped from.
+    /// The run a parley `style_index` of [`Self::display`] was shaped from;
+    /// `None` for the strut's, which no text is shaped in.
     #[must_use]
-    pub fn source_of(&self, style_index: u16) -> u32 {
+    pub fn source_of(&self, style_index: u16) -> Option<u32> {
         self.expect_result();
         self.paragraph.natural_sources[usize::from(style_index)]
     }
@@ -383,13 +390,15 @@ impl Retained for InlineFlow {
         self.paragraph
             .natural
             .align(alignment, AlignmentOptions::default());
-        let lines = line_boxes::line_boxes(
-            &self.paragraph,
-            &natural.lines,
-            &self.style.strut,
-            self.strut_font,
-            &self.run_fonts,
-        );
+        // Parley's lines are the CSS line boxes; the blank trailing lines it
+        // commits (`capture_lines`) are none of them.
+        let lines: Vec<LineGeometry> = self
+            .paragraph
+            .natural
+            .lines()
+            .take(natural.lines.len())
+            .map(|line| LineGeometry::of(&line))
+            .collect();
         // css-sizing-3's fit-content size: the available width clamped between
         // the intrinsic widths. Max-content is the unconstrained answer.
         let width = constraint.max_advance().map_or(intrinsic.max, |available| {
@@ -399,6 +408,7 @@ impl Retained for InlineFlow {
         let metrics = BlockMetrics {
             size: Size::new(width, height),
             first_baseline: lines.first().map(|line| line.baseline),
+            last_baseline: lines.last().map(|line| line.baseline),
         };
         self.result = Some(FlowResult {
             constraint,

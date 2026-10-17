@@ -288,8 +288,9 @@ lifetime nor a bound.
 
 Layout's transient call boundary uses two small `Copy` PODs: `LayoutInput`
 (layout goal, sizing mode, known dimensions, whether those dimensions
-establish definite percentage bases, parent size, and available space) →
-`LayoutOutput` (size, content size, baselines). `Layout` (order, location,
+establish definite percentage bases, parent size, available space, and
+whether the caller reads the box's last baseline) →
+`LayoutOutput` (size, content size, first and last baselines). `Layout` (order, location,
 size, content size, border/padding/margin) is the larger durable per-node
 result and is deliberately neither `Copy` nor `Clone`: algorithms move it
 into `LayoutSlot`, and readers borrow it through the slot or `Document`
@@ -374,6 +375,29 @@ cascaded at the style harvest, and the settle loop that relays a box whose
 anchor moved without its containing block running again — is
 `docs/dom-architecture.md` ("Anchor positioning"). Scope and reasons:
 `docs/style-assumptions.md` §28.
+
+**`reads_last_baseline` is a request, not geometry.** A caller sets it when it
+reads the box's last baseline from a measurement: a flex line's
+last-baseline-sharing group (the hypothetical cross-size measurement of each
+member), a grid row's (the §11.5 shim measurements and the in-flow
+measurements of each member), and a container measured with the request
+itself, which passes it to the item its own last baseline comes from — flex
+to the §8.5 item, grid to the last item in grid order of its last non-empty
+row (§10.6), grid-lanes to every item, since which item closes a track is
+known only after placement. Nothing else sets it. It changes one thing: a flex
+container's measurement whose cross-size pass would skip that §8.5 item (its
+cross size decided without its content, and in no group) measures it, once,
+instead of synthesizing its last baseline from its border box. A measurement
+without the request keeps the synthesized value and makes no extra probe; a
+commit reads its committed children and is exact either way, so the request
+means nothing there. The cache keeps it outside the key, in bit 20 of the
+packed input's flag word (`READS_LAST_BASELINE`), and answers a request that
+carries it only from a commit or from a measurement computed with it: a
+precise answer may serve an imprecise request, never the reverse, and a
+requested measurement replaces an unrequested one of the same input. It is a
+field rather than a payload of `LayoutGoal::Measure`, which the next paragraph
+would otherwise ask for, because it is harmless on a commit (exact anyway) and
+the variant's shape is matched at every measurement site.
 
 **`LayoutInput` stays one type, and the tree stays one trait.** The style
 surface splits per algorithm and the wire struct does not, for a structural
@@ -560,7 +584,7 @@ context, through the same `Retained` protocol — enter the same crate-private
 leaf box routine using Parley; external code cannot substitute a different
 callback. A `TextBlock` retains an owned `parley::Layout` for the one
 flattened paragraph its element establishes, an `InlineFlow` one for its
-block's text runs, and each reports size and first baseline without cloning or
+block's text runs, and each reports size and first and last baselines without cloning or
 reshaping. A probe may be answered from a
 three-constraint memo *without* moving those retained line breaks; only a
 commit does, because a commit's breaks are the ones painting reads.
@@ -742,8 +766,8 @@ v1 box-layout effects:
   the contained one. An authored `aspect-ratio` is style rather than contents and survives. The
   skipped-contents path shares this sizing.
 - **Layout containment** (`containment().contains(LAYOUT)`) — the box exports **no** baseline
-  (`LayoutOutput::first_baselines = NONE` at each algorithm's output construction; Relative already
-  exports none), and it **changes scrollable overflow**: with `overflow: visible`, a layout-contained
+  (`LayoutOutput::first_baselines` and `last_baselines` both `NONE` at each algorithm's output
+  construction; Relative already exports none), and it **changes scrollable overflow**: with `overflow: visible`, a layout-contained
   box's descendant overflow is *ink* overflow ([css-contain-2 §3.3](https://drafts.csswg.org/css-contain-2/#containment-layout),
   item 3), so its `content_size` collapses to its own padding box; a scroll container instead keeps
   its interior union as its scroll range. This is applied at each algorithm's output construction by
@@ -1087,7 +1111,14 @@ the painting — layout's job is to never be the frame's bottleneck.
   protocol bakes the fix in: `compute_cached_layout` around every
   generated-box dispatch, per-node slots (`cache::Cache`, embeddable, with two
   measurement slots inline, spilling to the heap up to
-  `MEASURE_CACHE_LIMIT = 32`, plus one layout slot). Shape-aware replacement is
+  `MEASURE_CACHE_LIMIT = 32`, plus one layout slot). Each entry packs its
+  output into six `f32`s: the size, the content size, and two baseline slots
+  that hold the present baselines in a fixed order (first `x`, first `y`, last
+  `x`, last `y`) with their presence in the input's flag word. No producer
+  reports an `x` baseline (it belongs to vertical writing modes, which
+  nothing here lays out), so an output carries at most a first and a last `y`
+  and the last baselines cost no entry any bytes; an output with more is
+  marked and answers no request, which keeps the cache exact. Shape-aware replacement is
   implemented; probe-trace validation and tuning remain L4 work. The key is
   **every `LayoutInput` field that decides geometry** — `goal` distinguishes
   side-effect-free measurements (including their requested axes) from geometry
@@ -1281,8 +1312,18 @@ the engine we're succeeding.
    main size), line cross sizes, `align-content: stretch`.
 6. **Main-axis alignment** (§9.5) — auto margins, then `justify-content`
    with `gap`.
-7. **Cross-axis alignment** (§9.6) — auto margins, `align-self` (baseline
-   alignment via child `first_baselines`), `align-content`.
+7. **Cross-axis alignment** (§9.6) — auto margins, `align-self`,
+   `align-content`. Baseline alignment (§8.3, §9.4 step 8, css-align-3 §9.3)
+   forms two sharing groups per line of a row container, from the children's
+   `first_baselines` and `last_baselines`: `baseline` items flush with the
+   line's cross-start edge, `last baseline` items with its cross-end edge,
+   which `wrap-reverse` exchanges (the browsers' reading; a group taller than
+   its line overflows, with no implicit `safe`). An item with no baseline set
+   gets one synthesized from its border box's bottom edge. A column
+   container's items share none, and an item that shares no baseline takes
+   css-align-3's fallback (`safe self-start` for `baseline`, `safe self-end`
+   for `last baseline`), as an absolutely positioned child's static position
+   does.
 8. **Out-of-flow children** (§4.1) — compute each one's static position per
    §9.8 (sole-item alignment). `PositionProperty::Absolute` children are
    then sized/placed against the container's padding box from their insets
@@ -1293,7 +1334,13 @@ the engine we're succeeding.
    out the boxes hoisted to this container in tree order among its own.
 9. **Finalize** — per-child `LayoutSlot::unrounded` writes (only for
    `LayoutGoal::Commit`), container border-box size, `content_size`
-   accumulation, container baseline.
+   accumulation, container first and last baselines (§8.5: the startmost and
+   endmost line — nearest the writing mode's start and end edges, which
+   `wrap-reverse` exchanges between the logical first and last lines — read
+   from the committed children, or from the measured ones under
+   `LayoutGoal::Measure`, where an item the cross pass did not measure gives
+   its border box's bottom edge unless the measurement carries
+   `reads_last_baseline`, in which case the cross pass measures it).
 
 The automatic minimum size (§4.5, `min-size: auto`) resolves inside steps
 2/4, honoring stylo's `Overflow::is_scrollable`.
@@ -1333,7 +1380,8 @@ The automatic minimum size (§4.5, `min-size: auto`) resolves inside steps
    cross-axis auto margins.
 6. **Commit and baseline** — lay out in-flow children with their final known
    dimensions, apply relative insets, store parent-relative layouts, and
-   export horizontal/vertical-container baselines.
+   export horizontal/vertical-container first baselines. Starlight has no
+   last baseline, so Linear exports none.
 7. **Out-of-flow children** — derive linear-aware static positions, lay out
    parent-contained absolute children against the padding box, and record
    hoisted static positions for the later host fixed-position pass.
@@ -1389,10 +1437,15 @@ dispatches to it.
    `gap`; `align/justify-self` place items in their areas; `Rtl` flips the
    inline axis.
 5. **Item layout & finalize** — final child layout at known area sizes,
-   first-baseline sharing, direct abs-pos children against a resolved grid
-   area, `LayoutSlot::unrounded` writes, container size, and `content_size`.
+   baseline sharing along rows (a `baseline` item in the row its area starts
+   in, flush with the row's start; a `last baseline` item in the row its
+   area ends in, flush with the row's end), direct abs-pos children against
+   a resolved grid area, `LayoutSlot::unrounded` writes, container size,
+   `content_size`, and the container's first and last baselines (css-grid-1
+   §10.6). Baselines are horizontal, so `justify-self` baseline values share
+   nothing and take their fallbacks.
 
-Last-baseline alignment, subgrid, named lines/areas and fragmentation stay out
+Subgrid, named lines/areas and fragmentation stay out
 of Grid's scope. The masonry model is **not** out of scope any more: it landed
 on 2026-09-18 as CSS Grid Level 3 `display: grid-lanes`, its own entry point
 beside `compute_grid_layout` (see below). Lynx's own
@@ -1465,10 +1518,12 @@ computed `font_size`.
    the distributed values take their fallback alignment. The first baseline
    comes from the items that open a track (§6.5) — the highest one among them
    with lanes down the columns, the first track's with lanes across the rows,
-   and none synthesised for an item that has none; §6.4 stacking-axis
-   self-alignment and baseline alignment/sharing in either axis are not
-   implemented, so a `baseline` self-alignment falls back to `start` before
-   anything reads it.
+   and none synthesised for an item that has none — and the last baseline
+   from the items that close one: the lowest last baseline among them, or
+   the last track's last item's. §6.4 stacking-axis self-alignment and
+   baseline alignment/sharing in either axis are not implemented, so a
+   `baseline` self-alignment falls back to `start`, and `last baseline` to
+   `end`, before anything reads them.
 6. **Finalize** — `LayoutSlot::unrounded` writes, hidden-subtree cleanup, and
    the shared absolute pass. §8 gives the stacking axis exactly two lines, the
    range's own edges, so grid-aligned absolute positioning resolves against a
@@ -1571,7 +1626,7 @@ fragmentation are out of scope; the grammar side of that list is recorded in
   fixtures and benchmarks are landed; browser goldens and differential
   fuzzing remain parity/performance hardening.
 - **L2 — grid** *(complete)*: `compute_grid_layout`, `auto-fill`/`auto-fit`,
-  dense packing, first-baseline alignment, and direct-child
+  dense packing, first- and last-baseline alignment along rows, and direct-child
   grid-area-relative absolute positioning.
 - **L2M — grid lanes** *(complete, 2026-09-18)*: `compute_grid_lanes_layout`
   on Grid's own template/line/track-sizing machinery, the `GridLanesStyle`

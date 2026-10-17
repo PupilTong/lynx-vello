@@ -410,7 +410,8 @@ fn as_items(collected: &[Collected], id_offset: usize) -> Vec<InlineItem<'_>> {
 
 /// The paragraph style, from the establishing element's CSS and attributes.
 fn block_style<T>(tree: &TreeArenas<T>, element: NodeSlot) -> BlockStyle {
-    BlockStyle::from_container_style(&StyleView::of(tree.at(element)))
+    let view = StyleView::of(tree.at(element));
+    BlockStyle::from_container_style(&view, &TextRunView::from_values(view.values()))
 }
 
 /// Rebuilds `element`'s paragraph when its content or style moved, and reports
@@ -440,14 +441,16 @@ pub(crate) fn refresh<T>(
 
     // Only the values parley *shapes* from force a new paragraph — the
     // verbatim switch and `text-wrap-mode` among them, because together they
-    // choose how the text is normalized. Alignment and truncation are applied
-    // to a finished layout, so a change there is a re-break at most — which is
-    // the whole point of keeping the two evictions apart.
+    // choose how the text is normalized, and the strut, which is parley's
+    // style 0. Alignment and truncation are applied to a finished layout, so a
+    // change there is a re-break at most — which is the whole point of keeping
+    // the two evictions apart.
     let needs_build = state.text_block(element).is_none_or(|store| {
         store.fingerprint != stamp
             || store.style.word_break != style.word_break
             || store.style.text_wrap != style.text_wrap
             || store.style.verbatim != style.verbatim
+            || store.style.strut != style.strut
             || store.run_styles != run_styles
     });
 
@@ -1563,11 +1566,17 @@ mod preserve_tests {
     }
 
     #[test]
-    fn the_keywords_the_paragraph_does_not_model_stay_collapsed() {
-        // `break-spaces` parses and is read as `collapse`; `preserve-spaces`
-        // and `discard` do not parse in the fork, leaving the initial value.
+    fn break_spaces_keeps_its_spaces_and_the_unparsed_keywords_collapse() {
+        // `break-spaces` keeps every space, as `preserve` does: `x` follows
+        // four of them.
+        let (doc, text) = paragraph("white-space-collapse: break-spaces;", "    x");
+        assert_eq!(
+            doc.text_range_boxes(text, 4, 5),
+            Some(vec![glyph(40.0, 0.0, 10.0)]),
+        );
+        // `preserve-spaces` and `discard` do not parse in the fork, leaving
+        // the initial `collapse`.
         for inline in [
-            "white-space-collapse: break-spaces;",
             "white-space-collapse: preserve-spaces;",
             "white-space-collapse: discard;",
         ] {

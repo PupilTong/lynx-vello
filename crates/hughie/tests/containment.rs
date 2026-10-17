@@ -329,6 +329,63 @@ fn linear_layout_containment_suppresses_the_exported_baseline() {
     assert_eq!(measured.first_baselines.y, None);
 }
 
+fn two_baseline_child(tree: &mut TestTree) -> TestId {
+    let style = TestStyle {
+        size: Size::new(size_px(40.0), size_px(20.0)),
+        flex_basis: basis_px(40.0),
+        flex_grow: nn(0.0),
+        flex_shrink: nn(0.0),
+        ..TestStyle::default()
+    };
+    tree.push_baseline_leaf(style, Size::new(40.0, 20.0), Some(6.0), Some(16.0))
+}
+
+/// Layout containment suppresses both baseline sets wherever a container
+/// exports them (css-contain-2 §3.2).
+#[test]
+fn layout_containment_suppresses_the_exported_last_baseline() {
+    let mut tree = TestTree::default();
+    let child = two_baseline_child(&mut tree);
+    let container = tree.push_grid(TestStyle::default(), vec![child]);
+    let normal = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
+    assert_eq!(normal.last_baselines.y, Some(16.0));
+
+    let mut tree = TestTree::default();
+    let child = two_baseline_child(&mut tree);
+    let container = tree.push_grid(layout_contained(TestStyle::default()), vec![child]);
+    let committed = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
+    assert_eq!(committed.last_baselines, Point::NONE);
+    let measured = measure(&tree, container, Size::MAX_CONTENT);
+    assert_eq!(measured.last_baselines, Point::NONE);
+
+    let mut tree = TestTree::default();
+    let child = two_baseline_child(&mut tree);
+    let container = flex_container(&mut tree, layout_contained(TestStyle::default()), &[child]);
+    assert_eq!(
+        perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT).last_baselines,
+        Point::NONE
+    );
+}
+
+/// Starlight's `linear` and `relative` have no last baseline (native Lynx
+/// aligns by none), so they export none: a `last baseline` parent
+/// synthesizes one from their border boxes.
+#[test]
+fn lynx_layouts_export_no_last_baseline() {
+    let mut tree = TestTree::default();
+    let child = two_baseline_child(&mut tree);
+    let container = linear_container(&mut tree, TestStyle::default(), &[child]);
+    let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
+    assert_eq!(output.first_baselines.y, Some(6.0));
+    assert_eq!(output.last_baselines, Point::NONE);
+
+    let mut tree = TestTree::default();
+    let child = two_baseline_child(&mut tree);
+    let container = relative_container(&mut tree, TestStyle::default(), &[child]);
+    let output = perform_layout(&tree, container, Size::NONE, Size::MAX_CONTENT);
+    assert_eq!(output.last_baselines, Point::NONE);
+}
+
 #[test]
 fn scroll_container_child_contributes_only_its_border_box() {
     let mut tree = TestTree::default();

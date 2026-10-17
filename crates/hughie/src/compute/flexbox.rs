@@ -21,14 +21,14 @@ use super::single_axis::{
     set_flow_start,
 };
 use super::util::{
-    Axis, ItemGeometry, ItemKey, OrderedItem, ResolvedContainerBox, accumulate_scrollable_overflow,
-    axis_has_intrinsic_style, axis_sizing_is_stable, clamp_axis, container_content_independence,
-    debug_assert_tree_order, edges_depend_on_inline_basis, is_scroll_container,
-    normalize_content_alignment, normalize_item_alignment, own_scrollable_overflow,
-    padding_box_end, relative_offset, resolve_container_box, resolve_gap, resolve_gap_axis,
-    resolve_insets, resolve_item_geometry, resolve_length_percentage, resolve_style_size,
-    sort_and_assign_layout_order, store_committed_child, style_size_behaves_auto,
-    style_size_depends_on_basis,
+    Axis, BaselineSet, ItemGeometry, ItemKey, OrderedItem, ResolvedContainerBox,
+    accumulate_scrollable_overflow, axis_has_intrinsic_style, axis_sizing_is_stable, clamp_axis,
+    container_content_independence, debug_assert_tree_order, edges_depend_on_inline_basis,
+    is_scroll_container, normalize_content_alignment, normalize_item_alignment_with_last_baseline,
+    own_scrollable_overflow, padding_box_end, relative_offset, resolve_container_box, resolve_gap,
+    resolve_gap_axis, resolve_insets, resolve_item_geometry, resolve_length_percentage,
+    resolve_style_size, sort_and_assign_layout_order, store_committed_child,
+    style_size_behaves_auto, style_size_depends_on_basis,
 };
 use super::{AbsoluteContainingBlock, compute_absolute_layout_in};
 use crate::geometry::{Edges, Point, Size};
@@ -116,8 +116,14 @@ struct FlexItem<N> {
     target_main: f32,
     hypothetical_cross: f32,
     target_cross: f32,
+    /// The first baseline the item aligns by: measured, or synthesized from
+    /// its border box's bottom edge (css-align-3 §9.1, the line-under edge).
     baseline: f32,
     measured_baselines: Point<Option<f32>>,
+    /// The last baseline the item aligns by, measured or synthesized as
+    /// `baseline` is.
+    last_baseline: f32,
+    measured_last_baselines: Point<Option<f32>>,
     frozen: bool,
     violation: f32,
     main_position: f32,
@@ -202,12 +208,28 @@ fn alignment_distribution(
     }
 }
 
+/// An item's cross-axis offset in its line, measured from the line's
+/// cross-start edge, for an item that joins no baseline-sharing group.
+///
+/// `flow_reverse` and `base_reverse` say whether the flow and the container's
+/// writing mode run the cross axis from its far side; `self_reverse` whether
+/// the item's own writing mode does, which only its `direction` in an inline
+/// (horizontal) cross axis can.
+///
+/// `baseline` and `last baseline` reach here for an item that shares no
+/// baseline — a column container's item, or an absolutely positioned child's
+/// static position — and take css-align-3 §4.2's fallback alignments, `safe
+/// self-start` and `safe self-end`: the item's own start or end edge, or the
+/// container's start edge once the item overflows the line. That `safe` is
+/// part of the fallback alignment itself, unlike the browsers' treatment of
+/// a baseline-sharing group taller than its line, which no `safe` moves.
 #[inline]
 fn item_alignment_offset(
     value: AlignFlags,
     free_space: f32,
     flow_reverse: bool,
     base_reverse: bool,
+    self_reverse: bool,
 ) -> f32 {
     let (start, end) = if flow_reverse == base_reverse {
         (0.0, free_space)
@@ -218,6 +240,18 @@ fn item_alignment_offset(
         start
     } else if value == AlignFlags::END {
         end
+    } else if value == AlignFlags::BASELINE || value == AlignFlags::LAST_BASELINE {
+        if free_space < 0.0 {
+            start
+        } else {
+            let self_start_is_flow_start = flow_reverse == self_reverse;
+            let wants_self_start = value == AlignFlags::BASELINE;
+            if wants_self_start == self_start_is_flow_start {
+                0.0
+            } else {
+                free_space
+            }
+        }
     } else if value == AlignFlags::FLEX_END {
         free_space
     } else if value == AlignFlags::CENTER {
@@ -225,6 +259,14 @@ fn item_alignment_offset(
     } else {
         0.0
     }
+}
+
+/// Whether the item's own writing mode runs the cross axis from its far
+/// side: its `direction` is `rtl` and the cross axis is the horizontal one,
+/// a column container's. Block axes are never reversed here.
+#[inline]
+fn item_reverses_cross_axis<N>(item: &FlexItem<N>, axes: Axes) -> bool {
+    axes.cross == Axis::Horizontal && item.direction == direction::T::Rtl
 }
 
 /// `flex-basis: auto`, or a value that behaves as it: the flex basis is the
@@ -275,7 +317,7 @@ where
         direction: style.direction(),
         position: style.position(),
         inset: resolve_insets(style.inset(), container_inner_size),
-        align_self: normalize_item_alignment(
+        align_self: normalize_item_alignment_with_last_baseline(
             style.align_self().0,
             axes.cross == Axis::Horizontal,
             rtl,
@@ -296,6 +338,8 @@ where
         target_cross: 0.0,
         baseline: 0.0,
         measured_baselines: Point::NONE,
+        last_baseline: 0.0,
+        measured_last_baselines: Point::NONE,
         frozen: false,
         violation: 0.0,
         main_position: 0.0,
@@ -1135,9 +1179,99 @@ fn resolve_flexible_lengths<N>(
     debug_assert!(false, "flex freeze loop exceeded the item-count bound");
 }
 
+/// The baseline-sharing group an item joins in its flex line (css-flexbox-1
+/// §8.3 and §9.4 step 8, css-align-3 §9.2), if it joins one: an item whose
+/// `align-self` is `baseline` or `last baseline`, whose inline axis is
+/// parallel to the main axis — in this engine's horizontal writing mode, a
+/// row container's item — and whose cross-axis margins are both non-`auto`.
+/// The two groups never share a baseline: they sit against opposite edges of
+/// the line.
 #[inline]
-fn is_first_baseline_candidate<N>(item: &FlexItem<N>, axes: Axes) -> bool {
-    axes.main == Axis::Vertical || item.align_self == AlignFlags::BASELINE
+fn baseline_participation<N>(item: &FlexItem<N>, axes: Axes) -> Option<BaselineSet> {
+    if axes.main != Axis::Horizontal
+        || item.margin_auto.flow_start(axes.cross, axes.cross_reverse)
+        || item.margin_auto.flow_end(axes.cross, axes.cross_reverse)
+    {
+        return None;
+    }
+    BaselineSet::of_alignment(item.align_self)
+}
+
+/// The item whose baseline a flex container exports as its first or last
+/// baseline (css-flexbox-1 §8.5), with its line and the baseline set read.
+///
+/// The startmost line is the one nearest the start edge of the container's
+/// writing mode in the cross axis, and the endmost the one nearest its end
+/// edge: §8.5's "startmost" is css-writing-modes-4 §6.2's "start", the
+/// block-start (top) edge for a row container's lines and the inline-start
+/// edge (left, or right under `direction: rtl`) for a column container's. It
+/// is not the line nearest the cross-start edge. Lines are laid out from the
+/// cross-start edge, which `wrap-reverse` moves to the opposite side, so under
+/// `wrap-reverse` the startmost line is the logically last one and the
+/// endmost the logically first (csswg-drafts#995; WPT
+/// `css/css-flexbox/flex-order-wrap-reverse-baseline.html` for rows).
+///
+/// A row container's first baseline is the shared baseline of the startmost
+/// line's first-baseline group, else of its last-baseline group, else the
+/// first item's first baseline; its last baseline is the endmost line's
+/// last-baseline group's, else its first-baseline group's, else the last
+/// item's last baseline. §8.5 steps 3 and 4 are taken together, as the first
+/// baseline always took them: the first (last) item in order-modified
+/// document order gives its baseline, or one synthesized from its border
+/// box, rather than the first (last) item that has one.
+///
+/// A column container's inline axis is its cross axis, so its baselines are
+/// the cross-axis baseline sets: the startmost item's first baseline and the
+/// endmost item's last baseline, the startmost being the topmost, which
+/// `column-reverse` makes each line's last item.
+fn exported_baseline_item<N>(
+    items: &[FlexItem<N>],
+    lines: &[FlexLine],
+    axes: Axes,
+    set: BaselineSet,
+) -> Option<(usize, usize, BaselineSet)> {
+    // Whether the logically first line (or item) is the one wanted: the
+    // first baseline wants the startmost, the last the endmost, and a flow
+    // that runs from the writing mode's end edge (`wrap-reverse` for lines,
+    // `column-reverse` for a column's items) exchanges the two.
+    let takes_logical_first = |reversed: bool| (set == BaselineSet::First) != reversed;
+    let line_index = if takes_logical_first(axes.cross_reverse != axes.base.cross) {
+        0
+    } else {
+        lines.len().checked_sub(1)?
+    };
+    let line = lines.get(line_index)?;
+    let range = line.start..line.end;
+    if range.is_empty() {
+        return None;
+    }
+    if axes.main == Axis::Horizontal {
+        // The first item of a group in order for the first baseline, the
+        // last for the last; every member of a group shares its baseline.
+        let in_group = |group: BaselineSet| {
+            let joins = |index: &usize| baseline_participation(&items[*index], axes) == Some(group);
+            match set {
+                BaselineSet::First => range.clone().find(joins),
+                BaselineSet::Last => range.clone().rfind(joins),
+            }
+        };
+        for group in [set, set.other()] {
+            if let Some(index) = in_group(group) {
+                return Some((line_index, index, group));
+            }
+        }
+        let index = match set {
+            BaselineSet::First => range.start,
+            BaselineSet::Last => range.end - 1,
+        };
+        return Some((line_index, index, set));
+    }
+    let index = if takes_logical_first(axes.main_reverse != axes.base.main) {
+        range.start
+    } else {
+        range.end - 1
+    };
+    Some((line_index, index, set))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1157,17 +1291,28 @@ fn determine_hypothetical_cross_sizes<T>(
     // `Some` only on a commit-goal pass, whose in-flow commit is the sole
     // consumer of the per-item flags this writes.
     container_independent: Option<Size<bool>>,
+    // The container's own measurement was asked for an exact last baseline
+    // (`LayoutInput::reads_last_baseline`); never set on a commit.
+    last_baseline_requested: bool,
 ) where
     T: LayoutTree,
 {
-    let exported_baseline_item = lines.first().and_then(|line| {
-        let line_items = &items[line.start..line.end];
-        line_items
-            .iter()
-            .position(|item| is_first_baseline_candidate(item, axes))
-            .map(|offset| line.start + offset)
-            .or_else(|| (!line_items.is_empty()).then_some(line.start))
-    });
+    // The item the container's first baseline comes from is measured
+    // whatever decides its cross size: nothing else knows its baseline. The
+    // item its last baseline is read from is measured the same way, and asked
+    // for that last baseline, only when the container's own measurement was
+    // asked for it; otherwise a measurement reads the baseline synthesized
+    // from its border box, and a commit the committed run's
+    // (`container_baselines`).
+    let exported_first =
+        exported_baseline_item(items, lines, axes, BaselineSet::First).map(|(_, index, _)| index);
+    let exported_last = if last_baseline_requested {
+        exported_baseline_item(items, lines, axes, BaselineSet::Last)
+            .filter(|&(_, _, set)| set == BaselineSet::Last)
+            .map(|(_, index, _)| index)
+    } else {
+        None
+    };
     let nowrap_cross = (wrap == flex_wrap::T::NOWRAP)
         .then(|| axes.cross.size(container_inner_size))
         .flatten();
@@ -1181,12 +1326,14 @@ fn determine_hypothetical_cross_sizes<T>(
             let max_cross = axes.cross.size(item.max_size);
             let cross_start_auto = item.margin_auto.flow_start(axes.cross, axes.cross_reverse);
             let cross_end_auto = item.margin_auto.flow_end(axes.cross, axes.cross_reverse);
-            let participates_in_baseline_alignment = axes.main == Axis::Horizontal
-                && item.align_self == AlignFlags::BASELINE
-                && !cross_start_auto
-                && !cross_end_auto;
-            let baseline_is_consumed =
-                exported_baseline_item == Some(item_index) || participates_in_baseline_alignment;
+            let participation = baseline_participation(item, axes);
+            let baseline_is_consumed = exported_first == Some(item_index)
+                || exported_last == Some(item_index)
+                || participation.is_some();
+            // A last-baseline group and the container's requested last
+            // baseline read this item's last baseline: ask for it exactly.
+            let reads_last_baseline =
+                exported_last == Some(item_index) || participation == Some(BaselineSet::Last);
             let stretched_cross = nowrap_cross.filter(|_| {
                 item.align_self == AlignFlags::STRETCH
                     && axes.cross.size(item.size_is_auto)
@@ -1229,6 +1376,8 @@ fn determine_hypothetical_cross_sizes<T>(
                 item.target_cross = cross;
                 item.measured_baselines = Point::NONE;
                 item.baseline = cross;
+                item.measured_last_baselines = Point::NONE;
+                item.last_baseline = cross;
                 continue;
             }
             // The item is measured from here on — its baseline is consumed, or
@@ -1258,17 +1407,15 @@ fn determine_hypothetical_cross_sizes<T>(
                 AvailableSpace::Definite(item.target_main),
                 axes.cross.size(available_space),
             );
-            let output = measure_child(
-                tree,
-                state,
-                item.key.node,
+            let mut input = LayoutInput::measure(
                 known,
-                known_is_definite,
                 container_inner_size,
                 child_available,
-                SizingMode::ApplySizeStyles,
                 RequestedAxis::Both,
-            );
+            )
+            .reading_last_baseline(reads_last_baseline);
+            input.definite_dimensions = known_is_definite;
+            let output = tree.compute_layout(state, item.key.node, input);
             item.hypothetical_cross = clamp_axis(
                 axes.cross.size(output.size),
                 min_cross,
@@ -1277,10 +1424,20 @@ fn determine_hypothetical_cross_sizes<T>(
             );
             item.target_cross = item.hypothetical_cross;
             item.measured_baselines = output.first_baselines;
-            item.baseline = if axes.main == Axis::Horizontal {
-                output.first_baselines.y.unwrap_or(output.size.height)
+            item.measured_last_baselines = output.last_baselines;
+            // A box with no baseline set is aligned by one synthesized from
+            // its border box's line-under edge, the bottom one (css-align-3
+            // §9.1), for its first and last baselines alike.
+            (item.baseline, item.last_baseline) = if axes.main == Axis::Horizontal {
+                (
+                    output.first_baselines.y.unwrap_or(output.size.height),
+                    output.last_baselines.y.unwrap_or(output.size.height),
+                )
             } else {
-                output.first_baselines.x.unwrap_or(output.size.width)
+                (
+                    output.first_baselines.x.unwrap_or(output.size.width),
+                    output.last_baselines.x.unwrap_or(output.size.width),
+                )
             };
         }
     }
@@ -1302,31 +1459,67 @@ fn calculate_line_cross_sizes<N>(
 
     for line in lines {
         let mut largest_outer = 0.0_f32;
-        let mut largest_before_baseline = 0.0_f32;
-        let mut largest_after_baseline = 0.0_f32;
-        let mut has_baseline_item = false;
+        // §9.4 step 8, once per baseline-sharing group: the largest distance
+        // from a member's baseline to its outer cross-start edge plus the
+        // largest to its outer cross-end edge.
+        let mut groups = [BaselineGroupExtent::default(); 2];
         for item in &items[line.start..line.end] {
             let outer_cross = item.hypothetical_cross + axes.cross.sum(item.margin);
-            if axes.main == Axis::Horizontal
-                && item.align_self == AlignFlags::BASELINE
-                && !item.margin_auto.flow_start(axes.cross, axes.cross_reverse)
-                && !item.margin_auto.flow_end(axes.cross, axes.cross_reverse)
-            {
-                let before = item.margin.top + item.baseline;
-                let after = outer_cross - before;
-                largest_before_baseline = largest_before_baseline.max(before);
-                largest_after_baseline = largest_after_baseline.max(after);
-                has_baseline_item = true;
-            } else {
-                largest_outer = largest_outer.max(outer_cross);
+            match baseline_participation(item, axes) {
+                Some(set) => groups[set.index()].include(item, set, item.hypothetical_cross),
+                None => largest_outer = largest_outer.max(outer_cross),
             }
         }
-        let baseline_outer = if has_baseline_item {
-            largest_before_baseline + largest_after_baseline
+        let baseline_outer = groups
+            .iter()
+            .map(BaselineGroupExtent::outer)
+            .fold(0.0_f32, f32::max);
+        line.cross_size = largest_outer.max(baseline_outer).max(0.0);
+    }
+}
+
+/// One baseline-sharing group's reach on either side of its shared baseline,
+/// in a row container's physical cross axis: from the baseline up to the
+/// highest member's top margin edge, and down to the lowest member's bottom
+/// margin edge.
+#[derive(Debug, Clone, Copy, Default)]
+struct BaselineGroupExtent {
+    before: f32,
+    after: f32,
+    occupied: bool,
+}
+
+impl BaselineGroupExtent {
+    fn include<N>(&mut self, item: &FlexItem<N>, set: BaselineSet, cross: f32) {
+        let baseline = match set {
+            BaselineSet::First => item.baseline,
+            BaselineSet::Last => item.last_baseline,
+        };
+        let before = item.margin.top + baseline;
+        let after = cross + item.margin.top + item.margin.bottom - before;
+        self.before = self.before.max(before);
+        self.after = self.after.max(after);
+        self.occupied = true;
+    }
+
+    fn outer(&self) -> f32 {
+        if self.occupied {
+            self.before + self.after
         } else {
             0.0
-        };
-        line.cross_size = largest_outer.max(baseline_outer).max(0.0);
+        }
+    }
+
+    /// Where the group's shared baseline sits below the line's top edge,
+    /// with the group flush with that top edge or with the bottom one. A
+    /// group taller than its line overflows the other edge: as in browsers,
+    /// no `safe` alignment moves it back.
+    fn shared_baseline(&self, flush_with_top: bool, line_cross: f32) -> f32 {
+        if flush_with_top {
+            self.before
+        } else {
+            line_cross - self.after
+        }
     }
 }
 
@@ -1516,19 +1709,21 @@ fn align_lines(
 
 fn align_items_cross_axis<N>(items: &mut [FlexItem<N>], lines: &[FlexLine], axes: Axes) {
     for line in lines {
-        let max_physical_baseline = if axes.main == Axis::Horizontal {
-            items[line.start..line.end]
-                .iter()
-                .filter(|item| {
-                    item.align_self == AlignFlags::BASELINE
-                        && !item.margin_auto.flow_start(axes.cross, axes.cross_reverse)
-                        && !item.margin_auto.flow_end(axes.cross, axes.cross_reverse)
-                })
-                .map(|item| item.margin.top + item.baseline)
-                .fold(0.0_f32, f32::max)
-        } else {
-            0.0
-        };
+        let mut groups = [BaselineGroupExtent::default(); 2];
+        for item in &items[line.start..line.end] {
+            if let Some(set) = baseline_participation(item, axes) {
+                groups[set.index()].include(item, set, item.target_cross);
+            }
+        }
+        // css-flexbox-1 §8.3: the first-baseline group sits against the
+        // line's cross-start edge, the last-baseline group against its
+        // cross-end edge. A row container's cross-start edge is the top one,
+        // or the bottom one under `wrap-reverse` (the WPT reading, and
+        // Chromium's; css-align-3 §9.3 step 3 would keep them physical).
+        let shared_baselines = BaselineSet::BOTH.map(|set| {
+            let flush_with_top = (set == BaselineSet::First) != axes.cross_reverse;
+            groups[set.index()].shared_baseline(flush_with_top, line.cross_size)
+        });
 
         for item in &mut items[line.start..line.end] {
             let start_auto = item.margin_auto.flow_start(axes.cross, axes.cross_reverse);
@@ -1566,8 +1761,14 @@ fn align_items_cross_axis<N>(items: &mut [FlexItem<N>], lines: &[FlexLine], axes
                 continue;
             }
 
-            if item.align_self == AlignFlags::BASELINE && axes.main == Axis::Horizontal {
-                let physical_top = max_physical_baseline - item.baseline;
+            if let Some(set) = baseline_participation(item, axes) {
+                // The shared baseline is measured from the line's top edge;
+                // `cross_position` from its cross-start edge.
+                let baseline = match set {
+                    BaselineSet::First => item.baseline,
+                    BaselineSet::Last => item.last_baseline,
+                };
+                let physical_top = shared_baselines[set.index()] - baseline;
                 item.cross_position = if axes.cross_reverse {
                     line.cross_size - physical_top - item.target_cross
                 } else {
@@ -1576,8 +1777,13 @@ fn align_items_cross_axis<N>(items: &mut [FlexItem<N>], lines: &[FlexLine], axes
                 continue;
             }
 
-            let alignment_offset =
-                item_alignment_offset(item.align_self, free, axes.cross_reverse, axes.base.cross);
+            let alignment_offset = item_alignment_offset(
+                item.align_self,
+                free,
+                axes.cross_reverse,
+                axes.base.cross,
+                item_reverses_cross_axis(item, axes),
+            );
             item.cross_position =
                 alignment_offset + flow_start(item.margin, axes.cross, axes.cross_reverse);
         }
@@ -1610,26 +1816,43 @@ fn item_border_box_location<N>(
     point
 }
 
-fn first_container_baseline<N>(
+/// The container's first and last baselines (css-flexbox-1 §8.5), from the
+/// items [`exported_baseline_item`] names, at their aligned border-box
+/// positions — before any relative offset, which moves a box without moving
+/// anything laid out against it.
+///
+/// A measurement reads the baselines its hypothetical cross pass measured; a
+/// commit reads the ones the committed items reported, after
+/// [`perform_in_flow_layout`] stored them on the items. An item with no
+/// baseline set gives one synthesized from its border box's bottom edge —
+/// and so, under a measurement not asked for an exact last baseline, does
+/// the item the last baseline comes from when the cross pass did not measure
+/// it (its cross size was decided without its content and it joins no
+/// group). A measurement asked for it (`LayoutInput::reads_last_baseline`)
+/// measured that item in the cross pass instead, so its last baseline is the
+/// item's own.
+fn container_baselines<N>(
     items: &[FlexItem<N>],
     lines: &[FlexLine],
     axes: Axes,
     inner_size: Size<f32>,
     content_origin: Point<f32>,
-) -> Option<f32> {
-    let line = *lines.first()?;
-    let first = items[line.start..line.end]
-        .iter()
-        .find(|item| is_first_baseline_candidate(item, axes))
-        .or_else(|| items[line.start..line.end].first())?;
-    let location = item_border_box_location(first, line, axes, inner_size, content_origin);
-    Some(
-        location.y
-            + first
-                .measured_baselines
-                .y
-                .unwrap_or_else(|| axes.main.pack(first.target_main, first.target_cross).height),
-    )
+) -> [Option<f32>; 2] {
+    BaselineSet::BOTH.map(|wanted| {
+        let (line_index, index, set) = exported_baseline_item(items, lines, axes, wanted)?;
+        let item = &items[index];
+        let location =
+            item_border_box_location(item, lines[line_index], axes, inner_size, content_origin);
+        let measured = match set {
+            BaselineSet::First => item.measured_baselines.y,
+            BaselineSet::Last => item.measured_last_baselines.y,
+        };
+        Some(
+            location.y
+                + measured
+                    .unwrap_or_else(|| axes.main.pack(item.target_main, item.target_cross).height),
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1642,13 +1865,12 @@ fn perform_in_flow_layout<T>(
     inner_size: Size<f32>,
     content_origin: Point<f32>,
     scroll_container: bool,
-) -> (Size<f32>, Option<f32>)
+) -> Size<f32>
 where
     T: LayoutTree,
 {
     let parent_size = inner_size.map(Some);
     let mut content_size = Size::ZERO;
-    let mut first_baseline = None;
 
     for line in lines {
         for item in &mut items[line.start..line.end] {
@@ -1663,6 +1885,10 @@ where
                 .set_size(&mut input.definite_dimensions, item.main_size_is_definite);
             input.sizing_mode = SizingMode::IgnoreSizeStyles;
             let output = tree.compute_layout(state, item.key.node, input);
+            // The committed run's baselines replace the measured ones: the
+            // container's own are read from these (`container_baselines`).
+            item.measured_baselines = output.first_baselines;
+            item.measured_last_baselines = output.last_baselines;
 
             let offset = if item.position == PositionProperty::Relative {
                 relative_offset(item.inset, item.direction)
@@ -1685,20 +1911,9 @@ where
                 &mut content_size,
                 scroll_container,
             );
-
-            if first_baseline.is_none()
-                && (axes.main == Axis::Vertical || item.align_self == AlignFlags::BASELINE)
-            {
-                first_baseline =
-                    Some(location.y + output.first_baselines.y.unwrap_or(output.size.height));
-            }
         }
     }
-
-    if first_baseline.is_none() {
-        first_baseline = first_container_baseline(items, lines, axes, inner_size, content_origin);
-    }
-    (content_size, first_baseline)
+    content_size
 }
 
 fn static_position_for_absolute<N>(
@@ -1724,6 +1939,7 @@ fn static_position_for_absolute<N>(
         free_cross,
         axes.cross_reverse,
         axes.base.cross,
+        item_reverses_cross_axis(item, axes),
     );
     let cross_flow = cross_alignment + flow_start(item.margin, axes.cross, axes.cross_reverse);
 
@@ -1936,8 +2152,9 @@ where
     let align_content =
         normalize_content_alignment(style.align_content().primary(), cross_horizontal, rtl)
             .unwrap_or(AlignFlags::STRETCH);
-    let align_items = normalize_item_alignment(style.align_items().0, cross_horizontal, rtl)
-        .unwrap_or(AlignFlags::STRETCH);
+    let align_items =
+        normalize_item_alignment_with_last_baseline(style.align_items().0, cross_horizontal, rtl)
+            .unwrap_or(AlignFlags::STRETCH);
     let justify_content =
         normalize_content_alignment(style.justify_content().primary(), main_horizontal, rtl)
             .unwrap_or(AlignFlags::FLEX_START);
@@ -1958,6 +2175,9 @@ where
         input.definite_dimensions.height || style_definite.height,
     );
     let container_independent = container_content_independence(input, style_definite);
+    // Only a measurement can be asked for an exact last baseline: a commit
+    // reads the committed children and is exact anyway.
+    let last_baseline_requested = input.reads_last_baseline && !input.goal.commits();
     let item_inline_basis_was_indefinite = !outer_definite.width;
     let main_percentage_basis_was_indefinite = !axes.main.size(outer_definite);
     let gap_value = style.gap();
@@ -2114,6 +2334,7 @@ where
         inner_size,
         inner_available_space,
         container_independent,
+        last_baseline_requested,
     );
     calculate_line_cross_sizes(
         &items,
@@ -2202,6 +2423,7 @@ where
             inner_size,
             final_available_space,
             container_independent,
+            last_baseline_requested,
         );
         calculate_line_cross_sizes(&items, &mut lines, axes, flex_wrap, Some(inner_cross));
     }
@@ -2240,19 +2462,19 @@ where
     let outer_size = outer_size.unwrap_or(Size::ZERO);
     let inner_size = inner_size.unwrap_or(Size::ZERO);
     let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
-    let provisional_baseline =
-        first_container_baseline(&items, &lines, axes, inner_size, content_origin);
     if matches!(input.goal, LayoutGoal::Measure(_)) {
-        let baseline = if layout_contained {
-            None
+        // Layout containment exports no baseline (css-contain-2 §3.2).
+        let [first, last] = if layout_contained {
+            [None, None]
         } else {
-            provisional_baseline
+            container_baselines(&items, &lines, axes, inner_size, content_origin)
         };
         return LayoutOutput::new(outer_size, padding_box_end(outer_size, border))
-            .with_first_baselines(Point::new(None, baseline));
+            .with_first_baselines(Point::new(None, first))
+            .with_last_baselines(Point::new(None, last));
     }
 
-    let (mut content_size, first_baseline) = perform_in_flow_layout(
+    let mut content_size = perform_in_flow_layout(
         tree,
         state,
         &mut items,
@@ -2298,12 +2520,14 @@ where
     content_size = content_size.zip_map(absolute_content_size, f32::max);
     let content_size = own_scrollable_overflow(&style, outer_size, border, content_size);
 
-    let baseline = if layout_contained {
-        None
+    let [first, last] = if layout_contained {
+        [None, None]
     } else {
-        first_baseline.or(provisional_baseline)
+        container_baselines(&items, &lines, axes, inner_size, content_origin)
     };
-    LayoutOutput::new(outer_size, content_size).with_first_baselines(Point::new(None, baseline))
+    LayoutOutput::new(outer_size, content_size)
+        .with_first_baselines(Point::new(None, first))
+        .with_last_baselines(Point::new(None, last))
 }
 
 #[cfg(test)]
@@ -2458,6 +2682,8 @@ mod tests {
             target_cross: cross,
             baseline: cross,
             measured_baselines: Point::NONE,
+            last_baseline: cross,
+            measured_last_baselines: Point::NONE,
             frozen: false,
             violation: 0.0,
             main_position: 0.0,
@@ -2533,6 +2759,7 @@ mod tests {
                 AvailableSpace::Definite(cross),
             ),
             Some(Size::new(false, false)),
+            false,
         );
     }
 
@@ -3148,11 +3375,14 @@ mod tests {
         let overflowing_auto = align_one_cross(overflowing_auto, reversed, 20.0);
         assert_eq!(overflowing_auto.margin.bottom, -10.0);
 
+        // Under `wrap-reverse` the first-baseline group sits against the
+        // line's cross-start edge, the bottom one (css-flexbox-1 §8.3), so
+        // its one member starts at that edge.
         let mut baseline = item(10.0, 20.0);
         baseline.align_self = AlignFlags::BASELINE;
         baseline.baseline = 8.0;
         let baseline = align_one_cross(baseline, reversed, 40.0);
-        assert_eq!(baseline.cross_position, 20.0);
+        assert_eq!(baseline.cross_position, 0.0);
 
         let mut end = item(10.0, 20.0);
         end.align_self = AlignFlags::END;
