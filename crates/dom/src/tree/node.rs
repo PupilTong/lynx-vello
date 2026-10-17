@@ -105,6 +105,31 @@ enum NodeContent {
     Test(LeafMetrics),
 }
 
+/// Per-node bits that each cost a padded byte of the node stride as a `bool`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct NodeFlags(u8);
+
+impl NodeFlags {
+    const CUSTOM_SUBTREE_MAY_CONTAIN: u8 = 1 << 0;
+    const MAY_OVERRIDE_CHILDREN: u8 = 1 << 1;
+    const LYNX_TEXT: u8 = 1 << 2;
+
+    const fn get(self, bit: u8) -> bool {
+        self.0 & bit != 0
+    }
+
+    /// Sets `bit` to `on`, answering what it was.
+    fn set(&mut self, bit: u8, on: bool) -> bool {
+        let was = self.get(bit);
+        if on {
+            self.0 |= bit;
+        } else {
+            self.0 &= !bit;
+        }
+        was
+    }
+}
+
 /// A single node in a [`Document`](crate::Document) tree.
 pub struct Node<T> {
     owner: *mut TreeArenas<T>,
@@ -126,12 +151,7 @@ pub struct Node<T> {
 
     pub(crate) custom_definition: Option<DefinitionId>,
     pub(crate) custom_state: CustomElementState,
-    custom_subtree_may_contain: bool,
-    /// Whether `tree::anonymous` may hold an override of this node's layout
-    /// children — the one test `LayoutTree::children` makes before it looks
-    /// one up. Set with the override; a stale `true` costs a lookup that
-    /// finds nothing, so only clearing it is best effort.
-    pub(crate) may_override_children: bool,
+    flags: NodeFlags,
 
     pub(crate) parsed_inline_style: Option<Arc<Locked<PropertyDeclarationBlock>>>,
     pub(crate) presentational_hints: Option<Arc<Locked<PropertyDeclarationBlock>>>,
@@ -248,8 +268,7 @@ impl<T> Node<T> {
             element_state: ElementState::empty(),
             custom_definition: None,
             custom_state: CustomElementState::default(),
-            custom_subtree_may_contain: false,
-            may_override_children: false,
+            flags: NodeFlags::default(),
             parsed_inline_style: None,
             presentational_hints: None,
             shadow: None,
@@ -291,13 +310,33 @@ impl<T> Node<T> {
 
     #[must_use]
     pub(crate) fn custom_subtree_may_contain(&self) -> bool {
-        self.custom_subtree_may_contain
+        self.flags.get(NodeFlags::CUSTOM_SUBTREE_MAY_CONTAIN)
     }
 
     /// Marks this node's shadow-including subtree as possibly containing a
     /// custom element, returning whether it was already marked.
     pub(crate) fn mark_custom_subtree_may_contain(&mut self) -> bool {
-        std::mem::replace(&mut self.custom_subtree_may_contain, true)
+        self.flags.set(NodeFlags::CUSTOM_SUBTREE_MAY_CONTAIN, true)
+    }
+
+    /// Whether `tree::anonymous` may hold an override of this node's layout
+    /// children — the one test `LayoutTree::children` makes before it looks
+    /// one up. Set with the override; a stale `true` costs a lookup that
+    /// finds nothing, so only clearing it is best effort.
+    #[must_use]
+    pub(crate) fn may_override_children(&self) -> bool {
+        self.flags.get(NodeFlags::MAY_OVERRIDE_CHILDREN)
+    }
+
+    pub(crate) fn set_may_override_children(&mut self, may: bool) {
+        self.flags.set(NodeFlags::MAY_OVERRIDE_CHILDREN, may);
+    }
+
+    /// Records that this element is a Lynx text element, from its custom
+    /// element definition ([`crate::tree::custom::CustomElement::is_lynx_text`]):
+    /// called once, where the element is given its definition.
+    pub(crate) fn mark_lynx_text(&mut self) {
+        self.flags.set(NodeFlags::LYNX_TEXT, true);
     }
 
     pub(crate) fn owner_document(&self) -> &Node<T> {
@@ -524,7 +563,7 @@ impl<T> Node<T> {
             ("element_state", size_of::<ElementState>(), true),
             ("custom_definition", size_of::<Option<DefinitionId>>(), true),
             ("custom_state", size_of::<CustomElementState>(), true),
-            ("may_override_children", size_of::<bool>(), false),
+            ("flags", size_of::<NodeFlags>(), false),
             (
                 "parsed_inline_style",
                 size_of::<Option<Arc<Locked<PropertyDeclarationBlock>>>>(),
@@ -757,6 +796,13 @@ impl<T> Node<T> {
             ImageRole::Source => source.as_deref(),
             ImageRole::Placeholder => placeholder.as_deref(),
         }
+    }
+
+    /// Whether this element is a Lynx text element: one that lays out as a
+    /// Lynx paragraph whatever its computed `display` is, other than `none`
+    /// and `contents` ([`crate::layout::display_mode`]).
+    pub(crate) fn is_lynx_text(&self) -> bool {
+        self.flags.get(NodeFlags::LYNX_TEXT)
     }
 
     pub(crate) fn is_replaced(&self) -> bool {

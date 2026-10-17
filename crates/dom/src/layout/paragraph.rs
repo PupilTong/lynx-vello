@@ -282,13 +282,13 @@ pub(crate) fn replaces_children<T>(node: &Node<T>) -> bool {
     let Some(style) = node.layout_computed_style() else {
         return false;
     };
-    match display_mode(*style.get_display()) {
+    match display_mode(node, *style.get_display()) {
         mode if establishes_paragraph(mode) => generated_content(node).is_some(),
         DisplayMode::Contents => {
             generated_content(node).is_some()
                 && box_parent(node).is_some_and(|parent| {
                     parent.layout_computed_style().is_some_and(|style| {
-                        establishes_paragraph(display_mode(*style.get_display()))
+                        establishes_paragraph(display_mode(parent, *style.get_display()))
                     })
                 })
         }

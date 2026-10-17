@@ -134,12 +134,12 @@
 
 use euclid::default::{Point2D, Rect, Size2D, Transform3D, Vector2D};
 use hughie::geometry::Edges;
-use hughie::style::{CoreStyle, PositionProperty};
+use hughie::style::PositionProperty;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::motion::OffsetPath;
 use stylo::values::computed::transform::{Rotate, Scale, Translate};
 
-use crate::layout::{ChainEnd, ContainingBlockChain, DisplayMode, Layout, StyleView, display_mode};
+use crate::layout::{ChainEnd, ContainingBlockChain, DisplayMode, Layout, StyleView};
 use crate::tree::document::{Document, NodeId};
 use crate::visual::build::{clipped_axes, padding_box, unclipped_axes_unbounded};
 use crate::visual::sticky;
@@ -421,7 +421,7 @@ impl<T> Document<T> {
         let node = self.get(id)?;
         let style = StyleView::try_of(node)?;
         if matches!(
-            display_mode(style.display()),
+            style.display_mode(),
             DisplayMode::None | DisplayMode::Contents
         ) {
             return None;

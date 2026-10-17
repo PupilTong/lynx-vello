@@ -159,6 +159,18 @@ pub trait CustomElement<T> {
         &[]
     }
 
+    /// Whether an element of this definition is a Lynx text element: one
+    /// that lays out as a Lynx paragraph, or a run of the paragraph around it,
+    /// whatever its computed `display` is, other than `none` and `contents`.
+    ///
+    /// This is the element's kind, not its style — as an HTML `img` is
+    /// replaced content whatever `display` says — so the computed value keeps
+    /// what the author wrote. Read once, by [`Document::define`]; an element
+    /// takes it from its definition at creation and keeps it for life.
+    fn is_lynx_text(&self) -> bool {
+        false
+    }
+
     fn constructed(&self, document: &mut Document<T>, element: NodeId) {
         let _ = (document, element);
     }
@@ -377,6 +389,8 @@ struct Definition<T> {
     observed: Box<[LocalName]>,
     /// The handler's [`CustomElement::observed_events`], read once.
     events: &'static [&'static str],
+    /// The handler's [`CustomElement::is_lynx_text`], read once.
+    lynx_text: bool,
     /// How many elements of this definition exist: counted where a node is
     /// given the definition, uncounted where it is freed
     /// ([`CustomElement::freed`]'s call), which every such node reaches.
@@ -599,6 +613,7 @@ impl<T> Document<T> {
             .map(|attribute| LocalName::from(attribute.as_str()))
             .collect();
         let events = element.observed_events();
+        let lynx_text = element.is_lynx_text();
         self.custom_elements
             .observed_events
             .extend(events.iter().copied());
@@ -611,6 +626,7 @@ impl<T> Document<T> {
         self.custom_elements.definitions.push(Definition {
             observed,
             events,
+            lynx_text,
             instances: 0,
             handler: Arc::from(element),
         });
@@ -637,6 +653,9 @@ impl<T> Document<T> {
             {
                 let root = self.live_node_mut(DOCUMENT_ELEMENT_NODE_ID);
                 root.custom_definition = Some(definition);
+                if lynx_text {
+                    root.mark_lynx_text();
+                }
                 root.custom_state = CustomElementState::Constructing;
                 root.mark_custom_subtree_may_contain();
             }
@@ -925,9 +944,13 @@ impl<T> Document<T> {
         let Some(definition) = self.custom_elements.by_name.get(local_name).copied() else {
             return;
         };
+        let lynx_text = self.custom_elements.definitions[definition.index()].lynx_text;
         {
             let node = self.live_node_mut(element);
             node.custom_definition = Some(definition);
+            if lynx_text {
+                node.mark_lynx_text();
+            }
             node.custom_state = CustomElementState::Constructing;
             node.mark_custom_subtree_may_contain();
         }

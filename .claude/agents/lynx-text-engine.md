@@ -11,10 +11,12 @@ You own `crates/hughie/src/text/` — the Lynx `<text>` block and the standard i
 and its wiring: `crates/dom/src/layout/text_block.rs` (`TextBlockStore`),
 `crates/dom/src/paint/text.rs` on the paint side, and
 `crates/bobcat-core/src/main/tree/text.rs`, which turns `<text>` attributes into
-presentational hints. A `<text>` is one flattened paragraph:
-`DisplayInside::LynxText` (`display: -lynx-text`, stylo fork PR #27) says
-structurally what Lynx says by converting every added child, so a `<text>`
-subtree is inline content rather than child boxes.
+presentational hints. A `<text>` is one flattened paragraph by its element
+kind: `text`, `inline-text` and `inline-truncation` are Lynx text elements
+(`CustomElement::is_lynx_text`), which `dom::layout::display_mode` reads under
+every `display` but `none` and `contents`. That says structurally what Lynx
+says by converting every added child, so a `<text>` subtree is inline content
+rather than child boxes.
 
 ## Read first
 

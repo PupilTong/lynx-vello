@@ -19,10 +19,13 @@
 //!   and answer code 3: the engine has no text selection model, so there is nothing selected to
 //!   report and nothing a selection could be set on.
 //!
-//! The component holds no state and has no lifecycle callback, so defining
-//! the tag changes nothing else about it: `:defined` already matches every
-//! element in `dom`, and `display: -lynx-text` and the `raw-text` rules are
-//! selector rules on the tag name, which a definition does not touch.
+//! The component holds no state and has no lifecycle callback. Its
+//! definition, and the two behaviourless ones beside it for `inline-text` and
+//! `inline-truncation`, carry one fact besides the method: the three tags are
+//! Lynx text elements ([`dom::CustomElement::is_lynx_text`]), which is what
+//! lays each out as a Lynx paragraph or a run of one. `:defined` already
+//! matches every element in `dom`, and the `raw-text` rules are selector rules
+//! on the tag name, which a definition does not touch.
 
 /// `text`'s own defaults, from `web-elements`' `x-text.css`.
 ///
@@ -87,33 +90,35 @@
 /// subtree a paragraph takes its custom truncation content from is a
 /// computed-style fact there, exactly as the paragraph limits are.
 ///
-/// # Why a `text`'s `display` is not important
+/// # Why this sheet gives a text no `display`
 ///
-/// A text tag — `text`, `inline-text`, `inline-truncation` — is either a
-/// `-lynx-text` scope or not rendered. Its `display: -lynx-text` here is a
-/// plain declaration, so an author `display: none` wins and hides it, as it
-/// does in native Lynx and in web-core. Any other author `display` computes
-/// back to `-lynx-text`: the stylo fork's adjuster keeps `none` on these three
-/// tags and turns every other value into `-lynx-text`
-/// (`StyleAdjuster::adjust_for_lynx_text`, ruled by the user on 2026-10-15).
-/// That is native Lynx's shape: a text's inline-ness is structural
-/// (`TextElement::ConvertToInlineElement`,
+/// A text tag — `text`, `inline-text`, `inline-truncation` — lays out as a
+/// Lynx paragraph, or a run of one, because of what the element is: [`define`]
+/// marks the three definitions as Lynx text elements
+/// ([`dom::CustomElement::is_lynx_text`]), as an HTML `img` is replaced content
+/// whatever its `display` says. Its computed `display` keeps the author's value.
+/// `none` hides it, as it does in native Lynx and in web-core; every other
+/// value but `contents` leaves it a paragraph. That is native Lynx's shape: a
+/// text's inline-ness is structural (`TextElement::ConvertToInlineElement`,
 /// `core/renderer/dom/fiber/text_element.cc:196-205`), so native ignores
-/// `display: flex` on a text, and no layout mode here lays text out outside
-/// `-lynx-text`. web-core lets the author's value take over the `x-text` host
-/// (`x-text { display: flex }` is author-origin, `x-text.css:7-13`) while its
-/// shadow tree keeps the text, so the host's box differs there
-/// (`docs/tracking/deviations.md`).
+/// `display: flex` on a text. `contents` on a text has no Lynx behaviour to
+/// follow and acts as computed. web-core lets the author's value take over the
+/// `x-text` host (`x-text { display: flex }` is author-origin,
+/// `x-text.css:7-13`) while its shadow tree keeps the text, so the host's box
+/// differs there (`docs/tracking/deviations.md`). The stylo fork's adjuster
+/// still computes these three tags' `display` back to `-lynx-text`
+/// (`StyleAdjuster::adjust_for_lynx_text`); layout no longer reads that value.
 ///
-/// Until 2026-10-15 the declaration was `display: -lynx-text !important`,
-/// which also outranked the author's `display: none`. Without it, a UA rule
-/// that hides an element's children hides a `text` among them too, as a
-/// browser would: `list > *:not(list-item):not(wrapper)`,
-/// `x-swiper > :not(x-swiper-item, wrapper)`, `image > *` and `svg > *`. The
-/// rule for anything written directly inside a `text` therefore names the two
-/// tags that are nested runs, and keeps its old specificity with `:where`, so
-/// the `wrapper`, `view`, `image` and `inline-truncation` rules after it still
-/// outrank it.
+/// Until 2026-10-15 the sheet declared `display: -lynx-text !important`,
+/// which also outranked the author's `display: none`, and until 2026-10-17 a
+/// plain `display: -lynx-text`. Without the `!important`, a UA rule that hides
+/// an element's children hides a `text` among them too, as a browser would:
+/// `list > *:not(list-item):not(wrapper)`, `x-swiper > :not(x-swiper-item,
+/// wrapper)`, `image > *` and `svg > *`. The rule for anything written
+/// directly inside a `text` therefore names the three text tags, and keeps
+/// its old specificity with `:where`, so the `wrapper`, `view` and `image`
+/// rules after it still outrank it. `inline-truncation` shows only directly
+/// inside a `text`, so the rule hiding it names every other parent.
 ///
 /// # Why an inline `image` has no padding
 ///
@@ -157,7 +162,7 @@ pub(super) const UA_RULES: &str = r#"
 @property --lynx-text-maxlength { syntax: "<integer>"; inherits: false; initial-value: -1; }
 @property --lynx-tail-color-convert { syntax: "<integer>"; inherits: false; initial-value: 0; }
 @property --lynx-inline-truncation { syntax: "<integer>"; inherits: false; initial-value: 0; }
-text { display: -lynx-text; color: initial; }
+text { color: initial; }
 text {
   --lynx-text-maxline: attr(text-maxline number, -1);
   --lynx-text-maxlength: attr(text-maxlength number, -1);
@@ -166,12 +171,11 @@ text[tail-color-convert="true"] { --lynx-tail-color-convert: 1; }
 text[text] { content: attr(text); }
 text[text-overflow="ellipsis"] { text-overflow: ellipsis; }
 text[text-overflow="clip"] { text-overflow: clip; }
-inline-text { display: -lynx-text; }
-inline-image, inline-truncation { display: none; }
-text > :where(:not(text, inline-text)) { display: none; }
+inline-image, :not(text) > inline-truncation { display: none; }
+text > :where(:not(text, inline-text, inline-truncation)) { display: none; }
 text > wrapper { display: contents; }
 text > view, text > image { display: flex; }
-text > inline-truncation { display: -lynx-text; --lynx-inline-truncation: 1; }
+text > inline-truncation { --lynx-inline-truncation: 1; }
 text > text, text > wrapper > text { color: inherit; }
 text > image, text > wrapper > image, inline-text > image, inline-text > wrapper > image, text > inline-truncation > image, text > inline-truncation > wrapper > image { padding: 0 !important; }
 "#;
@@ -242,11 +246,30 @@ use crate::main::record::write_record_field;
 /// code 8.
 const TEXT_TAG: &str = "text";
 
-/// Installs the `text` component. Must run before any element could carry
-/// the tag, which is [`Document::define`](dom::Document::define)'s own
-/// precondition.
+/// Installs the `text` component, and `inline-text` and `inline-truncation`
+/// beside it as Lynx text elements with no component behaviour. Must run
+/// before any element could carry the tags, which is
+/// [`Document::define`](dom::Document::define)'s own precondition.
 pub(super) fn define(document: &mut LynxDocument) {
     document.define(TEXT_TAG, Box::new(Text));
+    document.define(INLINE_TEXT_TAG, Box::new(TextRun));
+    document.define(INLINE_TRUNCATION_TAG, Box::new(TextRun));
+}
+
+/// The nested run tag.
+const INLINE_TEXT_TAG: &str = "inline-text";
+
+/// The truncation marker tag, whose content replaces a cut paragraph's tail.
+const INLINE_TRUNCATION_TAG: &str = "inline-truncation";
+
+/// `inline-text` and `inline-truncation`: Lynx text elements, defined for
+/// that kind alone.
+struct TextRun;
+
+impl CustomElement<()> for TextRun {
+    fn is_lynx_text(&self) -> bool {
+        true
+    }
 }
 
 /// The `text` component: `getTextBoundingRect` ([`text_bounding_rect`]).
@@ -254,6 +277,10 @@ pub(super) fn define(document: &mut LynxDocument) {
 struct Text;
 
 impl CustomElement<()> for Text {
+    fn is_lynx_text(&self) -> bool {
+        true
+    }
+
     fn invoke(
         &self,
         document: &mut LynxDocument,

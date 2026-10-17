@@ -34,7 +34,7 @@ use crate::layout::paragraph::{
     Collected, OwnedItem, TextStore, collect_generated, context_and_store, generated_content,
     hash_flow, run_white_space,
 };
-use crate::layout::style::{DisplayMode, StyleView, TextRunView, display_mode};
+use crate::layout::style::{DisplayMode, StyleView, TextRunView};
 use crate::tree::document::{DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 
@@ -137,7 +137,7 @@ pub(crate) fn paragraph_of<T>(
             if out_of_flow(view.position()) {
                 return None;
             }
-            match display_mode(view.display()) {
+            match view.display_mode() {
                 DisplayMode::Text | DisplayMode::Contents => {
                     if current != node && generated_content(here).is_some() {
                         return None;
@@ -239,7 +239,7 @@ fn is_truncation_marker<T>(node: &Node<T>) -> bool {
         return false;
     }
     let view = StyleView::of(node);
-    !out_of_flow(view.position()) && display_mode(view.display()) == DisplayMode::Text && {
+    !out_of_flow(view.position()) && view.display_mode() == DisplayMode::Text && {
         use hughie::style::LynxTextStyle;
         view.is_inline_truncation()
     }
@@ -336,7 +336,7 @@ fn collect_content<T>(
         if out_of_flow(view.position()) {
             continue;
         }
-        match display_mode(view.display()) {
+        match view.display_mode() {
             // A nested scope and a transparent box are both walked through;
             // the difference is only which style its runs carry, and that is
             // read per run from the innermost element ancestor anyway.

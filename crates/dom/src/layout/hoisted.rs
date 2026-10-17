@@ -33,7 +33,7 @@ use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
 use super::anchors::{connected_chain, containing_block_generator, precedes};
-use super::style::{DisplayMode, StyleView, box_parent, display_mode, resolve_position};
+use super::style::{DisplayMode, StyleView, box_parent, resolve_position};
 use crate::tree::document::{Document, DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 
@@ -59,7 +59,7 @@ pub(crate) fn hoisting_block<T>(node: &Node<T>) -> Option<NodeSlot> {
             return Some(block.id());
         }
         let style = StyleView::try_of(ancestor)?;
-        match display_mode(style.display()) {
+        match style.display_mode() {
             // A block container's content is text runs; every box under it
             // is hidden (`inline_flow`), an escaping one included.
             DisplayMode::None | DisplayMode::BlockFlow => return None,

@@ -989,9 +989,10 @@ impl<T: Sync> Document<T> {
     ) -> Option<NamedRanges> {
         // No box: `display: none` or `contents`, or skipped contents, whose
         // layout is zeroed.
-        let style = self.paint_style(subject)?;
+        let node = self.get(subject)?;
+        let style = node.layout_computed_style()?;
         if matches!(
-            display_mode(*style.get_display()),
+            display_mode(node, *style.get_display()),
             DisplayMode::None | DisplayMode::Contents
         ) || self.in_skipped_subtree(subject)
         {

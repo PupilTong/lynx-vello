@@ -3101,9 +3101,12 @@ Subsystems:
   impl, per-node `LayoutSlot`s in `DocumentLayoutState`, and the two
   per-element facts a `StyleView` answers with that no computed value carries:
   `content-visibility: auto` relevance (`relevance.rs`) and the css-sizing-4
-  last remembered size (`remembered.rs`). Two displays lay their content out
-  as one paragraph: `-lynx-text` (`text_block.rs`, the flattened Lynx
-  paragraph) and the internal `(block, flow)` block container
+  last remembered size (`remembered.rs`). Two kinds of box lay their content
+  out as one paragraph: a Lynx text element (`Node::is_lynx_text`, from its
+  custom element definition, under any `display` but `none` and `contents`;
+  `display: -lynx-text` too, which `<markdown>`'s shadow paragraphs still
+  use) (`text_block.rs`, the flattened Lynx paragraph) and the internal
+  `(block, flow)` block container
   (`DisplayMode::BlockFlow`, `inline_flow.rs`, a CSS inline formatting
   context of text runs; no author style produces it — the anonymous block box
   around loose text is its producer). `paragraph.rs` holds what both share:

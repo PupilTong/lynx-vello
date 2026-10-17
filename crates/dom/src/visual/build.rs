@@ -30,9 +30,7 @@
 
 use euclid::default::{Point2D, Rect, Size2D, Transform3D};
 use hughie::style::containment::effective_containment;
-use hughie::style::{
-    Contain, ContentVisibility, CoreStyle, Overflow, PositionProperty, visibility,
-};
+use hughie::style::{Contain, ContentVisibility, Overflow, PositionProperty, visibility};
 use hughie::tree::{Layout, LayoutTree};
 use stylo::computed_values::scroll_initial_target;
 use stylo::properties::ComputedValues;
@@ -49,7 +47,7 @@ use super::{
     stacking,
 };
 use crate::layout::{
-    DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
+    DisplayMode, StyleView, box_parent, establishes_absolute_containing_block,
     establishes_fixed_containing_block, skips_contents,
 };
 use crate::scroll::initial_target::InitialTarget;
@@ -111,7 +109,7 @@ pub(crate) fn build<T: Sync>(
     let commit_id = document.commit_id();
     let root = document.document_element();
     if let Some(style) = StyleView::try_of(root)
-        && display_mode(style.display()) != DisplayMode::None
+        && style.display_mode() != DisplayMode::None
     {
         let location = builder.rounded(root.id()).location;
         builder.build_stacking_context(
@@ -851,7 +849,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             });
         }
 
-        let mode = display_mode(style.display());
+        let mode = style.display_mode();
         if mode == DisplayMode::Leaf || skips_contents(self.node(root), values) {
             self.close_layer(layer);
             return;
@@ -1032,7 +1030,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         cursor: Cursor<'_>,
     ) -> Option<ChildBox<'doc, T>> {
         let view = StyleView::try_of(child_node)?;
-        let mode = display_mode(view.display());
+        let mode = view.display_mode();
         if mode == DisplayMode::None {
             return None;
         }

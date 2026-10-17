@@ -77,7 +77,6 @@
 //! measurement in this crate.
 
 use euclid::default::{Point2D, Rect, Size2D, Vector2D};
-use hughie::style::CoreStyle;
 use stylo::values::computed::{
     Length, NonNegativeLengthPercentageOrAuto, ScrollSnapAxis, ScrollSnapStop, ScrollSnapStrictness,
 };
@@ -85,7 +84,7 @@ use stylo::values::specified::box_::ScrollSnapAlignKeyword;
 
 use super::{ScrollAxes, clamp_to, is_scroll_container, wrap_axis};
 use crate::NodeId;
-use crate::layout::{DisplayMode, StyleView, box_parent, display_mode};
+use crate::layout::{DisplayMode, StyleView, box_parent};
 use crate::tree::document::Document;
 use crate::visual::PaintOrder;
 
@@ -602,7 +601,7 @@ impl<T> Document<T> {
             let Some(view) = StyleView::try_of(child) else {
                 continue;
             };
-            let mode = display_mode(view.display());
+            let mode = view.display_mode();
             if mode == DisplayMode::None {
                 continue;
             }

@@ -174,11 +174,14 @@ pub(crate) fn is_rendered<T>(
     state: &DocumentLayoutState,
     element: NodeId,
 ) -> bool {
-    let Some(style) = tree.get(element).and_then(Node::layout_computed_style) else {
+    let Some(node) = tree.get(element) else {
+        return false;
+    };
+    let Some(style) = node.layout_computed_style() else {
         return false;
     };
     if matches!(
-        display_mode(*style.get_display()),
+        display_mode(node, *style.get_display()),
         DisplayMode::None | DisplayMode::Contents
     ) {
         return false;
@@ -192,12 +195,12 @@ pub(crate) fn is_rendered<T>(
 /// does: it has been cascaded, and neither its `display` nor its `content`
 /// computes to `none`.
 pub(crate) fn backdrop_generates_box<T>(tree: &TreeArenas<T>, backdrop: NodeId) -> bool {
-    tree.get(backdrop)
-        .and_then(Node::layout_computed_style)
-        .is_some_and(|style| {
-            display_mode(*style.get_display()) != DisplayMode::None
+    tree.get(backdrop).is_some_and(|node| {
+        node.layout_computed_style().is_some_and(|style| {
+            display_mode(node, *style.get_display()) != DisplayMode::None
                 && !matches!(style.get_counters().content, Content::None)
         })
+    })
 }
 
 impl<T> Document<T> {
