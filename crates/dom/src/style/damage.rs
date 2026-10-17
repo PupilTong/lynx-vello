@@ -177,38 +177,6 @@ mod tests {
         }
     }
 
-    /// `--lynx-verbatim-white-space` is a switch: a positive value is on,
-    /// zero and a negative value are off, so only a change between the two
-    /// relays the paragraph out.
-    #[test]
-    fn verbatim_white_space_damage_tracks_the_switch() {
-        let property = "--lynx-verbatim-white-space";
-        let mut doc = Doc::with_css(&format!(
-            "@property {property} {{ syntax: '<integer>'; inherits: false; initial-value: 0; }}
-             .label {{ display: -lynx-text; }}"
-        ));
-        let label = doc.el(doc.root, "text.label");
-        flush(&mut doc);
-
-        for (value, computed, relayout) in [
-            ("1", "1", true),
-            ("2", "2", false),
-            ("0", "0", true),
-            ("invalid", "0", false),
-            ("-1", "-1", false),
-            ("3", "3", true),
-        ] {
-            doc.dom.set_inline_style_property(label, property, value);
-            let summary = flush(&mut doc);
-            assert_eq!(doc.value(label, property), computed, "{value}");
-            assert_eq!(
-                damage_of(&summary, label).is_some_and(StyleDamage::needs_relayout),
-                relayout,
-                "changing to {value}"
-            );
-        }
-    }
-
     #[test]
     fn empty_flip_structural_path_reports_relayout() {
         let mut doc = Doc::with_css(".box:empty { height: 50px }");

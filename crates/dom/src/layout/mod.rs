@@ -2029,39 +2029,6 @@ mod tests {
         }
     }
 
-    /// The verbatim white-space switch is read when the paragraph is built,
-    /// so turning it on or off rebuilds the paragraph rather than re-breaking
-    /// the retained one: `"a   b"` is three advances processed by
-    /// css-text-3 and five kept verbatim.
-    #[test]
-    #[expect(clippy::float_cmp, reason = "Ahem advances are exact")]
-    fn switching_verbatim_white_space_rebuilds_the_paragraph() {
-        let (mut document, label, _run) = label_document_parts("a   b", 200.0);
-        document.add_stylesheet(
-            r#"@property --lynx-verbatim-white-space { syntax: "<integer>"; inherits: false; initial-value: 0; }"#,
-            StylesheetOrigin::UserAgent,
-        );
-        document.layout();
-        let width = |document: &Document<()>| {
-            document
-                .text_block(label)
-                .expect("committed paragraph")
-                .size()
-                .width
-        };
-        assert_eq!(width(&document), 3.0 * 16.0);
-        let mut rebuilds = document.text_block_rebuilds(label).expect("shaped");
-
-        for (value, expected) in [("1", 5.0 * 16.0), ("", 3.0 * 16.0)] {
-            document.set_inline_style_property(label, "--lynx-verbatim-white-space", value);
-            document.layout();
-            assert_eq!(width(&document), expected, "{value:?}");
-            let now = document.text_block_rebuilds(label).expect("shaped");
-            assert!(now > rebuilds, "{value:?}: the paragraph is rebuilt");
-            rebuilds = now;
-        }
-    }
-
     #[test]
     #[expect(clippy::float_cmp, reason = "rounded boxes have exact pixel geometry")]
     fn cascaded_paragraph_limits_update_ancestor_and_following_sibling_geometry() {

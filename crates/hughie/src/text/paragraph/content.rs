@@ -85,14 +85,6 @@ pub(in crate::text) enum WhiteSpaceProcessing {
     /// paragraph: a collapsible whitespace sequence there is removed, as it
     /// is after a preserved break.
     Css,
-    /// css-text-3 §4.1 per run, except that a collapsible whitespace
-    /// sequence at the start of the paragraph is kept as one space: a
-    /// `display: -lynx-text` paragraph that is no Lynx `<text>` — a
-    /// `<markdown>` shadow paragraph — whose soft breaks collapse as a
-    /// browser collapses them. The kept leading space is what C2 in
-    /// `docs/tracking/web-text-test-replication.md` recorded for `<text>`
-    /// before `<text>` took [`Self::Verbatim`].
-    CssKeepingLeadingSpace,
     /// No white-space processing: the native Lynx `<text>`. Every run is
     /// processed as `preserve` whatever its own `white-space-collapse` —
     /// native reads no such property — so every space, tab and carriage
@@ -449,9 +441,7 @@ impl Normalizer {
     fn consume_run(&mut self, run: &TextRunItem<'_>, item: u32) {
         let white_space = match self.processing {
             WhiteSpaceProcessing::Verbatim { .. } => WhiteSpaceCollapse::Preserve,
-            WhiteSpaceProcessing::Css | WhiteSpaceProcessing::CssKeepingLeadingSpace => {
-                run.white_space
-            }
+            WhiteSpaceProcessing::Css => run.white_space,
         };
         let preserve_breaks = white_space != WhiteSpaceCollapse::Collapse;
         let preserve_spaces = white_space == WhiteSpaceCollapse::Preserve;
@@ -865,14 +855,9 @@ mod tests {
     use super::*;
     use crate::geometry::Size;
 
-    /// The processing of a `display: -lynx-text` paragraph that is no
-    /// `<text>`, which every test below that names no processing was written
-    /// against. A `<text>` takes [`WhiteSpaceProcessing::Verbatim`].
+    /// css-text-3 processing, which every test below that names no processing
+    /// was written against. A `<text>` takes [`WhiteSpaceProcessing::Verbatim`].
     fn normalize(items: &[InlineItem<'_>]) -> NormalizedBlock {
-        super::normalize(items, WhiteSpaceProcessing::CssKeepingLeadingSpace)
-    }
-
-    fn css(items: &[InlineItem<'_>]) -> NormalizedBlock {
         super::normalize(items, WhiteSpaceProcessing::Css)
     }
 
@@ -1239,32 +1224,32 @@ mod tests {
         let style = RunStyle::default();
         // Spaces, a tab and a segment break, split across two runs.
         let items = [run(&style, " \t"), run(&style, "\n  a b ")];
-        let block = css(&items);
+        let block = normalize(&items);
         assert_eq!(block.text, "a b ");
         // Every source unit is still counted, the removed ones included.
         assert_eq!(block.map.source_len(), 9);
         assert_eq!(block.map.byte_to_unit(&block.text, 0), 5);
-
-        let kept = normalize(&items);
-        assert_eq!(kept.text, " a b ", "a -lynx-text block keeps one space");
     }
 
     #[test]
     fn css_processing_keeps_preserved_spaces_at_the_paragraph_start() {
         let style = RunStyle::default();
-        assert_eq!(css(&[pre(&style, "  a")]).text, "  a");
+        assert_eq!(normalize(&[pre(&style, "  a")]).text, "  a");
         // A collapsible span before a preserved one is still at the line
         // start, and goes.
-        assert_eq!(css(&[run(&style, " "), pre(&style, " a")]).text, " a");
+        assert_eq!(normalize(&[run(&style, " "), pre(&style, " a")]).text, " a");
     }
 
     #[test]
     fn css_processing_removes_whitespace_after_a_preserved_break_as_before() {
         let style = RunStyle::default();
-        assert_eq!(css(&[raw(&style, "a\n  b")]).text, "a\nb");
-        assert_eq!(css(&[raw(&style, "a\n"), run(&style, "  b")]).text, "a\nb");
+        assert_eq!(normalize(&[raw(&style, "a\n  b")]).text, "a\nb");
+        assert_eq!(
+            normalize(&[raw(&style, "a\n"), run(&style, "  b")]).text,
+            "a\nb"
+        );
         // Only whitespace: nothing at all.
-        assert!(css(&[run(&style, " \n\t ")]).text.is_empty());
+        assert!(normalize(&[run(&style, " \n\t ")]).text.is_empty());
     }
 
     fn verbatim(items: &[InlineItem<'_>]) -> NormalizedBlock {

@@ -116,14 +116,11 @@ fn atom(id: u64, width: f32, height: f32, vertical_align: VerticalAlign) -> Inli
     })
 }
 
-/// A `<text>` root's paragraph parameters: the UA sheet gives every `text`
-/// `--lynx-verbatim-white-space: 1`, so its white space is kept verbatim.
-/// Every replica here is a `<text>`, so every one starts from these.
+/// A `<text>` root's paragraph parameters: every Lynx text block keeps its
+/// white space verbatim. Every replica here is a `<text>`, so every one
+/// starts from these.
 fn text_style() -> BlockStyle {
-    BlockStyle {
-        verbatim: true,
-        ..BlockStyle::default()
-    }
+    BlockStyle::default()
 }
 
 fn laid_out(

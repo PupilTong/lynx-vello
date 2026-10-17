@@ -409,17 +409,14 @@ impl LynxTextStyle for ParagraphStyle<'_> {}
 
 /// Stylo gives custom-property changes repaint damage. Compare the effective
 /// values the paragraph actually consumes to account for their layout
-/// dependency: the two limits, and the verbatim white-space switch, which
-/// changes the text the paragraph is shaped from.
+/// dependency: the two limits.
 pub(crate) fn paragraph_limits_changed(old: &ComputedValues, new: &ComputedValues) -> bool {
     if old.custom_properties().non_inherited == new.custom_properties().non_inherited {
         return false;
     }
 
     let (old, new) = (ParagraphStyle(old), ParagraphStyle(new));
-    old.text_maxline() != new.text_maxline()
-        || old.text_maxlength() != new.text_maxlength()
-        || old.verbatim_white_space() != new.verbatim_white_space()
+    old.text_maxline() != new.text_maxline() || old.text_maxlength() != new.text_maxlength()
 }
 
 /// Whether this paragraph's `tail-color-convert` is on, so its truncation

@@ -62,8 +62,8 @@
 /// those literals say the whole thing. Plain declarations, so author CSS still
 /// outranks the attribute the way it outranks every other UA rule.
 ///
-/// `--lynx-verbatim-white-space: 1` makes the paragraph a `text` establishes
-/// keep its text verbatim, as every native Lynx backend does: no CSS
+/// A `text`'s paragraph keeps its text verbatim, as every native Lynx backend
+/// does: no CSS
 /// white-space processing (`core/renderer/dom/fiber/raw_text_element.cc:16-46`
 /// stores the text as written, and Android `BaseTextShadowNode.java:494-498`,
 /// iOS `LynxBaseTextShadowNode.m:240-249` and textra
@@ -72,13 +72,13 @@
 /// `Layout` does; a newline that ends the text adds an empty last line, as
 /// Android's `StaticLayout` does; only `white-space: nowrap` stops the
 /// wrapping, and then nothing after the first newline shows — native parses
-/// no other `white-space` keyword, so `pre` and the rest wrap. It is a
-/// registered, non-inherited integer on the `text` root alone
-/// rather than a property of `display: -lynx-text`, because `<markdown>`'s
-/// shadow paragraphs are `-lynx-text` scopes too, and their soft breaks must
-/// collapse to spaces as a browser collapses them in web-core's `x-markdown`.
-/// This is a ruled deviation from web-core, whose `x-text` hands its text to
-/// the browser's CSS white-space processing (`docs/tracking/deviations.md`).
+/// no other `white-space` keyword, so `pre` and the rest wrap. Every
+/// `display: -lynx-text` paragraph does this, so `<markdown>`'s shadow
+/// paragraphs, which are `-lynx-text` scopes too, keep their soft breaks as
+/// line breaks until they move to the standard inline formatting context — a
+/// known gap (`docs/tracking/deviations.md`). This is a ruled deviation from
+/// web-core, whose `x-text` hands its text to the browser's CSS white-space
+/// processing.
 ///
 /// An `inline-truncation` is content wherever it is written *directly* inside
 /// a `text`, and generates no box anywhere else — the same scope web-core's
@@ -157,12 +157,10 @@ pub(super) const UA_RULES: &str = r#"
 @property --lynx-text-maxlength { syntax: "<integer>"; inherits: false; initial-value: -1; }
 @property --lynx-tail-color-convert { syntax: "<integer>"; inherits: false; initial-value: 0; }
 @property --lynx-inline-truncation { syntax: "<integer>"; inherits: false; initial-value: 0; }
-@property --lynx-verbatim-white-space { syntax: "<integer>"; inherits: false; initial-value: 0; }
 text { display: -lynx-text; color: initial; }
 text {
   --lynx-text-maxline: attr(text-maxline number, -1);
   --lynx-text-maxlength: attr(text-maxlength number, -1);
-  --lynx-verbatim-white-space: 1;
 }
 text[tail-color-convert="true"] { --lynx-tail-color-convert: 1; }
 text[text] { content: attr(text); }
@@ -697,16 +695,12 @@ mod tests {
     /// Every native backend hands a `text`'s string to its platform engine
     /// unchanged (`raw_text_element.cc:16-46`, Android
     /// `BaseTextShadowNode.java:494-498`, iOS `LynxBaseTextShadowNode.m:240-249`),
-    /// and the UA sheet says so with `--lynx-verbatim-white-space: 1` on the
-    /// `text` root: leading spaces and space runs stay, every newline breaks
-    /// the line and the spaces after it stay, trailing spaces hang.
+    /// and so does every `-lynx-text` paragraph: leading spaces and space runs
+    /// stay, every newline breaks the line and the spaces after it stay,
+    /// trailing spaces hang.
     #[test]
-    fn a_text_keeps_its_white_space_verbatim_through_the_ua_sheet() {
+    fn a_text_keeps_its_white_space_verbatim() {
         let (document, text) = verbatim_paragraph("  a   b  ");
-        assert_eq!(
-            custom_value(&document, text, "lynx-verbatim-white-space", "0"),
-            "1"
-        );
         assert_eq!(ink(&document, text), (7.0 * 20.0, 21.0));
 
         let (document, text) = verbatim_paragraph("ab\n  cd");
@@ -839,21 +833,6 @@ mod tests {
         document.set_inline_style_property(text, "white-space", "nowrap");
         document.layout();
         assert_eq!(ink(&document, text), (2.0 * 20.0, 21.0));
-    }
-
-    /// The flag is a computed value like the paragraph limits, so author CSS
-    /// can switch it, and a switch rebuilds the paragraph: off, the run is
-    /// processed by css-text-3 and its space run collapses.
-    #[test]
-    fn switching_the_verbatim_flag_rebuilds_the_paragraph() {
-        let (mut document, text) = verbatim_paragraph("a   b");
-        assert_eq!(ink(&document, text).0, 5.0 * 20.0);
-        document.set_inline_style_property(text, "--lynx-verbatim-white-space", "0");
-        document.layout();
-        assert_eq!(ink(&document, text).0, 3.0 * 20.0);
-        document.set_inline_style_property(text, "--lynx-verbatim-white-space", "");
-        document.layout();
-        assert_eq!(ink(&document, text).0, 5.0 * 20.0);
     }
 
     /// `tail-color-convert` is a native BOOL whose default is off, so only the

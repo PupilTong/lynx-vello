@@ -19,8 +19,6 @@ static TEXT_MAXLINE: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-text-max
 static TEXT_MAXLENGTH: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-text-maxlength"));
 static TAIL_COLOR_CONVERT: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-tail-color-convert"));
 static INLINE_TRUNCATION: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-inline-truncation"));
-static VERBATIM_WHITE_SPACE: LazyLock<Name> =
-    LazyLock::new(|| Name::from("lynx-verbatim-white-space"));
 
 /// Read the UA-registered, non-inherited integer after CSS computation.
 /// Stylo has no public scalar accessor for registered values. `ToCss` exposes
@@ -80,15 +78,6 @@ style_protocol! {
             // what keeps element vocabulary out of the layout host.
             is_inline_truncation -> bool =
                 paragraph_limit(style.computed_values(), &INLINE_TRUNCATION)
-                    .is_some_and(|value| value != 0),
-            // Whether this paragraph keeps its text verbatim, as native Lynx
-            // keeps a `<text>`'s: no white-space processing. A positive value
-            // is on; zero and a negative value are off. The UA sheet sets it
-            // to 1 on the `text` root alone, so a `display: -lynx-text` scope
-            // that is no `<text>` — a `<markdown>` shadow paragraph — still
-            // collapses its white space.
-            verbatim_white_space -> bool =
-                paragraph_limit(style.computed_values(), &VERBATIM_WHITE_SPACE)
                     .is_some_and(|value| value != 0),
         }
     }
@@ -181,7 +170,6 @@ mod tests {
         assert_eq!(style.text_maxlength(), None);
         assert!(!style.tail_color_convert());
         assert!(!style.is_inline_truncation());
-        assert!(!style.verbatim_white_space());
         // A paragraph needs no LinearStyle implementation.
         let block = crate::text::block::BlockStyle::from_container_style(&style);
         assert_eq!(block.max_lines, None);

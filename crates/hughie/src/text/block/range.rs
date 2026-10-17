@@ -422,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn an_aligned_line_misses_its_leading_space_and_an_inner_space_hits() {
+    fn an_aligned_line_misses_its_start_and_its_kept_spaces_hit() {
         let style = ahem_style();
         let block = block(
             &[run("a  b", &style)],
@@ -432,16 +432,15 @@ mod tests {
             },
             Some(100.0),
         );
-        // "a b" is 30px wide, centred in 100: it starts at 35.
-        assert_eq!(at(&block, 34.9, 5.0), None);
-        assert_eq!(at(&block, 35.0, 5.0), Some(0));
-        assert_eq!(
-            at(&block, 45.0, 5.0),
-            Some(1),
-            "a collapsed space is a cluster, answering the first unit it collapsed"
-        );
-        assert_eq!(at(&block, 55.0, 5.0), Some(3));
-        assert_eq!(at(&block, 65.0, 5.0), None);
+        // "a  b" keeps both spaces: 40px wide, centred in 100, it starts at 30.
+        assert_eq!(at(&block, 29.9, 5.0), None);
+        assert_eq!(at(&block, 30.0, 5.0), Some(0));
+        // The kept run of spaces is one cluster, shaped as one widened space,
+        // and answers its first unit.
+        assert_eq!(at(&block, 45.0, 5.0), Some(1));
+        assert_eq!(at(&block, 55.0, 5.0), Some(1));
+        assert_eq!(at(&block, 65.0, 5.0), Some(3));
+        assert_eq!(at(&block, 75.0, 5.0), None);
     }
 
     #[test]

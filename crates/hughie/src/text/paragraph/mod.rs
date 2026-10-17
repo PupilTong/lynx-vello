@@ -327,7 +327,7 @@ impl<S: Copy> Paragraph<S> {
         flow.measure_space_runs(context, breaking, source);
         let tab_stops = match processing {
             WhiteSpaceProcessing::Verbatim { .. } => tab::TabStops::Native,
-            WhiteSpaceProcessing::Css | WhiteSpaceProcessing::CssKeepingLeadingSpace => {
+            WhiteSpaceProcessing::Css => {
                 // Native stops take no minimum shift, so only css-text-3's
                 // `0.5ch` is measured.
                 flow.tab_min = tab_minimums(context, breaking, &flow, source);

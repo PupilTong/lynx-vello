@@ -387,11 +387,10 @@ consequential choice about whether to follow the spec or the quirk.
   browser, which applies css-text-3's `white-space-collapse: collapse` to
   every run except `raw-text`, which declares `preserve-breaks`
   (`lynx-stack/packages/web-platform/web-elements/src/elements/XText/x-text.css:261-265`).
-  A user ruling of 2026-10-16 follows native. The UA rule
-  `text { --lynx-verbatim-white-space: 1; }` (a registered, non-inherited
-  `<integer>` on the `text` root alone, `crates/bobcat-core/src/main/tree/text.rs`)
-  selects `WhiteSpaceProcessing::Verbatim`
-  (`crates/hughie/src/text/paragraph/content.rs`) for the paragraph, so:
+  A user ruling of 2026-10-16 follows native. Every `display: -lynx-text`
+  paragraph is built with `WhiteSpaceProcessing::Verbatim`
+  (`crates/hughie/src/text/paragraph/content.rs`, user ruling 2026-10-17:
+  no switch), so:
   space runs and leading spaces stay; every `\n`, in a `raw-text` carrier or
   a `text` attribute, is a forced break and the spaces after it stay; no
   run's own `white-space-collapse` is read; a soft wrap ends a space run on
@@ -424,8 +423,8 @@ consequential choice about whether to follow the spec or the quirk.
   after a `\n` — css-text-3's `each-line` (`BlockStyle::indent_keywords` in
   `crates/hughie/src/text/block/style.rs`) — and no soft-wrapped line; each
   indented line measures its tab stops from its own text start, after the
-  indent. A `<markdown>` paragraph still indents its first line only, and the
-  CSS inline formatting context follows the author's `text-indent` keywords.
+  indent. The CSS inline formatting context follows the author's
+  `text-indent` keywords.
   Under
   `white-space: nowrap` nothing after the first `\n` shows, as Android's
   `TextRenderer.handleWhiteSpaceWrap` deletes it
@@ -458,18 +457,27 @@ consequential choice about whether to follow the spec or the quirk.
   height), and the source map is unchanged. iOS and Harmony are not
   confirmed; the engine follows Android. Under the `nowrap` cut the text
   already ends at its first newline, which shows as one line, so a newline
-  that ends the text adds nothing there; a `<markdown>` paragraph and the CSS
-  inline formatting context keep css-text-3's result, where a final
-  preserved newline opens no line. `text-maxlength` composes in Android's order —
+  that ends the text adds nothing there; the CSS inline formatting context
+  keeps css-text-3's result, where a final preserved newline opens no line. `text-maxlength` composes in Android's order —
   `getUsedSpanClippedWithMaxLength` clips first and appends its ellipsis
   (`TextRenderer.java:126-135`), the newline deletion runs after it — so a
   length past the `\n` cuts nothing and leaves no marker (Android's appended
   ellipsis is deleted with the rest), while a length before it cuts as usual,
   its marker still gated on `text-overflow` (A0 in
-  `web-text-test-replication.md`). `<markdown>`'s shadow paragraphs are
-  `-lynx-text` scopes without the flag and keep css-text-3 collapsing, as
-  web-core's `x-markdown` does; author CSS can set the flag to `0` on a
-  `text` to get css-text-3 processing back.
+  `web-text-test-replication.md`).
+- **GAP: `<markdown>`'s paragraphs keep their white space verbatim, where
+  web-core's `x-markdown` collapses it** — its shadow paragraphs (`p`,
+  `h1`-`h6`, `td`, `pre code`, …) are `display: -lynx-text` scopes, and every
+  such paragraph is verbatim (previous entry). Until markdown moves to the
+  standard inline formatting context (the 2026-10-17 node-kind plan), a soft
+  break is a line break instead of a space, and a code block wraps under its
+  `pre` and shows an empty last line after the code's final newline instead of
+  keeping one unwrapped line per source line. Pinned by the ignored
+  `a_paragraph_s_soft_break_collapses_to_a_space` and
+  `a_code_block_keeps_its_lines_and_indentation_without_wrapping`
+  (`crates/bobcat-core/src/main/tree/markdown/tests.rs`) and the ignored golden
+  `markdown_renders_its_content_in_its_shadow_tree`
+  (`crates/bobcat-core/tests/screenshots.rs`).
 - **`text-align: justify` does not parse, and the declaration is dropped
   without a trace** — the vendored fork excludes `Justify` from
   `TextAlignKeyword` under its `lynx` feature

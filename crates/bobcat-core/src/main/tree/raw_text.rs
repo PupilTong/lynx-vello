@@ -94,10 +94,10 @@ const LYNX_TAGS: &[&str] = &[
 ];
 
 /// Carriers are hidden unless the box holding them renders their text (module
-/// doc), and author CSS may override or suppress their content. A `text`
-/// keeps every run verbatim (`--lynx-verbatim-white-space` in `text.rs`), so a
+/// doc), and author CSS may override or suppress their content. A
+/// `-lynx-text` paragraph keeps every run verbatim (`text.rs`), so a
 /// carrier's own `preserve-breaks` decides its newlines only as loose text in
-/// an HTML element and in a paragraph whose author CSS turned that flag off.
+/// an HTML element.
 pub(super) static UA_RULES: LazyLock<String> = LazyLock::new(|| {
     let lynx = LYNX_TAGS.join(", ");
     format!(

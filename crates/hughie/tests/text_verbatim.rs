@@ -1,4 +1,4 @@
-//! The Lynx `<text>` block's verbatim white space (`BlockStyle::verbatim`):
+//! The Lynx `<text>` block's verbatim white space (`BlockStyle::processing`):
 //! native Lynx's no-processing text, on Ahem geometry.
 //!
 //! Ahem at `font_size` 10: every glyph, the space included, advances 10px,
@@ -75,10 +75,7 @@ fn atom(id: u64) -> InlineItem<'static> {
 }
 
 fn verbatim() -> BlockStyle {
-    BlockStyle {
-        verbatim: true,
-        ..BlockStyle::default()
-    }
+    BlockStyle::default()
 }
 
 fn nowrap() -> BlockStyle {
@@ -100,9 +97,6 @@ fn leading_spaces_are_kept_and_measured() {
     let style = ahem();
     let block = laid_out(verbatim(), &[run(&style, "  ab")], None);
     assert_close(block.size().width, 40.0);
-    // The same run in a CSS-processed paragraph keeps one of them.
-    let css = laid_out(BlockStyle::default(), &[run(&style, "  ab")], None);
-    assert_close(css.size().width, 30.0);
 }
 
 #[test]
@@ -261,23 +255,6 @@ fn every_line_after_a_newline_is_indented_and_measures_its_stops_after_it() {
     assert!(clamped.truncated());
     assert_eq!(clamped.lines().len(), 2);
     assert_close(unit_x(&clamped, 2), 15.0);
-}
-
-/// A CSS-processed block — a `display: -lynx-text` paragraph that is no
-/// `<text>` — still indents its first line only.
-#[test]
-fn a_css_block_indents_its_first_line_only() {
-    let style = ahem();
-    let mut context = text_context();
-    let items = [InlineItem::Run(TextRunItem {
-        text: "a\nb",
-        style: &style,
-        white_space: WhiteSpaceCollapse::PreserveBreaks,
-    })];
-    let mut block = TextBlock::new(&mut context, BlockStyle::default(), &items, None);
-    block.commit(&mut context, BlockConstraint::new(None, 15.0));
-    assert_close(unit_x(&block, 0), 15.0);
-    assert_close(unit_x(&block, 2), 0.0);
 }
 
 #[test]
@@ -496,25 +473,6 @@ fn a_newline_that_ends_the_text_adds_an_empty_last_line() {
     let caret = block.range_boxes(4, 4).expect("a valid range");
     assert_close(caret[0].size.height, 10.0);
     assert_eq!(block.item_source_range(0), Some(0..4));
-}
-
-/// The empty line belongs to a verbatim `<text>` only: a CSS paragraph
-/// keeps css-text-3's result, where a preserved newline that ends the text
-/// opens no line box.
-#[test]
-fn a_css_paragraph_s_final_newline_adds_no_line() {
-    let style = ahem();
-    let block = laid_out(
-        BlockStyle::default(),
-        &[InlineItem::Run(TextRunItem {
-            text: "aaa\n",
-            style: &style,
-            white_space: WhiteSpaceCollapse::PreserveBreaks,
-        })],
-        None,
-    );
-    assert_eq!(block.lines().len(), 1);
-    assert_close(block.size().height, 10.0);
 }
 
 /// Under `nowrap` the text ends at its first newline, and what follows it —

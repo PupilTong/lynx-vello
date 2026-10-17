@@ -762,7 +762,7 @@ impl TextBlock {
         drop(spans);
         // The natural layout's indent rule, so every visible line keeps the
         // indent it was broken with.
-        display.set_text_indent(indent, self.style.indent_keywords().options());
+        display.set_text_indent(indent, BlockStyle::INDENT_KEYWORDS.options());
         let limit = u32::try_from(visible).expect("line count fits u32");
         shape::break_clamped(&mut display, width, Some(limit));
         (display, sources, slots)
@@ -937,7 +937,7 @@ impl Retained for TextBlock {
             RunBreaking::Uniform(self.style.breaking()),
             constraint,
             self.style.max_lines.map(NonZeroU32::get),
-            self.style.indent_keywords(),
+            BlockStyle::INDENT_KEYWORDS,
         );
 
         // Whether content remains past the committed lines is a unit-space
@@ -1209,45 +1209,43 @@ mod tests {
     }
 
     #[test]
-    fn preserved_tabs_reshape_only_when_a_break_moves_their_stop() {
+    fn tabs_reshape_only_when_a_break_moves_their_stop() {
         let mut context = text_context();
         let style = ahem_style();
+        // Unbroken, the tab starts at 40 and is 20 wide; wrapped at 25, `c`
+        // starts the second line and the tab at 10 is 10 wide.
         let items = [InlineItem::Run(TextRunItem {
-            text: "a\tb\tc\n\td",
+            text: "ab c\td",
             style: &style,
             white_space: WhiteSpaceCollapse::Preserve,
         })];
-        let nowrap = BlockStyle {
-            text_wrap: TextWrap::NoWrap,
-            ..BlockStyle::default()
-        };
-        let mut block = TextBlock::new(&mut context, nowrap, &items, None);
+        let mut block = TextBlock::new(&mut context, BlockStyle::default(), &items, None);
+        assert_eq!(
+            context.shape_count(),
+            1,
+            "the paragraph alone: a native stop measures no `0`",
+        );
+
+        block.commit(&mut context, BlockConstraint::new(Some(500.0), 0.0));
         assert_eq!(
             context.shape_count(),
             2,
-            "the paragraph, and one `0` for the run holding the tabs",
+            "one re-shape settles every tab of an unbroken paragraph",
         );
-
-        block.commit(&mut context, BlockConstraint::new(Some(50.0), 0.0));
-        assert_eq!(
-            context.shape_count(),
-            3,
-            "one re-shape settles every tab of an unwrapped paragraph",
-        );
-        block.commit(&mut context, BlockConstraint::new(Some(500.0), 0.0));
         block.commit(&mut context, BlockConstraint::new(None, 0.0));
-        assert_eq!(
-            context.shape_count(),
-            3,
-            "under nowrap no width moves a tab: the stops hold",
-        );
-        assert_eq!(block.break_count(), 3);
+        assert_eq!(context.shape_count(), 2, "no break, no tab moves");
 
-        block.commit(&mut context, BlockConstraint::new(None, 10.0));
+        block.commit(&mut context, BlockConstraint::new(Some(25.0), 0.0));
+        assert_eq!(context.shape_count(), 3, "the wrap moves the tab's stop");
+        block.commit(&mut context, BlockConstraint::new(Some(500.0), 0.0));
+        assert_eq!(context.shape_count(), 4, "and unwrapping moves it back");
+
+        block.commit(&mut context, BlockConstraint::new(Some(500.0), 10.0));
         assert_eq!(
             context.shape_count(),
             4,
-            "an indent moves the first line's tabs",
+            "a native stop counts from the text start after the indent",
         );
+        assert_eq!(block.break_count(), 5);
     }
 }
