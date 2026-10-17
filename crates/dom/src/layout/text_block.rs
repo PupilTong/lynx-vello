@@ -252,7 +252,7 @@ fn is_truncation_marker<T>(node: &Node<T>) -> bool {
     }
     let view = StyleView::of(node);
     !out_of_flow(view.position()) && display_mode(view.display()) == DisplayMode::Text && {
-        use hughie::style::TextContainerStyle;
+        use hughie::style::LynxTextStyle;
         view.is_inline_truncation()
     }
 }

@@ -14,7 +14,7 @@
 
 use core::ops::Range;
 
-use parley::{Line, PositionedLayoutItem};
+use parley::Line;
 
 use super::TextBlock;
 use crate::geometry::{Point, Rect, Size};
@@ -56,7 +56,7 @@ impl TextBlock {
     /// [`Self::has_committed`] first, as for every other reader.
     #[must_use]
     pub fn range_boxes(&self, start: u32, end: u32) -> Option<Vec<Rect<f32>>> {
-        let block = &self.content.block;
+        let block = &self.paragraph.content.block;
         if start > end || end > block.map.source_len() {
             return None;
         }
@@ -173,11 +173,7 @@ impl TextBlock {
     /// from; the truncation content is no source text and has no units.
     #[must_use]
     pub fn item_source_range(&self, item: u32) -> Option<Range<u32>> {
-        self.content
-            .block
-            .item_units
-            .get(usize::try_from(item).ok()?)
-            .cloned()
+        self.paragraph.item_source_range(item)
     }
 
     /// Calls `visit(units, left, right)` once per cluster or atomic box of
@@ -189,63 +185,17 @@ impl TextBlock {
     /// content's clusters and boxes. Clipping to the line's own source range,
     /// which is what drops the whitespace hanging at its end, is the
     /// caller's.
-    fn for_each_extent(
-        &self,
-        line: &Line<'_, TextBrush>,
-        mut visit: impl FnMut(Range<u32>, f32, f32),
-    ) {
-        let block = &self.content.block;
-        let text = &block.text;
+    fn for_each_extent(&self, line: &Line<'_, TextBrush>, visit: impl FnMut(Range<u32>, f32, f32)) {
+        let block = &self.paragraph.content.block;
         let (cut_byte, content_slots) = self
             .expect_result()
             .display
             .as_ref()
-            .map_or((text.len(), block.boxes.len()), |part| {
+            .map_or((block.text.len(), block.boxes.len()), |part| {
                 (part.cut_byte as usize, part.content_slots)
             });
-        // A run is split into one glyph run per style; its clusters are
-        // walked once, from the first glyph run's offset, which is where the
-        // run starts.
-        let mut walked_run = None;
-        for item in line.items() {
-            match item {
-                PositionedLayoutItem::GlyphRun(glyph_run) => {
-                    let run = glyph_run.run();
-                    if walked_run == Some(run.index()) {
-                        continue;
-                    }
-                    walked_run = Some(run.index());
-                    let mut x = glyph_run.offset();
-                    for cluster in run.visual_clusters() {
-                        let advance = cluster.advance();
-                        let bytes = cluster.text_range();
-                        if bytes.start < cut_byte {
-                            let first = block.map.byte_to_unit(
-                                text,
-                                u32::try_from(bytes.start).expect("text fits u32"),
-                            );
-                            let last = block.map.unit_before(
-                                text,
-                                u32::try_from(bytes.end.min(cut_byte)).expect("text fits u32"),
-                            );
-                            visit(first..last, x, x + advance);
-                        }
-                        x += advance;
-                    }
-                }
-                PositionedLayoutItem::InlineBox(inline_box) => {
-                    let slot = usize::try_from(inline_box.id).expect("slot ids are table indexes");
-                    if slot < content_slots {
-                        let unit = block.boxes[slot].unit;
-                        visit(
-                            unit..unit + 1,
-                            inline_box.x,
-                            inline_box.x + inline_box.width,
-                        );
-                    }
-                }
-            }
-        }
+        self.paragraph
+            .for_each_extent(line, cut_byte, content_slots, visit);
     }
 }
 

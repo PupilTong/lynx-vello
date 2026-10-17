@@ -37,7 +37,7 @@ use crate::style::TextBrush;
 
 /// The `tab-size` every preserved tab uses: the property's initial value, in
 /// spaces.
-pub(in crate::text::block) const TAB_SIZE: f32 = 8.0;
+pub(in crate::text) const TAB_SIZE: f32 = 8.0;
 
 /// How many times one layout re-shapes to settle its tab advances.
 ///
@@ -47,7 +47,7 @@ pub(in crate::text::block) const TAB_SIZE: f32 = 8.0;
 /// further round; the bound stops a pathological paragraph whose breaks and
 /// tab advances keep trading places, and the last round's breaks — the ones
 /// committed — are always taken against the last shaping.
-pub(in crate::text::block) const MAX_ROUNDS: u32 = 3;
+pub(in crate::text) const MAX_ROUNDS: u32 = 3;
 
 /// Two advances this close are the same advance: the walk sums floats in the
 /// same order every time, so a settled paragraph reproduces its spacing to
@@ -56,7 +56,7 @@ const SETTLED: f32 = 1.0e-3;
 
 /// The shift from `x` to the next tab stop of `size`, passing a stop closer
 /// than `min`. A non-positive tab size renders the tab as nothing (§4.1.2).
-pub(in crate::text::block) fn advance_to_stop(x: f32, size: f32, min: f32) -> f32 {
+pub(in crate::text) fn advance_to_stop(x: f32, size: f32, min: f32) -> f32 {
     if size.is_nan() || size <= 0.0 {
         return 0.0;
     }
@@ -81,7 +81,7 @@ pub(in crate::text::block) fn advance_to_stop(x: f32, size: f32, min: f32) -> f3
 /// a `text-maxline` clamp — keeps its spacing. A tab's own cluster advance is
 /// one space plus the run's letter-spacing plus its current extra, so the
 /// tab size is read back off the layout without a second measurement.
-pub(in crate::text::block) fn resolve(
+pub(in crate::text) fn resolve(
     layout: &Layout<TextBrush>,
     tabs: &[u32],
     spacing: &[f32],

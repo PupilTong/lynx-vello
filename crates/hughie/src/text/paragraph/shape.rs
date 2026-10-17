@@ -1,4 +1,4 @@
-//! Parley build and line breaking for the block path.
+//! Parley build and line breaking for every paragraph.
 //!
 //! One shaping per content revision; breaking re-runs per layout call. The
 //! breaker is always dropped before anything reads committed lines — the
@@ -11,22 +11,24 @@ use parley::{
     PositionedLayoutItem,
 };
 
-use super::SourceItem;
 use super::content::SourceMap;
-use super::style::{BlockStyle, RunStyle, WordBreak};
+use super::style::{BreakStyle, RunStyle, WordBreak};
 use crate::style::TextBrush;
 use crate::text::TextContext;
 
 /// One contiguous styled span handed to the shaper.
-pub(in crate::text::block) struct ShapeSpan<'block> {
-    pub(in crate::text::block) bytes: Range<usize>,
-    pub(in crate::text::block) style: &'block RunStyle,
-    pub(in crate::text::block) source: SourceItem,
+///
+/// `S` is the consumer's paint identity for the span, recorded per parley
+/// style index by [`shape`].
+pub(in crate::text) struct ShapeSpan<'block, S> {
+    pub(in crate::text) bytes: Range<usize>,
+    pub(in crate::text) style: &'block RunStyle,
+    pub(in crate::text) source: S,
     /// Added to the run's `letter-spacing` for this span alone. Zero except
     /// on a preserved tab's one-space span, where it widens the space to the
     /// tab stop (`super::tab`), and on the `0` the tab pass measures `ch`
     /// from, where it cancels the run's spacing.
-    pub(in crate::text::block) extra_spacing: f32,
+    pub(in crate::text) extra_spacing: f32,
 }
 
 /// Shapes one paragraph. `sources` receives the parley style-index → source
@@ -36,13 +38,13 @@ pub(in crate::text::block) struct ShapeSpan<'block> {
 /// Fully empty content short-circuits to an empty layout: parley shapes a
 /// substitute space for an empty build, whose glyph run would carry a style
 /// index this module never pushed.
-pub(in crate::text::block) fn shape(
+pub(in crate::text) fn shape<S: Copy>(
     context: &mut TextContext,
-    block: &BlockStyle,
+    breaking: BreakStyle,
     text: &str,
-    spans: &[ShapeSpan<'_>],
+    spans: &[ShapeSpan<'_, S>],
     boxes: Vec<InlineBox>,
-    sources: &mut Vec<SourceItem>,
+    sources: &mut Vec<S>,
 ) -> Layout<TextBrush> {
     sources.clear();
     if text.is_empty() && boxes.is_empty() {
@@ -65,12 +67,12 @@ pub(in crate::text::block) fn shape(
     // `white-space-collapse: preserve` needs nothing from parley beyond it:
     // the normalizer keeps every space, and the tab stops are `super::tab`'s.
     let mut builder = layout_context.style_run_builder(font_context, text, 1.0, false);
-    if block.word_break != WordBreak::BreakAll {
+    if breaking.word_break != WordBreak::BreakAll {
         builder.set_line_break_override(Some(LINE_BREAK_OVERRIDE));
     }
     builder.reserve(spans.len(), spans.len());
     for span in spans {
-        let mut style = super::style::parley_style(span.style, block);
+        let mut style = super::style::parley_style(span.style, breaking);
         style.letter_spacing += span.extra_spacing;
         let index = builder.push_style(style);
         debug_assert_eq!(usize::from(index), sources.len());
@@ -121,7 +123,7 @@ fn line_break_override(context: LineBreakContext) -> Option<bool> {
 /// empty-layout width workaround parley applies inside `break_next`. The
 /// clamp path must initialize both breaker advances — `BreakerState` defaults
 /// them to zero, under which every cluster overflows.
-pub(in crate::text::block) fn break_clamped(
+pub(in crate::text) fn break_clamped(
     layout: &mut Layout<TextBrush>,
     width: Option<f32>,
     max_lines: Option<u32>,
@@ -144,7 +146,7 @@ pub(in crate::text::block) fn break_clamped(
 /// range. Parley commits one after a box overflows onto its own line at the
 /// end of content, and after a trailing preserved newline — cases where CSS
 /// produces no line box.
-pub(in crate::text::block) fn is_blank_line(line: &parley::Line<'_, TextBrush>) -> bool {
+pub(in crate::text) fn is_blank_line(line: &parley::Line<'_, TextBrush>) -> bool {
     let range = line.text_range();
     range.start >= range.end
         && !line
@@ -154,21 +156,21 @@ pub(in crate::text::block) fn is_blank_line(line: &parley::Line<'_, TextBrush>) 
 
 /// One committed line's place in both offset spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::text::block) struct NaturalLine {
-    pub(in crate::text::block) start_unit: u32,
+pub(in crate::text) struct NaturalLine {
+    pub(in crate::text) start_unit: u32,
     /// End of the line's visible content — trailing collapsed whitespace
     /// excluded, matching the web reference's rect-derived line ranges, and
     /// trailing *preserved* spaces kept, because they are content. This
     /// is the basis for the reported range, the ellipsis arithmetic, and the
     /// dots back-off.
-    pub(in crate::text::block) end_unit: u32,
+    pub(in crate::text) end_unit: u32,
     /// Everything the line consumed, trailing whitespace included — the
     /// basis for locating a cut and for whether content remains.
-    pub(in crate::text::block) consumed_end: u32,
+    pub(in crate::text) consumed_end: u32,
     /// The line's text bytes; for a box-only line both bounds sit at the
     /// boxes' shared byte position.
-    pub(in crate::text::block) start_byte: u32,
-    pub(in crate::text::block) end_byte: u32,
+    pub(in crate::text) start_byte: u32,
+    pub(in crate::text) end_byte: u32,
 }
 
 /// Reads the committed lines back into source space, dropping trailing blank
@@ -177,7 +179,7 @@ pub(in crate::text::block) struct NaturalLine {
 /// `Line::text_range()` reports an inverted `usize::MAX..0` range for a line
 /// whose items are all inline boxes, so byte bounds fall back to the line's
 /// first box.
-pub(in crate::text::block) fn capture_lines(
+pub(in crate::text) fn capture_lines(
     layout: &Layout<TextBrush>,
     text: &str,
     map: &SourceMap,

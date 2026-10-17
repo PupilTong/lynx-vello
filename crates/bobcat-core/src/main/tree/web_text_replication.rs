@@ -33,7 +33,7 @@
 //! One divergence cuts across most of these fixtures and belongs to none of
 //! them: the markup indents its content, and a browser removes collapsible
 //! whitespace at the start of a line while this engine emits it as a space
-//! (`crates/hughie/src/text/block/content.rs:352-383` resolves an open
+//! (`crates/hughie/src/text/paragraph/content.rs:352-383` resolves an open
 //! whitespace span against the following character, with no start-of-line
 //! suppression). Wherever a case's own claim survives that divergence the
 //! replica keeps the fixture's indentation and pins the claim against a
