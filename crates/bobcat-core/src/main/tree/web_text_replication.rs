@@ -31,17 +31,21 @@
 //! width that keeps the fixture's line breaking, and says so.
 //!
 //! One divergence cuts across most of these fixtures and belongs to none of
-//! them: the markup indents its content, and a browser removes collapsible
-//! whitespace at the start of a line while this engine emits it as a space
-//! (`crates/hughie/src/text/paragraph/content.rs:377-408` resolves an open
-//! whitespace span against the following character, with no start-of-line
-//! suppression). Wherever a case's own claim survives that divergence the
-//! replica keeps the fixture's indentation and pins the claim against a
-//! control tree, so a paragraph's absolute advance is not what the case turns
-//! on. The exceptions are the cases whose claim *is* an absolute advance — the
-//! atomic-inline replicas, where the line's width is the atom's own measured
-//! width. Those drop the fixture's surrounding whitespace instead, and each
-//! such test's own doc comment says so.
+//! them: the markup indents its content. A browser collapses that
+//! indentation — a newline and the spaces after it to one space, a space at
+//! the start of a line removed — while a `<text>` here keeps its text
+//! verbatim, as every native Lynx backend does (the user's ruling of
+//! 2026-10-16, `docs/tracking/deviations.md`): the newline is a forced break
+//! and the spaces stay. A compiled `ReactLynx` card never carries HTML
+//! indentation into a `<text>` — its compiler trims it — so where a case's
+//! claim is something other than the collapsing, the replica writes the
+//! fixture's content the way such a card carries it: what the browser's
+//! collapsing leaves, as literal text, and the test's own doc comment says
+//! so. Replicas that compare two trees carrying the same indentation keep the
+//! markup, since the comparison holds whatever the indentation does. The cases
+//! whose claim *is* the collapsing deviate from web-core: they keep asserting
+//! it, ignored as DEVIATIONs, and a companion asserts what the engine
+//! renders.
 
 // Ahem and explicit line heights have exact metrics, so the geometry these
 // replicas assert is compared exactly; glyph counts convert to advances.
@@ -328,9 +332,24 @@ fn a_container_nested_inside_an_inline_atom_sizes_itself_without_re_entering_the
 /// The colour half of the screenshot diff is a per-run paint claim that
 /// `crates/dom`'s pixel tests own; here it is asserted as computed style. The
 /// collapse claim is pinned against a control written without that whitespace,
-/// which is one square narrower — an absolute advance would also carry the
-/// module-level leading-indentation divergence, which this case is not about.
+/// which is one square narrower.
+///
+/// The collapse claim is the browser's and does not hold for a `<text>`,
+/// which keeps the markup's newlines and indentation verbatim as native Lynx
+/// does: the paragraph is four lines, not one. So this replica is a DEVIATION;
+/// `a_nested_text_run_keeps_the_markup_s_newlines_in_a_text` asserts what the
+/// engine renders for the same tree, the run and colour claims included.
 #[test]
+#[ignore = "DEVIATION, not a missing feature: this engine follows native \
+            Lynx, by the user's ruling of 2026-10-16. A `<text>` does no CSS \
+            white-space processing on any native backend \
+            (`raw_text_element.cc:16-46`, Android \
+            `BaseTextShadowNode.java:494-498`, iOS \
+            `LynxBaseTextShadowNode.m:240-249`), so the markup's newlines are \
+            forced breaks and its indentation stays: four lines 312 wide, not \
+            web-core's one line 504 wide. \
+            `a_nested_text_run_keeps_the_markup_s_newlines_in_a_text` asserts \
+            that and passes."]
 fn a_text_nested_in_a_text_is_an_inline_run_that_scopes_only_its_own_colour() {
     const PARAGRAPH: &str = "width: 600px; font-size: 24px; font-weight: bold";
     const RED: &str = "font-size: 24px; color: red";
@@ -364,6 +383,42 @@ fn a_text_nested_in_a_text_is_an_inline_run_that_scopes_only_its_own_colour() {
         *style_of(&document, nested).get_font_weight(),
         *style_of(&document, text).get_font_weight(),
         "and still inherits the weight the paragraph was given"
+    );
+}
+
+/// The native half of `x-text/inline-text`
+/// (`a_text_nested_in_a_text_is_an_inline_run_that_scopes_only_its_own_colour`):
+/// the same tree in a `<text>` keeps its text verbatim. The markup
+/// `"\n    I am bold\n    "`, the nested `"and red"` and `"\n  "` lay out as
+/// four lines — an empty one, `"    I am bold"` (13 squares, 312), the
+/// indentation plus the nested run, and the closing indentation — while the
+/// nested run still overrides only its own colour and inherits the weight.
+#[test]
+fn a_nested_text_run_keeps_the_markup_s_newlines_in_a_text() {
+    const PARAGRAPH: &str = "width: 600px; font-size: 24px; font-weight: bold";
+    const RED: &str = "font-size: 24px; color: red";
+
+    let mut document = ahem_document();
+    let text = child(&mut document, "text", PARAGRAPH);
+    literal(&mut document, text, "\n    I am bold\n    ");
+    let nested = element_under(&mut document, text, "text", RED);
+    literal(&mut document, nested, "and red");
+    literal(&mut document, text, "\n  ");
+    document.layout();
+
+    assert_eq!(display(&document, nested), Display::LynxText);
+    assert_eq!(
+        ink(&document, text),
+        (13.0 * 24.0, 4.0 * 24.0),
+        "every newline breaks the line and every space stays"
+    );
+    assert_eq!(
+        style_of(&document, nested).get_color().solid_color(),
+        AbsoluteColor::srgb_legacy(255, 0, 0, 1.0),
+    );
+    assert_eq!(
+        *style_of(&document, nested).get_font_weight(),
+        *style_of(&document, text).get_font_weight(),
     );
 }
 
@@ -419,18 +474,22 @@ fn a_wrapper_between_a_text_and_its_nested_run_changes_nothing() {
 /// from the other direction: splitting content into a nested run is
 /// geometrically invisible, so the paragraph measures what the same characters
 /// measure as one undivided run.
+///
+/// The fixture's markup indentation is written the way a compiled card
+/// carries it — what the browser's collapsing leaves of it, as literal text —
+/// because a `<text>` keeps its text verbatim (module doc).
 #[test]
 fn splitting_a_paragraph_into_two_runs_leaves_its_line_geometry_untouched() {
     const PARAGRAPH: &str = "width: 600px; font-size: 24px; font-weight: bold";
 
     let mut document = ahem_document();
     let split = child(&mut document, "text", PARAGRAPH);
-    literal(&mut document, split, "\n    I am bold\n    ");
+    literal(&mut document, split, "I am bold ");
     let nested = element_under(&mut document, split, "text", "font-size: 24px; color: red");
     literal(&mut document, nested, "and red");
 
     let undivided = child(&mut document, "text", PARAGRAPH);
-    literal(&mut document, undivided, "\n    I am bold and red");
+    literal(&mut document, undivided, "I am bold and red");
     document.layout();
 
     assert_eq!(
@@ -492,6 +551,10 @@ fn a_maxline_on_a_nested_inline_run_neither_clips_nor_re_boxes_it() {
 /// hanging from one baseline give the larger run's ascent plus the larger run's
 /// descent, which for Ahem is exactly the larger font size — where two stacked
 /// baselines would cost the sum of the two.
+///
+/// The fixture's markup indentation is written the way a compiled card
+/// carries it — what the browser's collapsing leaves of it, as literal text —
+/// because a `<text>` keeps its text verbatim (module doc).
 #[test]
 fn runs_of_different_size_share_a_baseline_while_sibling_text_blocks_do_not() {
     let mut document = ahem_document();
@@ -510,10 +573,9 @@ fn runs_of_different_size_share_a_baseline_while_sibling_text_blocks_do_not() {
 
     let holder = child(&mut document, "view", "");
     let paragraph = element_under(&mut document, holder, "text", "font-size: 20px");
-    literal(&mut document, paragraph, "\n      ");
     let run_small = element_under(&mut document, paragraph, "text", "font-size: 20px");
     literal(&mut document, run_small, "hello world");
-    literal(&mut document, paragraph, "\n      ");
+    literal(&mut document, paragraph, " ");
     let run_large = element_under(&mut document, paragraph, "text", "font-size: 30px");
     literal(&mut document, run_large, "111");
     document.layout();
@@ -555,11 +617,15 @@ fn runs_of_different_size_share_a_baseline_while_sibling_text_blocks_do_not() {
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
 /// (`crates/dom/src/layout/text_block.rs:596-603`).
+///
+/// The fixture's markup indentation is written the way a compiled card
+/// carries it — what the browser's collapsing leaves of it, as literal text —
+/// because a `<text>` keeps its text verbatim (module doc).
 #[test]
 fn an_image_child_of_a_text_advances_the_line_by_its_used_size() {
     let mut document = ahem_document();
     let text = child(&mut document, "text", "font-size: 24px; color: blue");
-    literal(&mut document, text, "abcd\n    ");
+    literal(&mut document, text, "abcd ");
     let inline = image(&mut document, text, "width: 22px; height: 22px");
     document.layout();
 
@@ -596,15 +662,19 @@ fn an_image_child_of_a_text_advances_the_line_by_its_used_size() {
 /// the rounding walk pruned there (`crates/hughie/src/compute/mod.rs`'s
 /// `round_layout_inner`). A consumed element holding a placed atom now keeps
 /// an empty layout of its own instead.
+///
+/// The fixture's markup indentation is written the way a compiled card
+/// carries it — what the browser's collapsing leaves of it, as literal text —
+/// because a `<text>` keeps its text verbatim (module doc).
 #[test]
 fn a_wrapper_between_a_text_and_an_inline_image_changes_nothing() {
     let mut document = ahem_document();
     let plain = child(&mut document, "text", "font-size: 24px; color: blue");
-    literal(&mut document, plain, "abcd\n    ");
+    literal(&mut document, plain, "abcd ");
     let direct = image(&mut document, plain, "width: 22px; height: 22px");
 
     let wrapped = child(&mut document, "text", "font-size: 24px; color: blue");
-    literal(&mut document, wrapped, "abcd\n    ");
+    literal(&mut document, wrapped, "abcd ");
     let wrapper = element_under(&mut document, wrapped, "wrapper", "");
     let through = image(&mut document, wrapper, "width: 22px; height: 22px");
     document.layout();
@@ -657,11 +727,15 @@ fn a_wrapper_between_a_text_and_an_inline_image_changes_nothing() {
 /// (`crates/bobcat-core/src/main/tree/text.rs`'s `UA_RULES`) — the cascade
 /// spelling of web-core erasing the host element and rebuilding the box out of
 /// a property list `padding` is not on.
+///
+/// The fixture's markup indentation is written the way a compiled card
+/// carries it — what the browser's collapsing leaves of it, as literal text —
+/// because a `<text>` keeps its text verbatim (module doc).
 #[test]
 fn an_inline_image_s_margin_reaches_the_line_s_advance_and_its_padding_does_not() {
     let mut document = ahem_document();
     let margined = child(&mut document, "text", "font-size: 24px; color: blue");
-    literal(&mut document, margined, "abcd\n    ");
+    literal(&mut document, margined, "abcd ");
     let outer = image(
         &mut document,
         margined,
@@ -669,7 +743,7 @@ fn an_inline_image_s_margin_reaches_the_line_s_advance_and_its_padding_does_not(
     );
 
     let padded = child(&mut document, "text", "font-size: 24px; color: blue");
-    literal(&mut document, padded, "abcd\n    ");
+    literal(&mut document, padded, "abcd ");
     let inner = image(
         &mut document,
         padded,
@@ -735,7 +809,23 @@ fn adjacent_runs_written_without_whitespace_shape_as_one_uninterrupted_line() {
 /// box, so two siblings written with no whitespace between their tags still
 /// occupy separate lines, and a source newline plus indentation inside one
 /// collapses to a single space.
+///
+/// The collapse half is the browser's and does not hold for a `<text>`,
+/// which keeps the newline as a forced break and the indentation as spaces,
+/// as native Lynx does. So this replica is a DEVIATION;
+/// `adjacent_text_siblings_are_separate_blocks_that_keep_their_own_newlines`
+/// asserts what the engine renders, the block half included.
 #[test]
+#[ignore = "DEVIATION, not a missing feature: this engine follows native \
+            Lynx, by the user's ruling of 2026-10-16. A `<text>` does no CSS \
+            white-space processing on any native backend \
+            (`raw_text_element.cc:16-46`, Android \
+            `BaseTextShadowNode.java:494-498`, iOS \
+            `LynxBaseTextShadowNode.m:240-249`), so `\"Hello,\\n      web!\"` \
+            is two lines, the second indented: 200 by 40, not web-core's 220 \
+            by 20. \
+            `adjacent_text_siblings_are_separate_blocks_that_keep_their_own_newlines` \
+            asserts that and passes."]
 fn adjacent_text_siblings_are_separate_blocks_and_collapse_their_own_newlines() {
     let mut document = ahem_document();
     let column = child(
@@ -760,6 +850,34 @@ fn adjacent_text_siblings_are_separate_blocks_and_collapse_their_own_newlines() 
         (0.0, 20.0),
         "no whitespace between the tags, and still two boxes: a text is not an \
          inline element"
+    );
+}
+
+/// The native half of `x-text/text-is-block-element`
+/// (`adjacent_text_siblings_are_separate_blocks_and_collapse_their_own_newlines`):
+/// in a `<text>` the source newline is a forced break and the six spaces of
+/// indentation after it stay, so `"Hello,\n      web!"` is `"Hello,"` over
+/// `"      web!"` — ten squares wide, two lines tall — and the sibling block
+/// still follows it down.
+#[test]
+fn adjacent_text_siblings_are_separate_blocks_that_keep_their_own_newlines() {
+    let mut document = ahem_document();
+    let column = child(
+        &mut document,
+        "view",
+        "display: flex; flex-direction: column",
+    );
+    let first = element_under(&mut document, column, "text", "font-size: 20px");
+    literal(&mut document, first, "Hello,\n      web!");
+    let second = element_under(&mut document, column, "text", "font-size: 20px");
+    literal(&mut document, second, "Hello, Speedy!");
+    document.layout();
+
+    assert_eq!(ink(&document, first), (10.0 * 20.0, 2.0 * 20.0));
+    assert_eq!(
+        (frame(&document, first).1, frame(&document, second).1),
+        (0.0, 40.0),
+        "two boxes, the second below the first's two lines"
     );
 }
 
@@ -833,13 +951,16 @@ fn a_flex_view_inside_a_text_shrinks_to_fit_and_stays_on_the_line() {
 /// for atomic children restored after a content replacement and gave the
 /// paragraph a commit-goal path through `compute_inline_box_layout`
 /// (`crates/dom/src/layout/text_block.rs:596-603`).
+///
+/// The fixture's markup indentation is written the way a compiled card
+/// carries it — what the browser's collapsing leaves of it, as literal text —
+/// because a `<text>` keeps its text verbatim (module doc).
 #[test]
 fn a_raw_text_carrier_contributes_a_run_and_no_box_of_its_own() {
     let mut document = ahem_document();
     let text = child(&mut document, "text", "font-size: 24px; color: blue");
-    literal(&mut document, text, "\n    ");
     let carrier = raw_text(&mut document, text, "abcd");
-    literal(&mut document, text, "\n    ");
+    literal(&mut document, text, " ");
     let inline = image(&mut document, text, "width: 22px; height: 22px");
     document.layout();
 
@@ -876,22 +997,25 @@ fn a_raw_text_carrier_contributes_a_run_and_no_box_of_its_own() {
 /// `the_image_beside_a_wrapped_carrier_is_a_real_box_on_the_line`, so that a
 /// passing control comparison can never stand in for it: while both atoms were
 /// zero-size a control comparison held over two invisible boxes.
+///
+/// The fixture's markup indentation is written the way a compiled card
+/// carries it — what the browser's collapsing leaves of it, as literal text —
+/// because a `<text>` keeps its text verbatim (module doc). The wrapped tree's
+/// indentation sits inside the wrapper in the markup, and a browser collapses
+/// it with its neighbours into the one space before the image; a card carries
+/// none inside the wrapper.
 #[test]
 fn a_wrapper_between_a_text_and_a_raw_text_carrier_changes_nothing() {
     let mut document = ahem_document();
     let plain = child(&mut document, "text", "font-size: 24px; color: blue");
-    literal(&mut document, plain, "\n    ");
     raw_text(&mut document, plain, "abcd");
-    literal(&mut document, plain, "\n    ");
+    literal(&mut document, plain, " ");
     let direct = image(&mut document, plain, "width: 22px; height: 22px");
 
     let wrapped = child(&mut document, "text", "font-size: 24px; color: blue");
-    literal(&mut document, wrapped, "\n    ");
     let wrapper = element_under(&mut document, wrapped, "wrapper", "");
-    literal(&mut document, wrapper, "\n      ");
     let carrier = raw_text(&mut document, wrapper, "abcd");
-    literal(&mut document, wrapper, "\n    ");
-    literal(&mut document, wrapped, "\n    ");
+    literal(&mut document, wrapped, " ");
     let through = image(&mut document, wrapped, "width: 22px; height: 22px");
     document.layout();
 
@@ -966,18 +1090,22 @@ fn the_image_beside_a_wrapped_carrier_is_a_real_box_on_the_line() {
 /// paragraph's measure rather than about a `display` toggle. Its positive
 /// twin, `truncation_content_is_laid_in_at_the_clamp_a_maxline_overflows`,
 /// declares a `text-maxline` the same paragraph overflows.
+///
+/// The fixture's markup indentation is written the way a compiled card
+/// carries it — what the browser's collapsing leaves of it, as literal text —
+/// because a `<text>` keeps its text verbatim (module doc).
 #[test]
 fn truncation_content_is_skipped_entirely_when_no_maxline_is_declared() {
     const PARAGRAPH: &str = "width: 200px; font-size: 16px";
 
     let mut document = ahem_document();
     let text = child(&mut document, "text", PARAGRAPH);
-    literal(&mut document, text, "\n  hello world\n  ");
+    literal(&mut document, text, "hello world ");
     let truncation = element_under(&mut document, text, "inline-truncation", "");
     literal(&mut document, truncation, "!!!!!!!");
 
     let without = child(&mut document, "text", PARAGRAPH);
-    literal(&mut document, without, "\n  hello world\n  ");
+    literal(&mut document, without, "hello world ");
     document.layout();
 
     assert_eq!(
@@ -1529,6 +1657,12 @@ fn wrapping_every_string_in_a_raw_text_changes_neither_the_runs_nor_the_clamp() 
 /// background and radius are paint. `rounded_layout` snaps the centred item's
 /// half-pixel cross offset to the device grid, which is why the y is 12 and not
 /// the 11.5 the unrounded box carries.
+///
+/// The fixture's markup indentation is written the way a compiled card
+/// carries it — what the browser's collapsing leaves of it, as literal text —
+/// because a `<text>` keeps its text verbatim (module doc). The trailing
+/// space that collapsing leaves still hangs, as native Lynx hangs trailing
+/// whitespace.
 #[test]
 fn a_text_block_as_a_flex_item_sizes_to_its_run_and_is_centred_not_stretched() {
     let mut document = ahem_document();
@@ -1544,7 +1678,7 @@ fn a_text_block_as_a_flex_item_sizes_to_its_run_and_is_centred_not_stretched() {
         "text",
         "font-size: 15px; line-height: 21px; font-weight: 500",
     );
-    literal(&mut document, text, "abcdef\n    ");
+    literal(&mut document, text, "abcdef ");
     document.layout();
 
     assert_eq!(

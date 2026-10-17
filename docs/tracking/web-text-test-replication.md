@@ -17,29 +17,30 @@ must "render and behave the same as [it does] under `web-core` today", and
 explicitly *not* by "reimplementing Android/iOS native platform code paths".
 Where native Lynx and `web-core` disagree, the replicas assert `web-core`.
 [Native ↔ web conflicts](#native--web-conflicts) lists every disagreement found.
-Three of them were put to the user and decided *against* the default: the
+Four of them were put to the user and decided *against* the default: the
 truncation marker gate, see
 [A0](#a0-truncation-marker-gating--ruled-not-a-gap); `tail-color-convert`, see
-[A1](#a1-tail-color-convert--ruled-not-a-gap); and `text-maxline="1"` geometry,
-see [F](#f-recorded-deviations-not-gaps).
+[A1](#a1-tail-color-convert--ruled-not-a-gap); `text-maxline="1"` geometry,
+see [F](#f-recorded-deviations-not-gaps); and white space in a `text`, see
+[conflict 9](#9-white-space-in-a-text).
 
 ## The suite
 
 | File | Cases | Passing | Gap-ignored |
 | --- | --- | --- | --- |
-| [`crates/hughie/tests/web_text_replication.rs`](../../crates/hughie/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 17 | 3 |
-| [`crates/bobcat-core/src/main/tree/web_text_replication.rs`](../../crates/bobcat-core/src/main/tree/web_text_replication.rs) | the `<text>` element, its UA sheet and its attributes | 35 | 3 |
+| [`crates/hughie/tests/web_text_replication.rs`](../../crates/hughie/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 18 | 3 |
+| [`crates/bobcat-core/src/main/tree/web_text_replication.rs`](../../crates/bobcat-core/src/main/tree/web_text_replication.rs) | the `<text>` element, its UA sheet and its attributes | 46 | 4 |
 | [`crates/bobcat-core/src/main/runtime/web_text_replication.rs`](../../crates/bobcat-core/src/main/runtime/web_text_replication.rs) | the Element PAPI: content, restyle, truncation, `setNativeProps`, layout events | 15 | 6 |
 | [`crates/dom/tests/web_text_replication.rs`](../../crates/dom/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph, atom and inline-background paint | 27 | 0 |
 | [`crates/dom/tests/web_text_screenshots.rs`](../../crates/dom/tests/web_text_screenshots.rs) | golden screenshots — the originals' own oracle, for the cases whose claim is visual | 12 | 0 |
-| [`crates/bobcat-source/tests/web_text_css_replication.rs`](../../crates/bobcat-source/tests/web_text_css_replication.rs) | text CSS across the `.web.bundle` wire | 9 | 0 |
-| **Total** | | **115** | **12** |
+| [`crates/bobcat-source/tests/web_text_css_replication.rs`](../../crates/bobcat-source/tests/web_text_css_replication.rs) | text CSS across the `.web.bundle` wire | 10 | 0 |
+| **Total** | | **128** | **13** |
 
 A gap-ignored test asserts the `web-core` behavior and is marked
 `#[ignore = "GAP: …"]` naming the cause with a `file:line`. It is a real
 assertion, never weakened — run any file with `-- --ignored` and every one of
-the 12 fails on the assertion its own string names, so no ignore is masking a
-test that would now pass. Four of the 12 are marked `DEVIATION` instead: they
+the 13 fails on the assertion its own string names, so no ignore is masking a
+test that would now pass. Six of the 13 are marked `DEVIATION` instead: they
 assert `web-core` against a ruling that this engine follows native Lynx, and
 are listed in [F](#f-recorded-deviations-not-gaps).
 
@@ -442,7 +443,7 @@ reaches no second record.
 | # | Gap | Cause |
 | --- | --- | --- |
 | C1 | A run's `line-height` is taken from the style of the **next** span | Upstream parley: `shape/mod.rs:127-128` advances `item.style_index` before flushing the pending item, so the last span's `line-height` governs every line. Observed as a truncation flow's `line-height` rewriting lines *before* the cut. |
-| C2 | Leading collapsible whitespace is emitted, not removed | `crates/hughie/src/text/paragraph/content.rs:460` — `PendingKind::Space => true` emits unconditionally with no start-of-line suppression under `WhiteSpaceProcessing::CssKeepingLeadingSpace`, the `<text>` block's processing. The CSS inline formatting context (`hughie::text::inline`) processes with `WhiteSpaceProcessing::Css`, which removes the sequence; `<text>` keeps the gap until its own white-space processing changes. |
+| C2 | *Ruled, not a gap (user, 2026-10-16):* a `<text>` keeps its leading spaces | A `<text>` does no CSS white-space processing, as on every native backend: its paragraph is built with `WhiteSpaceProcessing::Verbatim` (`crates/hughie/src/text/paragraph/content.rs`), selected by the UA rule `text { --lynx-verbatim-white-space: 1; }`, so leading spaces, space runs, tabs and newlines all stay. `collapsible_whitespace_is_removed_at_the_start_of_a_line` keeps asserting web-core's 110 and is ignored as a DEVIATION; `leading_spaces_stay_in_a_text_the_way_native_lynx_keeps_them` asserts the 130 (`crates/hughie/tests/web_text_replication.rs`). The emit-without-removal behaviour this row used to record survives only as `WhiteSpaceProcessing::CssKeepingLeadingSpace`, the processing of a `display: -lynx-text` paragraph that is no `<text>` — a `<markdown>` shadow paragraph. The CSS inline formatting context (`hughie::text::inline`) processes with `WhiteSpaceProcessing::Css`, which removes the sequence. See [F](#f-recorded-deviations-not-gaps) and [conflict 9](#9-white-space-in-a-text). |
 
 ### D. Paint — closed
 
@@ -580,6 +581,22 @@ Each blocks replicas that could not be written at all.
   `an_atoms_margins_reach_the_line_and_step_its_border_box_in`
   (`crates/dom/tests/web_text_replication.rs`); see
   [`deviations.md`](deviations.md).
+- **C2. A `<text>` keeps its white space verbatim.**
+  **Ruled (user, 2026-10-16): this engine follows native Lynx here**
+  ([conflict 9](#9-white-space-in-a-text)). Three replicas assert `web-core`'s
+  collapsing and stay `#[ignore]`d, marked DEVIATION rather than GAP, each with
+  a passing native companion:
+  `collapsible_whitespace_is_removed_at_the_start_of_a_line` (companion
+  `leading_spaces_stay_in_a_text_the_way_native_lynx_keeps_them`, hughie),
+  `a_text_nested_in_a_text_is_an_inline_run_that_scopes_only_its_own_colour`
+  (companion `a_nested_text_run_keeps_the_markup_s_newlines_in_a_text`) and
+  `adjacent_text_siblings_are_separate_blocks_and_collapse_their_own_newlines`
+  (companion
+  `adjacent_text_siblings_are_separate_blocks_that_keep_their_own_newlines`),
+  both in `crates/bobcat-core/src/main/tree/web_text_replication.rs`. Nine
+  more replicas there whose claim is not the collapsing carry the fixture's
+  indentation the way a compiled card does — as the literal text the browser's
+  collapsing leaves — and say so in their doc comments.
 - `var()` inside an `@font-face` descriptor is not substituted. Correct per
   css-variables-1 §3; the browser `web-core` runs on behaves identically.
 - `x-text`, `inline-image` and `inline-text` are `web-core`'s *HTML* mappings of
@@ -626,8 +643,8 @@ failure mode is easy to reintroduce.
 
 ## Native ↔ web conflicts
 
-`AGENTS.md` resolves these to `web-core` by default. Conflicts 1, 3 and 7 were
-put to the user and decided the other way; conflict 8 was put to the user and
+`AGENTS.md` resolves these to `web-core` by default. Conflicts 1, 3, 7 and 9
+were put to the user and decided the other way; conflict 8 was put to the user and
 confirmed as `web-core`; the rest stand as `web-core`.
 
 ### 1. Truncation marker gating
@@ -707,6 +724,27 @@ every fragment (`box-decoration-break: clone` where the web default is `slice`,
 and the fork has no property to say otherwise), and an atomic inline box inside
 a scope is unioned into its fragment on both axes where a browser would let a
 taller atom overflow the band.
+
+### 9. White space in a `text`
+
+| | Behavior | Evidence |
+| --- | --- | --- |
+| native | None processed: the string reaches the platform engine as written, so space runs, leading spaces, tabs and newlines all stay; a tab stops every 20px on Android; `white-space` parses as `normal` or `nowrap` only, and under `nowrap` Android deletes everything from the first newline; a newline that ends the text leaves an empty last line in Android's `StaticLayout`, counted in the measured height | `lynx/core/renderer/dom/fiber/raw_text_element.cc:16-46`; `lynx/core/renderer/css/parser/enum_handler.cc:76-89`; Android `BaseTextShadowNode.java:494-498`, `TextRenderer.java:720`, `TextRenderer.java:850-867`; iOS `LynxBaseTextShadowNode.m:240-249`, `LynxTextRenderer.m:1024-1025`; textra `text_layout_textra.cc:569-575` |
+| web-core | css-text-3 in the browser: runs collapse, a space at a line start is removed, and only `raw-text` keeps newlines (`white-space-collapse: preserve-breaks`) | `packages/web-platform/web-elements/src/elements/XText/x-text.css:261-265` |
+| lynx-vello | Verbatim — **matches native** (Android for tabs, the `nowrap` cut and the empty last line) | `WhiteSpaceProcessing::Verbatim` in `crates/hughie/src/text/paragraph/content.rs`, `TabStops::Native` in `crates/hughie/src/text/paragraph/tab.rs`, the UA rule in `crates/bobcat-core/src/main/tree/text.rs` |
+
+**Decided (user, 2026-10-16): a `text` follows native.** `<markdown>`'s
+`-lynx-text` paragraphs are not `text` and keep collapsing. Replicas whose
+claim is the browser's collapsing are DEVIATIONs with native companions (F);
+replicas whose claim is something else write the fixture's indentation the way
+a compiled card carries it, which the tree replication file's module doc
+explains. Two follow-up rulings (user, 2026-10-16) also follow native:
+`white-space: pre`, `pre-wrap`, `pre-line` and `break-spaces` on a `text`
+wrap with every line shown, as native's dropped keyword leaves them, and only
+`nowrap` cuts at the first newline; and a newline that ends the text adds an
+empty last line, as Android's does (iOS and Harmony unconfirmed). Whether
+iOS's one-line limit marks the hidden lines with a tail ellipsis stays
+unconfirmed (`docs/tracking/deviations.md`, Text layout).
 
 ## Not replicated
 

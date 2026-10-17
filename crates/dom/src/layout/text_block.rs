@@ -438,14 +438,16 @@ pub(crate) fn refresh<T>(
         })
         .collect();
 
-    // Only the values parley *shapes* from force a new paragraph. Alignment
-    // and truncation are applied to a finished layout, so a change there is a
-    // re-break at most — which is the whole point of keeping the two evictions
-    // apart.
+    // Only the values parley *shapes* from force a new paragraph — the
+    // verbatim switch and `text-wrap-mode` among them, because together they
+    // choose how the text is normalized. Alignment and truncation are applied
+    // to a finished layout, so a change there is a re-break at most — which is
+    // the whole point of keeping the two evictions apart.
     let needs_build = state.text_block(element).is_none_or(|store| {
         store.fingerprint != stamp
             || store.style.word_break != style.word_break
             || store.style.text_wrap != style.text_wrap
+            || store.style.verbatim != style.verbatim
             || store.run_styles != run_styles
     });
 

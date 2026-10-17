@@ -992,3 +992,24 @@ fn a_freed_host_drops_its_state() {
     assert!(document.get(element).is_none());
     assert_eq!(count(&mut document), "1");
 }
+
+/// A markdown paragraph is a `-lynx-text` paragraph but no `text`, so the UA
+/// sheet's `--lynx-verbatim-white-space` does not reach it: its soft line
+/// break is a `"\n"` text node that css-text-3 collapses to one space, as
+/// the browser does with web-core's `<p>`.
+#[test]
+fn a_paragraph_s_soft_break_still_collapses_to_a_space() {
+    let (document, _events, element) = rendered("a\nb");
+    let paragraph = first(&document, element, "p");
+    let flag = style_of(&document, paragraph)
+        .custom_properties()
+        .non_inherited
+        .get(&dom::stylo::custom_properties::Name::from(
+            "lynx-verbatim-white-space",
+        ))
+        .map_or_else(|| "0".to_owned(), |value| value.to_variable_value().css);
+    assert_eq!(flag, "0", "the flag is set on `text` only");
+    assert_eq!(document.paragraph_of(paragraph), Some(paragraph));
+    let size = document.text_block_size(paragraph).unwrap();
+    assert_eq!((size.width, size.height), (30.0, 14.0));
+}

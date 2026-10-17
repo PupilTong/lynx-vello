@@ -219,7 +219,8 @@ fn lines_stack_by_their_own_heights() {
 #[test]
 fn collapsible_whitespace_is_removed_at_the_start_of_the_paragraph_and_after_a_break() {
     let style = ahem(10.0, LineHeight::Normal);
-    // css-text-3 §4.1.2 rule 1. The Lynx block keeps one space here (gap C2).
+    // css-text-3 §4.1.2 rule 1. A Lynx block that is no `<text>` keeps one
+    // space here, and a `<text>` keeps the whole run verbatim.
     let flow = committed(
         container(style.clone()),
         &[run(&style, "  \n  aa bb")],
