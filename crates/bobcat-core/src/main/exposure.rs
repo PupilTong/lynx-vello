@@ -113,9 +113,11 @@
 //!
 //! # How a registration is held
 //!
-//! An element is registered while it has a non-empty `exposure-id` or the
+//! An element is registered while it has a non-empty `exposure-id` or some
 //! realm has filed a `uiappear`/`uidisappear` handler on it, which the
-//! realm reports through the `exposureEvents` host member. Each
+//! document's listener table answers: the host tells this module on each
+//! change of that answer, as the realm reports a registration
+//! (`listenerOpened`/`listenerClosed`). Each
 //! registration owns one observer — root the viewport, one threshold, the
 //! element's `exposure-area`, and the root and target margins its margins
 //! fold into — whose handler, [`ExposureHandler`], compares what the
@@ -585,8 +587,9 @@ impl Exposure {
         self.update(document, node, listens);
     }
 
-    /// The realm's `exposureEvents`: whether the live element `node` has a
-    /// `uiappear`/`uidisappear` handler, reported on each change.
+    /// Whether the live element `node` has a `uiappear`/`uidisappear`
+    /// registration in the document's listener table, told on each change of
+    /// that answer.
     pub(crate) fn set_listens(&mut self, document: &mut LynxDocument, node: NodeId, wants: bool) {
         self.update(document, node, wants);
     }

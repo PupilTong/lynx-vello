@@ -66,6 +66,19 @@ use crate::view::ScriptSource;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ChildKey(u64);
 
+impl ChildKey {
+    /// The registrant this child's event registrations are filed under in
+    /// the document's listener table ([`dom::event::ListenerKey`]): the key's
+    /// own number. [`ChildRealms`] hands keys out from 1, so no child is ever
+    /// [`dom::event::ListenerKey`]`(0)`, which is the page realm's; and since
+    /// a key is never reused, a released child's rows can never be read as a
+    /// newer child's.
+    pub(crate) fn listener_key(self) -> dom::event::ListenerKey {
+        debug_assert_ne!(self.0, 0, "child keys start at 1");
+        dom::event::ListenerKey(self.0)
+    }
+}
+
 /// One `ShadowRealm` child: its realm, the two tables its core members
 /// write to, and what its owner's host modules keep for it.
 pub(crate) struct ChildRealm {
@@ -101,6 +114,8 @@ impl ChildRealms {
     pub(crate) fn new() -> Self {
         Self {
             live: RefCell::new(Vec::new()),
+            // From 1: 0 is the page realm's listener key
+            // ([`ChildKey::listener_key`]).
             next: Cell::new(1),
         }
     }
@@ -126,7 +141,8 @@ impl ChildRealms {
         ChildKey(id)
     }
 
-    fn keys(&self) -> Vec<ChildKey> {
+    /// Every live child's key, in construction order.
+    pub(crate) fn keys(&self) -> Vec<ChildKey> {
         self.live.borrow().iter().map(|child| child.key).collect()
     }
 

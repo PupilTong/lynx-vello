@@ -31,7 +31,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use dom::event::EventDetail;
+use dom::event::{EventDetail, ListenerEdge, ListenerKey, ListenerKinds};
 use dom::{MethodCall, MethodError, MethodOutcome, StylePool};
 use quickjs_rust_bridge::{HostArgument, HostValue};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -61,6 +61,20 @@ use crate::view::{LynxViewError, ScreenMetrics, ScriptSource, StartupSource, Vie
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
+
+/// The registrant the page realm's event registrations are filed under in
+/// the document's listener table. A `ShadowRealm` child's is its
+/// [`ChildKey::listener_key`], which is never 0.
+const PAGE_REALM: ListenerKey = ListenerKey(0);
+
+/// The event names whose listeners are the document's rather than a path's:
+/// every realm with any registration for one of them is called at the
+/// document element, as web-core adds its listener for these on `document`
+/// rather than on the view's shadow root (`WASMJSBinding.ts:262-282`). The
+/// target of either is the document element already (there is no focus
+/// model), so a realm whose root is elsewhere — a `frame`'s card — hears it
+/// with no step of its own and runs its `global-bindEvent` pass alone.
+const DOCUMENT_LEVEL_EVENTS: [&str; 2] = ["keydown", "keyup"];
 /// The `bobcat:frame` exports a `frame`'s connection and disconnection are
 /// handed to; see [`MainThreadRuntime::dispatch_component_events`].
 const FRAME_CONNECTED_EXPORT: &str = "__BobcatFrameConnected";
@@ -169,6 +183,112 @@ fn push_detail_strings<'a>(
 /// input event's discriminator and eight detail numbers. Extras and touch
 /// points spill.
 type Arguments<'a> = SmallVec<[HostArgument<'a>; 15]>;
+
+/// One realm one dispatch calls: which, at which node's capture step, and
+/// its part of the path, encoded as the call carries it.
+struct RealmCall {
+    /// The child to call, or `None` for the page realm.
+    child: Option<ChildKey>,
+    /// The registrant the realm's registrations are filed under.
+    key: ListenerKey,
+    /// The node at whose capture step the realm is called.
+    at: dom::NodeId,
+    /// The steps the realm is handed, target first, as comma-joined packed
+    /// node ids: each step's node, then the target that step sees.
+    nodes: String,
+    targets: String,
+}
+
+/// The realms a dispatch of `name` over `steps` calls, in the order they are
+/// considered — the page realm, then `children` in construction order — each
+/// with where it is called and what it is handed; see
+/// [`MainThreadRuntime::dispatch`] for the rules. A realm whose call step is
+/// not on the path is left out.
+///
+/// Built while the document is borrowed and before the walk takes a step, so
+/// the parts are encoded against the tree the path was computed over, which
+/// is the standard's rule: the path is fixed when the dispatch begins.
+fn realm_calls(
+    slot: &DocumentSlot,
+    document: &LynxDocument,
+    steps: &dom::event::EventSteps,
+    name: &str,
+    children: &[ChildKey],
+) -> SmallVec<[RealmCall; 2]> {
+    let mut calls = SmallVec::new();
+    let capture: SmallVec<[&dom::event::EventStep; 16]> =
+        steps.steps().iter().filter(|step| step.capture).collect();
+    let Some(top) = capture.first().map(|step| step.node) else {
+        return calls;
+    };
+    let on_path = document.listeners_on_path(steps, name);
+    let document_level = DOCUMENT_LEVEL_EVENTS.contains(&name);
+    let invited = |key: ListenerKey| {
+        on_path.contains(&key)
+            || document.realm_has_global(key, name)
+            || (document_level && document.realm_registration_counts(key, name) != (0, 0))
+    };
+    // The page realm answers for the document tree, and for a detached tree:
+    // its call is at the path's own root, unless that root is a shadow root,
+    // where a non-composed event inside a shadow tree ends.
+    if invited(PAGE_REALM) && document.shadow_root_of(top).is_none() {
+        calls.extend(realm_call(document, &capture, None, PAGE_REALM, top, None));
+    }
+    for &child in children {
+        let key = child.listener_key();
+        let Some(&root) = slot.roots.get(&key) else {
+            continue;
+        };
+        if !invited(key) {
+            continue;
+        }
+        let at = if document_level {
+            dom::NodeId::DOCUMENT_ELEMENT
+        } else {
+            root
+        };
+        let tree = document.shadow_root_of(root);
+        calls.extend(realm_call(document, &capture, Some(child), key, at, tree));
+    }
+    calls
+}
+
+/// One [`RealmCall`] at `at`'s capture step, handed the capture steps from
+/// there inward that are in the tree `tree` roots (`None`: the document tree
+/// or a detached one), target first. `None` when `at` is not on the path.
+fn realm_call(
+    document: &LynxDocument,
+    capture: &[&dom::event::EventStep],
+    child: Option<ChildKey>,
+    key: ListenerKey,
+    at: dom::NodeId,
+    tree: Option<dom::NodeId>,
+) -> Option<RealmCall> {
+    let from = capture.iter().position(|step| step.node == at)?;
+    let mut nodes = String::new();
+    let mut targets = String::new();
+    // The capture pass read backwards is the path, target first, whatever
+    // `bubbles` cut from the bubble pass.
+    for step in capture[from..]
+        .iter()
+        .rev()
+        .filter(|step| document.shadow_root_of(step.node) == tree)
+    {
+        if !nodes.is_empty() {
+            nodes.push(',');
+            targets.push(',');
+        }
+        write!(nodes, "{}", packed_node_id(step.node)).expect("writing to a String");
+        write!(targets, "{}", packed_node_id(step.target)).expect("writing to a String");
+    }
+    Some(RealmCall {
+        child,
+        key,
+        at,
+        nodes,
+        targets,
+    })
+}
 
 /// Appends the extras channel: the count, then each name and its value.
 fn encode_extras<'a>(extras: Extras<'a>, arguments: &mut Arguments<'a>) {
@@ -326,6 +446,44 @@ impl MainThreadError {
 impl fmt::Display for MainThreadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}: {}", self.context, self.source)
+    }
+}
+
+/// What one dispatch's listeners threw: one failure per realm call that
+/// failed, in the order the calls ran, never empty.
+///
+/// A dispatch calls each realm that listens on its path once, and a realm
+/// whose listener throws does not keep the rest of the walk — the other
+/// realms, the components after it — from running, so one dispatch can fail
+/// more than once. Every failure is kept, for the caller to report each.
+#[derive(Debug)]
+pub(crate) struct ListenerFailures(SmallVec<[MainThreadError; 1]>);
+
+impl ListenerFailures {
+    /// Every failure, in the order the calls that failed ran.
+    pub(crate) fn into_errors(self) -> impl Iterator<Item = MainThreadError> {
+        self.0.into_iter()
+    }
+
+    /// `failures` as a dispatch's answer: `Ok(called)` when there are none.
+    fn or_called(failures: SmallVec<[MainThreadError; 1]>, called: bool) -> Result<bool, Self> {
+        if failures.is_empty() {
+            Ok(called)
+        } else {
+            Err(Self(failures))
+        }
+    }
+}
+
+impl fmt::Display for ListenerFailures {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, failure) in self.0.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str("; ")?;
+            }
+            write!(formatter, "{failure}")?;
+        }
+        Ok(())
     }
 }
 
@@ -573,15 +731,22 @@ struct DocumentSlot {
     exposure: Exposure,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
-    /// The event names the view's realms have a registration for anywhere,
-    /// as their global edges said, each with how many realms hold it: the
-    /// page realm and every `ShadowRealm` child a `frame` renders in, so a
-    /// frame realm that closes `tap` leaves the page's `tap` open.
-    listened: FxHashMap<Arc<str>, u32>,
+    /// The page each `ShadowRealm` child answers as, by the registrant its
+    /// event registrations are filed under: the nested page its
+    /// `framePage` handed it, which `bobcat:frame-boot` makes the child's
+    /// page root. The one fact about a realm a dispatch needs and the
+    /// document cannot answer, because which realm renders under which page
+    /// is the realms' own business: the step at that page is where the child
+    /// is called ([`MainThreadRuntime::dispatch`]). Written by a child's
+    /// `framePage`, removed when the child closes or is freed
+    /// ([`Self::forget_realm`]); the page realm's root is the document
+    /// element, which needs no entry. One entry per live frame card.
+    roots: FxHashMap<ListenerKey, dom::NodeId>,
     /// The event names the document's components observe on an element that
     /// exists, as [`dom::Document::take_observed_name_edges`] said when last
-    /// drained ([`Self::sync_observed_names`]). With [`Self::listened`], this
-    /// thread's copy of what the painter routes against ([`Self::routes`]).
+    /// drained ([`Self::sync_names`]). With the document's listener
+    /// table ([`dom::Document::has_listeners_for`]), what the painter routes
+    /// against ([`Self::routes`]).
     observed: FxHashSet<&'static str>,
     /// The scroll containers that have scrolled since the painter last
     /// posted them at rest: an adopted offset moved them, or a script-facing
@@ -620,7 +785,7 @@ impl DocumentSlot {
             autoplays: Autoplays::default(),
             exposure: Exposure::new(),
             removals: 0,
-            listened: FxHashMap::default(),
+            roots: FxHashMap::default(),
             observed: FxHashSet::default(),
             scrolling: SmallVec::new(),
             outbox,
@@ -732,48 +897,203 @@ impl DocumentSlot {
         }
     }
 
-    /// Whether anything hears `name`: a realm registration anywhere, or an
-    /// element of a component that observes it. Two set lookups.
+    /// Whether anything hears `name`: a realm registration anywhere, in the
+    /// document's listener table, or an element of a component that observes
+    /// it. Two lookups.
+    ///
+    /// Not [`dom::Document::hears`], which reads the observing *definitions*
+    /// rather than their live elements: a UA definition that observes
+    /// `scroll` would make every scroll owe an event whether or not an
+    /// element of it exists. What is routed and what is queued follow the
+    /// live elements, as they did before the table existed;
+    /// [`MainThreadRuntime::dispatch`]'s own gate is the wider `hears`.
     fn listens(&self, name: &str) -> bool {
-        self.listened.contains_key(name) || self.observed.contains(name)
+        self.registered(name) || self.observed.contains(name)
     }
 
-    /// One global edge of one realm's listener-name count: `available` for a
-    /// name's first registration anywhere in that realm, not for the removal
-    /// of its last.
+    /// Whether any realm holds a registration for `name`, of any kind on any
+    /// node: the document's listener table. No document is no registration.
+    fn registered(&self, name: &str) -> bool {
+        self.document
+            .as_ref()
+            .is_some_and(|document| document.has_listeners_for(name))
+    }
+
+    /// A realm's `listenerOpened`: `key` listens for `name` on `node` in the
+    /// passes `kinds` names, replacing what it reported there before.
     ///
-    /// Counted here per realm holding the name, the page realm and every
-    /// frame realm, so only the union's edges — a name's first holder and
-    /// its last — change [`Self::listened`]; each realm's own edges are
-    /// deduplicated by its [`RealmListenerNames`]. Forwarded to the painter
-    /// as [`Self::change_names`] says.
-    fn listener_edge(&mut self, name: &str, available: bool) {
-        self.change_names(name, |slot| {
-            if available {
-                if let Some(holders) = slot.listened.get_mut(name) {
-                    *holders += 1;
-                } else {
-                    slot.listened.insert(Arc::from(name), 1);
-                }
-            } else if let Some(holders) = slot.listened.get_mut(name) {
-                *holders -= 1;
-                if *holders == 0 {
-                    slot.listened.remove(name);
-                }
+    /// The table's edge goes to the painter at once
+    /// ([`Self::forward_listener_edges`]), after the closes freed nodes left
+    /// waiting, so the painter always hears a name's edges in the order they
+    /// happened. A change of whether `node` has any registration for
+    /// `uiappear` or `uidisappear` is what registers it for exposure
+    /// detection, or lets it go ([`Exposure::set_listens`]); nothing else
+    /// tells exposure about a listener.
+    fn open_listener(
+        &mut self,
+        node: dom::NodeId,
+        name: &str,
+        kinds: ListenerKinds,
+        key: ListenerKey,
+    ) {
+        self.sync_listener_edges();
+        let exposure = is_exposure_event(name);
+        let document = self.document.as_mut().expect(DOCUMENT_EXISTS);
+        let heard = exposure && hears_exposure(document, node);
+        let edge = document.add_listener(node, name, kinds, key);
+        if exposure {
+            self.exposure_follows(node, heard);
+        }
+        self.forward_listener_edges(&[(name, edge)]);
+    }
+
+    /// A realm's `listenerClosed`: `key` no longer listens for `name` on
+    /// `node`, in any pass. As [`Self::open_listener`] for the edge and for
+    /// exposure.
+    fn close_listener(&mut self, node: dom::NodeId, name: &str, key: ListenerKey) {
+        self.sync_listener_edges();
+        let exposure = is_exposure_event(name);
+        let document = self.document.as_mut().expect(DOCUMENT_EXISTS);
+        let heard = exposure && hears_exposure(document, node);
+        let edge = document.remove_listener(node, name, key);
+        if exposure {
+            self.exposure_follows(node, heard);
+        }
+        self.forward_listener_edges(&[(name, edge)]);
+    }
+
+    /// Tells exposure whether `node` has a `uiappear`/`uidisappear`
+    /// registration now, when that answer is no longer `before`.
+    fn exposure_follows(&mut self, node: dom::NodeId, before: bool) {
+        let Self {
+            document, exposure, ..
+        } = self;
+        let document = document.as_mut().expect(DOCUMENT_EXISTS);
+        let now = hears_exposure(document, node);
+        if now != before {
+            exposure.set_listens(document, node, now);
+        }
+    }
+
+    /// The realm `key` is closing or has been freed: every registration it
+    /// filed leaves the table, each name that leaves unheard because of it
+    /// closes on the painter, and it has no root any more, so no later
+    /// dispatch calls it. Idempotent: a child that closed itself is
+    /// forgotten again, for nothing, when it is freed.
+    ///
+    /// The exposure registrations of its elements are not touched: they go
+    /// with the elements, which the frame's `resetFrame` frees.
+    fn forget_realm(&mut self, key: ListenerKey) {
+        self.roots.remove(&key);
+        self.sync_listener_edges();
+        let Some(document) = self.document.as_mut() else {
+            return;
+        };
+        let closed = document.remove_listeners_of(key);
+        let edges: SmallVec<[(&str, ListenerEdge); 4]> = closed
+            .iter()
+            .map(|name| (&**name, ListenerEdge::Closed))
+            .collect();
+        self.forward_listener_edges(&edges);
+    }
+
+    /// Applies the closes the document's free path left waiting
+    /// ([`dom::Document::take_listener_edges`]): a node freed by a removal or
+    /// a handle's collection takes its registrations with it, and no caller
+    /// was there to hand the edge to. One length check when no freed node
+    /// held a registration.
+    ///
+    /// Drained before every edge a member forwards, so the painter hears
+    /// each name's edges in order, and before every commit is published
+    /// ([`Self::sync_names`]) — the end of every entry, the epilogue's
+    /// [`Self::commit_if_dirty`], included — so a close a collection made in
+    /// an entry crosses before that entry's `ScriptFinished` does on the same
+    /// outbox FIFO, as the realm's own close did when the realm reported it.
+    fn sync_listener_edges(&mut self) {
+        let Some(document) = self.document.as_mut() else {
+            return;
+        };
+        let edges = document.take_listener_edges();
+        if edges.is_empty() {
+            return;
+        }
+        let edges: SmallVec<[(&str, ListenerEdge); 2]> =
+            edges.iter().map(|(name, edge)| (&**name, *edge)).collect();
+        self.forward_listener_edges(&edges);
+    }
+
+    /// Forwards to the painter what `edges` — changes the listener table has
+    /// already made, in the order it made them — move in what
+    /// [`Self::routes`] says, one edge at a time.
+    ///
+    /// The table is the only copy of which names are registered, so the
+    /// state the painter last heard is rebuilt from it: a name with an edge
+    /// not yet forwarded was registered before that edge exactly when the
+    /// edge is a close. That is why every caller drains the waiting closes
+    /// first ([`Self::sync_listener_edges`]): then the table and what the
+    /// painter heard differ by `edges` alone.
+    fn forward_listener_edges(&self, edges: &[(&str, ListenerEdge)]) {
+        for (index, &(name, edge)) in edges.iter().enumerate() {
+            if edge == ListenerEdge::None {
+                continue;
             }
-        });
+            let (pending, rest) = (&edges[index..], &edges[index + 1..]);
+            self.forward_routes(
+                name,
+                |name| self.registered_before(pending, name),
+                |name| self.registered_before(rest, name),
+            );
+        }
+    }
+
+    /// Whether `name` was registered with the edges in `unapplied` not yet
+    /// made: the first of them that names it decides, and with none the
+    /// table does.
+    fn registered_before(&self, unapplied: &[(&str, ListenerEdge)], name: &str) -> bool {
+        unapplied
+            .iter()
+            .find(|&&(pending, edge)| pending == name && edge != ListenerEdge::None)
+            .map_or_else(
+                || self.registered(name),
+                |&(_, edge)| edge == ListenerEdge::Closed,
+            )
+    }
+
+    /// Sends the painter the edges of [`Self::routes`] for `name` between a
+    /// registration state `before` and one `after`, the observed names
+    /// unchanged. An edge may move two of its names: `dblclick` is decided
+    /// here from the `click`s the painter sends, so opening it opens `click`
+    /// there too, and closing it closes `click` unless `click` itself is
+    /// wanted.
+    fn forward_routes(
+        &self,
+        name: &str,
+        before: impl Fn(&str) -> bool,
+        after: impl Fn(&str) -> bool,
+    ) {
+        let paired = (name == DOUBLE_CLICK_EVENT).then_some(CLICK_EVENT);
+        for routed in std::iter::once(name).chain(paired) {
+            let was = self.routes_given(routed, &before);
+            let now = self.routes_given(routed, &after);
+            if was != now {
+                self.outbox.listener_edge(Arc::from(routed), now);
+            }
+        }
     }
 
     /// Applies the observed-name edges the document recorded since the last
-    /// call, forwarding each to the painter as [`Self::change_names`] says.
+    /// call, forwarding each to the painter as [`Self::change_names`] says,
+    /// and then the listener table's waiting closes
+    /// ([`Self::sync_listener_edges`]).
     ///
     /// Called before every commit is published ([`Self::flush`],
     /// [`Self::commit_if_dirty`]): the edges cross in the mailbox the frame
     /// does, ahead of it, so the painter routes a name from the first frame
-    /// that shows the element observing it. One length check when nothing
-    /// was created or freed with a definition observing a name, and none
-    /// before the document exists.
-    fn sync_observed_names(&mut self) {
+    /// that shows the element observing it. One length check each when
+    /// nothing was created or freed with a definition observing a name or a
+    /// registration on it, and none before the document exists.
+    fn sync_names(&mut self) {
+        self.sync_listener_edges();
         let Some(document) = self.document.as_mut() else {
             return;
         };
@@ -789,16 +1109,12 @@ impl DocumentSlot {
         }
     }
 
-    /// Runs `change` on [`Self::listened`] or [`Self::observed`] for `name`,
-    /// then forwards to the painter whatever moved in what
-    /// [`Self::routes`] says: the painter's set is the union of the two
-    /// sides, so a name crosses open when either side first wants it and
-    /// closed when neither does, and a realm registration for a name an
-    /// element already observes moves nothing there.
-    ///
-    /// An edge may move two of its names: `dblclick` is decided here from
-    /// the `click`s the painter sends, so opening it opens `click` there
-    /// too, and closing it closes `click` unless `click` itself is wanted.
+    /// Runs `change` on [`Self::observed`] for `name`, then forwards to the
+    /// painter whatever moved in what [`Self::routes`] says: the painter's
+    /// set is the union of the two sides, so a name crosses open when either
+    /// side first wants it and closed when neither does, and a realm
+    /// registration for a name an element already observes moves nothing
+    /// there. The `dblclick` pairing is [`Self::forward_routes`]'s.
     fn change_names(&mut self, name: &str, change: impl FnOnce(&mut Self)) {
         let paired = (name == DOUBLE_CLICK_EVENT).then_some(CLICK_EVENT);
         let before = (self.routes(name), paired.map(|paired| self.routes(paired)));
@@ -817,7 +1133,14 @@ impl DocumentSlot {
     /// registration or a live component element wants it
     /// ([`Self::listens`]), or, for `click`, a `dblclick`.
     fn routes(&self, name: &str) -> bool {
-        self.listens(name) || (name == CLICK_EVENT && self.listens(DOUBLE_CLICK_EVENT))
+        self.routes_given(name, &|name| self.registered(name))
+    }
+
+    /// [`Self::routes`] with `registered` answering which names a realm
+    /// registration holds.
+    fn routes_given(&self, name: &str, registered: &impl Fn(&str) -> bool) -> bool {
+        let wants = |name: &str| registered(name) || self.observed.contains(name);
+        wants(name) || (name == CLICK_EVENT && wants(DOUBLE_CLICK_EVENT))
     }
 
     /// An exposure attribute of the live element `node` was written or
@@ -827,14 +1150,6 @@ impl DocumentSlot {
             document, exposure, ..
         } = self;
         exposure.attribute_changed(document.as_mut().expect(DOCUMENT_EXISTS), node);
-    }
-
-    /// The realm's `exposureEvents`; see [`Exposure::set_listens`].
-    fn exposure_events(&mut self, node: dom::NodeId, wants: bool) {
-        let Self {
-            document, exposure, ..
-        } = self;
-        exposure.set_listens(document.as_mut().expect(DOCUMENT_EXISTS), node, wants);
     }
 
     /// The realm's `switchExposure`; see [`Exposure::switch`].
@@ -905,7 +1220,7 @@ impl DocumentSlot {
         // is then already at its size rather than held and recomputed.
         self.settle_sheets(thread)?;
         self.adopt_metrics();
-        self.sync_observed_names();
+        self.sync_names();
         let frame = self.document_mut().commit();
         if self.bound {
             // A frame held from before the binding is older than this one, and
@@ -992,7 +1307,7 @@ impl DocumentSlot {
     fn commit_if_dirty(&mut self) {
         // Before the sheets' check: the names an element observes are routed
         // whether or not this entry commits.
-        self.sync_observed_names();
+        self.sync_names();
         if !self.sheets.is_empty() || self.failed_sheet.is_some() {
             return;
         }
@@ -1228,7 +1543,7 @@ impl MainThreadRuntime {
             Some(Rc::clone(&document) as Rc<dyn ChildHostModules>),
             |engine| {
                 document
-                    .install_members(engine, startup_strings(&mut startup), None)
+                    .install_members(engine, startup_strings(&mut startup), PAGE_REALM, None)
                     .map_err(MainThreadError::into_script_error)?;
                 // The transport alone: the view's modules are the BTS's, and
                 // this realm has no `NativeModules`. What the transport is
@@ -1797,7 +2112,7 @@ impl MainThreadRuntime {
                 &EventDetail::None,
                 &extras,
             ) {
-                failures.push(error);
+                failures.extend(error.into_errors());
             }
         }
         failures
@@ -1872,7 +2187,7 @@ impl MainThreadRuntime {
         name: &str,
         payload: &InputEventPayload,
         release: Option<dom::NodeId>,
-    ) -> Result<bool, MainThreadError> {
+    ) -> Result<bool, ListenerFailures> {
         if let Some(release) = release {
             return self.dispatch_click(js_runtime, target, release, payload);
         }
@@ -1911,7 +2226,7 @@ impl MainThreadRuntime {
         down: dom::NodeId,
         release: dom::NodeId,
         payload: &InputEventPayload,
-    ) -> Result<bool, MainThreadError> {
+    ) -> Result<bool, ListenerFailures> {
         let (target, click, double) = {
             let slot = self.slot.borrow();
             let Some(document) = slot.document.as_ref() else {
@@ -1964,41 +2279,78 @@ impl MainThreadRuntime {
         } else {
             Ok(false)
         };
-        // A `click` listener that threw is the failure reported; the
-        // `dblclick` still ran.
+        // What a `click` listener threw does not keep the `dblclick` from
+        // running, and both are answered, the `click`'s first.
         match (clicked, doubled) {
-            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
             (Ok(clicked), Ok(doubled)) => Ok(clicked || doubled),
+            (Err(failed), Ok(_)) | (Ok(_), Err(failed)) => Err(failed),
+            (Err(mut clicked), Err(doubled)) => {
+                clicked.0.extend(doubled.0);
+                Err(clicked)
+            }
         }
     }
 
     /// One whole dispatch, whatever produced it: the one place an event is
-    /// delivered. The path is computed once; the engine components' Rust walk
-    /// runs over it first, then one call into the realm carries the same
-    /// path, the flag that shapes the walk, the timestamp and the numbers the
-    /// `detail` is made of.
+    /// delivered. The path is computed once, and one walk runs over it —
+    /// the engine components' handlers at each step, and at the step of each
+    /// listening realm's root one call into that realm, which runs the
+    /// realm's own Lynx walk over its part of the path.
     ///
     /// A target freed since the event formed resolves to nothing rather than
     /// a path — a `NodeId` names one node for the life of the document, so
-    /// the check is one lookup and can never hit a stranger.
+    /// the check is one lookup and can never hit a stranger — and so does a
+    /// name nothing hears ([`dom::Document::hears`]: no registration and no
+    /// observing definition), which costs that one check and builds no path.
     ///
-    /// **The Rust walk** is [`dom::Document::dispatch_element_event_over`]
-    /// over the steps: one set lookup when no
-    /// [`dom::CustomElement::observed_events`] names the event, and
-    /// otherwise the `handle_event` of every defined element on the path. A
-    /// handler's `stop_propagation` ends that walk and nothing else; the
-    /// realm's dispatch below runs whatever happened there.
+    /// **Which realms are called** is decided before the walk, from the
+    /// document's listener table, and is not revisited during it
+    /// (`docs/tracking/deviations.md`): a realm is called when it holds a
+    /// path registration for the name on a node of the path, in a pass that
+    /// node's steps run ([`dom::Document::listeners_on_path`]); when it holds
+    /// a `global-bindEvent` registration for the name anywhere
+    /// ([`dom::Document::realm_has_global`]); or, for a document-level name
+    /// ([`DOCUMENT_LEVEL_EVENTS`]), when it holds any registration for it.
+    /// A realm with nothing to run is not called, so an event nothing on its
+    /// path listens for costs no crossing at all.
     ///
-    /// **The realm's dispatch** is handed the path as the standard's event
-    /// path — every step, in target-first, root-last order, each with its
-    /// shadow-retargeted target, which is the capture pass of the steps read
-    /// backwards — encoded as two comma-joined decimal id strings, which is
-    /// how `childElementIds` carries a list already: the boundary takes
-    /// primitives and structured clones only, a clone can be minted by the
-    /// realm alone, and a decimal id cannot contain the separator. One call
-    /// carries the whole dispatch, and what the realm then runs over it —
-    /// the passes, whether any listener exists at all — is the realm's
-    /// business, because every registration lives there.
+    /// **Where each is called** is the capture step of its root. The page
+    /// realm's page is the document element, and it is called at the first
+    /// step of the path — the document node above that element for every
+    /// path in the document tree, so it is handed the whole path, exactly
+    /// what the one call before the listener table carried; or the root of a
+    /// detached tree's path, which is the page realm's too. A `frame`'s
+    /// card's root is the nested page its `framePage` answered
+    /// ([`DocumentSlot::roots`]). A document-level name calls the children at
+    /// the document element, after the page realm, in the order they were
+    /// constructed. A realm whose root is not
+    /// on the path is not called: a card's `global-bindtap` hears the taps
+    /// inside its frame and no other. The walk is [`dom::Document::advance`],
+    /// one step at a time with the document borrowed for that step alone, so
+    /// a realm's listeners may mutate the tree; a component's
+    /// `stop_propagation` ends the walk, the realm calls after it included.
+    /// A realm's own `catch` and `stopPropagation` end that realm's walk and
+    /// nothing else, as web-core's do (user ruling, 2026-10-18).
+    ///
+    /// **Each call** hands the realm its part of the path as the standard's
+    /// event path: the capture steps from its root inward, in target-first,
+    /// root-last order, each with its shadow-retargeted target, keeping the
+    /// steps of the root's own tree and no other — no shadow root, no UA
+    /// component's shadow content, no nested frame's card — encoded as two
+    /// comma-joined decimal id strings, which is how `childElementIds`
+    /// carries a list already: the boundary takes primitives and structured
+    /// clones only, a clone can be minted by the realm alone, and a decimal
+    /// id cannot contain the separator. For the page realm that is the whole
+    /// path less every step inside a shadow tree, which is exactly what the
+    /// one call before the listener table carried: script names no node of a
+    /// UA shadow tree — no handle, no listener — and a browser reports
+    /// exactly that to every listener outside the tree: the host,
+    /// retargeted, as the first step that remains says. An event at shadow
+    /// content therefore starts at its host there, and a non-composed one
+    /// there reaches no realm at all. The components' walk keeps those steps:
+    /// a component's shadow tree is its own. A realm called at a step that is
+    /// not of its tree (a card hearing a key at the document element) is
+    /// handed no step, and runs its `global-bindEvent` pass alone.
     ///
     /// `bubbles` crosses as itself rather than as a shortened path, because
     /// the passes narrow differently: a non-bubbling event still captures down
@@ -2011,14 +2363,7 @@ impl MainThreadRuntime {
     ///
     /// `composed` is the event's own flag too, and it shapes the path here,
     /// where the tree is: a non-composed event's path ends at the root of the
-    /// tree its target is in (DOM's *get the parent*). The realm's path then
-    /// loses every step at a UA shadow tree's content, because script names
-    /// no node of one — no handle, no listener — and a browser reports
-    /// exactly that to every listener outside the tree: the host, retargeted,
-    /// as the first step that remains says. An event at shadow content
-    /// therefore starts at its host there, and a non-composed one there
-    /// reaches no step at all. The Rust walk keeps those steps: a component's
-    /// shadow tree is its own.
+    /// tree its target is in (DOM's *get the parent*).
     ///
     /// Everything else crosses as primitives, and the realm builds the
     /// objects, in this order: the `timestamp`; the extras channel
@@ -2030,10 +2375,13 @@ impl MainThreadRuntime {
     /// is the Lynx layer that reshapes them (user ruling, 2026-10-13). No
     /// JSON is formatted here and none is parsed there.
     ///
-    /// The document is released before the realm's call, which is what lets
-    /// a listener mutate the tree.
+    /// Each call is its own module-export call with its own microtask
+    /// checkpoint, as a browser checkpoints after each listener invocation.
+    /// A call that throws is kept and the walk goes on, so every realm still
+    /// hears the event; [`Self::finish_batch`] runs once, at the end; and
+    /// every failure is answered, in the order the calls ran.
     ///
-    /// Returns whether the realm published the export, which is all the host
+    /// Answers whether some realm published the export, which is all the host
     /// can know: nothing here says whether anything ran.
     #[allow(
         clippy::too_many_arguments,
@@ -2049,59 +2397,122 @@ impl MainThreadRuntime {
         timestamp: f64,
         detail: &EventDetail,
         extras: Extras<'_>,
-    ) -> Result<bool, MainThreadError> {
-        let mut nodes = String::new();
-        let mut targets = String::new();
-        {
-            let mut slot = self.slot.borrow_mut();
-            let document = slot.document_mut();
-            if document.get(target).is_none() {
+    ) -> Result<bool, ListenerFailures> {
+        // The realm files every name lowercased — `element-papi.ts`
+        // lowercases both halves of a registration, and its dispatch the
+        // name it is handed — so the listener table is asked in that
+        // spelling; a component's own name (`parseEnd`) keeps its case for
+        // the components' walk. One scan, and no allocation for a name that
+        // is lowercase already, which every routed input name is.
+        let lowered;
+        let registered = if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            lowered = name.to_ascii_lowercase();
+            lowered.as_str()
+        } else {
+            name
+        };
+        let children = self.core.children.keys();
+        let (steps, calls) = {
+            let slot = self.slot.borrow();
+            let document = slot.document.as_ref().expect(DOCUMENT_EXISTS);
+            if document.get(target).is_none()
+                || !(document.hears(registered) || document.observes_event(name))
+            {
                 return Ok(false);
             }
             let steps = document.event_steps(target, bubbles, composed);
-            // The capture pass read backwards is the whole path, target
-            // first, whatever `bubbles` cut from the bubble pass.
-            for step in steps
-                .steps()
-                .iter()
-                .rev()
-                .filter(|step| step.capture && document.shadow_root_of(step.node).is_none())
-            {
-                if !nodes.is_empty() {
-                    nodes.push(',');
-                    targets.push(',');
-                }
-                write!(nodes, "{}", packed_node_id(step.node)).expect("writing to a String");
-                write!(targets, "{}", packed_node_id(step.target)).expect("writing to a String");
-            }
-            document.dispatch_element_event_over(&steps, name, detail, timestamp);
-        }
+            let calls = realm_calls(&slot, document, &steps, registered, &children);
+            (steps, calls)
+        };
 
+        let mut walk = self
+            .slot
+            .borrow()
+            .document
+            .as_ref()
+            .expect(DOCUMENT_EXISTS)
+            .event_walk(&steps, name, detail, timestamp);
+        let mut failures: SmallVec<[MainThreadError; 1]> = SmallVec::new();
+        let mut called = false;
+        loop {
+            // The document is borrowed for one step's components alone: a
+            // realm call below runs listeners that mutate the tree.
+            let outcome = self.slot.borrow_mut().document_mut().advance(&mut walk);
+            let Some(outcome) = outcome else {
+                break;
+            };
+            if !outcome.capture {
+                continue;
+            }
+            for call in calls.iter().filter(|call| call.at == outcome.node) {
+                match self.call_realm(js_runtime, call, name, bubbles, timestamp, detail, extras) {
+                    Ok(published) => called |= published,
+                    Err(error) => failures.push(error),
+                }
+            }
+        }
+        // Listeners remove elements too; the count they ran up is settled
+        // here, at the end of the dispatch, as long as nothing failed.
+        if let Err(error) = self.finish_batch(js_runtime, failures.is_empty()) {
+            failures.push(error);
+        }
+        ListenerFailures::or_called(failures, called)
+    }
+
+    /// One realm's part of one dispatch: `__BobcatDispatchEvent(nodes,
+    /// targets, name, bubbles, timestamp, extras…, detail…)` in the page
+    /// realm, or in the child `call` names. A child that closed since the
+    /// walk began — a listener before it let go of its frame — has no root
+    /// any more and is not called, nor is one already freed.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the dispatch's own arguments, which every call carries"
+    )]
+    fn call_realm(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+        call: &RealmCall,
+        name: &str,
+        bubbles: bool,
+        timestamp: f64,
+        detail: &EventDetail,
+        extras: Extras<'_>,
+    ) -> Result<bool, MainThreadError> {
         // The detail last, because a touch event's points make it the one
         // part of variable length besides the extras before it.
         let mut arguments = Arguments::new();
-        arguments.push(HostArgument::String(&nodes));
-        arguments.push(HostArgument::String(&targets));
+        arguments.push(HostArgument::String(&call.nodes));
+        arguments.push(HostArgument::String(&call.targets));
         arguments.push(HostArgument::String(name));
         arguments.push(HostArgument::Boolean(bubbles));
         arguments.push(HostArgument::Number(timestamp));
         encode_extras(extras, &mut arguments);
         encode_detail(detail, &mut arguments);
 
-        let called = self
-            .core
-            .engine
-            .call_module_export(
+        let called = match call.child {
+            None => self.core.engine.call_module_export(
                 js_runtime,
                 ELEMENT_MODULE_SPECIFIER,
                 EVENT_DISPATCH_EXPORT,
                 &arguments,
-            )
-            .map_err(|error| MainThreadError::from_engine("delivering an event", error))?;
-        // Listeners remove elements too; the count they ran up is settled
-        // here, at the end of the dispatch.
-        self.finish_batch(js_runtime, true)?;
-        Ok(called)
+            ),
+            Some(child) => {
+                if !self.slot.borrow().roots.contains_key(&call.key) {
+                    return Ok(false);
+                }
+                let Some(called) = self.core.children.call_module_export(
+                    js_runtime,
+                    child,
+                    ELEMENT_MODULE_SPECIFIER,
+                    EVENT_DISPATCH_EXPORT,
+                    &arguments,
+                ) else {
+                    return Ok(false);
+                };
+                called
+            }
+        };
+        called.map_err(|error| MainThreadError::from_engine("delivering an event", error))
     }
 
     /// Fires a non-composed `tap` at `target` for the engine's own
@@ -2153,7 +2564,7 @@ impl MainThreadRuntime {
         target: dom::NodeId,
         name: &str,
         position: dom::Point2D<f32>,
-    ) -> Result<bool, MainThreadError> {
+    ) -> Result<bool, ListenerFailures> {
         self.dispatch_input_event(
             js_runtime,
             target,
@@ -2320,7 +2731,7 @@ impl MainThreadRuntime {
                 &EventDetail::Exposure,
                 &[],
             ) {
-                failures.push(error);
+                failures.extend(error.into_errors());
             }
         }
         for (kind, appeared) in [("exposure", true), ("disexposure", false)] {
@@ -2853,13 +3264,16 @@ await Promise.resolve().then(() => __FlushElementTree());
 /// realms a `frame` renders.
 ///
 /// One set of members for both (user ruling), and the same code: the same
-/// slot, the same outbox and thread, the same listener name count, the same
-/// `createPage` and the same `flushElementTree`. Nothing in it knows which
-/// page a realm renders: a child's `bobcat:element` answers `__CreatePage`
-/// with the nested page `bobcat:frame-boot` handed it
-/// (`__BobcatUsePageRoot`), and its card's sheet goes to the frame's shadow
-/// root because `adoptStyleSheet` was told so. What a child differs in is
-/// its `retired` flag, which its `closeRealm` sets, what it does not get —
+/// slot, the same outbox and thread, the same listener table, the same
+/// `createPage` and the same `flushElementTree`. The one record of which
+/// page a realm renders is the nested page a child's `framePage` answered,
+/// which a dispatch calls it at ([`DocumentSlot::roots`]): a child's
+/// `bobcat:element` answers `__CreatePage` with the nested page
+/// `bobcat:frame-boot` handed it (`__BobcatUsePageRoot`), and its card's
+/// sheet goes to the frame's shadow root because `adoptStyleSheet` was told
+/// so. What a child differs in is the registrant its event registrations are
+/// filed under ([`ChildKey::listener_key`]), its `retired` flag, which its
+/// `closeRealm` sets, what it does not get —
 /// the startup strings answer `undefined`, and the native module members
 /// are the page realm's, installed beside these by
 /// [`MainThreadRuntime::new`] — and its workers: a child gets the same three
@@ -2882,16 +3296,26 @@ struct DocumentHost {
 
 impl DocumentHost {
     /// Installs the document members into one realm, with `startup` as its
-    /// one-shot strings and `retired` as the flag its `closeRealm` sets:
-    /// `None` for the page realm, which cannot close itself.
+    /// one-shot strings, `key` as the registrant its event registrations are
+    /// filed under — [`PAGE_REALM`], or a child's
+    /// [`ChildKey::listener_key`] — and `retired` as the flag its
+    /// `closeRealm` sets: `None` for the page realm, which cannot close
+    /// itself.
     fn install_members(
         &self,
         engine: &mut ScriptEngine,
         startup: [(&'static str, Option<String>); 4],
+        key: ListenerKey,
         retired: Option<Rc<Cell<bool>>>,
     ) -> Result<(), MainThreadError> {
-        install_host_module(engine, &self.slot, self.thread.clone(), retired)?;
-        install_event_members(engine, &self.slot)?;
+        install_host_module(
+            engine,
+            &self.slot,
+            self.thread.clone(),
+            key,
+            retired.clone(),
+        )?;
+        install_event_members(engine, &self.slot, key, retired)?;
         style_sheets::install_styles(engine, &self.slot, &self.outbox, self.thread.clone())?;
         install_startup_strings(engine, startup)
     }
@@ -2899,10 +3323,12 @@ impl DocumentHost {
 
 impl ChildHostModules for DocumentHost {
     /// A child's members: the page realm's, with no startup strings, which
-    /// are the page's, and a `closeRealm` that retires the child; then the
-    /// `Worker` members over a worker owner of the child's, recorded under
-    /// `key` so the workers it creates are delivered to it, which is what the
-    /// child keeps.
+    /// are the page's, its event registrations filed under `key`'s
+    /// [`ChildKey::listener_key`], and a `closeRealm` that retires the child;
+    /// then the `Worker` members over a worker owner of the child's, recorded
+    /// under `key` so the workers it creates are delivered to it. What the
+    /// child keeps is that owner and the release of its registrations
+    /// ([`ChildDocumentState`]).
     fn install(
         &self,
         engine: &mut ScriptEngine,
@@ -2912,6 +3338,7 @@ impl ChildHostModules for DocumentHost {
         self.install_members(
             engine,
             STARTUP_STRINGS.map(|name| (name, None)),
+            key.listener_key(),
             Some(retired),
         )
         .map_err(MainThreadError::into_script_error)?;
@@ -2926,7 +3353,11 @@ impl ChildHostModules for DocumentHost {
         workers
             .install(engine)
             .map_err(|error| context_of("installing Worker", error))?;
-        Ok(Box::new(workers))
+        Ok(Box::new(ChildDocumentState {
+            workers: Box::new(workers),
+            slot: Rc::clone(&self.slot),
+            key: key.listener_key(),
+        }))
     }
 }
 
@@ -2975,6 +3406,9 @@ fn install_host_module(
     // `flushElementTree`'s, for the waits it makes on the listed author sheets
     // and before a painter has bound.
     thread: crate::jobs::JsThreadHandle,
+    // The registrant the realm's event registrations are filed under, which
+    // its `framePage` and `closeRealm` name.
+    key: ListenerKey,
     // A child's own release flag, which its `closeRealm` sets; `None` in the
     // page realm.
     retired: Option<Rc<Cell<bool>>>,
@@ -3051,8 +3485,8 @@ fn install_host_module(
     // held by the handle that names it. Host-owned text children are freed
     // with the node because no realm handle names them. Every
     // listener the realm had on it is gone too, since those lived on the
-    // handle — which the realm settles itself, before it calls this, by
-    // closing whatever event names that handle alone held open.
+    // handle, and the listener table drops the node's rows in the
+    // document's free path: the realm tells the host nothing about them.
     let closed = retired.clone();
     install(engine, "dropElement", 1, move |arguments| {
         const NAME: &str = "bobcat-internal:host.dropElement";
@@ -3086,34 +3520,49 @@ fn install_host_module(
         Ok(HostValue::Undefined)
     })?;
 
-    install_nested_page_members(engine, handle, retired)
+    install_nested_page_members(engine, handle, key, retired)
 }
 
 /// Installs the three members a nested card's realms speak to, all generic:
 /// `framePage` reads a `frame`'s nested page, `resetFrame` empties it, and
 /// `closeRealm` retires the realm that calls it. Which realm renders which
-/// frame, and when one is let go of, is `bobcat:frame`'s to decide; nothing
-/// here keeps a record of it.
+/// frame, and when one is let go of, is `bobcat:frame`'s to decide. The one
+/// record kept is the page a child asked for, which `bobcat:frame-boot`
+/// makes the child's page root: the step at that page is where a dispatch
+/// calls the child ([`DocumentSlot::roots`]), until its `closeRealm` lets go
+/// of it and of every registration the child filed.
 fn install_nested_page_members(
     engine: &mut ScriptEngine,
     handle: &Rc<RefCell<DocumentSlot>>,
+    key: ListenerKey,
     retired: Option<Rc<Cell<bool>>>,
 ) -> Result<(), MainThreadError> {
-    tree_members! { engine, handle;
-        // The nested page a `frame` component built with the element, which
-        // lives as long as the frame. Refused past `MAX_FRAME_DEPTH`
-        // frames, so a card that embeds itself stops there.
-        fn framePage(frame: node_id_argument) |document| {
-            validate_live_element(document, NAME, frame)?;
-            let page = nested_page(document, frame)
-                .ok_or_else(|| format!("{NAME} requires a frame element"))?;
-            if frame_depth(document, frame) > MAX_FRAME_DEPTH {
-                return Err(format!(
-                    "{NAME}: frames nest at most {MAX_FRAME_DEPTH} deep"
-                ));
-            }
-            Ok(node_id_value(page))
+    // The nested page a `frame` component built with the element, which
+    // lives as long as the frame. Refused past `MAX_FRAME_DEPTH` frames, so a
+    // card that embeds itself stops there. A child's answer is its root from
+    // then on; the page realm's root is the document element, whatever
+    // frames it reads.
+    let tree = Rc::clone(handle);
+    install(engine, "framePage", 1, move |arguments| {
+        const NAME: &str = "bobcat-internal:host.framePage";
+        let frame = node_id_argument(NAME, arguments, 0)?;
+        let mut slot = borrow_slot(NAME, &tree)?;
+        let document = slot.document_mut();
+        validate_live_element(document, NAME, frame)?;
+        let page = nested_page(document, frame)
+            .ok_or_else(|| format!("{NAME} requires a frame element"))?;
+        if frame_depth(document, frame) > MAX_FRAME_DEPTH {
+            return Err(format!(
+                "{NAME}: frames nest at most {MAX_FRAME_DEPTH} deep"
+            ));
         }
+        if key != PAGE_REALM {
+            slot.roots.insert(key, page);
+        }
+        Ok(node_id_value(page))
+    })?;
+
+    tree_members! { engine, handle;
         // Frees every child of a frame's nested page with its whole subtree
         // — it is inside a shadow tree, so `dom` frees what is under it
         // outright — and every sheet mounted on the frame's shadow root, so
@@ -3138,11 +3587,17 @@ fn install_nested_page_members(
         }
     }
 
+    // Retires the child, and lets go of its root and of every registration
+    // it filed now rather than when the release step frees it: from here on
+    // no dispatch calls it, and a name only it held closes on the painter.
+    let tree = Rc::clone(handle);
     install(engine, "closeRealm", 0, move |_arguments| {
+        const NAME: &str = "bobcat-internal:host.closeRealm";
         let Some(retired) = &retired else {
             return Err("the page realm cannot close itself".to_owned());
         };
         retired.set(true);
+        borrow_slot(NAME, &tree)?.forget_realm(key);
         Ok(HostValue::Undefined)
     })?;
 
@@ -3241,74 +3696,108 @@ fn startup_strings(startup: &mut RealmStartup) -> [(&'static str, Option<String>
     ]
 }
 
-/// The names one realm holds open, each counted once in
-/// [`DocumentSlot::listener_edge`] however often the realm's edges repeat it.
-/// Dropped with the realm's two members, which is when the realm is freed:
-/// what a released frame realm left open is closed then, as if it had
-/// closed each name itself.
-struct RealmListenerNames {
-    slot: Rc<RefCell<DocumentSlot>>,
-    open: RefCell<FxHashSet<Arc<str>>>,
-}
-
-impl RealmListenerNames {
-    fn edge(&self, member: &str, name: &str, available: bool) -> Result<(), String> {
-        let mut open = self.open.borrow_mut();
-        if open.contains(name) == available {
-            return Ok(());
-        }
-        borrow_slot(member, &self.slot)?.listener_edge(name, available);
-        if available {
-            open.insert(Arc::from(name));
-        } else {
-            open.remove(name);
-        }
-        Ok(())
-    }
-}
-
-impl Drop for RealmListenerNames {
-    fn drop(&mut self) {
-        // A realm is freed by the owner's release step or with the realm
-        // core, never inside a member, so nothing holds the slot here.
-        let Ok(mut slot) = self.slot.try_borrow_mut() else {
-            return;
-        };
-        for name in self.open.get_mut().drain() {
-            slot.listener_edge(&name, false);
-        }
-    }
-}
-
-/// Installs the two members the realm's event registrations speak to.
+/// Installs the two members a realm's event registrations speak to, for the
+/// realm whose registrations are filed under `key`.
 ///
-/// Neither touches the document, and neither carries a node: the realm owns
-/// every registration and the whole walk over an event path, so all the host
-/// is told is the *name* set the painting side routes against — and only its
-/// global edges, the first registration for a name anywhere and the removal
-/// of its last. A name already open hears nothing, so the traffic is edges,
-/// never registrations, and the `Arc` each one allocates is rare enough to
-/// be free. What this realm holds open joins what the view's other realms
-/// do: [`DocumentSlot::listener_edge`] counts the realms holding each name,
-/// keeps this thread's copy and forwards the edges of the union.
+/// `listenerOpened(node, name, kinds)` says the realm now listens for `name`
+/// on `node` in the passes `kinds` names — the bits of
+/// [`ListenerKinds`]: 1 a bubble-pass registration (`__AddEventListener`'s
+/// bubble list, `bindEvent`, `catchEvent`), 2 a capture-pass one (its
+/// capture list, `capture-bind`, `capture-catch`), 4 a `global-bindEvent` —
+/// replacing what it said there before, so a realm whose kinds change
+/// reports the new set and nothing else. `listenerClosed(node, name)` says
+/// it no longer listens there at all. The callbacks stay in the realm; what
+/// crosses is one call per (element, name) edge, which
+/// [`DocumentSlot::open_listener`] files in the document's listener table:
+/// the table is what a dispatch reads to decide which realms to call and
+/// where, what a component asks whether anything listens on it, what the
+/// painter's name set follows, and what registers an element for exposure.
+///
+/// A node that is no longer live registers nothing, which is the table's
+/// rule, and a realm that has closed (`retired`) is not heard at all: its
+/// rows are gone, and nothing it says after that may file new ones. A freed
+/// node's rows leave with it, in the document's free path, so a collected
+/// handle tells the host nothing.
 fn install_event_members(
     engine: &mut ScriptEngine,
     handle: &Rc<RefCell<DocumentSlot>>,
+    key: ListenerKey,
+    retired: Option<Rc<Cell<bool>>>,
 ) -> Result<(), MainThreadError> {
-    let realm = Rc::new(RealmListenerNames {
-        slot: Rc::clone(handle),
-        open: RefCell::new(FxHashSet::default()),
-    });
-    for (member, available) in [("listenerNameOpened", true), ("listenerNameClosed", false)] {
-        let realm = Rc::clone(&realm);
-        install(engine, member, 1, move |arguments| {
-            let name = string_argument(member, arguments, 0)?;
-            realm.edge(member, name, available)?;
-            Ok(HostValue::Undefined)
-        })?;
-    }
+    let tree = Rc::clone(handle);
+    let closed = retired.clone();
+    install(engine, "listenerOpened", 3, move |arguments| {
+        const NAME: &str = "bobcat-internal:host.listenerOpened";
+        let node = node_id_argument(NAME, arguments, 0)?;
+        let name = string_argument(NAME, arguments, 1)?;
+        let kinds = kinds_argument(NAME, arguments, 2)?;
+        if closed.as_ref().is_some_and(|closed| closed.get()) {
+            return Ok(HostValue::Undefined);
+        }
+        borrow_slot(NAME, &tree)?.open_listener(node, name, kinds, key);
+        Ok(HostValue::Undefined)
+    })?;
+
+    let tree = Rc::clone(handle);
+    install(engine, "listenerClosed", 2, move |arguments| {
+        const NAME: &str = "bobcat-internal:host.listenerClosed";
+        let node = node_id_argument(NAME, arguments, 0)?;
+        let name = string_argument(NAME, arguments, 1)?;
+        if retired.as_ref().is_some_and(|retired| retired.get()) {
+            return Ok(HostValue::Undefined);
+        }
+        borrow_slot(NAME, &tree)?.close_listener(node, name, key);
+        Ok(HostValue::Undefined)
+    })?;
 
     Ok(())
+}
+
+/// Whether `name` is one of the two an element hears its exposure by, so a
+/// change of its registrations is a change of whether the element is
+/// registered for exposure detection.
+fn is_exposure_event(name: &str) -> bool {
+    name == APPEAR_EVENT || name == DISAPPEAR_EVENT
+}
+
+/// Whether some realm registered for `uiappear` or `uidisappear` on `node`,
+/// in any form: what registers an element for exposure whether or not it
+/// carries an `exposure-id`. Every form counts, `__AddEventListener`'s
+/// included — native's rule: `FiberAddEventListener` syncs the name into the
+/// element's event set for every form it files
+/// (`core/runtime/lepus/bindings/renderer_functions.cc:1077`), and native
+/// exposure fires `uiappear` at an element whose event set has it
+/// (`UIExposure.java:543-547`). web-core marks an element from `__AddEvent`
+/// alone (`createElementAPI.ts:160-170`).
+fn hears_exposure(document: &LynxDocument, node: dom::NodeId) -> bool {
+    document.has_listener(node, APPEAR_EVENT) || document.has_listener(node, DISAPPEAR_EVENT)
+}
+
+/// What a child's host modules keep for it: its `Worker` owner, and the
+/// release of its event registrations, which [`Drop`] runs when the child is
+/// freed — so a child freed without closing itself (a `ShadowRealm` nothing
+/// referred to any more) leaves no row in the listener table and no root,
+/// as one that called `closeRealm` already left none.
+struct ChildDocumentState {
+    workers: Box<dyn ChildHostState>,
+    slot: Rc<RefCell<DocumentSlot>>,
+    key: ListenerKey,
+}
+
+impl ChildHostState for ChildDocumentState {
+    fn is_busy(&self) -> bool {
+        self.workers.is_busy()
+    }
+}
+
+impl Drop for ChildDocumentState {
+    fn drop(&mut self) {
+        // A child is freed by the owner's release step or with the realm
+        // core, never inside a member, so nothing holds the slot here.
+        if let Ok(mut slot) = self.slot.try_borrow_mut() {
+            slot.forget_realm(self.key);
+        }
+    }
 }
 
 /// The UI-method status codes `callElementMethod` answers with, from the
@@ -3599,32 +4088,19 @@ fn install_attribute_writes(
     Ok(())
 }
 
-/// Installs the two members the realm's exposure surface speaks to, both
-/// answered by the document's [`Exposure`] beside the document in the slot.
+/// Installs the member the realm's exposure switch speaks to, answered by
+/// the document's [`Exposure`] beside the document in the slot.
 ///
-/// `exposureEvents(node, wants)` is the realm reporting whether an element
-/// has a `uiappear`/`uidisappear` handler, on each change of that answer:
-/// the registrations live in the realm, and an element with a handler is
-/// detected whether or not it carries an `exposure-id`. `switchExposure(on,
-/// sendEvent)` is `lynx.stopExposure`/`lynx.resumeExposure` as native runs
-/// them. Both flags are `0` or `1`, as every flag a tree member takes, and
-/// neither member answers anything: what they change is delivered by the
-/// next intersection delivery entry.
+/// `switchExposure(on, sendEvent)` is `lynx.stopExposure` /
+/// `lynx.resumeExposure` as native runs them. Both flags are `0` or `1`, as
+/// every flag a tree member takes, and it answers nothing: what it changes
+/// is delivered by the next intersection delivery entry. Whether an element
+/// is registered for its `uiappear`/`uidisappear` is not a member's: the
+/// listener table answers it ([`DocumentSlot::open_listener`]).
 fn install_exposure_members(
     engine: &mut ScriptEngine,
     handle: &Rc<RefCell<DocumentSlot>>,
 ) -> Result<(), MainThreadError> {
-    let tree = Rc::clone(handle);
-    install(engine, "exposureEvents", 2, move |arguments| {
-        const NAME: &str = "bobcat-internal:host.exposureEvents";
-        let node = node_id_argument(NAME, arguments, 0)?;
-        let wants = flag_argument(NAME, arguments, 1)?;
-        let mut handle = borrow_slot(NAME, &tree)?;
-        validate_live_element(handle.document_mut(), NAME, node)?;
-        handle.exposure_events(node, wants);
-        Ok(HostValue::Undefined)
-    })?;
-
     let tree = Rc::clone(handle);
     install(engine, "switchExposure", 2, move |arguments| {
         const NAME: &str = "bobcat-internal:host.switchExposure";
@@ -3856,6 +4332,31 @@ fn flag_argument(function: &str, arguments: &[HostValue], index: usize) -> Resul
         HostValue::Number(0.0) => Ok(false),
         HostValue::Number(1.0) => Ok(true),
         _ => Err(format!("{function} expects 0 or 1 for argument {index}")),
+    }
+}
+
+/// The passes one registration runs in, as `listenerOpened` takes them: the
+/// bits of [`ListenerKinds`], at least one. An empty set is not an opening —
+/// `listenerClosed` is the removal — so 0 is refused with every non-integer
+/// and every bit outside the three.
+fn kinds_argument(
+    function: &str,
+    arguments: &[HostValue],
+    index: usize,
+) -> Result<ListenerKinds, String> {
+    match *argument(arguments, index) {
+        HostValue::Number(value) if value.fract() == 0.0 && (1.0..=7.0).contains(&value) =>
+        {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "an integer in 1..=7"
+            )]
+            Ok(ListenerKinds::from_bits(value as u8))
+        }
+        _ => Err(format!(
+            "{function} expects the kinds 1 to 7 for argument {index}"
+        )),
     }
 }
 

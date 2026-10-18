@@ -511,6 +511,20 @@ impl<T> Document<T> {
         table.id(name).is_some_and(|id| !table.counts(id).is_zero()) || self.observes_event(name)
     }
 
+    /// Whether any registration of any kind, by any registrant, on any node
+    /// holds `name`: the set whose 0↔1 edges [`ListenerEdge`] reports.
+    ///
+    /// [`Self::hears`] without the definitions. A host that keeps its own
+    /// router's name set as the union of this answer and a set of its own —
+    /// the names a *live* element of an observing definition wants, which is
+    /// narrower than the per-definition set [`Self::hears`] reads — asks
+    /// this. One name lookup.
+    #[must_use]
+    pub fn has_listeners_for(&self, name: &str) -> bool {
+        let table = &self.listeners;
+        table.id(name).is_some_and(|id| !table.counts(id).is_zero())
+    }
+
     /// The registrants a dispatch of `name` over `steps` reaches through a
     /// path registration, each once, in the order the capture pass first
     /// meets them (root inward).

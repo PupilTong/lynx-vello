@@ -2243,11 +2243,13 @@ impl dom::CustomElement<()> for StoppingComponent {
     }
 }
 
-/// The one dispatch runs the Rust walk over the path first and the realm's
-/// walk over the same path after it, and a component's `stop_propagation`
-/// ends the Rust walk alone.
+/// The one walk calls the page realm at its root — the path's first step —
+/// so the realm's whole Lynx walk, bubble listeners included, runs before
+/// the component on the path hears the capture step (web-core's order,
+/// `docs/tracking/deviations.md`); the component's `stop_propagation` then
+/// ends the walk, which has nothing after it here.
 #[test]
-fn the_rust_walk_runs_before_the_realm_and_its_stop_does_not_reach_script() {
+fn the_page_realm_runs_at_its_root_before_the_components_on_the_path() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -2305,9 +2307,9 @@ fn the_rust_walk_runs_before_the_realm_and_its_stop_does_not_reach_script() {
         .evaluate_module(
             &mut js_runtime,
             r"
-                // Both script listeners ran, after the component marked the
-                // target: its stop never reached the realm.
-                if (seen.join('|') !== 'inner:seen|outer:seen') {
+                // Both script listeners ran, before the component marked the
+                // target.
+                if (seen.join('|') !== 'inner:null|outer:null') {
                   throw new Error('unexpected deliveries: ' + seen.join('|'));
                 }
                 ",
@@ -5798,11 +5800,12 @@ fn stopping_propagation_ends_the_walk() {
         .expect("verification");
 }
 
-/// The host filters nothing: the painting side already refuses to route a
-/// name no listener anywhere has registered, and a dispatch that arrives for
-/// one anyway reaches a realm that finds nothing and runs nothing.
+/// The painting side already refuses to route a name no listener anywhere
+/// has registered, and a dispatch that arrives for one anyway is answered by
+/// the host's listener table: nothing hears the name, so no path is built and
+/// no realm is called.
 #[test]
-fn a_dispatch_with_nothing_registered_reaches_the_realm_and_runs_nothing() {
+fn a_dispatch_with_nothing_registered_calls_no_realm() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -5818,10 +5821,10 @@ fn a_dispatch_with_nothing_registered_reaches_the_realm_and_runs_nothing() {
         .expect("main-thread script");
 
     assert!(
-        runtime
+        !runtime
             .dispatch_for_test(&mut js_runtime, node_id(3), &tap(), event_point())
             .expect("dispatch"),
-        "the realm published the export, which is all the answer means now"
+        "no realm was called"
     );
 }
 
@@ -7775,7 +7778,7 @@ fn a_frame_realm_declares_the_page_members() {
 
 /// The page realm's `bobcat-internal:host` exports, sorted as a namespace
 /// lists them.
-const MTS_HOST_MEMBERS: [&str; 52] = [
+const MTS_HOST_MEMBERS: [&str; 51] = [
     "adoptStyleSheet",
     "attributeNames",
     "callElementMethod",
@@ -7787,7 +7790,6 @@ const MTS_HOST_MEMBERS: [&str; 52] = [
     "createPage",
     "createWorker",
     "dropElement",
-    "exposureEvents",
     "fetchResource",
     "flushElementTree",
     "framePage",
@@ -7798,8 +7800,8 @@ const MTS_HOST_MEMBERS: [&str; 52] = [
     "initData",
     "initialProcessor",
     "insertBefore",
-    "listenerNameClosed",
-    "listenerNameOpened",
+    "listenerClosed",
+    "listenerOpened",
     "loadModuleSync",
     "logScriptMessage",
     "nativeModuleTable",
@@ -7902,12 +7904,14 @@ fn an_rpx_exposure_margin_resolves_against_the_viewport_width() {
     assert_eq!(exposure_observer(&elements, view), None);
 }
 
-/// The two exposure members, from script: `exposureEvents` registers an
-/// element that has no `exposure-id` and lets it go again, `switchExposure`
-/// stops and resumes detection, and each refuses an argument that is not
-/// its shape — a flag is `0` or `1`, as every tree member's is.
+/// The members exposure follows, from script: `listenerOpened` for
+/// `uiappear` registers an element that has no `exposure-id` and
+/// `listenerClosed` lets it go again — the listener table is what exposure
+/// reads — `switchExposure` stops and resumes detection, and each refuses an
+/// argument that is not its shape: a flag is `0` or `1`, as every tree
+/// member's is, and kinds are 1 to 7.
 #[test]
-fn the_exposure_members_register_listeners_and_switch_detection() {
+fn the_listener_members_register_exposure_and_switch_exposure_switches_detection() {
     let (mut js, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -7928,7 +7932,7 @@ fn the_exposure_members_register_listeners_and_switch_detection() {
                 &mut js,
                 &format!(
                     r"
-            import {{ exposureEvents, switchExposure }} from 'bobcat-internal:host';
+            import {{ listenerClosed, listenerOpened, switchExposure }} from 'bobcat-internal:host';
             import {{ __GetElementUniqueID }} from 'bobcat:element';
             const view = __GetElementUniqueID(globalThis.view);
             {source}
@@ -7941,8 +7945,15 @@ fn the_exposure_members_register_listeners_and_switch_detection() {
     };
     assert_eq!(exposure_observer(&elements, view), None);
 
-    run("exposureEvents(view, 1);");
+    run("listenerOpened(view, 'uiappear', 1);");
     let first = exposure_observer(&elements, view).expect("a listener registers the element");
+    run("listenerOpened(view, 'uiappear', 5); listenerOpened(view, 'uidisappear', 2);");
+    assert_eq!(
+        exposure_observer(&elements, view),
+        Some(first),
+        "new kinds and the other name are no change of whether the element listens",
+    );
+    run("listenerClosed(view, 'uidisappear');");
     run("switchExposure(0, 1);");
     assert_eq!(
         exposure_observer(&elements, view),
@@ -7952,14 +7963,16 @@ fn the_exposure_members_register_listeners_and_switch_detection() {
     run("switchExposure(1, 1);");
     let resumed = exposure_observer(&elements, view).expect("resuming observes it again");
     assert_ne!(resumed, first, "with an observer of its own");
-    run("exposureEvents(view, 0);");
+    run("listenerClosed(view, 'uiappear');");
     assert_eq!(exposure_observer(&elements, view), None);
 
     run(r"
         for (const [call, expected] of [
-          [() => exposureEvents(view, true), 'exposureEvents expects 0 or 1 for argument 1'],
+          [() => listenerOpened(view, 'uiappear', 0), 'listenerOpened expects the kinds 1 to 7 for argument 2'],
+          [() => listenerOpened(view, 'uiappear', 8), 'listenerOpened expects the kinds 1 to 7 for argument 2'],
           [() => switchExposure(1, 2), 'switchExposure expects 0 or 1 for argument 1'],
-          [() => exposureEvents(987654321, 1), 'exposureEvents'],
+          [() => listenerOpened(-1, 'uiappear', 1), 'listenerOpened'],
+          [() => listenerClosed(view, 3), 'listenerClosed'],
         ]) {
           let thrown;
           try { call(); } catch (error) { thrown = String(error?.message ?? error); }
@@ -7970,14 +7983,13 @@ fn the_exposure_members_register_listeners_and_switch_detection() {
     ");
 }
 
-/// The realm registers an element for exposure out of its own handler maps:
-/// the first `uiappear`/`uidisappear` handler `__AddEvent` files calls
-/// `exposureEvents(node, 1)`, which arms an observer for an element that
-/// has no `exposure-id`; a second handler, of the other name or the other
-/// kind, calls nothing — the observer is the one the first call armed, where
-/// a second call would have re-armed a fresh one — and web-core's disable
-/// mark, a `null` handler, taking the last one away calls
-/// `exposureEvents(node, 0)`, which lets the registration go.
+/// An element is registered for exposure out of the listener table: the
+/// first `uiappear`/`uidisappear` handler `__AddEvent` files arms an observer
+/// for an element that has no `exposure-id`; a second handler, of the other
+/// name or the other kind, changes nothing — the observer is the one the
+/// first armed, where a second arming would have made a fresh one — and
+/// web-core's disable mark, a `null` handler, taking the last one away lets
+/// the registration go.
 #[test]
 fn an_add_event_for_uiappear_arms_and_disarms_exposure() {
     let (mut js, mut runtime, elements) = runtime();
@@ -8943,11 +8955,10 @@ fn dropping_a_frame_frees_its_nested_page() {
             r"
         import { createElement, framePage, insertBefore } from 'bobcat-internal:host';
         const page = __CreatePage();
-        let frame = __CreateElement('frame', 0);
+        globalThis.frame = __CreateElement('frame', 0);
         __AppendElement(page, frame);
         insertBefore(framePage(__GetElementUniqueID(frame)), createElement('view'), undefined);
         __RemoveElement(page, frame);
-        frame = undefined;
     ",
             "app:///dropped-frame.js",
         )
@@ -8957,6 +8968,16 @@ fn dropping_a_frame_frees_its_nested_page() {
         let page = frame_page_of(&tree, node_id(3));
         (page, tree.get(page).unwrap().child_ids()[0])
     };
+    // Let go of the handle only now: a collection the engine starts on its
+    // own may otherwise free it before the probe above.
+    runtime
+        .evaluate_module(
+            &mut js,
+            "globalThis.frame = undefined;",
+            "app:///forget-frame.js",
+            "letting go of the frame",
+        )
+        .unwrap();
     runtime.collect_garbage(&mut js).unwrap();
     let tree = elements.tree();
     assert!(tree.get(node_id(3)).is_none(), "the frame was dropped");
@@ -8966,7 +8987,9 @@ fn dropping_a_frame_frees_its_nested_page() {
 
 /// The published names are the union of every realm's: a child that opens
 /// and closes `tap`, which the page also holds, leaves it published, and a
-/// name only a closed child held is closed when the child is freed.
+/// name only a child held closes when the child closes itself — its
+/// `closeRealm` takes its rows out of the listener table — not later, when
+/// the release step frees it.
 #[test]
 fn a_frame_realm_closes_only_its_own_listener_names() {
     let (mut js, mut runtime, _elements, mut names) = runtime_over_watching_names(ingredients());
@@ -9006,13 +9029,514 @@ fn a_frame_realm_closes_only_its_own_listener_names() {
         )
         .unwrap();
     assert!(
-        names.contains("scroll"),
-        "the child still lives until the release step"
-    );
-    assert_eq!(runtime.core().children.release_unneeded(), 1);
-    assert!(
         !names.contains("scroll"),
-        "a freed child's names close with it"
+        "a closed child's names close with it, before the release step"
     );
     assert!(names.contains("tap"));
+    assert_eq!(runtime.core().children.release_unneeded(), 1);
+    assert!(!names.contains("scroll"));
+    assert!(
+        names.contains("tap"),
+        "freeing the child closes nothing more"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The kernel's walk calls each listening realm once, at its root.
+// ---------------------------------------------------------------------------
+
+/// The page realm's part of a dispatch as the one call before the listener
+/// table encoded it: every capture step read backwards, less every step
+/// inside a shadow tree.
+fn whole_path_encoding(
+    document: &LynxDocument,
+    steps: &dom::event::EventSteps,
+) -> (String, String) {
+    let mut nodes = String::new();
+    let mut targets = String::new();
+    for step in steps
+        .steps()
+        .iter()
+        .rev()
+        .filter(|step| step.capture && document.shadow_root_of(step.node).is_none())
+    {
+        if !nodes.is_empty() {
+            nodes.push(',');
+            targets.push(',');
+        }
+        write!(nodes, "{}", packed_node_id(step.node)).unwrap();
+        write!(targets, "{}", packed_node_id(step.target)).unwrap();
+    }
+    (nodes, targets)
+}
+
+/// The page realm's call is the one call it always was, argument for
+/// argument: called at the path's first step, it is handed the whole path
+/// less every step inside a shadow tree — for a target in the document tree,
+/// one in a UA shadow tree (which starts at its host), and one in a detached
+/// tree. A non-composed event inside a shadow tree, whose path ends at the
+/// shadow root, does not call it, where the old call carried an empty path.
+#[test]
+fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
+    let (mut js, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(&mut js, "__CreatePage();", "app:///path-encoding.js")
+        .unwrap();
+    let (outer, inner, shadowed, detached) = {
+        let mut document = elements.tree();
+        let page = document.document_element().id();
+        let outer = document.create_element("view", ());
+        let inner = document.create_element("view", ());
+        document.append_child(page, outer);
+        document.append_child(outer, inner);
+        let host = document.create_element("view", ());
+        document.append_child(inner, host);
+        let shadow = document.attach_shadow(host, dom::ShadowRootMode::Open);
+        let shadowed = document.create_element("view", ());
+        document.append_child(shadow, shadowed);
+        let loose = document.create_element("view", ());
+        let detached = document.create_element("view", ());
+        document.append_child(loose, detached);
+        for node in [outer, loose] {
+            document.add_listener(node, "tap", ListenerKinds::PATH_CAPTURE, PAGE_REALM);
+        }
+        (outer, inner, shadowed, detached)
+    };
+    let slot = elements.slot.borrow();
+    let document = slot.document.as_ref().unwrap();
+    for (target, composed) in [(inner, true), (shadowed, true), (detached, true)] {
+        let steps = document.event_steps(target, true, composed);
+        let calls = realm_calls(&slot, document, &steps, "tap", &[]);
+        assert_eq!(calls.len(), 1, "{target:?}");
+        let call = &calls[0];
+        assert_eq!(call.child, None);
+        assert_eq!(call.at, steps.steps()[0].node, "at the path's first step");
+        assert_eq!(
+            (call.nodes.clone(), call.targets.clone()),
+            whole_path_encoding(document, &steps),
+            "{target:?}"
+        );
+    }
+    let steps = document.event_steps(inner, true, true);
+    let page = packed_node_id(dom::NodeId::DOCUMENT_ELEMENT).to_string();
+    assert!(
+        realm_calls(&slot, document, &steps, "tap", &[])[0]
+            .nodes
+            .split(',')
+            .any(|id| id == page),
+        "the document element is on it, with the document node above it"
+    );
+    let _ = outer;
+    let steps = document.event_steps(shadowed, true, false);
+    assert!(
+        realm_calls(&slot, document, &steps, "tap", &[]).is_empty(),
+        "a non-composed path inside a shadow tree is no realm's"
+    );
+}
+
+/// A name some element listens for, dispatched where nothing on the path
+/// listens and no realm holds a global registration for it, calls no realm
+/// at all: the dispatch answers that nothing was published. At the element
+/// that does listen, the page realm is called and its listener runs.
+#[test]
+fn an_event_nothing_on_its_path_listens_for_calls_no_realm() {
+    let (mut js, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        const page = __CreatePage();
+        const listening = __CreateView(0);
+        const quiet = __CreateView(0);
+        __AppendElement(page, listening);
+        __AppendElement(page, quiet);
+        globalThis.held = [listening, quiet];
+        globalThis.runs = 0;
+        __AddEventListener(listening, 'tap', () => { runs += 1; }, {});
+    ",
+            "app:///nothing-on-the-path.js",
+        )
+        .unwrap();
+    let (listening, quiet) = {
+        let tree = elements.tree();
+        let children = tree.document_element().child_ids().to_vec();
+        (children[0], children[1])
+    };
+    assert!(elements.tree().hears("tap"));
+    assert!(
+        !runtime
+            .dispatch_for_test(&mut js, quiet, &tap(), event_point())
+            .expect("dispatch"),
+        "no realm was called"
+    );
+    assert!(
+        runtime
+            .dispatch_for_test(&mut js, listening, &tap(), event_point())
+            .expect("dispatch")
+    );
+    runtime
+        .evaluate_module(
+            &mut js,
+            "if (globalThis.runs !== 1) throw Error('ran ' + globalThis.runs);",
+            "app:///nothing-on-the-path-verify.js",
+            "verifying",
+        )
+        .unwrap();
+}
+
+/// A `global-bindEvent` registration alone is enough for the page realm to
+/// be called for an event of its name anywhere, with the registering element
+/// as the delivery's `currentTarget` and the event's own target.
+#[test]
+fn a_global_registration_alone_calls_its_realm() {
+    let (mut js, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        globalThis.runWorklet = (value, params) => value.body(params[0]);
+        globalThis.seen = [];
+        const page = __CreatePage();
+        const registered = __CreateView(0);
+        const elsewhere = __CreateView(0);
+        __AppendElement(page, registered);
+        __AppendElement(page, elsewhere);
+        globalThis.held = [registered, elsewhere];
+        __AddEvent(registered, 'global-bindEvent', 'tap', { type: 'worklet', value: {
+            body: (e) => seen.push(e.target.uid + '@' + e.currentTarget.uid),
+        } });
+    ",
+            "app:///global-alone.js",
+        )
+        .unwrap();
+    let (registered, elsewhere) = {
+        let tree = elements.tree();
+        let children = tree.document_element().child_ids().to_vec();
+        (children[0], children[1])
+    };
+    assert!(
+        runtime
+            .dispatch_for_test(&mut js, elsewhere, &tap(), event_point())
+            .expect("dispatch")
+    );
+    runtime
+        .evaluate_module(
+            &mut js,
+            &format!(
+                "if (seen.join('|') !== '{}@{}') throw Error(seen.join('|'));",
+                packed_node_id(elsewhere),
+                packed_node_id(registered)
+            ),
+            "app:///global-alone-verify.js",
+            "verifying",
+        )
+        .unwrap();
+}
+
+/// The page every frame-call test runs: a 20px spacer, then a 100×50 frame,
+/// whose border box therefore starts at (0, 20); the page realm
+/// `capture-catch`es `tap` on the frame and binds `keydown` on its page. A
+/// `ShadowRealm` child is made the frame's card: it renders a 100×50 `inner`
+/// under the nested page, binds `tap` there and files a `global-bindEvent`
+/// for `keydown` on it. Every handler, in either realm, reports
+/// `<label> <type> <target uid>` and the `detail`'s `x,y` when it has them to
+/// the page realm's `seen`, through a function the page handed the child, so
+/// the order across realms is the order they ran in.
+const FRAME_CALLS: &str = r"
+globalThis.runWorklet = (value, params) => value.body(params[0]);
+globalThis.seen = [];
+globalThis.report = (line) => { seen.push(line); };
+const line = (label, e) => label + ' ' + e.type + ' ' + e.target.uid +
+    (e.detail && e.detail.x !== undefined ? ' ' + e.detail.x + ',' + e.detail.y : '');
+const log = (label) => ({ type: 'worklet', value: { body: (e) => report(line(label, e)) } });
+const page = __CreatePage();
+const spacer = __CreateView(0);
+__SetInlineStyles(spacer, 'height:20px');
+__AppendElement(page, spacer);
+const frame = __CreateElement('frame', 0);
+__SetInlineStyles(frame, 'width:100px;height:50px');
+__AppendElement(page, frame);
+__AddEvent(frame, 'capture-catch', 'tap', log('page-frame'));
+__AddEvent(page, 'bindEvent', 'keydown', log('page-key'));
+__FlushElementTree();
+globalThis.realm = await frameRealm();
+realm.evaluate(`(frame, report) => {
+    globalThis.runWorklet = (value, params) => value.body(params[0]);
+    const line = (label, e) => label + ' ' + e.type + ' ' + e.target.uid +
+        (e.detail && e.detail.x !== undefined ? ' ' + e.detail.x + ',' + e.detail.y : '');
+    const log = (label) => ({ type: 'worklet', value: { body: (e) => report(line(label, e)) } });
+    E.__BobcatUsePageRoot(H.framePage(frame));
+    const inner = E.__CreateView(0);
+    E.__SetInlineStyles(inner, 'width:100px;height:50px');
+    E.__AppendElement(E.__CreatePage(), inner);
+    E.__AddEvent(inner, 'bindEvent', 'tap', log('card-inner'));
+    E.__AddEvent(inner, 'global-bindEvent', 'keydown', log('card-key'));
+    E.__FlushElementTree();
+}`)(__GetElementUniqueID(frame), (text) => report(text));
+";
+
+/// [`FRAME_CALLS`] booted: the frame and the child's `inner`.
+fn frame_calls() -> (
+    ScriptRuntime,
+    MainThreadRuntime,
+    DocumentProbe,
+    dom::NodeId,
+    dom::NodeId,
+) {
+    let (mut js, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            &format!("{FRAME_REALM}{FRAME_CALLS}"),
+            "app:///frame-calls.js",
+        )
+        .unwrap();
+    let (frame, inner) = {
+        let tree = elements.tree();
+        let frame = first_frame(&tree);
+        let page = frame_page_of(&tree, frame);
+        (frame, tree.get(page).unwrap().child_ids()[0])
+    };
+    (js, runtime, elements, frame, inner)
+}
+
+/// What the realms of [`FRAME_CALLS`] reported, in order, and empties it.
+fn frame_lines(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) -> Vec<String> {
+    runtime
+        .evaluate_module(
+            js,
+            "import { __SetAttribute, __CreatePage } from 'bobcat:element';
+             __SetAttribute(__CreatePage(), 'data-seen', seen.join('|'));
+             seen.length = 0;",
+            "app:///frame-lines.js",
+            "reading what the realms reported",
+        )
+        .unwrap();
+    let probe = runtime.with_document(|tree| {
+        tree.document_element()
+            .attribute("data-seen")
+            .unwrap_or_default()
+            .to_owned()
+    });
+    if probe.is_empty() {
+        return Vec::new();
+    }
+    probe.split('|').map(str::to_owned).collect()
+}
+
+/// A tap inside a frame's card calls the page realm at the path's first step
+/// — its `capture-catch` on the frame hears it retargeted to the frame, with
+/// the viewport's coordinates — and then the card's realm, directly, at its
+/// nested page, handed its own part of the path: its `bindtap` hears its own
+/// node as the target, `x`/`y` relative to the frame's border box. The
+/// page's `catch` ends the page's walk alone.
+#[test]
+fn a_cards_bindtap_is_called_in_its_own_realm_at_its_nested_page() {
+    let (mut js, mut runtime, _elements, frame, inner) = frame_calls();
+    assert!(
+        runtime
+            .dispatch_for_test(&mut js, inner, &tap(), dom::Point2D::new(30.0, 40.0))
+            .expect("dispatch")
+    );
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            format!("page-frame tap {} 30,40", packed_node_id(frame)),
+            format!("card-inner tap {} 30,20", packed_node_id(inner)),
+        ]
+    );
+}
+
+/// A key at the document element calls every realm with a registration for
+/// it there, the page realm first: the page's `bindkeydown` on its page,
+/// then the card's `global-bindkeydown`, with no step of the card's own and
+/// the registering element as its target.
+#[test]
+fn a_key_calls_every_realm_that_registered_it() {
+    let (mut js, mut runtime, _elements, _frame, inner) = frame_calls();
+    let payload = InputEventPayload {
+        detail: dom::event::EventDetail::Key {
+            key: Arc::from("a"),
+            code: Arc::from("KeyA"),
+            repeat: false,
+            modifiers: dom::input::Modifiers::default(),
+        },
+        timestamp: 0.0,
+    };
+    runtime
+        .dispatch_input_event(
+            &mut js,
+            dom::NodeId::DOCUMENT_ELEMENT,
+            "keydown",
+            &payload,
+            None,
+        )
+        .expect("dispatch");
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            format!(
+                "page-key keydown {}",
+                packed_node_id(dom::NodeId::DOCUMENT_ELEMENT)
+            ),
+            format!("card-key keydown {}", packed_node_id(inner)),
+        ]
+    );
+}
+
+/// A child's `closeRealm` takes every row it filed out of the listener table
+/// and lets go of its root at once: the next tap inside its frame calls the
+/// page realm alone.
+#[test]
+fn close_realm_clears_the_childs_rows_and_root() {
+    let (mut js, mut runtime, elements, frame, inner) = frame_calls();
+    let child = runtime.core().children.keys()[0].listener_key();
+    assert_eq!(
+        elements.tree().realm_registration_counts(child, "tap"),
+        (1, 0)
+    );
+    assert!(elements.slot.borrow().roots.contains_key(&child));
+    runtime
+        .evaluate_module(
+            &mut js,
+            "globalThis.realm.evaluate('H.closeRealm()');",
+            "app:///close-frame-calls.js",
+            "closing the card's realm",
+        )
+        .unwrap();
+    assert_eq!(
+        elements.tree().realm_registration_counts(child, "tap"),
+        (0, 0)
+    );
+    assert_eq!(
+        elements.tree().realm_registration_counts(child, "keydown"),
+        (0, 0)
+    );
+    assert!(elements.slot.borrow().roots.is_empty());
+
+    runtime
+        .dispatch_for_test(&mut js, inner, &tap(), dom::Point2D::new(30.0, 40.0))
+        .expect("dispatch");
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [format!("page-frame tap {} 30,40", packed_node_id(frame))]
+    );
+}
+
+/// A listener that throws in one realm does not keep the next from hearing
+/// the event: both are called, and the failure is answered once.
+#[test]
+fn a_realm_that_throws_does_not_keep_the_next_from_hearing_the_event() {
+    let (mut js, mut runtime, _elements, frame, inner) = frame_calls();
+    runtime
+        .evaluate_module(
+            &mut js,
+            "import { __AddEventListener, __GetElementUniqueID } from 'bobcat:element';
+             import { __BobcatHandleOf } from 'bobcat:element';
+             const frame = __BobcatHandleOf(FRAME);
+             // Capturing, beside the `capture-catch` that stops the page's
+             // walk at the frame: the same node's listeners still run.
+             __AddEventListener(frame, 'tap', () => { throw Error('page listener'); },
+                 { capture: true });"
+                .replace("FRAME", &packed_node_id(frame).to_string())
+                .as_str(),
+            "app:///throwing-page.js",
+            "filing a throwing listener",
+        )
+        .unwrap();
+    let failed = runtime
+        .dispatch_for_test(&mut js, inner, &tap(), dom::Point2D::new(30.0, 40.0))
+        .expect_err("the page listener threw");
+    let failures: Vec<MainThreadError> = failed.into_errors().collect();
+    assert_eq!(failures.len(), 1);
+    assert!(
+        failures[0].to_string().contains("page listener"),
+        "{}",
+        failures[0]
+    );
+    let lines = frame_lines(&mut js, &mut runtime);
+    assert!(
+        lines.contains(&format!("card-inner tap {} 30,20", packed_node_id(inner))),
+        "{lines:?}"
+    );
+}
+
+/// Exposure follows the listener table, whichever realm's rows it holds: an
+/// element the page realm listens on for `uiappear` stays registered while a
+/// second realm's row for it remains, and goes with the last.
+#[test]
+fn exposure_follows_every_realms_rows_for_an_element() {
+    let (mut js, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            &format!(
+                r"{FRAME_REALM}
+        const page = __CreatePage();
+        const view = __CreateView(0);
+        __AppendElement(page, view);
+        globalThis.view = view;
+        globalThis.listener = () => {{}};
+        __AddEventListener(view, 'uiappear', listener, {{}});
+        globalThis.realm = await frameRealm();
+        realm.evaluate(`id => H.listenerOpened(id, 'uidisappear', 4)`)(__GetElementUniqueID(view));
+        __RemoveEventListener(view, 'uiappear', listener, {{}});
+    "
+            ),
+            "app:///exposure-two-realms.js",
+        )
+        .unwrap();
+    let view = first_card_element(&elements);
+    assert!(
+        exposure_observer(&elements, view).is_some(),
+        "the child's row keeps the element registered"
+    );
+    runtime
+        .evaluate_module(
+            &mut js,
+            "import { __GetElementUniqueID } from 'bobcat:element';
+             globalThis.realm.evaluate(`id => H.listenerClosed(id, 'uidisappear')`)(
+                 __GetElementUniqueID(globalThis.view));",
+            "app:///exposure-two-realms-close.js",
+            "closing the child's row",
+        )
+        .unwrap();
+    assert_eq!(exposure_observer(&elements, view), None);
+}
+
+/// A freed element takes its registrations with it, in the document's free
+/// path, and the close of a name only it held reaches the painter at the
+/// next flush, with no word from the realm.
+#[test]
+fn a_freed_elements_last_registration_closes_its_name_at_the_next_flush() {
+    let (mut js, mut runtime, _elements, mut names) = runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        import { dropElement } from 'bobcat-internal:host';
+        const page = __CreatePage();
+        const view = __CreateView(0);
+        __AppendElement(page, view);
+        __AddEventListener(view, 'longpress', () => {}, {});
+        globalThis.view = view;
+    ",
+            "app:///freed-registration.js",
+        )
+        .unwrap();
+    assert!(names.contains("longpress"));
+    runtime
+        .evaluate_module(
+            &mut js,
+            "import { dropElement } from 'bobcat-internal:host';
+             import { __CreatePage, __FlushElementTree, __GetElementUniqueID, __RemoveElement }
+                 from 'bobcat:element';
+             __RemoveElement(__CreatePage(), globalThis.view);
+             dropElement(__GetElementUniqueID(globalThis.view));
+             __FlushElementTree();",
+            "app:///free-the-registration.js",
+            "freeing the registered element",
+        )
+        .unwrap();
+    assert!(!names.contains("longpress"));
 }

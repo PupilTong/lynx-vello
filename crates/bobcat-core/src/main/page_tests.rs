@@ -1157,8 +1157,8 @@ fn an_intersection_hook_that_mutates_gets_its_own_commit_and_no_second_delivery(
 /// [`WATCHED_SCROLLPORT`] px column scroller — the page element's first child
 /// — every row registered for exposure the way the realm registers an
 /// element with a `uiappear` handler: a script listener for `uiappear` and
-/// `uidisappear` on it, and `exposureEvents(row, 1)`. Row `exposed` (when it
-/// is a row's index) also carries `exposure-id="first"`.
+/// `uidisappear` on it, which the listener table reports to exposure. Row
+/// `exposed` (when it is a row's index) also carries `exposure-id="first"`.
 ///
 /// Each listener appends `<event>:row<index>` to the page element's
 /// `data-heard`, which [`heard`] reads back. `updatePage({on, sendEvent})`
@@ -1167,7 +1167,7 @@ fn exposure_page(exposed: Option<usize>) -> String {
     let exposed = exposed.map_or_else(|| "-1".to_owned(), |row| row.to_string());
     format!(
         r"
-import {{ exposureEvents, switchExposure }} from 'bobcat-internal:host';
+import {{ switchExposure }} from 'bobcat-internal:host';
 globalThis.renderPage = function () {{
   const page = __CreatePage('card', 0);
   __SetInlineStyles(page, 'display:flex;width:200px;height:240px;align-items:flex-start');
@@ -1189,7 +1189,6 @@ globalThis.renderPage = function () {{
         __SetAttribute(page, 'data-heard', heard.join(','));
       }}, {{}});
     }}
-    exposureEvents(__GetElementUniqueID(row), 1);
   }}
 }};
 globalThis.updatePage = function (data) {{

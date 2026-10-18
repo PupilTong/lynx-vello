@@ -160,9 +160,10 @@ impl ScriptHarness {
     /// Delivers one routed event to `target`, with the payload a pointer
     /// event carries: a position, no wheel delta and no touch points.
     ///
-    /// The answer is only whether the realm published its dispatch export:
-    /// the path is computed here and everything over it — which steps have a
-    /// registration, and whether any does — belongs to the realm.
+    /// The answer is whether a realm was called and published its dispatch
+    /// export: the host calls a realm only when the document's listener
+    /// table holds a registration of it that the path reaches, so an event
+    /// nothing on its path listens for answers `false` without crossing.
     ///
     /// # Panics
     ///

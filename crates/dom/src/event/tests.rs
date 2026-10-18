@@ -1179,6 +1179,15 @@ mod listener_table {
         assert!(document.hears("tap"));
         document.remove_listener(page, "tap", PAGE);
         assert!(!document.hears("tap"));
+        assert!(
+            !document.has_listeners_for("pointerdown"),
+            "a definition is no registration"
+        );
+        document.add_listener(page, "pointerdown", GLOBAL, CARD);
+        assert!(document.has_listeners_for("pointerdown"));
+        document.remove_listener(page, "pointerdown", CARD);
+        assert!(!document.has_listeners_for("pointerdown"));
+        assert!(document.hears("pointerdown"));
         // An observed type still walks the components when nothing registered.
         document.dispatch_element_event(page, "pointerdown", &EventDetail::None, true, true, 0.0);
     }
