@@ -1625,11 +1625,11 @@ and name nodes `resetFrame` already freed. `dropElement` of a frame host does
 nothing frame-specific: its shadow tree goes with it. Nodes a closed child
 created and never attached stay until the view ends. A child's event
 registrations are filed in `dom`'s listener table under its
-`ChildKey::listener_key()` (never `ListenerKey(0)`, the page realm's); its
-`framePage` answer is recorded as its root (`DocumentSlot::roots`), the step a
-dispatch calls it at; `closeRealm` — and the drop of its host state when the
-release step frees it — removes its rows (`remove_listeners_of`) and its
-root. The published listener names are the table's, over every realm: a
+`ChildKey::listener_key()` (never `ListenerKey(0)`, the page realm's); the
+host keeps no record of which page a child renders, and a dispatch calls it
+like any other realm (below); `closeRealm` — and the drop of its host state
+when the release step frees it — removes its rows (`remove_listeners_of`).
+The published listener names are the table's, over every realm: a
 child closing `tap` leaves the page's open, and a name only a closed child
 held closes when it closes.
 
@@ -1876,20 +1876,27 @@ for the name is delivered to, in registration order, whatever path the event
 took and whether or not a `catch` ended the walk, so a global delivery has
 `eventPhase` `NONE`.
 
-The kernel walks; each realm runs its Lynx walk over its part (scheme D, user
-ruling 2026-10-18). The host computes the event path while it holds the
-document and walks it once (`dom`'s `EventWalk`), and at the capture step of
-each listening realm's root releases the document and makes one call to that
-realm's Element module `__BobcatDispatchEvent` export — the page realm's
-through `quickjs::ScriptEngine::call_module_export`, a `frame`'s card's through
-`ChildRealms::call_module_export` — carrying that realm's part of the path:
-the standard's bubble steps from its root inward, target-first, as two
-comma-joined decimal id strings — the nodes, and position for position each
-step's shadow-retargeted target, less every step outside the root's own tree:
-a UA shadow tree's content, which script names none of, so an event at shadow
-chrome starts at its host (routed input events are composed, the components'
-events are not, as HTML and web-core fire them), and a nested frame's card —
-plus the name and then primitives alone: the
+The kernel walks; each realm runs its Lynx walk over the steps it holds
+(scheme D, user ruling 2026-10-18; every realm at the path's top, user ruling
+2026-10-19). The host computes the event path while it holds the document and
+walks it once (`dom`'s `EventWalk`), and at the path's first capture step
+releases the document and makes one call to each listening realm's Element
+module `__BobcatDispatchEvent` export, the page realm first, then the
+children in construction order — the page realm's through
+`quickjs::ScriptEngine::call_module_export`, a `frame`'s card's through
+`ChildRealms::call_module_export` — every call carrying the same path,
+encoded once before the first (`encode_path`): the standard's bubble steps,
+target-first, as two comma-joined decimal id strings — the nodes, and
+position for position each step's shadow-retargeted target, less the steps
+whose node or target is no longer live and the shadow roots. A frame is a
+plain shadow tree to the dispatch. Each realm skips the steps it holds no
+handle for — the page realm a UA shadow tree's content, which script names
+none of, and every card; a card everything outside its nested page — and its
+`event.target` is the target of the first step it holds, so an event at
+shadow chrome reaches the page realm at its host (routed input events are
+composed, the components' events are not, as HTML and web-core fire them);
+a realm holding no step runs its `global-bindEvent` pass alone, aimed at each
+registering element. Then the name and primitives alone: the
 `timestamp` (milliseconds on the view's timeline); the extras channel
 (`extraCount`, then name/value pairs: what a Lynx handler reads beside the W3C
 payload, such as a `load`'s size or a `scroll`'s metrics, which the realm makes
@@ -1913,13 +1920,20 @@ dispatch); `clientX`/`clientY`/`pageX`/`pageY` stay the viewport's.
 
 Which realms are called is the host's, from `dom`'s listener table, decided
 before the walk: a realm with a path registration for the name on the path
-in a pass its steps run (`Document::listeners_on_path`), with a
-`global-bindEvent` for it (`Document::realm_has_global`), or, for `keydown`
-and `keyup`, with any registration for it (called at the document element). A
-realm with nothing to run is not called; an event nothing on its path listens
-for calls no realm at all. The page realm is called at the path's first step
-and handed exactly the path the one call before the table carried; a card at
-its nested page. Each call checkpoints on its own; a call that throws is
+in a pass its steps run (`Document::listeners_on_path`), or with a
+`global-bindEvent` for it that the path reaches
+(`Document::global_registrants_on_path`: the registering node's tree root —
+the document node for a light-tree node, a frame's shadow root for a card's
+node — is a node of the path, so a card's global registration hears only the
+events whose path passes through its frame, as web-core's card listens on its
+own shadow root); and, for web-core's document-level names
+(`DOCUMENT_LEVEL_EVENTS`: `keydown`, `keyup`, `WASMJSBinding.ts:30`), with a
+`global-bindEvent` for it anywhere, so a card hears every key. A realm with nothing to run is
+not called; an event nothing on its path listens for calls no realm at all;
+a realm that lost every registration for the name before its call
+(`Document::realm_registration_counts` is `(0, 0)`) is skipped then. For a
+path in the document tree the page realm runs exactly the steps the one call
+before the table carried. Each call checkpoints on its own; a call that throws is
 collected and the walk goes on (`ListenerFailures`). The realm reports per
 (element, name) registrations with their passes: `listenerOpened(node, name,
 kinds)` (1 bubble, 2 capture, 4 global, or'ed; the host replaces the kinds on
@@ -1932,8 +1946,9 @@ an event script hears is delivered. It computes the steps once and drives
 `dom`'s walk over them (`Document::event_walk`/`Document::advance`) step by
 step, so an engine component whose definition lists the type in
 `CustomElement::observed_events` hears it at its own step; a component's
-`stop_propagation` is the walk's one stop flag and ends every realm call after
-its step. What the event carries
+`stop_propagation` is the walk's one stop flag and ends the walk after its
+step, which keeps no realm from its call, every call being at the first. What
+the event carries
 is `dom::event::EventDetail` (one variant per payload shape), which the router
 fills in, `ToMain::DispatchEvent` carries, the Rust walk lends out and
 `encode_detail` turns into the realm's numbers. A name a component observes is

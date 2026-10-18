@@ -1237,6 +1237,134 @@ mod listener_table {
         );
     }
 
+    /// A global registration in a shadow tree is reached by a path through
+    /// that shadow root — the composed path from inside it, and the
+    /// non-composed one, which ends there — and not by a path outside it.
+    #[test]
+    fn a_global_registration_in_a_shadow_tree_is_reached_only_through_its_shadow_root() {
+        let (mut document, _host, _root, button) = shadow_tree(ShadowRootMode::Open);
+        let page = document.document_element().id();
+        let outside = document.create_element("view", ());
+        document.append_child(page, outside);
+        let inner = document.create_element("view", ());
+        document.append_child(button, inner);
+        document.add_listener(button, "tap", GLOBAL, CARD);
+
+        for composed in [true, false] {
+            let steps = document.event_steps(inner, true, composed);
+            assert_eq!(
+                document
+                    .global_registrants_on_path(&steps, "tap")
+                    .as_slice(),
+                [CARD],
+                "composed {composed}"
+            );
+        }
+        let steps = document.event_steps(outside, true, true);
+        assert!(
+            document
+                .global_registrants_on_path(&steps, "tap")
+                .is_empty(),
+            "a path outside the shadow tree"
+        );
+        let steps = document.event_steps(page, true, true);
+        assert!(
+            document
+                .global_registrants_on_path(&steps, "tap")
+                .is_empty(),
+            "the document element's path"
+        );
+        assert!(document.realm_has_global(CARD, "tap"), "held all the same");
+    }
+
+    /// A global registration in the document tree is reached by every
+    /// connected composed path, one from inside a shadow tree included,
+    /// since each ends at the document node; not by a detached tree's path,
+    /// nor by a non-composed path that ends at a shadow root. Each
+    /// registrant once, in the order its first global row was made.
+    #[test]
+    fn a_light_tree_global_registration_is_reached_by_every_connected_path() {
+        let (mut document, _host, _root, button) = shadow_tree(ShadowRootMode::Open);
+        let page = document.document_element().id();
+        let view = document.create_element("view", ());
+        document.append_child(page, view);
+        let loose = document.create_element("view", ());
+        document.add_listener(view, "tap", GLOBAL, CARD);
+        document.add_listener(page, "tap", GLOBAL | BUBBLE, PAGE);
+        document.add_listener(page, "longpress", GLOBAL, CARD);
+        document.add_listener(view, "tap", GLOBAL | CAPTURE, CARD);
+
+        for target in [page, view, button] {
+            let steps = document.event_steps(target, true, true);
+            assert_eq!(
+                document
+                    .global_registrants_on_path(&steps, "tap")
+                    .as_slice(),
+                [CARD, PAGE],
+                "{target:?}"
+            );
+        }
+        let steps = document.event_steps(loose, true, true);
+        assert!(
+            document
+                .global_registrants_on_path(&steps, "tap")
+                .is_empty(),
+            "a detached tree's path"
+        );
+        let steps = document.event_steps(button, true, false);
+        assert!(
+            document
+                .global_registrants_on_path(&steps, "tap")
+                .is_empty(),
+            "a non-composed path that ends at a shadow root"
+        );
+    }
+
+    /// The global rows follow every removal: a kinds change that drops
+    /// `GLOBAL`, a removal, a freed node and a registrant going away.
+    #[test]
+    fn the_global_rows_follow_every_removal() {
+        let (mut document, page, outer, inner) = nested();
+        let reached = |document: &Document<()>| {
+            let steps = document.event_steps(inner, true, true);
+            document.global_registrants_on_path(&steps, "tap")
+        };
+        document.add_listener(outer, "tap", GLOBAL, CARD);
+        document.add_listener(page, "tap", GLOBAL, PAGE);
+        assert_eq!(reached(&document).as_slice(), [CARD, PAGE]);
+
+        document.add_listener(outer, "tap", BUBBLE, CARD);
+        assert_eq!(reached(&document).as_slice(), [PAGE], "kinds replaced");
+        document.add_listener(outer, "tap", GLOBAL, CARD);
+        assert_eq!(
+            reached(&document).as_slice(),
+            [PAGE, CARD],
+            "filed again, last"
+        );
+
+        document.remove_listener(page, "tap", PAGE);
+        assert_eq!(reached(&document).as_slice(), [CARD]);
+
+        document.add_listener(inner, "tap", GLOBAL, PAGE);
+        document.remove_element(inner);
+        document.drop_element(inner);
+        let steps = document.event_steps(outer, true, true);
+        assert_eq!(
+            document
+                .global_registrants_on_path(&steps, "tap")
+                .as_slice(),
+            [CARD],
+            "a freed node's global row left with it"
+        );
+
+        document.remove_listeners_of(CARD);
+        assert!(
+            document
+                .global_registrants_on_path(&steps, "tap")
+                .is_empty()
+        );
+    }
+
     #[test]
     fn would_reach_listener_answers_by_name_then_global_then_the_path() {
         let (mut document, page, outer, inner) = nested();

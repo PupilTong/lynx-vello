@@ -135,31 +135,35 @@ import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 // capture), a second add of those four is ignored outright, and `once` and
 // capture behave as `addEventListener`'s do.
 //
-// **The kernel walks; this file runs the Lynx walk over its part.** The host
-// computes the event path while it holds the document and walks it once, in
-// Rust: the engine's components hear each step there, and at the capture
-// step of this realm's root — the document's for the page realm, the nested
-// page `__BobcatUsePageRoot` named for a frame's card — the host releases the
-// document and calls this realm once:
+// **The kernel walks; this file runs the Lynx walk over the steps it holds.**
+// The host computes the event path while it holds the document and walks it
+// once, in Rust: the engine's components hear each step there, and at the
+// path's top step the host releases the document and calls each realm that
+// listens once, the page realm first, with the whole path:
 // `__BobcatDispatchEvent(nodes, targets, name, bubbles, timestamp,
 // extraCount, ...extraNameValuePairs, detailKind, ...detailValues)`, where
-// `nodes` is this realm's part of the path — the steps from its root inward
-// that are in its own tree, no UA component's shadow content and no nested
-// frame's card — in target-first order as comma-joined decimal node ids, and
-// `targets` carries, position for position, the shadow-retargeted target of
-// that step. Two strings because the boundary takes primitives and
-// structured clones only, a clone can be minted by the realm alone, and a
-// decimal id cannot contain the separator — the same encoding
-// `childElementIds` uses. Releasing the document before the call is what
-// lets a listener mutate the tree. The host calls this realm only when it
-// has something to run: a registration on the path that the path's passes
-// reach, a `global-bindEvent` for the name, or, for `keydown` and `keyup`,
-// any registration — a key's target is the document element, so a frame's
-// card is handed no step and runs its global pass alone, with each
-// delivery's `target` the element that registered. Several realms on one
-// path each run their own walk, the page's first: one realm's `catch` ends
-// its own walk and no other's, as web-core walks each card's shadow root
-// apart.
+// `nodes` is the path in target-first order as comma-joined decimal node
+// ids — every step but the shadow roots and the nodes freed since the path
+// was computed — and `targets` carries, position for position, the
+// shadow-retargeted target of that step. Two strings because the boundary
+// takes primitives and structured clones only, a clone can be minted by the
+// realm alone, and a decimal id cannot contain the separator — the same
+// encoding `childElementIds` uses. Releasing the document before the call is
+// what lets a listener mutate the tree. This file runs the Lynx walk over
+// the steps it holds handles for and skips the rest: in the page realm a UA
+// component's shadow content and every frame's card, in a frame's card
+// everything outside its nested page. `event.target` is the target of the
+// first step it holds. The host calls this realm only when it has something
+// to run: a registration on the path that the path's passes reach, a
+// `global-bindEvent` for the name on a node whose tree root (the document
+// node, or the frame's shadow root for a card) is on the path, or, for
+// `keydown` and `keyup`, a `global-bindEvent` for the name anywhere — web-core
+// listens for those on `document`. A realm that holds no step of the path —
+// a frame's card hearing a key, whose target is the document element — runs
+// its global pass alone, with each delivery's `target` the element that
+// registered. Several realms on one path each run their own walk, the
+// page's first: one realm's `catch` ends its own walk and no other's, as
+// web-core walks each card's shadow root apart.
 //
 // **Kernel events are W3C; this file is the Lynx layer** (user ruling,
 // 2026-10-13). The host dispatches every event whose name exists in W3C with
@@ -3429,14 +3433,15 @@ function handlerInPass(
 
 /**
  * One whole dispatch in this realm, the single call the host makes into it
- * per event, at the step of this realm's root.
+ * per event, at the path's top step, with the whole path.
  *
  * The host computed the path while it held the document and released it
  * before calling, which is what lets a listener mutate the tree. Everything
  * after that is this file's: the standard's capture pass from the far end of
- * this realm's part of the path inwards, its bubble pass back out, then the
- * `global-bindEvent` pass, which is not over the path at all. An empty part
- * — a frame's card hearing a key — runs the global pass alone.
+ * the path inwards over the steps this realm holds handles for, its bubble
+ * pass back out, then the `global-bindEvent` pass, which is not over the
+ * path at all. A path with no step this realm holds — a frame's card
+ * hearing a key — runs the global pass alone.
  *
  * `bubbles` narrows the last two and never the first: a non-bubbling event
  * binds on its at-target steps alone and runs no global pass. See the header.
@@ -3474,17 +3479,20 @@ function dispatchEvent(
   const detailKind = rest[pairs];
   const detailNumbers = rest.slice(pairs + 1);
   const steps = pathSteps(pathIds, targetIds);
-  const first = steps[0];
-  // A pathless dispatch — a frame's card hearing a key at the document
-  // element, which is no node of its tree — has a global pass to run, or
-  // nothing at all.
+  // The first step this realm holds a handle for, whose target is this
+  // realm's `event.target`: the steps before it are another realm's or a UA
+  // component's shadow content. None — a frame's card hearing a key at the
+  // document element, which is no node of its tree — leaves a global pass
+  // to run, or nothing at all.
+  const first = steps.find((step) => handleOf(step.node) !== undefined);
   if (first === undefined && !bubbles) {
     return undefined;
   }
   const name = String(eventName).toLowerCase();
   let stopped = false;
   let immediate = false;
-  // No node yet for a pathless dispatch: its first delivery names one.
+  // No node yet for a dispatch with no step held: its first delivery names
+  // one.
   let targetNodeId = first?.target ?? NaN;
   // A reading the host could not take — a detached painter's, say — reports
   // the time origin rather than `NaN`.
@@ -3498,7 +3506,7 @@ function dispatchEvent(
   const event: DispatchedEvent = {
     type: name,
     eventPhase: NONE,
-    // A pathless dispatch's is set by its first delivery, before any
+    // With no step held, it is set by the first delivery, before any
     // listener reads it.
     target: first === undefined
       ? (null as unknown as DispatchedEvent["target"])
@@ -3635,7 +3643,7 @@ function dispatchEvent(
   // unconditionally. It runs no closures: `__AddEventListener` carries no
   // Lynx form and so never files globally. `eventPhase` is `NONE`, since no
   // step of any path produced the delivery, and `target` is the event's own,
-  // or, with no path, the registering element itself.
+  // or, with no step held, the registering element itself.
   const runGlobalPass = (): undefined => {
     const registered = globalNodes.get(name);
     if (registered === undefined) {

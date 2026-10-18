@@ -2248,13 +2248,13 @@ impl dom::CustomElement<()> for StoppingComponent {
     }
 }
 
-/// The one walk calls the page realm at its root — the path's first step —
-/// so the realm's whole Lynx walk, bubble listeners included, runs before
+/// The one walk calls the page realm at the path's top step, so the
+/// realm's whole Lynx walk, bubble listeners included, runs before
 /// the component on the path hears the capture step (web-core's order,
 /// `docs/tracking/deviations.md`); the component's `stop_propagation` then
 /// ends the walk, which has nothing after it here.
 #[test]
-fn the_page_realm_runs_at_its_root_before_the_components_on_the_path() {
+fn the_page_realm_runs_at_the_paths_top_before_the_components_on_the_path() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -9047,7 +9047,7 @@ fn a_frame_realm_closes_only_its_own_listener_names() {
 }
 
 // ---------------------------------------------------------------------------
-// The kernel's walk calls each listening realm once, at its root.
+// The kernel's walk calls each listening realm once, at the path's top.
 // ---------------------------------------------------------------------------
 
 /// The page realm's part of a dispatch as the one call before the listener
@@ -9075,19 +9075,21 @@ fn whole_path_encoding(
     (nodes, targets)
 }
 
-/// The page realm's call is the one call it always was, argument for
-/// argument: called at the path's first step, it is handed the whole path
-/// less every step inside a shadow tree — for a target in the document tree,
-/// one in a UA shadow tree (which starts at its host), and one in a detached
-/// tree. A non-composed event inside a shadow tree, whose path ends at the
-/// shadow root, does not call it, where the old call carried an empty path.
+/// The one encoding every realm is handed is the page realm's call as it
+/// always was, for a target in the document tree and one in a detached
+/// tree: the whole path, called at its first step. For a target in a UA
+/// shadow tree it carries the shadow content's steps beside those — every
+/// step but the shadow root — which the page realm holds no handle for and
+/// skips, so the steps it runs are the old ones. A non-composed event inside
+/// a shadow tree, whose path is the shadow tree's alone, invites no realm
+/// that holds nothing there.
 #[test]
 fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
     let (mut js, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(&mut js, "__CreatePage();", "app:///path-encoding.js")
         .unwrap();
-    let (outer, inner, shadowed, detached) = {
+    let (inner, shadowed, detached) = {
         let mut document = elements.tree();
         let page = document.document_element().id();
         let outer = document.create_element("view", ());
@@ -9105,37 +9107,71 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
         for node in [outer, loose] {
             document.add_listener(node, "tap", ListenerKinds::PATH_CAPTURE, PAGE_REALM);
         }
-        (outer, inner, shadowed, detached)
+        (inner, shadowed, detached)
     };
     let slot = elements.slot.borrow();
     let document = slot.document.as_ref().unwrap();
-    for (target, composed) in [(inner, true), (shadowed, true), (detached, true)] {
-        let steps = document.event_steps(target, true, composed);
-        let calls = realm_calls(&slot, document, &steps, "tap", &[]);
+    let encoded = |steps: &dom::event::EventSteps| {
+        let path = encode_path(document, steps);
+        (path.nodes, path.targets)
+    };
+    for target in [inner, detached] {
+        let steps = document.event_steps(target, true, true);
+        let calls = realm_calls(document, &steps, "tap", &[]);
         assert_eq!(calls.len(), 1, "{target:?}");
-        let call = &calls[0];
-        assert_eq!(call.child, None);
-        assert_eq!(call.at, steps.steps()[0].node, "at the path's first step");
+        assert_eq!(calls[0].child, None);
         assert_eq!(
-            (call.nodes.clone(), call.targets.clone()),
+            encoded(&steps),
             whole_path_encoding(document, &steps),
             "{target:?}"
         );
     }
-    let steps = document.event_steps(inner, true, true);
+    let steps = document.event_steps(shadowed, true, true);
+    assert_eq!(realm_calls(document, &steps, "tap", &[]).len(), 1);
+    let (nodes, targets) = encoded(&steps);
+    let outside: (Vec<&str>, Vec<&str>) = nodes
+        .split(',')
+        .zip(targets.split(','))
+        .filter(|(node, _)| {
+            let id = steps
+                .steps()
+                .iter()
+                .find(|step| packed_node_id(step.node).to_string() == *node)
+                .unwrap()
+                .node;
+            document.shadow_root_of(id).is_none()
+        })
+        .unzip();
+    let (old_nodes, old_targets) = whole_path_encoding(document, &steps);
+    assert_eq!(
+        (outside.0.join(","), outside.1.join(",")),
+        (old_nodes.clone(), old_targets),
+        "less the shadow content, the steps the old call carried"
+    );
+    assert_eq!(
+        nodes.split(',').next(),
+        Some(packed_node_id(shadowed).to_string().as_str()),
+        "the shadow content first, which the page realm skips"
+    );
+    assert!(
+        steps
+            .steps()
+            .iter()
+            .filter(|step| document.get(step.node).unwrap().is_shadow_root())
+            .all(|step| !nodes
+                .split(',')
+                .any(|id| id == packed_node_id(step.node).to_string())),
+        "no shadow root"
+    );
     let page = packed_node_id(dom::NodeId::DOCUMENT_ELEMENT).to_string();
     assert!(
-        realm_calls(&slot, document, &steps, "tap", &[])[0]
-            .nodes
-            .split(',')
-            .any(|id| id == page),
+        old_nodes.split(',').any(|id| id == page),
         "the document element is on it, with the document node above it"
     );
-    let _ = outer;
     let steps = document.event_steps(shadowed, true, false);
     assert!(
-        realm_calls(&slot, document, &steps, "tap", &[]).is_empty(),
-        "a non-composed path inside a shadow tree is no realm's"
+        realm_calls(document, &steps, "tap", &[]).is_empty(),
+        "a non-composed path inside a shadow tree invites no realm with nothing there"
     );
 }
 
@@ -9329,14 +9365,14 @@ fn frame_lines(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) -> Vec<S
     probe.split('|').map(str::to_owned).collect()
 }
 
-/// A tap inside a frame's card calls the page realm at the path's first step
-/// — its `capture-catch` on the frame hears it retargeted to the frame, with
-/// the viewport's coordinates — and then the card's realm, directly, at its
-/// nested page, handed its own part of the path: its `bindtap` hears its own
-/// node as the target, `x`/`y` relative to the frame's border box. The
-/// page's `catch` ends the page's walk alone.
+/// A tap inside a frame's card calls the page realm at the path's top — its
+/// `capture-catch` on the frame hears it retargeted to the frame, the first
+/// step it holds a handle for, with the viewport's coordinates — and then
+/// the card's realm, directly, at the same step, handed the same path: its
+/// `bindtap` hears its own node as the target, `x`/`y` relative to the
+/// frame's border box. The page's `catch` ends the page's walk alone.
 #[test]
-fn a_cards_bindtap_is_called_in_its_own_realm_at_its_nested_page() {
+fn a_cards_bindtap_is_called_in_its_own_realm_after_the_pages_walk() {
     let (mut js, mut runtime, _elements, frame, inner) = frame_calls();
     assert!(
         runtime
@@ -9352,10 +9388,13 @@ fn a_cards_bindtap_is_called_in_its_own_realm_at_its_nested_page() {
     );
 }
 
-/// A key at the document element calls every realm with a registration for
-/// it there, the page realm first: the page's `bindkeydown` on its page,
-/// then the card's `global-bindkeydown`, with no step of the card's own and
-/// the registering element as its target.
+/// A key at the document element calls the page realm, whose `bindkeydown`
+/// on its page is on the path, and the card's realm by its
+/// `global-bindkeydown`, after the page's. The key's path does not pass
+/// through the frame's shadow root, so the card's global registration is
+/// not reached by the tree rule: the card is called by web-core's
+/// document-level rule ([`DOCUMENT_LEVEL_EVENTS`]), holds no step of the
+/// path, and runs its global pass, the registering element its target.
 #[test]
 fn a_key_calls_every_realm_that_registered_it() {
     let (mut js, mut runtime, _elements, _frame, inner) = frame_calls();
@@ -9389,18 +9428,94 @@ fn a_key_calls_every_realm_that_registered_it() {
     );
 }
 
-/// A child's `closeRealm` takes every row it filed out of the listener table
-/// and lets go of its root at once: the next tap inside its frame calls the
-/// page realm alone.
+/// A card's `global-bindEvent` is reached only by an event whose path
+/// passes through the frame's shadow root, the root of the card's tree: a
+/// tap outside the frame, where the card holds nothing on the path, calls
+/// no realm at all, as web-core's card listens on its own shadow root.
 #[test]
-fn close_realm_clears_the_childs_rows_and_root() {
+fn a_cards_global_registration_does_not_hear_a_tap_outside_its_frame() {
+    let (mut js, mut runtime, elements, _frame, inner) = frame_calls();
+    runtime
+        .evaluate_module(
+            &mut js,
+            &format!(
+                "globalThis.realm.evaluate(`(report) => {{
+                    const inner = E.__BobcatHandleOf({inner});
+                    E.__AddEvent(inner, 'global-bindEvent', 'tap', {{ type: 'worklet', value: {{
+                        body: (e) => report('card-global ' + e.type + ' ' + e.target.uid),
+                    }} }});
+                }}`)((text) => report(text));",
+                inner = packed_node_id(inner)
+            ),
+            "app:///card-global-tap.js",
+            "filing the card's global tap",
+        )
+        .unwrap();
+    let spacer = elements.tree().document_element().child_ids()[0];
+    assert!(
+        !runtime
+            .dispatch_for_test(&mut js, spacer, &tap(), dom::Point2D::new(5.0, 5.0))
+            .expect("dispatch"),
+        "no realm was called"
+    );
+    assert_eq!(frame_lines(&mut js, &mut runtime), Vec::<String>::new());
+
+    // Inside the frame it is reached, after the card's own `bindtap`.
+    runtime
+        .dispatch_for_test(&mut js, inner, &tap(), dom::Point2D::new(30.0, 40.0))
+        .expect("dispatch");
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime).last(),
+        Some(&format!("card-global tap {}", packed_node_id(inner)))
+    );
+}
+
+/// A page-level `global-bindtap`, on a light-tree node, still hears a tap
+/// inside a frame's card: the document node is on that composed path. Its
+/// target is the frame, the first step the page realm holds, and the page's
+/// `capture-catch` on the frame does not keep it from running.
+#[test]
+fn a_page_global_registration_hears_a_tap_inside_a_card() {
+    let (mut js, mut runtime, elements, frame, inner) = frame_calls();
+    let spacer = elements.tree().document_element().child_ids()[0];
+    runtime
+        .evaluate_module(
+            &mut js,
+            &format!(
+                "import {{ __AddEvent, __BobcatHandleOf }} from 'bobcat:element';
+                 __AddEvent(__BobcatHandleOf({spacer}), 'global-bindEvent', 'tap', {{
+                     type: 'worklet',
+                     value: {{ body: (e) => report('page-global ' + e.type + ' ' + e.target.uid) }},
+                 }});",
+                spacer = packed_node_id(spacer)
+            ),
+            "app:///page-global-tap.js",
+            "filing the page's global tap",
+        )
+        .unwrap();
+    runtime
+        .dispatch_for_test(&mut js, inner, &tap(), dom::Point2D::new(30.0, 40.0))
+        .expect("dispatch");
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            format!("page-frame tap {} 30,40", packed_node_id(frame)),
+            format!("page-global tap {}", packed_node_id(frame)),
+            format!("card-inner tap {} 30,20", packed_node_id(inner)),
+        ]
+    );
+}
+
+/// A child's `closeRealm` takes every row it filed out of the listener table
+/// at once: the next tap inside its frame calls the page realm alone.
+#[test]
+fn close_realm_clears_the_childs_rows() {
     let (mut js, mut runtime, elements, frame, inner) = frame_calls();
     let child = runtime.core().children.keys()[0].listener_key();
     assert_eq!(
         elements.tree().realm_registration_counts(child, "tap"),
         (1, 0)
     );
-    assert!(elements.slot.borrow().roots.contains_key(&child));
     runtime
         .evaluate_module(
             &mut js,
@@ -9417,7 +9532,6 @@ fn close_realm_clears_the_childs_rows_and_root() {
         elements.tree().realm_registration_counts(child, "keydown"),
         (0, 0)
     );
-    assert!(elements.slot.borrow().roots.is_empty());
 
     runtime
         .dispatch_for_test(&mut js, inner, &tap(), dom::Point2D::new(30.0, 40.0))

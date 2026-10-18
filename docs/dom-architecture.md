@@ -952,8 +952,13 @@ reports, which a host's router
 unions with its own live-element names), `listeners_on_path`
 (the registrants one dispatch reaches through a path registration — a capture
 registration on its node's capture step, a bubble one on its bubble step, so
-an ancestor's bubble registration misses a non-bubbling event), and
-`realm_has_global`/`realm_registration_counts`.
+an ancestor's bubble registration misses a non-bubbling event),
+`global_registrants_on_path` (the registrants one dispatch reaches through a
+global registration: one whose node's tree root — the document node for a
+node in the document tree, the shadow root for one in a shadow tree — is a
+node of the path, which is the scope a listener on that root would have; the
+table indexes the global rows per name, so this scans the name's few global
+rows), and `realm_has_global`/`realm_registration_counts`.
 
 The walk over a path is this crate's too, and it is driven one step at a
 time. `Document::event_walk(&steps, type_name, &detail, timestamp)` starts an

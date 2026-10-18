@@ -13,8 +13,9 @@
 //!   is costly to produce (a `<text>` `layout`, scroll metrics) is produced only when someone hears
 //!   it;
 //! - a host's, per event: which registrants hold a registration on this path
-//!   ([`Document::listeners_on_path`]) and which hold a global one
-//!   ([`Document::realm_has_global`]), so a realm with nothing to run is not called at all;
+//!   ([`Document::listeners_on_path`]) and which hold a global one the path reaches
+//!   ([`Document::global_registrants_on_path`]), so a realm with nothing to run is not called at
+//!   all;
 //! - a router's, per name: does anything hear `name` at all ([`Document::hears`]), and each change
 //!   that adds the name's first registration or removes its last ([`RegistrationChange`]), which
 //!   feeds the presenting thread's name filter.
@@ -37,6 +38,9 @@
 //!   rows in practice, which the inline storage holds.
 //! - `by_realm`: (registrant, name) → its path and global registration counts, which decide whether
 //!   a realm takes part in one dispatch without scanning the path for it.
+//! - `global_rows`: name → the (node, registrant) of each registration holding
+//!   [`ListenerKinds::GLOBAL`], in the order they were made, so which global registrations a path
+//!   reaches is a scan of the name's few global rows rather than of the table.
 //! - `by_name`: name → the name's id, with per-name path and global counts in `names`. The ids keep
 //!   the other two maps' keys a few bytes wide and make a probe from a borrowed `&str` one string
 //!   hash, done once per question. A name's id outlives its last registration: the set of names is
@@ -91,8 +95,11 @@ impl ListenerKinds {
     /// Lynx's `capture-bind`/`capture-catch`. Runs at every node on the
     /// capture pass, whether the event bubbles or not.
     pub const PATH_CAPTURE: Self = Self(1 << 1);
-    /// Lynx's `global-bindEvent`: heard for every event of the name, on any
-    /// path.
+    /// Lynx's `global-bindEvent`: heard for every event of the name whose
+    /// path passes through the root of the registering node's tree — the
+    /// document node for a node in the document tree, so every connected
+    /// path; the shadow root for a node in a shadow tree
+    /// ([`Document::global_registrants_on_path`]).
     pub const GLOBAL: Self = Self(1 << 2);
 
     const PATH: u8 = Self::PATH_BUBBLE.0 | Self::PATH_CAPTURE.0;
@@ -212,6 +219,9 @@ struct NameSlot {
 pub(crate) struct Listeners {
     by_target: FxHashMap<NodeId, SmallVec<[Registration; 2]>>,
     by_realm: FxHashMap<(ListenerKey, NameId), Counts>,
+    /// Per name, the node and registrant of every registration holding
+    /// [`ListenerKinds::GLOBAL`], in the order they were made.
+    global_rows: FxHashMap<NameId, SmallVec<[(NodeId, ListenerKey); 2]>>,
     by_name: FxHashMap<Arc<str>, NameId>,
     names: Vec<NameSlot>,
     /// The names whose last registration [`Self::forget_node`] removed,
@@ -274,6 +284,33 @@ impl Listeners {
         counts.is_zero()
     }
 
+    /// Files `key`'s global registration of `id` on `node` at the end of the
+    /// name's global rows.
+    fn global_in(
+        global_rows: &mut FxHashMap<NameId, SmallVec<[(NodeId, ListenerKey); 2]>>,
+        id: NameId,
+        node: NodeId,
+        key: ListenerKey,
+    ) {
+        global_rows.entry(id).or_default().push((node, key));
+    }
+
+    /// Takes `key`'s global registration of `id` on `node` out of the name's
+    /// global rows; the name's entry leaves with its last.
+    fn global_out(
+        global_rows: &mut FxHashMap<NameId, SmallVec<[(NodeId, ListenerKey); 2]>>,
+        id: NameId,
+        node: NodeId,
+        key: ListenerKey,
+    ) {
+        if let Some(rows) = global_rows.get_mut(&id) {
+            rows.retain(|row| *row != (node, key));
+            if rows.is_empty() {
+                global_rows.remove(&id);
+            }
+        }
+    }
+
     /// Drops every registration on `node` — the node is being freed — and
     /// queues each name whose last registration that removed.
     pub(crate) fn forget_node(&mut self, node: NodeId) {
@@ -281,6 +318,9 @@ impl Listeners {
             return;
         };
         for row in rows {
+            if row.kinds.global() {
+                Self::global_out(&mut self.global_rows, row.name, node, row.key);
+            }
             if Self::count_out(
                 &mut self.names,
                 &mut self.by_realm,
@@ -373,6 +413,11 @@ impl<T> Document<T> {
                 Listeners::count_out(&mut table.names, &mut table.by_realm, id, key, old);
                 table.count_in(id, key, kinds);
             }
+            match (old.global(), kinds.global()) {
+                (false, true) => Listeners::global_in(&mut table.global_rows, id, node, key),
+                (true, false) => Listeners::global_out(&mut table.global_rows, id, node, key),
+                _ => {}
+            }
             return RegistrationChange::Unchanged;
         }
         rows.push(Registration {
@@ -381,6 +426,9 @@ impl<T> Document<T> {
             kinds,
         });
         table.count_in(id, key, kinds);
+        if kinds.global() {
+            Listeners::global_in(&mut table.global_rows, id, node, key);
+        }
         if was_heard {
             return RegistrationChange::Unchanged;
         }
@@ -419,6 +467,9 @@ impl<T> Document<T> {
         if rows.is_empty() {
             table.by_target.remove(&node);
         }
+        if row.kinds.global() {
+            Listeners::global_out(&mut table.global_rows, id, node, key);
+        }
         let last_removed =
             Listeners::count_out(&mut table.names, &mut table.by_realm, id, key, row.kinds);
         if last_removed {
@@ -438,9 +489,14 @@ impl<T> Document<T> {
         let Listeners {
             by_target,
             by_realm,
+            global_rows,
             names,
             ..
         } = &mut self.listeners;
+        global_rows.retain(|_, rows| {
+            rows.retain(|(_, holder)| *holder != key);
+            !rows.is_empty()
+        });
         let mut last_removed = SmallVec::new();
         by_target.retain(|_, rows| {
             rows.retain(|row| {
@@ -534,7 +590,8 @@ impl<T> Document<T> {
     /// registration on its node's bubble step, so for an event that does not
     /// bubble an ancestor's bubble registration is not reached — the target's
     /// is, since the target keeps its bubble turn. Global registrations are
-    /// not path registrations; [`Self::realm_has_global`] answers those. One
+    /// not path registrations; [`Self::global_registrants_on_path`] answers
+    /// those. One
     /// name lookup, then one probe per node of the path, most of which miss.
     #[must_use]
     pub fn listeners_on_path(&self, steps: &EventSteps, name: &str) -> SmallVec<[ListenerKey; 2]> {
@@ -591,9 +648,49 @@ impl<T> Document<T> {
         reached
     }
 
-    /// Whether `key` holds a global registration for `name` anywhere: a
-    /// realm that does is called for every event of the name, whatever its
-    /// path. One lookup.
+    /// The registrants a dispatch of `name` over `steps` reaches through a
+    /// global registration, each once, in the order their first such
+    /// registration was made.
+    ///
+    /// A global registration is reached when the root of the registering
+    /// node's tree — DOM's *root* of the node, not its shadow-including root
+    /// — is a node of the path: the document node for a node in the document
+    /// tree, which every connected composed path ends at, so such a
+    /// registration hears its name on every connected path and on no path
+    /// of a detached tree; the shadow root for a node in a shadow tree, so it
+    /// hears only the events whose path passes through that shadow root; the
+    /// topmost ancestor for a node in a detached tree. This is the scope a
+    /// listener on that root would have. One name lookup, then one root walk
+    /// per global row of the name and one scan of the path for it.
+    #[must_use]
+    pub fn global_registrants_on_path(
+        &self,
+        steps: &EventSteps,
+        name: &str,
+    ) -> SmallVec<[ListenerKey; 2]> {
+        let table = &self.listeners;
+        let mut reached = SmallVec::new();
+        let Some(rows) = table.id(name).and_then(|id| table.global_rows.get(&id)) else {
+            return reached;
+        };
+        for &(node, key) in rows {
+            if reached.contains(&key) {
+                continue;
+            }
+            let root = self.tree_root(node);
+            if steps
+                .steps()
+                .iter()
+                .any(|step| step.capture && step.node == root)
+            {
+                reached.push(key);
+            }
+        }
+        reached
+    }
+
+    /// Whether `key` holds a global registration for `name` anywhere,
+    /// whatever tree its node is in. One lookup.
     #[must_use]
     pub fn realm_has_global(&self, key: ListenerKey, name: &str) -> bool {
         self.realm_registration_counts(key, name).1 > 0

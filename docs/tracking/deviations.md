@@ -902,37 +902,51 @@ consequential choice about whether to follow the spec or the quirk.
   listener) and translate `catch*`/`capture-catch` to "register + implicit
   `stopPropagation()`" — this reproduces Lynx's exact observable behavior
   while still being real `addEventListener` underneath.
-- **Each realm's Lynx walk runs at its root's capture step (2026-10-18,
-  user ruling: scheme D).** The kernel walks the path once
-  (`MainThreadRuntime::dispatch` over `dom`'s `EventWalk`) and calls each
-  realm that listens — the page realm, and each `frame`'s card in its
-  `ShadowRealm` — once, at its root, where that realm runs its whole Lynx
-  walk (capture, bubble, `global-bindEvent`) over its part of the path. This
-  is web-core's model — its listener sits on the view's shadow root, or on
-  `document` for keys (`WASMJSBinding.ts:262-282`), and `#commonEventHandler`
-  runs the whole Lynx walk from there — and not native Lynx's, where one
-  propagation crosses the page and every card. The recorded differences:
+- **Each realm's Lynx walk runs at the path's top step (2026-10-18, user
+  ruling: scheme D; every realm at the top, user ruling 2026-10-19).** The
+  kernel walks the path once (`MainThreadRuntime::dispatch` over `dom`'s
+  `EventWalk`) and calls each realm that listens — the page realm, and each
+  `frame`'s card in its `ShadowRealm` — once, at the path's first capture
+  step, the page realm first, where that realm runs its whole Lynx walk
+  (capture, bubble, `global-bindEvent`) over the steps of the path it holds
+  handles for. This is web-core's model — its listener sits on the view's
+  shadow root, or on `document` for keys (`WASMJSBinding.ts:262-282`), and
+  `#commonEventHandler` runs the whole Lynx walk from there — and not native
+  Lynx's, where one propagation crosses the page and every card. A
+  `global-bindEvent` is scoped as web-core's listener is: reached by an
+  event whose path passes through the registering node's tree root (the
+  document node, or a frame's shadow root for a card), and, for web-core's
+  document-level `keydown`/`keyup`, by every key. The recorded differences:
   - **A realm's Lynx handlers run before every component handler on the
-    path and cannot stop them.** Their call is at the root's capture step,
-    the first step of the realm's part of the path, so the engine's own
-    components on the steps after it (a swiper hearing a `tap` on its
-    content, a markdown on its own shadow content) hear the event after
-    every Lynx handler of that realm has run, bubble-pass ones included, and
-    whatever those handlers did.
+    path and cannot stop them.** Their call is at the path's top step, so
+    the engine's own components on the steps after it (a swiper hearing a
+    `tap` on its content, a markdown on its own shadow content) hear the
+    event after every Lynx handler of every realm has run, bubble-pass ones
+    included, and whatever those handlers did.
+  - **A frame card's Lynx handlers run when the page realm's do, at the top
+    of the path.** Every realm is called at the same step, the page realm
+    first, then the cards in construction order, so the page realm's whole
+    walk — its bubble pass included — runs before the card's capture pass,
+    and a page-level component between the frame and the card (a swiper
+    the frame sits in, say) hears the event after the card's handlers. In
+    web-core the card's listener sits on the card's own shadow root, deeper
+    in the path, so that component would hear it first.
   - **Lynx `catch` and `stopPropagation` never reach the kernel's stop
     flag.** They end the realm's own walk: another realm on the path — a
     card inside a frame the page `catch`es on — and the components still
     hear the event. web-core never calls the DOM `stopPropagation` either.
-    A component's `stop_propagation` is the one flag, and it ends every
-    realm call after its step. A switch that lets a realm set the kernel's
-    flag is a follow-up, not built.
+    A component's `stop_propagation` is the one flag; every realm being
+    called at the first step, it ends the components' walk alone.
   - **Which realms take part is decided before the walk.** The invitees are
     computed from the listener table before the first step, so a realm that
     first registers for the name during a dispatch — a listener of another
-    realm, earlier on the path, filing one in it — takes part from the next
-    dispatch. Within a realm that is called, a registration made during the
-    dispatch follows the standard (the path is fixed, a node's listeners are
-    read when its step runs), because that walk is the realm's own.
+    realm, called before it, filing one in it — takes part from the next
+    dispatch, and a realm that lost every registration for the name before
+    its call — a realm called before it freed its nodes or closed it — is
+    not called. Within a realm that is called, a registration made during
+    the dispatch follows the standard (the path is fixed, a node's
+    listeners are read when its step runs), because that walk is the
+    realm's own.
 - **No `preventDefault()`/`cancelable`** — Lynx's touch/tap/longpress events
   cannot be canceled by app code; built-in behavior suppression (e.g. scroll
   panning) goes through a separate gesture-arbitration API instead.

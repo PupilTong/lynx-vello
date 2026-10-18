@@ -34,7 +34,7 @@ use std::sync::Arc;
 use dom::event::{EventDetail, ListenerKey, ListenerKinds, RegistrationChange};
 use dom::{MethodCall, MethodError, MethodOutcome, StylePool};
 use quickjs_rust_bridge::{HostArgument, HostValue};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use tokio::sync::watch;
 
@@ -67,14 +67,18 @@ const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
 /// [`ChildKey::listener_key`], which is never 0.
 const PAGE_REALM: ListenerKey = ListenerKey(0);
 
-/// The event names whose listeners are the document's rather than a path's:
-/// every realm with any registration for one of them is called at the
-/// document element, as web-core adds its listener for these on `document`
-/// rather than on the view's shadow root (`WASMJSBinding.ts:262-282`). The
-/// target of either is the document element already (there is no focus
-/// model), so a realm whose root is elsewhere — a `frame`'s card — hears it
-/// with no step of its own and runs its `global-bindEvent` pass alone.
+/// web-core's rule for which events a nested card hears from the whole
+/// document: the names web-core listens for on `document` rather than on the
+/// card's `lynx-view` shadow root (`DOCUMENT_LEVEL_EVENTS`,
+/// `web-core/ts/client/mainthread/elementAPIs/WASMJSBinding.ts:30`, used at
+/// `:266-282`), intersected with the names this engine dispatches. For these,
+/// every realm with a `global-bindEvent` registration for the name is
+/// invited whatever tree the registering node is in, so a frame's card hears
+/// every key, whose target is the document element; every other global
+/// registration is reached only by a path through its node's tree root
+/// ([`dom::Document::global_registrants_on_path`]).
 const DOCUMENT_LEVEL_EVENTS: [&str; 2] = ["keydown", "keyup"];
+
 /// The `bobcat:frame` exports a `frame`'s connection and disconnection are
 /// handed to; see [`MainThreadRuntime::dispatch_component_events`].
 const FRAME_CONNECTED_EXPORT: &str = "__BobcatFrameConnected";
@@ -184,96 +188,85 @@ fn push_detail_strings<'a>(
 /// points spill.
 type Arguments<'a> = SmallVec<[HostArgument<'a>; 15]>;
 
-/// One realm one dispatch calls: which, at which node's capture step, and
-/// its part of the path, encoded as the call carries it.
+/// One realm one dispatch calls. Every one is called at the path's top
+/// step and handed the same [`EncodedPath`].
 struct RealmCall {
     /// The child to call, or `None` for the page realm.
     child: Option<ChildKey>,
     /// The registrant the realm's registrations are filed under.
     key: ListenerKey,
-    /// The node at whose capture step the realm is called.
-    at: dom::NodeId,
-    /// The steps the realm is handed, target first, as comma-joined packed
-    /// node ids: each step's node, then the target that step sees.
-    nodes: String,
-    targets: String,
 }
 
 /// The realms a dispatch of `name` over `steps` calls, in the order they are
-/// considered — the page realm, then `children` in construction order — each
-/// with where it is called and what it is handed; see
-/// [`MainThreadRuntime::dispatch`] for the rules. A realm whose call step is
-/// not on the path is left out.
+/// called — the page realm, then `children` in construction order: each one
+/// with a path registration for the name that the path's passes reach
+/// ([`dom::Document::listeners_on_path`]), with a `global-bindEvent`
+/// registration for it that the path reaches — one whose node's tree root
+/// (the document node, or the shadow root it sits in) is a node of the path
+/// ([`dom::Document::global_registrants_on_path`]) — or, for a
+/// [`DOCUMENT_LEVEL_EVENTS`] name, with a `global-bindEvent` registration
+/// for it anywhere ([`dom::Document::realm_has_global`]). None for a path
+/// with no capture step. See [`MainThreadRuntime::dispatch`].
 ///
-/// Built while the document is borrowed and before the walk takes a step, so
-/// the parts are encoded against the tree the path was computed over, which
-/// is the standard's rule: the path is fixed when the dispatch begins.
+/// Decided while the document is borrowed and before the walk takes a step,
+/// so they are read against the tree the path was computed over.
 fn realm_calls(
-    slot: &DocumentSlot,
     document: &LynxDocument,
     steps: &dom::event::EventSteps,
     name: &str,
     children: &[ChildKey],
 ) -> SmallVec<[RealmCall; 2]> {
-    let mut calls = SmallVec::new();
-    let capture: SmallVec<[&dom::event::EventStep; 16]> =
-        steps.steps().iter().filter(|step| step.capture).collect();
-    let Some(top) = capture.first().map(|step| step.node) else {
-        return calls;
-    };
+    if !steps.steps().iter().any(|step| step.capture) {
+        return SmallVec::new();
+    }
     let on_path = document.listeners_on_path(steps, name);
+    let globals = document.global_registrants_on_path(steps, name);
     let document_level = DOCUMENT_LEVEL_EVENTS.contains(&name);
     let invited = |key: ListenerKey| {
         on_path.contains(&key)
-            || document.realm_has_global(key, name)
-            || (document_level && document.realm_registration_counts(key, name) != (0, 0))
+            || globals.contains(&key)
+            || (document_level && document.realm_has_global(key, name))
     };
-    // The page realm answers for the document tree, and for a detached tree:
-    // its call is at the path's own root, unless that root is a shadow root,
-    // where a non-composed event inside a shadow tree ends.
-    if invited(PAGE_REALM) && document.shadow_root_of(top).is_none() {
-        calls.extend(realm_call(document, &capture, None, PAGE_REALM, top, None));
-    }
-    for &child in children {
-        let key = child.listener_key();
-        let Some(&root) = slot.roots.get(&key) else {
-            continue;
-        };
-        if !invited(key) {
-            continue;
-        }
-        let at = if document_level {
-            dom::NodeId::DOCUMENT_ELEMENT
-        } else {
-            root
-        };
-        let tree = document.shadow_root_of(root);
-        calls.extend(realm_call(document, &capture, Some(child), key, at, tree));
-    }
-    calls
+    let page = invited(PAGE_REALM).then_some(RealmCall {
+        child: None,
+        key: PAGE_REALM,
+    });
+    page.into_iter()
+        .chain(children.iter().filter_map(|&child| {
+            let key = child.listener_key();
+            invited(key).then_some(RealmCall {
+                child: Some(child),
+                key,
+            })
+        }))
+        .collect()
 }
 
-/// One [`RealmCall`] at `at`'s capture step, handed the capture steps from
-/// there inward that are in the tree `tree` roots (`None`: the document tree
-/// or a detached one), target first. `None` when `at` is not on the path.
-fn realm_call(
-    document: &LynxDocument,
-    capture: &[&dom::event::EventStep],
-    child: Option<ChildKey>,
-    key: ListenerKey,
-    at: dom::NodeId,
-    tree: Option<dom::NodeId>,
-) -> Option<RealmCall> {
-    let from = capture.iter().position(|step| step.node == at)?;
+/// The path every realm a dispatch calls is handed, as two comma-joined
+/// lists of packed node ids: each step's node, and the target that step
+/// sees ([`encode_path`]).
+struct EncodedPath {
+    nodes: String,
+    targets: String,
+}
+
+/// The one encoding of a dispatch's path: the capture steps read backwards
+/// — the path, target first, whatever `bubbles` cut from the bubble pass —
+/// less every step whose node or target is no longer live and every step at
+/// a shadow root, which no realm can hold a handle for. Nothing is filtered
+/// by tree: a realm is handed nodes it holds no handle for (another realm's,
+/// a UA component's shadow content) and skips them. A `NodeId` names one
+/// node for the life of the document, so liveness is one lookup per id.
+fn encode_path(document: &LynxDocument, steps: &dom::event::EventSteps) -> EncodedPath {
     let mut nodes = String::new();
     let mut targets = String::new();
-    // The capture pass read backwards is the path, target first, whatever
-    // `bubbles` cut from the bubble pass.
-    for step in capture[from..]
-        .iter()
-        .rev()
-        .filter(|step| document.shadow_root_of(step.node) == tree)
-    {
+    for step in steps.steps().iter().rev().filter(|step| {
+        step.capture
+            && document
+                .get(step.node)
+                .is_some_and(|node| !node.is_shadow_root())
+            && document.get(step.target).is_some()
+    }) {
         if !nodes.is_empty() {
             nodes.push(',');
             targets.push(',');
@@ -281,13 +274,7 @@ fn realm_call(
         write!(nodes, "{}", packed_node_id(step.node)).expect("writing to a String");
         write!(targets, "{}", packed_node_id(step.target)).expect("writing to a String");
     }
-    Some(RealmCall {
-        child,
-        key,
-        at,
-        nodes,
-        targets,
-    })
+    EncodedPath { nodes, targets }
 }
 
 /// Appends the extras channel: the count, then each name and its value.
@@ -731,17 +718,6 @@ struct DocumentSlot {
     exposure: Exposure,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
-    /// The page each `ShadowRealm` child answers as, by the registrant its
-    /// event registrations are filed under: the nested page its
-    /// `framePage` handed it, which `bobcat:frame-boot` makes the child's
-    /// page root. The one fact about a realm a dispatch needs and the
-    /// document cannot answer, because which realm renders under which page
-    /// is the realms' own business: the step at that page is where the child
-    /// is called ([`MainThreadRuntime::dispatch`]). Written by a child's
-    /// `framePage`, removed when the child closes or is freed
-    /// ([`Self::forget_realm`]); the page realm's root is the document
-    /// element, which needs no entry. One entry per live frame card.
-    roots: FxHashMap<ListenerKey, dom::NodeId>,
     /// The event names the document's components observe on an element that
     /// exists, as [`dom::Document::take_observed_name_changes`] said when last
     /// drained ([`Self::sync_names`]). With the document's listener
@@ -819,7 +795,6 @@ impl DocumentSlot {
             autoplays: Autoplays::default(),
             exposure: Exposure::new(),
             removals: 0,
-            roots: FxHashMap::default(),
             observed: FxHashSet::default(),
             scrolling: SmallVec::new(),
             outbox,
@@ -1011,16 +986,15 @@ impl DocumentSlot {
     }
 
     /// The realm `key` is closing or has been freed: every registration it
-    /// filed leaves the table, each name whose last registration that
+    /// filed leaves the table, so no later dispatch invites it and the one
+    /// under way skips it, and each name whose last registration that
     /// removed is no longer routed by the painter unless an observed name
-    /// keeps it, and it has no root any more, so no later dispatch calls it.
-    /// Idempotent: a child that closed itself is forgotten again, for
-    /// nothing, when it is freed.
+    /// keeps it. Idempotent: a child that closed itself is forgotten again,
+    /// for nothing, when it is freed.
     ///
     /// The exposure registrations of its elements are not touched: they go
     /// with the elements, which the frame's `resetFrame` frees.
     fn forget_realm(&mut self, key: ListenerKey) {
-        self.roots.remove(&key);
         self.apply_pending_last_removals();
         let Some(document) = self.document.as_mut() else {
             return;
@@ -2356,9 +2330,9 @@ impl MainThreadRuntime {
 
     /// One whole dispatch, whatever produced it: the one place an event is
     /// delivered. The path is computed once, and one walk runs over it —
-    /// the engine components' handlers at each step, and at the step of each
-    /// listening realm's root one call into that realm, which runs the
-    /// realm's own Lynx walk over its part of the path.
+    /// the engine components' handlers at each step, and at the path's top
+    /// step one call into each listening realm, which runs the realm's own
+    /// Lynx walk over the steps of the path it holds handles for.
     ///
     /// A target freed since the event formed resolves to nothing rather than
     /// a path — a `NodeId` names one node for the life of the document, so
@@ -2367,53 +2341,61 @@ impl MainThreadRuntime {
     /// observing definition), which costs that one check and builds no path.
     ///
     /// **Which realms are called** is decided before the walk, from the
-    /// document's listener table, and is not revisited during it
-    /// (`docs/tracking/deviations.md`): a realm is called when it holds a
-    /// path registration for the name on a node of the path, in a pass that
-    /// node's steps run ([`dom::Document::listeners_on_path`]); when it holds
-    /// a `global-bindEvent` registration for the name anywhere
-    /// ([`dom::Document::realm_has_global`]); or, for a document-level name
-    /// ([`DOCUMENT_LEVEL_EVENTS`]), when it holds any registration for it.
-    /// A realm with nothing to run is not called, so an event nothing on its
-    /// path listens for costs no crossing at all.
+    /// document's listener table (`docs/tracking/deviations.md`): a realm is
+    /// called when it holds a path registration for the name on a node of
+    /// the path, in a pass that node's steps run
+    /// ([`dom::Document::listeners_on_path`]), or a `global-bindEvent`
+    /// registration for the name the path reaches
+    /// ([`dom::Document::global_registrants_on_path`]): one whose node's
+    /// tree root is a node of the path — the document node for the page's
+    /// own and any light-tree node, which every connected composed path ends
+    /// at; a frame's shadow root for a card's, so a card's global
+    /// registration hears only the events whose path passes through its
+    /// frame, as web-core's card listens on its own shadow root. web-core's
+    /// document-level names ([`DOCUMENT_LEVEL_EVENTS`], `keydown` and
+    /// `keyup`) are the exception: every realm with a global registration
+    /// for one is invited. A realm with nothing to run is not called, so an event nothing on its
+    /// path listens for costs no crossing at all. A realm invited that lost
+    /// every registration for the name before its call — a listener of a
+    /// realm called before it freed its nodes, or closed it — is skipped
+    /// then; a child already freed is skipped by
+    /// `ChildRealms::call_module_export` answering nothing.
     ///
-    /// **Where each is called** is the capture step of its root. The page
-    /// realm's page is the document element, and it is called at the first
-    /// step of the path — the document node above that element for every
-    /// path in the document tree, so it is handed the whole path, exactly
-    /// what the one call before the listener table carried; or the root of a
-    /// detached tree's path, which is the page realm's too. A `frame`'s
-    /// card's root is the nested page its `framePage` answered
-    /// ([`DocumentSlot::roots`]). A document-level name calls the children at
-    /// the document element, after the page realm, in the order they were
-    /// constructed. A realm whose root is not
-    /// on the path is not called: a card's `global-bindtap` hears the taps
-    /// inside its frame and no other. The walk is [`dom::Document::advance`],
-    /// one step at a time with the document borrowed for that step alone, so
-    /// a realm's listeners may mutate the tree; a component's
-    /// `stop_propagation` ends the walk, the realm calls after it included.
-    /// A realm's own `catch` and `stopPropagation` end that realm's walk and
-    /// nothing else, as web-core's do (user ruling, 2026-10-18).
+    /// **Where they are called** is the first capture step the walk
+    /// reports, the path's top: the document node above the document element
+    /// for every path in the document tree, a detached tree's root, or the
+    /// shadow root a non-composed event inside a shadow tree ends at. The
+    /// page realm is called first, then the children in the order they were
+    /// constructed. A frame is a shadow tree like any other here: no record
+    /// says which realm renders which nested page, and each realm finds its
+    /// own steps in the path by the handles it holds. The walk is
+    /// [`dom::Document::advance`], one step at a time with the document
+    /// borrowed for that step alone, so a realm's listeners may mutate the
+    /// tree. A component's `stop_propagation` ends the walk after its step,
+    /// so it keeps no realm from its call, every call being at the first
+    /// step; a `stop_immediate_propagation` at that step, which reports no
+    /// step, does. A realm's own `catch`
+    /// and `stopPropagation` end that realm's walk and nothing else, as
+    /// web-core's do (user ruling, 2026-10-18).
     ///
-    /// **Each call** hands the realm its part of the path as the standard's
-    /// event path: the capture steps from its root inward, in target-first,
-    /// root-last order, each with its shadow-retargeted target, keeping the
-    /// steps of the root's own tree and no other — no shadow root, no UA
-    /// component's shadow content, no nested frame's card — encoded as two
-    /// comma-joined decimal id strings, which is how `childElementIds`
-    /// carries a list already: the boundary takes primitives and structured
-    /// clones only, a clone can be minted by the realm alone, and a decimal
-    /// id cannot contain the separator. For the page realm that is the whole
-    /// path less every step inside a shadow tree, which is exactly what the
-    /// one call before the listener table carried: script names no node of a
-    /// UA shadow tree — no handle, no listener — and a browser reports
-    /// exactly that to every listener outside the tree: the host,
-    /// retargeted, as the first step that remains says. An event at shadow
-    /// content therefore starts at its host there, and a non-composed one
-    /// there reaches no realm at all. The components' walk keeps those steps:
-    /// a component's shadow tree is its own. A realm called at a step that is
-    /// not of its tree (a card hearing a key at the document element) is
-    /// handed no step, and runs its `global-bindEvent` pass alone.
+    /// **Each call** hands the realm the same path ([`encode_path`]), encoded
+    /// once, right before the first call: the standard's event path, the
+    /// capture steps in target-first, root-last order, each with its
+    /// shadow-retargeted target, less the steps whose node or target is no
+    /// longer live and every shadow root, as two comma-joined decimal id
+    /// strings, which is how `childElementIds` carries a list already: the
+    /// boundary takes primitives and structured clones only, a clone can be
+    /// minted by the realm alone, and a decimal id cannot contain the
+    /// separator. A realm skips the steps it holds no handle for: the page
+    /// realm a UA component's shadow content, which script names no node of,
+    /// and a frame's card; a card everything outside its nested page. Its
+    /// `event.target` is the target of the first step it holds, so an event
+    /// at shadow content reaches the page realm at its host, retargeted, as
+    /// a browser reports it to every listener outside the shadow tree. A
+    /// realm that holds no step at all — a card hearing a key at the
+    /// document element — runs its `global-bindEvent` pass alone. The
+    /// components' walk keeps every step: a component's shadow tree is its
+    /// own.
     ///
     /// `bubbles` crosses as itself rather than as a shortened path, because
     /// the passes narrow differently: a non-bubbling event still captures down
@@ -2484,9 +2466,12 @@ impl MainThreadRuntime {
                 return Ok(false);
             }
             let steps = document.event_steps(target, bubbles, composed);
-            let calls = realm_calls(&slot, document, &steps, registered, &children);
+            let calls = realm_calls(document, &steps, registered, &children);
             (steps, calls)
         };
+        // Taken at the first capture step, the path's top, where every
+        // invited realm is called.
+        let mut calls = (!calls.is_empty()).then_some(calls);
 
         let mut walk = self
             .slot
@@ -2507,8 +2492,31 @@ impl MainThreadRuntime {
             if !outcome.capture {
                 continue;
             }
-            for call in calls.iter().filter(|call| call.at == outcome.node) {
-                match self.call_realm(js_runtime, call, name, bubbles, timestamp, detail, extras) {
+            let Some(calls) = calls.take() else {
+                continue;
+            };
+            // Encoded once, with the document borrowed for the encoding
+            // alone, and handed to every call.
+            let path = encode_path(
+                self.slot.borrow().document.as_ref().expect(DOCUMENT_EXISTS),
+                &steps,
+            );
+            for call in &calls {
+                // A realm that has lost every registration for the name since
+                // it was invited has nothing left to run.
+                let left = self
+                    .slot
+                    .borrow()
+                    .document
+                    .as_ref()
+                    .expect(DOCUMENT_EXISTS)
+                    .realm_registration_counts(call.key, registered);
+                if left == (0, 0) {
+                    continue;
+                }
+                match self.call_realm(
+                    js_runtime, call, &path, name, bubbles, timestamp, detail, extras,
+                ) {
                     Ok(published) => called |= published,
                     Err(error) => failures.push(error),
                 }
@@ -2522,11 +2530,10 @@ impl MainThreadRuntime {
         ListenerFailures::or_called(failures, called)
     }
 
-    /// One realm's part of one dispatch: `__BobcatDispatchEvent(nodes,
+    /// One realm's call in one dispatch: `__BobcatDispatchEvent(nodes,
     /// targets, name, bubbles, timestamp, extras…, detail…)` in the page
-    /// realm, or in the child `call` names. A child that closed since the
-    /// walk began — a listener before it let go of its frame — has no root
-    /// any more and is not called, nor is one already freed.
+    /// realm, or in the child `call` names. A child already freed is not
+    /// called.
     #[allow(
         clippy::too_many_arguments,
         reason = "the dispatch's own arguments, which every call carries"
@@ -2535,6 +2542,7 @@ impl MainThreadRuntime {
         &mut self,
         js_runtime: &mut ScriptRuntime,
         call: &RealmCall,
+        path: &EncodedPath,
         name: &str,
         bubbles: bool,
         timestamp: f64,
@@ -2544,8 +2552,8 @@ impl MainThreadRuntime {
         // The detail last, because a touch event's points make it the one
         // part of variable length besides the extras before it.
         let mut arguments = Arguments::new();
-        arguments.push(HostArgument::String(&call.nodes));
-        arguments.push(HostArgument::String(&call.targets));
+        arguments.push(HostArgument::String(&path.nodes));
+        arguments.push(HostArgument::String(&path.targets));
         arguments.push(HostArgument::String(name));
         arguments.push(HostArgument::Boolean(bubbles));
         arguments.push(HostArgument::Number(timestamp));
@@ -2560,9 +2568,6 @@ impl MainThreadRuntime {
                 &arguments,
             ),
             Some(child) => {
-                if !self.slot.borrow().roots.contains_key(&call.key) {
-                    return Ok(false);
-                }
                 let Some(called) = self.core.children.call_module_export(
                     js_runtime,
                     child,
@@ -3328,9 +3333,8 @@ await Promise.resolve().then(() => __FlushElementTree());
 ///
 /// One set of members for both (user ruling), and the same code: the same
 /// slot, the same outbox and thread, the same listener table, the same
-/// `createPage` and the same `flushElementTree`. The one record of which
-/// page a realm renders is the nested page a child's `framePage` answered,
-/// which a dispatch calls it at ([`DocumentSlot::roots`]): a child's
+/// `createPage` and the same `flushElementTree`. Which page a realm renders
+/// is the realm's own record, kept nowhere here: a child's
 /// `bobcat:element` answers `__CreatePage` with the nested page
 /// `bobcat:frame-boot` handed it (`__BobcatUsePageRoot`), and its card's
 /// sheet goes to the frame's shadow root because `adoptStyleSheet` was told
@@ -3470,7 +3474,7 @@ fn install_host_module(
     // and before a painter has bound.
     thread: crate::jobs::JsThreadHandle,
     // The registrant the realm's event registrations are filed under, which
-    // its `framePage` and `closeRealm` name.
+    // its `closeRealm` lets go of.
     key: ListenerKey,
     // A child's own release flag, which its `closeRealm` sets; `None` in the
     // page realm.
@@ -3588,44 +3592,31 @@ fn install_host_module(
 
 /// Installs the three members a nested card's realms speak to, all generic:
 /// `framePage` reads a `frame`'s nested page, `resetFrame` empties it, and
-/// `closeRealm` retires the realm that calls it. Which realm renders which
-/// frame, and when one is let go of, is `bobcat:frame`'s to decide. The one
-/// record kept is the page a child asked for, which `bobcat:frame-boot`
-/// makes the child's page root: the step at that page is where a dispatch
-/// calls the child ([`DocumentSlot::roots`]), until its `closeRealm` lets go
-/// of it and of every registration the child filed.
+/// `closeRealm` retires the realm that calls it and lets go of every
+/// registration it filed. Which realm renders which frame, and when one is
+/// let go of, is `bobcat:frame`'s to decide; the host keeps no record of it.
 fn install_nested_page_members(
     engine: &mut ScriptEngine,
     handle: &Rc<RefCell<DocumentSlot>>,
     key: ListenerKey,
     retired: Option<Rc<Cell<bool>>>,
 ) -> Result<(), MainThreadError> {
-    // The nested page a `frame` component built with the element, which
-    // lives as long as the frame. Refused past `MAX_FRAME_DEPTH` frames, so a
-    // card that embeds itself stops there. A child's answer is its root from
-    // then on; the page realm's root is the document element, whatever
-    // frames it reads.
-    let tree = Rc::clone(handle);
-    install(engine, "framePage", 1, move |arguments| {
-        const NAME: &str = "bobcat-internal:host.framePage";
-        let frame = node_id_argument(NAME, arguments, 0)?;
-        let mut slot = borrow_slot(NAME, &tree)?;
-        let document = slot.document_mut();
-        validate_live_element(document, NAME, frame)?;
-        let page = nested_page(document, frame)
-            .ok_or_else(|| format!("{NAME} requires a frame element"))?;
-        if frame_depth(document, frame) > MAX_FRAME_DEPTH {
-            return Err(format!(
-                "{NAME}: frames nest at most {MAX_FRAME_DEPTH} deep"
-            ));
-        }
-        if key != PAGE_REALM {
-            slot.roots.insert(key, page);
-        }
-        Ok(node_id_value(page))
-    })?;
-
     tree_members! { engine, handle;
+        // The nested page a `frame` component built with the element, which
+        // lives as long as the frame. Refused past `MAX_FRAME_DEPTH` frames,
+        // so a card that embeds itself stops there. Nothing is recorded.
+        fn framePage(frame: node_id_argument) |document| {
+            validate_live_element(document, NAME, frame)?;
+            let page = nested_page(document, frame)
+                .ok_or_else(|| format!("{NAME} requires a frame element"))?;
+            if frame_depth(document, frame) > MAX_FRAME_DEPTH {
+                return Err(format!(
+                    "{NAME}: frames nest at most {MAX_FRAME_DEPTH} deep"
+                ));
+            }
+            Ok(node_id_value(page))
+        }
+
         // Frees every child of a frame's nested page with its whole subtree
         // — it is inside a shadow tree, so `dom` frees what is under it
         // outright — and every sheet mounted on the frame's shadow root, so
@@ -3650,10 +3641,9 @@ fn install_nested_page_members(
         }
     }
 
-    // Retires the child, and lets go of its root and of every registration
-    // it filed now rather than when the release step frees it: from here on
-    // no dispatch calls it, and a name only it held is no longer routed by
-    // the painter.
+    // Retires the child, and lets go of every registration it filed now
+    // rather than when the release step frees it: from here on no dispatch
+    // calls it, and a name only it held is no longer routed by the painter.
     let tree = Rc::clone(handle);
     install(engine, "closeRealm", 0, move |_arguments| {
         const NAME: &str = "bobcat-internal:host.closeRealm";
@@ -3841,8 +3831,8 @@ fn hears_exposure(document: &LynxDocument, node: dom::NodeId) -> bool {
 /// What a child's host modules keep for it: its `Worker` owner, and the
 /// release of its event registrations, which [`Drop`] runs when the child is
 /// freed — so a child freed without closing itself (a `ShadowRealm` nothing
-/// referred to any more) leaves no row in the listener table and no root,
-/// as one that called `closeRealm` already left none.
+/// referred to any more) leaves no row in the listener table, as one that
+/// called `closeRealm` already left none.
 struct ChildDocumentState {
     workers: Box<dyn ChildHostState>,
     slot: Rc<RefCell<DocumentSlot>>,

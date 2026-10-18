@@ -4560,8 +4560,63 @@ describe("a frame's card", () => {
     expect(mock.named("callElementMethod")).toEqual([]);
   });
 
-  it("runs its global pass alone when handed no step, aimed at the element that registered", () => {
+  it("skips the steps it holds no handle for, and aims at the first one it holds", () => {
+    const { frameId, page, view } = card();
+    const outer = mock.createElement("page");
+    const seen: unknown[] = [];
+    __AddEventListener(page, "tap", (event: ListenerEvent) => {
+      seen.push(["page", event.target.uid, event.currentTarget.uid, event.eventPhase]);
+    }, { capture: true });
+    __AddEventListener(view, "tap", (event: ListenerEvent) => {
+      seen.push(["view", event.target.uid, event.currentTarget.uid, event.eventPhase]);
+    }, {});
+    const uid = __GetElementUniqueID(view);
+    const pageUid = __GetElementUniqueID(page);
+
+    // The whole path, as the host hands it to every realm: the card's own
+    // steps, then the frame and the page realm's page, which this realm
+    // holds no handle for, retargeted to the frame.
+    elementModule.__BobcatDispatchEvent(
+      [uid, pageUid, frameId, outer].join(","),
+      [uid, uid, frameId, frameId].join(","),
+      "tap",
+      true,
+      0,
+      0,
+      DETAIL_EMPTY,
+    );
+
+    expect(seen).toEqual([
+      ["page", uid, pageUid, 1],
+      ["view", uid, uid, 2],
+    ]);
+  });
+
+  it("takes its target from the first step it holds when the steps before it are another realm's", () => {
+    const { frameId, view } = card();
+    const shadowContent = mock.createElement("view");
+    let target: unknown;
+    __AddEventListener(view, "tap", (event: ListenerEvent) => {
+      target = event.target.uid;
+    }, {});
+    const uid = __GetElementUniqueID(view);
+
+    elementModule.__BobcatDispatchEvent(
+      [shadowContent, uid, frameId].join(","),
+      [shadowContent, uid, frameId].join(","),
+      "tap",
+      true,
+      0,
+      0,
+      DETAIL_EMPTY,
+    );
+
+    expect(target).toBe(uid);
+  });
+
+  it("runs its global pass alone when it holds no step of the path, aimed at the element that registered", () => {
     const { view } = card();
+    const documentElement = mock.createElement("page");
     const seen: unknown[] = [];
     globalThis.runWorklet = (value, params) => {
       (value as { body: (event: unknown) => void }).body(params[0]);
@@ -4573,10 +4628,10 @@ describe("a frame's card", () => {
     const uid = __GetElementUniqueID(view);
 
     // A key's target is the document element, which is no node of a card's
-    // tree: the host hands the card an empty path.
+    // tree: the host hands the card the page's path, none of which it holds.
     elementModule.__BobcatDispatchEvent(
-      "",
-      "",
+      String(documentElement),
+      String(documentElement),
       "keydown",
       true,
       0,
@@ -4591,11 +4646,36 @@ describe("a frame's card", () => {
     expect(seen).toEqual([["keydown", uid, uid, 0, "a"]]);
   });
 
-  it("runs nothing for a pathless event that does not bubble", () => {
+  it("runs its global pass alone when handed no step", () => {
     const { view } = card();
+    let target: unknown;
+    globalThis.runWorklet = (value, params) => {
+      (value as { body: (event: unknown) => void }).body(params[0]);
+    };
+    __AddEvent(view, "global-bindEvent", "keydown", {
+      type: "worklet",
+      value: { body: (event: ListenerEvent) => (target = event.target.uid) },
+    });
+
+    elementModule.__BobcatDispatchEvent("", "", "keydown", true, 0, 0, DETAIL_KEY, "a", "KeyA", false, 0);
+
+    expect(target).toBe(__GetElementUniqueID(view));
+  });
+
+  it("runs nothing for an event that does not bubble when it holds no step", () => {
+    const { frameId, view } = card();
     __AddEvent(view, "global-bindEvent", "load", "3:0:load");
 
     elementModule.__BobcatDispatchEvent("", "", "load", false, 0, 0, DETAIL_EMPTY);
+    elementModule.__BobcatDispatchEvent(
+      String(frameId),
+      String(frameId),
+      "load",
+      false,
+      0,
+      0,
+      DETAIL_EMPTY,
+    );
 
     // A non-bubbling event runs no global pass, so there is nothing to run.
     expect(mock.named("publishEvent")).toEqual([]);
