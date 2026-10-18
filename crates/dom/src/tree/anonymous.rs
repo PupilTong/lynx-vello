@@ -1145,6 +1145,75 @@ mod tests {
         );
     }
 
+    /// The output the node's last committing run reported.
+    fn committed_output(doc: &Doc, id: NodeId) -> hughie::tree::LayoutOutput {
+        let slot = &doc
+            .dom
+            .layout_state()
+            .get(doc.dom.live_slot(id))
+            .expect("laid out")
+            .slot;
+        let input = slot.committed_input().expect("committed");
+        slot.cached_layout(input)
+            .expect("the committed entry answers its own input")
+    }
+
+    /// The box's inline formatting context reports both its first and its
+    /// last line box's baseline, and its flex container hands both on as its
+    /// own (css-flexbox-1 §8.5): `aa bb cc` in 20px wraps to three 10px
+    /// lines, first baseline 8, last 28.
+    #[test]
+    fn a_wrapped_box_hands_its_last_line_baseline_to_its_container() {
+        let mut doc = doc(".row { display: flex; width: 20px; }");
+        let root = doc.root;
+        let row = doc.el(root, "div.row");
+        text(&mut doc, row, "aa bb cc");
+        doc.flush();
+
+        let [anonymous] = boxes(&doc, row)[..] else {
+            panic!("one box")
+        };
+        assert_eq!(rect(&doc, anonymous), (0.0, 0.0, 20.0, 30.0));
+        for id in [anonymous, row] {
+            let output = committed_output(&doc, id);
+            assert_eq!(output.first_baselines.y, Some(8.0));
+            assert_eq!(output.last_baselines.y, Some(28.0));
+        }
+    }
+
+    /// `align-items: last baseline` lines anonymous text items up by their
+    /// last lines (css-align-3 §9.3). The 20px-wide item wraps `aa bb cc`
+    /// to three 10px lines, last baseline 28; `dd` keeps one, baseline 8, so
+    /// it sits 20 lower than the wrapped one. A 0×0 box splits the text into
+    /// two items.
+    #[test]
+    fn last_baseline_lines_anonymous_text_up_on_its_last_line() {
+        let cases = [
+            // Flex: the wrapped item shrinks to its 20px min-content width.
+            ".row { display: flex; width: 40px; align-items: last baseline; }",
+            // Grid: one row, the wrapped item in a 20px column; the row's
+            // height comes from the shimmed contributions.
+            ".row { display: grid; grid-template-columns: 20px 0 20px;
+                    align-items: last baseline; }",
+        ];
+        for css in cases {
+            let mut doc = doc(&format!("{css} .cut {{ width: 0; height: 0; }}"));
+            let root = doc.root;
+            let row = doc.el(root, "div.row");
+            text(&mut doc, row, "aa bb cc");
+            doc.el(row, "view.cut");
+            text(&mut doc, row, "dd");
+            doc.flush();
+
+            let [wrapped, single] = boxes(&doc, row)[..] else {
+                panic!("{css}: two boxes")
+            };
+            assert_eq!(rect(&doc, wrapped), (0.0, 0.0, 20.0, 30.0), "{css}");
+            assert_eq!(rect(&doc, single), (20.0, 20.0, 20.0, 10.0), "{css}");
+            assert_eq!(rect(&doc, row).3, 30.0, "{css}");
+        }
+    }
+
     #[test]
     fn the_box_inherits_the_containers_font() {
         let mut doc = doc("");
@@ -1161,6 +1230,40 @@ mod tests {
         doc.flush();
         assert_eq!(boxes(&doc, div), [anonymous]);
         assert_eq!(rect(&doc, anonymous), (0.0, 0.0, 60.0, 20.0));
+    }
+
+    /// The container's `direction` reaches its box, where it is the inline
+    /// formatting context's bidi paragraph level: parley reads it when it
+    /// shapes, so the change needs a new flow (`InlineFlow::set_style`
+    /// asserts as much in debug builds, which this runs in), and `start`
+    /// moves to the right edge.
+    #[test]
+    fn a_container_direction_change_re_shapes_the_box_at_the_new_level() {
+        let mut doc = doc("div { display: flex; flex-direction: column; width: 60px; }");
+        let root = doc.root;
+        let div = doc.el(root, "div");
+        text(&mut doc, div, "aa");
+        doc.flush();
+        let [anonymous] = boxes(&doc, div)[..] else {
+            panic!("one box")
+        };
+        let start = |doc: &Doc| {
+            let flow = doc.dom.inline_flow(anonymous).expect("a committed flow");
+            let line = flow.display().get(0).expect("a line");
+            line.items()
+                .find_map(|item| match item {
+                    parley::PositionedLayoutItem::GlyphRun(glyph_run) => Some(glyph_run.offset()),
+                    parley::PositionedLayoutItem::InlineBox(_) => None,
+                })
+                .expect("a glyph run")
+        };
+        assert_eq!(rect(&doc, anonymous).2, 60.0);
+        assert_eq!(start(&doc), 0.0);
+
+        doc.set_inline(div, "direction: rtl");
+        doc.flush();
+        assert_eq!(boxes(&doc, div), [anonymous]);
+        assert_eq!(start(&doc), 40.0, "the 60px box's right edge");
     }
 
     #[test]

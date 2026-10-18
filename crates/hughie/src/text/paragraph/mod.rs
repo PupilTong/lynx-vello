@@ -23,10 +23,11 @@
 //! inline formatting context ([`crate::text::inline`]).
 //!
 //! Where a consumer places its lines in the block axis is a [`LineGeometry`]
-//! per line. The Lynx block reports parley's own line metrics there; the
-//! inline formatting context reports the CSS 2.2 §10.8 line boxes, whose
-//! baselines differ from parley's. Every reader of a laid-out paragraph —
-//! paint, range boxes, hit points — positions a line through it.
+//! per line: parley's own line metrics, which since parley 0.12 are CSS 2.2
+//! §10.8.1 line boxes — every line starts with the root inline box's strut
+//! ([`ParagraphRoot`]), and every span and atomic box adds its own box around
+//! the shared baseline. Every reader of a laid-out paragraph — paint, range
+//! boxes, hit points — positions a line through it.
 //!
 //! White-space processing is decided in one place: `content::normalize`,
 //! called only from `Flow::build` with the consumer's
@@ -50,7 +51,9 @@ use core::ops::Range;
 pub use content::{InlineBoxSpec, InlineItem, TextRunItem};
 use content::{NormalizedBlock, WhiteSpaceProcessing, normalize};
 pub use memo::{BlockConstraint, BlockMetrics};
-use parley::{ContentWidths, InlineBox, InlineBoxKind, Layout};
+use parley::{
+    ContentWidths, InlineBox, InlineBoxKind, Layout, WhiteSpaceCollapse as ParleyWhiteSpace,
+};
 use shape::{NaturalLine, ShapeSpan};
 pub use style::{
     BreakStyle, Direction, IndentKeywords, LineHeight, OverflowWrap, RunStyle, TextAlign,
@@ -60,13 +63,8 @@ pub use style::{
 use crate::style::TextBrush;
 use crate::text::TextContext;
 
-/// Where one laid-out line sits in its paragraph's block axis.
-///
-/// The one source of line placement every reader goes through. `shift` is
-/// what a y coordinate parley positioned on this line — a glyph run's
-/// baseline, a run's ascent and descent, the line's own extent — needs added
-/// to land on this geometry: zero where the consumer reports parley's own
-/// metrics, the distance from parley's baseline to the line box's otherwise.
+/// Where one laid-out line sits in its paragraph's block axis: parley's own
+/// line box, which is also where it placed the line's glyphs and boxes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LineGeometry {
     /// The top of the line box, from the paragraph's top.
@@ -75,8 +73,18 @@ pub struct LineGeometry {
     pub height: f32,
     /// The line's alphabetic baseline, from the paragraph's top.
     pub baseline: f32,
-    /// The offset from parley's placement of this line to this one.
-    pub shift: f32,
+}
+
+impl LineGeometry {
+    /// Parley's placement of `line`.
+    pub(in crate::text) fn of(line: &parley::Line<'_, TextBrush>) -> Self {
+        let metrics = line.metrics();
+        Self {
+            top: metrics.block_min_coord,
+            height: metrics.block_max_coord - metrics.block_min_coord,
+            baseline: metrics.baseline,
+        }
+    }
 }
 
 /// The line-breaking values each content item is shaped with.
@@ -101,7 +109,13 @@ impl RunBreaking<'_> {
 /// One owned flattened item.
 #[derive(Debug)]
 pub(in crate::text) enum OwnedItem {
-    Run(RunStyle),
+    Run {
+        style: RunStyle,
+        /// How the run's whitespace hangs at a line end and whether a wrap
+        /// opportunity follows each space, in parley's vocabulary
+        /// (`white_space_hanging`).
+        hanging: ParleyWhiteSpace,
+    },
     Box(InlineBoxSpec),
 }
 
@@ -117,10 +131,6 @@ pub(in crate::text) struct Flow {
     /// Each preserved tab's `0.5ch`, the shortest shift it takes; indexed
     /// like `block.tabs`. Measured once, for the content flow only.
     pub(in crate::text) tab_min: Vec<f32>,
-    /// The extra letter-spacing each verbatim space byte with an advance of
-    /// its own is shaped with, indexed like `block.space_runs`. Measured by
-    /// [`Self::measure_space_runs`].
-    pub(in crate::text) space_spacing: Vec<f32>,
 }
 
 impl Flow {
@@ -130,75 +140,21 @@ impl Flow {
     ) -> Self {
         let block = normalize(items, processing);
         let tabs = block.tabs.len();
-        let space_runs = block.space_runs.len();
         Self {
             items: items
                 .iter()
                 .map(|item| match item {
-                    InlineItem::Run(run) => OwnedItem::Run(run.style.clone()),
+                    InlineItem::Run(run) => OwnedItem::Run {
+                        style: run.style.clone(),
+                        hanging: white_space_hanging(processing, run.white_space),
+                    },
                     InlineItem::Box(spec) => OwnedItem::Box(*spec),
                 })
                 .collect(),
             block,
             tab_spacing: vec![0.0; tabs],
             tab_min: vec![0.0; tabs],
-            space_spacing: vec![0.0; space_runs],
         }
-    }
-
-    /// Gives each verbatim space byte with an advance of its own that
-    /// advance: a run's one space widened by `count - 1` times the advance
-    /// one space of the run's style takes, letter-spacing included, and a
-    /// space before a forced break narrowed to nothing.
-    ///
-    /// One shaping per distinct run item holding such a byte, when the flow
-    /// is built: a flow without one shapes nothing here.
-    pub(in crate::text) fn measure_space_runs<S: Copy>(
-        &mut self,
-        context: &mut TextContext,
-        breaking: RunBreaking<'_>,
-        source: fn(u32) -> S,
-    ) {
-        const SPACE: &str = " ";
-        let mut measured: Vec<(u32, f32)> = Vec::new();
-        let spacing = self
-            .block
-            .space_runs
-            .iter()
-            .map(|run| {
-                let item = self.item_at(run.byte);
-                let advance =
-                    if let Some(&(_, advance)) = measured.iter().find(|(seen, _)| *seen == item) {
-                        advance
-                    } else {
-                        let spans = [ShapeSpan {
-                            bytes: 0..SPACE.len(),
-                            style: self.run_style(item),
-                            breaking: breaking.of(item),
-                            source: source(item),
-                            extra_spacing: 0.0,
-                        }];
-                        let mut probe =
-                            shape::shape(context, SPACE, &spans, Vec::new(), &mut Vec::new());
-                        probe.break_all_lines(None);
-                        // A lone space is all trailing whitespace, which `width`
-                        // leaves out.
-                        let advance = probe.full_width();
-                        measured.push((item, advance));
-                        advance
-                    };
-                if run.before_break {
-                    return -advance;
-                }
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "a space count is far below f32's exact integer range"
-                )]
-                let others = (run.count - 1) as f32;
-                advance * others
-            })
-            .collect();
-        self.space_spacing = spacing;
     }
 
     /// The run item holding byte `byte` of the normalized text.
@@ -209,7 +165,7 @@ impl Flow {
 
     pub(in crate::text) fn run_style(&self, item: u32) -> &RunStyle {
         match &self.items[item as usize] {
-            OwnedItem::Run(style) => style,
+            OwnedItem::Run { style, .. } => style,
             OwnedItem::Box(_) => unreachable!("styled ranges only reference run items"),
         }
     }
@@ -217,66 +173,88 @@ impl Flow {
     pub(in crate::text) fn box_spec(&self, item: u32) -> &InlineBoxSpec {
         match &self.items[item as usize] {
             OwnedItem::Box(spec) => spec,
-            OwnedItem::Run(_) => unreachable!("box slots only reference box items"),
+            OwnedItem::Run { .. } => unreachable!("box slots only reference box items"),
+        }
+    }
+
+    /// How run item `item`'s whitespace hangs and breaks, in parley's
+    /// vocabulary.
+    pub(in crate::text) fn hanging(&self, item: u32) -> ParleyWhiteSpace {
+        match &self.items[item as usize] {
+            OwnedItem::Run { hanging, .. } => *hanging,
+            OwnedItem::Box(_) => unreachable!("styled ranges only reference run items"),
         }
     }
 
     /// The shaper spans for this flow, offset into a combined display string.
     ///
-    /// One span per styled range, except that every preserved tab's space and
-    /// every verbatim space run's one space is a span of its own carrying its
-    /// extra spacing — the only way to give one cluster an advance of its own
-    /// in parley.
+    /// One span per styled range, except that every preserved tab's space is
+    /// a span of its own carrying its tab spacing — the only way to give one
+    /// cluster an advance of its own in parley.
     pub(in crate::text) fn spans<S>(
         &self,
         byte_offset: u32,
         source: fn(u32) -> S,
         breaking: RunBreaking<'_>,
     ) -> Vec<ShapeSpan<'_, S>> {
-        // Every one-byte span with an advance of its own, ascending by byte.
-        let mut widened: Vec<(u32, f32)> = self
-            .block
-            .tabs
-            .iter()
-            .copied()
-            .zip(self.tab_spacing.iter().copied())
-            .chain(
-                self.block
-                    .space_runs
-                    .iter()
-                    .map(|run| run.byte)
-                    .zip(self.space_spacing.iter().copied()),
-            )
-            .collect();
-        widened.sort_unstable_by_key(|&(byte, _)| byte);
-        let mut spans = Vec::with_capacity(self.block.ranges.len() + 2 * widened.len());
+        let tabs = &self.block.tabs;
+        let mut spans = Vec::with_capacity(self.block.ranges.len() + 2 * tabs.len());
         let mut push = |bytes: core::ops::Range<u32>, item: u32, extra_spacing: f32| {
             spans.push(ShapeSpan {
                 bytes: (bytes.start + byte_offset) as usize..(bytes.end + byte_offset) as usize,
                 style: self.run_style(item),
                 breaking: breaking.of(item),
+                hanging: self.hanging(item),
                 source: source(item),
                 extra_spacing,
             });
         };
-        let mut next = 0;
+        let mut next_tab = 0;
         for range in &self.block.ranges {
             let mut start = range.bytes.start;
-            while let Some(&(byte, spacing)) = widened.get(next)
-                && byte < range.bytes.end
+            while let Some(&tab) = tabs.get(next_tab)
+                && tab < range.bytes.end
             {
-                if start < byte {
-                    push(start..byte, range.item, 0.0);
+                if start < tab {
+                    push(start..tab, range.item, 0.0);
                 }
-                push(byte..byte + 1, range.item, spacing);
-                start = byte + 1;
-                next += 1;
+                push(tab..tab + 1, range.item, self.tab_spacing[next_tab]);
+                start = tab + 1;
+                next_tab += 1;
             }
             if start < range.bytes.end {
                 push(start..range.bytes.end, range.item, 0.0);
             }
         }
         spans
+    }
+}
+
+/// How a run's whitespace hangs at a line end, and whether a wrap
+/// opportunity follows each space, under `processing`.
+///
+/// The normalizer has already collapsed or kept every character, so parley
+/// reads this only for hanging and for `break-spaces`' opportunities
+/// (`parley::WhiteSpaceCollapse` on a `StyleRunBuilder`). A CSS paragraph
+/// hands each run its own value: collapsible spaces always hang, preserved
+/// ones hang when the line wraps (conditionally before a forced break, CSS
+/// Text 4 §4.3.2), `break-spaces` ones never hang. A verbatim paragraph
+/// hangs every space at a line end, unconditionally — native Lynx's line
+/// extent leaves trailing whitespace out (Android `Layout.getLineMax`)
+/// whether or not the line wraps and whatever follows — which is parley's
+/// `Collapse` hanging.
+fn white_space_hanging(
+    processing: WhiteSpaceProcessing,
+    white_space: WhiteSpaceCollapse,
+) -> ParleyWhiteSpace {
+    match processing {
+        WhiteSpaceProcessing::Verbatim { .. } => ParleyWhiteSpace::Collapse,
+        WhiteSpaceProcessing::Css => match white_space {
+            WhiteSpaceCollapse::Collapse => ParleyWhiteSpace::Collapse,
+            WhiteSpaceCollapse::PreserveBreaks => ParleyWhiteSpace::PreserveBreaks,
+            WhiteSpaceCollapse::Preserve => ParleyWhiteSpace::Preserve,
+            WhiteSpaceCollapse::BreakSpaces => ParleyWhiteSpace::BreakSpaces,
+        },
     }
 }
 
@@ -296,6 +274,29 @@ pub(in crate::text) struct Paragraph<S> {
     /// Where the content's preserved tabs stop: css-text-3's stops, or native
     /// Lynx's for a paragraph whose white space is processed verbatim.
     tab_stops: tab::TabStops,
+    /// The root inline box every line starts with.
+    pub(in crate::text) root: ParagraphRoot<S>,
+    /// What a `vertical-align` percentage of an atomic box is a fraction
+    /// of: the root inline box's line height (`position::percent_basis`).
+    pub(in crate::text) percent_basis: f32,
+}
+
+/// The root inline box of a paragraph, owned: its strut style with the paint
+/// identity parley's style 0 records, and the base direction
+/// ([`shape::LineRoot`]).
+#[derive(Debug, Clone)]
+pub(in crate::text) struct ParagraphRoot<S> {
+    pub(in crate::text) strut: Option<(RunStyle, S)>,
+    pub(in crate::text) direction: parley::BaseDirection,
+}
+
+impl<S: Copy> ParagraphRoot<S> {
+    pub(in crate::text) fn line_root(&self) -> shape::LineRoot<'_, S> {
+        shape::LineRoot {
+            strut: self.strut.as_ref().map(|(style, source)| (style, *source)),
+            direction: self.direction,
+        }
+    }
 }
 
 /// What one natural break reports, in the content's own offset spaces.
@@ -314,17 +315,18 @@ impl<S: Copy> Paragraph<S> {
     /// Builds and shapes the content flow of `items`.
     ///
     /// `breaking` is the line-breaking style each item's spans are shaped
-    /// with, `processing` how its white space is processed, and `source` the
-    /// paint identity a content item's spans record.
+    /// with, `processing` how its white space is processed, `source` the
+    /// paint identity a content item's spans record, and `root` the root
+    /// inline box every line starts with.
     pub(in crate::text) fn new(
         context: &mut TextContext,
         breaking: RunBreaking<'_>,
         processing: WhiteSpaceProcessing,
         items: &[InlineItem<'_>],
         source: fn(u32) -> S,
+        root: ParagraphRoot<S>,
     ) -> Self {
         let mut flow = Flow::build(items, processing);
-        flow.measure_space_runs(context, breaking, source);
         let tab_stops = match processing {
             WhiteSpaceProcessing::Verbatim { .. } => tab::TabStops::Native,
             WhiteSpaceProcessing::Css => {
@@ -335,7 +337,9 @@ impl<S: Copy> Paragraph<S> {
             }
         };
         let spans = flow.spans(0, source, breaking);
-        let boxes = parley_boxes(&flow, 0, 0);
+        // Box sizes are written in before every break; at construction the
+        // percentage basis is not known yet, and nothing reads the boxes.
+        let boxes = parley_boxes(&flow, 0, 0, 0.0);
         let mut natural_sources = Vec::new();
         let natural = shape::shape(
             context,
@@ -343,22 +347,34 @@ impl<S: Copy> Paragraph<S> {
             &spans,
             boxes,
             &mut natural_sources,
+            root.line_root(),
         );
         drop(spans);
+        // With no strut the first run stands in for the root, as it does as
+        // parley's style 0.
+        let basis_style = root.strut.as_ref().map(|(style, _)| style).or_else(|| {
+            flow.items.iter().find_map(|item| match item {
+                OwnedItem::Run { style, .. } => Some(style),
+                OwnedItem::Box(_) => None,
+            })
+        });
+        let percent_basis = position::percent_basis(&natural, basis_style);
         Self {
             content: flow,
             natural,
             natural_sources,
             source,
             tab_stops,
+            root,
+            percent_basis,
         }
     }
 
     /// Breaks the natural layout at `constraint`, committing at most
     /// `max_lines` lines, and reads the committed lines back.
     ///
-    /// The atomic boxes' current sizes and `vertical-align` line
-    /// contributions are written in first, and the constraint's indent goes
+    /// The atomic boxes' current sizes, baselines and `vertical-align` values
+    /// are written in first, and the constraint's indent goes
     /// on the lines `keywords` name. Shaping is not re-run, except that a
     /// paragraph with preserved tabs re-shapes when a break moved a tab to a
     /// different stop (`tab`), at most `tab::MAX_ROUNDS` times; `breaking` is
@@ -373,11 +389,15 @@ impl<S: Copy> Paragraph<S> {
     ) -> NaturalBreak {
         let width = constraint.max_advance();
 
-        // Box widths and vertical-align line contributions feed the breaker.
-        for (slot, entry) in self.natural.inline_boxes_mut().iter_mut().enumerate() {
+        // Box sizes, baselines and alignments feed the breaker, which sizes
+        // and places the line boxes around them.
+        for (slot, entry) in self.natural.inline_boxes_mut().enumerate() {
             let spec = self.content.box_spec(self.content.block.boxes[slot].item);
-            entry.width = spec.size.width;
-            entry.height = position::line_contribution(spec);
+            let sized = sized_box(spec, slot, entry.index, self.percent_basis);
+            entry.width = sized.width;
+            entry.height = sized.height;
+            entry.baseline = sized.baseline;
+            entry.vertical_align = sized.vertical_align;
         }
 
         let indent = constraint.indent;
@@ -442,13 +462,14 @@ impl<S: Copy> Paragraph<S> {
     /// layout changes is a shaping input.
     fn reshape(&mut self, context: &mut TextContext, breaking: RunBreaking<'_>) {
         let spans = self.content.spans(0, self.source, breaking);
-        let boxes = parley_boxes(&self.content, 0, 0);
+        let boxes = parley_boxes(&self.content, 0, 0, self.percent_basis);
         self.natural = shape::shape(
             context,
             &self.content.block.text,
             &spans,
             boxes,
             &mut self.natural_sources,
+            self.root.line_root(),
         );
     }
 }
@@ -495,24 +516,23 @@ fn tab_minimums<S: Copy>(
                 bytes: 0..ZERO.len(),
                 style,
                 breaking: breaking.of(item),
+                hanging: parley::WhiteSpaceCollapse::Collapse,
                 source: source(item),
                 extra_spacing: -style.letter_spacing,
             }];
-            let mut probe = shape::shape(context, ZERO, &spans, Vec::new(), &mut Vec::new());
-            probe.break_all_lines(None);
-            let half = probe.width() * 0.5;
+            let half = shape::probe_width(context, ZERO, &spans, Vec::new()) * 0.5;
             measured.push((item, half));
             half
         })
         .collect()
 }
 
-/// The parley boxes of one flow, sized from the current specs and carrying
-/// their vertical-align line contribution as the height.
+/// The parley boxes of one flow, sized and aligned from the current specs.
 pub(in crate::text) fn parley_boxes(
     flow: &Flow,
     byte_offset: u32,
     base_slot: usize,
+    percent_basis: f32,
 ) -> Vec<InlineBox> {
     flow.block
         .boxes
@@ -520,17 +540,32 @@ pub(in crate::text) fn parley_boxes(
         .enumerate()
         .map(|(slot, entry)| {
             let spec = flow.box_spec(entry.item);
-            sized_box(spec, base_slot + slot, (entry.byte + byte_offset) as usize)
+            sized_box(
+                spec,
+                base_slot + slot,
+                (entry.byte + byte_offset) as usize,
+                percent_basis,
+            )
         })
         .collect()
 }
 
-pub(in crate::text) fn sized_box(spec: &InlineBoxSpec, slot: usize, index: usize) -> InlineBox {
+/// One atomic box as parley lays it out: its margin box, its baseline from
+/// the box's top edge (`None` puts the bottom edge on the baseline), and its
+/// `vertical-align`, which parley 0.12 resolves against the root inline box.
+pub(in crate::text) fn sized_box(
+    spec: &InlineBoxSpec,
+    slot: usize,
+    index: usize,
+    percent_basis: f32,
+) -> InlineBox {
     InlineBox {
         id: slot as u64,
         kind: InlineBoxKind::InFlow,
         index,
         width: spec.size.width,
-        height: position::line_contribution(spec),
+        height: spec.size.height,
+        baseline: spec.baseline,
+        vertical_align: position::parley_vertical_align(spec.vertical_align, percent_basis),
     }
 }

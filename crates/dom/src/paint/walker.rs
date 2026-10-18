@@ -1711,7 +1711,7 @@ fn collect_text_clip_under<'doc, T>(
     {
         // An element with no runs still establishes a paragraph; it just has
         // no ink, and a silhouette of nothing would clip everything away.
-        clip.runs.push((offset, paragraph.layout, paragraph.lines));
+        clip.runs.push((offset, paragraph.layout));
     }
 
     // The children layout reads: loose text is laid out by the anonymous
@@ -2541,11 +2541,11 @@ mod tests {
         doc.flush();
 
         let clip = super::collect_text_clip(&doc.dom, div);
-        let [(offset, _, lines)] = clip.runs[..] else {
+        let [(offset, layout)] = clip.runs[..] else {
             panic!("one paragraph, the anonymous box's")
         };
         assert_eq!((offset.x, offset.y), (20.0, 0.0), "after the 20px view");
-        assert_eq!(lines.len(), 1);
+        assert_eq!(layout.len(), 1);
     }
 
     fn walk_twice(doc: &mut Doc) -> Frames {

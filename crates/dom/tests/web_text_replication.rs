@@ -457,8 +457,10 @@ fn a_truncation_atom_is_placed_at_the_clamp_and_hidden_without_one() {
 
     // Six break-all lines clamped to two. The 40px icon needs two of the five
     // squares on the clamp line, which is also the two-unit minimum, so three
-    // squares are kept and the icon takes the fourth and fifth.
-    assert_eq!(ink(&doc, overflowing), (100.0, 40.0));
+    // squares are kept and the icon takes the fourth and fifth. The 20px icon
+    // sits on the baseline, 4px higher than the 16px ascent of a 20px line,
+    // so the clamp line's box is 24 (CSS 2.2 §10.8.1).
+    assert_eq!(ink(&doc, overflowing), (100.0, 44.0));
     assert_eq!(
         rect(&doc, placed).0,
         60.0,
@@ -1801,14 +1803,14 @@ fn an_atomic_inline_box_sits_inside_the_blocks_border_and_padding() {
 /// `GetOffsetFromTopMarginEdgeToBaseline` returns `margin-top + offset_height_`
 /// when a box reports no baseline of its own
 /// (`lynx/core/renderer/starlight/layout/layout_object.cc:1118-1124`), and
-/// `offset_height_` is the border-box height. So this engine's `.down` line is
-/// 68 tall where native's would be 60.
+/// `offset_height_` is the border-box height. So this engine's `.down` line
+/// reserves the 8px margin above the baseline, where native's reserves it
+/// below.
 ///
 /// The atom is deliberately much taller than the run, so that the line's
-/// height is the box's contribution and nothing else; the two pixels by which
-/// the box overhangs the line's top edge are the recorded all-ascent
-/// deviation (`docs/tracking/deviations.md`, "Text layout"), not this
-/// fixture's claim.
+/// height above the baseline is the box's contribution and nothing else; the
+/// run's 4px descent below the baseline is the rest of the line box (CSS 2.2
+/// §10.8.1, as parley 0.12 builds it).
 #[test]
 fn an_atoms_margins_reach_the_line_and_step_its_border_box_in() {
     let mut doc = Doc::with_device(device(400.0, 400.0));
@@ -1840,55 +1842,55 @@ fn an_atoms_margins_reach_the_line_and_step_its_border_box_in() {
 
     assert_eq!(
         ink(&doc, plain),
-        (80.0, 60.0),
+        (80.0, 64.0),
         "the control: two em squares, then a 40x60 box that is the whole of the \
-         line's height",
+         line's height above the baseline, over the run's 4px descent",
     );
-    assert_eq!(rect(&doc, plain_atom), (40.0, -2.0, 40.0, 60.0));
+    assert_eq!(rect(&doc, plain_atom), (40.0, 0.0, 40.0, 60.0));
 
     assert_eq!(
         ink(&doc, left),
-        (90.0, 60.0),
+        (90.0, 64.0),
         "`margin-left` is advance the line grows by ahead of the box",
     );
     assert_eq!(
         rect(&doc, left_atom),
-        (50.0, -2.0, 40.0, 60.0),
+        (50.0, 0.0, 40.0, 60.0),
         "and the border box starts one margin past the margin box's origin, \
          keeping the size its own layout produced and its place on the baseline",
     );
 
     assert_eq!(
         ink(&doc, back),
-        (70.0, 60.0),
+        (70.0, 64.0),
         "a negative margin shrinks the advance rather than being clamped away",
     );
     assert_eq!(
         rect(&doc, back_atom),
-        (30.0, -2.0, 40.0, 60.0),
+        (30.0, 0.0, 40.0, 60.0),
         "and pulls the border box back over the run before it",
     );
 
     assert_eq!(
         ink(&doc, up),
-        (80.0, 68.0),
+        (80.0, 72.0),
         "`margin-top` is above-baseline contribution: the line grows by it",
     );
     assert_eq!(
         rect(&doc, up_atom),
-        (40.0, 6.0, 40.0, 60.0),
+        (40.0, 8.0, 40.0, 60.0),
         "and the border box moves down inside the margin box by that margin",
     );
 
     assert_eq!(
         ink(&doc, down),
-        (80.0, 68.0),
+        (80.0, 72.0),
         "`margin-bottom` is above the baseline too, because it is the bottom \
          margin edge that sits on it, so the line grows by the same 8",
     );
     assert_eq!(
         rect(&doc, down_atom),
-        (40.0, -2.0, 40.0, 60.0),
+        (40.0, 0.0, 40.0, 60.0),
         "while the border box, which the margin hangs below, does not move",
     );
 }
@@ -2011,8 +2013,10 @@ fn a_relative_atom_stays_in_the_line_and_only_absolute_leaves_it() {
 
     let control = ink(&doc, plain);
     assert_eq!(control, (120.0, 30.0), "two em squares and two 40px boxes");
-    assert_eq!(rect(&doc, plain_first), (40.0, 3.0, 40.0, 20.0));
-    assert_eq!(rect(&doc, plain_second), (80.0, 3.0, 40.0, 20.0));
+    // The 30px line puts the baseline 21 down (16 of ascent and 5 of
+    // half-leading), and each box sits its bottom edge on it.
+    assert_eq!(rect(&doc, plain_first), (40.0, 1.0, 40.0, 20.0));
+    assert_eq!(rect(&doc, plain_second), (80.0, 1.0, 40.0, 20.0));
 
     for (label, text, first, second) in [
         ("relative", relative, relative_first, relative_second),
@@ -2060,7 +2064,7 @@ fn a_relative_atom_stays_in_the_line_and_only_absolute_leaves_it() {
     );
     assert_eq!(
         rect(&doc, absolute_second),
-        (40.0, 3.0, 40.0, 20.0),
+        (40.0, 1.0, 40.0, 20.0),
         "and the in-flow atom beside it closes the gap the escape left",
     );
 }

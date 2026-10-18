@@ -435,10 +435,9 @@ mod tests {
         // "a  b" keeps both spaces: 40px wide, centred in 100, it starts at 30.
         assert_eq!(at(&block, 29.9, 5.0), None);
         assert_eq!(at(&block, 30.0, 5.0), Some(0));
-        // The kept run of spaces is one cluster, shaped as one widened space,
-        // and answers its first unit.
+        // Each kept space is a cluster of its own.
         assert_eq!(at(&block, 45.0, 5.0), Some(1));
-        assert_eq!(at(&block, 55.0, 5.0), Some(1));
+        assert_eq!(at(&block, 55.0, 5.0), Some(2));
         assert_eq!(at(&block, 65.0, 5.0), Some(3));
         assert_eq!(at(&block, 75.0, 5.0), None);
     }

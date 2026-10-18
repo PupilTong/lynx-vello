@@ -365,18 +365,26 @@ impl<T> RelativeStyle for StyleView<'_, T> {}
 /// with `letter-spacing` and `word-break`, so a struct-granular answer alone
 /// would still re-shape a paragraph whose only change was its alignment.
 ///
-/// The field list mirrors [`crate::layout::TextLayout`]'s shaping inputs —
-/// what `hughie`'s `translate_run_style` and `normalize_runs` read, and
-/// nothing else. `direction` is deliberately absent: Parley is never told a
-/// base direction (bidi comes from the text), so `direction` only selects the
-/// alignment a commit re-applies anyway. Keeping this list in step with the
-/// measurer is guarded in debug builds by the shaping fingerprint the retained
-/// layout carries, which panics if a kept artifact outlived its inputs.
+/// The field list mirrors the paragraph's shaping inputs — what `hughie`'s
+/// `parley_style` and the normalizer read, and nothing else — plus
+/// `direction`, which a CSS block container's inline formatting context hands
+/// parley as its bidi paragraph level when it shapes (a Lynx `<text>` keeps
+/// first-strong detection and does not read it, so for one of those a change
+/// re-shapes needlessly). Keeping this list in step with the measurer is
+/// guarded in debug builds by the shaping fingerprint the retained layout
+/// carries, which panics if a kept artifact outlived its inputs.
 pub(crate) fn shaping_inputs_changed(old: &ComputedValues, new: &ComputedValues) -> bool {
     let (old_font, new_font) = (old.get_font(), new.get_font());
     let (old_text, new_text) = (old.get_inherited_text(), new.get_inherited_text());
-    if std::ptr::eq(old_font, new_font) && std::ptr::eq(old_text, new_text) {
+    let (old_box, new_box) = (old.get_inherited_box(), new.get_inherited_box());
+    if std::ptr::eq(old_font, new_font)
+        && std::ptr::eq(old_text, new_text)
+        && std::ptr::eq(old_box, new_box)
+    {
         return false;
+    }
+    if !std::ptr::eq(old_box, new_box) && old_box.direction != new_box.direction {
+        return true;
     }
     (!std::ptr::eq(old_font, new_font)
         && (old_font.font_family != new_font.font_family

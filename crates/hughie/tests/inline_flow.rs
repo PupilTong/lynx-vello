@@ -7,8 +7,8 @@
 
 use hughie::text::inline::{InlineFlow, InlineFlowStyle, InlineRun};
 use hughie::text::paragraph::{
-    BlockConstraint, BreakStyle, IndentKeywords, LineGeometry, LineHeight, OverflowWrap, RunStyle,
-    TextAlign, TextWrap, WhiteSpaceCollapse, WordBreak,
+    BlockConstraint, BreakStyle, Direction, IndentKeywords, LineGeometry, LineHeight, OverflowWrap,
+    RunStyle, TextAlign, TextWrap, WhiteSpaceCollapse, WordBreak,
 };
 use hughie::text::{FontBlob, TextContext};
 use parley::PositionedLayoutItem;
@@ -116,7 +116,8 @@ fn line_starts(flow: &InlineFlow) -> Vec<f32> {
 fn the_strut_holds_a_line_of_smaller_text_at_the_containers_line_height() {
     // CSS 2.2 §10.8.1: the strut — the container's 20px Ahem at `normal` —
     // starts every line box, so 10px text sits on a 20px line with the
-    // container's baseline. Parley alone would make the line 10px tall.
+    // container's baseline. Parley builds that line box itself, and draws
+    // the glyphs on its baseline.
     let small = ahem(10.0, LineHeight::Normal);
     let flow = committed(
         container(ahem(20.0, LineHeight::Normal)),
@@ -127,7 +128,18 @@ fn the_strut_holds_a_line_of_smaller_text_at_the_containers_line_height() {
         panic!("one line expected, got {:?}", flow.line_geometry())
     };
     assert_line(*line, 0.0, 20.0, 16.0);
-    assert_close(line.shift, 8.0);
+    let glyph_baseline = flow
+        .display()
+        .lines()
+        .next()
+        .and_then(|line| {
+            line.items().find_map(|item| match item {
+                PositionedLayoutItem::GlyphRun(glyph_run) => Some(glyph_run.baseline()),
+                PositionedLayoutItem::InlineBox(_) => None,
+            })
+        })
+        .expect("a glyph run");
+    assert_close(glyph_baseline, 16.0);
     assert_close(flow.size().height, 20.0);
     assert_close(flow.size().width, 20.0);
     assert_eq!(flow.first_baseline(), Some(16.0));
@@ -560,6 +572,181 @@ fn a_new_alignment_applies_to_the_same_flow() {
     });
     flow.commit(&mut context, BlockConstraint::new(Some(60.0), 0.0));
     assert_eq!(line_starts(&flow), [10.0, 10.0]);
+}
+
+/// Each line's text, as the byte range parley laid on it.
+fn line_ranges(flow: &InlineFlow) -> Vec<core::ops::Range<usize>> {
+    flow.display()
+        .lines()
+        .map(|line| line.text_range())
+        .collect()
+}
+
+/// The inline offset and advance of the glyph run whose text holds `byte`.
+fn run_at(flow: &InlineFlow, byte: usize) -> (f32, f32) {
+    flow.display()
+        .lines()
+        .flat_map(|line| line.items().collect::<Vec<_>>())
+        .find_map(|item| match item {
+            PositionedLayoutItem::GlyphRun(glyph_run)
+                if glyph_run.run().text_range().contains(&byte) =>
+            {
+                Some((glyph_run.offset(), glyph_run.advance()))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no glyph run holds byte {byte}"))
+}
+
+/// css-text-3 §4.1.3 and §5.1: under `break-spaces` a wrap opportunity
+/// follows every preserved space, and none of them hangs, so the spaces a line
+/// cannot hold wrap onto the next line like content. Under `pre-wrap`
+/// (`preserve`) the whole sequence hangs at the line end instead.
+#[test]
+fn break_spaces_wraps_after_each_space_and_hangs_none() {
+    let style = ahem(10.0, LineHeight::Normal);
+    let at = |white_space, width| {
+        committed(
+            container(style.clone()),
+            &[styled(
+                &style,
+                "aaa   bbb",
+                white_space,
+                BreakStyle::default(),
+            )],
+            Some(width),
+        )
+    };
+    // 50px holds "aaa" and two spaces; the third starts the next line.
+    let break_spaces = at(WhiteSpaceCollapse::BreakSpaces, 50.0);
+    assert_eq!(line_ranges(&break_spaces), [0..5, 5..9]);
+    assert_eq!(run_at(&break_spaces, 5), (0.0, 40.0));
+    // `pre-wrap` hangs all three spaces after "aaa".
+    let pre_wrap = at(WhiteSpaceCollapse::Preserve, 50.0);
+    assert_eq!(line_ranges(&pre_wrap), [0..6, 6..9]);
+
+    // Trailing spaces take width: a 30px line holds "ab " and wraps the two
+    // spaces after it, where `pre-wrap` hangs them on one line.
+    let trailing = |white_space| {
+        committed(
+            container(style.clone()),
+            &[styled(&style, "ab   ", white_space, BreakStyle::default())],
+            Some(30.0),
+        )
+    };
+    let break_spaces = trailing(WhiteSpaceCollapse::BreakSpaces);
+    assert_eq!(line_ranges(&break_spaces), [0..3, 3..5]);
+    assert_close(break_spaces.size().height, 20.0);
+    let pre_wrap = trailing(WhiteSpaceCollapse::Preserve);
+    assert_eq!(line_ranges(&pre_wrap).len(), 1);
+    assert_eq!(line_ranges(&pre_wrap)[0], 0..5);
+    // And they count toward the max-content width, which the hanging
+    // `pre-wrap` sequence at a forced end also does only where it fits.
+    let mut context = text_context();
+    let mut flow = InlineFlow::new(
+        &mut context,
+        container(style.clone()),
+        &[styled(
+            &style,
+            "ab   ",
+            WhiteSpaceCollapse::BreakSpaces,
+            BreakStyle::default(),
+        )],
+    );
+    assert_close(flow.max_content_width(&mut context, 0.0), 50.0);
+    // Its min-content width is the widest piece between two opportunities,
+    // "ab " with the space it ends in: a `break-spaces` space never hangs.
+    assert_close(flow.min_content_width(&mut context, 0.0), 30.0);
+}
+
+/// The container's `direction` is the paragraph's bidi level (UAX #9 P3
+/// overridden, css-writing-modes-3 §2.1), not the first strong character's:
+/// `start` aligns to the right, a line mixing Latin and Hebrew orders its
+/// runs right to left, and a trailing space hangs past the left edge.
+#[test]
+fn an_rtl_container_sets_the_paragraph_level() {
+    let style = ahem(10.0, LineHeight::Normal);
+    let rtl = |text_align| InlineFlowStyle {
+        direction: Direction::Rtl,
+        text_align,
+        ..container(style.clone())
+    };
+
+    // `start` is the right edge.
+    let flow = committed(rtl(TextAlign::Start), &[run(&style, "aa")], Some(100.0));
+    assert_eq!(line_starts(&flow), [80.0]);
+    assert_eq!(flow.first_baseline(), Some(8.0));
+
+    // "abc אבג": the Latin run comes first logically, so an RTL paragraph
+    // puts it at the right end, and the Hebrew run to its left. An LTR
+    // container of the same text, which first-strong detection would also
+    // give, keeps the Latin run on the left.
+    let mixed = "abc \u{5d0}\u{5d1}\u{5d2}";
+    let flow = committed(rtl(TextAlign::Start), &[run(&style, mixed)], None);
+    // Latin on the right.
+    assert_close(run_at(&flow, 0).0, 40.0);
+    // Hebrew on the left.
+    assert_close(run_at(&flow, 4).0, 0.0);
+    let ltr = committed(container(style.clone()), &[run(&style, mixed)], None);
+    // Latin on the left.
+    assert_close(run_at(&ltr, 0).0, 0.0);
+    // Hebrew on the right.
+    assert_close(run_at(&ltr, 4).0, 40.0);
+
+    // A wrap leaves "אא " on the first line. An RTL paragraph's end edge is
+    // its left one, so that is where the trailing space hangs: the run starts
+    // at the left edge with the space, and the letters after it — 10px in,
+    // past the hanging space — sit flush with the right edge.
+    let hebrew = "\u{5d0}\u{5d0} \u{5d1}\u{5d1}";
+    let flow = committed(rtl(TextAlign::Start), &[run(&style, hebrew)], Some(30.0));
+    let first = flow.display().get(0).expect("a first line");
+    assert_close(first.metrics().hanging_advance, 10.0);
+    assert_eq!(run_at(&flow, 0), (0.0, 30.0));
+    // A space ending a Latin run in the same RTL paragraph does not hang:
+    // parley keeps it at the run's level, inside the line on the right,
+    // where UAX #9 L1 would move it to the paragraph level on the left
+    // (`docs/tracking/deviations.md`, Text layout).
+    let flow = committed(rtl(TextAlign::Start), &[run(&style, "aa bb")], Some(30.0));
+    let first = flow.display().get(0).expect("a first line");
+    assert_close(first.metrics().hanging_advance, 0.0);
+    assert_eq!(run_at(&flow, 0), (0.0, 30.0));
+    // An LTR paragraph aligned right hangs that space past the right edge:
+    // "aa" is flush with it.
+    let flow = committed(
+        InlineFlowStyle {
+            text_align: TextAlign::Right,
+            ..container(style.clone())
+        },
+        &[run(&style, "aa bb")],
+        Some(30.0),
+    );
+    assert_eq!(run_at(&flow, 0), (10.0, 30.0));
+}
+
+/// The last line box's baseline, for the layout pass's `last baseline`
+/// alignment: the first's on one line, the last line's own on several, and
+/// none without a line box.
+#[test]
+fn the_last_baseline_is_the_last_line_box_s() {
+    let style = ahem(10.0, LineHeight::Normal);
+    let one = committed(container(style.clone()), &[run(&style, "aaaa")], None);
+    assert_eq!(one.first_baseline(), Some(8.0));
+    assert_eq!(one.last_baseline(), Some(8.0));
+
+    let mut context = text_context();
+    let mut flow = InlineFlow::new(
+        &mut context,
+        container(style.clone()),
+        &[run(&style, "aaaa bbbb cccc")],
+    );
+    let metrics = flow.commit(&mut context, BlockConstraint::new(Some(50.0), 0.0));
+    assert_eq!(flow.line_geometry().len(), 3);
+    assert_eq!(metrics.first_baseline, Some(8.0));
+    assert_eq!(metrics.last_baseline, Some(28.0));
+    assert_eq!(flow.last_baseline(), Some(28.0));
+
+    let empty = committed(container(style.clone()), &[], Some(50.0));
+    assert_eq!(empty.last_baseline(), None);
 }
 
 fn pre<'src>(style: &'src RunStyle, text: &'src str) -> InlineRun<'src> {

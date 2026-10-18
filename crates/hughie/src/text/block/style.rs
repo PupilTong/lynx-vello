@@ -11,7 +11,7 @@ use core::num::NonZeroU32;
 
 use crate::text::paragraph::content::WhiteSpaceProcessing;
 use crate::text::paragraph::{
-    BreakStyle, Direction, IndentKeywords, OverflowWrap, TextAlign, TextWrap, WordBreak,
+    BreakStyle, Direction, IndentKeywords, OverflowWrap, RunStyle, TextAlign, TextWrap, WordBreak,
 };
 
 /// Container-level parameters of one Lynx text block.
@@ -35,6 +35,13 @@ pub struct BlockStyle {
     /// The `text-maxlength` attribute, in UTF-16 source units where an atomic
     /// box counts exactly one. Zero is meaningful: everything is cut.
     pub max_chars: Option<u32>,
+    /// The establishing element's own font and `line-height`: the root
+    /// inline box's strut, which every line box starts with (CSS 2.2
+    /// §10.8.1), as the browser starts web-core's `x-text` lines with the
+    /// `x-text`'s own font and Android's `StaticLayout` with the text's base
+    /// paint. `None` leaves the strut to the first content run, which is
+    /// what a paragraph built without a host has.
+    pub strut: Option<RunStyle>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -91,14 +98,19 @@ impl BlockStyle {
 /// Builds the paragraph parameters from a container's computed style.
 ///
 /// Paragraph limits come from `LynxTextStyle`, whose host view reads the
-/// establishing element's computed custom properties alongside paragraph CSS.
+/// establishing element's computed custom properties alongside paragraph CSS;
+/// `own_font` is the same element's computed values seen as a run, which the
+/// strut is built from.
 /// `text_indent` is absent by design — it is a [`BlockConstraint`] input,
 /// because a percentage resolves against the definite inline size.
 ///
 /// [`BlockConstraint`]: super::BlockConstraint
 impl BlockStyle {
     #[must_use]
-    pub fn from_container_style<S: crate::style::LynxTextStyle>(style: &S) -> Self {
+    pub fn from_container_style<S: crate::style::LynxTextStyle, R: crate::style::TextRunStyle>(
+        style: &S,
+        own_font: &R,
+    ) -> Self {
         use stylo::values::specified::text::TextOverflowSide;
 
         Self {
@@ -112,6 +124,7 @@ impl BlockStyle {
             },
             max_lines: style.text_maxline(),
             max_chars: style.text_maxlength(),
+            strut: Some(RunStyle::from_run_style(own_font)),
         }
     }
 }

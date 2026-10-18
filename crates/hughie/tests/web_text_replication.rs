@@ -1189,32 +1189,23 @@ fn a_leading_image_survives_a_cut_that_retreats_only_trailing_content() {
     assert!(origin.x + size.width <= 300.0 + EPSILON);
 }
 
-/// The line-height half of `x-text/truncation-first-element-is-image`, split
-/// out because it does not hold yet. The fixture's paragraph declares
-/// `line-height: 32px` and only the `inline-truncation` subtree declares
-/// `22px`, so on the web every one of the three line boxes is 32px tall: a line
-/// box is at least as tall as the block's own strut, and the 22px truncation
-/// span — which reaches only the last line in the first place — is shorter than
-/// it, so it raises nothing and lowers nothing (the fixture's screenshot is
-/// recorded as "3 lines at 24px/32px").
+/// The line-height half of `x-text/truncation-first-element-is-image`. The
+/// fixture's paragraph declares `line-height: 32px` and only the
+/// `inline-truncation` subtree declares `22px`, so on the web every one of the
+/// three line boxes is 32px tall: a line box is at least as tall as the
+/// block's own strut, and the 22px truncation span — which reaches only the
+/// last line in the first place — is shorter than it, so it raises nothing
+/// and lowers nothing (the fixture's screenshot is recorded as "3 lines at
+/// 24px/32px").
 ///
-/// This block reports 22/22/22 instead, and the same block built with no
-/// truncation content reports 32/32/32. The cause is not the cut: a shaped run
-/// takes its `line-height` from the style of the span that *follows* it, so
-/// whichever span is pushed last governs every line the preceding run lands on.
-/// Two ordinary runs with different `line-height` in one paragraph and no
-/// truncation anywhere reproduce it; the truncation content is only the last
-/// span here. `line-height: normal` hides it, which is why the mixed-metric
-/// assertions in `a_lynx_wrapper_adds_no_box_and_no_break_to_a_clamped_paragraph`
-/// hold.
+/// Gap C1 until the parley 0.12 upgrade: parley 0.11 read a shaped run's
+/// `line-height` from the style of the span that *followed* it, so the 22px
+/// truncation span set all three lines. Parley 0.12 resolves each span's own
+/// box (its `style_metrics`), so the replica runs. The second half keeps the
+/// defect's own shape — two ordinary runs with different `line-height`, one
+/// line each, under a strut lower than both — so a regression shows without
+/// truncation in sight.
 #[test]
-#[ignore = "GAP: a run's line-height is read from the style of the NEXT span, \
-            so the last span's line-height governs every line \
-            (parley-0.11.0/src/shape/mod.rs:127-128 advances \
-            `item.style_index` before flushing the pending item, and \
-            parley-0.11.0/src/layout/data.rs:435-436 reads the run's \
-            line-height through it; reached from \
-            crates/hughie/src/text/paragraph/shape.rs:83-90)"]
 fn a_runs_line_height_is_not_taken_from_the_span_after_it() {
     let body = ahem_at_line_height(24.0, 32.0);
     let more = ahem_at_line_height(14.0, 22.0);
@@ -1249,10 +1240,20 @@ fn a_runs_line_height_is_not_taken_from_the_span_after_it() {
         .collect::<Vec<_>>();
     assert_eq!(heights, vec![32.0, 32.0, 32.0]);
 
-    // The same defect with no truncation in sight: two runs, two declared
-    // line heights, one line each. Line 0 holds only the 24px/32px run.
+    // The same shape with no truncation in sight: two runs, two declared
+    // line heights, one line each. Line 0 holds only the 24px/32px run, line
+    // 1 only the 14px/22px one, and the strut is lower than both.
     let plain = [run(&body, "AAAAAAAAAA"), run(&more, "BBBBB")];
-    let plain = laid_out(&mut context, text_style(), &plain, None, Some(240.0));
+    let plain = laid_out(
+        &mut context,
+        BlockStyle {
+            strut: Some(ahem_at_line_height(10.0, 10.0)),
+            ..text_style()
+        },
+        &plain,
+        None,
+        Some(240.0),
+    );
     assert_eq!(plain.lines().len(), 2);
     assert_close(plain.lines()[0].height, 32.0);
     assert_close(plain.lines()[1].height, 22.0);

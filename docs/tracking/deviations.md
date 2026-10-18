@@ -227,6 +227,95 @@ consequential choice about whether to follow the spec or the quirk.
     area, so the box is shifted
     back to end at the padding edge; WPT `grid-position-area-basic.html`'s
     reference leaves it overflowing (unverified in browsers).
+- **`first baseline` / `last baseline` self-alignment (user rulings,
+  2026-10-16 and 2026-10-17)** — `hughie` aligns flex and grid items by
+  their last baselines (css-align-3 §9.3; css-flexbox-1 §8.3, §9.4 step 8
+  and §8.5; css-grid-1 §10.6 and §11.5 step 1), and every box reports
+  `LayoutOutput::last_baselines` beside its first baselines. The stylo
+  fork's `lynx` grammar parses css-align-3's `<baseline-position>` —
+  `baseline`, `first baseline`, `last baseline` — for `align-items`,
+  `align-self`, `justify-items` and `justify-self` (fork PR
+  PupilTong/stylo#50; `ItemPlacement` and `SelfAlignment` in
+  `vendor/stylo/style/values/specified/align.rs`), as web-core's browser
+  does. **Native** has neither: `FlexAlignType`
+  (`lynx/core/renderer/starlight/style/css_type.h`) ends at `kBaseline`, and
+  `JustifyType` (`css_type.h:28`) has no baseline value at all, so
+  `justify-items`/`justify-self: baseline` — accepted now because
+  `first baseline` serializes as `baseline` (css-align-3 §4.2) and has to
+  parse back — is a native-vs-web difference resolved toward web-core.
+  `last_baseline_lines_anonymous_text_up_on_its_last_line` in
+  `crates/dom/src/tree/anonymous.rs` drives both through anonymous text
+  items. What is decided:
+  - **Where a group sits in its flex line (user ruling, 2026-10-17: as
+    browsers do).** The first-baseline group sits against the line's
+    cross-start edge and the last-baseline group against its cross-end edge
+    (css-flexbox-1 §8.3), so `wrap-reverse`, which makes cross-start the
+    bottom edge, moves each group to the other edge. WPT
+    `css/css-flexbox/multiline-reverse-wrap-baseline.html` checks this, and
+    Chromium does it (`FlexLayoutAlgorithm::BaselineAscent`, baseline groups
+    by line side). css-align-3 §9.3 step 3 places a group by its fallback
+    alignment "resolved to physical directions", which would keep the first
+    group at the top under `wrap-reverse`; that reading, which this engine
+    followed for the first-baseline group until this ruling, is not used.
+    Grid rows run top to bottom with no reversal, so grid has nothing to
+    change.
+  - **A group taller than its line or row overflows.** A first-baseline
+    group overflows the end edge and a last-baseline group the start edge;
+    nothing moves it back. css-align-3 gives `last baseline` the fallback
+    alignment `safe self-end`, which would put an overflowing last-baseline
+    group at the start; Chromium applies `safe` only when the author writes
+    it, in flex and grid alike, and this engine follows Chromium.
+  - **An item that shares no baseline takes the `safe` fallback.** This is
+    a different rule from the one above: it is about one item that joins no
+    group — a column container's item, whose inline axis is the cross axis,
+    or an absolutely positioned child's static position — not about a group
+    taller than its line. Such an item takes css-align-3 §4.2's fallback
+    alignment, `safe self-start` for `baseline` and `safe self-end` for
+    `last baseline`: its own start or end edge, by its own `direction`, and
+    the container's start edge once it overflows the line. Flex and grid
+    both do this (`item_alignment_offset` in
+    `crates/hughie/src/compute/flexbox.rs` and
+    `crates/hughie/src/compute/grid/alignment.rs`). In flex this replaced
+    plain `end` for `last baseline` and the line's cross-start edge for
+    `baseline`, so under `wrap-reverse` an unshared `baseline` item now sits
+    at the start edge rather than at the cross-start edge, as Chromium's
+    `CrossAxisStaticPositionEdge` also places a static position.
+  - **The container's first and last baselines under `wrap-reverse`.**
+    css-flexbox-1 §8.5 takes them from the startmost and endmost line, and
+    its "startmost" is css-writing-modes-4 §6.2's "start": the line nearest
+    the block-start (top) edge in a row container and the inline-start edge
+    in a column container, whatever the wrap direction — not the line
+    nearest the cross-start edge, which `wrap-reverse` moves to the other
+    side (csswg-drafts#995; WPT
+    `css/css-flexbox/flex-order-wrap-reverse-baseline.html`). This engine
+    does the same. Within that line §8.5 prefers the first-baseline group for
+    the first baseline and the last-baseline group for the last, and this
+    engine follows that text. Chromium's `BaselineAccumulator` instead
+    prefers the group flush with the line's top edge for the first baseline
+    and the one flush with its bottom edge for the last, which differs from
+    §8.5 only when one `wrap-reverse` line holds both groups: §8.5 then gives
+    a first baseline below the last. No WPT covers that case.
+  - **Container baselines, §8.5 and §10.6 steps 3 and 4.** Taken together,
+    as the first baseline always was: the first (last) item gives its
+    baseline, or one synthesized from its border box, where the steps would
+    take the first (last) item that has a baseline.
+  - **Lynx `linear` and `relative` containers report no last baseline
+    (user ruling, 2026-10-17: as native).** Starlight has no last baseline,
+    so a `last baseline` parent synthesizes one from their border box's
+    bottom edge. web-core differs: there a `linear` view is a CSS flex box
+    (`lynx-stack/packages/web-platform/web-elements/src/elements/common-css/linear.css`)
+    with a last baseline
+    of its own, so a `<view>` that keeps the default `display: linear`
+    aligns by its last line under web-core and by its bottom edge here.
+  - **Grid shares baselines along rows only.** Baselines are horizontal in
+    this engine, so `justify-self: baseline`/`last baseline` take their
+    fallbacks, `safe self-start`/`safe self-end`. css-grid-1 §10.3 and §10.4
+    exclude an item whose size depends on an intrinsically sized track from
+    baseline alignment; that exclusion is not implemented for either set.
+  - **grid-lanes** aligns by no baseline (`style-assumptions.md` §24):
+    `last baseline` takes `end` in the grid axis, as `baseline` takes
+    `start`, and the container's last baseline is the lowest among the items
+    placed last in each track (css-grid-3 §6.5).
 
 ## CSS visual/paint & animation (see [css-visual.md](css-visual.md), [css-animation.md](css-animation.md))
 
@@ -396,16 +485,12 @@ consequential choice about whether to follow the spec or the quirk.
   run's own `white-space-collapse` is read; a soft wrap ends a space run on
   the line before it, and every space at a line end hangs — it adds no width
   and is not line content, so `getTextBoundingRect` and the per-line layout
-  data exclude it, as Android's `getLineMax` does. Parley hangs only one
-  overflowing space cluster and starts the next line with the rest, so a
-  `<text>` emits each run of spaces inside one run item as one space cluster
-  widened to the whole run's advance, and shapes the spaces directly before a
-  newline with no advance, which would otherwise hang, break the line and
-  leave the newline a line of its own (`SpaceRun` in
-  `crates/hughie/src/text/paragraph/content.rs`). Two limits follow: a
-  `text-maxlength` or ellipsis cut that falls inside such a run lands before
-  the whole run, and a run of spaces split between two runs (at a nested
-  `text` boundary) hangs only its first part at a wrap. A tab advances to the
+  data exclude it, as Android's `getLineMax` does. Parley 0.12 hangs a
+  whole sequence of overflowing spaces (CSS Text 4 §4.3.2) and takes a
+  newline's break before any wrap opportunity, and a `<text>` hands every
+  run parley's `collapse` hanging, which hangs line-end spaces
+  unconditionally — before a newline and under `nowrap` too
+  (`white_space_hanging` in `crates/hughie/src/text/paragraph/mod.rs`). A tab advances to the
   first multiple of 20px strictly past its position, Android's
   `Layout.TAB_INCREMENT` (AOSP `Layout.java:3714`), by Android's own
   `nextTab(h) = floor((h + 20) / 20) * 20` with no rounding tolerance. The
@@ -497,23 +582,22 @@ consequential choice about whether to follow the spec or the quirk.
   with one arm to add. The whole cost is a fork patch un-gating the keyword,
   which is a change to the vendored submodule and its own review, so it is
   filed here rather than smuggled into an engine-side change.
-- **Parley 0.11 paragraph base direction** — the public Parley builders and
-  `Layout` expose no base-direction override. Internally, text analysis always
-  invokes bidi resolution with an automatic/first-strong base level, even
-  though the lower-level `parlance` crate defines a `BaseDirection` value.
-  Consequently, the `hughie` text adapter can resolve physical
-  `text-align: start`/`end` from `CoreStyle::direction()`, but cannot yet force
-  UAX #9 paragraph ordering for neutral or opposite-strong text inside an
-  explicitly LTR/RTL container. Injecting bidi controls would corrupt source
-  byte ranges, so the current implementation retains Parley's automatic bidi
-  shaping and records this as an integration limitation. Revisit when Parley
-  exposes its base-level input (or if a narrowly-scoped upstream patch is
-  adopted). The limit applies to both paragraph kinds: the CSS block
-  container's inline formatting context (`hughie::text::inline`) resolves
-  `text-align` from `direction` the same way and keeps the same first-strong
-  paragraph level, where css-writing-modes-3 takes it from the block's
-  `direction` (`unicode-bidi: plaintext`, the one content-detected case, is not
-  compiled under `lynx`).
+- **Paragraph base direction: the inline formatting context follows
+  `direction`; a `<text>` stays first-strong** — parley 0.12 takes a base
+  direction (`StyleRunBuilder::set_base_direction`, `parley::BaseDirection`).
+  The CSS block container's inline formatting context (`hughie::text::inline`)
+  hands it the block's `direction`, as css-writing-modes-3 takes the bidi
+  paragraph level from the block (`unicode-bidi: plaintext`, the one
+  content-detected case, is not compiled under `lynx`): `text-align: start`,
+  the order of a line mixing directions and the end edge whitespace hangs on
+  all follow `direction`. A `<text>` keeps `BaseDirection::Auto`, first-strong
+  detection, as it had before the upgrade; its `text-align: start`/`end` still
+  resolve from `direction`. One limit remains in both: parley does not apply
+  UAX #9 rule L1 to trailing whitespace, so a space that ends a line inside a
+  run of the opposite direction stays at that run's level, inside the line,
+  where L1 would move it to the paragraph level and hang it at the end edge
+  (`an_rtl_container_sets_the_paragraph_level` in
+  `crates/hughie/tests/inline_flow.rs`).
 - **Inline formatting context: one line-break override per paragraph** —
   `word-break` is a per-run value there, and parley honours it per style, but
   the Chromium line-break override (a wrap opportunity after every space
@@ -524,30 +608,23 @@ consequential choice about whether to follow the spec or the quirk.
   to the UAX #14 opportunities alone (`crates/hughie/src/text/paragraph/shape.rs`,
   `shape`). A paragraph without `break-all` keeps the override, as `<text>`
   always has.
-- **Inline formatting context: `line-height: normal` and fallback fonts** —
-  CSS 2.2 §10.8.1 leaves `normal` to the user agent. The context follows
-  Chrome: a run's first available font — the first `font-family` entry with
-  a U+0020 glyph, found by shaping one space — gives ascent + descent + line
-  gap, and every font the run's glyphs on a line actually use contributes its
-  own ascent, descent and half line gap as well. With a numeric or length
-  `line-height` only the first available font sets the run's box, and glyphs
-  from a fallback font overflow the line box. Metrics are not rounded to whole
-  pixels as Chrome rounds them (`crates/hughie/src/text/inline/line_boxes.rs`).
-- **Inline formatting context: gradient tiles follow parley's line extent** —
-  a nested run's gradient `color` tile spans the line's extent as parley laid
-  it out, moved onto the CSS baseline by the line's shift, not the CSS line
-  box. Only a `display: contents` element inside an anonymous block could
-  carry such a run; `<text>` is unaffected, its shifts all being zero
-  (`crates/dom/src/paint/text.rs`, `assign_nested_tiles`).
+- **Line boxes: `line-height: normal` and fallback fonts** — CSS 2.2
+  §10.8.1 leaves `normal` to the user agent. Both paragraph kinds take parley
+  0.12's line boxes, which follow Chrome: a span's first available font
+  (fontique's `first_available_font`) gives ascent + descent + line gap, and
+  a run shaped in a fallback font adds that font's box as well. With a
+  numeric or length `line-height` only the first available font sets the
+  span's box, and glyphs from a fallback font overflow the line box. Metrics
+  are not rounded to whole pixels as Chrome rounds them (the builder's
+  `quantize` is off, `crates/hughie/src/text/paragraph/shape.rs`).
 - **Inline formatting context: not implemented** — `text-overflow`, which
-  applies only to a block whose `overflow` is not `visible` (css-overflow-3)
-  and so never to the anonymous block, the one producer; it would go per
-  overflowing line box after the line boxes are built
-  (`crates/hughie/src/text/inline/mod.rs`). `white-space-collapse:
-  break-spaces`, read as `collapse` as in `<text>`: it needs a wrap opportunity
-  after every preserved space and spaces that never hang, and parley has
-  neither. A last baseline for `align-items: last baseline`, which no box in
-  this engine reports. And any box-generating child: the content is text runs
+  applies only to a block whose `overflow` is not `visible` (css-overflow-3).
+  The one producer of this context is the anonymous block box around loose
+  text, which computes `overflow: visible` and which no author CSS can reach,
+  so the property is unreachable there and is not implemented, by the user's
+  ruling of 2026-10-16; a non-anonymous block container would apply it per
+  overflowing line box after the break (`crates/hughie/src/text/inline/mod.rs`).
+  And any box-generating child: the content is text runs
   only, every other child is hidden, which the anonymous block producer never
   puts there (`crates/dom/src/layout/inline_flow.rs`).
 
@@ -610,19 +687,18 @@ consequential choice about whether to follow the spec or the quirk.
   (`crates/hughie/src/style/text.rs:67`) and applied by `RunPaint::fill_style`
   (`crates/dom/src/paint/text.rs:116`), so reversing the ruling is a change to
   the painter and the default, not to shaping.
-- **`hughie::text::block` vertical alignment of atomic inlines** — parley 0.11
-  has no vertical-align: an in-flow box sits bottom-on-baseline and its height
-  counts as pure ascent. The module writes each box's line-height
-  *contribution* into `InlineBox::height` (above-baseline part for
-  baseline-anchored values, full height otherwise) and overrides each box's
-  `y` from a placement table, so lines are always tall enough — but the
-  baseline's position inside a line grown by a non-baseline-aligned tall box
-  follows parley's all-ascent rule rather than the CSS ascent/descent split,
-  a baseline-aligned box's below-baseline part does not reserve descent, and
-  `super`'s raise is placement-only. `sub`/`super` offsets are named UA
-  constants (0.20/0.34 of the reference font size), `Percent`'s basis is the
-  line's resolved line height, and the Lynx-only `center` behaves as
-  `middle`.
+- **`hughie::text::block` vertical alignment of atomic inlines** — parley
+  0.12 aligns and places an atomic box itself, by CSS 2.2 §10.8.1 with
+  css-inline-3's `alignment-baseline` plus `baseline-shift`
+  (`crates/hughie/src/text/paragraph/position.rs`): a box's part below its
+  baseline reserves descent, and a non-baseline value moves the line's
+  baseline as CSS does. What remains approximate: every box aligns against
+  the root inline box (a `StyleRunBuilder` box's parent span is always style
+  0), not against the nested text it sits in; `sub` and `super` are parley's
+  (one fifth and one third of the root's font size, WebKit's and Blink's
+  constants); a percentage is of the root's `line-height` — its font's
+  ascent plus descent for `normal` — where CSS takes the box's own; and the
+  Lynx-only `center` behaves as `middle`.
 - **`hughie::text::block` line-height scope** — per-run (the web target's CSS
   inheritance behavior), not paragraph-wide as native textra applies it
   (`ApplyParagraphStyle`); the paragraph-wide behavior is the degenerate case

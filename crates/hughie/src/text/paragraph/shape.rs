@@ -7,8 +7,8 @@
 use core::ops::Range;
 
 use parley::{
-    CHROMIUM_LINE_BREAK_OVERRIDE, InlineBox, Layout, LineBreakContext, LineBreakOverrideFn,
-    PositionedLayoutItem,
+    BaseDirection, CHROMIUM_LINE_BREAK_OVERRIDE, InlineBox, Layout, LineHeight as ParleyLineHeight,
+    PositionedLayoutItem, TextStyle as ParleyTextStyle,
 };
 
 use super::content::SourceMap;
@@ -25,6 +25,11 @@ pub(in crate::text) struct ShapeSpan<'block, S> {
     pub(in crate::text) style: &'block RunStyle,
     /// The line-breaking values written into this span's parley style.
     pub(in crate::text) breaking: BreakStyle,
+    /// How the span's whitespace hangs at a line end and whether a wrap
+    /// opportunity follows each space: the `white_space_collapse` written
+    /// into its parley style. The text is already normalized, so parley
+    /// reads it for nothing else.
+    pub(in crate::text) hanging: parley::WhiteSpaceCollapse,
     pub(in crate::text) source: S,
     /// Added to the run's `letter-spacing` for this span alone. Zero except
     /// on a preserved tab's one-space span, where it widens the space to the
@@ -33,32 +38,111 @@ pub(in crate::text) struct ShapeSpan<'block, S> {
     pub(in crate::text) extra_spacing: f32,
 }
 
-/// Shapes one paragraph. `sources` receives the parley style-index → source
-/// identity table: push order is the style index, which is the run-identity
-/// channel that leaves `TextBrush = ()` untouched crate-wide.
+/// The root inline box of one shaped paragraph (CSS 2.2 §9.2.1, css-inline-3
+/// root inline box): its style, which every line box starts with as its strut
+/// (CSS 2.2 §10.8.1), and the paragraph's base direction.
+#[derive(Clone, Copy)]
+pub(in crate::text) struct LineRoot<'block, S> {
+    /// The strut's style and the paint identity its parley style index
+    /// records. No text is shaped in it: it is parley's style 0, which parley
+    /// 0.12 starts every line box with, so the content's own styles start at
+    /// index 1. `None` leaves style 0 to the first span — the shape a
+    /// one-run measurement probe wants — and, with no span at all, to a
+    /// style with no extent, so that no strut applies.
+    pub(in crate::text) strut: Option<(&'block RunStyle, S)>,
+    /// The bidi paragraph level (UAX #9 P2–P3): a CSS block container's
+    /// `direction`, or first-strong detection for a Lynx `<text>`.
+    pub(in crate::text) direction: BaseDirection,
+}
+
+impl<S> LineRoot<'_, S> {
+    /// No strut, first-strong direction: a measurement probe.
+    pub(in crate::text) const PROBE: Self = Self {
+        strut: None,
+        direction: BaseDirection::Auto,
+    };
+}
+
+/// Shapes one paragraph into a layout the caller keeps. `sources` receives
+/// the parley style-index → source identity table: push order is the style
+/// index, which is the run-identity channel that leaves `TextBrush = ()`
+/// untouched crate-wide. With a strut, index 0 is the strut's and no glyph
+/// run carries it.
+///
+/// The shaping happens in the context's scratch layout and the caller gets a
+/// copy of it. Parley reserves a layout's shaping buffers for the text's
+/// UTF-8 byte length (`parley_engine`'s `shape_text`, an upper bound on the
+/// characters, about three per CJK character) and never shrinks them; a
+/// cloned `Vec` holds exactly its elements, so the retained layout costs what
+/// was shaped, and the scratch's buffers serve the next shaping.
 ///
 /// Fully empty content short-circuits to an empty layout: parley shapes a
 /// substitute space for an empty build, whose glyph run would carry a style
 /// index this module never pushed.
-///
-/// The line-break override is one decision per parley builder, so it cannot
-/// follow each span's `word-break`: the paragraph takes it unless a span is
-/// `break-all`, whose opportunities between ASCII letters the override's
-/// pair table would suppress.
 pub(in crate::text) fn shape<S: Copy>(
     context: &mut TextContext,
     text: &str,
     spans: &[ShapeSpan<'_, S>],
     boxes: Vec<InlineBox>,
     sources: &mut Vec<S>,
+    root: LineRoot<'_, S>,
 ) -> Layout<TextBrush> {
+    if !build_into_scratch(context, text, spans, boxes, sources, root) {
+        return Layout::default();
+    }
+    let (_, _, scratch) = context.shaping_parts();
+    let layout = scratch.clone();
+    context.trim_scratch(text.len());
+    layout
+}
+
+/// Shapes a measurement probe in the context's scratch layout, breaks it as
+/// one unbounded line and answers its width, keeping nothing.
+pub(in crate::text) fn probe_width<S: Copy>(
+    context: &mut TextContext,
+    text: &str,
+    spans: &[ShapeSpan<'_, S>],
+    boxes: Vec<InlineBox>,
+) -> f32 {
+    if !build_into_scratch(
+        context,
+        text,
+        spans,
+        boxes,
+        &mut Vec::new(),
+        LineRoot::PROBE,
+    ) {
+        return 0.0;
+    }
+    let (_, _, scratch) = context.shaping_parts();
+    scratch.break_all_lines(None);
+    let width = scratch.width();
+    context.trim_scratch(text.len());
+    width
+}
+
+/// Builds `text` into the context's scratch layout, reusing its buffers.
+/// `false`, building nothing, for fully empty content.
+///
+/// The line-break override is one decision per parley builder, so it cannot
+/// follow each span's `word-break`: the paragraph takes it unless a span is
+/// `break-all`, whose opportunities between ASCII letters the override's
+/// pair table would suppress.
+fn build_into_scratch<S: Copy>(
+    context: &mut TextContext,
+    text: &str,
+    spans: &[ShapeSpan<'_, S>],
+    boxes: Vec<InlineBox>,
+    sources: &mut Vec<S>,
+    root: LineRoot<'_, S>,
+) -> bool {
     sources.clear();
     if text.is_empty() && boxes.is_empty() {
-        return Layout::default();
+        return false;
     }
     #[cfg(test)]
     context.record_shape();
-    let (font_context, layout_context) = context.font_and_layout_contexts();
+    let (font_context, layout_context, scratch) = context.shaping_parts();
     // `text` is already whitespace-normalized by `super::content::normalize`,
     // and `style_run_builder` takes it verbatim — parley's own
     // `WhiteSpaceCollapse` lives on the `TreeBuilder` path, which this does not
@@ -77,12 +161,32 @@ pub(in crate::text) fn shape<S: Copy>(
         .iter()
         .all(|span| span.breaking.word_break != WordBreak::BreakAll)
     {
-        builder.set_line_break_override(Some(LINE_BREAK_OVERRIDE));
+        // Parley 0.12 takes a mandatory break before it looks for a wrap
+        // opportunity, so the override's opportunity after the space of
+        // `"a \nb"` no longer swallows the newline's break.
+        builder.set_line_break_override(Some(CHROMIUM_LINE_BREAK_OVERRIDE));
     }
-    builder.reserve(spans.len(), spans.len());
+    builder.set_base_direction(root.direction);
+    builder.reserve(spans.len() + 1, spans.len());
+    if let Some((strut, source)) = root.strut {
+        let index = builder.push_style(super::style::parley_style(strut, BreakStyle::default()));
+        debug_assert_eq!(index, 0, "the strut is parley's style 0");
+        sources.push(source);
+    } else if spans.is_empty() {
+        // Boxes and no run, and no strut asked for: parley would make its own
+        // default style the strut. A style with no extent above or below the
+        // baseline is no strut at all; no glyph run carries it, so it records
+        // no paint identity.
+        builder.push_style(ParleyTextStyle {
+            font_size: 0.0,
+            line_height: ParleyLineHeight::Absolute(0.0),
+            ..ParleyTextStyle::default()
+        });
+    }
     for span in spans {
         let mut style = super::style::parley_style(span.style, span.breaking);
         style.letter_spacing += span.extra_spacing;
+        style.white_space_collapse = span.hanging;
         let index = builder.push_style(style);
         debug_assert_eq!(usize::from(index), sources.len());
         sources.push(span.source);
@@ -92,32 +196,8 @@ pub(in crate::text) fn shape<S: Copy>(
         debug_assert!(text.is_char_boundary(inline_box.index));
         builder.push_inline_box(inline_box);
     }
-    builder.build(text)
-}
-
-/// Parley's Chromium override, minus the opportunity it forces in front of a
-/// hard line break.
-///
-/// The Chromium rule it carries — a soft wrap opportunity after every space
-/// sequence — fires for a space followed by `\n` as well, which UAX #14 LB6
-/// forbids (`× BK`, `× LF`, …). Parley's breaker tests "is this a wrap
-/// opportunity" before "is this a newline", so a newline that carries a wrap
-/// opportunity never forces its break under `text-wrap-mode: wrap`, and
-/// `"a \nb"` lays out as one line. Normalized text only has a space directly
-/// before a newline when that space is preserved (`white-space-collapse:
-/// preserve`), or when an atomic box flushed it out in front of a preserved
-/// break; deferring those pairs to the default analysis puts the break back.
-static LINE_BREAK_OVERRIDE: &LineBreakOverrideFn =
-    &(line_break_override as fn(LineBreakContext) -> Option<bool>);
-
-fn line_break_override(context: LineBreakContext) -> Option<bool> {
-    if matches!(
-        context.after,
-        '\n' | '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}'
-    ) {
-        return None;
-    }
-    CHROMIUM_LINE_BREAK_OVERRIDE(context)
+    builder.build_into(scratch, text);
+    true
 }
 
 /// Breaks lines at `width`, committing at most `max_lines` of them.

@@ -1955,3 +1955,168 @@ fn fit_content_lanes_with_a_contained_inline_axis_take_their_substituted_width()
         vec![Point::ZERO, Point::new(150.0, 0.0)]
     );
 }
+
+#[test]
+fn the_last_baseline_comes_from_the_items_placed_last_in_each_track() {
+    let leaf = |tree: &mut TestTree, height: f32, last: Option<f32>| {
+        tree.push_baseline_leaf(
+            leaf_style(10.0, height),
+            Size::new(10.0, height),
+            Some(2.0),
+            last,
+        )
+    };
+    let mut tree = TestTree::default();
+    let first = leaf(&mut tree, 30.0, Some(25.0));
+    let second = leaf(&mut tree, 20.0, Some(15.0));
+    let third = leaf(&mut tree, 10.0, Some(6.0));
+    let root = tree.push_grid_lanes(
+        lanes_style(&[px(50.0), px(50.0)], &[]),
+        vec![first, second, third],
+    );
+
+    // The third item lands under the second and closes the second track at
+    // 20 + 6; the first closes the first at 25. The lowest wins.
+    let output = auto_layout(&tree, root);
+    assert_point(tree.layout(third).location, Point::new(50.0, 20.0));
+    assert_eq!(output.first_baselines.y, Some(2.0));
+    assert_eq!(output.last_baselines.y, Some(26.0));
+
+    let mut tree = TestTree::default();
+    let first = leaf(&mut tree, 30.0, Some(25.0));
+    let second = leaf(&mut tree, 20.0, Some(15.0));
+    let third = leaf(&mut tree, 10.0, None);
+    let root = tree.push_grid_lanes(
+        lanes_style(&[px(50.0), px(50.0)], &[]),
+        vec![first, second, third],
+    );
+
+    // A last item without a baseline contributes none; the item above it is
+    // no longer last in its track.
+    assert_eq!(auto_layout(&tree, root).last_baselines.y, Some(25.0));
+
+    let mut tree = TestTree::default();
+    let first = tree.push_baseline_leaf(
+        leaf_style(30.0, 20.0),
+        Size::new(30.0, 20.0),
+        Some(5.0),
+        Some(15.0),
+    );
+    let second = tree.push_baseline_leaf(
+        leaf_style(20.0, 20.0),
+        Size::new(20.0, 20.0),
+        Some(4.0),
+        Some(8.0),
+    );
+    let root = tree.push_grid_lanes(lanes_style(&[], &[px(40.0), px(40.0)]), vec![first, second]);
+
+    // Row lanes read the last item of the last track that received one.
+    let output = auto_layout(&tree, root);
+    assert_eq!(output.first_baselines.y, Some(5.0));
+    assert_eq!(output.last_baselines.y, Some(48.0));
+}
+
+#[test]
+fn last_baseline_self_alignment_falls_back_to_end_in_the_grid_axis() {
+    let mut tree = TestTree::default();
+    let item = styled(
+        &mut tree,
+        TestStyle {
+            direction: direction::T::Ltr,
+            align_self: self_align(AlignFlags::LAST_BASELINE),
+            justify_self: self_align(AlignFlags::LAST_BASELINE),
+            ..leaf_style(20.0, 10.0)
+        },
+        20.0,
+        10.0,
+    );
+    let root = tree.push_grid_lanes(
+        TestStyle {
+            direction: direction::T::Rtl,
+            ..lanes_style(&[px(100.0)], &[])
+        },
+        vec![item],
+    );
+
+    sized_layout(&tree, root, Some(100.0), None);
+
+    // `end` of the right-to-left container is its left edge.
+    assert_point(tree.layout(item).location, Point::new(0.0, 0.0));
+}
+
+#[test]
+fn layout_containment_suppresses_the_container_last_baseline() {
+    let mut tree = TestTree::default();
+    let item = tree.push_baseline_leaf(
+        leaf_style(10.0, 30.0),
+        Size::new(10.0, 30.0),
+        Some(5.0),
+        Some(25.0),
+    );
+    let root = tree.push_grid_lanes(
+        TestStyle {
+            containment: Contain::LAYOUT,
+            ..lanes_style(&[px(50.0)], &[])
+        },
+        vec![item],
+    );
+
+    assert_eq!(auto_layout(&tree, root).last_baselines.y, None);
+}
+
+/// A grid-lanes container that is a last-baseline group member is asked for
+/// an exact last baseline, and asks its items in turn: which item closes a
+/// track is known only after placement. The nested flex container's last item
+/// has a fixed height, so only an exact measurement gives its 19 rather than
+/// its 22px bottom edge.
+#[test]
+fn a_requested_last_baseline_asks_the_items_that_may_close_a_track() {
+    let mut tree = TestTree::default();
+    let line = |tree: &mut TestTree, height: f32, baseline: f32| {
+        tree.push_baseline_leaf(
+            leaf_style(40.0, height),
+            Size::new(40.0, height),
+            Some(baseline),
+            Some(baseline),
+        )
+    };
+    let upper = line(&mut tree, 10.0, 8.0);
+    let lower = line(&mut tree, 12.0, 9.0);
+    let flex = tree.push_flex(
+        TestStyle {
+            display: Display::Flex,
+            size: Size::new(size_px(40.0), size_auto()),
+            flex_wrap: stylo::computed_values::flex_wrap::T::WRAP,
+            align_items: support::items(AlignFlags::FLEX_START),
+            ..TestStyle::default()
+        },
+        vec![upper, lower],
+    );
+    let lanes = tree.push_grid_lanes(
+        TestStyle {
+            size: Size::new(size_px(40.0), size_auto()),
+            ..lanes_style(&[px(40.0)], &[])
+        },
+        vec![flex],
+    );
+    let beside = tree.push_baseline_leaf(
+        leaf_style(20.0, 20.0),
+        Size::new(20.0, 20.0),
+        Some(15.0),
+        Some(15.0),
+    );
+    let root = tree.push_flex(
+        TestStyle {
+            display: Display::Flex,
+            align_items: support::items(AlignFlags::LAST_BASELINE),
+            ..TestStyle::default()
+        },
+        vec![lanes, beside],
+    );
+
+    let output = sized_layout(&tree, root, Some(100.0), None);
+
+    assert_size(tree.layout(lanes).size, Size::new(40.0, 22.0));
+    assert_close(tree.layout(beside).location.y, 4.0);
+    assert_eq!(output.last_baselines.y, Some(19.0));
+}
