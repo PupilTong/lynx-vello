@@ -496,7 +496,7 @@ fn the_one_comparison_retargeting_rule_agrees_with_the_standards_predicate() {
 mod rust_walk {
     use std::sync::{Arc, Mutex};
 
-    use super::super::{ElementEvent, EventDetail, EventPhase};
+    use super::super::{ElementEvent, EventDetail, EventPhase, EventStep, EventWalk, StepOutcome};
     use crate::input::PointerKind;
     use crate::tree::document::tests::device;
     use crate::{CustomElement, Document, NodeId, Point2D};
@@ -722,6 +722,186 @@ mod rust_walk {
         document.dispatch_element_event_over(&steps, "pointerdown", &pointer(0.0), 0.0);
         assert_eq!(take(&log), ["outer:pointerdown:capture:0:0"]);
     }
+
+    fn outcomes(document: &mut Document<()>, walk: &mut EventWalk<'_>) -> Vec<StepOutcome> {
+        std::iter::from_fn(|| document.advance(walk)).collect()
+    }
+
+    fn outcome(step: &EventStep) -> StepOutcome {
+        StepOutcome {
+            node: step.node,
+            target: step.target,
+            capture: step.capture,
+        }
+    }
+
+    #[test]
+    fn a_walk_reports_every_step_and_runs_each_component_before_reporting_its_step() {
+        let log = Log::default();
+        let (mut document, outer, inner) = page(&log, false);
+        let steps = document.event_steps(inner, true, true);
+        let detail = pointer(2.0);
+        let mut walk = document.event_walk(&steps, "pointerdown", &detail, 1.0);
+
+        let mut seen = Vec::new();
+        while let Some(step) = document.advance(&mut walk) {
+            seen.push((step, take(&log)));
+        }
+        let expected: Vec<StepOutcome> = steps.steps().iter().map(outcome).collect();
+        assert_eq!(
+            seen.iter().map(|(step, _)| *step).collect::<Vec<_>>(),
+            expected,
+            "every step is reported, the at-target capture step included"
+        );
+        let delivered: Vec<(NodeId, bool, Vec<String>)> = seen
+            .into_iter()
+            .filter(|(_, log)| !log.is_empty())
+            .map(|(step, log)| (step.node, step.capture, log))
+            .collect();
+        assert_eq!(
+            delivered,
+            [
+                (
+                    outer,
+                    true,
+                    vec!["outer:pointerdown:capture:1:2".to_owned()]
+                ),
+                (
+                    inner,
+                    false,
+                    vec!["inner:pointerdown:at-target:1:2".to_owned()]
+                ),
+                (
+                    outer,
+                    false,
+                    vec!["outer:pointerdown:bubble:1:2".to_owned()]
+                ),
+            ],
+            "a step's component has run by the time the step is reported, and the target's \
+             capture step delivers to no component"
+        );
+        assert!(document.advance(&mut walk).is_none());
+        assert!(!walk.propagation_stopped());
+    }
+
+    #[test]
+    fn a_component_stop_reports_its_own_step_and_ends_the_walk_for_good() {
+        let log = Log::default();
+        let (mut document, outer, inner) = page(&log, true);
+        let steps = document.event_steps(inner, true, true);
+        let detail = pointer(0.0);
+        let mut walk = document.event_walk(&steps, "pointerdown", &detail, 0.0);
+
+        let reported = outcomes(&mut document, &mut walk);
+        assert_eq!(
+            reported.last().map(|step| (step.node, step.capture)),
+            Some((outer, true)),
+            "the step that stopped is the last one reported: the rest of its node's listeners \
+             still run"
+        );
+        assert_eq!(reported.len(), 3, "document node, page, outer");
+        assert!(walk.propagation_stopped());
+        assert!(
+            document.advance(&mut walk).is_none(),
+            "a stopped walk stays stopped"
+        );
+        assert_eq!(take(&log), ["outer:pointerdown:capture:0:0"]);
+    }
+
+    /// Stops immediately at its own element.
+    struct ImmediateStop {
+        log: Log,
+    }
+
+    impl CustomElement<()> for ImmediateStop {
+        fn observed_events(&self) -> &'static [&'static str] {
+            &["pointerdown"]
+        }
+
+        fn handle_event(
+            &self,
+            _document: &mut Document<()>,
+            _element: NodeId,
+            event: &mut ElementEvent<'_>,
+        ) {
+            self.log
+                .lock()
+                .expect("never poisoned")
+                .push("immediate".to_owned());
+            event.stop_immediate_propagation();
+        }
+    }
+
+    #[test]
+    fn an_immediate_stop_withholds_the_step_it_ran_at() {
+        let log = Log::default();
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        document.define(
+            "probe-immediate",
+            Box::new(ImmediateStop {
+                log: Arc::clone(&log),
+            }),
+        );
+        let page = document.document_element().id();
+        let stopper = document.create_element("probe-immediate", ());
+        let inner = document.create_element("view", ());
+        document.append_child(page, stopper);
+        document.append_child(stopper, inner);
+        let steps = document.event_steps(inner, true, true);
+        let detail = pointer(0.0);
+        let mut walk = document.event_walk(&steps, "pointerdown", &detail, 0.0);
+
+        let reported = outcomes(&mut document, &mut walk);
+        assert_eq!(
+            reported.iter().map(|step| step.node).collect::<Vec<_>>(),
+            [document.root_node().id(), page],
+            "nothing is reported from the stopping node on"
+        );
+        assert!(walk.propagation_stopped());
+        assert_eq!(take(&log), ["immediate"]);
+    }
+
+    #[test]
+    fn a_walk_of_a_type_no_definition_observes_still_reports_every_step() {
+        let log = Log::default();
+        let (mut document, _outer, inner) = page(&log, true);
+        let steps = document.event_steps(inner, true, true);
+        let detail = EventDetail::None;
+        let mut walk = document.event_walk(&steps, "tap", &detail, 0.0);
+        assert_eq!(
+            outcomes(&mut document, &mut walk),
+            steps.steps().iter().map(outcome).collect::<Vec<_>>()
+        );
+        assert!(take(&log).is_empty(), "no component is looked up for `tap`");
+    }
+
+    #[test]
+    fn a_step_freed_mid_walk_is_skipped_unreported() {
+        let log = Log::default();
+        let (mut document, outer, inner) = page(&log, false);
+        let steps = document.event_steps(inner, true, true);
+        let detail = EventDetail::None;
+        let mut walk = document.event_walk(&steps, "tap", &detail, 0.0);
+        let first = document
+            .advance(&mut walk)
+            .expect("the document node's step");
+        assert_eq!(first.node, document.root_node().id());
+
+        document.drop_subtree(outer);
+        let page = document.document_element().id();
+        assert_eq!(
+            outcomes(&mut document, &mut walk)
+                .iter()
+                .map(|step| (step.node, step.capture))
+                .collect::<Vec<_>>(),
+            [
+                (page, true),
+                (page, false),
+                (document.root_node().id(), false)
+            ],
+            "the freed nodes' steps resolve to nothing"
+        );
+    }
 }
 
 #[test]
@@ -763,4 +943,320 @@ fn the_nearest_common_event_ancestor_is_inclusive_and_crosses_shadow_boundaries(
     // Two detached trees share nothing.
     let loose = document.create_element("view", ());
     assert_eq!(document.nearest_common_event_ancestor(loose, inner), None);
+}
+
+// ---------------------------------------------------------------------------
+// The listener table
+// ---------------------------------------------------------------------------
+
+mod listener_table {
+    use super::{nested, shadow_tree};
+    use crate::event::{ElementEvent, EventDetail, ListenerEdge, ListenerKey, ListenerKinds};
+    use crate::tree::document::tests::device;
+    use crate::tree::shadow::ShadowRootMode;
+    use crate::{CustomElement, Document, NodeId};
+
+    const PAGE: ListenerKey = ListenerKey(0);
+    const CARD: ListenerKey = ListenerKey(7);
+    const BUBBLE: ListenerKinds = ListenerKinds::PATH_BUBBLE;
+    const CAPTURE: ListenerKinds = ListenerKinds::PATH_CAPTURE;
+    const GLOBAL: ListenerKinds = ListenerKinds::GLOBAL;
+
+    fn names(names: &[std::sync::Arc<str>]) -> Vec<&str> {
+        names.iter().map(|name| &**name).collect()
+    }
+
+    #[test]
+    fn a_repeated_add_replaces_the_kinds_and_moves_the_counts_by_the_difference() {
+        let (mut document, _page, _outer, inner) = nested();
+        assert_eq!(
+            document.add_listener(inner, "tap", BUBBLE, PAGE),
+            ListenerEdge::Opened
+        );
+        assert_eq!(document.realm_registration_counts(PAGE, "tap"), (1, 0));
+        assert!(!document.realm_has_global(PAGE, "tap"));
+
+        assert_eq!(
+            document.add_listener(inner, "tap", BUBBLE | GLOBAL, PAGE),
+            ListenerEdge::None,
+            "the same (node, name, registrant) is one registration"
+        );
+        assert_eq!(document.realm_registration_counts(PAGE, "tap"), (1, 1));
+        assert!(document.realm_has_global(PAGE, "tap"));
+
+        assert_eq!(
+            document.add_listener(inner, "tap", GLOBAL, PAGE),
+            ListenerEdge::None
+        );
+        assert_eq!(document.realm_registration_counts(PAGE, "tap"), (0, 1));
+
+        assert_eq!(
+            document.add_listener(inner, "tap", ListenerKinds::empty(), PAGE),
+            ListenerEdge::Closed,
+            "an empty set is a removal"
+        );
+        assert_eq!(document.realm_registration_counts(PAGE, "tap"), (0, 0));
+        assert!(!document.hears("tap"));
+    }
+
+    #[test]
+    fn a_name_opens_with_its_first_registration_and_closes_with_its_last() {
+        let (mut document, _page, outer, inner) = nested();
+        assert_eq!(
+            document.add_listener(outer, "tap", BUBBLE, PAGE),
+            ListenerEdge::Opened
+        );
+        assert_eq!(
+            document.add_listener(inner, "tap", CAPTURE, CARD),
+            ListenerEdge::None,
+            "another node and another registrant: the name is heard already"
+        );
+        assert_eq!(
+            document.add_listener(inner, "scroll", BUBBLE, PAGE),
+            ListenerEdge::Opened,
+            "edges are per name"
+        );
+
+        assert_eq!(
+            document.remove_listener(inner, "tap", PAGE),
+            ListenerEdge::None,
+            "not registered by this registrant"
+        );
+        assert_eq!(
+            document.remove_listener(inner, "unheard", PAGE),
+            ListenerEdge::None
+        );
+        assert_eq!(
+            document.remove_listener(outer, "tap", PAGE),
+            ListenerEdge::None
+        );
+        assert_eq!(
+            document.remove_listener(inner, "tap", CARD),
+            ListenerEdge::Closed
+        );
+        assert!(!document.hears("tap"));
+        assert!(document.hears("scroll"));
+        assert_eq!(
+            document.add_listener(inner, "tap", BUBBLE, CARD),
+            ListenerEdge::Opened,
+            "a closed name opens again"
+        );
+    }
+
+    #[test]
+    fn a_stale_node_registers_nothing() {
+        let (mut document, _page, _outer, inner) = nested();
+        document.drop_element(inner);
+        assert_eq!(
+            document.add_listener(inner, "tap", BUBBLE, PAGE),
+            ListenerEdge::None
+        );
+        assert!(!document.hears("tap"));
+    }
+
+    #[test]
+    fn removing_a_registrant_answers_the_names_it_closed() {
+        let (mut document, _page, outer, inner) = nested();
+        document.add_listener(outer, "tap", BUBBLE, PAGE);
+        document.add_listener(inner, "scroll", BUBBLE | GLOBAL, PAGE);
+        document.add_listener(inner, "keydown", GLOBAL, PAGE);
+        document.add_listener(inner, "tap", CAPTURE, CARD);
+
+        let mut closed = document.remove_listeners_of(PAGE);
+        closed.sort();
+        assert_eq!(
+            names(&closed),
+            ["keydown", "scroll"],
+            "`tap` is still the card's"
+        );
+        assert!(document.hears("tap"));
+        assert!(!document.hears("scroll"));
+        assert_eq!(document.realm_registration_counts(PAGE, "tap"), (0, 0));
+        assert_eq!(document.realm_registration_counts(CARD, "tap"), (1, 0));
+        assert!(!document.has_listener(outer, "tap"));
+        assert!(document.has_listener(inner, "tap"));
+        assert!(document.remove_listeners_of(PAGE).is_empty());
+        assert!(
+            document.take_listener_edges().is_empty(),
+            "a registrant's removal returns its closes rather than queuing them"
+        );
+    }
+
+    #[test]
+    fn a_freed_node_takes_its_registrations_and_queues_the_close() {
+        let (mut document, _page, outer, inner) = nested();
+        document.add_listener(inner, "tap", BUBBLE, PAGE);
+        document.add_listener(inner, "scroll", GLOBAL, CARD);
+        document.add_listener(outer, "scroll", BUBBLE, PAGE);
+
+        // Detaching is not freeing: a re-render moves nodes constantly.
+        document.remove_element(inner);
+        assert!(document.has_listener(inner, "tap"));
+        assert!(document.take_listener_edges().is_empty());
+
+        document.drop_element(inner);
+        assert!(!document.has_listener(inner, "tap"));
+        let edges = document.take_listener_edges();
+        assert_eq!(
+            edges
+                .iter()
+                .map(|(name, edge)| (&**name, *edge))
+                .collect::<Vec<_>>(),
+            [("tap", ListenerEdge::Closed)],
+            "`scroll` is still heard on `outer`"
+        );
+        assert!(document.take_listener_edges().is_empty(), "drained");
+        assert_eq!(document.realm_registration_counts(CARD, "scroll"), (0, 0));
+        assert_eq!(document.realm_registration_counts(PAGE, "scroll"), (1, 0));
+        assert!(!document.hears("tap"));
+    }
+
+    #[test]
+    fn an_add_that_undoes_a_queued_close_withdraws_it() {
+        let (mut document, _page, outer, inner) = nested();
+        document.add_listener(inner, "tap", BUBBLE, PAGE);
+        document.drop_subtree(inner);
+        assert_eq!(
+            document.add_listener(outer, "tap", BUBBLE, PAGE),
+            ListenerEdge::None,
+            "the host never saw `tap` close"
+        );
+        assert!(
+            document.take_listener_edges().is_empty(),
+            "the close is withdrawn rather than reported after the add"
+        );
+        assert!(document.hears("tap"));
+    }
+
+    #[test]
+    fn a_shadow_tree_freed_with_its_host_takes_its_registrations() {
+        let (mut document, host, _root, button) = shadow_tree(ShadowRootMode::Open);
+        document.add_listener(button, "tap", BUBBLE, PAGE);
+        document.drop_element(host);
+        assert!(document.get(button).is_none());
+        assert_eq!(
+            document
+                .take_listener_edges()
+                .iter()
+                .map(|(name, edge)| (&**name, *edge))
+                .collect::<Vec<_>>(),
+            [("tap", ListenerEdge::Closed)]
+        );
+    }
+
+    #[test]
+    fn has_listener_is_per_node_and_per_name() {
+        let (mut document, page, outer, inner) = nested();
+        document.add_listener(outer, "layout", GLOBAL, PAGE);
+        assert!(document.has_listener(outer, "layout"), "any kind counts");
+        assert!(!document.has_listener(inner, "layout"));
+        assert!(!document.has_listener(page, "layout"));
+        assert!(!document.has_listener(outer, "tap"));
+    }
+
+    struct Observer;
+
+    impl CustomElement<()> for Observer {
+        fn observed_events(&self) -> &'static [&'static str] {
+            &["pointerdown"]
+        }
+
+        fn handle_event(&self, _: &mut Document<()>, _: NodeId, _: &mut ElementEvent<'_>) {}
+    }
+
+    #[test]
+    fn a_name_is_heard_by_a_registration_or_an_observing_definition() {
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        let page = document.document_element().id();
+        assert!(!document.hears("pointerdown"));
+        document.define("probe-observer", Box::new(Observer));
+        assert!(
+            document.hears("pointerdown"),
+            "a definition that observes the name hears it, with no registration"
+        );
+        assert!(!document.hears("tap"));
+        document.add_listener(page, "tap", CAPTURE, PAGE);
+        assert!(document.hears("tap"));
+        document.remove_listener(page, "tap", PAGE);
+        assert!(!document.hears("tap"));
+        // An observed type still walks the components when nothing registered.
+        document.dispatch_element_event(page, "pointerdown", &EventDetail::None, true, true, 0.0);
+    }
+
+    #[test]
+    fn the_path_reaches_capture_registrations_on_capture_steps_and_bubble_ones_on_bubble_steps() {
+        let (mut document, page, outer, inner) = nested();
+        let ancestor_bubble = ListenerKey(1);
+        let ancestor_capture = ListenerKey(2);
+        let target_bubble = ListenerKey(3);
+        let global_only = ListenerKey(4);
+        document.add_listener(outer, "tap", BUBBLE, ancestor_bubble);
+        document.add_listener(outer, "tap", CAPTURE, ancestor_capture);
+        document.add_listener(inner, "tap", BUBBLE, target_bubble);
+        document.add_listener(inner, "tap", BUBBLE, ancestor_bubble);
+        document.add_listener(page, "tap", GLOBAL, global_only);
+        document.add_listener(page, "scroll", CAPTURE, ListenerKey(5));
+
+        let bubbling = document.event_steps(inner, true, false);
+        assert_eq!(
+            document.listeners_on_path(&bubbling, "tap").as_slice(),
+            [ancestor_bubble, ancestor_capture, target_bubble],
+            "each once, in capture order; a global registration is not a path one"
+        );
+
+        let non_bubbling = document.event_steps(inner, false, false);
+        assert_eq!(
+            document.listeners_on_path(&non_bubbling, "tap").as_slice(),
+            [ancestor_capture, target_bubble, ancestor_bubble],
+            "an ancestor's bubble registration is not reached; the target keeps its bubble turn"
+        );
+
+        let at_outer = document.event_steps(outer, false, false);
+        assert_eq!(
+            document.listeners_on_path(&at_outer, "tap").as_slice(),
+            [ancestor_bubble, ancestor_capture],
+            "at the target both kinds run"
+        );
+        assert!(document.listeners_on_path(&bubbling, "unheard").is_empty());
+        assert_eq!(
+            document.listeners_on_path(&bubbling, "scroll").as_slice(),
+            [ListenerKey(5)],
+            "the path is probed for its own name alone"
+        );
+    }
+
+    #[test]
+    fn would_reach_listener_answers_by_name_then_global_then_the_path() {
+        let (mut document, page, outer, inner) = nested();
+        let sibling = document.create_element("view", ());
+        document.append_child(page, sibling);
+
+        assert!(
+            !document.would_reach_listener(inner, "tap", true, true),
+            "no registration of the name"
+        );
+
+        document.add_listener(outer, "tap", BUBBLE, PAGE);
+        assert!(document.would_reach_listener(inner, "tap", true, true));
+        assert!(
+            !document.would_reach_listener(inner, "tap", false, true),
+            "a non-bubbling event misses an ancestor's bubble registration"
+        );
+        assert!(
+            !document.would_reach_listener(sibling, "tap", true, true),
+            "not on the sibling's path"
+        );
+
+        document.add_listener(outer, "tap", BUBBLE | CAPTURE, PAGE);
+        assert!(
+            document.would_reach_listener(inner, "tap", false, true),
+            "a capture registration hears it on the way in"
+        );
+
+        document.add_listener(inner, "scroll", GLOBAL, CARD);
+        assert!(
+            document.would_reach_listener(sibling, "scroll", false, false),
+            "a global registration hears the name on any path"
+        );
+    }
 }

@@ -899,7 +899,9 @@ exactly that caller. `InputEvent::default_prevented` is the `preventDefault()`
 seam an embedder hands to that router after its own arbitration; this crate
 never reads it.
 
-Its `event` module is the other half, and it does **not** dispatch to script:
+Its `event` module is the other half. It does **not** call script — a
+listener's callback is a value in a realm, reached only after the document is
+released — but it holds everything around that call that needs the tree.
 `Document::event_steps(target, bubbles, composed)` returns the ordered node
 visits one event resolves to — the capture pass root-inward, the bubble pass
 target-outward, the target in both — as plain `Copy` `EventStep`s owning no
@@ -909,39 +911,71 @@ slotted node's event parent is its assigned slot, a shadow root's is its host,
 host outward reports the host. The shadow-crossing test is a single comparison
 rather than the standard's per-step ancestor walk, and the equivalence is
 argued in `event_path`'s doc comment and pinned by a differential test.
-Dispatch itself belongs to `bobcat-core`, split across its two threads because
-the realm cannot move and scrolling must stay responsive: the painter routes
-the input and decides the user-agent scroll, and the script thread builds the
-path from the exclusively owned document and delivers it there — that order is
-what lets a listener mutate the tree. Nothing guards the window in between: a
-`NodeId` names one node for the life of the document, so a step that outlived
-its node resolves to no handle and reaches no one. There is no `preventDefault`
-and no cancelable event anywhere on this path — Lynx dispatches none — so
-suppressing a user-agent default action stays gesture arbitration's job,
-arriving on the separate `InputEvent::default_prevented` seam.
+Calling the realms belongs to `bobcat-core`, split across its two threads
+because the realm cannot move and scrolling must stay responsive: the painter
+routes the input and decides the user-agent scroll, and the script thread
+builds the path from the exclusively owned document and delivers it there —
+that order is what lets a listener mutate the tree. Nothing guards the window
+in between: a `NodeId` names one node for the life of the document, so a step
+that outlived its node resolves to no handle and reaches no one. There is no
+`preventDefault` and no cancelable event anywhere on this path — Lynx
+dispatches none — so suppressing a user-agent default action stays gesture
+arbitration's job, arriving on the separate `InputEvent::default_prevented`
+seam.
 
-There is a second walk, and this crate runs all of it: the one that delivers
-to the engine's own components rather than to script.
-`Document::dispatch_element_event_over(&steps, type_name, &detail, timestamp)`
-walks steps the caller already computed — capture pass root-inward, the
-target once, bubble pass target-outward — calling `CustomElement::handle_event`
-on every step whose node is a constructed custom element.
-`bobcat-core`'s one dispatch entry computes the steps once, runs this walk over
-them and then hands the same steps to the realm, so a component hears every
-event script hears, first; a component's `stop_propagation` ends this walk
-only. `Document::dispatch_element_event(target, type_name, &detail, bubbles,
+The module also keeps the standard's event listener lists, minus the
+callbacks, in one side table (`event::listeners`): per node, which registrant
+(`ListenerKey`, a realm to the host) listens for which type in which passes
+(`ListenerKinds`: `PATH_BUBBLE`, `PATH_CAPTURE`, and Lynx's `GLOBAL`).
+`Document::add_listener(node, name, kinds, key)` records one registration per
+(node, name, registrant) — a repeated add replaces the kinds — and returns the
+name's document-wide 0↔1 `ListenerEdge`; `remove_listener` and
+`remove_listeners_of(key)` (a realm closing) are its inverses. It is a side
+table because registrations are sparse and a field on `Node` would make every
+node pay for an empty list; it is keyed by node so the one free path
+(`free_node`) drops a freed node's rows in one probe, and costs no probe at
+all while the table is empty. A name whose last registration left with a freed
+node closes there, with no caller to hand the edge to, so the close waits for
+`Document::take_listener_edges`, which a host drains after every mutation
+batch; an add that undoes a waiting close withdraws it and reports no edge.
+The questions it answers: `has_listener(node, name)` (a component asking
+whether anything listens on it, before producing a costly event),
+`would_reach_listener(target, name, bubbles, composed)` (whether an event it
+fires reaches any registration: no registration of the name is one lookup, a
+global one anywhere is `true`, otherwise a path probe), `hears(name)` (any
+registration, or a definition that observes the name), `listeners_on_path`
+(the registrants one dispatch reaches through a path registration — a capture
+registration on its node's capture step, a bubble one on its bubble step, so
+an ancestor's bubble registration misses a non-bubbling event), and
+`realm_has_global`/`realm_registration_counts`.
+
+The walk over a path is this crate's too, and it is driven one step at a
+time. `Document::event_walk(&steps, type_name, &detail, timestamp)` starts an
+`EventWalk`, and `Document::advance(&mut walk)` visits the next step: it calls
+`CustomElement::handle_event` if the step's node is a constructed custom
+element, then reports the step (`StepOutcome { node, target, capture }`) so the
+host can run its own listeners there — a realm call — with the document
+released in between. The walk holds the dispatch's one stop flag: a
+component's `stop_propagation` reports the step it stopped at and nothing
+after it, and `stop_immediate_propagation` withholds that step too. A host
+checks `hears` before it builds any of this, so a type nothing hears costs
+that check alone; a walk of a type no definition observes looks no component
+up. `Document::dispatch_element_event_over(&steps, type_name, &detail,
+timestamp)` drives a walk to its end, and
+`Document::dispatch_element_event(target, type_name, &detail, bubbles,
 composed, timestamp)` computes the steps itself, for an event only the engine
-hears. The walk exists here because handing the path up so the layer above
-can call back down per step would buy nothing: these handlers are Rust, owned
-by this document, and already called from inside its mutations. The at-target
-capture step is skipped rather than delivered twice (a component has one hook,
-not a registration set per phase); every hook takes `&mut Document`, so the
-path is collected up front and each step re-checks liveness before the call;
-each call is its own `[CEReactions]` scope, so what a handler's mutation
-raised is drained before the next step. `ElementEvent` answers
+hears. The component half of the walk is
+here because handing the path up so the layer above can call back down per
+step would buy nothing: these handlers are Rust, owned by this document, and
+already called from inside its mutations. The at-target capture step delivers
+to no component (a component has one hook, not a registration set per phase)
+but is still reported, since the host's capture listeners are a different set;
+every hook takes `&mut Document`, so the path is collected up front and each
+step re-checks liveness, a step whose node was freed being skipped unreported;
+each call is its own `[CEReactions]` scope, so what a handler's mutation raised
+is drained before the next step. `ElementEvent` answers
 `type_name`/`detail`/`timestamp`/`target`/`current_target`/`phase` and carries
-both stop methods behind one flag, because a node's local name resolves to at
-most one definition. `dom::event::EventDetail` is the one description of an
+both stop methods. `dom::event::EventDetail` is the one description of an
 event's payload, one variant per shape. A shadow root has no hook, so the
 shadow root a non-composed path ends at is delivered to its host's
 `handle_event` (with `element` and `current_target` the host) — where a script
@@ -950,7 +984,8 @@ delivers nothing, since its host follows it as itself. For a non-bubbling
 event that step is in the capture pass only, so a handler that keeps only
 bubble-phase deliveries never sees one. A definition names the types it
 handles in `CustomElement::observed_events`; `define` unions them into one
-set, and a type nothing observes costs one set lookup and builds no path.
+set, and `dispatch_element_event` returns after one set lookup for a type
+nothing observes.
 Which of those names have an instance is tracked beside it: the registry
 counts the elements of each definition (counted where an element is given its
 definition, uncounted where it is freed) and, per name, the definitions with
