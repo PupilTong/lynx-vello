@@ -3398,7 +3398,8 @@ describe("exposure", () => {
     __AddEvent(inner, "bindEvent", "uiappear", undefined);
 
     // Whether the element is detected is the host's, read off its listener
-    // table: the realm reports each (element, name) edge and nothing more.
+    // table: the realm reports each change of what an element has registered
+    // for a name, and nothing more.
     expect(mock.calls.filter(([name]) => String(name).startsWith("listener"))).toEqual([
       ["listenerOpened", id, "uiappear", 1],
       ["listenerOpened", id, "uidisappear", 1],

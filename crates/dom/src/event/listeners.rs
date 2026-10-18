@@ -58,7 +58,7 @@
 //! applies every returned change as it gets it, and the drained ones
 //! whenever it drains, holds the table's set of heard names after each drain.
 //! The host drains after every mutation batch, as it drains
-//! [`Document::take_observed_name_edges`].
+//! [`Document::take_observed_name_changes`].
 
 use std::ops::BitOr;
 use std::sync::Arc;
@@ -512,7 +512,8 @@ impl<T> Document<T> {
     }
 
     /// Whether any registration of any kind, by any registrant, on any node
-    /// holds `name`: the set whose 0↔1 edges [`ListenerEdge`] reports.
+    /// holds `name`: the set whose membership changes [`RegistrationChange`]
+    /// reports, as the name's registration count crosses zero.
     ///
     /// [`Self::hears`] without the definitions. A host that keeps its own
     /// router's name set as the union of this answer and a set of its own —

@@ -2074,9 +2074,10 @@ view published before its task ended is still the frame the painter must draw.
 Every publication from the
 main thread wakes the embedder through its `EventRequester`, always after the
 state it announces is in place, and the `Painter::pump` that answers is the
-turn that draws it. A listener-name edge is the one exception that wakes
-nobody: the painter reads the set at the start of its next routing pass, which
-is a turn the host was taking anyway.
+turn that draws it. Telling the painter whether a name is routed
+(`ViewOutbox::set_name_routed`) is the one exception that wakes nobody: the
+painter reads the set at the start of its next routing pass, which is a turn
+the host was taking anyway.
 A frame the painter asks of *itself* wakes nothing either — it is asked
 inside one of the embedder's own calls, and the turn that embedder is already
 in is the turn that answers it. Nothing announces the main thread's exit:

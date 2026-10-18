@@ -603,10 +603,10 @@ mod rust_walk {
     }
 
     /// A name is live while any definition observing it has an element: the
-    /// first element of either probe opens `pointerdown`, freeing one of two
-    /// closes nothing, freeing the last closes it, and a create-and-free
-    /// between two drains reports nothing. The definition-based gate stays
-    /// open throughout.
+    /// first element of either probe makes `pointerdown` live, freeing one of
+    /// two changes nothing, freeing the last ends its liveness, and a
+    /// create-and-free between two drains reports nothing. The
+    /// definition-based gate observes the name throughout.
     #[test]
     fn an_observed_name_is_live_while_an_element_observing_it_exists() {
         let mut document: Document<()> = Document::new(device(), "page", ());
@@ -622,32 +622,35 @@ mod rust_walk {
             );
         }
         assert!(
-            document.take_observed_name_edges().is_empty(),
+            document.take_observed_name_changes().is_empty(),
             "a definition alone makes nothing live"
         );
         assert!(document.observes_event("pointerdown"));
 
         let page = document.document_element().id();
         let outer = document.create_element("probe-outer", ());
-        assert_eq!(document.take_observed_name_edges(), [("pointerdown", true)]);
+        assert_eq!(
+            document.take_observed_name_changes(),
+            [("pointerdown", true)]
+        );
         let inner = document.create_element("probe-inner", ());
         let second = document.create_element("probe-inner", ());
         document.append_child(page, outer);
         document.append_child(outer, inner);
         assert!(
-            document.take_observed_name_edges().is_empty(),
+            document.take_observed_name_changes().is_empty(),
             "already live: connecting and more instances change nothing"
         );
 
         document.drop_element(inner);
         document.drop_element(outer);
         assert!(
-            document.take_observed_name_edges().is_empty(),
+            document.take_observed_name_changes().is_empty(),
             "`second` still observes it, unconnected"
         );
         document.drop_element(second);
         assert_eq!(
-            document.take_observed_name_edges(),
+            document.take_observed_name_changes(),
             [("pointerdown", false)]
         );
         assert!(document.observes_event("pointerdown"));
@@ -655,8 +658,8 @@ mod rust_walk {
         let brief = document.create_element("probe-outer", ());
         document.drop_element(brief);
         assert!(
-            document.take_observed_name_edges().is_empty(),
-            "an edge undone before the drain is not reported"
+            document.take_observed_name_changes().is_empty(),
+            "a change undone before the drain is not reported"
         );
         assert!(take(&log).is_empty());
     }

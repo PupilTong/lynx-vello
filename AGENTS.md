@@ -1495,12 +1495,13 @@ The private `MainThreadRuntime` registers the native QuickJS ESM
 included; and `"bobcat-internal:native-modules"`, which every realm kind
 declares, the MTS realm included, for `invokeNativeModule` alone. The MTS
 members group as the document's own life, tree vocabulary over numeric
-`NodeId`s, attributes and style, selector queries, the commit, the event-name
-edges, timers, the one-shot startup strings the realm alone reads (the
-page-data triple handed over as plain JSON and processor-name strings, and
-the native module table it posts unread to its BTS), the stylesheet pair, the
-diagnostics pair, the display-frame demand, the three worker operations, and
-the nested-page members `framePage`, `resetFrame` and `closeRealm` (below).
+`NodeId`s, attributes and style, selector queries, the commit, the event
+registrations (`listenerOpened`/`listenerClosed`), timers, the one-shot
+startup strings the realm alone reads (the page-data triple handed over as
+plain JSON and processor-name strings, and the native module table it posts
+unread to its BTS), the stylesheet pair, the diagnostics pair, the
+display-frame demand, the three worker operations, and the nested-page
+members `framePage`, `resetFrame` and `closeRealm` (below).
 Those four one-shot strings do not arrive separately: they, the entry's
 resolved URL, the BTS entry's, the listed stylesheets' answers and the screen
 are one `RealmStartup`, which is everything a realm is opened with and nothing
@@ -1937,9 +1938,10 @@ is `dom::event::EventDetail` (one variant per payload shape), which the router
 fills in, `ToMain::DispatchEvent` carries, the Rust walk lends out and
 `encode_detail` turns into the realm's numbers. A name a component observes is
 in the painter's name set while an element of that component exists, beside
-the listener table's names: `dom`'s `Document::take_observed_name_edges`
-reports its 0↔1 edges, and `Document::take_listener_edges` the closes a freed
-node made, both drained before each commit is published
+the listener table's names: `dom`'s `Document::take_observed_name_changes`
+reports each observed name that became live or stopped being, and
+`Document::take_pending_last_removals` each name whose last registration a
+freed node removed, both drained before each commit is published
 (`DocumentSlot::sync_names`).
 CSSOM-View's `scroll` and `scrollend` are decided on this thread, never on
 the painter: `adopt_scroll_offsets` queues a `scroll` per container a post
@@ -1969,9 +1971,11 @@ card's own `addEventListener` for that name never runs (user ruling,
 2026-09-21). `bubbles = true` is a recorded choice where the spec is silent
 (Chromium bubbles, WebKit and Gecko do not); `composed = false`; nothing
 cancelable. The painting
-side routes against the *name* set, and is sent only its global edges — a
-name's first registration anywhere and the removal of its last — which the
-listener table's `ListenerEdge`s are (`DocumentSlot::forward_listener_edges`).
+side routes against the *name* set, and the painter is told whether a name
+is routed only when the name's document-wide registration count crosses
+zero — its first registration anywhere added and its last removed — which
+the listener table's `RegistrationChange::{FirstAdded, LastRemoved}` are
+(`DocumentSlot::publish_route_changes`, `ViewOutbox::set_name_routed`).
 
 A second engine-decided path is the **W3C IntersectionObserver primitive**
 (`crates/dom/src/visual/intersection/`, user-directed 2026-10-08, Rust-only:
@@ -3001,7 +3005,8 @@ QuickJS's `WeakMap` marks its values unconditionally, so a closure that
 captured its own element would otherwise keep the handle, and through it the
 whole subtree, alive for the life of the realm. The per-node dispatch, the
 standard's `eventPhase`, and `once` are all resolved here, with only the event
-name's open/close edges crossing to the host.
+changes of what a realm has registered for a name on an element crossing
+to the host.
 
 **Identity and lifecycle.** An element handle is a plain object carrying its
 DOM `NodeId` under a realm-local symbol (web-core's `uniqueIdSymbol` shape) —

@@ -2651,10 +2651,11 @@ export function __GetEvents(
  * Every name the element held or is handed is reconciled once, after the
  * whole replacement: what the host is told describes the element before and
  * after the call, not the empty element between the clear and the adds. So a
- * name handed back neither closes nor reopens, a `global-bindEvent` handed
- * back keeps its delivery position, and an element that keeps a `uiappear`
- * handler is not unregistered from exposure and registered again — which
- * would have made a visible element hear `uiappear` a second time.
+ * name handed back is neither reported removed nor added again, a
+ * `global-bindEvent` handed back keeps its delivery position, and an element
+ * that keeps a `uiappear` handler is not unregistered from exposure and
+ * registered again — which would have made a visible element hear
+ * `uiappear` a second time.
  */
 export function __SetEvents(element: unknown, events: unknown): undefined {
   const handle = element as Handle;

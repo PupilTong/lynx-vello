@@ -947,7 +947,8 @@ whether anything listens on it, before producing a costly event),
 fires reaches any registration: no registration of the name is one lookup, a
 global one anywhere is `true`, otherwise a path probe), `hears(name)` (any
 registration, or a definition that observes the name), `has_listeners_for(name)`
-(any registration alone: the set the edges describe, which a host's router
+(any registration alone: the set whose membership `RegistrationChange`
+reports, which a host's router
 unions with its own live-element names), `listeners_on_path`
 (the registrants one dispatch reaches through a path registration — a capture
 registration on its node's capture step, a bubble one on its bubble step, so
@@ -994,7 +995,7 @@ nothing observes.
 Which of those names have an instance is tracked beside it: the registry
 counts the elements of each definition (counted where an element is given its
 definition, uncounted where it is freed) and, per name, the definitions with
-an element alive, and `Document::take_observed_name_edges` hands out the
+an element alive, and `Document::take_observed_name_changes` hands out the
 names whose liveness changed since the last call — the input a host's router
 is fed per instance, while the walk's gate (`observes_event`) stays per
 definition. The

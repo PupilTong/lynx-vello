@@ -1659,10 +1659,11 @@ fn clearing_inline_styles_removes_the_attribute_and_layout_effect() {
 
 /// The painting side routes against the published name set, and the realm is
 /// the only thing that can maintain it: every registration lives there, in
-/// six places per element, and the host is told only the global edges — a
-/// name's first registration anywhere, and the removal of its last.
+/// six places per element, and the host is told only when a name's
+/// document-wide registration count crosses zero — its first registration
+/// anywhere added, and its last removed.
 #[test]
-fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
+fn the_published_names_follow_the_realm_registration_counts_crossing_zero() {
     let (mut js_runtime, mut runtime, _elements, mut names) =
         runtime_over_watching_names(ingredients());
     runtime
@@ -1685,7 +1686,7 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
                   __AddEvent(outer, 'global-bindEvent', 'swipe', '3:0:swipe');
                 };
                 ",
-            "app:///edges.js",
+            "app:///registration-counts.js",
         )
         .expect("main-thread script");
     // Nothing of the components': `slotchange` (the swiper's and the refresh
@@ -1723,10 +1724,13 @@ fn the_published_names_are_the_global_edges_of_the_realm_registrations() {
             "unregistering",
         )
         .expect("unregistration");
-    assert!(names.names().is_empty(), "the last registration closes it");
+    assert!(
+        names.names().is_empty(),
+        "removing the last registration unpublishes it"
+    );
 
     // A name a component observes, with no element of it alive, is the
-    // realm's like any other: its last removal closes it.
+    // realm's like any other: removing its last registration unpublishes it.
     runtime
         .evaluate_module(
             &mut js_runtime,
@@ -2056,13 +2060,14 @@ fn adopted_offsets_queue_scroll_events_only_for_a_name_something_hears() {
     );
 }
 
-/// The painter's name set follows the realm's edges with two adjustments:
-/// a `dblclick` registration opens `click` there too (the `dblclick` is
-/// decided from the `click`s the painter sends) and closing it closes
-/// `click` only when `click` is not listened for itself; and a name an
-/// element alive observes (the page's `x-swiper`'s `slotchange`) stays open
-/// whatever the realm's edges for it say, where an unobserved name's close
-/// closes it. `tap`, which no element here observes, is not there at all.
+/// The painter's name set follows the realm's registration counts crossing
+/// zero with two adjustments: a `dblclick` registration routes `click` there
+/// too (the `dblclick` is decided from the `click`s the painter sends) and
+/// removing it stops routing `click` only when `click` is not listened for
+/// itself; and a name an element alive observes (the page's `x-swiper`'s
+/// `slotchange`) stays routed whatever the realm's registrations for it say,
+/// where an unobserved name stops being routed with its last registration.
+/// `tap`, which no element here observes, is not there at all.
 #[test]
 fn the_painter_names_pair_click_with_dblclick_and_keep_observed_names() {
     let (mut js_runtime, mut runtime, _elements, mut names) =
@@ -2123,7 +2128,7 @@ fn the_painter_names_pair_click_with_dblclick_and_keep_observed_names() {
     assert_eq!(
         names.names(),
         ["slotchange"],
-        "the realm's close of an observed name is not forwarded; of another, it is"
+        "the last removal of an observed name keeps it routed; of another, it does not"
     );
 }
 
@@ -2456,7 +2461,7 @@ fn global_bind_handlers_run_after_the_path_even_when_a_catch_ended_it() {
         .expect("verification");
 }
 
-/// A name no path registration holds open is still a name the painting side
+/// A name no path registration holds is still a name the painting side
 /// has to route, or the event that would reach a global handler is dropped
 /// before a path is ever built.
 #[test]
@@ -2513,7 +2518,7 @@ fn a_global_only_registration_publishes_its_name_and_is_delivered() {
         .expect("verification");
     assert!(
         !names.contains("swipe"),
-        "the last global registration closes its name like any other"
+        "removing the last global registration unpublishes its name like any other"
     );
 
     // The painting side is what drops an event nobody wants; a dispatch that
@@ -4948,11 +4953,11 @@ fn a_tap_on_markdown_link_text_reaches_script_as_link() {
 
 /// A name a component observes is in the painter's name set with no realm
 /// listener anywhere once an element of it exists — `tap`, for a probe
-/// component defined after the build, whose element's creation opens it at
-/// the next commit — so the painter sends the gesture's `tap` and the
+/// component defined after the build, whose element's creation publishes
+/// it at the next commit — so the painter sends the gesture's `tap` and the
 /// component hears it. Before that element, the document's own markdown
-/// definition opens nothing. A script that listens for the name and then
-/// stops does not close what the element still observes.
+/// definition publishes nothing. A script that listens for the name and
+/// then stops does not unpublish what the element still observes.
 #[test]
 fn a_tap_a_component_observes_is_routed_with_no_script_listener() {
     let (mut js_runtime, mut runtime, elements, mut names) =
@@ -4983,7 +4988,7 @@ fn a_tap_a_component_observes_is_routed_with_no_script_listener() {
     );
     assert!(elements.tree().observes_event("tap"));
     runtime.commit_if_dirty();
-    assert!(!names.contains("tap"), "a definition opens nothing");
+    assert!(!names.contains("tap"), "a definition publishes nothing");
 
     runtime
         .evaluate_module(
@@ -5004,7 +5009,7 @@ fn a_tap_a_component_observes_is_routed_with_no_script_listener() {
         "an element's names cross where the entry's commit does"
     );
     runtime.commit_if_dirty();
-    assert!(names.contains("tap"), "the probe element opens `tap`");
+    assert!(names.contains("tap"), "the probe element publishes `tap`");
     runtime
         .evaluate_module(
             &mut js_runtime,
@@ -5020,7 +5025,7 @@ fn a_tap_a_component_observes_is_routed_with_no_script_listener() {
         .expect("the listener");
     assert!(
         names.contains("tap"),
-        "the realm's last removal does not close an element's name"
+        "the realm's last removal does not unpublish an element's name"
     );
 
     let text = {
@@ -5105,7 +5110,7 @@ fn a_markdown_element_routes_tap_while_it_exists() {
         (children[0], children[1])
     };
     let freed = |node: dom::NodeId| elements.tree().get(node).is_none();
-    assert!(names.contains("tap"), "a markdown element opens `tap`");
+    assert!(names.contains("tap"), "a markdown element publishes `tap`");
 
     step(
         &mut runtime,
@@ -5146,7 +5151,7 @@ fn a_markdown_element_routes_tap_while_it_exists() {
         &mut runtime,
         "globalThis.held.push(__CreateElement('x-markdown', 0));",
     );
-    assert!(names.contains("tap"), "a new markdown opens it again");
+    assert!(names.contains("tap"), "a new markdown publishes it again");
     step(&mut runtime, "globalThis.held.pop();");
     assert!(
         !names.contains("tap"),
@@ -8035,7 +8040,7 @@ fn an_add_event_for_uiappear_arms_and_disarms_exposure() {
     assert_eq!(
         exposure_observer(&elements, view),
         Some(armed),
-        "neither a second handler nor removing one of two is an edge",
+        "neither a second handler nor removing one of two changes whether the element listens",
     );
     run("__AddEvent(view, 'bindEvent', 'uidisappear', undefined);");
     assert_eq!(
@@ -8985,9 +8990,9 @@ fn dropping_a_frame_frees_its_nested_page() {
     assert!(tree.get(inner).is_none(), "and what was under the page");
 }
 
-/// The published names are the union of every realm's: a child that opens
-/// and closes `tap`, which the page also holds, leaves it published, and a
-/// name only a child held closes when the child closes itself — its
+/// The published names are the union of every realm's: a child that adds
+/// and removes `tap`, which the page also holds, leaves it published, and a
+/// name only a child held is unpublished when the child closes itself — its
 /// `closeRealm` takes its rows out of the listener table — not later, when
 /// the release step frees it.
 #[test]
@@ -9030,7 +9035,7 @@ fn a_frame_realm_closes_only_its_own_listener_names() {
         .unwrap();
     assert!(
         !names.contains("scroll"),
-        "a closed child's names close with it, before the release step"
+        "a closed child's names are unpublished with it, before the release step"
     );
     assert!(names.contains("tap"));
     assert_eq!(runtime.core().children.release_unneeded(), 1);
@@ -9505,10 +9510,10 @@ fn exposure_follows_every_realms_rows_for_an_element() {
 }
 
 /// A freed element takes its registrations with it, in the document's free
-/// path, and the close of a name only it held reaches the painter at the
-/// next flush, with no word from the realm.
+/// path, and the last removal of a name only it held reaches the painter at
+/// the next flush, with no word from the realm.
 #[test]
-fn a_freed_elements_last_registration_closes_its_name_at_the_next_flush() {
+fn a_freed_elements_last_registration_unpublishes_its_name_at_the_next_flush() {
     let (mut js, mut runtime, _elements, mut names) = runtime_over_watching_names(ingredients());
     runtime
         .run_main_thread_script(

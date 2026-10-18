@@ -220,9 +220,9 @@ Landed and not to be regressed:
 - Event dispatch: `dom::Document::event_steps` builds the path; the host makes
   **one** `__BobcatDispatchEvent` call per event and the realm runs capture,
   bubble and the `global-bindEvent` pass itself. The host keeps no listener
-  index — only 0↔1 listener-name edges cross back, and the painter holds a
-  lock-free replica. `target.dataset` is re-read per delivery; no staleness
-  guards exist.
+  index — it is told only when a listener name's registration count crosses
+  zero, and the painter holds a lock-free replica. `target.dataset` is
+  re-read per delivery; no staleness guards exist.
 - String and worklet handlers live in separate kind tables. String `__AddEvent`
   handlers publish snapshots carrying `dataset`/`id`/`uid`, never handles.
 - A listener or timer callback that throws is nonfatal: `ListenerFailed` /

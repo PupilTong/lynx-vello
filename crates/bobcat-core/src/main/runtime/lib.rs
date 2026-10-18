@@ -31,7 +31,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use dom::event::{EventDetail, ListenerEdge, ListenerKey, ListenerKinds};
+use dom::event::{EventDetail, ListenerKey, ListenerKinds, RegistrationChange};
 use dom::{MethodCall, MethodError, MethodOutcome, StylePool};
 use quickjs_rust_bridge::{HostArgument, HostValue};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -743,7 +743,7 @@ struct DocumentSlot {
     /// element, which needs no entry. One entry per live frame card.
     roots: FxHashMap<ListenerKey, dom::NodeId>,
     /// The event names the document's components observe on an element that
-    /// exists, as [`dom::Document::take_observed_name_edges`] said when last
+    /// exists, as [`dom::Document::take_observed_name_changes`] said when last
     /// drained ([`Self::sync_names`]). With the document's listener
     /// table ([`dom::Document::has_listeners_for`]), what the painter routes
     /// against ([`Self::routes`]).
@@ -757,6 +757,40 @@ struct DocumentSlot {
     scrolling: SmallVec<[dom::NodeId; 4]>,
     /// Where committed frames leave for the painting side.
     outbox: ViewOutbox,
+}
+
+/// A name a registration change carries to
+/// [`DocumentSlot::publish_route_changes`]: borrowed from a member call, or
+/// the document's own `Arc<str>` ([`dom::Document::take_pending_last_removals`],
+/// [`dom::Document::remove_listeners_of`]), which reaches the painter's set
+/// without a second allocation.
+trait RouteName {
+    fn as_str(&self) -> &str;
+
+    /// The name as the painter's set holds it.
+    fn to_arc(&self) -> Arc<str>;
+}
+
+impl RouteName for &str {
+    fn as_str(&self) -> &str {
+        self
+    }
+
+    /// Allocates: a member call's name is only borrowed, so the one
+    /// allocation is here, at the boundary, and only for a name sent.
+    fn to_arc(&self) -> Arc<str> {
+        Arc::from(*self)
+    }
+}
+
+impl RouteName for Arc<str> {
+    fn as_str(&self) -> &str {
+        self
+    }
+
+    fn to_arc(&self) -> Arc<str> {
+        Arc::clone(self)
+    }
 }
 
 /// What every caller of [`DocumentSlot::document_mut`] relies on, stated at
@@ -870,7 +904,7 @@ impl DocumentSlot {
         })?;
         // Nothing of the components' is published here: a name they observe
         // is routed once an element observing it exists, which the
-        // document's edges say at the first commit.
+        // document's observed-name changes say at the first commit.
         self.document = Some(document);
         Ok(())
     }
@@ -922,13 +956,14 @@ impl DocumentSlot {
     /// A realm's `listenerOpened`: `key` listens for `name` on `node` in the
     /// passes `kinds` names, replacing what it reported there before.
     ///
-    /// The table's edge goes to the painter at once
-    /// ([`Self::forward_listener_edges`]), after the closes freed nodes left
-    /// waiting, so the painter always hears a name's edges in the order they
-    /// happened. A change of whether `node` has any registration for
-    /// `uiappear` or `uidisappear` is what registers it for exposure
-    /// detection, or lets it go ([`Exposure::set_listens`]); nothing else
-    /// tells exposure about a listener.
+    /// What that did to the name's registration count goes to the painter
+    /// at once ([`Self::publish_route_changes`]), after the last removals
+    /// freed nodes left waiting, so the painter is told whether a name is
+    /// routed in the order its registration count crossed zero. A change of
+    /// whether `node` has any registration for `uiappear` or `uidisappear`
+    /// is what registers it for exposure detection, or lets it go
+    /// ([`Exposure::set_listens`]); nothing else tells exposure about a
+    /// listener.
     fn open_listener(
         &mut self,
         node: dom::NodeId,
@@ -936,30 +971,30 @@ impl DocumentSlot {
         kinds: ListenerKinds,
         key: ListenerKey,
     ) {
-        self.sync_listener_edges();
+        self.apply_pending_last_removals();
         let exposure = is_exposure_event(name);
         let document = self.document.as_mut().expect(DOCUMENT_EXISTS);
         let heard = exposure && hears_exposure(document, node);
-        let edge = document.add_listener(node, name, kinds, key);
+        let change = document.add_listener(node, name, kinds, key);
         if exposure {
             self.exposure_follows(node, heard);
         }
-        self.forward_listener_edges(&[(name, edge)]);
+        self.publish_route_changes(&[(name, change)]);
     }
 
     /// A realm's `listenerClosed`: `key` no longer listens for `name` on
-    /// `node`, in any pass. As [`Self::open_listener`] for the edge and for
-    /// exposure.
+    /// `node`, in any pass. As [`Self::open_listener`] for the registration
+    /// change and for exposure.
     fn close_listener(&mut self, node: dom::NodeId, name: &str, key: ListenerKey) {
-        self.sync_listener_edges();
+        self.apply_pending_last_removals();
         let exposure = is_exposure_event(name);
         let document = self.document.as_mut().expect(DOCUMENT_EXISTS);
         let heard = exposure && hears_exposure(document, node);
-        let edge = document.remove_listener(node, name, key);
+        let change = document.remove_listener(node, name, key);
         if exposure {
             self.exposure_follows(node, heard);
         }
-        self.forward_listener_edges(&[(name, edge)]);
+        self.publish_route_changes(&[(name, change)]);
     }
 
     /// Tells exposure whether `node` has a `uiappear`/`uidisappear`
@@ -976,129 +1011,157 @@ impl DocumentSlot {
     }
 
     /// The realm `key` is closing or has been freed: every registration it
-    /// filed leaves the table, each name that leaves unheard because of it
-    /// closes on the painter, and it has no root any more, so no later
-    /// dispatch calls it. Idempotent: a child that closed itself is
-    /// forgotten again, for nothing, when it is freed.
+    /// filed leaves the table, each name whose last registration that
+    /// removed is no longer routed by the painter unless an observed name
+    /// keeps it, and it has no root any more, so no later dispatch calls it.
+    /// Idempotent: a child that closed itself is forgotten again, for
+    /// nothing, when it is freed.
     ///
     /// The exposure registrations of its elements are not touched: they go
     /// with the elements, which the frame's `resetFrame` frees.
     fn forget_realm(&mut self, key: ListenerKey) {
         self.roots.remove(&key);
-        self.sync_listener_edges();
+        self.apply_pending_last_removals();
         let Some(document) = self.document.as_mut() else {
             return;
         };
-        let closed = document.remove_listeners_of(key);
-        let edges: SmallVec<[(&str, ListenerEdge); 4]> = closed
-            .iter()
-            .map(|name| (&**name, ListenerEdge::Closed))
+        let changes: SmallVec<[(Arc<str>, RegistrationChange); 4]> = document
+            .remove_listeners_of(key)
+            .into_iter()
+            .map(|name| (name, RegistrationChange::LastRemoved))
             .collect();
-        self.forward_listener_edges(&edges);
+        self.publish_route_changes(&changes);
     }
 
-    /// Applies the closes the document's free path left waiting
-    /// ([`dom::Document::take_listener_edges`]): a node freed by a removal or
-    /// a handle's collection takes its registrations with it, and no caller
-    /// was there to hand the edge to. One length check when no freed node
-    /// held a registration.
+    /// Applies the last removals the document's free path left waiting
+    /// ([`dom::Document::take_pending_last_removals`]): a node freed by a
+    /// removal or a handle's collection takes its registrations with it, and
+    /// no caller was there to hand the registration change to. One length
+    /// check when no freed node held a registration.
     ///
-    /// Drained before every edge a member forwards, so the painter hears
-    /// each name's edges in order, and before every commit is published
+    /// Drained before every registration change a member publishes, so the
+    /// painter is told whether a name is routed in the order its
+    /// registration count crossed zero, and before every commit is published
     /// ([`Self::sync_names`]) — the end of every entry, the epilogue's
-    /// [`Self::commit_if_dirty`], included — so a close a collection made in
-    /// an entry crosses before that entry's `ScriptFinished` does on the same
-    /// outbox FIFO, as the realm's own close did when the realm reported it.
-    fn sync_listener_edges(&mut self) {
+    /// [`Self::commit_if_dirty`], included — so a last removal a collection
+    /// made in an entry crosses before that entry's `ScriptFinished` does on
+    /// the same outbox FIFO, as the realm's own removal did when the realm
+    /// reported it.
+    fn apply_pending_last_removals(&mut self) {
         let Some(document) = self.document.as_mut() else {
             return;
         };
-        let edges = document.take_listener_edges();
-        if edges.is_empty() {
+        let removals = document.take_pending_last_removals();
+        if removals.is_empty() {
             return;
         }
-        let edges: SmallVec<[(&str, ListenerEdge); 2]> =
-            edges.iter().map(|(name, edge)| (&**name, *edge)).collect();
-        self.forward_listener_edges(&edges);
+        self.publish_route_changes(&removals);
     }
 
-    /// Forwards to the painter what `edges` — changes the listener table has
-    /// already made, in the order it made them — move in what
-    /// [`Self::routes`] says, one edge at a time.
+    /// Publishes to the painter what `changes` — registration changes the
+    /// listener table has already made, in the order it made them — move in
+    /// what [`Self::routes`] says, one change at a time.
     ///
     /// The table is the only copy of which names are registered, so the
-    /// state the painter last heard is rebuilt from it: a name with an edge
-    /// not yet forwarded was registered before that edge exactly when the
-    /// edge is a close. That is why every caller drains the waiting closes
-    /// first ([`Self::sync_listener_edges`]): then the table and what the
-    /// painter heard differ by `edges` alone.
-    fn forward_listener_edges(&self, edges: &[(&str, ListenerEdge)]) {
-        for (index, &(name, edge)) in edges.iter().enumerate() {
-            if edge == ListenerEdge::None {
+    /// state the painter was last told is rebuilt from it: a name with a
+    /// change not yet published was registered before that change exactly
+    /// when the change is a last removal. That is why every caller applies
+    /// the waiting last removals first ([`Self::apply_pending_last_removals`]):
+    /// then the table and what the painter was told differ by `changes`
+    /// alone.
+    ///
+    /// A name the document handed out as its own `Arc<str>` reaches the
+    /// painter as that `Arc`; one a member call only borrowed is allocated
+    /// once, when it is sent ([`RouteName`]).
+    fn publish_route_changes<N: RouteName>(&self, changes: &[(N, RegistrationChange)]) {
+        for (index, (name, change)) in changes.iter().enumerate() {
+            if *change == RegistrationChange::Unchanged {
                 continue;
             }
-            let (pending, rest) = (&edges[index..], &edges[index + 1..]);
-            self.forward_routes(
+            let (pending, rest) = (&changes[index..], &changes[index + 1..]);
+            self.publish_route_change(
                 name,
-                |name| self.registered_before(pending, name),
-                |name| self.registered_before(rest, name),
+                |name| self.was_registered_before(pending, name),
+                |name| self.was_registered_before(rest, name),
             );
         }
     }
 
-    /// Whether `name` was registered with the edges in `unapplied` not yet
-    /// made: the first of them that names it decides, and with none the
-    /// table does.
-    fn registered_before(&self, unapplied: &[(&str, ListenerEdge)], name: &str) -> bool {
+    /// Whether `name` was registered with the registration changes in
+    /// `unapplied` not yet made: the first of them that names it decides,
+    /// and with none the table does.
+    fn was_registered_before<N: RouteName>(
+        &self,
+        unapplied: &[(N, RegistrationChange)],
+        name: &str,
+    ) -> bool {
         unapplied
             .iter()
-            .find(|&&(pending, edge)| pending == name && edge != ListenerEdge::None)
+            .find(|(pending, change)| {
+                pending.as_str() == name && *change != RegistrationChange::Unchanged
+            })
             .map_or_else(
                 || self.registered(name),
-                |&(_, edge)| edge == ListenerEdge::Closed,
+                |(_, change)| *change == RegistrationChange::LastRemoved,
             )
     }
 
-    /// Sends the painter the edges of [`Self::routes`] for `name` between a
-    /// registration state `before` and one `after`, the observed names
-    /// unchanged. An edge may move two of its names: `dblclick` is decided
-    /// here from the `click`s the painter sends, so opening it opens `click`
-    /// there too, and closing it closes `click` unless `click` itself is
-    /// wanted.
-    fn forward_routes(
+    /// Tells the painter whether `name` is routed when [`Self::routes`] for
+    /// it differs between a registration state `before` and one `after`, the
+    /// observed names unchanged. One registration change may move two names:
+    /// `dblclick` is decided here from the `click`s the painter sends, so the
+    /// first `dblclick` registration routes `click` there too, and the last
+    /// one removed stops routing `click` unless `click` itself is wanted.
+    fn publish_route_change<N: RouteName>(
         &self,
-        name: &str,
+        name: &N,
         before: impl Fn(&str) -> bool,
         after: impl Fn(&str) -> bool,
     ) {
-        let paired = (name == DOUBLE_CLICK_EVENT).then_some(CLICK_EVENT);
-        for routed in std::iter::once(name).chain(paired) {
-            let was = self.routes_given(routed, &before);
-            let now = self.routes_given(routed, &after);
-            if was != now {
-                self.outbox.listener_edge(Arc::from(routed), now);
-            }
+        let name_str = name.as_str();
+        if let Some(routed) = self.route_moved(name_str, &before, &after) {
+            self.outbox.set_name_routed(name.to_arc(), routed);
+        }
+        if name_str == DOUBLE_CLICK_EVENT
+            && let Some(routed) = self.route_moved(CLICK_EVENT, &before, &after)
+        {
+            self.outbox.set_name_routed(Arc::from(CLICK_EVENT), routed);
         }
     }
 
-    /// Applies the observed-name edges the document recorded since the last
-    /// call, forwarding each to the painter as [`Self::change_names`] says,
-    /// and then the listener table's waiting closes
-    /// ([`Self::sync_listener_edges`]).
+    /// Whether [`Self::routes_given`] for `name` is `after` now when it was
+    /// not `before`: the routed state to tell the painter, or `None` when
+    /// nothing moved.
+    fn route_moved(
+        &self,
+        name: &str,
+        before: &impl Fn(&str) -> bool,
+        after: &impl Fn(&str) -> bool,
+    ) -> Option<bool> {
+        let was = self.routes_given(name, before);
+        let now = self.routes_given(name, after);
+        (was != now).then_some(now)
+    }
+
+    /// Applies the listener table's waiting last removals
+    /// ([`Self::apply_pending_last_removals`]), and then the observed-name
+    /// changes the document recorded since the last call, publishing each to
+    /// the painter as [`Self::change_names`] says.
     ///
     /// Called before every commit is published ([`Self::flush`],
-    /// [`Self::commit_if_dirty`]): the edges cross in the mailbox the frame
-    /// does, ahead of it, so the painter routes a name from the first frame
-    /// that shows the element observing it. One length check each when
-    /// nothing was created or freed with a definition observing a name or a
-    /// registration on it, and none before the document exists.
+    /// [`Self::commit_if_dirty`]): the painter is told whether a name is
+    /// routed in the mailbox the frame crosses in, ahead of the frame, so the
+    /// painter routes a name from the first frame that shows the element
+    /// observing it. One length check each when nothing was created or freed
+    /// with a definition observing a name or a registration on it, and none
+    /// before the document exists.
     fn sync_names(&mut self) {
-        self.sync_listener_edges();
+        self.apply_pending_last_removals();
         let Some(document) = self.document.as_mut() else {
             return;
         };
-        let edges = document.take_observed_name_edges();
-        for (name, live) in edges {
+        let changes = document.take_observed_name_changes();
+        for (name, live) in changes {
             self.change_names(name, |slot| {
                 if live {
                     slot.observed.insert(name);
@@ -1109,23 +1172,23 @@ impl DocumentSlot {
         }
     }
 
-    /// Runs `change` on [`Self::observed`] for `name`, then forwards to the
+    /// Runs `change` on [`Self::observed`] for `name`, then tells the
     /// painter whatever moved in what [`Self::routes`] says: the painter's
-    /// set is the union of the two sides, so a name crosses open when either
-    /// side first wants it and closed when neither does, and a realm
+    /// set is the union of the two sides, so the painter routes a name from
+    /// when either side first wants it until neither does, and a realm
     /// registration for a name an element already observes moves nothing
-    /// there. The `dblclick` pairing is [`Self::forward_routes`]'s.
+    /// there. The `dblclick` pairing is [`Self::publish_route_change`]'s.
     fn change_names(&mut self, name: &str, change: impl FnOnce(&mut Self)) {
         let paired = (name == DOUBLE_CLICK_EVENT).then_some(CLICK_EVENT);
         let before = (self.routes(name), paired.map(|paired| self.routes(paired)));
         change(self);
         if self.routes(name) != before.0 {
-            self.outbox.listener_edge(Arc::from(name), !before.0);
+            self.outbox.set_name_routed(Arc::from(name), !before.0);
         }
         if let (Some(paired), Some(was)) = (paired, before.1)
             && self.routes(paired) != was
         {
-            self.outbox.listener_edge(Arc::from(paired), !was);
+            self.outbox.set_name_routed(Arc::from(paired), !was);
         }
     }
 
@@ -2217,9 +2280,9 @@ impl MainThreadRuntime {
     /// within [`DOUBLE_CLICK_MILLISECONDS`] of the last one is then followed
     /// by a `dblclick` there, and a third starts over. The painting side sends
     /// a `click` when its name set holds `click`, which a realm `dblclick`
-    /// registration opens as well ([`DocumentSlot::listener_edge`]), so each
-    /// is dispatched here only when a realm listener or a component hears
-    /// it.
+    /// registration routes as well ([`DocumentSlot::publish_route_change`]),
+    /// so each is dispatched here only when a realm listener or a component
+    /// hears it.
     fn dispatch_click(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -3589,7 +3652,8 @@ fn install_nested_page_members(
 
     // Retires the child, and lets go of its root and of every registration
     // it filed now rather than when the release step frees it: from here on
-    // no dispatch calls it, and a name only it held closes on the painter.
+    // no dispatch calls it, and a name only it held is no longer routed by
+    // the painter.
     let tree = Rc::clone(handle);
     install(engine, "closeRealm", 0, move |_arguments| {
         const NAME: &str = "bobcat-internal:host.closeRealm";
@@ -3707,7 +3771,8 @@ fn startup_strings(startup: &mut RealmStartup) -> [(&'static str, Option<String>
 /// replacing what it said there before, so a realm whose kinds change
 /// reports the new set and nothing else. `listenerClosed(node, name)` says
 /// it no longer listens there at all. The callbacks stay in the realm; what
-/// crosses is one call per (element, name) edge, which
+/// crosses is one call per change of what the realm has registered for a
+/// name on an element, which
 /// [`DocumentSlot::open_listener`] files in the document's listener table:
 /// the table is what a dispatch reads to decide which realms to call and
 /// where, what a component asks whether anything listens on it, what the
@@ -4336,7 +4401,7 @@ fn flag_argument(function: &str, arguments: &[HostValue], index: usize) -> Resul
 }
 
 /// The passes one registration runs in, as `listenerOpened` takes them: the
-/// bits of [`ListenerKinds`], at least one. An empty set is not an opening —
+/// bits of [`ListenerKinds`], at least one. An empty set is not a registration —
 /// `listenerClosed` is the removal — so 0 is refused with every non-integer
 /// and every bit outside the three.
 fn kinds_argument(
