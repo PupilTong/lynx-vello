@@ -2864,10 +2864,42 @@ consequential choice about whether to follow the spec or the quirk.
       acknowledgements. web-core awaits its nested instance's dispose RPC
       before terminating the Worker; native destroys the nested render with
       the frame.
-  - *The nested card gets no events.* Input dispatch does not enter a
-    frame (`MainThreadRuntime::dispatch` drops the steps in a shadow tree),
-    so a handler inside the card never runs; native and web-core dispatch
-    into the nested view.
+  - *Events reach the card in its own realm, called by the kernel at the
+    frame's nested page* (user rulings 2026-10-16 and 2026-10-18, scheme D;
+    "Each realm's Lynx walk runs at its root's capture step", Event model &
+    gestures): the page realm is called at the path's first step, then the
+    card's, each running its own Lynx walk over its part of the path, with
+    no forwarding between them. Where the references disagree:
+    - *A catch stops one card's walk alone* (web-core): a `catchtap` in the
+      card does not stop the page's `bindtap` on the frame's ancestors, and a
+      page `capture-catch` does not stop the card, as each web-core
+      `lynx-view` walks its own shadow root (`event_apis.rs:406-432`).
+      Native runs one propagation across both pages
+      (`LynxEventEmitter.java:118-158`, `touch_event_handler.cc:1537-1931`),
+      where either catch ends it; not adopted.
+    - *Every card hears every key* (web-core): a card that registered
+      `keydown`/`keyup` is called at the document element, so its
+      `global-bindkeydown`/`keyup` fires for each key, as web-core's nested
+      binding listens on `document`; native Android/iOS have no `keydown`.
+    - *The card's `detail.x/y` is frame-local* (my decision; both references
+      agree): the card's pointer, wheel and touch `x/y` and its position
+      `detail` are relative to the frame's border box, read once per
+      dispatch from the layout walk (`boundingClientRect`, so transforms are
+      ignored); `clientX/Y`/`pageX/Y` stay the viewport's, as web-core's
+      `clientX/Y` are. A frame with no box — one a listener earlier in the
+      same dispatch removed — answers the viewport's origin.
+    - *A frame an earlier listener removed still has its card called* in the
+      same dispatch: the realms a dispatch calls are fixed before its walk,
+      and the card's realm keeps its root until its `closeRealm`, which the
+      disconnection starts in a later entry.
+    - *The card's exposure records go to the page's BTS* (deferred): a
+      card's elements' `exposure`/`disexposure` lists still go to the page
+      realm's BTS, where both references keep exposure per card.
+    - *A frame's connection calls reach the page realm alone* (deferred):
+      `__BobcatFrameConnected`/`__BobcatFrameDisconnected` are not routed to
+      the realm whose scope holds the frame's handle, so a frame inside a
+      nested card that the card disconnects without letting go of its handle
+      keeps its card.
   - *A relative `src` resolves against the view's base*, not the host card's
     URL: `bobcat:frame` resolves `src` with `resolveUrl`, which is the
     resolution the fetcher makes against `ViewSources::base_url`, and the

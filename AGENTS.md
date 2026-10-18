@@ -1729,9 +1729,31 @@ itself: the cycle that closes makes QuickJS leak an object when a worker's
 release.) A frame inside a
 nested card that the nested card disconnects without letting go of its
 handle keeps its card: the connection calls reach the page realm alone. No
-`load` event, no events into the frame (so a handler inside the card never
-runs) and no frame methods beyond the shared base set (native's surface; user
-ruling 2026-10-15). The card's BTS is a BTS like the page's, on the group's
+`load` event and no frame methods beyond the shared base set (native's
+surface; user ruling 2026-10-15). **Events reach the card in its own realm**
+(user rulings 2026-10-16, web-core's catch and keyboard; 2026-10-18, scheme
+D): nothing forwards between realms. The kernel's walk calls the page realm at
+the path's first step and the card's realm at the frame's nested page, its
+recorded root, each once and only when the listener table invites it (see the
+event paragraphs below), so the page's handlers on the frame hear a tap
+inside the card first, with the frame as the target, retargeted, and the
+card's own handlers after, at the card's node. A catch or a stop ends one
+realm's walk alone, as each web-core `lynx-view` walks its own shadow root
+(native's single propagation across both pages is not adopted), and a
+listener that throws in either realm is that dispatch's `ListenerFailed`
+after the other realm still heard the event. The card's `detail.x/y` and
+pointer, wheel and touch `x/y` are relative to the frame's border box (its
+`boundingClientRect`, read once per position dispatch, so no transforms; a
+frame with no box answers the viewport's origin), while `clientX/Y` and
+`pageX/Y` stay the viewport's. A `keydown`/`keyup` calls every realm that
+registered it at the document element, a card with no step of its own, so
+each card's `global-bindkey*` hears every key, as web-core's nested bindings
+listen on `document`. Non-composed events at a card's node (`scroll`, image
+`load`/`error`, `uiappear`) end at the frame's shadow root and reach only the
+card. The realms a dispatch calls are fixed before its walk, so a frame an
+earlier listener removed still has its card called in that dispatch; its
+`closeRealm` follows the disconnection in a later entry
+(`docs/tracking/deviations.md`, `<frame>`). The card's BTS is a BTS like the page's, on the group's
 worker runtime, with the parent's `SystemInfo`; it shares the group's
 `sharedData` with every other BTS and has the view's `NativeModules` (both
 native's, where web-core gives a frame its own `sharedData` and none; user
@@ -3105,8 +3127,10 @@ of the element path in the same file.
   `api-frame-data-update` as `react-frame-data-update`, whose button's tap
   re-renders the frame's card through that card's own BTS, beside
   `react-frame-global-props-update`, the same for `global-props` (no upstream
-  case); all rendered end to end by `crates/bobcat-source/tests/frame.rs`) is
-  in that
+  case); `react-frame-tap` and its card `react-frame-tap-inner` (no upstream
+  case), a tap inside the frame that runs the card's `catchtap` and
+  `main-thread:bindtap` and the host's `bindtap` on the frame's wrapper; all
+  rendered end to end by `crates/bobcat-source/tests/frame.rs`) is in that
   package's `NOTICE.lynx-stack`. Native builds use the shared
   `scripts/lynx-bytecode.ts` hook to disable BTS manifest bytecode. MTS keeps
   the compiler's default encoding. The fixture-only source repack remains
