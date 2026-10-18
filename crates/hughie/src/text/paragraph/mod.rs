@@ -520,16 +520,7 @@ fn tab_minimums<S: Copy>(
                 source: source(item),
                 extra_spacing: -style.letter_spacing,
             }];
-            let mut probe = shape::shape(
-                context,
-                ZERO,
-                &spans,
-                Vec::new(),
-                &mut Vec::new(),
-                shape::LineRoot::PROBE,
-            );
-            probe.break_all_lines(None);
-            let half = probe.width() * 0.5;
+            let half = shape::probe_width(context, ZERO, &spans, Vec::new()) * 0.5;
             measured.push((item, half));
             half
         })

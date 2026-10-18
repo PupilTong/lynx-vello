@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use parley::fontique::{
     Collection, CollectionOptions, FontInfoOverride, GenericFamily, Script, ScriptExt, SourceCache,
 };
-use parley::{FontContext, LayoutContext};
+use parley::{FontContext, Layout, LayoutContext};
 
 use super::FontBlob;
 use crate::style::TextBrush;
@@ -17,10 +17,28 @@ fn system_font_template() -> &'static FontContext {
     TEMPLATE.get_or_init(FontContext::new)
 }
 
+/// The largest text, in UTF-8 bytes, whose shaping buffers the scratch
+/// layout keeps for the next shaping: parley reserves about this many
+/// characters, clusters and glyphs, so it bounds what one context holds
+/// between shapings at about a megabyte. Ordinary paragraphs are far
+/// smaller; one past it frees the buffers once its copy is taken.
+const SCRATCH_KEEP_BYTES: usize = 16 * 1024;
+
 /// Reusable resources for text shaping and layout.
 pub struct TextContext {
     font: FontContext,
     layout: LayoutContext<TextBrush>,
+    /// The layout every shaping builds into first.
+    ///
+    /// Parley sizes a fresh layout's shaping buffers for the text's UTF-8
+    /// byte length, an upper bound on its characters, and never shrinks them:
+    /// it is built for a caller that reuses one layout. Shaping here, and
+    /// keeping a copy sized to what was shaped
+    /// (`super::paragraph::shape::shape`), keeps that bound out of every
+    /// retained paragraph. Measurement probes read it in place and keep
+    /// nothing. Its own buffers serve the next shaping, and a paragraph
+    /// larger than [`SCRATCH_KEEP_BYTES`] does not leave them behind.
+    scratch: Layout<TextBrush>,
     #[cfg(test)]
     shape_count: usize,
 }
@@ -31,6 +49,7 @@ impl TextContext {
         Self {
             font: system_font_template().clone(),
             layout: LayoutContext::new(),
+            scratch: Layout::default(),
             #[cfg(test)]
             shape_count: 0,
         }
@@ -47,6 +66,7 @@ impl TextContext {
                 source_cache: SourceCache::default(),
             },
             layout: LayoutContext::new(),
+            scratch: Layout::default(),
             #[cfg(test)]
             shape_count: 0,
         }
@@ -141,10 +161,24 @@ impl TextContext {
         registered.iter().map(|(_, fonts)| fonts.len()).sum()
     }
 
-    pub(super) fn font_and_layout_contexts(
+    /// The parley contexts and the scratch layout a shaping builds into.
+    pub(super) fn shaping_parts(
         &mut self,
-    ) -> (&mut FontContext, &mut LayoutContext<TextBrush>) {
-        (&mut self.font, &mut self.layout)
+    ) -> (
+        &mut FontContext,
+        &mut LayoutContext<TextBrush>,
+        &mut Layout<TextBrush>,
+    ) {
+        (&mut self.font, &mut self.layout, &mut self.scratch)
+    }
+
+    /// Releases the scratch layout's buffers when the shaping just done was
+    /// of more than [`SCRATCH_KEEP_BYTES`]: one long paragraph should not
+    /// keep its buffers for the life of the context.
+    pub(super) fn trim_scratch(&mut self, text_len: usize) {
+        if text_len > SCRATCH_KEEP_BYTES {
+            self.scratch = Layout::default();
+        }
     }
 
     #[cfg(test)]

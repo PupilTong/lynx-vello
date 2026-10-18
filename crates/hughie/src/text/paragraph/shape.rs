@@ -63,19 +63,22 @@ impl<S> LineRoot<'_, S> {
     };
 }
 
-/// Shapes one paragraph. `sources` receives the parley style-index → source
-/// identity table: push order is the style index, which is the run-identity
-/// channel that leaves `TextBrush = ()` untouched crate-wide. With a strut,
-/// index 0 is the strut's and no glyph run carries it.
+/// Shapes one paragraph into a layout the caller keeps. `sources` receives
+/// the parley style-index → source identity table: push order is the style
+/// index, which is the run-identity channel that leaves `TextBrush = ()`
+/// untouched crate-wide. With a strut, index 0 is the strut's and no glyph
+/// run carries it.
+///
+/// The shaping happens in the context's scratch layout and the caller gets a
+/// copy of it. Parley reserves a layout's shaping buffers for the text's
+/// UTF-8 byte length (`parley_engine`'s `shape_text`, an upper bound on the
+/// characters, about three per CJK character) and never shrinks them; a
+/// cloned `Vec` holds exactly its elements, so the retained layout costs what
+/// was shaped, and the scratch's buffers serve the next shaping.
 ///
 /// Fully empty content short-circuits to an empty layout: parley shapes a
 /// substitute space for an empty build, whose glyph run would carry a style
 /// index this module never pushed.
-///
-/// The line-break override is one decision per parley builder, so it cannot
-/// follow each span's `word-break`: the paragraph takes it unless a span is
-/// `break-all`, whose opportunities between ASCII letters the override's
-/// pair table would suppress.
 pub(in crate::text) fn shape<S: Copy>(
     context: &mut TextContext,
     text: &str,
@@ -84,13 +87,62 @@ pub(in crate::text) fn shape<S: Copy>(
     sources: &mut Vec<S>,
     root: LineRoot<'_, S>,
 ) -> Layout<TextBrush> {
+    if !build_into_scratch(context, text, spans, boxes, sources, root) {
+        return Layout::default();
+    }
+    let (_, _, scratch) = context.shaping_parts();
+    let layout = scratch.clone();
+    context.trim_scratch(text.len());
+    layout
+}
+
+/// Shapes a measurement probe in the context's scratch layout, breaks it as
+/// one unbounded line and answers its width, keeping nothing.
+pub(in crate::text) fn probe_width<S: Copy>(
+    context: &mut TextContext,
+    text: &str,
+    spans: &[ShapeSpan<'_, S>],
+    boxes: Vec<InlineBox>,
+) -> f32 {
+    if !build_into_scratch(
+        context,
+        text,
+        spans,
+        boxes,
+        &mut Vec::new(),
+        LineRoot::PROBE,
+    ) {
+        return 0.0;
+    }
+    let (_, _, scratch) = context.shaping_parts();
+    scratch.break_all_lines(None);
+    let width = scratch.width();
+    context.trim_scratch(text.len());
+    width
+}
+
+/// Builds `text` into the context's scratch layout, reusing its buffers.
+/// `false`, building nothing, for fully empty content.
+///
+/// The line-break override is one decision per parley builder, so it cannot
+/// follow each span's `word-break`: the paragraph takes it unless a span is
+/// `break-all`, whose opportunities between ASCII letters the override's
+/// pair table would suppress.
+fn build_into_scratch<S: Copy>(
+    context: &mut TextContext,
+    text: &str,
+    spans: &[ShapeSpan<'_, S>],
+    boxes: Vec<InlineBox>,
+    sources: &mut Vec<S>,
+    root: LineRoot<'_, S>,
+) -> bool {
     sources.clear();
     if text.is_empty() && boxes.is_empty() {
-        return Layout::default();
+        return false;
     }
     #[cfg(test)]
     context.record_shape();
-    let (font_context, layout_context) = context.font_and_layout_contexts();
+    let (font_context, layout_context, scratch) = context.shaping_parts();
     // `text` is already whitespace-normalized by `super::content::normalize`,
     // and `style_run_builder` takes it verbatim — parley's own
     // `WhiteSpaceCollapse` lives on the `TreeBuilder` path, which this does not
@@ -144,7 +196,8 @@ pub(in crate::text) fn shape<S: Copy>(
         debug_assert!(text.is_char_boundary(inline_box.index));
         builder.push_inline_box(inline_box);
     }
-    builder.build(text)
+    builder.build_into(scratch, text);
+    true
 }
 
 /// Breaks lines at `width`, committing at most `max_lines` of them.

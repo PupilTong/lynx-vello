@@ -101,7 +101,9 @@ pub fn shape_line(
     if text.is_empty() {
         return ShapedLine::default();
     }
-    let (font_context, layout_context) = context.font_and_layout_contexts();
+    // Shaped in the context's scratch layout, whose buffers the next shaping
+    // reuses: the line keeps its own glyph copies, not the layout.
+    let (font_context, layout_context, layout) = context.shaping_parts();
     let mut builder = layout_context.ranged_builder(font_context, text, 1.0, false);
     builder.push_default(StyleProperty::<TextBrush>::FontFamily(family_list(
         &font.families,
@@ -119,7 +121,7 @@ pub fn shape_line(
         font.stretch,
     )));
     builder.push_default(StyleProperty::LetterSpacing(letter_spacing));
-    let mut layout = builder.build(text);
+    builder.build_into(layout, text);
     layout.break_all_lines(None);
 
     let mut line = ShapedLine {
@@ -171,6 +173,7 @@ pub fn shape_line(
             });
         }
     }
+    context.trim_scratch(text.len());
     line
 }
 

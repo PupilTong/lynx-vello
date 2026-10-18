@@ -46,7 +46,7 @@ pub use style::{BlockStyle, TextOverflow};
 use truncate::{CutPlan, OverflowCut, Tail};
 
 use super::paragraph::memo::{BreakMemo, Retained};
-use super::paragraph::shape::{self, LineRoot, NaturalLine, ShapeSpan};
+use super::paragraph::shape::{self, NaturalLine, ShapeSpan};
 use super::paragraph::style::resolve_alignment;
 pub use super::paragraph::{
     BlockConstraint, BlockMetrics, Direction, InlineBoxSpec, InlineItem, LineHeight, RunStyle,
@@ -665,17 +665,7 @@ impl TextBlock {
                 source: SourceItem::Ellipsis { item },
                 extra_spacing: 0.0,
             }];
-            let mut sources = Vec::new();
-            let mut probe = shape::shape(
-                context,
-                DOTS,
-                &spans,
-                Vec::new(),
-                &mut sources,
-                LineRoot::PROBE,
-            );
-            probe.break_all_lines(None);
-            probe.width()
+            shape::probe_width(context, DOTS, &spans, Vec::new())
         };
         self.dots_width = Some((item, width));
         width
@@ -695,18 +685,8 @@ impl TextBlock {
             .flow
             .spans(0, SourceItem::Truncation, RunBreaking::Uniform(breaking));
         let boxes = parley_boxes(&part.flow, 0, 0, self.paragraph.percent_basis);
-        let mut sources = Vec::new();
-        let mut probe = shape::shape(
-            context,
-            &part.flow.block.text,
-            &spans,
-            boxes,
-            &mut sources,
-            LineRoot::PROBE,
-        );
+        let width = shape::probe_width(context, &part.flow.block.text, &spans, boxes);
         drop(spans);
-        probe.break_all_lines(None);
-        let width = probe.width();
         part.natural_width = Some(width);
         width
     }
