@@ -33,10 +33,10 @@
 //! ([`Document::would_reach_listener`]), a host learns which registrants one
 //! dispatch reaches ([`Document::listeners_on_path`],
 //! [`Document::realm_has_global`]) and whether anything hears a type at all
-//! ([`Document::hears`]), and a router gets the 0↔1 edges of that last answer
-//! ([`ListenerEdge`]). A freed node's registrations leave in the document's
-//! one free path; `listeners`' module doc says why the table sits beside the
-//! tree.
+//! ([`Document::hears`]), and a router learns when a type's registration
+//! count crosses zero ([`RegistrationChange`]). A freed node's registrations
+//! leave in the document's one free path; `listeners`' module doc says why
+//! the table sits beside the tree.
 //!
 //! **The walk.** [`Document::event_walk`] starts an [`EventWalk`] over a
 //! path, and [`Document::advance`] visits one step at a time: it runs the
@@ -128,7 +128,7 @@ pub use self::detail::{
     EventDetail, TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET, TouchPoint, TouchPoints,
 };
 pub use self::element::{ElementEvent, EventPhase, EventWalk, StepOutcome};
-pub use self::listeners::{ListenerEdge, ListenerKey, ListenerKinds};
+pub use self::listeners::{ListenerKey, ListenerKinds, RegistrationChange};
 use crate::tree::document::{Document, NodeId};
 use crate::tree::node::Node;
 

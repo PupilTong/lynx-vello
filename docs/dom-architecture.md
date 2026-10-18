@@ -928,16 +928,19 @@ callbacks, in one side table (`event::listeners`): per node, which registrant
 (`ListenerKey`, a realm to the host) listens for which type in which passes
 (`ListenerKinds`: `PATH_BUBBLE`, `PATH_CAPTURE`, and Lynx's `GLOBAL`).
 `Document::add_listener(node, name, kinds, key)` records one registration per
-(node, name, registrant) — a repeated add replaces the kinds — and returns the
-name's document-wide 0↔1 `ListenerEdge`; `remove_listener` and
-`remove_listeners_of(key)` (a realm closing) are its inverses. It is a side
+(node, name, registrant) — a repeated add replaces the kinds — and returns a
+`RegistrationChange`: `FirstAdded` when the name's document-wide registration
+count went from zero to one, `LastRemoved` when it went from one to zero,
+`Unchanged` otherwise; `remove_listener` and `remove_listeners_of(key)` (a
+realm going away) are its inverses. It is a side
 table because registrations are sparse and a field on `Node` would make every
 node pay for an empty list; it is keyed by node so the one free path
 (`free_node`) drops a freed node's rows in one probe, and costs no probe at
 all while the table is empty. A name whose last registration left with a freed
-node closes there, with no caller to hand the edge to, so the close waits for
-`Document::take_listener_edges`, which a host drains after every mutation
-batch; an add that undoes a waiting close withdraws it and reports no edge.
+node reaches zero there, with no caller to hand the change to, so the name
+waits for `Document::take_pending_last_removals`, which a host drains after
+every mutation batch; an add that undoes a waiting last removal withdraws it
+and reports `Unchanged`.
 The questions it answers: `has_listener(node, name)` (a component asking
 whether anything listens on it, before producing a costly event),
 `would_reach_listener(target, name, bubbles, composed)` (whether an event it

@@ -951,7 +951,7 @@ fn the_nearest_common_event_ancestor_is_inclusive_and_crosses_shadow_boundaries(
 
 mod listener_table {
     use super::{nested, shadow_tree};
-    use crate::event::{ElementEvent, EventDetail, ListenerEdge, ListenerKey, ListenerKinds};
+    use crate::event::{ElementEvent, EventDetail, ListenerKey, ListenerKinds, RegistrationChange};
     use crate::tree::document::tests::device;
     use crate::tree::shadow::ShadowRootMode;
     use crate::{CustomElement, Document, NodeId};
@@ -971,14 +971,14 @@ mod listener_table {
         let (mut document, _page, _outer, inner) = nested();
         assert_eq!(
             document.add_listener(inner, "tap", BUBBLE, PAGE),
-            ListenerEdge::Opened
+            RegistrationChange::FirstAdded
         );
         assert_eq!(document.realm_registration_counts(PAGE, "tap"), (1, 0));
         assert!(!document.realm_has_global(PAGE, "tap"));
 
         assert_eq!(
             document.add_listener(inner, "tap", BUBBLE | GLOBAL, PAGE),
-            ListenerEdge::None,
+            RegistrationChange::Unchanged,
             "the same (node, name, registrant) is one registration"
         );
         assert_eq!(document.realm_registration_counts(PAGE, "tap"), (1, 1));
@@ -986,13 +986,13 @@ mod listener_table {
 
         assert_eq!(
             document.add_listener(inner, "tap", GLOBAL, PAGE),
-            ListenerEdge::None
+            RegistrationChange::Unchanged
         );
         assert_eq!(document.realm_registration_counts(PAGE, "tap"), (0, 1));
 
         assert_eq!(
             document.add_listener(inner, "tap", ListenerKinds::empty(), PAGE),
-            ListenerEdge::Closed,
+            RegistrationChange::LastRemoved,
             "an empty set is a removal"
         );
         assert_eq!(document.realm_registration_counts(PAGE, "tap"), (0, 0));
@@ -1000,46 +1000,46 @@ mod listener_table {
     }
 
     #[test]
-    fn a_name_opens_with_its_first_registration_and_closes_with_its_last() {
+    fn a_name_changes_with_its_first_registration_added_and_its_last_removed() {
         let (mut document, _page, outer, inner) = nested();
         assert_eq!(
             document.add_listener(outer, "tap", BUBBLE, PAGE),
-            ListenerEdge::Opened
+            RegistrationChange::FirstAdded
         );
         assert_eq!(
             document.add_listener(inner, "tap", CAPTURE, CARD),
-            ListenerEdge::None,
+            RegistrationChange::Unchanged,
             "another node and another registrant: the name is heard already"
         );
         assert_eq!(
             document.add_listener(inner, "scroll", BUBBLE, PAGE),
-            ListenerEdge::Opened,
-            "edges are per name"
+            RegistrationChange::FirstAdded,
+            "registration counts are per name"
         );
 
         assert_eq!(
             document.remove_listener(inner, "tap", PAGE),
-            ListenerEdge::None,
+            RegistrationChange::Unchanged,
             "not registered by this registrant"
         );
         assert_eq!(
             document.remove_listener(inner, "unheard", PAGE),
-            ListenerEdge::None
+            RegistrationChange::Unchanged
         );
         assert_eq!(
             document.remove_listener(outer, "tap", PAGE),
-            ListenerEdge::None
+            RegistrationChange::Unchanged
         );
         assert_eq!(
             document.remove_listener(inner, "tap", CARD),
-            ListenerEdge::Closed
+            RegistrationChange::LastRemoved
         );
         assert!(!document.hears("tap"));
         assert!(document.hears("scroll"));
         assert_eq!(
             document.add_listener(inner, "tap", BUBBLE, CARD),
-            ListenerEdge::Opened,
-            "a closed name opens again"
+            RegistrationChange::FirstAdded,
+            "a name whose last registration was removed is first added again"
         );
     }
 
@@ -1049,23 +1049,23 @@ mod listener_table {
         document.drop_element(inner);
         assert_eq!(
             document.add_listener(inner, "tap", BUBBLE, PAGE),
-            ListenerEdge::None
+            RegistrationChange::Unchanged
         );
         assert!(!document.hears("tap"));
     }
 
     #[test]
-    fn removing_a_registrant_answers_the_names_it_closed() {
+    fn removing_a_registrant_answers_the_names_whose_last_registration_it_removed() {
         let (mut document, _page, outer, inner) = nested();
         document.add_listener(outer, "tap", BUBBLE, PAGE);
         document.add_listener(inner, "scroll", BUBBLE | GLOBAL, PAGE);
         document.add_listener(inner, "keydown", GLOBAL, PAGE);
         document.add_listener(inner, "tap", CAPTURE, CARD);
 
-        let mut closed = document.remove_listeners_of(PAGE);
-        closed.sort();
+        let mut last_removed = document.remove_listeners_of(PAGE);
+        last_removed.sort();
         assert_eq!(
-            names(&closed),
+            names(&last_removed),
             ["keydown", "scroll"],
             "`tap` is still the card's"
         );
@@ -1077,13 +1077,13 @@ mod listener_table {
         assert!(document.has_listener(inner, "tap"));
         assert!(document.remove_listeners_of(PAGE).is_empty());
         assert!(
-            document.take_listener_edges().is_empty(),
-            "a registrant's removal returns its closes rather than queuing them"
+            document.take_pending_last_removals().is_empty(),
+            "a registrant's removal returns its last removals rather than queuing them"
         );
     }
 
     #[test]
-    fn a_freed_node_takes_its_registrations_and_queues_the_close() {
+    fn a_freed_node_takes_its_registrations_and_queues_the_last_removal() {
         let (mut document, _page, outer, inner) = nested();
         document.add_listener(inner, "tap", BUBBLE, PAGE);
         document.add_listener(inner, "scroll", GLOBAL, CARD);
@@ -1092,38 +1092,38 @@ mod listener_table {
         // Detaching is not freeing: a re-render moves nodes constantly.
         document.remove_element(inner);
         assert!(document.has_listener(inner, "tap"));
-        assert!(document.take_listener_edges().is_empty());
+        assert!(document.take_pending_last_removals().is_empty());
 
         document.drop_element(inner);
         assert!(!document.has_listener(inner, "tap"));
-        let edges = document.take_listener_edges();
+        let last_removals = document.take_pending_last_removals();
         assert_eq!(
-            edges
+            last_removals
                 .iter()
-                .map(|(name, edge)| (&**name, *edge))
+                .map(|(name, change)| (&**name, *change))
                 .collect::<Vec<_>>(),
-            [("tap", ListenerEdge::Closed)],
+            [("tap", RegistrationChange::LastRemoved)],
             "`scroll` is still heard on `outer`"
         );
-        assert!(document.take_listener_edges().is_empty(), "drained");
+        assert!(document.take_pending_last_removals().is_empty(), "drained");
         assert_eq!(document.realm_registration_counts(CARD, "scroll"), (0, 0));
         assert_eq!(document.realm_registration_counts(PAGE, "scroll"), (1, 0));
         assert!(!document.hears("tap"));
     }
 
     #[test]
-    fn an_add_that_undoes_a_queued_close_withdraws_it() {
+    fn an_add_that_undoes_a_queued_last_removal_withdraws_it() {
         let (mut document, _page, outer, inner) = nested();
         document.add_listener(inner, "tap", BUBBLE, PAGE);
         document.drop_subtree(inner);
         assert_eq!(
             document.add_listener(outer, "tap", BUBBLE, PAGE),
-            ListenerEdge::None,
-            "the host never saw `tap` close"
+            RegistrationChange::Unchanged,
+            "the host was never told `tap` lost its last registration"
         );
         assert!(
-            document.take_listener_edges().is_empty(),
-            "the close is withdrawn rather than reported after the add"
+            document.take_pending_last_removals().is_empty(),
+            "the last removal is withdrawn rather than reported after the add"
         );
         assert!(document.hears("tap"));
     }
@@ -1136,11 +1136,11 @@ mod listener_table {
         assert!(document.get(button).is_none());
         assert_eq!(
             document
-                .take_listener_edges()
+                .take_pending_last_removals()
                 .iter()
-                .map(|(name, edge)| (&**name, *edge))
+                .map(|(name, change)| (&**name, *change))
                 .collect::<Vec<_>>(),
-            [("tap", ListenerEdge::Closed)]
+            [("tap", RegistrationChange::LastRemoved)]
         );
     }
 

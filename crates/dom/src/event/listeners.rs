@@ -15,8 +15,9 @@
 //! - a host's, per event: which registrants hold a registration on this path
 //!   ([`Document::listeners_on_path`]) and which hold a global one
 //!   ([`Document::realm_has_global`]), so a realm with nothing to run is not called at all;
-//! - a router's, per name: does anything hear `name` at all ([`Document::hears`]), and the 0↔1
-//!   edges of that answer ([`ListenerEdge`]), which feed the presenting thread's name filter.
+//! - a router's, per name: does anything hear `name` at all ([`Document::hears`]), and each change
+//!   that adds the name's first registration or removes its last ([`RegistrationChange`]), which
+//!   feeds the presenting thread's name filter.
 //!
 //! # Why a side table
 //!
@@ -42,16 +43,19 @@
 //!   the page's event vocabulary, a few dozen strings for the life of the document, so ids are not
 //!   recycled.
 //!
-//! # Edges
+//! # A name's registration count crossing zero
 //!
 //! A name is *heard* while at least one registration of any kind holds it.
-//! [`Document::add_listener`] and [`Document::remove_listener`] return the
-//! edge their own change made, and [`Document::remove_listeners_of`] the
-//! names it closed. A node freed by a removal or a handle collection has no
-//! caller to return an edge to, so its closes wait in a queue that
-//! [`Document::take_listener_edges`] drains. A close waiting there that an
-//! add undoes before the drain is withdrawn and the add reports no edge, so a
-//! host that applies every returned edge as it gets it, and the drained ones
+//! [`Document::add_listener`] and [`Document::remove_listener`] return what
+//! their own change did to that count — the first registration of the name
+//! added, the last one removed, or neither ([`RegistrationChange`]) — and
+//! [`Document::remove_listeners_of`] the names whose last registration it
+//! removed. A node freed by a removal or a handle collection has no caller
+//! to return that to, so the names whose last registration left with it wait
+//! in a queue that [`Document::take_pending_last_removals`] drains. A last
+//! removal waiting there that an add undoes before the drain is withdrawn
+//! and the add reports [`RegistrationChange::Unchanged`], so a host that
+//! applies every returned change as it gets it, and the drained ones
 //! whenever it drains, holds the table's set of heard names after each drain.
 //! The host drains after every mutation batch, as it drains
 //! [`Document::take_observed_name_edges`].
@@ -144,16 +148,19 @@ impl BitOr for ListenerKinds {
     }
 }
 
-/// What one change did to whether a name is heard — whether any
-/// registration of any kind, by any registrant, on any node holds it.
+/// What one change did to a name's registration count — the number of
+/// registrations of any kind, by any registrant, on any node, that hold it —
+/// and whether that count crossed zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ListenerEdge {
-    /// Heard before and after, or unheard before and after.
-    None,
-    /// The first registration of the name.
-    Opened,
-    /// The last registration of the name went.
-    Closed,
+pub enum RegistrationChange {
+    /// The count stayed above zero, or stayed at zero.
+    Unchanged,
+    /// The count went from zero to one: the first registration of the name
+    /// was added.
+    FirstAdded,
+    /// The count went from one to zero: the last registration of the name
+    /// was removed.
+    LastRemoved,
 }
 
 /// A name's index into [`Listeners::names`].
@@ -207,10 +214,10 @@ pub(crate) struct Listeners {
     by_realm: FxHashMap<(ListenerKey, NameId), Counts>,
     by_name: FxHashMap<Arc<str>, NameId>,
     names: Vec<NameSlot>,
-    /// Closes made by [`Self::forget_node`], waiting for
-    /// [`Document::take_listener_edges`]. Holds a name only while no
-    /// registration holds it, so each name at most once.
-    pending: SmallVec<[(Arc<str>, ListenerEdge); 2]>,
+    /// The names whose last registration [`Self::forget_node`] removed,
+    /// waiting for [`Document::take_pending_last_removals`]. Holds a name
+    /// only while no registration holds it, so each name at most once.
+    pending_last_removals: SmallVec<[(Arc<str>, RegistrationChange); 2]>,
 }
 
 impl Listeners {
@@ -268,7 +275,7 @@ impl Listeners {
     }
 
     /// Drops every registration on `node` — the node is being freed — and
-    /// queues a close for each name that leaves unheard.
+    /// queues each name whose last registration that removed.
     pub(crate) fn forget_node(&mut self, node: NodeId) {
         let Some(rows) = self.by_target.remove(&node) else {
             return;
@@ -282,7 +289,8 @@ impl Listeners {
                 row.kinds,
             ) {
                 let spelling = Arc::clone(&self.names[row.name.0 as usize].spelling);
-                self.pending.push((spelling, ListenerEdge::Closed));
+                self.pending_last_removals
+                    .push((spelling, RegistrationChange::LastRemoved));
             }
         }
     }
@@ -334,25 +342,26 @@ impl<T> Document<T> {
     /// registration, and the counts move by the difference. An empty `kinds`
     /// is [`Self::remove_listener`]. A node that is not live registers
     /// nothing, which is what keeps a freed node's id out of the table: its
-    /// rows left with it ([`Self::take_listener_edges`]).
+    /// rows left with it ([`Self::take_pending_last_removals`]).
     ///
-    /// [`ListenerEdge::Opened`] when this is the name's first registration,
-    /// unless the name's last one went with a freed node since the last
-    /// [`Self::take_listener_edges`]: that waiting close is withdrawn instead
-    /// and the edge is [`ListenerEdge::None`], because the host never saw
-    /// the name close.
+    /// [`RegistrationChange::FirstAdded`] when this is the name's first
+    /// registration, unless the name's last one went with a freed node since
+    /// the last [`Self::take_pending_last_removals`]: that waiting last
+    /// removal is withdrawn instead and the answer is
+    /// [`RegistrationChange::Unchanged`], because the host was never told the
+    /// last registration was removed.
     pub fn add_listener(
         &mut self,
         node: NodeId,
         name: &str,
         kinds: ListenerKinds,
         key: ListenerKey,
-    ) -> ListenerEdge {
+    ) -> RegistrationChange {
         if kinds.is_empty() {
             return self.remove_listener(node, name, key);
         }
         if !self.contains_node(node) {
-            return ListenerEdge::None;
+            return RegistrationChange::Unchanged;
         }
         let table = &mut self.listeners;
         let id = table.intern(name);
@@ -364,7 +373,7 @@ impl<T> Document<T> {
                 Listeners::count_out(&mut table.names, &mut table.by_realm, id, key, old);
                 table.count_in(id, key, kinds);
             }
-            return ListenerEdge::None;
+            return RegistrationChange::Unchanged;
         }
         rows.push(Registration {
             name: id,
@@ -373,51 +382,57 @@ impl<T> Document<T> {
         });
         table.count_in(id, key, kinds);
         if was_heard {
-            return ListenerEdge::None;
+            return RegistrationChange::Unchanged;
         }
         if let Some(index) = table
-            .pending
+            .pending_last_removals
             .iter()
-            .position(|(pending, _)| **pending == *name)
+            .position(|(waiting, _)| **waiting == *name)
         {
-            table.pending.remove(index);
-            return ListenerEdge::None;
+            table.pending_last_removals.remove(index);
+            return RegistrationChange::Unchanged;
         }
-        ListenerEdge::Opened
+        RegistrationChange::FirstAdded
     }
 
     /// Drops `key`'s registration for `name` on `node`, whatever its kinds,
-    /// and answers [`ListenerEdge::Closed`] when it was the name's last.
-    /// Removing what is not registered is [`ListenerEdge::None`].
-    pub fn remove_listener(&mut self, node: NodeId, name: &str, key: ListenerKey) -> ListenerEdge {
+    /// and answers [`RegistrationChange::LastRemoved`] when it was the name's
+    /// last. Removing what is not registered is
+    /// [`RegistrationChange::Unchanged`].
+    pub fn remove_listener(
+        &mut self,
+        node: NodeId,
+        name: &str,
+        key: ListenerKey,
+    ) -> RegistrationChange {
         let table = &mut self.listeners;
         let Some(id) = table.id(name) else {
-            return ListenerEdge::None;
+            return RegistrationChange::Unchanged;
         };
         let Some(rows) = table.by_target.get_mut(&node) else {
-            return ListenerEdge::None;
+            return RegistrationChange::Unchanged;
         };
         let Some(index) = rows.iter().position(|row| row.name == id && row.key == key) else {
-            return ListenerEdge::None;
+            return RegistrationChange::Unchanged;
         };
         let row = rows.remove(index);
         if rows.is_empty() {
             table.by_target.remove(&node);
         }
-        let closed =
+        let last_removed =
             Listeners::count_out(&mut table.names, &mut table.by_realm, id, key, row.kinds);
-        if closed {
-            ListenerEdge::Closed
+        if last_removed {
+            RegistrationChange::LastRemoved
         } else {
-            ListenerEdge::None
+            RegistrationChange::Unchanged
         }
     }
 
     /// Drops every registration `key` holds — the registrant is going away —
-    /// and answers the names that left unheard because of it, each once.
+    /// and answers the names whose last registration that removed, each once.
     ///
     /// Scans the whole table: a registrant's rows are indexed by name, not by
-    /// node, and a realm closes rarely enough that a per-registrant node
+    /// node, and a realm goes away rarely enough that a per-registrant node
     /// index would be paid for on every add to save work here.
     pub fn remove_listeners_of(&mut self, key: ListenerKey) -> SmallVec<[Arc<str>; 4]> {
         let Listeners {
@@ -426,14 +441,14 @@ impl<T> Document<T> {
             names,
             ..
         } = &mut self.listeners;
-        let mut closed = SmallVec::new();
+        let mut last_removed = SmallVec::new();
         by_target.retain(|_, rows| {
             rows.retain(|row| {
                 if row.key != key {
                     return true;
                 }
                 if Listeners::count_out(names, by_realm, row.name, row.key, row.kinds) {
-                    closed.push(Arc::clone(&names[row.name.0 as usize].spelling));
+                    last_removed.push(Arc::clone(&names[row.name.0 as usize].spelling));
                 }
                 false
             });
@@ -443,27 +458,28 @@ impl<T> Document<T> {
             by_realm.keys().all(|(holder, _)| *holder != key),
             "a registrant's counts leave with its last registration"
         );
-        closed
+        last_removed
     }
 
-    /// The closes that freed nodes made since the last call, each name once,
-    /// in the order they happened.
+    /// The names whose last registration a freed node removed since the last
+    /// call, each name once, in the order it happened.
     ///
     /// A node freed by a removal ([`Self::drop_element`],
     /// [`Self::drop_subtree`]) takes its registrations with it, in the
     /// document's one free path, and a name whose last registration that was
-    /// closes there with no caller to return the edge to. A close an add
-    /// undid before this call is not here and that add reported no edge (see
-    /// [`Self::add_listener`]), so applying these after the edges the calls
-    /// returned leaves a host with the table's set of heard names. Every
-    /// entry is [`ListenerEdge::Closed`] today; the pair names the edge so a
-    /// host forwards it unchanged. Empty and allocation-free when no freed
+    /// reaches zero there with no caller to return the change to. A last
+    /// removal an add undid before this call is not here and that add
+    /// reported [`RegistrationChange::Unchanged`] (see [`Self::add_listener`]),
+    /// so applying these after the changes the calls returned leaves a host
+    /// with the table's set of heard names. Every entry is
+    /// [`RegistrationChange::LastRemoved`] today; the pair names the change so
+    /// a host forwards it unchanged. Empty and allocation-free when no freed
     /// node held a registration.
     ///
     /// A host drains this after every mutation batch it runs, before it next
     /// trusts its own copy of the set.
-    pub fn take_listener_edges(&mut self) -> SmallVec<[(Arc<str>, ListenerEdge); 2]> {
-        std::mem::take(&mut self.listeners.pending)
+    pub fn take_pending_last_removals(&mut self) -> SmallVec<[(Arc<str>, RegistrationChange); 2]> {
+        std::mem::take(&mut self.listeners.pending_last_removals)
     }
 
     /// Whether any registrant registered for `name` on `node`, in any kind:

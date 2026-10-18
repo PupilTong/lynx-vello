@@ -897,9 +897,10 @@ impl<T> Document<T> {
         }
         // The listener table names nodes as registration targets, and the
         // same retired-id rule makes this its one cleanup: a freed node's
-        // registrations leave here, and a name they were the last of queues
-        // its close for `Document::take_listener_edges`, since no caller of a
-        // free has an edge to return. One test when nothing is registered.
+        // registrations leave here, and a name they were the last of is
+        // queued for `Document::take_pending_last_removals`, since no caller
+        // of a free has a change to return. One test when nothing is
+        // registered.
         if !self.listeners.is_empty() {
             self.listeners.forget_node(id);
         }
