@@ -118,10 +118,15 @@ pub fn compute_root_layout<T: LayoutTree>(
 /// Commits an atomic inline subtree at the same constraints used to measure it.
 /// The paragraph places its outer box afterwards; this writes its own box model
 /// and descendant geometry, which a measurement alone cannot restore after hiding.
+///
+/// `known_dimensions` is the border box a paragraph sized the box to itself —
+/// a CSS inline formatting context's shrink-to-fit width (CSS 2.2 §10.3.9) —
+/// or `Size::NONE` to let the box size itself against `available_space`.
 pub fn compute_inline_box_layout<T: LayoutTree>(
     tree: &T,
     state: &mut T::State,
     node: T::NodeId,
+    known_dimensions: Size<Option<f32>>,
     parent_size: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
 ) -> LayoutOutput {
@@ -130,12 +135,26 @@ pub fn compute_inline_box_layout<T: LayoutTree>(
         state,
         node,
         LayoutInput::commit(
-            Size::NONE,
+            known_dimensions,
             parent_size,
             available_space,
             Size::new(false, false),
         ),
     )
+}
+
+/// The offset `position: relative` moves a box by after it was placed in
+/// flow (CSS 2.2 §9.4.3), for a box its host places itself: insets resolved
+/// against `basis` — the containing block's width for `left`/`right`, its
+/// height for `top`/`bottom`, an indefinite one leaving the inset `auto` —
+/// `left` winning over `right` unless the box is right-to-left, `top` over
+/// `bottom`.
+#[must_use]
+pub fn used_relative_offset<Style: CoreStyle>(
+    style: &Style,
+    basis: Size<Option<f32>>,
+) -> Point<f32> {
+    util::relative_offset(resolve_insets(style.inset(), basis), style.direction())
 }
 
 fn commit_independent_box<T: LayoutTree>(

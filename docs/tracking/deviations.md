@@ -617,19 +617,42 @@ consequential choice about whether to follow the spec or the quirk.
   span's box, and glyphs from a fallback font overflow the line box. Metrics
   are not rounded to whole pixels as Chrome rounds them (the builder's
   `quantize` is off, `crates/hughie/src/text/paragraph/shape.rs`).
-- **Inline formatting context: not implemented** — `text-overflow`, which
+- **Inline formatting context: `text-overflow` not implemented** — it
   applies only to a block whose `overflow` is not `visible` (css-overflow-3).
   The producers of this context — the anonymous block box around loose text,
   and the block containers of HTML content the engine builds — compute
   `overflow: visible` or are unreachable by author CSS, so the property is
   not implemented, by the user's ruling of 2026-10-16; a block container
   that clipped would apply it per overflowing line box after the break
-  (`crates/hughie/src/text/inline/mod.rs`). And every box-generating child
-  that is no inline box — an atomic inline box, a block-level box, an
-  out-of-flow box: the content is text runs and inline boxes, every other
-  child is hidden, which the anonymous block producer never puts there
-  (`crates/dom/src/layout/inline_flow.rs`).
-- **Inline formatting context: what an inline box does not do** —
+  (`crates/hughie/src/text/inline/mod.rs`).
+- **Inline formatting context: a block-level box among inline content is an
+  atomic inline (an engine decision in the plan the user adopted on
+  2026-10-17)** — CSS 2.2 §9.2.1.1 breaks an
+  inline box around an in-flow block-level box inside it: the inline box and
+  its inline ancestors on that line are split into a piece before and a
+  piece after, the line boxes on either side are wrapped in anonymous block
+  boxes, and the block-level box becomes their sibling, a full-width block
+  of its own between them. Chrome and Firefox do exactly that, and paint the
+  split inline box's start edge on the piece before and its end edge on the
+  piece after. This engine does not split: a `block`, `flex`, `grid`,
+  `grid-lanes`, `linear` or `relative` box, or a Lynx text element, inside a
+  block container's content is one atomic inline box, laid out by its own
+  display, placed on the line by its margin box and `vertical-align` as an
+  `inline-block` would be, with the inline content continuing beside it on
+  the same line (`crates/dom/src/layout/inline_flow.rs`).
+- **Inline formatting context: its atoms follow CSS, a `<text>`'s follow
+  native Lynx (2026-10-17)** — an atomic inline box of a block container's
+  inline formatting context with an auto width shrinks to fit (CSS 2.2
+  §10.3.9: `min(max(min-content, available), max-content)` against the
+  block's content width, `min-width`, `max-width` and percentages included),
+  so a wide one wraps its own content, and a `position: relative` one is
+  painted, hit-tested and measured at its offset from its place on the line
+  (§9.4.3) (`crates/dom/src/layout/inline_flow.rs`, `size_atoms`,
+  `place_and_hide`). A Lynx `<text>`'s atoms still differ, as native Lynx
+  does: measured once at max-content, so a wide one overflows its line, and
+  placed with their relative insets ignored (the user's 2026-09-17 ruling,
+  below).
+- **Inline formatting context: what an inline box and an atom do not do** —
   the full inline box model of CSS 2.2 §10.3.1 and §10.6.1 with
   `box-decoration-break: slice` is implemented (`hughie::text::inline`,
   `crates/hughie/src/text/inline/edge.rs`, `paint::walker`'s
@@ -645,6 +668,20 @@ consequential choice about whether to follow the spec or the quirk.
   - `position: relative` offsets, `opacity`, `transform`, `filter`,
     `box-shadow` and `outline` on a non-atomic inline box are not applied, and
     `background-clip: text` on one clips to its border box;
+  - an out-of-flow box's static position is where the content after it
+    begins, by that content's direction (`InlineFlow::static_position`), not
+    where the bidi algorithm would put a neutral placeholder, so on a line
+    that mixes directions the two can differ at a direction boundary; in a
+    right-to-left block, a box hoisted past the block takes that position as
+    its left margin edge, where CSS 2.2 §10.3.7 sets `right` to it (a box the
+    block or one of its inline boxes lays out does take it as its right
+    edge); a block-level out-of-flow box takes its static position on the
+    line, as the atom it would be here (block-in-inline, above), where CSS
+    puts it below the line; and an inline box split across lines is the
+    containing block of its absolutely positioned descendants as the bounding
+    box of its first and last fragments' padding boxes, a case CSS 2.2
+    §10.1.4 leaves undefined (`crates/dom/src/layout/inline_flow.rs`,
+    `out_of_flow_boxes`);
   - a box's edges sit beside the logical first and last characters of its
     content, so a box whose first or last character runs against the box's
     own direction carries its edge beside that character rather than at the
@@ -678,8 +715,9 @@ consequential choice about whether to follow the spec or the quirk.
     input fixes one, else its parent's offer), and a box with a percentage
     edge re-shapes the paragraph when that moves;
   - paint order inside the paragraph is every inline box's background and
-    border in tree order, then every glyph — CSS2 Appendix E's order wherever
-    content does not overlap, but not its line-by-line interleaving; and `Document::bounding_client_rect` of an
+    border in tree order, then every glyph, then each atom whole — CSS2
+    Appendix E's order wherever content does not overlap, but not its
+    line-by-line interleaving; and `Document::bounding_client_rect` of an
     inline box is its fragments' union unsnapped to device pixels.
 
 - **`hughie::text::block` ellipsis algorithm** — the standalone Lynx

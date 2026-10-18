@@ -39,8 +39,9 @@
 > core's generic splice (`inline/edge.rs` — parley's own atomic boxes would add
 > a soft wrap opportunity on both sides of an edge), and each
 > reports one fragment per line, which the painter draws its background and
-> border from with `box-decoration-break: slice`. The source-range and hit
-> queries both kinds answer
+> border from with `box-decoration-break: slice`. Atomic inline boxes —
+> replaced elements and every block-level box — are measured and placed as a
+> `<text>`'s atoms are. The source-range and hit queries both kinds answer
 > share one implementation (`paragraph/query.rs`). This document's §5–§8 do
 > not describe it; `docs/tracking/css-text.md` ("Standard inline formatting
 > context") and `docs/tracking/deviations.md` ("Text layout") do.

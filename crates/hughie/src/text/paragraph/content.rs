@@ -66,7 +66,8 @@ pub struct TextRunItem<'src> {
     pub white_space: WhiteSpaceCollapse,
 }
 
-/// One atomic inline — a Lynx inline image or inline view.
+/// One atomic inline — a Lynx inline image or inline view, or an atom of a
+/// CSS inline formatting context.
 ///
 /// It carries no content, no children, and no measure hook: the inner text of
 /// an inline view can never join the paragraph because there is nothing to
@@ -143,6 +144,10 @@ pub(in crate::text) struct NormalizedBlock {
     /// The segments [`Self::splice`] inserted into `text`, ascending.
     /// `ranges` covers every byte but theirs.
     pub(in crate::text) inserted: Vec<InsertedSegment>,
+    /// The advance a consumer lays beside each atomic box, indexed like
+    /// `boxes`: before it and after it in visual order. The breaker sees the
+    /// box that much wider; the box itself does not grow. Empty for none.
+    pub(in crate::text) box_advance: Vec<(f32, f32)>,
 }
 
 /// Where the normalizer met one [`InlineItem::Marker`].
@@ -157,6 +162,9 @@ pub(in crate::text) struct MarkerAt {
     /// order, and a space the sequence keeps ([`NormalizedBlock::space_kept`])
     /// sits at `byte`.
     pub(in crate::text) space: Option<u32>,
+    /// How many atomic boxes came before it, which orders it against a box
+    /// at the same byte.
+    pub(in crate::text) atoms_before: u32,
 }
 
 /// Text a consumer inserts into the normalized text ([`NormalizedBlock::splice`]).
@@ -164,6 +172,9 @@ pub(in crate::text) struct MarkerAt {
 pub(in crate::text) struct Insertion {
     /// The byte of the text before any insertion it goes in front of.
     pub(in crate::text) at: u32,
+    /// How many atomic boxes come before it: a box at `at` past that count
+    /// follows it.
+    pub(in crate::text) atoms_before: u32,
     pub(in crate::text) text: String,
     /// The style it is shaped in.
     pub(in crate::text) style: RunStyle,
@@ -516,6 +527,7 @@ impl Normalizer {
             item,
             byte: self.byte_len(),
             space: self.pending.as_ref().map(|pending| pending.id),
+            atoms_before: u32::try_from(self.boxes.len()).expect("box count fits u32"),
         });
     }
 
@@ -790,14 +802,15 @@ impl Normalizer {
             markers: self.markers,
             space_kept: self.space_kept,
             inserted: Vec::new(),
+            box_advance: Vec::new(),
         }
     }
 }
 
 impl NormalizedBlock {
     /// Inserts `insertions`, in text order, into the normalized text: each
-    /// before the byte `at` of the text as it was, and before an atomic box
-    /// at that byte. Every byte
+    /// before the byte `at` of the text as it was, after the atomic boxes at
+    /// that byte it counts in `atoms_before` and before the rest. Every byte
     /// offset after one moves past it, a styled range or segment it falls
     /// inside is cut there, and the source map counts its bytes as no source
     /// unit, so every source offset a caller sees is unchanged. Each lands in
@@ -808,7 +821,9 @@ impl NormalizedBlock {
             return;
         }
         debug_assert!(
-            insertions.windows(2).all(|pair| pair[0].at <= pair[1].at),
+            insertions.windows(2).all(
+                |pair| (pair[0].at, pair[0].atoms_before) <= (pair[1].at, pair[1].atoms_before)
+            ),
             "insertions come in text order",
         );
         let shifts = Shifts {
@@ -817,7 +832,11 @@ impl NormalizedBlock {
         let box_bytes: Vec<u32> = self
             .boxes
             .iter()
-            .map(|entry| entry.byte + shifts.before(entry.byte, true))
+            .enumerate()
+            .map(|(slot, entry)| {
+                let slot = u32::try_from(slot).expect("box count fits u32");
+                entry.byte + shifts.before_box(entry.byte, slot)
+            })
             .collect();
         for (entry, &byte) in self.boxes.iter_mut().zip(&box_bytes) {
             entry.byte = byte;
@@ -983,6 +1002,12 @@ impl NormalizedBlock {
             })
             .collect()
     }
+
+    /// The advance laid beside atomic box `slot`, before it and after it in
+    /// visual order ([`Self::box_advance`]).
+    pub(in crate::text) fn box_advance(&self, slot: usize) -> (f32, f32) {
+        self.box_advance.get(slot).copied().unwrap_or((0.0, 0.0))
+    }
 }
 
 /// Where a list of insertions moves the bytes of the text before them.
@@ -1004,6 +1029,18 @@ impl Shifts<'_> {
                     insertion.at < byte
                 }
             })
+            .map(|insertion| u32::try_from(insertion.text.len()).expect("fits u32"))
+            .sum()
+    }
+
+    /// The bytes inserted before atomic box `slot` at old byte `byte`: every
+    /// insertion before that byte, and the ones at it that count the box
+    /// among the boxes before them.
+    fn before_box(&self, byte: u32, slot: u32) -> u32 {
+        self.insertions
+            .iter()
+            .take_while(|insertion| insertion.at <= byte)
+            .filter(|insertion| insertion.at < byte || insertion.atoms_before <= slot)
             .map(|insertion| u32::try_from(insertion.text.len()).expect("fits u32"))
             .sum()
     }

@@ -2,10 +2,11 @@
 //!
 //! A block container (CSS 2.2 §9.2.1, css-display-3 `block flow`) lays its
 //! inline-level content out in line boxes (CSS 2.2 §9.4.2). That content is
-//! text runs and non-atomic inline boxes around them (§9.2.2), so the
-//! paragraph is the core's ([`crate::text::paragraph`]) with CSS semantics on
-//! top, and nothing the Lynx `<text>` block adds is representable: no line or
-//! length limit, no truncation, no custom truncation content.
+//! text runs, non-atomic inline boxes around them (§9.2.2), and atomic inline
+//! boxes, so the paragraph is the core's ([`crate::text::paragraph`]) with CSS
+//! semantics on top, and nothing the Lynx `<text>` block adds is
+//! representable: no line or length limit, no truncation, no custom
+//! truncation content.
 //!
 //! What this module does that the core leaves to its consumer:
 //!
@@ -30,6 +31,12 @@
 //!   (§9.4.2). Each box reports one fragment per line it is on ([`InlineFragment`]): its content
 //!   area — its own font's ascent and descent — grown by its vertical padding and border, from its
 //!   first to its last content on that line plus the edges it owns there.
+//! - **Atomic inline boxes** ([`InlineFlowItem::Atom`]) are placed by their margin box and
+//!   `vertical-align` as the core places a Lynx atom (`crate::text::paragraph::position`); the host
+//!   lays each out by its own display and writes the size in ([`InlineFlow::set_atom_size`]). The
+//!   size may move with the width the host lays a line out at — CSS shrinks an auto-width atom to
+//!   fit it — so a commit records the sizes it used and [`InlineFlow::restore_committed`] writes
+//!   them back.
 //! - **Direction** is the container's `direction`, handed to parley as the bidi paragraph level
 //!   (UAX #9 P3 overridden, as css-writing-modes-3 §2.1 takes it from the block): `text-align:
 //!   start` and the side trailing whitespace hangs on follow it, and a mixed line orders its runs
@@ -45,9 +52,10 @@
 //! `overflow: visible` or are unreachable by author CSS. A block container
 //! that clipped would apply it per overflowing line box, after the break.
 //!
-//! Not implemented, recorded in `docs/tracking/deviations.md`:
-//! `vertical-align` on a non-atomic inline box, and the line-height of an
-//! inline box whose own font has no text on a line.
+//! Not implemented, recorded in `docs/tracking/deviations.md`: block-in-inline
+//! splitting (a block-level box among inline content is an atomic inline
+//! here), `vertical-align` on a non-atomic inline box, and the line-height
+//! of an inline box whose own font has no text on a line.
 
 mod boxes;
 mod edge;
@@ -59,20 +67,21 @@ use std::sync::OnceLock;
 
 pub use boxes::InlineEdges;
 use boxes::{BoxSpec, InlineBoxes};
-use parley::{AlignmentOptions, BaseDirection, Layout};
+use parley::{AlignmentOptions, BaseDirection, Layout, PositionedLayoutItem};
 
 use crate::geometry::{Point, Rect, Size};
 use crate::style::{TextBrush, TextContainerStyle, TextRunStyle};
 use crate::text::TextContext;
+use crate::text::block::PlacedBox;
 use crate::text::paragraph::content::WhiteSpaceProcessing;
 use crate::text::paragraph::memo::{BreakMemo, Retained};
 use crate::text::paragraph::query::{Displayed, LineSpan};
 use crate::text::paragraph::shape::NaturalLine;
 use crate::text::paragraph::style::resolve_alignment;
 use crate::text::paragraph::{
-    BlockConstraint, BlockMetrics, BreakStyle, Direction, Flow, IndentKeywords, InlineItem,
-    LineGeometry, NaturalBreak, OwnedItem, Paragraph, ParagraphRoot, RunBreaking, RunStyle,
-    TextAlign, TextRunItem, WhiteSpaceCollapse,
+    BlockConstraint, BlockMetrics, BreakStyle, Direction, Flow, IndentKeywords, InlineBoxSpec,
+    InlineItem, LineGeometry, NaturalBreak, OwnedItem, Paragraph, ParagraphRoot, RunBreaking,
+    RunStyle, TextAlign, TextRunItem, VerticalAlign, WhiteSpaceCollapse,
 };
 
 /// The block container's own parameters: CSS properties only.
@@ -130,6 +139,9 @@ pub struct InlineRun<'src> {
 #[derive(Clone, Copy, Debug)]
 pub enum InlineFlowItem<'src> {
     Run(InlineRun<'src>),
+    /// An atomic inline box (CSS 2.2 §9.2.2): one unbreakable piece of the
+    /// line, its margin box written in by [`InlineFlow::set_atom_size`].
+    Atom(InlineAtom),
     /// The start of a non-atomic inline box: every item up to the matching
     /// [`Self::Close`] is its content.
     Open(InlineBoxOpen<'src>),
@@ -141,6 +153,16 @@ impl<'src> From<InlineRun<'src>> for InlineFlowItem<'src> {
     fn from(run: InlineRun<'src>) -> Self {
         Self::Run(run)
     }
+}
+
+/// An atomic inline box, before the host has measured it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InlineAtom {
+    /// A [`VerticalAlign::Percent`] here is of the root inline box's line
+    /// height. CSS takes it of the atom's own `line-height` (CSS 2.2
+    /// §10.8.1): a host resolves it into a [`VerticalAlign::Length`] with
+    /// [`crate::text::paragraph::used_line_height`] first.
+    pub vertical_align: VerticalAlign,
 }
 
 /// A non-atomic inline box's own parameters.
@@ -195,6 +217,8 @@ struct FlowResult {
     /// The same lines in source space.
     natural: Vec<NaturalLine>,
     metrics: BlockMetrics,
+    /// Every atomic box's placement.
+    atoms: Vec<PlacedBox>,
     /// The inline boxes' fragments, worked out on first read: a probe needs
     /// none of them.
     fragments: OnceLock<Vec<InlineFragment>>,
@@ -225,6 +249,13 @@ pub struct InlineFlow {
     /// The intrinsic widths at the indent last asked about. Independent of
     /// the constraint, so one entry serves every width a pass asks at.
     intrinsic: Option<Intrinsic>,
+    /// Every atom's margin box and baseline as the last commit laid them out.
+    ///
+    /// An atom's size depends on the width it is laid out at (the host
+    /// shrinks it to fit, CSS 2.2 §10.3.9), so a probe after a commit can
+    /// leave other sizes written in; putting the committed layout back puts
+    /// these back first.
+    committed_atoms: Vec<(Size<f32>, Option<f32>)>,
 }
 
 impl fmt::Debug for InlineFlow {
@@ -234,7 +265,9 @@ impl fmt::Debug for InlineFlow {
 }
 
 impl InlineFlow {
-    /// Builds and shapes the block's content: `items` in document order.
+    /// Builds and shapes the block's content: `items` in document order. An
+    /// atom's id, for [`Self::set_atom_size`] and in [`Self::atoms`], is its
+    /// index in `items`.
     #[must_use]
     pub fn new(
         context: &mut TextContext,
@@ -246,7 +279,7 @@ impl InlineFlow {
             .map(|item| match item {
                 InlineFlowItem::Run(run) => run.breaking,
                 InlineFlowItem::Open(open) => open.breaking,
-                InlineFlowItem::Close => BreakStyle::default(),
+                InlineFlowItem::Atom(_) | InlineFlowItem::Close => BreakStyle::default(),
             })
             .collect();
         let (flow, mut boxes) = lay_in(items);
@@ -274,6 +307,7 @@ impl InlineFlow {
             result: None,
             memo: BreakMemo::new(),
             intrinsic: None,
+            committed_atoms: Vec::new(),
         }
     }
 
@@ -314,7 +348,9 @@ impl InlineFlow {
         context: &mut TextContext,
         constraint: BlockConstraint,
     ) -> BlockMetrics {
-        Retained::commit(self, context, constraint)
+        let metrics = Retained::commit(self, context, constraint);
+        self.committed_atoms = self.atom_sizes().collect();
+        metrics
     }
 
     /// Whether a commit has ever produced this flow's retained result.
@@ -333,7 +369,39 @@ impl InlineFlow {
     /// Puts the retained layout back where the last commit left it. Answers
     /// whether parley was re-entered.
     pub fn restore_committed(&mut self, context: &mut TextContext) -> bool {
+        if self.has_committed() && !self.atom_sizes().eq(self.committed_atoms.iter().copied()) {
+            let committed = core::mem::take(&mut self.committed_atoms);
+            let atoms = self
+                .paragraph
+                .content
+                .items
+                .iter_mut()
+                .filter_map(|item| match item {
+                    OwnedItem::Box(spec) => Some(spec),
+                    _ => None,
+                });
+            for (spec, &(size, baseline)) in atoms.zip(&committed) {
+                spec.size = size;
+                spec.baseline = baseline;
+            }
+            self.committed_atoms = committed;
+            self.memo.mark_boxes_dirty();
+            self.memo.forget();
+            self.intrinsic = None;
+        }
         Retained::restore_committed(self, context)
+    }
+
+    /// Every atom's current margin box and baseline, in item order.
+    fn atom_sizes(&self) -> impl Iterator<Item = (Size<f32>, Option<f32>)> + '_ {
+        self.paragraph
+            .content
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                OwnedItem::Box(spec) => Some((spec.size, spec.baseline)),
+                _ => None,
+            })
     }
 
     /// The min-content width at `indent` (css-sizing-3): the widest
@@ -420,6 +488,144 @@ impl InlineFlow {
         }
     }
 
+    /// Updates one atomic box's measured margin box and the distance from
+    /// its top to its baseline (`None`: its bottom margin edge sits on the
+    /// baseline). The next [`Self::probe`] or [`Self::commit`] re-breaks
+    /// without re-shaping.
+    ///
+    /// Panics on an id that names no atom: a correct host cannot produce one.
+    pub fn set_atom_size(&mut self, item: u32, size: Size<f32>, baseline: Option<f32>) {
+        let Some(OwnedItem::Box(spec)) = self.paragraph.content.items.get_mut(item as usize) else {
+            panic!("set_atom_size addresses an atom this flow was built with");
+        };
+        if spec.size == size && spec.baseline == baseline {
+            // The measure/place round trip repeats every pass; a repeat is no
+            // change and must not defeat the memo.
+            return;
+        }
+        spec.size = size;
+        spec.baseline = baseline;
+        self.memo.mark_boxes_dirty();
+        // The break and both intrinsic widths depend on the atom's size.
+        // `committed` survives: it names where the layout must be put back.
+        self.memo.forget();
+        self.intrinsic = None;
+    }
+
+    /// Where every atomic box ended up, in line order; each id is the atom's
+    /// item index.
+    #[must_use]
+    pub fn atoms(&self) -> &[PlacedBox] {
+        &self.expect_result().atoms
+    }
+
+    /// The static position (CSS 2.2 §10.3.7, §10.6.4) of an out-of-flow box
+    /// the content holds right before item `item` — after every item when
+    /// `item` is the item count — in the paragraph's own coordinates: where
+    /// its hypothetical box would start on the line, the inline-start edge of
+    /// the content that follows it (the right side of right-to-left
+    /// content), and the top of that line box. Without a line box it is the
+    /// origin.
+    ///
+    /// Such a box is no item: it takes nothing from the line and does not
+    /// interrupt white space collapsing, so it sits where the content after
+    /// it begins. After a soft wrap that is the next line, where Blink's
+    /// line breaker puts an out-of-flow box too (an out-of-flow item is not
+    /// "trailable" there, `IsTrailableItemType` in `line_breaker.cc`).
+    #[must_use]
+    pub fn static_position(&self, item: u32) -> Point<f32> {
+        let result = self.expect_result();
+        let content = &self.paragraph.content;
+        let byte = self.item_start_byte(item);
+        let Some(last) = result.natural.len().checked_sub(1) else {
+            return Point::ZERO;
+        };
+        // The line holding `byte`: the first that ends after it, or holds
+        // nothing but boxes there; past the text, the last.
+        let index = result
+            .natural
+            .iter()
+            .position(|line| {
+                byte < line.end_byte
+                    || (line.start_byte == line.end_byte && line.start_byte == byte)
+            })
+            .unwrap_or(last);
+        let line = self
+            .paragraph
+            .natural
+            .lines()
+            .nth(index)
+            .expect("a natural line per reported line");
+        let rtl_base = self.style.direction == Direction::Rtl;
+        // What starts at or holds `byte`, by its inline-start edge: an atom
+        // there that is not before `item` first, as a box sits before the
+        // text at its byte; else the cluster. Failing both, the inline-end
+        // edge of the content logically last before it on the line, ordered
+        // by where it ends, an atom after the text ending at its byte.
+        let mut atom_at: Option<(u32, f32)> = None;
+        let mut cluster_at = None;
+        let mut before: Option<((u32, u8, u32), f32)> = None;
+        let mut note_before = |key: (u32, u8, u32), edge: f32| {
+            if before.is_none_or(|(seen, _)| key >= seen) {
+                before = Some((key, edge));
+            }
+        };
+        let mut walked_run = None;
+        for entry in line.items() {
+            match entry {
+                PositionedLayoutItem::GlyphRun(glyph_run) => {
+                    let run = glyph_run.run();
+                    if walked_run == Some(run.index()) {
+                        continue;
+                    }
+                    walked_run = Some(run.index());
+                    let mut x = glyph_run.offset();
+                    for cluster in run.visual_clusters() {
+                        let advance = cluster.advance();
+                        let bytes = cluster.text_range();
+                        let start = u32::try_from(bytes.start).expect("text fits u32");
+                        let end = u32::try_from(bytes.end).expect("text fits u32");
+                        let (leading, trailing) = if cluster.is_rtl() {
+                            (x + advance, x)
+                        } else {
+                            (x, x + advance)
+                        };
+                        if cluster_at.is_none() && start <= byte && byte < end {
+                            cluster_at = Some(leading);
+                        }
+                        if end <= byte {
+                            note_before((end, 0, 0), trailing);
+                        }
+                        x += advance;
+                    }
+                }
+                PositionedLayoutItem::InlineBox(inline_box) => {
+                    let slot = usize::try_from(inline_box.id).expect("slot ids are table indexes");
+                    let entry = content.block.boxes[slot];
+                    let (left, right) = (inline_box.x, inline_box.x + inline_box.width);
+                    let (leading, trailing) = if rtl_base {
+                        (right, left)
+                    } else {
+                        (left, right)
+                    };
+                    if entry.byte < byte || (entry.byte == byte && entry.item < item) {
+                        note_before((entry.byte, 1, entry.item), trailing);
+                    } else if entry.byte == byte
+                        && atom_at.is_none_or(|(first, _)| entry.item < first)
+                    {
+                        atom_at = Some((entry.item, leading));
+                    }
+                }
+            }
+        }
+        let x = atom_at
+            .map(|(_, edge)| edge)
+            .or(cluster_at)
+            .or(before.map(|(_, edge)| edge))
+            .unwrap_or_else(|| line.metrics().offset);
+        Point::new(x, result.lines[index].top)
+    }
+
     /// Every non-atomic inline box's fragments, by box in tree order and,
     /// within a box, by line. A box with no content and no nonzero edge has
     /// none.
@@ -430,7 +636,8 @@ impl InlineFlow {
     }
 
     /// The source units item `item` contributed: a run's whole pre-collapse
-    /// text, an inline box boundary none. Fixed when the flow is built.
+    /// text, an atom's one unit, an inline box boundary none. Fixed when the
+    /// flow is built.
     ///
     /// `None` when `item` is past the items the flow was built from.
     #[must_use]
@@ -440,6 +647,57 @@ impl InlineFlow {
             return None;
         }
         self.paragraph.item_source_range(item)
+    }
+
+    /// Where the content from item `item` on begins in the shaped text: the
+    /// first of those items with a place there answers — a run's first kept
+    /// byte, an atom's byte, an inline box's start (where its start edge
+    /// begins) or its end (where its end edge begins). Past every item it is
+    /// the end of the text.
+    fn item_start_byte(&self, item: u32) -> u32 {
+        let block = &self.paragraph.content.block;
+        let boxes = &self.boxes;
+        let count = u32::try_from(self.breaking.len()).expect("item count fits u32");
+        for index in item..count {
+            let place =
+                match &self.paragraph.content.items[index as usize] {
+                    OwnedItem::Run { .. } => block
+                        .ranges
+                        .iter()
+                        .find(|range| range.item == index)
+                        .map(|range| range.bytes.start),
+                    OwnedItem::Box(_) => block
+                        .boxes
+                        .iter()
+                        .find(|entry| entry.item == index)
+                        .map(|entry| entry.byte),
+                    OwnedItem::Marker => boxes
+                        .item_span
+                        .get(index as usize)
+                        .copied()
+                        .flatten()
+                        .map(|span| {
+                            let at = &boxes.spans[span as usize];
+                            if at.item == index {
+                                // An `Open`: where its start edge begins.
+                                at.bytes.start
+                            } else {
+                                // A `Close`: where its end edge begins.
+                                boxes
+                                    .edges
+                                    .iter()
+                                    .find(|edge| {
+                                        edge.members.contains(&(span, edge::EdgeSide::End))
+                                    })
+                                    .map_or(at.bytes.end, |edge| edge.bytes.start)
+                            }
+                        }),
+                };
+            if let Some(byte) = place {
+                return byte;
+            }
+        }
+        u32::try_from(block.text.len()).expect("text fits u32")
     }
 
     /// The boxes the source range `[start, end)` occupies in the committed
@@ -483,6 +741,34 @@ impl InlineFlow {
             cut_byte: block.text.len(),
             content_slots: block.boxes.len(),
         }
+    }
+
+    /// Every atom on the first `line_count` lines, where parley put it:
+    /// `vertical-align` applied, and moved past an inline box edge laid in
+    /// before it.
+    fn place_atoms(&self, line_count: usize) -> Vec<PlacedBox> {
+        let content = &self.paragraph.content;
+        if content.block.boxes.is_empty() {
+            return Vec::new();
+        }
+        let mut atoms = Vec::with_capacity(content.block.boxes.len());
+        for (index, line) in self.paragraph.natural.lines().take(line_count).enumerate() {
+            for item in line.items() {
+                let PositionedLayoutItem::InlineBox(inline_box) = item else {
+                    continue;
+                };
+                let slot = usize::try_from(inline_box.id).expect("slot ids are table indexes");
+                let spec = content.box_spec(content.block.boxes[slot].item);
+                let (before, _) = content.block.box_advance(slot);
+                atoms.push(PlacedBox::Visible {
+                    id: spec.id,
+                    line: u32::try_from(index).expect("line count fits u32"),
+                    origin: Point::new(inline_box.x + before, inline_box.y),
+                    size: spec.size,
+                });
+            }
+        }
+        atoms
     }
 
     fn expect_result(&self) -> &FlowResult {
@@ -551,11 +837,18 @@ fn lay_in(items: &[InlineFlowItem<'_>]) -> (Flow, InlineBoxes) {
     let mut open = 0_usize;
     let mut core: Vec<InlineItem<'_>> = items
         .iter()
-        .map(|item| match item {
+        .enumerate()
+        .map(|(index, item)| match item {
             InlineFlowItem::Run(run) => InlineItem::Run(TextRunItem {
                 text: run.text,
                 style: run.style,
                 white_space: run.white_space,
+            }),
+            InlineFlowItem::Atom(atom) => InlineItem::Box(InlineBoxSpec {
+                id: index as u64,
+                size: Size::ZERO,
+                baseline: None,
+                vertical_align: atom.vertical_align,
             }),
             InlineFlowItem::Open(spec) => {
                 specs.push(BoxSpec::new(spec.style, spec.direction, spec.edges));
@@ -609,6 +902,7 @@ impl Retained for InlineFlow {
             .take(natural.lines.len())
             .map(|line| LineGeometry::of(&line))
             .collect();
+        let atoms = self.place_atoms(natural.lines.len());
         // css-sizing-3's fit-content size: the available width clamped between
         // the intrinsic widths. Max-content is the unconstrained answer.
         let width = constraint.max_advance().map_or(intrinsic.max, |available| {
@@ -625,6 +919,7 @@ impl Retained for InlineFlow {
             lines,
             natural: natural.lines,
             metrics,
+            atoms,
             fragments: OnceLock::new(),
         });
     }

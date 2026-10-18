@@ -1,16 +1,16 @@
 //! Inline box fragments: one per line a non-atomic inline box is on.
 //!
 //! A fragment's inline extent is everything of the box on its line — the
-//! glyph runs of its content and of every box nested in it, the edge
-//! clusters of nested boxes, and its own border and padding where its edges
-//! are on that line — and its block extent the box's content
+//! glyph runs of its content and of every box nested in it, the atoms in
+//! it, the edge clusters of nested boxes, and its own border and padding
+//! where its edges are on that line — and its block extent the box's content
 //! area: its first available font's ascent and descent around the line's
 //! baseline (CSS 2.2 §10.6.1; vertical alignment of a non-atomic box is not
 //! applied, so that baseline is the line's), grown by its vertical padding
 //! and border. An inline box's margin is outside its border box and inside
 //! its parent's, which is where it is counted.
 //!
-//! The walk is per glyph run, not per cluster: parley splits a
+//! The walk is per glyph run and per atom, not per cluster: parley splits a
 //! glyph run at every style change, every run is one item's, and every item
 //! is in one innermost box. Collapsible whitespace hanging at the line's end
 //! edge is no box's content (css-text-3 §4.1.3), so content extents are cut
@@ -21,6 +21,7 @@ use parley::PositionedLayoutItem;
 use super::edge::{EdgeRun, EdgeSide, SpanAt};
 use super::{FlowSource, InlineFlow, InlineFragment};
 use crate::geometry::{Point, Rect, Size};
+use crate::text::paragraph::Direction;
 
 /// Each box's inline extent on one line, if it has any.
 struct Extents<'a> {
@@ -105,6 +106,7 @@ impl InlineFlow {
         line: &parley::Line<'_, crate::style::TextBrush>,
         extents: &mut Extents<'_>,
     ) {
+        let block = &self.paragraph.content.block;
         let boxes = &self.boxes;
         // The hanging zone sits at the line's end edge, which is the
         // paragraph direction's.
@@ -157,8 +159,14 @@ impl InlineFlow {
                         }
                     }
                 }
-                // The flow holds no atomic box.
-                PositionedLayoutItem::InlineBox(_) => {}
+                PositionedLayoutItem::InlineBox(inline_box) => {
+                    let slot = usize::try_from(inline_box.id).expect("slot ids index slots");
+                    let atom = block.boxes[slot].item;
+                    let (before, after) = block.box_advance(slot);
+                    let right = inline_box.x + inline_box.width - after;
+                    extents.add(boxes.item_span[atom as usize], inline_box.x + before, right);
+                    self.add_atom_edges(extents, slot, inline_box.x, right, after);
+                }
             }
         }
     }
@@ -196,6 +204,56 @@ impl InlineFlow {
                 cursor = if rtl { from } else { to };
                 extents.add(owner, from.min(to), from.max(to));
             }
+        }
+    }
+
+    /// The edges slot `slot`'s atom carries, on the sides they were laid in:
+    /// from the atom's left edge `left` inward, and from `right` — the end of
+    /// its margin box — outward over the `after` laid in after it.
+    fn add_atom_edges(
+        &self,
+        extents: &mut Extents<'_>,
+        slot: usize,
+        left: f32,
+        right: f32,
+        after: f32,
+    ) {
+        let boxes = &self.boxes;
+        let Some(&(start, end)) = boxes.slot_edges.get(slot) else {
+            return;
+        };
+        let spans = &boxes.spans;
+        // On each side, outermost first: the margin, then the border and
+        // padding.
+        let mut on_left: Vec<(f32, f32, u32)> = Vec::new();
+        let mut on_right: Vec<(f32, f32, u32)> = Vec::new();
+        if let Some(span) = start {
+            let (_, direction, edges) = boxes.span_spec(span);
+            let entry = (edges.start_margin, edges.start_inset, span);
+            match direction {
+                Direction::Ltr => on_left.push(entry),
+                Direction::Rtl => on_right.push(entry),
+            }
+        }
+        if let Some(span) = end {
+            let (_, direction, edges) = boxes.span_spec(span);
+            let entry = (edges.end_margin, edges.end_inset, span);
+            match direction {
+                Direction::Ltr => on_right.push(entry),
+                Direction::Rtl => on_left.push(entry),
+            }
+        }
+        let mut cursor = left;
+        for (margin, inset, span) in on_left {
+            extents.add(spans[span as usize].parent, cursor, cursor + margin);
+            extents.add(Some(span), cursor + margin, cursor + margin + inset);
+            cursor += margin + inset;
+        }
+        let mut cursor = right + after;
+        for (margin, inset, span) in on_right {
+            extents.add(spans[span as usize].parent, cursor - margin, cursor);
+            extents.add(Some(span), cursor - margin - inset, cursor - margin);
+            cursor -= margin + inset;
         }
     }
 }

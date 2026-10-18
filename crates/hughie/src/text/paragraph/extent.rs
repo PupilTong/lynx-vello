@@ -13,8 +13,9 @@ impl<S> Paragraph<S> {
     /// `line` that shows source content, in visual order, with the source
     /// units it covers and its inline extent.
     ///
-    /// An inserted segment's cluster covers no source unit and is skipped
-    /// (`content::NormalizedBlock::splice`).
+    /// An inserted segment's cluster covers no source unit and is skipped;
+    /// an atom's extent is its own margin box, without the advance laid
+    /// beside it (`content::NormalizedBlock::box_advance`).
     ///
     /// `line` belongs to a layout whose text starts with this paragraph's
     /// normalized content: the natural layout, or one a consumer built over a
@@ -69,10 +70,11 @@ impl<S> Paragraph<S> {
                     let slot = usize::try_from(inline_box.id).expect("slot ids are table indexes");
                     if slot < content_slots {
                         let unit = block.boxes[slot].unit;
+                        let (before, after) = block.box_advance(slot);
                         visit(
                             unit..unit + 1,
-                            inline_box.x,
-                            inline_box.x + inline_box.width,
+                            inline_box.x + before,
+                            inline_box.x + inline_box.width - after,
                         );
                     }
                 }

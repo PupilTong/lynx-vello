@@ -34,11 +34,11 @@
 //!   side. Where the copy would join or change what is around it (`start_cluster`) the cluster is
 //!   [`FALLBACK_START`] alone (WORD JOINER, class WJ: no opportunity before or after it): before
 //!   white space, a break, a format character, a mark or another character that extends the
-//!   grapheme before it, or the end of the text, which is UAX #14's answer before nearly all of
-//!   them anyway (classes SP, BK, CM, ZWJ, ZW, WJ, GL, BA); before a character that continues the
-//!   grapheme before the box, where UAX #14 has no opportunity either (`LB8a`, LB9, LB26, LB28);
-//!   and before a character of a cursively joining script, whose shaping would read the copy as a
-//!   neighbour (parley passes each run the text around it as shaping context,
+//!   grapheme before it, an atomic box, or the end of the text, which is UAX #14's answer before
+//!   nearly all of them anyway (classes SP, BK, CM, ZWJ, ZW, WJ, GL, BA); before a character that
+//!   continues the grapheme before the box, where UAX #14 has no opportunity either (`LB8a`, LB9,
+//!   LB26, LB28); and before a character of a cursively joining script, whose shaping would read
+//!   the copy as a neighbour (parley passes each run the text around it as shaping context,
 //!   `parley_engine-0.12.0/src/shape/shaper.rs:346-347`), or of a script whose words UAX #14
 //!   segments by dictionary (class SA), whose segmentation the copy would change. In the last two
 //!   the only opportunity kept at the box's start is the one after a space, Chromium's — where a
@@ -63,6 +63,12 @@
 //! start mark, and the opportunity after an end mark is Chromium's between
 //! the characters around it. A paragraph without inline box edges inserts
 //! nothing and is shaped with the core's override alone.
+//!
+//! An edge next to an atomic box is no cluster: it is added to the atom's
+//! advance (the core's `NormalizedBlock::box_advance`, recorded in
+//! [`super::boxes::InlineBoxes::slot_edges`]), because the breaker already
+//! treats an atom as one unbreakable piece with an opportunity on each side,
+//! and a cluster beside it would be separable from it.
 //!
 //! Several edges meeting at one place — boxes closing, then boxes opening
 //! — share at most one end cluster and one start cluster, which list their
@@ -143,6 +149,15 @@ pub(super) struct SpanAt {
     pub(super) parent: Option<u32>,
     /// From where its start edge begins to where its end edge ends.
     pub(super) bytes: Range<u32>,
+    /// The atomic boxes in it, as slots.
+    pub(super) slots: Range<u32>,
+}
+
+/// What happens at one byte of the normalized text, in source order.
+#[derive(Debug, Clone, Copy)]
+enum Event {
+    Marker(u32),
+    Atom(u32),
 }
 
 /// An edge cluster being assembled.
@@ -163,6 +178,9 @@ struct Marker {
     /// boundary lies after that sequence's first space in source order, so it
     /// lands after the space should the sequence keep one.
     pending: Option<u32>,
+    /// How many atomic boxes came before it, which orders it against an atom
+    /// at the same byte.
+    slots_before: u32,
 }
 
 /// One box as its boundaries met it.
@@ -174,6 +192,8 @@ struct SpanRecord {
     /// Its `Open` and its `Close` boundary, as indexes into the boundaries.
     open: u32,
     close: u32,
+    /// The atomic boxes in it, as slots.
+    slots: Range<u32>,
 }
 
 /// The boxes and their boundaries.
@@ -197,7 +217,7 @@ impl Boundaries {
         let mut item_span = Vec::with_capacity(items.len());
         let mut found = block.markers.iter();
         // The next marker, as the boundary `opening` or closing `span`: its
-        // index among the boundaries.
+        // index among the boundaries, and how many atoms came before it.
         let boundary = |found: &mut core::slice::Iter<'_, MarkerAt>,
                         span: u32,
                         opening: bool,
@@ -215,20 +235,25 @@ impl Boundaries {
                 open: opening,
                 byte: at.byte,
                 pending: at.space,
+                slots_before: at.atoms_before,
             });
-            u32::try_from(markers.len() - 1).expect("marker count fits u32")
+            (
+                u32::try_from(markers.len() - 1).expect("marker count fits u32"),
+                at.atoms_before,
+            )
         };
         for (index, item) in items.iter().enumerate() {
             let item_index = u32::try_from(index).expect("item count fits u32");
             match item {
                 InlineFlowItem::Open(_) => {
                     let span = u32::try_from(spans.len()).expect("box count fits u32");
-                    let marker = boundary(&mut found, span, true, &mut markers);
+                    let (marker, slots) = boundary(&mut found, span, true, &mut markers);
                     spans.push(SpanRecord {
                         item: item_index,
                         parent: open.last().copied(),
                         open: marker,
                         close: u32::MAX,
+                        slots: slots..slots,
                     });
                     open.push(span);
                     item_span.push(Some(span));
@@ -240,15 +265,23 @@ impl Boundaries {
                         item_span.push(None);
                         continue;
                     };
-                    spans[span as usize].close = boundary(&mut found, span, false, &mut markers);
+                    let (marker, slots) = boundary(&mut found, span, false, &mut markers);
+                    let record = &mut spans[span as usize];
+                    record.close = marker;
+                    record.slots.end = slots;
                     item_span.push(Some(span));
                 }
-                InlineFlowItem::Run(_) => item_span.push(open.last().copied()),
+                InlineFlowItem::Run(_) | InlineFlowItem::Atom(_) => {
+                    item_span.push(open.last().copied());
+                }
             }
         }
         // A box the items never closed ends with the content.
         while let Some(span) = open.pop() {
-            spans[span as usize].close = boundary(&mut found, span, false, &mut markers);
+            let (marker, slots) = boundary(&mut found, span, false, &mut markers);
+            let record = &mut spans[span as usize];
+            record.close = marker;
+            record.slots.end = slots;
         }
         Self {
             spans,
@@ -259,7 +292,7 @@ impl Boundaries {
     }
 }
 
-/// The walk over one paragraph's boundaries, and what it produces.
+/// The walk over one paragraph's boundaries and atoms, and what it produces.
 struct Placer<'a> {
     markers: &'a [Marker],
     records: &'a [SpanRecord],
@@ -270,19 +303,37 @@ struct Placer<'a> {
     span_bytes: Vec<Range<u32>>,
     edges: Vec<EdgeRun>,
     insertions: Vec<Insertion>,
+    /// The boxes whose start and end edge each atom carries.
+    slot_edges: Vec<(Option<u32>, Option<u32>)>,
+    /// How many atom events the walk has passed.
+    atoms_passed: u32,
 }
 
 /// One byte's events being walked: where the new text is, and the cluster
 /// being assembled there.
 struct Group<'g> {
-    /// The boundaries at this byte, as indexes into the boundaries.
-    events: &'g [u32],
+    events: &'g [Event],
     /// The byte of the text before insertion the events are at.
     at: u32,
     cursor: u32,
     building: Option<Building>,
     /// What a start cluster at `at` is made of, from the content around it.
     start: StartCluster,
+}
+
+impl Group<'_> {
+    /// What a start cluster flushed before the event at `position` is made
+    /// of: the fallback when an atom of this byte comes first.
+    fn start_after(&self, position: usize) -> StartCluster {
+        if self.events[position + 1..]
+            .iter()
+            .any(|event| matches!(event, Event::Atom(_)))
+        {
+            StartCluster::Fallback
+        } else {
+            self.start
+        }
+    }
 }
 
 impl Placer<'_> {
@@ -294,25 +345,78 @@ impl Placer<'_> {
         }
     }
 
+    /// Whether `event` takes part in the edge walk: an atom does, and a
+    /// boundary with an edge to lay in.
+    fn bears(&self, event: Event) -> bool {
+        match event {
+            Event::Atom(_) => true,
+            Event::Marker(index) => {
+                let marker = self.markers[index as usize];
+                self.has_edge(
+                    marker.span,
+                    if marker.open {
+                        EdgeSide::Start
+                    } else {
+                        EdgeSide::End
+                    },
+                )
+            }
+        }
+    }
+
+    /// The atom right after (`forward`) or right before the event at
+    /// `position`, if the nearest event that takes part is one.
+    fn neighbour(&self, group: &Group<'_>, position: usize, forward: bool) -> Option<u32> {
+        let found = if forward {
+            group.events[position + 1..]
+                .iter()
+                .find(|&&other| self.bears(other))
+        } else {
+            group.events[..position]
+                .iter()
+                .rev()
+                .find(|&&other| self.bears(other))
+        };
+        match found {
+            Some(&Event::Atom(slot)) => Some(slot),
+            _ => None,
+        }
+    }
+
     /// Walks one byte's events, in source order.
     fn walk(&mut self, group: &mut Group<'_>) {
-        for &index in group.events {
-            let marker = self.markers[index as usize];
-            if marker.open {
-                self.open(group, marker.span);
-            } else {
-                self.close(group, marker.span);
+        for position in 0..group.events.len() {
+            match group.events[position] {
+                Event::Atom(_) => {
+                    self.flush(group, StartCluster::Fallback);
+                    self.atoms_passed += 1;
+                }
+                Event::Marker(index) => {
+                    let marker = self.markers[index as usize];
+                    if marker.open {
+                        self.open(group, position, marker.span);
+                    } else {
+                        self.close(group, position, marker.span);
+                    }
+                }
             }
         }
         let start = group.start;
         self.flush(group, start);
     }
 
-    /// A box starts: its start edge goes into the start cluster being
-    /// assembled.
-    fn open(&mut self, group: &mut Group<'_>, span: u32) {
+    /// A box starts: its start edge goes into the atom right after it, or
+    /// into the start cluster being assembled.
+    fn open(&mut self, group: &mut Group<'_>, position: usize, span: u32) {
         if !self.has_edge(span, EdgeSide::Start) {
-            self.flush(group, group.start);
+            self.flush(group, group.start_after(position));
+            self.span_bytes[span as usize].start = group.cursor;
+            return;
+        }
+        if let Some(slot) = self.neighbour(group, position, true)
+            && self.slot_edges[slot as usize].0.is_none()
+        {
+            self.slot_edges[slot as usize].0 = Some(span);
             self.span_bytes[span as usize].start = group.cursor;
             return;
         }
@@ -333,11 +437,20 @@ impl Placer<'_> {
             .push((span, EdgeSide::Start));
     }
 
-    /// A box ends: its end edge goes into the cluster being assembled — a
-    /// start cluster when the box opened at this byte and so holds nothing.
-    fn close(&mut self, group: &mut Group<'_>, span: u32) {
+    /// A box ends: its end edge goes into the atom right before it, if that
+    /// atom is its own, or into the cluster being assembled — a start
+    /// cluster when the box opened at this byte and so holds nothing.
+    fn close(&mut self, group: &mut Group<'_>, position: usize, span: u32) {
         if !self.has_edge(span, EdgeSide::End) {
-            self.flush(group, group.start);
+            self.flush(group, group.start_after(position));
+            self.span_bytes[span as usize].end = group.cursor;
+            return;
+        }
+        if let Some(slot) = self.neighbour(group, position, false)
+            && self.records[span as usize].slots.contains(&slot)
+            && self.slot_edges[slot as usize].1.is_none()
+        {
+            self.slot_edges[slot as usize].1 = Some(span);
             self.span_bytes[span as usize].end = group.cursor;
             return;
         }
@@ -385,6 +498,7 @@ impl Placer<'_> {
         };
         self.insertions.push(Insertion {
             at: group.at,
+            atoms_before: self.atoms_passed,
             text,
             style: self.specs[style_span as usize].edge_style.clone(),
             extra_spacing: boxes::edge_advance(self.specs, &edge),
@@ -407,9 +521,10 @@ impl Placer<'_> {
 /// the next (UAX #14 LB4, LB5 would put a mark after the break there). CSS
 /// does not define this; Blink's line breaker does the same
 /// (`LineBreaker::HandleForcedLineBreak`: "Include following close tags",
-/// for preserved newlines and `<br>`), and Gecko for preserved newlines. A
-/// box that opens after the break is content of the box after it.
-fn landing(boundaries: &Boundaries, text: &str, index: usize) -> u32 {
+/// for preserved newlines and `<br>`), and Gecko for preserved newlines.
+/// `atoms` are the bytes of the atomic boxes, in order: one after the break
+/// is content of the box after it, and so is a box that opens after it.
+fn landing(boundaries: &Boundaries, text: &str, atoms: &[u32], index: usize) -> u32 {
     let markers = &boundaries.markers;
     let marker = markers[index];
     let after_space = u32::from(
@@ -427,9 +542,13 @@ fn landing(boundaries: &Boundaries, text: &str, index: usize) -> u32 {
         // stays with its start.
         return marker.byte + after_space;
     }
+    let last_atom = (marker.slots_before as usize)
+        .checked_sub(1)
+        .map(|slot| atoms[slot]);
     match before_forced_break(text, marker.byte) {
         Some(byte)
-            if landing(boundaries, text, open) <= byte
+            if landing(boundaries, text, atoms, open) <= byte
+                && last_atom.is_none_or(|atom| atom <= byte)
                 && markers[..index]
                     .iter()
                     .rev()
@@ -461,7 +580,8 @@ fn before_forced_break(text: &str, end: u32) -> Option<u32> {
 /// Lays the edge clusters of the inline boxes among `items` into `block`, a
 /// flow's normalized text built from them — every `Open` and `Close` a
 /// marker — and answers every box's place; `specs` are the boxes'
-/// parameters in open order.
+/// parameters in open order. An edge next to an atom goes into the atom's
+/// advance instead (`NormalizedBlock::box_advance`).
 pub(super) fn place(
     block: &mut NormalizedBlock,
     items: &[InlineFlowItem<'_>],
@@ -484,6 +604,8 @@ pub(super) fn place(
         span_bytes: vec![0..0; records.len()],
         edges: Vec::new(),
         insertions: Vec::new(),
+        slot_edges: vec![(None, None); block.boxes.len()],
+        atoms_passed: 0,
     };
     let mut shift = 0;
     let mut start = 0;
@@ -493,7 +615,7 @@ pub(super) fn place(
             .iter()
             .position(|event| event.0 != at)
             .map_or(events.len(), |offset| start + offset);
-        let group: Vec<u32> = events[start..end].iter().map(|event| event.1).collect();
+        let group: Vec<Event> = events[start..end].iter().map(|event| event.1).collect();
         let mut walked = Group {
             events: &group,
             at,
@@ -510,6 +632,7 @@ pub(super) fn place(
         span_bytes,
         edges,
         insertions,
+        slot_edges,
         ..
     } = placer;
     block.splice(insertions);
@@ -521,6 +644,14 @@ pub(super) fn place(
             .eq(edges.iter().map(|edge| &edge.bytes)),
         "every edge cluster is one inserted segment, where the walk put it",
     );
+    if slot_edges
+        .iter()
+        .any(|&(start, end)| start.is_some() || end.is_some())
+    {
+        block.box_advance = (0..slot_edges.len())
+            .map(|slot| boxes::slot_edge_sides(&specs, &slot_edges, slot))
+            .collect();
+    }
     // A box whose boundaries carried no cluster takes the places they landed
     // at; one with an edge took its cluster's.
     let spans = records
@@ -530,6 +661,7 @@ pub(super) fn place(
             item: record.item,
             parent: record.parent,
             bytes: bytes.start..bytes.end.max(bytes.start),
+            slots: record.slots.clone(),
         })
         .collect();
     InlineBoxes {
@@ -537,23 +669,41 @@ pub(super) fn place(
         spans,
         edges,
         item_span: boundaries.item_span,
+        slot_edges,
         areas: Vec::new(),
     }
 }
 
-/// The boundaries in source order, each with the byte of the text before
-/// insertion it lands at.
-fn events_in_order(boundaries: &Boundaries, block: &NormalizedBlock) -> Vec<(u32, u32)> {
-    let mut events: Vec<(u32, u32)> = (0..boundaries.markers.len())
-        .map(|index| {
+/// The boundaries and atoms in source order, each with the byte of the text
+/// before insertion it is at: a boundary where it lands, an atom at its own
+/// byte. An atom is ordered against a boundary at the same byte by how many
+/// atoms that boundary followed.
+fn events_in_order(boundaries: &Boundaries, block: &NormalizedBlock) -> Vec<(u32, Event)> {
+    let atoms: Vec<u32> = block.boxes.iter().map(|entry| entry.byte).collect();
+    let mut events: Vec<(u32, u32, u8, u32, Event)> = boundaries
+        .markers
+        .iter()
+        .enumerate()
+        .map(|(index, marker)| {
+            let event = u32::try_from(index).expect("marker count fits u32");
             (
-                landing(boundaries, &block.text, index),
-                u32::try_from(index).expect("marker count fits u32"),
+                landing(boundaries, &block.text, &atoms, index),
+                marker.slots_before,
+                0,
+                event,
+                Event::Marker(event),
             )
         })
+        .chain(block.boxes.iter().enumerate().map(|(slot, entry)| {
+            let slot = u32::try_from(slot).expect("box count fits u32");
+            (entry.byte, slot, 1, 0, Event::Atom(slot))
+        }))
         .collect();
-    events.sort_unstable();
+    events.sort_by_key(|&(byte, slots, kind, index, _)| (byte, slots, kind, index));
     events
+        .into_iter()
+        .map(|(byte, _, _, _, event)| (byte, event))
+        .collect()
 }
 
 /// What a start edge cluster is made of ([`start_cluster`]).
@@ -790,11 +940,13 @@ pub(super) const BREAK_OVERRIDE: BreakOverride = BreakOverride {
 mod tests {
     use parley::LineBreakOverrideFn;
 
-    use super::super::{InlineBoxOpen, InlineRun, lay_in};
+    use super::super::{InlineAtom, InlineBoxOpen, InlineRun, lay_in};
     use super::*;
     use crate::text::inline::InlineEdges;
     use crate::text::paragraph::content::SourceMap;
-    use crate::text::paragraph::{BreakStyle, Direction, RunStyle, WhiteSpaceCollapse};
+    use crate::text::paragraph::{
+        BreakStyle, Direction, RunStyle, VerticalAlign, WhiteSpaceCollapse,
+    };
 
     fn run<'src>(style: &'src RunStyle, text: &'src str) -> InlineFlowItem<'src> {
         InlineFlowItem::Run(InlineRun {
@@ -820,6 +972,12 @@ mod tests {
         })
     }
 
+    fn atom() -> InlineFlowItem<'static> {
+        InlineFlowItem::Atom(InlineAtom {
+            vertical_align: VerticalAlign::Baseline,
+        })
+    }
+
     /// What the edge pass made of some items: the normalized text with the
     /// clusters in it, and the boxes' places.
     struct Laid {
@@ -829,6 +987,7 @@ mod tests {
         edges: Vec<EdgeRun>,
         spans: Vec<SpanAt>,
         item_span: Vec<Option<u32>>,
+        slot_edges: Vec<(Option<u32>, Option<u32>)>,
     }
 
     fn css(items: &[InlineFlowItem<'_>]) -> Laid {
@@ -841,6 +1000,7 @@ mod tests {
             edges: boxes.edges,
             spans: boxes.spans,
             item_span: boxes.item_span,
+            slot_edges: boxes.slot_edges,
         }
     }
 
@@ -986,7 +1146,7 @@ mod tests {
             [(1, EdgeSide::End), (0, EdgeSide::End)]
         );
         // What follows the break inside the box keeps the edge after it: an
-        // empty box.
+        // empty box, an atom.
         let empty_after = [
             open(&style, 0.0, 5.0),
             preserved("ab\n"),
@@ -1000,6 +1160,15 @@ mod tests {
             block.edges[0].members,
             [(1, EdgeSide::Start), (1, EdgeSide::End), (0, EdgeSide::End)]
         );
+        let atom_after = [
+            open(&style, 0.0, 5.0),
+            preserved("ab\n"),
+            atom(),
+            InlineFlowItem::Close,
+        ];
+        let block = css(&atom_after);
+        assert_eq!(shown(&block), "ab\n");
+        assert_eq!(block.slot_edges, [(None, Some(0))]);
         // A box opening after the break is not one ending with it.
         let opened_after = [
             preserved("ab\n"),
@@ -1070,6 +1239,23 @@ mod tests {
         let block = css(&bare);
         assert_eq!(shown(&block), "ab");
         assert_eq!(block.spans[0].bytes, 1..1);
+    }
+
+    #[test]
+    fn an_edge_beside_an_atom_is_laid_into_the_atoms_advance() {
+        let style = RunStyle::default();
+        let items = [
+            run(&style, "a"),
+            open(&style, 5.0, 7.0),
+            atom(),
+            InlineFlowItem::Close,
+            run(&style, "b"),
+        ];
+        let block = css(&items);
+        assert_eq!(shown(&block), "ab");
+        assert!(block.edges.is_empty());
+        assert_eq!(block.slot_edges, [(Some(0), Some(0))]);
+        assert_eq!(block.spans[0].slots, 0..1);
     }
 
     #[test]

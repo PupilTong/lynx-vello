@@ -99,6 +99,10 @@ pub(super) struct InlineBoxes {
     /// The innermost box around each item, indexed like the items; an `Open`
     /// or `Close` answers its own box. Empty without boxes.
     pub(super) item_span: Vec<Option<u32>>,
+    /// The boxes whose start and whose end edge each atom carries, indexed
+    /// like the paragraph's atom slots: an edge next to an atom is added to
+    /// the atom's advance, which is unbreakable already. Empty without boxes.
+    pub(super) slot_edges: Vec<(Option<u32>, Option<u32>)>,
     /// Each box's content area above and below the baseline: its first
     /// available font's ascent and descent (CSS 2.2 §10.6.1), indexed like
     /// `specs`.
@@ -111,6 +115,35 @@ impl InlineBoxes {
         let spec = &self.specs[span as usize];
         (&spec.style, spec.direction, &spec.edges)
     }
+}
+
+/// The edge widths atom slot `slot` carries, as the advance laid before it
+/// and after it in visual order: a start edge goes on the side its box's
+/// direction starts from.
+pub(super) fn slot_edge_sides(
+    specs: &[BoxSpec],
+    slot_edges: &[(Option<u32>, Option<u32>)],
+    slot: usize,
+) -> (f32, f32) {
+    let Some(&(start, end)) = slot_edges.get(slot) else {
+        return (0.0, 0.0);
+    };
+    let mut sides = (0.0, 0.0);
+    if let Some(span) = start {
+        let spec = &specs[span as usize];
+        match spec.direction {
+            Direction::Ltr => sides.0 += spec.edges.start(),
+            Direction::Rtl => sides.1 += spec.edges.start(),
+        }
+    }
+    if let Some(span) = end {
+        let spec = &specs[span as usize];
+        match spec.direction {
+            Direction::Ltr => sides.1 += spec.edges.end(),
+            Direction::Rtl => sides.0 += spec.edges.end(),
+        }
+    }
+    sides
 }
 
 /// The advance an edge cluster with `edge`'s members takes.
