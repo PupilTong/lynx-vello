@@ -4547,6 +4547,66 @@ describe("a frame's card", () => {
     ]);
   });
 
+  it("makes a touch event's detail and every point's x and y relative to its frame's border box", () => {
+    const { page, view } = card();
+    let received!: ListenerEvent & Record<string, unknown>;
+    __AddEventListener(page, "touchstart", (event: ListenerEvent & Record<string, unknown>) => {
+      received = {
+        ...event,
+        touches: structuredClone(event["touches"]),
+        changedTouches: structuredClone(event["changedTouches"]),
+      } as ListenerEvent & Record<string, unknown>;
+    }, {});
+
+    dispatch([view, page], "touchstart", { x: 130, y: 60, touchNumbers: [1, 130, 60, 7] });
+
+    expect(received.detail).toEqual({ x: 110, y: 30 });
+    const point = { identifier: 1, x: 110, y: 30, pageX: 130, pageY: 60, clientX: 130, clientY: 60 };
+    expect(received["touches"]).toEqual([point]);
+    expect(received["changedTouches"]).toEqual([point]);
+  });
+
+  it("ends its own path passes at its own catch, and still runs its global pass, frame-local", () => {
+    const { page, view } = card();
+    const seen: string[] = [];
+    globalThis.runWorklet = (value, params) => {
+      const event = params[0] as ListenerEvent & { detail: { x: number; y: number } };
+      seen.push(`${(value as { label: string }).label}:${event.target.uid}:${event.detail.x},${event.detail.y}`);
+    };
+    __AddEvent(view, "catchEvent", "tap", { type: "worklet", value: { label: "view-catch" } });
+    __AddEvent(page, "bindEvent", "tap", { type: "worklet", value: { label: "page-bind" } });
+    __AddEvent(page, "global-bindEvent", "tap", { type: "worklet", value: { label: "page-global" } });
+    const uid = __GetElementUniqueID(view);
+
+    dispatch([view, page], "tap", { x: 120, y: 60, button: 0, buttons: 0 });
+
+    // The page's bubble step is this realm's own walk, which the catch
+    // ended; the global pass is no step of the path. Another realm's walk
+    // is the host's to call, and nothing here reaches it.
+    expect(seen).toEqual([`view-catch:${uid}:100,30`, `page-global:${uid}:100,30`]);
+  });
+
+  it("still refuses a target of its own that no handle names", () => {
+    const { view } = card();
+    const uid = __GetElementUniqueID(view);
+
+    expect(() =>
+      elementModule.__BobcatDispatchEvent(
+        String(uid),
+        "999",
+        "tap",
+        true,
+        0,
+        0,
+        DETAIL_POSITION,
+        0,
+        0,
+        undefined,
+        undefined,
+      )
+    ).toThrow("ownership graph");
+  });
+
   it("reads no origin for a dispatch without a position", () => {
     const { view } = card();
     let runs = 0;
@@ -4615,7 +4675,7 @@ describe("a frame's card", () => {
   });
 
   it("runs its global pass alone when it holds no step of the path, aimed at the element that registered", () => {
-    const { view } = card();
+    const { page, view } = card();
     const documentElement = mock.createElement("page");
     const seen: unknown[] = [];
     globalThis.runWorklet = (value, params) => {
@@ -4625,7 +4685,13 @@ describe("a frame's card", () => {
       seen.push([event.type, event.target.uid, event.currentTarget.uid, event.eventPhase, event.key]);
     __AddEvent(view, "global-bindEvent", "keydown", { type: "worklet", value: { body } });
     __AddEvent(view, "bindEvent", "keydown", { type: "worklet", value: { body: () => seen.push("bind") } });
+    // A second element of the card, filed after the first: delivered after
+    // it, and aimed at itself.
+    const other = __CreateView(0);
+    __AppendElement(page, other);
+    __AddEvent(other, "global-bindEvent", "keydown", { type: "worklet", value: { body } });
     const uid = __GetElementUniqueID(view);
+    const otherUid = __GetElementUniqueID(other);
 
     // A key's target is the document element, which is no node of a card's
     // tree: the host hands the card the page's path, none of which it holds.
@@ -4643,7 +4709,10 @@ describe("a frame's card", () => {
       0,
     );
 
-    expect(seen).toEqual([["keydown", uid, uid, 0, "a"]]);
+    expect(seen).toEqual([
+      ["keydown", uid, uid, 0, "a"],
+      ["keydown", otherUid, otherUid, 0, "a"],
+    ]);
   });
 
   it("runs its global pass alone when handed no step", () => {
