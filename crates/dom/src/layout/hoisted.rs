@@ -60,8 +60,9 @@ pub(crate) fn hoisting_block<T>(node: &Node<T>) -> Option<NodeSlot> {
         }
         let style = StyleView::try_of(ancestor)?;
         match style.display_mode() {
-            // A block container's content is text runs; every box under it
-            // is hidden (`inline_flow`), an escaping one included.
+            // A block container's content is text runs and inline boxes;
+            // every other box under it is hidden (`inline_flow`), an
+            // escaping one included.
             DisplayMode::None | DisplayMode::BlockFlow => return None,
             DisplayMode::Contents => {}
             DisplayMode::Text if super::paragraph::replaces_children(ancestor) => return None,

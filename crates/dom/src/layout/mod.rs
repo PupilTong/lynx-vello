@@ -563,9 +563,18 @@ impl<T> Document<T> {
     /// pass has laid out, or one detached from the document tree.
     ///
     /// Coordinates are device-pixel-snapped, like [`Self::rounded_layout`].
+    ///
+    /// An inline box of an inline formatting context has no layout box: its
+    /// rect is the union of its fragments' border boxes (CSSOM-View's
+    /// `getBoundingClientRect` over `getClientRects`), placed in the
+    /// paragraph's content box, unsnapped. One with no fragment — no
+    /// content and no nonzero edge — answers `None`.
     #[must_use]
     pub fn bounding_client_rect(&self, id: crate::NodeId) -> Option<Rect<f32>> {
         let node = self.get(id)?;
+        if inline_flow::is_inline_box(node) {
+            return self.inline_box_client_rect(id);
+        }
         let style = StyleView::try_of(node)?;
         if matches!(
             style.display_mode(),
@@ -609,15 +618,51 @@ impl<T> Document<T> {
         (chain.end() == Some(ChainEnd::DocumentElement)).then(|| Rect::new(origin, size))
     }
 
-    /// The measured size of the paragraph `id` establishes.
+    /// [`Self::bounding_client_rect`] of an inline box: its fragments'
+    /// union, moved from the paragraph's content box to the viewport.
+    fn inline_box_client_rect(&self, id: crate::NodeId) -> Option<Rect<f32>> {
+        let paragraph = self.paragraph_of(id)?;
+        let painted = self.painted_paragraph(paragraph)?;
+        let mut union: Option<Rect<f32>> = None;
+        for fragment in painted.fragments() {
+            if painted.sources.get(fragment.item as usize) != Some(&id) {
+                continue;
+            }
+            let rect = Rect::new(
+                Point2D::new(fragment.rect.origin.x, fragment.rect.origin.y),
+                Size2D::new(fragment.rect.size.width, fragment.rect.size.height),
+            );
+            union = Some(union.map_or(rect, |seen| seen.union(&rect)));
+        }
+        let union = union?;
+        let block = self.bounding_client_rect(paragraph)?;
+        let inset = self.rounded_layout(paragraph)?;
+        let content = Vector2D::new(
+            inset.border.left + inset.padding.left,
+            inset.border.top + inset.padding.top,
+        );
+        Some(union.translate(block.origin.to_vector() + content))
+    }
+
+    /// The measured size of the paragraph `id` establishes, from its last
+    /// commit. What it measures depends on the kind:
     ///
-    /// The block's own ink, not its box: a stretched text element is wider
-    /// than the text in it. This is the size Lynx's `layout` event reports,
-    /// and the only way an embedder can ask what a run actually measured now
-    /// that a text node has no box of its own.
+    /// - A Lynx text element's: the widest line, trailing whitespace excluded, by the stacked line
+    ///   heights (`hughie::text::block::TextBlock::size`). This is the size Lynx's `layout` event
+    ///   reports. It is the text's extent, not the element's box: a stretched text element is wider
+    ///   than the text in it.
+    /// - A block container's inline formatting context: the fit-content width `min(max-content,
+    ///   max(min-content, available))` (css-sizing-3) at the width the commit laid the lines out
+    ///   at, by the stacked line boxes' height (`hughie::text::inline::InlineFlow::size`). It is
+    ///   neither the widest broken line nor the container's content box, which a definite `width`
+    ///   makes wider.
+    ///
+    /// A text node has no box of its own, so this is how an embedder asks
+    /// what a run measured. `None` when `id` establishes no paragraph (an
+    /// inline box, an element of another display) or no commit reached it.
     #[must_use]
     pub fn text_block_size(&self, id: crate::NodeId) -> Option<hughie::geometry::Size<f32>> {
-        Some(self.text_block(id)?.size())
+        self.committed_paragraph(id)?.committed_size()
     }
 
     /// The boxes the source range `[start, end)` of the paragraph `id`
@@ -650,7 +695,7 @@ impl<T> Document<T> {
         start: u32,
         end: u32,
     ) -> Option<Vec<Rect<f32>>> {
-        let boxes = self.text_block(id)?.range_boxes(start, end)?;
+        let boxes = self.committed_paragraph(id)?.range_boxes(start, end)?;
         Some(
             boxes
                 .into_iter()
@@ -695,7 +740,7 @@ impl<T> Document<T> {
         point: Point2D<f32>,
     ) -> Option<usize> {
         let unit = self
-            .text_block(paragraph)?
+            .committed_paragraph(paragraph)?
             .index_at_point(hughie::geometry::Point::new(point.x, point.y))?;
         usize::try_from(unit).ok()
     }
@@ -720,7 +765,7 @@ impl<T> Document<T> {
     #[must_use]
     pub fn inline_source_range(&self, element: crate::NodeId) -> Option<core::ops::Range<usize>> {
         let slot = self.slot(element)?;
-        let units = text_block::inline_source_range(self.arenas(), self.layout_state(), slot)?;
+        let units = paragraph::inline_source_range(self.arenas(), self.layout_state(), slot)?;
         Some(usize::try_from(units.start).ok()?..usize::try_from(units.end).ok()?)
     }
 
@@ -743,14 +788,28 @@ impl<T> Document<T> {
     #[must_use]
     pub fn paragraph_of(&self, node: crate::NodeId) -> Option<crate::NodeId> {
         let slot = self.slot(node)?;
-        text_block::paragraph_of(self.arenas(), self.layout_state(), slot)
+        paragraph::paragraph_of(self.arenas(), self.layout_state(), slot)
     }
 
-    /// The paragraph `id` established, if a commit has produced one.
-    ///
-    /// `None` keeps every reader fail-closed: a block no commit laid out is
-    /// one that does not paint, rather than a panic on the paint thread.
-    #[must_use]
+    /// The committed paragraph `id` establishes, of either kind. An inline
+    /// box establishes none, whatever its layout state still holds from a
+    /// time it laid itself out.
+    fn committed_paragraph(&self, id: crate::NodeId) -> Option<&paragraph::TextStore> {
+        let node = self.get(id)?;
+        if inline_flow::is_inline_box(node) {
+            return None;
+        }
+        let slot = self.slot(id)?;
+        self.layout_state()
+            .get(slot)?
+            .text
+            .as_deref()
+            .filter(|store| store.has_committed())
+    }
+
+    /// The Lynx paragraph `id` established, if a commit has produced one:
+    /// what this crate's tests inspect beyond [`Self::text_block_size`].
+    #[cfg(test)]
     pub(crate) fn text_block(&self, id: crate::NodeId) -> Option<&hughie::text::block::TextBlock> {
         let slot = self.slot(id)?;
         self.layout_state()
@@ -884,11 +943,14 @@ impl<T> Document<T> {
                 if style_view
                     .as_ref()
                     .is_some_and(|style| style.display().is_contents())
+                    || inline_flow::is_inline_box(node)
                 {
-                    // A contents element never owns a layout cache. Its
-                    // children participate in the nearest box ancestor, so
-                    // an empty cache here cannot prove that ancestor was
-                    // already invalidated or provide an in-place boundary.
+                    // A contents element never owns a layout cache, and
+                    // neither does an inline box, which runs no layout of its
+                    // own. Their children participate in the nearest box
+                    // ancestor, so an empty cache here cannot prove that
+                    // ancestor was already invalidated or provide an in-place
+                    // boundary.
                     state.clear_box_cache(node_slot);
                     current = node.flat_parent_id();
                     continue;
@@ -1031,7 +1093,9 @@ impl<T> Document<T> {
     ///
     /// A block container establishes a paragraph too, but never nests in
     /// one: inside a `-lynx-text` subtree it is an atomic box, and its own
-    /// runs end at it. The walk stops there.
+    /// runs end at it. The walk stops there. An inline box of an inline
+    /// formatting context establishes none: its runs are the paragraph's
+    /// around it, so the walk goes through it.
     fn paragraph_container(&self, id: crate::NodeId) -> Option<crate::NodeId> {
         // Loose text is not under the anonymous box that lays it out
         // (`tree::anonymous`), so no walk up from it finds the box.
@@ -1044,7 +1108,7 @@ impl<T> Document<T> {
         let own = start
             .layout_computed_style()
             .map(|style| display_mode(start, *style.get_display()));
-        if own == Some(DisplayMode::BlockFlow) {
+        if own == Some(DisplayMode::BlockFlow) && !inline_flow::is_inline_box(start) {
             return Some(id);
         }
         let mut paragraph = (own == Some(DisplayMode::Text)).then_some(id);
@@ -1056,6 +1120,7 @@ impl<T> Document<T> {
             match display_mode(node, *style.get_display()) {
                 DisplayMode::Text => paragraph = Some(node.id()),
                 DisplayMode::Contents => {}
+                DisplayMode::BlockFlow if inline_flow::is_inline_box(node) => {}
                 DisplayMode::BlockFlow => return Some(node.id()),
                 _ => break,
             }

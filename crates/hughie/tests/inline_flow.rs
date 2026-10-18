@@ -5,7 +5,7 @@
 //! is 0.8em, the descent 0.2em and the line gap zero, so `line-height:
 //! normal` is 1em with the baseline 0.8em down.
 
-use hughie::text::inline::{InlineFlow, InlineFlowStyle, InlineRun};
+use hughie::text::inline::{InlineFlow, InlineFlowItem, InlineFlowStyle, InlineRun};
 use hughie::text::paragraph::{
     BlockConstraint, BreakStyle, Direction, IndentKeywords, LineGeometry, LineHeight, OverflowWrap,
     RunStyle, TextAlign, TextWrap, WhiteSpaceCollapse, WordBreak,
@@ -64,16 +64,16 @@ fn styled<'src>(
     text: &'src str,
     white_space: WhiteSpaceCollapse,
     breaking: BreakStyle,
-) -> InlineRun<'src> {
-    InlineRun {
+) -> InlineFlowItem<'src> {
+    InlineFlowItem::Run(InlineRun {
         text,
         style,
         white_space,
         breaking,
-    }
+    })
 }
 
-fn run<'src>(style: &'src RunStyle, text: &'src str) -> InlineRun<'src> {
+fn run<'src>(style: &'src RunStyle, text: &'src str) -> InlineFlowItem<'src> {
     styled(
         style,
         text,
@@ -90,7 +90,11 @@ fn container(strut: RunStyle) -> InlineFlowStyle {
 }
 
 /// A flow committed at `width` with no indent.
-fn committed(style: InlineFlowStyle, runs: &[InlineRun<'_>], width: Option<f32>) -> InlineFlow {
+fn committed(
+    style: InlineFlowStyle,
+    runs: &[InlineFlowItem<'_>],
+    width: Option<f32>,
+) -> InlineFlow {
     let mut context = text_context();
     let mut flow = InlineFlow::new(&mut context, style, runs);
     flow.commit(&mut context, BlockConstraint::new(width, 0.0));
@@ -749,7 +753,7 @@ fn the_last_baseline_is_the_last_line_box_s() {
     assert_eq!(empty.last_baseline(), None);
 }
 
-fn pre<'src>(style: &'src RunStyle, text: &'src str) -> InlineRun<'src> {
+fn pre<'src>(style: &'src RunStyle, text: &'src str) -> InlineFlowItem<'src> {
     styled(
         style,
         text,

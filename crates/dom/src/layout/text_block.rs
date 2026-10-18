@@ -105,95 +105,6 @@ pub(crate) fn inline_scopes<T>(
         .take_while(move |&id| id != paragraph && Some(id) != container && tree.get(id).is_some())
 }
 
-/// The element establishing the committed paragraph whose content `node` is
-/// — `node` itself when it establishes one.
-///
-/// Walks up by the flatten walk's own rules ([`collect_content`]), so a node
-/// answers exactly when that walk would reach it: through text nodes, nested
-/// `-lynx-text` scopes and `contents` wrappers, with `node` itself also
-/// allowed to be an in-flow atom. Anything the walk never enters answers
-/// `None`: a node inside an atom's own subtree (unless a paragraph nearer to
-/// it is found first), a `display: none` or out-of-flow element and what is
-/// under it, and the children a generated-content list replaced. A node in
-/// the `inline-truncation` content answers the paragraph it truncates.
-pub(crate) fn paragraph_of<T>(
-    tree: &TreeArenas<T>,
-    state: &DocumentLayoutState,
-    node: NodeSlot,
-) -> Option<NodeSlot> {
-    let mut current = node;
-    loop {
-        let here = tree.at(current);
-        if here.is_element() {
-            if state
-                .text_block(current)
-                .and_then(TextBlockStore::committed)
-                .is_some()
-            {
-                // A replacing root shows none of its children.
-                return (current == node || generated_content(here).is_none()).then_some(current);
-            }
-            let view = StyleView::try_of(here)?;
-            if out_of_flow(view.position()) {
-                return None;
-            }
-            match view.display_mode() {
-                DisplayMode::Text | DisplayMode::Contents => {
-                    if current != node && generated_content(here).is_some() {
-                        return None;
-                    }
-                }
-                DisplayMode::None => return None,
-                // An atom is one item of the paragraph above it; what is
-                // inside it is not.
-                _ if current == node => {}
-                _ => return None,
-            }
-        } else if !here.is_text_node() {
-            return None;
-        }
-        current = here
-            .flat_parent()
-            .and_then(|parent| tree.slot(parent.id()))?;
-    }
-}
-
-/// The source units `element` contributes to the committed paragraph it is
-/// inline content of: the union of its items' and its descendants'.
-///
-/// `None` for a text node (a run is attributed to the element whose style it
-/// carries, not to its node), for the paragraph's own root, outside a
-/// committed paragraph, and for an element that contributes no item — an
-/// empty scope, or one inside the truncation content, which is no source
-/// text.
-pub(crate) fn inline_source_range<T>(
-    tree: &TreeArenas<T>,
-    state: &DocumentLayoutState,
-    element: NodeSlot,
-) -> Option<core::ops::Range<u32>> {
-    if !tree.at(element).is_element() {
-        return None;
-    }
-    let paragraph = paragraph_of(tree, state, element)?;
-    if paragraph == element {
-        return None;
-    }
-    let store = state.text_block(paragraph)?;
-    let block = store.committed()?;
-    let mut range: Option<core::ops::Range<u32>> = None;
-    for (item, &source) in store.source_ids.iter().enumerate() {
-        if !inline_scopes(tree, source, paragraph).any(|scope| scope == element) {
-            continue;
-        }
-        let units = block.item_source_range(u32::try_from(item).ok()?)?;
-        range = Some(match range {
-            Some(seen) => seen.start.min(units.start)..seen.end.max(units.end),
-            None => units,
-        });
-    }
-    range
-}
-
 /// The establishing element's subtree, split into the two flows a paragraph
 /// takes: its own content, and the custom truncation content.
 struct Flattened {
@@ -220,7 +131,7 @@ struct Flattened {
 /// (`docs/tracking/deviations.md`) — and a sticky atom is not pinned: the
 /// visual layer samples sticky displacement only for boxes it emits items
 /// for, and an atom inside a paragraph is painted by the paragraph.
-const fn out_of_flow(position: PositionProperty) -> bool {
+pub(crate) const fn out_of_flow(position: PositionProperty) -> bool {
     matches!(
         position,
         PositionProperty::Absolute | PositionProperty::Fixed
@@ -404,6 +315,9 @@ fn as_items(collected: &[Collected], id_offset: usize) -> Vec<InlineItem<'_>> {
                 baseline: None,
                 vertical_align: *vertical_align,
             }),
+            OwnedItem::Open { .. } | OwnedItem::Close => {
+                unreachable!("the Lynx flatten walk opens no inline box")
+            }
         })
         .collect()
 }
@@ -435,7 +349,7 @@ pub(crate) fn refresh<T>(
         .chain(flat.truncation.iter())
         .filter_map(|entry| match &entry.item {
             OwnedItem::Run { style, .. } => Some(style.clone()),
-            OwnedItem::Atom { .. } => None,
+            _ => None,
         })
         .collect();
 
@@ -898,7 +812,7 @@ mod generated_content_tests {
             .into_iter()
             .filter_map(|entry| match entry.item {
                 OwnedItem::Run { text, .. } => Some(text),
-                OwnedItem::Atom { .. } => None,
+                _ => None,
             })
             .collect()
     }

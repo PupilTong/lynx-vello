@@ -114,7 +114,7 @@ impl PaintOrder {
             return None;
         }
         Some(match item.kind {
-            PaintItemKind::ElementBox => item.node,
+            PaintItemKind::ElementBox | PaintItemKind::InlineFragment { .. } => item.node,
             PaintItemKind::TextRun { element } | PaintItemKind::Backdrop { element } => element,
         })
     }

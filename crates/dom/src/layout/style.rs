@@ -43,6 +43,11 @@ pub(crate) enum DisplayMode {
     /// grid, grid-lanes, linear or relative container (CSS 2.2 §9.2.1.1,
     /// css-flexbox-1 §4, css-grid-1 §6), a style the engine builds itself,
     /// and of the block containers of the HTML content the engine builds.
+    ///
+    /// An `inline` element maps here too, and lays its own content out when
+    /// no inline formatting context took it in; inside a block container it
+    /// is a non-atomic inline box of that container's context instead, and
+    /// runs no layout of its own ([`crate::layout::inline_flow::is_inline_box`]).
     BlockFlow,
     Leaf,
 }

@@ -244,15 +244,31 @@ exposes line data. Its recorded deviations live in
 
 Text outside a `<text>` is laid out by a second paragraph kind: the CSS block
 container's inline formatting context (`hughie::text::inline`, driven by
-`crates/dom/src/layout/inline_flow.rs`). Its display is stylo's internal
-`(block, flow)` value — what CSS calls `block`, which the `lynx` grammar never
-parses — and its one producer is the anonymous block box CSS wraps around
-loose text in a flex, grid, grid-lanes, linear or relative container (CSS 2.2
-§9.2.1.1, css-flexbox-1 §4, css-grid-1 §6). Its content is text runs only:
-text nodes, and `display: contents` elements either walked through or, with a
-string `content` list, contributing that text. It takes CSS properties only —
-no Lynx attribute or `--lynx-*` value reaches it — and differs from `<text>` in
-exactly the places CSS does:
+`crates/dom/src/layout/inline_flow.rs`). Its display is `(block, flow)` —
+`display: block`, or an `inline` element no inline formatting context around
+it took in — which the `lynx` grammar parses only in the engine's own sheets
+(a UA sheet, or `Document::add_engine_shadow_stylesheet`). Its producers are
+the anonymous block box CSS wraps around loose text in a flex, grid,
+grid-lanes, linear or relative container (CSS 2.2 §9.2.1.1, css-flexbox-1 §4,
+css-grid-1 §6) and the block containers of HTML content the engine builds.
+Its content, in tree order through `display: contents` elements:
+
+- text runs — text nodes, and an element's string `content` list in place of its children;
+- **non-atomic inline boxes** — a `display: inline` element that is not replaced and no Lynx text
+  element, nested to any depth — with the full inline box model of CSS 2.2 §10.3.1 and §10.6.1:
+  inline-start and inline-end margin, border and padding as advance on the line, under
+  `box-decoration-break: slice` (the start edge on the box's first fragment, the end edge on its
+  last), never a soft wrap opportunity of their own; vertical padding and border painted around
+  the box's content area without moving the line box; an empty box with a nonzero edge taking part
+  in the line (§9.4.2). Each box reports one fragment per line, which the painter draws its
+  background and border from (the background positioned over all fragments end to end,
+  css-break-3 §5.4), the hit test answers it from, and `Document::bounding_client_rect` unions.
+
+Every other child — a replaced element, a block-level box, an absolutely positioned or fixed box —
+is not content and is hidden. The limits are in [deviations.md](deviations.md) under "Text
+layout". The context takes CSS
+properties only — no Lynx attribute or `--lynx-*` value reaches it — and
+differs from `<text>` in exactly the places CSS does:
 
 - css-text-3 §4.1 white-space processing in full, including the removal of a collapsible
   sequence at the start of the paragraph, where a `<text>` processes none (its text is verbatim,
@@ -277,7 +293,8 @@ line and each run's own half-leading box around the shared baseline — the stru
 own font here and the establishing element's for a `<text>`; and both report a first and a last
 baseline (`BlockMetrics`).
 
-`text-overflow` does not apply there: the anonymous block computes `overflow:
-visible`, the case css-overflow-3 leaves the property inert in, and no author
-CSS reaches it, so it is not implemented (user ruling 2026-10-16). The limits
-it records live in [deviations.md](deviations.md) under "Text layout".
+`text-overflow` does not apply there: its producers compute `overflow:
+visible`, the case css-overflow-3 leaves the property inert in, or are
+unreachable by author CSS, so it is not implemented (user ruling 2026-10-16).
+The limits it records live in [deviations.md](deviations.md) under "Text
+layout".

@@ -1,6 +1,14 @@
 //! The paint-order builder: CSS2 Appendix E over the laid-out tree,
-//! collapsed for an engine with no floats and no inline-level boxes other
-//! than text leaves.
+//! collapsed for an engine with no floats.
+//!
+//! A paragraph — a Lynx text element, or a block container's inline
+//! formatting context — paints as one record after its element's box: every
+//! inline box background and border in tree order, then every glyph
+//! (`paint::walker`). A Lynx paragraph's atomic inline boxes follow as
+//! records of their own, each painted whole. That is Appendix E step 7's
+//! order for content that does not overlap; it does not interleave the steps
+//! line by line. A non-atomic inline box emits no record of its own and clips
+//! nothing (`layout::inline_flow`).
 //!
 //! Per stacking context `E` the emitted order is:
 //! 1. `E`'s own item;
@@ -46,6 +54,7 @@ use super::{
     PaintOrder, RenderLayer, ScrollSlot, SnapSlot, SnapSlotAxis, Space, SpaceKind, StickySlot,
     stacking,
 };
+use crate::layout::inline_flow::is_inline_box;
 use crate::layout::{
     DisplayMode, StyleView, box_parent, establishes_absolute_containing_block,
     establishes_fixed_containing_block, skips_contents,
@@ -835,6 +844,9 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             });
         }
         let (visible, hit_testable) = item_flags(values);
+        // An inline box that is a stacking context still paints as fragments
+        // of the paragraph around it.
+        let visible = visible && !is_inline_box(self.node(root));
         if visible {
             self.items.push(PaintItem {
                 node: root,
@@ -1104,6 +1116,61 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             slot: ctx.current.chain,
             space: ctx.current.space,
         });
+        for fragment in self.fragment_records(root, Point2D::zero(), ctx.current) {
+            self.items.push(PaintItem {
+                node: fragment.node,
+                kind: fragment.kind,
+                transform: glyph_origin.then_translate(euclid::vec3(
+                    fragment.offset.x,
+                    fragment.offset.y,
+                    0.0,
+                )),
+                clip: fragment.clip,
+                size: fragment.size,
+                radii: fragment.radii,
+                hit_testable: fragment.hit_testable,
+                slot: fragment.slot,
+                space: fragment.space,
+            });
+        }
+    }
+
+    /// One hit-only record per fragment of every inline box in the inline
+    /// formatting context `root` establishes, by box in tree order, at
+    /// `content_offset` — where the paragraph's content box is — plus each
+    /// fragment's place in it. A `visibility: hidden` box has none; one
+    /// whose `pointer-events` is `none` has records that no hit takes.
+    fn fragment_records(
+        &self,
+        root: NodeId,
+        content_offset: Point2D<f32>,
+        content: FlowContext,
+    ) -> Vec<ItemRecord> {
+        let Some(paragraph) = self.document.painted_paragraph(root) else {
+            return Vec::new();
+        };
+        paragraph
+            .fragments()
+            .iter()
+            .filter_map(|fragment| {
+                let node = *paragraph.sources.get(fragment.item as usize)?;
+                let (visible, hit_testable) = item_flags(self.document.paint_style(node)?);
+                visible.then(|| ItemRecord {
+                    node,
+                    kind: PaintItemKind::InlineFragment { paragraph: root },
+                    offset: Point2D::new(
+                        content_offset.x + fragment.rect.origin.x,
+                        content_offset.y + fragment.rect.origin.y,
+                    ),
+                    clip: content.clip,
+                    size: Size2D::new(fragment.rect.size.width, fragment.rect.size.height),
+                    radii: CornerRadii::ZERO,
+                    hit_testable,
+                    slot: content.chain,
+                    space: content.space,
+                })
+            })
+            .collect()
     }
 
     fn collect_child(
@@ -1171,6 +1238,8 @@ impl<'doc, T: Sync> Builder<'doc, T> {
     ) {
         let style = child.view.values();
         let (visible, hit_testable) = item_flags(style);
+        // An inline box paints as fragments of the paragraph around it.
+        let visible = visible && !is_inline_box(self.node(child.node));
         let descend =
             child.mode != DisplayMode::Leaf && !skips_contents(self.node(child.node), style);
         let is_item_container = ranks_children_as_items(child.mode);
@@ -1258,6 +1327,9 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                         space: content.space,
                     },
                 );
+                for record in self.fragment_records(child.node, content_offset, content) {
+                    self.push_stream(target, record);
+                }
             }
         }
         if let Some(inner) = inner {
@@ -1467,6 +1539,13 @@ fn member_clip_contexts(position: PositionProperty, ctx: ClipContexts) -> ClipCo
 /// `skips_contents` answer must come from one place, even where — as here,
 /// which reads only `PAINT` — it cannot change the result.
 pub(super) fn clipped_axes<T>(node: &Node<T>, style: &ComputedValues) -> ScrollAxes {
+    // Neither `overflow` nor paint containment applies to a non-atomic
+    // inline box (css-overflow-3, css-contain-2 §3.3), which has no box of
+    // its own to clip to, whatever the UA sheet's `overflow: clip` on every
+    // element says.
+    if is_inline_box(node) {
+        return ScrollAxes { x: false, y: false };
+    }
     if effective_containment(
         *style.get_contain(),
         *style.get_content_visibility(),

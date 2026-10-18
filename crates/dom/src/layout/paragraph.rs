@@ -1,19 +1,21 @@
 //! What the two paragraph-establishing boxes share.
 //!
 //! A `display: -lynx-text` element lays its flattened subtree out as one
-//! Lynx paragraph (`text_block`); a block container — the internal
-//! `(block, flow)` display — lays its text runs out as a CSS inline
-//! formatting context (`inline_flow`). Both keep one retained parley paragraph
-//! in layout state, collect their runs with the same per-run reads, go through
-//! hughie's leaf box wrapper with the same measure closure, and are painted
-//! from the same record. This module holds those shared parts:
+//! Lynx paragraph (`text_block`); a block container — the `(block, flow)`
+//! display — lays its inline content out as a CSS inline formatting context
+//! (`inline_flow`). Both keep one retained parley paragraph in layout state,
+//! collect their runs with the same per-run reads, go through hughie's leaf
+//! box wrapper with the same measure closure, and are painted from the same
+//! record. This module holds those shared parts:
 //!
 //! - [`TextStore`], the one retained paragraph a node's layout state holds, of either kind, and the
 //!   probe/restore calls the pass routes through it;
 //! - [`PaintedParagraph`], a committed paragraph as the painter and the text clip read it;
 //! - the run collection pieces: [`Collected`], the generated-content replacement, and the
 //!   `white-space-collapse` read;
-//! - [`measure`], the closure both box wrappers run, and the `text-indent` resolution in it.
+//! - [`measure`], the closure both box wrappers run, and the `text-indent` resolution in it;
+//! - [`paragraph_of`] and [`inline_source_range`], which answer for either kind which paragraph a
+//!   node is content of and which source units an element contributes to it.
 
 use std::hash::{Hash, Hasher};
 
@@ -21,18 +23,18 @@ use hughie::compute::{LeafMeasureInput, LeafMetrics};
 use hughie::geometry::{Point, Size};
 use hughie::text::TextContext;
 use hughie::text::block::{BlockConstraint, BlockMetrics, PlacedBox, SourceItem, TextBlock};
-use hughie::text::inline::InlineFlow;
-use hughie::text::paragraph::{LineGeometry, RunStyle, WhiteSpaceCollapse};
+use hughie::text::inline::{FlowSource, InlineEdges, InlineFlow, InlineFragment};
+use hughie::text::paragraph::{BreakStyle, Direction, LineGeometry, RunStyle, WhiteSpaceCollapse};
 use hughie::tree::AvailableSpace;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{Content, ContentItem};
 
 use crate::layout::TextBrush;
-use crate::layout::inline_flow::InlineFlowStore;
+use crate::layout::inline_flow::{InlineBoxInsets, InlineFlowStore, is_inline_box};
 use crate::layout::style::{
     DisplayMode, StyleView, TextRunView, box_parent, display_mode, inline_style_of,
 };
-use crate::layout::text_block::TextBlockStore;
+use crate::layout::text_block::{TextBlockStore, inline_scopes, out_of_flow};
 use crate::tree::document::{DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 
@@ -148,9 +150,63 @@ impl TextStore {
                     lines: flow.line_geometry(),
                     sources: &store.source_ids,
                     truncation_sources: &[],
-                    kind: PaintedKind::Flow(flow),
+                    kind: PaintedKind::Flow(flow, &store.insets),
                 })
             }
+        }
+    }
+
+    /// The committed paragraph's source-range boxes
+    /// ([`TextBlock::range_boxes`], [`InlineFlow::range_boxes`]).
+    pub(crate) fn range_boxes(
+        &self,
+        start: u32,
+        end: u32,
+    ) -> Option<Vec<hughie::geometry::Rect<f32>>> {
+        match self {
+            Self::Block(store) => store.committed()?.range_boxes(start, end),
+            Self::Flow(store) => store.committed()?.range_boxes(start, end),
+        }
+    }
+
+    /// The source unit under `point` in the committed paragraph.
+    pub(crate) fn index_at_point(&self, point: Point<f32>) -> Option<u32> {
+        match self {
+            Self::Block(store) => store.committed()?.index_at_point(point),
+            Self::Flow(store) => store.committed()?.index_at_point(point),
+        }
+    }
+
+    /// The committed paragraph's measured size ([`TextBlock::size`],
+    /// [`InlineFlow::size`]).
+    pub(crate) fn committed_size(&self) -> Option<hughie::geometry::Size<f32>> {
+        match self {
+            Self::Block(store) => Some(store.committed()?.size()),
+            Self::Flow(store) => Some(store.committed()?.size()),
+        }
+    }
+
+    /// Whether a commit has produced the paragraph.
+    pub(crate) fn has_committed(&self) -> bool {
+        match self {
+            Self::Block(store) => store.committed().is_some(),
+            Self::Flow(store) => store.committed().is_some(),
+        }
+    }
+
+    /// Item index → the node that contributed it.
+    fn source_ids(&self) -> &[NodeId] {
+        match self {
+            Self::Block(store) => &store.source_ids,
+            Self::Flow(store) => &store.source_ids,
+        }
+    }
+
+    /// The source units item `item` contributed.
+    fn item_source_range(&self, item: u32) -> Option<core::ops::Range<u32>> {
+        match self {
+            Self::Block(store) => store.committed()?.item_source_range(item),
+            Self::Flow(store) => store.committed()?.item_source_range(item),
         }
     }
 }
@@ -172,7 +228,8 @@ pub(crate) struct PaintedParagraph<'a> {
 
 enum PaintedKind<'a> {
     Block(&'a TextBlock),
-    Flow(&'a InlineFlow),
+    /// The flow, and its inline boxes' border and padding.
+    Flow(&'a InlineFlow, &'a [InlineBoxInsets]),
 }
 
 impl PaintedParagraph<'_> {
@@ -180,29 +237,70 @@ impl PaintedParagraph<'_> {
     pub(crate) fn style_count(&self) -> usize {
         match self.kind {
             PaintedKind::Block(block) => block.style_count(),
-            PaintedKind::Flow(flow) => flow.style_count(),
+            PaintedKind::Flow(flow, _) => flow.style_count(),
         }
     }
 
     /// The paint identity of one parley style index. Every run of an inline
     /// formatting context is content; style 0 of either kind is the strut,
-    /// which no text is shaped in.
+    /// which no text is shaped in, and so is an inline box's edge cluster,
+    /// whose glyph run draws nothing ([`Self::draws`]).
     pub(crate) fn source_of(&self, style_index: u16) -> SourceItem {
         match self.kind {
             PaintedKind::Block(block) => block.source_of(style_index),
-            PaintedKind::Flow(flow) => flow
-                .source_of(style_index)
-                .map_or(SourceItem::Strut, SourceItem::Content),
+            PaintedKind::Flow(flow, _) => match flow.source_of(style_index) {
+                FlowSource::Run(item) => SourceItem::Content(item),
+                FlowSource::Strut | FlowSource::Edge(_) => SourceItem::Strut,
+            },
         }
     }
 
-    /// Every atomic box's outcome; an inline formatting context of text runs
-    /// has none.
+    /// Whether the glyph run of a parley style index is drawn: every one but
+    /// an inline box's edge cluster, which is advance and no ink — no glyph,
+    /// no decoration, no shadow (css-text-decor-3 draws a decoration across a
+    /// box's text, not across its padding).
+    pub(crate) fn draws(&self, style_index: u16) -> bool {
+        match self.kind {
+            PaintedKind::Block(_) => true,
+            PaintedKind::Flow(flow, _) => {
+                !matches!(flow.source_of(style_index), FlowSource::Edge(_))
+            }
+        }
+    }
+
+    /// Every atomic box's outcome; an inline formatting context lays no
+    /// atomic box out.
     pub(crate) fn boxes(&self) -> &[PlacedBox] {
         match self.kind {
             PaintedKind::Block(block) => block.boxes(),
-            PaintedKind::Flow(_) => &[],
+            PaintedKind::Flow(..) => &[],
         }
+    }
+
+    /// The inline boxes' fragments, by box in tree order: only an inline
+    /// formatting context has inline boxes.
+    pub(crate) fn fragments(&self) -> &[InlineFragment] {
+        match self.kind {
+            PaintedKind::Block(_) => &[],
+            PaintedKind::Flow(flow, _) => flow.fragments(),
+        }
+    }
+
+    /// The border and padding of the inline box whose `Open` is item `item`.
+    pub(crate) fn insets(&self, item: u32) -> Option<&InlineBoxInsets> {
+        match self.kind {
+            PaintedKind::Block(_) => None,
+            PaintedKind::Flow(_, insets) => insets.iter().find(|entry| entry.item == item),
+        }
+    }
+
+    /// Whether the elements around this paragraph's runs paint their
+    /// backgrounds as Lynx inline scopes — one fragment per line from their
+    /// runs' extents (`paint::text::inline_background_fragments`).
+    /// A `<text>`'s nested scopes do; an inline formatting context's inline
+    /// boxes paint from their own fragments, with their borders and padding.
+    pub(crate) const fn paints_scope_backgrounds(&self) -> bool {
+        matches!(self.kind, PaintedKind::Block(_))
     }
 }
 
@@ -231,6 +329,16 @@ pub(crate) enum OwnedItem {
     Atom {
         vertical_align: hughie::text::paragraph::VerticalAlign,
     },
+    /// The start of a non-atomic inline box; only a CSS inline formatting
+    /// context has one.
+    Open {
+        style: RunStyle,
+        breaking: BreakStyle,
+        direction: Direction,
+        edges: InlineEdges,
+    },
+    /// The end of the innermost open inline box.
+    Close,
 }
 
 /// Hashes one flow's structure: its length, and per item the node behind it
@@ -248,6 +356,8 @@ pub(crate) fn hash_flow(collected: &[Collected], hasher: &mut impl Hasher) {
                 white_space.hash(hasher);
             }
             OwnedItem::Atom { .. } => 1_u8.hash(hasher),
+            OwnedItem::Open { .. } => 2_u8.hash(hasher),
+            OwnedItem::Close => 3_u8.hash(hasher),
         }
     }
 }
@@ -403,4 +513,116 @@ pub(crate) fn measure<T>(
     LeafMetrics::new(metrics.size)
         .with_first_baselines(Point::new(None, metrics.first_baseline))
         .with_last_baselines(Point::new(None, metrics.last_baseline))
+}
+
+/// The element establishing the committed paragraph whose content `node` is
+/// — `node` itself when it establishes one — of either kind.
+///
+/// Walks up by the two content walks' own rules (`text_block::collect_content`
+/// and `inline_flow::collect_flow`), so a node answers exactly when one of
+/// them would reach it: through text nodes, `contents` wrappers, a Lynx
+/// paragraph's nested `-lynx-text` scopes and an inline formatting context's
+/// inline boxes, with `node` itself also allowed to be an in-flow atom of a
+/// Lynx paragraph (an inline formatting context lays no atom out, and hides
+/// such a box). Anything the walks never enter answers `None`: a node inside
+/// an atom's own subtree (unless a paragraph nearer to it is found first), a
+/// `display: none` or out-of-flow element and what is under it, and the
+/// children a generated-content list replaced. A node in the `inline-truncation` content
+/// answers the paragraph it truncates.
+///
+/// Loose text answers `None`: the anonymous block box that lays it out is the
+/// engine's own node, never handed out (`tree::anonymous`).
+pub(crate) fn paragraph_of<T>(
+    tree: &TreeArenas<T>,
+    state: &DocumentLayoutState,
+    node: NodeSlot,
+) -> Option<NodeSlot> {
+    let mut current = node;
+    let mut atom = false;
+    loop {
+        let here = tree.at(current);
+        if here.is_element() {
+            // An inline box is content of the flow around it, whatever its
+            // layout state still holds from a time it laid itself out.
+            let inline_box = is_inline_box(here);
+            if !inline_box
+                && let Some(store) = state
+                    .text_store(current)
+                    .filter(|store| store.has_committed())
+            {
+                if atom && store.as_flow().is_some() {
+                    return None;
+                }
+                // A replacing root shows none of its children.
+                return (current == node || generated_content(here).is_none()).then_some(current);
+            }
+            let view = StyleView::try_of(here)?;
+            if out_of_flow(hughie::style::CoreStyle::position(&view)) {
+                return None;
+            }
+            match view.display_mode() {
+                DisplayMode::Text | DisplayMode::Contents => {
+                    if current != node && generated_content(here).is_some() {
+                        return None;
+                    }
+                }
+                DisplayMode::BlockFlow if inline_box => {
+                    if current != node && generated_content(here).is_some() {
+                        return None;
+                    }
+                }
+                DisplayMode::None => return None,
+                // An atom is one item of the paragraph above it; what is
+                // inside it is not.
+                _ if current == node => atom = true,
+                _ => return None,
+            }
+        } else if !here.is_text_node() {
+            return None;
+        }
+        current = here
+            .flat_parent()
+            .and_then(|parent| tree.slot(parent.id()))?;
+    }
+}
+
+/// The source units `element` contributes to the committed paragraph it is
+/// inline content of: the union of its items' and its descendants'.
+///
+/// `None` for a text node (a run is attributed to the element whose style it
+/// carries, not to its node), for the paragraph's own root, outside a
+/// committed paragraph, and for an element that contributes no content item
+/// — an empty scope or inline box, or one inside the truncation content,
+/// which is no source text. An inline box's own boundaries count no unit.
+pub(crate) fn inline_source_range<T>(
+    tree: &TreeArenas<T>,
+    state: &DocumentLayoutState,
+    element: NodeSlot,
+) -> Option<core::ops::Range<u32>> {
+    if !tree.at(element).is_element() {
+        return None;
+    }
+    let paragraph = paragraph_of(tree, state, element)?;
+    if paragraph == element {
+        return None;
+    }
+    let store = state.text_store(paragraph)?;
+    if !store.has_committed() {
+        return None;
+    }
+    let mut range: Option<core::ops::Range<u32>> = None;
+    for (item, &source) in store.source_ids().iter().enumerate() {
+        if !inline_scopes(tree, source, paragraph).any(|scope| scope == element) {
+            continue;
+        }
+        let units = store.item_source_range(u32::try_from(item).ok()?)?;
+        if units.is_empty() {
+            continue;
+        }
+        range = Some(match range {
+            Some(seen) => seen.start.min(units.start)..seen.end.max(units.end),
+            None => units,
+        });
+    }
+    range
 }

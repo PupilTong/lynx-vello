@@ -19,6 +19,7 @@ bench = false
 layout-test-utils = []
 
 [dependencies]
+icu_properties = { workspace = true }
 smallvec = { workspace = true }
 style_traits = { workspace = true }
 stylo = { workspace = true }

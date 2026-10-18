@@ -57,9 +57,9 @@ consequential choice about whether to follow the spec or the quirk.
   container that is one item, and render nothing for a white-space-only
   sequence. `dom` builds those boxes (`crates/dom/src/tree/anonymous.rs`)
   for `flex`, `grid` and `grid-lanes` and, by ruling, for Lynx's `linear`
-  and `relative`, which have no such rule of their own; each box is the
-  internal `(block, flow)` container laid out as a CSS inline formatting
-  context (`crates/dom/src/layout/inline_flow.rs`), never a `-lynx-text`
+  and `relative`, which have no such rule of their own; each box is a
+  `(block, flow)` block container laid out as a CSS inline formatting context
+  (`crates/dom/src/layout/inline_flow.rs`), never a `-lynx-text`
   paragraph. On the Lynx side a `raw-text` renders as such text inside a tag
   that is not a Lynx tag (`div`, `span`, any other name), directly or
   through one `wrapper` (`crates/bobcat-core/src/main/tree/raw_text.rs`).
@@ -619,14 +619,68 @@ consequential choice about whether to follow the spec or the quirk.
   `quantize` is off, `crates/hughie/src/text/paragraph/shape.rs`).
 - **Inline formatting context: not implemented** — `text-overflow`, which
   applies only to a block whose `overflow` is not `visible` (css-overflow-3).
-  The one producer of this context is the anonymous block box around loose
-  text, which computes `overflow: visible` and which no author CSS can reach,
-  so the property is unreachable there and is not implemented, by the user's
-  ruling of 2026-10-16; a non-anonymous block container would apply it per
-  overflowing line box after the break (`crates/hughie/src/text/inline/mod.rs`).
-  And any box-generating child: the content is text runs
-  only, every other child is hidden, which the anonymous block producer never
-  puts there (`crates/dom/src/layout/inline_flow.rs`).
+  The producers of this context — the anonymous block box around loose text,
+  and the block containers of HTML content the engine builds — compute
+  `overflow: visible` or are unreachable by author CSS, so the property is
+  not implemented, by the user's ruling of 2026-10-16; a block container
+  that clipped would apply it per overflowing line box after the break
+  (`crates/hughie/src/text/inline/mod.rs`). And every box-generating child
+  that is no inline box — an atomic inline box, a block-level box, an
+  out-of-flow box: the content is text runs and inline boxes, every other
+  child is hidden, which the anonymous block producer never puts there
+  (`crates/dom/src/layout/inline_flow.rs`).
+- **Inline formatting context: what an inline box does not do** —
+  the full inline box model of CSS 2.2 §10.3.1 and §10.6.1 with
+  `box-decoration-break: slice` is implemented (`hughie::text::inline`,
+  `crates/hughie/src/text/inline/edge.rs`, `paint::walker`'s
+  `paint_inline_boxes`); these parts of it are not, each recorded rather than
+  silently approximated:
+  - `vertical-align` on a non-atomic inline box is not applied (its text sits
+    on the line's baseline), and an inline box adds its own line-height box to
+    a line only through its own text runs there, so a box whose content on a
+    line is only nested boxes does not grow it (CSS 2.2 §10.8.1 counts the
+    box's strut-like box on every line it is on); an empty box with nonzero
+    edges keeps the line from being a zero-height one (§9.4.2) but adds no
+    line height of its own beyond the root's strut;
+  - `position: relative` offsets, `opacity`, `transform`, `filter`,
+    `box-shadow` and `outline` on a non-atomic inline box are not applied, and
+    `background-clip: text` on one clips to its border box;
+  - a box's edges sit beside the logical first and last characters of its
+    content, so a box whose first or last character runs against the box's
+    own direction carries its edge beside that character rather than at the
+    box's visual extreme (CSS 2.2 §9.10 puts an `ltr` box's left edge on its
+    leftmost piece); a box that bidi reordering splits on one line reports one
+    fragment spanning both pieces;
+  - a box's end edge sits before a collapsible space its content ends with,
+    so that space still hangs at a soft wrap after the box; mid-line the
+    space is drawn after the edge rather than inside it;
+  - before a box whose first character is in a cursively joining script
+    (Joining_Type D, R, L or C: Arabic, Syriac, Mongolian, N'Ko, Old Uyghur,
+    Chorasmian and the like) or one UAX #14 segments by dictionary
+    (Line_Break SA: Thai, Lao, Khmer, Myanmar, Tai Le, Tai Tham and the
+    like), the only soft wrap opportunity kept at the box's start is the one
+    after a space: a dictionary break at a box boundary inside unspaced text
+    is lost (`start_cluster` in `edge.rs`, its properties from
+    `icu_properties`);
+  - a UAX #14 rule that reads past a box's first character (LB15b, LB19a,
+    LB25, LB28a) reads the start edge's copy of that character as the
+    character's successor, so its answer at the box's start can differ for
+    non-ASCII text (Chromium's pair table settles every pair of printable
+    ASCII characters other than the space first): a Brahmic orthographic
+    syllable that a box boundary splits before its final virama gains an
+    opportunity there (LB28a);
+  - a box that starts between the two regional indicators of one flag keeps
+    no opportunity between the flags after it inside the box: the shaper
+    pairs the indicators of the box's run from its own first one, and the
+    opportunities fall inside those clusters (nothing breaks inside a flag);
+  - percentage margins and padding resolve against the block container's
+    content width as the layout input implies it (its own width when the
+    input fixes one, else its parent's offer), and a box with a percentage
+    edge re-shapes the paragraph when that moves;
+  - paint order inside the paragraph is every inline box's background and
+    border in tree order, then every glyph — CSS2 Appendix E's order wherever
+    content does not overlap, but not its line-by-line interleaving; and `Document::bounding_client_rect` of an
+    inline box is its fragments' union unsnapped to device pixels.
 
 - **`hughie::text::block` ellipsis algorithm** — the standalone Lynx
   text-block module implements the web reference's *slow path*

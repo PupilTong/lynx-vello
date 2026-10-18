@@ -27,6 +27,23 @@
 > together, because the UA sheet makes `inline-text` a text block and so the
 > first paragraph the engine lays out is already multi-run. **D5**'s truncation
 > and **D7**'s shrink-to-fit defect are unchanged and still open.
+>
+> **Status (2026-10-17): a second paragraph kind, the CSS block container's
+> inline formatting context, carries HTML inline content.** It shares the
+> paragraph core (`crates/hughie/src/text/paragraph/`) with the Lynx block and
+> is laid out by `crates/hughie/src/text/inline/`, driven by
+> `crates/dom/src/layout/inline_flow.rs`. Unlike a `<text>`, which flattens
+> its nested scopes into runs, it keeps non-atomic inline boxes as boxes: each
+> one's inline-axis margin, border and padding is an *edge cluster* the
+> inline formatting context lays into the core's shaped text through the
+> core's generic splice (`inline/edge.rs` — parley's own atomic boxes would add
+> a soft wrap opportunity on both sides of an edge), and each
+> reports one fragment per line, which the painter draws its background and
+> border from with `box-decoration-break: slice`. The source-range and hit
+> queries both kinds answer
+> share one implementation (`paragraph/query.rs`). This document's §5–§8 do
+> not describe it; `docs/tracking/css-text.md` ("Standard inline formatting
+> context") and `docs/tracking/deviations.md` ("Text layout") do.
 
 Two halves. The first records what the measurement path did and why —
 the retained-layout contract `crates/hughie/src/text/` implemented and the
