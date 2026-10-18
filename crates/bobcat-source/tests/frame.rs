@@ -604,7 +604,7 @@ async fn boot_tap_host() -> Host {
 /// 1, from the background thread's re-render alone.
 ///
 /// The two lines' order is not asserted. The kernel calls the page realm at
-/// the path's first step and the card's realm after it, at its nested page,
+/// the path's top step and the card's realm after it, at the same step,
 /// so the page realm does post the tap to its background thread before the
 /// card's realm posts it to the card's (`frame_tests.rs` checks the realms'
 /// order on the main thread), but the two

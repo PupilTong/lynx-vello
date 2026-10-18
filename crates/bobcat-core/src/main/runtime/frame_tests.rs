@@ -8,8 +8,8 @@
 //! custom element queues and `bobcat:frame` turns into a load and a
 //! disposal that waits for the card's background thread. Then input events
 //! inside a frame, which the kernel's walk delivers to each listening realm
-//! once, at its root: the page realm at the path's first step, a card's
-//! realm at its frame's nested page.
+//! once, at the path's top: the page realm first, then each card's realm,
+//! each walking the steps it holds handles for.
 //!
 //! The host stands in for a container installer: it answers the plain fetch
 //! of the card's URL, and serves `<url>/root.js` (the card's root as an MTS
@@ -1314,9 +1314,9 @@ const PADDING: (f32, f32) = (5.0, 5.0);
 /// frame — `target` the frame, retargeted, and `detail` in the viewport —
 /// then the card's own, at its node, with `detail` relative to the frame's
 /// border box; the card's background-thread handler is published to the
-/// card's own BTS. The order is the path's: the kernel calls the page realm
-/// at the path's first step and the card's realm at its nested page, each
-/// once, over its own part of the path. Each card's `catch` ends its own
+/// card's own BTS. The kernel calls the page realm and then the card's
+/// realm, each once at the path's top, and each walks the steps of the path
+/// it holds handles for. Each card's `catch` ends its own
 /// walk alone: `cv`'s `catchtap` stops the card's page's bind and leaves the
 /// host's wrapper's alone (web-core's semantics, user ruling).
 #[test]
@@ -1368,7 +1368,9 @@ fn a_pages_catch_does_not_stop_the_frames_card() {
 }
 
 /// A card's `global-bindtap` hears the taps inside its frame, and no
-/// other: a tap in the wrapper's padding is the page's alone.
+/// other: a tap in the wrapper's padding is the page's alone. The card's
+/// registration is reached only by a path through the frame's shadow root,
+/// its tree's root, as web-core's card listens on its own shadow root.
 #[test]
 fn a_cards_global_bind_hears_only_taps_inside_its_frame() {
     let mut engine = booted_event_view();
@@ -1491,8 +1493,8 @@ fn a_key_reaches_a_cards_global_bind() {
     );
 }
 
-/// A frame showing no card — here one whose `src` does not fetch, so its
-/// realm never takes a root — has no realm of its own on the path: a tap
+/// A frame showing no card — here one whose `src` does not fetch, so no
+/// realm is made for it — has no realm of its own to call: a tap
 /// inside it is the page's alone, at the frame, and nothing but the one
 /// fetch diagnostic is reported.
 #[test]
@@ -1584,11 +1586,11 @@ fn a_frames_events_follow_its_card() {
 }
 
 /// A page listener that takes the frame out of the tree inside the tap: the
-/// card is still called, at its nested page, after the page's walk — the
+/// card is still called, after the page's walk — the
 /// behavior #428 did not have, where the realm of the frame found the frame
 /// out of its page tree and handed the card nothing. Here the realms a
 /// dispatch calls are fixed before its first step, and the card's realm
-/// stays live, its root recorded, until its `closeRealm` runs, which the
+/// keeps its registrations until its `closeRealm` runs, which the
 /// frame's disconnection starts in a later entry (design
 /// `event-dispatch-root-registration-design.md` §4.5; deviations.md, the
 /// realms of a dispatch are fixed before its walk). The frame has left the

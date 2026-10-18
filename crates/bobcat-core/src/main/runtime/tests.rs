@@ -9543,6 +9543,53 @@ fn close_realm_clears_the_childs_rows() {
     );
 }
 
+/// A page listener that frees the card's nodes before the card's call — the
+/// page realm is called first, at the same step — leaves the card no
+/// registration for the name, and it is not called: the invitation was
+/// computed before the walk, and the call-time check finds the card's rows
+/// gone with its nodes. Freed here by the card's own removal and
+/// `dropElement`, which frees the node at once.
+#[test]
+fn a_realm_whose_steps_an_earlier_listener_freed_is_not_called() {
+    let (mut js, mut runtime, elements, frame, inner) = frame_calls();
+    let child = RealmId::Child(runtime.core().children.keys()[0]).listener_key();
+    runtime
+        .evaluate_module(
+            &mut js,
+            &format!(
+                "import {{ __AddEventListener, __BobcatHandleOf }} from 'bobcat:element';
+                 const free = globalThis.realm.evaluate(`id => {{
+                     E.__RemoveElement(E.__CreatePage(), E.__BobcatHandleOf(id));
+                     H.dropElement(id);
+                 }}`);
+                 __AddEventListener(__BobcatHandleOf({frame}), 'tap', () => free({inner}),
+                     {{ capture: true }});",
+                frame = packed_node_id(frame),
+                inner = packed_node_id(inner),
+            ),
+            "app:///free-on-tap.js",
+            "filing a listener that frees the card's view",
+        )
+        .unwrap();
+    runtime
+        .dispatch_for_test(&mut js, inner, &tap(), dom::Point2D::new(30.0, 40.0))
+        .expect("nothing fails");
+    assert!(
+        elements.tree().get(inner).is_none(),
+        "the listener freed it"
+    );
+    let tree = elements.tree();
+    assert!(
+        !tree.has_listener(inner, "tap") && !tree.global_registrants("tap").contains(&child),
+        "the card's rows went with its node"
+    );
+    drop(tree);
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [format!("page-frame tap {} 30,40", packed_node_id(frame))]
+    );
+}
+
 /// A listener that throws in one realm does not keep the next from hearing
 /// the event: both are called, and the failure is answered once.
 #[test]
