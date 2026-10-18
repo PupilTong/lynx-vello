@@ -117,6 +117,10 @@ pub(in crate::text) struct Flow {
     /// Each preserved tab's `0.5ch`, the shortest shift it takes; indexed
     /// like `block.tabs`. Measured once, for the content flow only.
     pub(in crate::text) tab_min: Vec<f32>,
+    /// The extra letter-spacing each verbatim space byte with an advance of
+    /// its own is shaped with, indexed like `block.space_runs`. Measured by
+    /// [`Self::measure_space_runs`].
+    pub(in crate::text) space_spacing: Vec<f32>,
 }
 
 impl Flow {
@@ -126,6 +130,7 @@ impl Flow {
     ) -> Self {
         let block = normalize(items, processing);
         let tabs = block.tabs.len();
+        let space_runs = block.space_runs.len();
         Self {
             items: items
                 .iter()
@@ -137,7 +142,63 @@ impl Flow {
             block,
             tab_spacing: vec![0.0; tabs],
             tab_min: vec![0.0; tabs],
+            space_spacing: vec![0.0; space_runs],
         }
+    }
+
+    /// Gives each verbatim space byte with an advance of its own that
+    /// advance: a run's one space widened by `count - 1` times the advance
+    /// one space of the run's style takes, letter-spacing included, and a
+    /// space before a forced break narrowed to nothing.
+    ///
+    /// One shaping per distinct run item holding such a byte, when the flow
+    /// is built: a flow without one shapes nothing here.
+    pub(in crate::text) fn measure_space_runs<S: Copy>(
+        &mut self,
+        context: &mut TextContext,
+        breaking: RunBreaking<'_>,
+        source: fn(u32) -> S,
+    ) {
+        const SPACE: &str = " ";
+        let mut measured: Vec<(u32, f32)> = Vec::new();
+        let spacing = self
+            .block
+            .space_runs
+            .iter()
+            .map(|run| {
+                let item = self.item_at(run.byte);
+                let advance =
+                    if let Some(&(_, advance)) = measured.iter().find(|(seen, _)| *seen == item) {
+                        advance
+                    } else {
+                        let spans = [ShapeSpan {
+                            bytes: 0..SPACE.len(),
+                            style: self.run_style(item),
+                            breaking: breaking.of(item),
+                            source: source(item),
+                            extra_spacing: 0.0,
+                        }];
+                        let mut probe =
+                            shape::shape(context, SPACE, &spans, Vec::new(), &mut Vec::new());
+                        probe.break_all_lines(None);
+                        // A lone space is all trailing whitespace, which `width`
+                        // leaves out.
+                        let advance = probe.full_width();
+                        measured.push((item, advance));
+                        advance
+                    };
+                if run.before_break {
+                    return -advance;
+                }
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "a space count is far below f32's exact integer range"
+                )]
+                let others = (run.count - 1) as f32;
+                advance * others
+            })
+            .collect();
+        self.space_spacing = spacing;
     }
 
     /// The run item holding byte `byte` of the normalized text.
@@ -162,17 +223,33 @@ impl Flow {
 
     /// The shaper spans for this flow, offset into a combined display string.
     ///
-    /// One span per styled range, except that every preserved tab's space is
-    /// a span of its own carrying its tab spacing — the only way to give one
-    /// cluster an advance of its own in parley.
+    /// One span per styled range, except that every preserved tab's space and
+    /// every verbatim space run's one space is a span of its own carrying its
+    /// extra spacing — the only way to give one cluster an advance of its own
+    /// in parley.
     pub(in crate::text) fn spans<S>(
         &self,
         byte_offset: u32,
         source: fn(u32) -> S,
         breaking: RunBreaking<'_>,
     ) -> Vec<ShapeSpan<'_, S>> {
-        let tabs = &self.block.tabs;
-        let mut spans = Vec::with_capacity(self.block.ranges.len() + 2 * tabs.len());
+        // Every one-byte span with an advance of its own, ascending by byte.
+        let mut widened: Vec<(u32, f32)> = self
+            .block
+            .tabs
+            .iter()
+            .copied()
+            .zip(self.tab_spacing.iter().copied())
+            .chain(
+                self.block
+                    .space_runs
+                    .iter()
+                    .map(|run| run.byte)
+                    .zip(self.space_spacing.iter().copied()),
+            )
+            .collect();
+        widened.sort_unstable_by_key(|&(byte, _)| byte);
+        let mut spans = Vec::with_capacity(self.block.ranges.len() + 2 * widened.len());
         let mut push = |bytes: core::ops::Range<u32>, item: u32, extra_spacing: f32| {
             spans.push(ShapeSpan {
                 bytes: (bytes.start + byte_offset) as usize..(bytes.end + byte_offset) as usize,
@@ -182,18 +259,18 @@ impl Flow {
                 extra_spacing,
             });
         };
-        let mut next_tab = 0;
+        let mut next = 0;
         for range in &self.block.ranges {
             let mut start = range.bytes.start;
-            while let Some(&tab) = tabs.get(next_tab)
-                && tab < range.bytes.end
+            while let Some(&(byte, spacing)) = widened.get(next)
+                && byte < range.bytes.end
             {
-                if start < tab {
-                    push(start..tab, range.item, 0.0);
+                if start < byte {
+                    push(start..byte, range.item, 0.0);
                 }
-                push(tab..tab + 1, range.item, self.tab_spacing[next_tab]);
-                start = tab + 1;
-                next_tab += 1;
+                push(byte..byte + 1, range.item, spacing);
+                start = byte + 1;
+                next += 1;
             }
             if start < range.bytes.end {
                 push(start..range.bytes.end, range.item, 0.0);
@@ -216,6 +293,9 @@ pub(in crate::text) struct Paragraph<S> {
     pub(in crate::text) natural_sources: Vec<S>,
     /// The paint identity of content item `n`.
     source: fn(u32) -> S,
+    /// Where the content's preserved tabs stop: css-text-3's stops, or native
+    /// Lynx's for a paragraph whose white space is processed verbatim.
+    tab_stops: tab::TabStops,
 }
 
 /// What one natural break reports, in the content's own offset spaces.
@@ -244,7 +324,16 @@ impl<S: Copy> Paragraph<S> {
         source: fn(u32) -> S,
     ) -> Self {
         let mut flow = Flow::build(items, processing);
-        flow.tab_min = tab_minimums(context, breaking, &flow, source);
+        flow.measure_space_runs(context, breaking, source);
+        let tab_stops = match processing {
+            WhiteSpaceProcessing::Verbatim { .. } => tab::TabStops::Native,
+            WhiteSpaceProcessing::Css => {
+                // Native stops take no minimum shift, so only css-text-3's
+                // `0.5ch` is measured.
+                flow.tab_min = tab_minimums(context, breaking, &flow, source);
+                tab::TabStops::Css
+            }
+        };
         let spans = flow.spans(0, source, breaking);
         let boxes = parley_boxes(&flow, 0, 0);
         let mut natural_sources = Vec::new();
@@ -261,6 +350,7 @@ impl<S: Copy> Paragraph<S> {
             natural,
             natural_sources,
             source,
+            tab_stops,
         }
     }
 
@@ -307,6 +397,7 @@ impl<S: Copy> Paragraph<S> {
                 &self.content.tab_min,
                 indent,
                 keywords,
+                self.tab_stops,
             ) else {
                 break;
             };

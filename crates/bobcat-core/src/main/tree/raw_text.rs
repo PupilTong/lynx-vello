@@ -94,8 +94,10 @@ const LYNX_TAGS: &[&str] = &[
 ];
 
 /// Carriers are hidden unless the box holding them renders their text (module
-/// doc). Their own style supplies the newline policy, and author CSS may
-/// override or suppress their content.
+/// doc), and author CSS may override or suppress their content. A
+/// `-lynx-text` paragraph keeps every run verbatim (`text.rs`), so a
+/// carrier's own `preserve-breaks` decides its newlines only as loose text in
+/// an HTML element.
 pub(super) static UA_RULES: LazyLock<String> = LazyLock::new(|| {
     let lynx = LYNX_TAGS.join(", ");
     format!(

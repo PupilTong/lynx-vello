@@ -219,7 +219,8 @@ fn lines_stack_by_their_own_heights() {
 #[test]
 fn collapsible_whitespace_is_removed_at_the_start_of_the_paragraph_and_after_a_break() {
     let style = ahem(10.0, LineHeight::Normal);
-    // css-text-3 §4.1.2 rule 1. The Lynx block keeps one space here (gap C2).
+    // css-text-3 §4.1.2 rule 1. A Lynx `<text>` keeps the whole run
+    // verbatim.
     let flow = committed(
         container(style.clone()),
         &[run(&style, "  \n  aa bb")],
@@ -559,4 +560,189 @@ fn a_new_alignment_applies_to_the_same_flow() {
     });
     flow.commit(&mut context, BlockConstraint::new(Some(60.0), 0.0));
     assert_eq!(line_starts(&flow), [10.0, 10.0]);
+}
+
+fn pre<'src>(style: &'src RunStyle, text: &'src str) -> InlineRun<'src> {
+    styled(
+        style,
+        text,
+        WhiteSpaceCollapse::Preserve,
+        BreakStyle::default(),
+    )
+}
+
+/// The advance of every line, in line order: its content from its start,
+/// the indent excluded.
+fn advances(flow: &InlineFlow) -> Vec<f32> {
+    flow.display()
+        .lines()
+        .map(|line| line.metrics().advance)
+        .collect()
+}
+
+fn assert_advances(flow: &InlineFlow, expected: &[f32]) {
+    let actual = advances(flow);
+    assert_eq!(actual.len(), expected.len(), "lines: {actual:?}");
+    for (actual, expected) in actual.into_iter().zip(expected) {
+        assert_close(actual, *expected);
+    }
+}
+
+#[test]
+fn a_tab_advances_to_the_next_stop_of_eight_spaces() {
+    // css-text-3 §4.2: `tab-size: 8`, so Ahem 10 stops every 80.
+    let style = ahem(10.0, LineHeight::Normal);
+    for (text, advance) in [
+        ("\tx", 90.0),
+        ("ab\tx", 90.0),
+        ("abcdefg\tx", 90.0),
+        // A tab on a stop moves a whole tab size.
+        ("abcdefgh\tx", 170.0),
+    ] {
+        for text_wrap in [TextWrap::Wrap, TextWrap::NoWrap] {
+            let flow = committed(
+                container(style.clone()),
+                &[styled(
+                    &style,
+                    text,
+                    WhiteSpaceCollapse::Preserve,
+                    BreakStyle {
+                        text_wrap,
+                        ..BreakStyle::default()
+                    },
+                )],
+                None,
+            );
+            assert_advances(&flow, &[advance]);
+        }
+    }
+}
+
+#[test]
+fn the_tab_size_counts_letter_spacing() {
+    // A space advances 12, so the stops are every 96; `a` ends at 12, and
+    // `x` after the tab adds its own 12.
+    let style = RunStyle {
+        letter_spacing: 2.0,
+        ..ahem(10.0, LineHeight::Normal)
+    };
+    let flow = committed(container(style.clone()), &[pre(&style, "a\tx")], None);
+    assert_advances(&flow, &[108.0]);
+}
+
+#[test]
+fn tab_columns_restart_after_a_break_and_count_the_first_line_indent() {
+    // Stops are measured from the content edge: the 30px indent is part of
+    // the first line's position, so its tab is 50 wide; the second line
+    // starts at the edge, so its tab is a whole 80.
+    let style = ahem(10.0, LineHeight::Normal);
+    let mut context = text_context();
+    let mut flow = InlineFlow::new(
+        &mut context,
+        container(style.clone()),
+        &[pre(&style, "\tx\n\ty")],
+    );
+    flow.commit(&mut context, BlockConstraint::new(None, 30.0));
+    assert_advances(&flow, &[60.0, 90.0]);
+}
+
+#[test]
+fn a_soft_wrap_moves_the_tab_stop_with_it() {
+    let style = ahem(10.0, LineHeight::Normal);
+    // On its own line the tab sits at 20, not at the 120 of the unwrapped
+    // paragraph, so `b` lands on the second line's first stop.
+    let flow = committed(
+        container(style.clone()),
+        &[pre(&style, "aaaa aaaa aa\tb")],
+        Some(100.0),
+    );
+    assert_eq!(advances(&flow).len(), 2);
+    assert_close(advances(&flow)[1], 90.0);
+
+    // A tab whose shift overflows the line hangs at its end like a space,
+    // and what follows it wraps to the start of the next line.
+    let flow = committed(
+        container(style.clone()),
+        &[pre(&style, "aaaa aaaa\tb")],
+        Some(100.0),
+    );
+    assert_eq!(advances(&flow).len(), 2);
+    assert_close(advances(&flow)[1], 10.0);
+}
+
+#[test]
+fn preserved_spaces_are_kept_and_hang_at_a_soft_wrap() {
+    let style = ahem(10.0, LineHeight::Normal);
+    let flow = committed(container(style.clone()), &[pre(&style, "    x")], None);
+    assert_advances(&flow, &[50.0]);
+
+    // The preserved spaces stay on the first line; the one that overflows
+    // the measure hangs past it rather than wrapping.
+    let flow = committed(
+        container(style.clone()),
+        &[pre(&style, "aa  bb")],
+        Some(30.0),
+    );
+    assert_eq!(advances(&flow).len(), 2);
+    assert_close(advances(&flow)[1], 20.0);
+
+    // `nowrap` takes the wrap opportunity away: one line.
+    let flow = committed(
+        container(style.clone()),
+        &[styled(
+            &style,
+            "aa  bb",
+            WhiteSpaceCollapse::Preserve,
+            BreakStyle {
+                text_wrap: TextWrap::NoWrap,
+                ..BreakStyle::default()
+            },
+        )],
+        Some(30.0),
+    );
+    assert_advances(&flow, &[60.0]);
+}
+
+#[test]
+fn a_preserved_break_is_forced_and_keeps_the_indentation_after_it() {
+    let style = ahem(10.0, LineHeight::Normal);
+    let flow = committed(container(style.clone()), &[pre(&style, "a  \n  b")], None);
+    assert_eq!(advances(&flow).len(), 2);
+    assert_close(advances(&flow)[1], 30.0);
+
+    // A preserved space before the break keeps the break, wrapping or not.
+    for text_wrap in [TextWrap::Wrap, TextWrap::NoWrap] {
+        let flow = committed(
+            container(style.clone()),
+            &[styled(
+                &style,
+                "a \nb",
+                WhiteSpaceCollapse::Preserve,
+                BreakStyle {
+                    text_wrap,
+                    ..BreakStyle::default()
+                },
+            )],
+            Some(200.0),
+        );
+        assert_eq!(advances(&flow).len(), 2, "{text_wrap:?}");
+    }
+}
+
+#[test]
+fn a_preserved_newline_that_ends_the_text_opens_no_line() {
+    // css-text-3: a preserved newline that ends the text opens no line box,
+    // unlike a Lynx `<text>`, which shows an empty last line.
+    let style = ahem(10.0, LineHeight::Normal);
+    let flow = committed(
+        container(style.clone()),
+        &[styled(
+            &style,
+            "aaa\n",
+            WhiteSpaceCollapse::PreserveBreaks,
+            BreakStyle::default(),
+        )],
+        None,
+    );
+    assert_eq!(flow.line_geometry().len(), 1);
 }

@@ -41,11 +41,10 @@ mod truncate;
 use core::fmt;
 use core::num::NonZeroU32;
 
-use parley::{AlignmentOptions, ContentWidths, IndentOptions, Layout, PositionedLayoutItem};
+use parley::{AlignmentOptions, ContentWidths, Layout, PositionedLayoutItem};
 pub use style::{BlockStyle, TextOverflow};
 use truncate::{CutPlan, OverflowCut, Tail};
 
-use super::paragraph::content::WhiteSpaceProcessing;
 use super::paragraph::memo::{BreakMemo, Retained};
 use super::paragraph::shape::{self, NaturalLine, ShapeSpan};
 use super::paragraph::style::resolve_alignment;
@@ -54,8 +53,8 @@ pub use super::paragraph::{
     TextAlign, TextIndent, TextRunItem, TextWrap, VerticalAlign, WhiteSpaceCollapse, WordBreak,
 };
 use super::paragraph::{
-    Flow, IndentKeywords, LineGeometry, NaturalBreak, OwnedItem, Paragraph, RunBreaking,
-    parley_boxes, position, sized_box,
+    Flow, LineGeometry, NaturalBreak, OwnedItem, Paragraph, RunBreaking, parley_boxes, position,
+    sized_box,
 };
 use crate::geometry::{Point, Size};
 use crate::style::TextBrush;
@@ -81,6 +80,10 @@ pub enum SourceItem {
 /// A range covers the line's visible content only: the collapsed whitespace
 /// a soft wrap consumed belongs to no line, so consecutive ranges can have a
 /// gap, matching the web reference's rect-derived ranges.
+///
+/// A verbatim paragraph whose text ends with a newline reports one more
+/// line, empty, as Android's `StaticLayout` does: `source_start ==
+/// source_end ==` the source length, with the height of the line before it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LineInfo {
     pub source_start: u32,
@@ -204,14 +207,22 @@ impl TextBlock {
         let paragraph = Paragraph::new(
             context,
             RunBreaking::Uniform(block_style.breaking()),
-            WhiteSpaceProcessing::CssKeepingLeadingSpace,
+            block_style.processing(true),
             items,
             SourceItem::Content,
         );
         let flow = &paragraph.content;
-        let truncation = truncation.map(|items| TruncationFlow {
-            flow: Flow::build(items, WhiteSpaceProcessing::CssKeepingLeadingSpace),
-            natural_width: None,
+        let truncation = truncation.map(|items| {
+            let mut flow = Flow::build(items, block_style.processing(false));
+            flow.measure_space_runs(
+                context,
+                RunBreaking::Uniform(block_style.breaking()),
+                SourceItem::Truncation,
+            );
+            TruncationFlow {
+                flow,
+                natural_width: None,
+            }
         });
         debug_assert!(
             {
@@ -247,9 +258,11 @@ impl TextBlock {
     ///
     /// Sound only for values parley does not shape from: alignment and
     /// direction are applied after breaking, and truncation is decided from a
-    /// finished layout. A font, a letter-spacing or a word-break change is a
-    /// different paragraph and needs a new block — the host decides which it
-    /// has, because it is the one holding the old style to compare.
+    /// finished layout. A font, a letter-spacing, a word-break, a
+    /// `text_wrap` or a `verbatim` change is a different paragraph and needs a
+    /// new block — the last two choose the white-space processing the text
+    /// was normalized with. The host decides which it has, because it is the
+    /// one holding the old style to compare.
     ///
     /// Invalidates the break memo, since `text-align` moves line offsets and
     /// `max_lines` moves the reported size.
@@ -413,20 +426,25 @@ impl TextBlock {
             .map(|entry| *self.paragraph.content.box_spec(entry.item))
             .collect();
         // Truncation content is not shown when nothing truncates; its boxes
-        // still report an outcome so a host can drive their visibility.
+        // still report an outcome so a host can drive their visibility, as do
+        // the boxes a `nowrap` verbatim paragraph dropped after its first
+        // newline.
         let hidden = self
-            .truncation
-            .iter()
-            .flat_map(|part| part.flow.block.boxes.iter())
-            .map(|entry| PlacedBox::Hidden {
-                id: self
-                    .truncation
-                    .as_ref()
-                    .expect("iterating this part")
-                    .flow
-                    .box_spec(entry.item)
-                    .id,
-            })
+            .dropped_boxes()
+            .chain(
+                self.truncation
+                    .iter()
+                    .flat_map(|part| part.flow.block.boxes.iter())
+                    .map(|entry| PlacedBox::Hidden {
+                        id: self
+                            .truncation
+                            .as_ref()
+                            .expect("iterating this part")
+                            .flow
+                            .box_spec(entry.item)
+                            .id,
+                    }),
+            )
             .collect();
         let (lines, boxes, size, first_baseline) = assemble(
             &self.paragraph.natural,
@@ -742,14 +760,30 @@ impl TextBlock {
         let mut sources = Vec::new();
         let mut display = shape::shape(context, &text, &spans, boxes, &mut sources);
         drop(spans);
-        display.set_text_indent(indent, IndentOptions::default());
+        // The natural layout's indent rule, so every visible line keeps the
+        // indent it was broken with.
+        display.set_text_indent(indent, BlockStyle::INDENT_KEYWORDS.options());
         let limit = u32::try_from(visible).expect("line count fits u32");
         shape::break_clamped(&mut display, width, Some(limit));
         (display, sources, slots)
     }
 
-    /// The `Hidden` entries: main boxes at or past the cut, plus the whole
-    /// truncation content when it is not shown.
+    /// The boxes a `nowrap` verbatim paragraph dropped after its first
+    /// newline: content with a source unit and no place in the text.
+    fn dropped_boxes(&self) -> impl Iterator<Item = PlacedBox> + '_ {
+        let content = &self.paragraph.content;
+        content
+            .block
+            .dropped_boxes
+            .iter()
+            .map(|&item| PlacedBox::Hidden {
+                id: content.box_spec(item).id,
+            })
+    }
+
+    /// The `Hidden` entries: main boxes at or past the cut, the boxes a
+    /// `nowrap` verbatim paragraph dropped, plus the whole truncation content
+    /// when it is not shown.
     fn hidden_boxes(&self, plan: &CutPlan) -> Vec<PlacedBox> {
         let mut hidden = Vec::new();
         for entry in &self.paragraph.content.block.boxes {
@@ -759,6 +793,7 @@ impl TextBlock {
                 });
             }
         }
+        hidden.extend(self.dropped_boxes());
         if !plan.truncation_visible
             && let Some(part) = &self.truncation
         {
@@ -902,15 +937,17 @@ impl Retained for TextBlock {
             RunBreaking::Uniform(self.style.breaking()),
             constraint,
             self.style.max_lines.map(NonZeroU32::get),
-            IndentKeywords::default(),
+            BlockStyle::INDENT_KEYWORDS,
         );
 
         // Whether content remains past the committed lines is a unit-space
         // fact, never the breaker's: parley reports itself unfinished while
-        // only a renderless final line is pending.
+        // only a renderless final line is pending. What a `nowrap` verbatim
+        // paragraph dropped after its first newline is not content that
+        // remains: native removes it before laying the text out.
         let more_content = natural_lines
             .last()
-            .is_some_and(|line| line.consumed_end < self.paragraph.content.block.map.source_len());
+            .is_some_and(|line| line.consumed_end < self.paragraph.content.block.map.shown_len());
 
         let truncation_width = if more_content && self.truncation.is_some() {
             Some(self.measure_truncation(context))
@@ -986,9 +1023,12 @@ fn assemble(
     let mut used_fallback = false;
 
     for (index, &natural_line) in natural_lines.iter().enumerate().take(visible) {
+        // A blank line stands only where the natural line is the empty last
+        // line a verbatim paragraph keeps; anywhere else it is a truncated
+        // layout's, and the natural line supplies the metrics.
         let rendered = final_layout
             .get(index)
-            .filter(|line| !shape::is_blank_line(line));
+            .filter(|line| natural_line.is_empty() || !shape::is_blank_line(line));
         if rendered.is_none() {
             used_fallback = true;
         }
@@ -1169,45 +1209,43 @@ mod tests {
     }
 
     #[test]
-    fn preserved_tabs_reshape_only_when_a_break_moves_their_stop() {
+    fn tabs_reshape_only_when_a_break_moves_their_stop() {
         let mut context = text_context();
         let style = ahem_style();
+        // Unbroken, the tab starts at 40 and is 20 wide; wrapped at 25, `c`
+        // starts the second line and the tab at 10 is 10 wide.
         let items = [InlineItem::Run(TextRunItem {
-            text: "a\tb\tc\n\td",
+            text: "ab c\td",
             style: &style,
             white_space: WhiteSpaceCollapse::Preserve,
         })];
-        let nowrap = BlockStyle {
-            text_wrap: TextWrap::NoWrap,
-            ..BlockStyle::default()
-        };
-        let mut block = TextBlock::new(&mut context, nowrap, &items, None);
+        let mut block = TextBlock::new(&mut context, BlockStyle::default(), &items, None);
+        assert_eq!(
+            context.shape_count(),
+            1,
+            "the paragraph alone: a native stop measures no `0`",
+        );
+
+        block.commit(&mut context, BlockConstraint::new(Some(500.0), 0.0));
         assert_eq!(
             context.shape_count(),
             2,
-            "the paragraph, and one `0` for the run holding the tabs",
+            "one re-shape settles every tab of an unbroken paragraph",
         );
-
-        block.commit(&mut context, BlockConstraint::new(Some(50.0), 0.0));
-        assert_eq!(
-            context.shape_count(),
-            3,
-            "one re-shape settles every tab of an unwrapped paragraph",
-        );
-        block.commit(&mut context, BlockConstraint::new(Some(500.0), 0.0));
         block.commit(&mut context, BlockConstraint::new(None, 0.0));
-        assert_eq!(
-            context.shape_count(),
-            3,
-            "under nowrap no width moves a tab: the stops hold",
-        );
-        assert_eq!(block.break_count(), 3);
+        assert_eq!(context.shape_count(), 2, "no break, no tab moves");
 
-        block.commit(&mut context, BlockConstraint::new(None, 10.0));
+        block.commit(&mut context, BlockConstraint::new(Some(25.0), 0.0));
+        assert_eq!(context.shape_count(), 3, "the wrap moves the tab's stop");
+        block.commit(&mut context, BlockConstraint::new(Some(500.0), 0.0));
+        assert_eq!(context.shape_count(), 4, "and unwrapping moves it back");
+
+        block.commit(&mut context, BlockConstraint::new(Some(500.0), 10.0));
         assert_eq!(
             context.shape_count(),
             4,
-            "an indent moves the first line's tabs",
+            "a native stop counts from the text start after the indent",
         );
+        assert_eq!(block.break_count(), 5);
     }
 }

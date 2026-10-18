@@ -62,6 +62,24 @@
 /// those literals say the whole thing. Plain declarations, so author CSS still
 /// outranks the attribute the way it outranks every other UA rule.
 ///
+/// A `text`'s paragraph keeps its text verbatim, as every native Lynx backend
+/// does: no CSS
+/// white-space processing (`core/renderer/dom/fiber/raw_text_element.cc:16-46`
+/// stores the text as written, and Android `BaseTextShadowNode.java:494-498`,
+/// iOS `LynxBaseTextShadowNode.m:240-249` and textra
+/// `text_layout_textra.cc:569-575` hand it to the platform engine unchanged).
+/// Spaces, tabs and newlines all stay; tabs stop every 20px as Android's
+/// `Layout` does; a newline that ends the text adds an empty last line, as
+/// Android's `StaticLayout` does; only `white-space: nowrap` stops the
+/// wrapping, and then nothing after the first newline shows — native parses
+/// no other `white-space` keyword, so `pre` and the rest wrap. Every
+/// `display: -lynx-text` paragraph does this, so `<markdown>`'s shadow
+/// paragraphs, which are `-lynx-text` scopes too, keep their soft breaks as
+/// line breaks until they move to the standard inline formatting context — a
+/// known gap (`docs/tracking/deviations.md`). This is a ruled deviation from
+/// web-core, whose `x-text` hands its text to the browser's CSS white-space
+/// processing.
+///
 /// An `inline-truncation` is content wherever it is written *directly* inside
 /// a `text`, and generates no box anywhere else — the same scope web-core's
 /// `:scope > inline-truncation` query honours. It carries
@@ -652,6 +670,169 @@ mod tests {
             .non_inherited
             .get(&Name::from(name))
             .map_or_else(|| initial.to_owned(), |value| value.to_variable_value().css)
+    }
+
+    /// A wide Ahem `text` at 20px whose run a `raw-text` carries, laid out.
+    fn verbatim_paragraph(content: &str) -> (LynxDocument, dom::NodeId) {
+        const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
+        let mut document = document();
+        assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+        let text = child(
+            &mut document,
+            "text",
+            "width:400px;font-family:Ahem;font-size:20px;line-height:21px",
+        );
+        append_run(&mut document, text, content);
+        document.layout();
+        (document, text)
+    }
+
+    fn ink(document: &LynxDocument, text: dom::NodeId) -> (f32, f32) {
+        let size = document.text_block_size(text).expect("paragraph");
+        (size.width, size.height)
+    }
+
+    /// Every native backend hands a `text`'s string to its platform engine
+    /// unchanged (`raw_text_element.cc:16-46`, Android
+    /// `BaseTextShadowNode.java:494-498`, iOS `LynxBaseTextShadowNode.m:240-249`),
+    /// and so does every `-lynx-text` paragraph: leading spaces and space runs
+    /// stay, every newline breaks the line and the spaces after it stay,
+    /// trailing spaces hang.
+    #[test]
+    fn a_text_keeps_its_white_space_verbatim() {
+        let (document, text) = verbatim_paragraph("  a   b  ");
+        assert_eq!(ink(&document, text), (7.0 * 20.0, 21.0));
+
+        let (document, text) = verbatim_paragraph("ab\n  cd");
+        assert_eq!(
+            ink(&document, text),
+            (4.0 * 20.0, 2.0 * 21.0),
+            "the raw-text carrier's newline breaks the line; its indent stays"
+        );
+    }
+
+    /// A nested run's own `white-space-collapse` is not read: native parses no
+    /// such property, so a nested `text` or `inline-text` run is kept verbatim
+    /// like the root's own, whatever it declares.
+    #[test]
+    fn a_nested_run_is_kept_verbatim_whatever_its_white_space() {
+        let (mut document, text) = verbatim_paragraph("a");
+        let nested = element_under(&mut document, text, "text", "white-space: normal");
+        append_run(&mut document, nested, "  b");
+        let inline = element_under(&mut document, text, "inline-text", "white-space: normal");
+        append_run(&mut document, inline, "  c");
+        document.layout();
+        assert_eq!(ink(&document, text), (7.0 * 20.0, 21.0));
+    }
+
+    /// A `text` attribute's generated run is verbatim too: its newline is a
+    /// forced break, as the attribute form is on every native backend.
+    #[test]
+    fn a_text_attribute_s_newline_breaks_the_line() {
+        let (mut document, text) = verbatim_paragraph("");
+        document.set_attribute(text, "text", "ab\ncd");
+        document.layout();
+        assert_eq!(ink(&document, text), (2.0 * 20.0, 2.0 * 21.0));
+    }
+
+    /// One computed longhand of `element`, as CSS text.
+    fn computed(document: &LynxDocument, element: dom::NodeId, property: &str) -> String {
+        use dom::stylo::properties::PropertyId;
+
+        let id = PropertyId::parse_enabled_for_all_content(property)
+            .unwrap_or_else(|()| panic!("unknown property `{property}`"));
+        let longhand = id
+            .as_shorthand()
+            .err()
+            .unwrap_or_else(|| panic!("`{property}` is a shorthand"));
+        style_of(document, element).computed_value_to_string(longhand)
+    }
+
+    /// Native parses `white-space` as `normal` or `nowrap` and drops every
+    /// other keyword (`enum_handler.cc:76-89`), so on a `text` only `nowrap`
+    /// stops the wrapping and shows nothing after the first newline (Android
+    /// `TextRenderer.java:850-867`); `pre`, `pre-wrap`, `pre-line` and
+    /// `break-spaces` wrap at the box width with every line shown, as
+    /// `normal` does. Spaces and newlines are kept under every keyword.
+    #[test]
+    fn only_nowrap_stops_a_text_from_wrapping() {
+        // Fifteen `a`, a space, ten `b`, a newline, `cc`: at 400px (twenty
+        // em squares) the first line ends after the `a`s.
+        const CONTENT: &str = "aaaaaaaaaaaaaaa bbbbbbbbbb\ncc";
+        for (keyword, wrap_mode, collapse, expected) in [
+            ("normal", "wrap", "collapse", (15.0 * 20.0, 3.0 * 21.0)),
+            ("pre", "nowrap", "preserve", (15.0 * 20.0, 3.0 * 21.0)),
+            ("pre-wrap", "wrap", "preserve", (15.0 * 20.0, 3.0 * 21.0)),
+            (
+                "pre-line",
+                "wrap",
+                "preserve-breaks",
+                (15.0 * 20.0, 3.0 * 21.0),
+            ),
+            (
+                "break-spaces",
+                "wrap",
+                "break-spaces",
+                (15.0 * 20.0, 3.0 * 21.0),
+            ),
+            ("nowrap", "nowrap", "collapse", (26.0 * 20.0, 21.0)),
+        ] {
+            let (mut document, text) = verbatim_paragraph(CONTENT);
+            document.set_inline_style_property(text, "white-space", keyword);
+            document.layout();
+            assert_eq!(
+                computed(&document, text, "text-wrap-mode"),
+                wrap_mode,
+                "{keyword}"
+            );
+            assert_eq!(
+                computed(&document, text, "white-space-collapse"),
+                collapse,
+                "{keyword}"
+            );
+            assert_eq!(ink(&document, text), expected, "{keyword}");
+        }
+    }
+
+    /// Changing `white-space` between `nowrap` and `pre` keeps
+    /// `text-wrap-mode: nowrap` and changes only the collapse half, which is
+    /// what tells them apart on a `text`: the paragraph is rebuilt either way.
+    #[test]
+    fn switching_nowrap_to_pre_shows_every_line_again() {
+        let (mut document, text) = verbatim_paragraph("ab\ncdef");
+        for (keyword, expected) in [
+            ("nowrap", (2.0 * 20.0, 21.0)),
+            ("pre", (4.0 * 20.0, 2.0 * 21.0)),
+            ("nowrap", (2.0 * 20.0, 21.0)),
+        ] {
+            document.set_inline_style_property(text, "white-space", keyword);
+            document.layout();
+            assert_eq!(ink(&document, text), expected, "{keyword}");
+        }
+    }
+
+    /// A newline that ends a `text`'s text adds an empty last line, as
+    /// Android's `StaticLayout` does and Lynx measures
+    /// (`TextRenderer.java:720`) — wrapped or not, written in a carrier or in
+    /// the `text` attribute. Under `nowrap` it adds nothing: the text already
+    /// ends at its first newline.
+    #[test]
+    fn a_newline_that_ends_a_text_adds_an_empty_line() {
+        let (document, text) = verbatim_paragraph("ab\n");
+        assert_eq!(ink(&document, text), (2.0 * 20.0, 2.0 * 21.0));
+
+        let (document, text) = verbatim_paragraph("aaaaaaaaaaaaaaa bbbbbbbbbb\n");
+        assert_eq!(ink(&document, text), (15.0 * 20.0, 3.0 * 21.0));
+
+        let (mut document, text) = verbatim_paragraph("");
+        document.set_attribute(text, "text", "ab\n");
+        document.layout();
+        assert_eq!(ink(&document, text), (2.0 * 20.0, 2.0 * 21.0));
+
+        let (mut document, text) = verbatim_paragraph("ab\n");
+        document.set_inline_style_property(text, "white-space", "nowrap");
+        document.layout();
+        assert_eq!(ink(&document, text), (2.0 * 20.0, 21.0));
     }
 
     /// `tail-color-convert` is a native BOOL whose default is off, so only the

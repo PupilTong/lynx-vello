@@ -30,6 +30,18 @@
 //!   in at a cut, not at a position of its own.
 //! - A tab is shaped as a space, so `text-align: justify` stretches it like one; stops are decided
 //!   before alignment.
+//!
+//! A native Lynx `<text>` places its stops differently ([`TabStops::Native`]):
+//! Android's `Layout` puts one every `TAB_INCREMENT` = 20px and advances a tab
+//! to the first stop strictly past its position, with no minimum shift (AOSP
+//! `Layout.java:3714`, minikin's `nextTab`), by the exact formula
+//! [`native_tab_shift`] carries. The position is measured from the start of
+//! the line's text, after the leading indent: Lynx applies `text-indent` as
+//! a `LeadingMarginSpan.Standard(indent, 0)`
+//! (`lynx/platform/android/lynx_android/src/main/java/com/lynx/tasm/behavior/shadow/text/
+//! TextShadowNode.java:295-298`), a margin outside the text `TextLine` measures a tab's position
+//! in, so an indented line's stops sit at the indent plus multiples of 20. iOS and
+//! Harmony leave tabs to their platform text engines; this follows Android.
 
 use parley::{BreakReason, Layout, PositionedLayoutItem};
 
@@ -39,6 +51,20 @@ use crate::style::TextBrush;
 /// The `tab-size` every preserved tab uses: the property's initial value, in
 /// spaces.
 pub(in crate::text) const TAB_SIZE: f32 = 8.0;
+
+/// Android's tab stop interval, in px: `Layout.TAB_INCREMENT`.
+pub(in crate::text) const NATIVE_TAB_INCREMENT: f32 = 20.0;
+
+/// Where a paragraph's tab stops are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::text) enum TabStops {
+    /// css-text-3: every [`TAB_SIZE`] space advances, a stop closer than
+    /// `0.5ch` passed.
+    Css,
+    /// Native Lynx: every [`NATIVE_TAB_INCREMENT`] px, the first stop strictly
+    /// past the tab's position.
+    Native,
+}
 
 /// How many times one layout re-shapes to settle its tab advances.
 ///
@@ -74,6 +100,14 @@ pub(in crate::text) fn advance_to_stop(x: f32, size: f32, min: f32) -> f32 {
     if shift < min { shift + size } else { shift }
 }
 
+/// The shift from `h`, a position measured from the start of the line's text,
+/// to Android's next tab stop: `nextTab(h) = floor((h + 20) / 20) * 20`, which
+/// is strictly greater than `h`. No tolerance: a position a rounding error
+/// short of a stop moves by that error, as Android's float arithmetic does.
+pub(in crate::text) fn native_tab_shift(h: f32) -> f32 {
+    ((h + NATIVE_TAB_INCREMENT) / NATIVE_TAB_INCREMENT).floor() * NATIVE_TAB_INCREMENT - h
+}
+
 /// The extra spacing each preserved tab needs at the positions the committed
 /// lines give it, or `None` when every tab already has what it needs.
 ///
@@ -89,6 +123,7 @@ pub(in crate::text) fn resolve(
     min: &[f32],
     indent: f32,
     keywords: IndentKeywords,
+    stops: TabStops,
 ) -> Option<Vec<f32>> {
     if tabs.is_empty() {
         return None;
@@ -97,10 +132,14 @@ pub(in crate::text) fn resolve(
     debug_assert_eq!(tabs.len(), min.len());
     let mut wanted = spacing.to_vec();
     for (index, line) in layout.lines().enumerate() {
-        // An indented line starts at the `text-indent` parley applied to it;
-        // stops are measured from the content edge, so the indent counts
-        // toward the position.
-        let mut x = applied_indent(layout, index, indent, keywords);
+        // An indented line starts at the `text-indent` parley applied to it.
+        // css-text-3 measures stops from the content edge, so the indent
+        // counts toward the position; Android measures them from the start
+        // of the line's text, after its leading margin, so it does not.
+        let mut x = match stops {
+            TabStops::Css => applied_indent(layout, index, indent, keywords),
+            TabStops::Native => 0.0,
+        };
         // A shaping run is split into one glyph run per style; its clusters
         // are walked once, from its first glyph run.
         let mut walked_run = None;
@@ -120,7 +159,10 @@ pub(in crate::text) fn resolve(
                             continue;
                         };
                         let space = cluster.advance() - spacing[tab];
-                        let shift = advance_to_stop(x, TAB_SIZE * space, min[tab]);
+                        let shift = match stops {
+                            TabStops::Css => advance_to_stop(x, TAB_SIZE * space, min[tab]),
+                            TabStops::Native => native_tab_shift(x),
+                        };
                         wanted[tab] = shift - space;
                         x += shift;
                     }
@@ -183,6 +225,19 @@ mod tests {
         assert_eq!(advance_to_stop(75.0, 80.0, 5.0), 5.0);
         // A rounding error short of a stop is on the stop.
         assert_eq!(advance_to_stop(80.0 - 1.0e-6, 80.0, 5.0), 80.0);
+    }
+
+    #[test]
+    fn a_native_tab_moves_to_the_next_multiple_of_twenty_strictly_past() {
+        assert_eq!(native_tab_shift(0.0), 20.0);
+        assert_eq!(native_tab_shift(10.0), 10.0);
+        // On a stop: the next one.
+        assert_eq!(native_tab_shift(20.0), 20.0);
+        assert_eq!(native_tab_shift(35.0), 5.0);
+        // No tolerance: just short of a stop moves to that stop, by the
+        // remainder.
+        let short = 20.0 - 1.0e-3;
+        assert_eq!(native_tab_shift(short), 20.0 - short);
     }
 
     #[test]

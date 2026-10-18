@@ -408,7 +408,8 @@ impl TextContainerStyle for ParagraphStyle<'_> {}
 impl LynxTextStyle for ParagraphStyle<'_> {}
 
 /// Stylo gives custom-property changes repaint damage. Compare the effective
-/// values the paragraph actually consumes to account for their layout dependency.
+/// values the paragraph actually consumes to account for their layout
+/// dependency: the two limits.
 pub(crate) fn paragraph_limits_changed(old: &ComputedValues, new: &ComputedValues) -> bool {
     if old.custom_properties().non_inherited == new.custom_properties().non_inherited {
         return false;

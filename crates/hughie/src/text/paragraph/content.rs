@@ -19,6 +19,18 @@
 //! source units survive — never how they are counted. A preserved tab is
 //! emitted as a space and listed in [`NormalizedBlock::tabs`]; its advance is
 //! the tab stop's business (`super::tab`), not the glyph's.
+//!
+//! [`WhiteSpaceProcessing::Verbatim`] is the native Lynx `<text>`: no run's
+//! `white-space-collapse` is read, every run is processed as `preserve`, and
+//! with `first_line_only` everything after the first forced break is dropped
+//! from the text while its source units stay counted. A run of two or more
+//! spaces in one run item is emitted as one space byte standing for all of
+//! them ([`NormalizedBlock::space_runs`]), which the shaper widens to their
+//! full advance: parley hangs one overflowing space cluster at a line end and
+//! starts the next line with the rest, where native hangs the whole run. The
+//! spaces directly before a forced break are shaped with no advance, because
+//! a space that overflows there would hang, break the line, and leave the
+//! newline a line of its own.
 
 use core::ops::Range;
 
@@ -73,11 +85,19 @@ pub(in crate::text) enum WhiteSpaceProcessing {
     /// paragraph: a collapsible whitespace sequence there is removed, as it
     /// is after a preserved break.
     Css,
-    /// css-text-3 §4.1 per run, except that a collapsible whitespace
-    /// sequence at the start of the paragraph is kept as one space — what
-    /// the Lynx `<text>` block does today (gap C2 in
-    /// `docs/tracking/web-text-test-replication.md`).
-    CssKeepingLeadingSpace,
+    /// No white-space processing: the native Lynx `<text>`. Every run is
+    /// processed as `preserve` whatever its own `white-space-collapse` —
+    /// native reads no such property — so every space, tab and carriage
+    /// return is kept and every newline is a forced break; a newline that
+    /// ends the text is followed by an empty last line
+    /// ([`SourceMap::final_empty_line`]).
+    ///
+    /// `first_line_only` is native's `white-space: nowrap`: the text ends
+    /// after the first newline, which is kept so a paragraph whose first
+    /// character is that newline still shows its one empty line. What
+    /// follows is dropped — counted in source units, emitted nowhere, and an
+    /// atomic box in it listed in [`NormalizedBlock::dropped_boxes`].
+    Verbatim { first_line_only: bool },
 }
 
 /// Whitespace-normalized paragraph content with its source map.
@@ -100,6 +120,28 @@ pub(in crate::text) struct NormalizedBlock {
     /// `text`, a cluster of its own, whose advance the block widens to the
     /// next tab stop at break time.
     pub(in crate::text) tabs: Vec<u32>,
+    /// The box items a `first_line_only` processing dropped, in order: they
+    /// have a source unit and no place in the text.
+    pub(in crate::text) dropped_boxes: Vec<u32>,
+    /// Every space byte a verbatim processing shapes with an advance of its
+    /// own, ascending by byte: each run of two or more spaces emitted as one
+    /// byte, and each space directly before a forced break.
+    pub(in crate::text) space_runs: Vec<SpaceRun>,
+}
+
+/// One space byte with an advance of its own, a cluster by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::text) struct SpaceRun {
+    pub(in crate::text) byte: u32,
+    /// The source spaces the byte stands for. Above one, the shaper widens
+    /// the byte to the advance of all of them, so a line end hangs the whole
+    /// run as one cluster.
+    pub(in crate::text) count: u32,
+    /// Whether the byte sits directly before a forced break, with nothing
+    /// but spaces between: it hangs at its line's end whatever its width,
+    /// so it is shaped with no advance and never overflows onto a line of
+    /// its own ahead of the break.
+    pub(in crate::text) before_break: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +163,19 @@ pub(in crate::text) struct BoxAt {
 pub(in crate::text) struct SourceMap {
     segments: Vec<Segment>,
     source_len: u32,
+    /// Where the source content the text shows ends: `source_len`, or
+    /// earlier where a `first_line_only` processing dropped the rest. The
+    /// segments cover `0..shown_len`.
+    shown_len: u32,
+    /// Whether every space at a line's end hangs outside the line's content,
+    /// preserved or not: a verbatim paragraph's, as native Lynx's line extent
+    /// excludes trailing whitespace (Android `Layout.getLineMax`).
+    hanging_spaces: bool,
+    /// Whether a newline that ends the text is followed by an empty last
+    /// line: a verbatim paragraph's without the `nowrap` cut, as Android's
+    /// `StaticLayout` ends such text with an empty line. Under the cut the
+    /// text ends at its first newline by construction, and shows one line.
+    final_empty_line: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -143,7 +198,8 @@ enum SegmentKind {
     /// length — itself, or a space for a preserved tab or carriage return —
     /// so intra-segment offsets are recomputed from the normalized text.
     Verbatim,
-    /// A whitespace span: several source units emitting zero or one byte.
+    /// A whitespace span: several source units emitting zero or one byte —
+    /// a collapsed span, or a verbatim run of spaces.
     Collapsed,
     /// One source unit, zero bytes; `norm.start` is the box's byte index.
     Box,
@@ -152,6 +208,19 @@ enum SegmentKind {
 impl SourceMap {
     pub(in crate::text) const fn source_len(&self) -> u32 {
         self.source_len
+    }
+
+    /// Where the source content the text shows ends: [`Self::source_len`]
+    /// unless a `first_line_only` processing dropped what follows the first
+    /// forced break.
+    pub(in crate::text) const fn shown_len(&self) -> u32 {
+        self.shown_len
+    }
+
+    /// Whether a newline that ends the text is followed by an empty last
+    /// line rather than ending the paragraph, as css-text-3 has it.
+    pub(in crate::text) const fn final_empty_line(&self) -> bool {
+        self.final_empty_line
     }
 
     /// Source unit of a normalized byte offset used as a *start*: the unit
@@ -204,14 +273,15 @@ impl SourceMap {
     /// The end of `text[start..end]` with its trailing newlines and
     /// *collapsible* spaces dropped — the line-end whitespace that belongs to
     /// no line's content. A preserved space is content and stops the walk,
-    /// wherever it sits.
+    /// wherever it sits, except in a verbatim paragraph, where every space
+    /// at a line's end hangs as native Lynx hangs it.
     pub(in crate::text) fn visible_end(&self, text: &str, start: u32, end: u32) -> u32 {
         let mut visible = end;
         for (offset, character) in text[start as usize..end as usize].char_indices().rev() {
             let byte = start + u32::try_from(offset).expect("text fits u32");
             let trailing = match character {
                 '\n' => true,
-                ' ' => self.is_collapsed_byte(byte),
+                ' ' => self.hanging_spaces || self.is_collapsed_byte(byte),
                 _ => false,
             };
             if !trailing {
@@ -234,14 +304,15 @@ impl SourceMap {
     }
 
     /// Normalized byte of a source cut, or `None` when the cut lies at or
-    /// past the end of the source (nothing to cut).
+    /// past the end of the shown source (nothing to cut): past
+    /// [`Self::shown_len`] the text already ends.
     ///
     /// Snap rules: a unit inside a surrogate pair rounds down to the char
     /// start; a unit inside a collapsed span lands on the span's emitted
     /// byte; a unit on a box lands on the box's byte (cutting there hides
     /// the box).
     pub(in crate::text) fn unit_to_byte(&self, text: &str, unit: u32) -> Option<u32> {
-        if unit >= self.source_len {
+        if unit >= self.shown_len {
             return None;
         }
         let segment = self
@@ -308,6 +379,24 @@ struct Normalizer {
     /// paragraph start when the processing removes leading whitespace there.
     at_line_start: bool,
     tabs: Vec<u32>,
+    processing: WhiteSpaceProcessing,
+    /// Where a `first_line_only` processing stopped emitting: the source
+    /// unit after the first forced break. Everything from it on is counted
+    /// and dropped.
+    dropped_from: Option<u32>,
+    dropped_boxes: Vec<u32>,
+    /// The space a verbatim processing emitted last, while nothing else has
+    /// followed it: the head of a run the next space of the same item joins.
+    open_space: Option<OpenSpace>,
+    space_runs: Vec<SpaceRun>,
+}
+
+/// The last emitted space of a verbatim run, still open to more spaces.
+#[derive(Clone, Copy)]
+struct OpenSpace {
+    byte: u32,
+    unit: u32,
+    item: u32,
 }
 
 /// The sentinel handed to the segment-break predicate when the next content
@@ -328,6 +417,11 @@ pub(in crate::text) fn normalize(
         pending: None,
         at_line_start: processing == WhiteSpaceProcessing::Css,
         tabs: Vec::new(),
+        processing,
+        dropped_from: None,
+        dropped_boxes: Vec::new(),
+        open_space: None,
+        space_runs: Vec::new(),
     };
 
     let mut item_units = Vec::with_capacity(items.len());
@@ -345,9 +439,17 @@ pub(in crate::text) fn normalize(
 
 impl Normalizer {
     fn consume_run(&mut self, run: &TextRunItem<'_>, item: u32) {
-        let preserve_breaks = run.white_space != WhiteSpaceCollapse::Collapse;
-        let preserve_spaces = run.white_space == WhiteSpaceCollapse::Preserve;
+        let white_space = match self.processing {
+            WhiteSpaceProcessing::Verbatim { .. } => WhiteSpaceCollapse::Preserve,
+            WhiteSpaceProcessing::Css => run.white_space,
+        };
+        let preserve_breaks = white_space != WhiteSpaceCollapse::Collapse;
+        let preserve_spaces = white_space == WhiteSpaceCollapse::Preserve;
         for character in run.text.chars() {
+            if self.dropped_from.is_some() {
+                self.units += u32::try_from(character.len_utf16()).expect("1 or 2");
+                continue;
+            }
             match character {
                 '\n' if preserve_breaks => self.preserved_break(character, item),
                 '\n' => self.queue_segment_break(item),
@@ -363,7 +465,15 @@ impl Normalizer {
     }
 
     fn consume_box(&mut self, item: u32) {
+        if self.dropped_from.is_some() {
+            self.units += 1;
+            self.dropped_boxes.push(item);
+            return;
+        }
         self.flush_pending(OBJECT_REPLACEMENT);
+        // A box takes no byte, so the space before it must close here: a
+        // space after the box starts a run of its own.
+        self.open_space = None;
         let byte = self.byte_len();
         self.boxes.push(BoxAt {
             byte,
@@ -427,11 +537,70 @@ impl Normalizer {
     fn preserved_space(&mut self, character: char, item: u32) {
         debug_assert_eq!(character.len_utf16(), 1);
         self.flush_pending(' ');
+        if character == ' ' && matches!(self.processing, WhiteSpaceProcessing::Verbatim { .. }) {
+            if let Some(open) = self.open_space
+                && open.item == item
+                && open.byte + 1 == self.byte_len()
+            {
+                self.join_space_run(open);
+                return;
+            }
+            self.open_space = Some(OpenSpace {
+                byte: self.byte_len(),
+                unit: self.units,
+                item,
+            });
+        }
         if character == '\t' {
             self.tabs.push(self.byte_len());
         }
         self.emit_verbatim(' ', item);
         self.at_line_start = false;
+    }
+
+    /// One more source space joins the open run: no byte is emitted, and the
+    /// run's one byte becomes a [`SegmentKind::Collapsed`] segment covering
+    /// every space of it, split off the verbatim segment it was emitted in.
+    fn join_space_run(&mut self, open: OpenSpace) {
+        let last = self
+            .segments
+            .last_mut()
+            .expect("the open space emitted a segment");
+        debug_assert_eq!(last.norm.end, open.byte + 1);
+        if last.kind == SegmentKind::Verbatim {
+            if last.norm.start == open.byte {
+                last.kind = SegmentKind::Collapsed;
+            } else {
+                last.norm.end = open.byte;
+                last.units.end = open.unit;
+                self.segments.push(Segment {
+                    norm: Range2 {
+                        start: open.byte,
+                        end: open.byte + 1,
+                    },
+                    units: Range2 {
+                        start: open.unit,
+                        end: open.unit + 1,
+                    },
+                    kind: SegmentKind::Collapsed,
+                });
+            }
+            self.space_runs.push(SpaceRun {
+                byte: open.byte,
+                count: 1,
+                before_break: false,
+            });
+        }
+        self.units += 1;
+        self.segments
+            .last_mut()
+            .expect("the run's segment was just ensured")
+            .units
+            .end = self.units;
+        self.space_runs
+            .last_mut()
+            .expect("the run was recorded with its first joining space")
+            .count += 1;
     }
 
     /// A preserved newline drops the open whitespace span and emits itself.
@@ -444,8 +613,45 @@ impl Normalizer {
         if let Some(pending) = self.pending.take() {
             self.close_collapsed(pending.unit_start, 0);
         }
+        if matches!(self.processing, WhiteSpaceProcessing::Verbatim { .. }) {
+            self.mark_spaces_before_break();
+        }
         self.emit_verbatim(character, item);
         self.at_line_start = true;
+        if self.processing
+            == (WhiteSpaceProcessing::Verbatim {
+                first_line_only: true,
+            })
+        {
+            self.dropped_from = Some(self.units);
+        }
+    }
+
+    /// Marks every space byte directly before the break about to be emitted
+    /// — back to the first other character, tab or box — as
+    /// [`SpaceRun::before_break`]. A tab keeps the advance the tab pass gives
+    /// it.
+    fn mark_spaces_before_break(&mut self) {
+        let mut byte = self.byte_len();
+        while byte > 0
+            && self.text.as_bytes()[byte as usize - 1] == b' '
+            && self.tabs.last() != Some(&(byte - 1))
+            && self.boxes.last().is_none_or(|entry| entry.byte != byte)
+        {
+            byte -= 1;
+            let index = self.space_runs.partition_point(|run| run.byte < byte);
+            match self.space_runs.get_mut(index) {
+                Some(run) if run.byte == byte => run.before_break = true,
+                _ => self.space_runs.insert(
+                    index,
+                    SpaceRun {
+                        byte,
+                        count: 1,
+                        before_break: true,
+                    },
+                ),
+            }
+        }
     }
 
     /// Resolves the open whitespace span against the next piece of content.
@@ -598,9 +804,17 @@ impl Normalizer {
             map: SourceMap {
                 segments: self.segments,
                 source_len: self.units,
+                shown_len: self.dropped_from.unwrap_or(self.units),
+                hanging_spaces: matches!(self.processing, WhiteSpaceProcessing::Verbatim { .. }),
+                final_empty_line: self.processing
+                    == (WhiteSpaceProcessing::Verbatim {
+                        first_line_only: false,
+                    }),
             },
             item_units,
             tabs: self.tabs,
+            dropped_boxes: self.dropped_boxes,
+            space_runs: self.space_runs,
         }
     }
 }
@@ -641,13 +855,9 @@ mod tests {
     use super::*;
     use crate::geometry::Size;
 
-    /// The Lynx block's processing, which every test below that names no
-    /// processing was written against.
+    /// css-text-3 processing, which every test below that names no processing
+    /// was written against. A `<text>` takes [`WhiteSpaceProcessing::Verbatim`].
     fn normalize(items: &[InlineItem<'_>]) -> NormalizedBlock {
-        super::normalize(items, WhiteSpaceProcessing::CssKeepingLeadingSpace)
-    }
-
-    fn css(items: &[InlineItem<'_>]) -> NormalizedBlock {
         super::normalize(items, WhiteSpaceProcessing::Css)
     }
 
@@ -1014,31 +1224,108 @@ mod tests {
         let style = RunStyle::default();
         // Spaces, a tab and a segment break, split across two runs.
         let items = [run(&style, " \t"), run(&style, "\n  a b ")];
-        let block = css(&items);
+        let block = normalize(&items);
         assert_eq!(block.text, "a b ");
         // Every source unit is still counted, the removed ones included.
         assert_eq!(block.map.source_len(), 9);
         assert_eq!(block.map.byte_to_unit(&block.text, 0), 5);
-
-        let kept = normalize(&items);
-        assert_eq!(kept.text, " a b ", "the Lynx block keeps one space");
     }
 
     #[test]
     fn css_processing_keeps_preserved_spaces_at_the_paragraph_start() {
         let style = RunStyle::default();
-        assert_eq!(css(&[pre(&style, "  a")]).text, "  a");
+        assert_eq!(normalize(&[pre(&style, "  a")]).text, "  a");
         // A collapsible span before a preserved one is still at the line
         // start, and goes.
-        assert_eq!(css(&[run(&style, " "), pre(&style, " a")]).text, " a");
+        assert_eq!(normalize(&[run(&style, " "), pre(&style, " a")]).text, " a");
     }
 
     #[test]
     fn css_processing_removes_whitespace_after_a_preserved_break_as_before() {
         let style = RunStyle::default();
-        assert_eq!(css(&[raw(&style, "a\n  b")]).text, "a\nb");
-        assert_eq!(css(&[raw(&style, "a\n"), run(&style, "  b")]).text, "a\nb");
+        assert_eq!(normalize(&[raw(&style, "a\n  b")]).text, "a\nb");
+        assert_eq!(
+            normalize(&[raw(&style, "a\n"), run(&style, "  b")]).text,
+            "a\nb"
+        );
         // Only whitespace: nothing at all.
-        assert!(css(&[run(&style, " \n\t ")]).text.is_empty());
+        assert!(normalize(&[run(&style, " \n\t ")]).text.is_empty());
+    }
+
+    fn verbatim(items: &[InlineItem<'_>]) -> NormalizedBlock {
+        super::normalize(
+            items,
+            WhiteSpaceProcessing::Verbatim {
+                first_line_only: false,
+            },
+        )
+    }
+
+    #[test]
+    fn verbatim_processing_emits_a_run_of_spaces_as_one_byte() {
+        let style = RunStyle::default();
+        let block = verbatim(&[run(&style, "a   b c")]);
+        assert_eq!(block.text, "a b c");
+        assert_eq!(
+            block.space_runs,
+            [SpaceRun {
+                byte: 1,
+                count: 3,
+                before_break: false,
+            }]
+        );
+        let (text, map) = (&block.text, &block.map);
+        assert_eq!(map.source_len(), 7);
+        // The run's byte starts at its first space and ends after its last.
+        assert_eq!(map.byte_to_unit(text, 1), 1);
+        assert_eq!(map.unit_before(text, 2), 4);
+        assert_eq!(map.byte_to_unit(text, 2), 4);
+        // A cut inside the run lands on its byte; after it, on what follows.
+        assert_eq!(map.unit_to_byte(text, 2), Some(1));
+        assert_eq!(map.unit_to_byte(text, 4), Some(2));
+        // A single space stays an ordinary verbatim byte.
+        assert_eq!(map.byte_to_unit(text, 4), 6);
+    }
+
+    #[test]
+    fn verbatim_processing_zeroes_the_spaces_before_a_forced_break() {
+        let style = RunStyle::default();
+        let block = verbatim(&[run(&style, "a  \nb \nc\t \n")]);
+        assert_eq!(block.text, "a \nb \nc  \n");
+        assert_eq!(block.tabs, [7]);
+        assert_eq!(
+            block.space_runs,
+            [
+                SpaceRun {
+                    byte: 1,
+                    count: 2,
+                    before_break: true,
+                },
+                SpaceRun {
+                    byte: 4,
+                    count: 1,
+                    before_break: true,
+                },
+                // The space after the tab, not the tab: the tab pass sets
+                // the tab's advance.
+                SpaceRun {
+                    byte: 8,
+                    count: 1,
+                    before_break: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn verbatim_processing_ends_a_run_of_spaces_at_a_box_or_another_run() {
+        let style = RunStyle::default();
+        let boxed = verbatim(&[run(&style, "a "), atom(1), run(&style, " b")]);
+        assert_eq!(boxed.text, "a  b");
+        assert!(boxed.space_runs.is_empty());
+        let split = verbatim(&[run(&style, "a  "), run(&style, "  b")]);
+        assert_eq!(split.text, "a  b");
+        assert_eq!(split.space_runs.len(), 2);
+        assert_eq!(split.map.source_len(), 6);
     }
 }

@@ -5,7 +5,7 @@ use core::num::NonZeroU32;
 use std::sync::LazyLock;
 
 use style_traits::ToCss;
-use stylo::computed_values::text_wrap_mode;
+use stylo::computed_values::{text_wrap_mode, white_space_collapse};
 use stylo::custom_properties::Name;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{
@@ -41,6 +41,11 @@ style_protocol! {
                 *style.inherited_values().get_inherited_text().get_text_align(),
             text_wrap_mode -> text_wrap_mode::T =
                 *style.inherited_values().get_inherited_text().get_text_wrap_mode(),
+            // The container's own value. A run reads its own for its text;
+            // a Lynx text block reads this one only to tell `white-space: pre`
+            // from `nowrap` (`BlockStyle::from_container_style`).
+            white_space_collapse -> white_space_collapse::T =
+                *style.inherited_values().get_inherited_text().get_white_space_collapse(),
             word_break -> WordBreak =
                 *style.inherited_values().get_inherited_text().get_word_break(),
             text_indent -> TextIndent =
@@ -155,6 +160,10 @@ mod tests {
 
         assert_eq!(style.text_align(), TextAlign::Start);
         assert_eq!(style.text_wrap_mode(), text_wrap_mode::T::Wrap);
+        assert_eq!(
+            style.white_space_collapse(),
+            white_space_collapse::T::Collapse
+        );
         assert_eq!(style.word_break(), WordBreak::Normal);
         assert!(style.text_indent().length.is_zero());
         assert_eq!(style.text_maxline(), None);

@@ -623,7 +623,7 @@ fn a_box_wider_than_the_width_takes_its_own_line() {
 }
 
 #[test]
-fn nowrap_suppresses_soft_wrapping_but_not_preserved_breaks() {
+fn nowrap_suppresses_soft_wrapping() {
     let style = ahem_style();
     let mut context = text_context();
 
@@ -640,19 +640,6 @@ fn nowrap_suppresses_soft_wrapping_but_not_preserved_breaks() {
     );
     assert_eq!(block.lines().len(), 1);
     assert_close(block.size().width, 90.0);
-
-    let hard = [raw(&style, "aa\naa")];
-    let block = laid_out(
-        &mut context,
-        BlockStyle {
-            text_wrap: TextWrap::NoWrap,
-            ..BlockStyle::default()
-        },
-        &hard,
-        None,
-        Some(30.0),
-    );
-    assert_eq!(block.lines().len(), 2);
 }
 
 #[test]
@@ -1473,259 +1460,6 @@ fn only_box(block: &TextBlock, start: u32, end: u32) -> Rect<f32> {
 }
 
 #[test]
-fn preserved_spaces_are_clusters_that_indent_the_line() {
-    let style = ahem_style();
-    let mut context = text_context();
-    let block = laid_out(
-        &mut context,
-        BlockStyle::default(),
-        &[pre(&style, "    x")],
-        None,
-        None,
-    );
-    assert_eq!(block.lines().len(), 1);
-    assert_eq!(
-        (block.lines()[0].source_start, block.lines()[0].source_end),
-        (0, 5)
-    );
-    assert_close(block.size().width, 50.0);
-    // Four advances in.
-    assert_close(only_box(&block, 4, 5).origin.x, 40.0);
-    // Each space answers for its own unit, both ways.
-    let second = only_box(&block, 1, 2);
-    assert_close(second.origin.x, 10.0);
-    assert_close(second.size.width, 10.0);
-    assert_eq!(block.index_at_point(Point::new(15.0, 5.0)), Some(1));
-    assert_eq!(block.index_at_point(Point::new(35.0, 5.0)), Some(3));
-
-    // The same source collapsed starts the `x` one space in.
-    let collapsed = laid_out(
-        &mut context,
-        BlockStyle::default(),
-        &[run(&style, "    x")],
-        None,
-        None,
-    );
-    assert_close(only_box(&collapsed, 4, 5).origin.x, 10.0);
-}
-
-#[test]
-fn preserved_spaces_are_soft_wrap_opportunities_that_hang() {
-    let style = ahem_style();
-    let mut context = text_context();
-    let block = laid_out(
-        &mut context,
-        BlockStyle::default(),
-        &[pre(&style, "aa  bb")],
-        None,
-        Some(30.0),
-    );
-    let lines = block.lines();
-    assert_eq!(lines.len(), 2);
-    // The preserved spaces stay on the first line as its content; the one
-    // that overflows the measure hangs past it rather than wrapping.
-    assert_eq!((lines[0].source_start, lines[0].source_end), (0, 4));
-    assert_eq!((lines[1].source_start, lines[1].source_end), (4, 6));
-    assert_close(only_box(&block, 3, 4).origin.x, 30.0);
-    assert_close(block.size().width, 20.0);
-
-    // `nowrap` takes the wrap opportunity away: one line.
-    let block = laid_out(
-        &mut context,
-        BlockStyle {
-            text_wrap: TextWrap::NoWrap,
-            ..BlockStyle::default()
-        },
-        &[pre(&style, "aa  bb")],
-        None,
-        Some(30.0),
-    );
-    assert_eq!(block.lines().len(), 1);
-    assert_close(only_box(&block, 4, 5).origin.x, 40.0);
-}
-
-#[test]
-fn a_preserved_break_is_forced_and_keeps_the_indentation_after_it() {
-    let style = ahem_style();
-    let mut context = text_context();
-    let block = laid_out(
-        &mut context,
-        BlockStyle::default(),
-        &[pre(&style, "a  \n  b")],
-        None,
-        None,
-    );
-    let lines = block.lines();
-    assert_eq!(lines.len(), 2);
-    // The spaces before the break are content of the first line.
-    assert_eq!((lines[0].source_start, lines[0].source_end), (0, 3));
-    assert_eq!((lines[1].source_start, lines[1].source_end), (4, 7));
-    let b = only_box(&block, 6, 7);
-    assert_close(b.origin.x, 20.0);
-    assert_close(b.origin.y, 10.0);
-}
-
-#[test]
-fn a_tab_advances_to_the_next_stop_of_eight_spaces() {
-    let style = ahem_style();
-    let mut context = text_context();
-    for (text, x_unit, x) in [
-        ("\tx", 1, 80.0),
-        ("ab\tx", 3, 80.0),
-        ("abcdefg\tx", 8, 80.0),
-        // A tab on a stop moves a whole tab size.
-        ("abcdefgh\tx", 9, 160.0),
-    ] {
-        for wrap in [TextWrap::Wrap, TextWrap::NoWrap] {
-            let block = laid_out(
-                &mut context,
-                BlockStyle {
-                    text_wrap: wrap,
-                    ..BlockStyle::default()
-                },
-                &[pre(&style, text)],
-                None,
-                None,
-            );
-            assert_close(only_box(&block, x_unit, x_unit + 1).origin.x, x);
-            // The tab is one cluster for its one unit, spanning the shift.
-            let tab = only_box(&block, x_unit - 1, x_unit);
-            assert_close(tab.origin.x + tab.size.width, x);
-            assert_eq!(
-                block.index_at_point(Point::new(x - 1.0, 5.0)),
-                Some(x_unit - 1),
-                "{text:?}: the tab answers for its own unit",
-            );
-        }
-    }
-}
-
-#[test]
-fn a_tab_stop_closer_than_half_a_ch_is_passed_and_boxes_count_toward_it() {
-    let style = ahem_style();
-    let mut context = text_context();
-    // Ahem's `0` is 10 px, so the threshold is 5. A 76 px box leaves a 4 px
-    // shift to the first stop, which is passed for the second.
-    let block = laid_out(
-        &mut context,
-        BlockStyle::default(),
-        &[
-            atom(1, 76.0, 10.0, VerticalAlign::Baseline),
-            pre(&style, "\tx"),
-        ],
-        None,
-        None,
-    );
-    assert_close(only_box(&block, 2, 3).origin.x, 160.0);
-
-    let block = laid_out(
-        &mut context,
-        BlockStyle::default(),
-        &[
-            atom(1, 75.0, 10.0, VerticalAlign::Baseline),
-            pre(&style, "\tx"),
-        ],
-        None,
-        None,
-    );
-    assert_close(only_box(&block, 2, 3).origin.x, 80.0);
-}
-
-#[test]
-fn the_tab_size_counts_letter_spacing() {
-    let style = RunStyle {
-        letter_spacing: 2.0,
-        ..ahem_style()
-    };
-    let mut context = text_context();
-    let block = laid_out(
-        &mut context,
-        BlockStyle::default(),
-        &[pre(&style, "a\tx")],
-        None,
-        None,
-    );
-    // A space advances 12, so the stops are every 96; `a` ends at 12.
-    assert_close(only_box(&block, 2, 3).origin.x, 96.0);
-}
-
-#[test]
-fn tab_columns_restart_after_a_break_and_count_the_first_line_indent() {
-    let style = ahem_style();
-    let mut context = text_context();
-    let block = laid_out_at(
-        &mut context,
-        BlockStyle::default(),
-        &[pre(&style, "\tx\n\ty")],
-        None,
-        BlockConstraint::new(None, 30.0),
-    );
-    // Stops are measured from the content edge: the indent is part of the
-    // first line's position, and the second line starts at the edge.
-    assert_close(only_box(&block, 0, 1).size.width, 50.0);
-    assert_close(only_box(&block, 1, 2).origin.x, 80.0);
-    let y = only_box(&block, 4, 5);
-    assert_close(y.origin.x, 80.0);
-    assert_close(y.origin.y, 10.0);
-}
-
-#[test]
-fn a_soft_wrap_moves_the_tab_stop_with_it() {
-    let style = ahem_style();
-    let mut context = text_context();
-    let block = laid_out(
-        &mut context,
-        BlockStyle::default(),
-        &[pre(&style, "aaaa aaaa aa\tb")],
-        None,
-        Some(100.0),
-    );
-    let lines = block.lines();
-    assert_eq!(lines.len(), 2);
-    assert_eq!(lines[1].source_start, 10);
-    // On its own line the tab sits at 20, not at the 120 of the unwrapped
-    // paragraph, so `b` lands on the second line's first stop.
-    let b = only_box(&block, 13, 14);
-    assert_close(b.origin.x, 80.0);
-    assert_close(b.origin.y, 10.0);
-
-    // A tab whose shift overflows the line hangs at its end like a space,
-    // and what follows it wraps.
-    let block = laid_out(
-        &mut context,
-        BlockStyle::default(),
-        &[pre(&style, "aaaa aaaa\tb")],
-        None,
-        Some(100.0),
-    );
-    let lines = block.lines();
-    assert_eq!(lines.len(), 2);
-    assert_eq!((lines[0].source_start, lines[0].source_end), (0, 10));
-    assert_eq!(lines[1].source_start, 10);
-    assert_close(only_box(&block, 9, 10).size.width, 70.0);
-    assert_close(only_box(&block, 10, 11).origin.x, 0.0);
-}
-
-#[test]
-fn a_preserved_space_before_a_break_keeps_the_break_under_wrap() {
-    let style = ahem_style();
-    let mut context = text_context();
-    for wrap in [TextWrap::Wrap, TextWrap::NoWrap] {
-        let block = laid_out(
-            &mut context,
-            BlockStyle {
-                text_wrap: wrap,
-                ..BlockStyle::default()
-            },
-            &[pre(&style, "a \nb")],
-            None,
-            Some(200.0),
-        );
-        assert_eq!(block.lines().len(), 2, "{wrap:?}");
-    }
-}
-
-#[test]
 fn a_truncated_display_keeps_the_tab_stops() {
     let style = ahem_style();
     let mut context = text_context();
@@ -1741,7 +1475,8 @@ fn a_truncated_display_keeps_the_tab_stops() {
         None,
     );
     assert!(block.truncated());
-    assert_close(only_box(&block, 1, 2).origin.x, 80.0);
+    // A native stop every 20px: the tab at the line start runs to 20.
+    assert_close(only_box(&block, 1, 2).origin.x, 20.0);
     // The tab, `a`, and three dots.
-    assert_close(block.size().width, 120.0);
+    assert_close(block.size().width, 60.0);
 }

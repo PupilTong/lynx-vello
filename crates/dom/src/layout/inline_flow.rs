@@ -407,4 +407,86 @@ mod tests {
         assert_eq!(doc.inline_flow(block).expect("a flow").size().width, 60.0);
         assert_eq!(size(&doc, view), Size::new(0.0, 0.0));
     }
+
+    /// A 400px page of 10px Ahem: every glyph, the space included, advances
+    /// 10px, and the block is as wide as its widest line.
+    const WIDE: &str = "page { display: flex; flex-direction: column; align-items: flex-start;
+                               width: 400px; height: 200px;
+                               font-family: Ahem; font-size: 10px; }";
+
+    fn flow_size(doc: &Document<()>, block: NodeId) -> Size<f32> {
+        doc.inline_flow(block).expect("a flow").size()
+    }
+
+    #[test]
+    fn a_run_takes_its_white_space_from_computed_style() {
+        // `white-space-collapse` inherits into the anonymous block, so its
+        // run reads the page's value.
+        for (css, width) in [
+            ("", 10.0),
+            ("page { white-space-collapse: preserve; }", 50.0),
+            ("page { white-space: pre; }", 50.0),
+        ] {
+            let (doc, block, _) = page(&format!("{WIDE} {css}"), "    x");
+            assert_eq!(flow_size(&doc, block).width, width, "{css:?}");
+        }
+    }
+
+    #[test]
+    fn a_preserved_tab_lands_on_column_eight_and_each_break_restarts_the_columns() {
+        // `abc` ends at 30 and the tab runs to the stop at 80; after the
+        // break the tab starts at the edge and runs to 80 again.
+        let (doc, block, _) = page(
+            &format!("{WIDE} page {{ white-space: pre; }}"),
+            "abc\tx\n\ty",
+        );
+        assert_eq!(flow_size(&doc, block), Size::new(90.0, 20.0));
+    }
+
+    #[test]
+    fn preserve_breaks_still_collapses_the_spaces_around_a_break() {
+        let (doc, block, _) = page(
+            &format!("{WIDE} page {{ white-space-collapse: preserve-breaks; }}"),
+            "  a\n  b",
+        );
+        assert_eq!(flow_size(&doc, block), Size::new(10.0, 20.0));
+    }
+
+    #[test]
+    fn a_contents_scope_s_white_space_reaches_its_runs_alone() {
+        let (mut doc, block, _) = page(
+            &format!(
+                "{WIDE} span {{ display: contents; }}
+                 .pre {{ white-space-collapse: preserve; }}"
+            ),
+            "a  ",
+        );
+        let span = doc.create_element("span", ());
+        doc.add_class(span, "pre");
+        doc.append_child(block, span);
+        let inner = doc.create_text_node("  b", ());
+        doc.append_child(span, inner);
+        doc.layout();
+        // `a`, the collapsed pair as one space, then the two preserved
+        // spaces: the collapsible space is kept by the preserved one after it.
+        assert_eq!(flow_size(&doc, block).width, 50.0);
+
+        // Turning the mode off rebuilds the flow: `a b`.
+        doc.remove_class(span, "pre");
+        doc.layout();
+        assert_eq!(flow_size(&doc, block).width, 30.0);
+    }
+
+    #[test]
+    fn the_keywords_the_flow_does_not_model_stay_collapsed() {
+        // `break-spaces` parses and is read as `collapse`; `preserve-spaces`
+        // and `discard` do not parse in the fork, leaving the initial value.
+        for keyword in ["break-spaces", "preserve-spaces", "discard"] {
+            let (doc, block, _) = page(
+                &format!("{WIDE} page {{ white-space-collapse: {keyword}; }}"),
+                "    x",
+            );
+            assert_eq!(flow_size(&doc, block).width, 10.0, "{keyword}");
+        }
+    }
 }

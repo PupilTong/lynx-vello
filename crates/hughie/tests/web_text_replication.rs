@@ -25,6 +25,13 @@
 //! `text-overflow: ellipsis` set, so the gated-open path — the marker the
 //! references show — stays covered.
 //!
+//! A second exception is white space, by the user's ruling of 2026-10-16:
+//! a `<text>` keeps its text verbatim, as every native backend does, where
+//! `web-core` hands it to the browser's CSS white-space processing. Every
+//! replica is laid out with that verbatim processing (`text_style`), and the
+//! one whose claim is the browser's collapsing is ignored as a DEVIATION with
+//! a native companion beside it.
+//!
 //! The fixtures are re-authored against the vendored Ahem face: every glyph
 //! (CJK and punctuation included) advances one em, so a run of `n` characters
 //! at `font_size` is exactly `n * font_size` wide and every break point is
@@ -107,6 +114,13 @@ fn atom(id: u64, width: f32, height: f32, vertical_align: VerticalAlign) -> Inli
         baseline: None,
         vertical_align,
     })
+}
+
+/// A `<text>` root's paragraph parameters: every Lynx text block keeps its
+/// white space verbatim. Every replica here is a `<text>`, so every one
+/// starts from these.
+fn text_style() -> BlockStyle {
+    BlockStyle::default()
 }
 
 fn laid_out(
@@ -236,7 +250,7 @@ fn a_lynx_wrapper_adds_no_box_and_no_break_to_a_clamped_paragraph() {
             BlockStyle {
                 word_break: WordBreak::BreakAll,
                 max_lines: core::num::NonZeroU32::new(clamp),
-                ..BlockStyle::default()
+                ..text_style()
             },
             &items,
             None,
@@ -294,7 +308,7 @@ fn an_avatar_atom_and_a_short_run_fit_one_line_under_a_two_line_clamp() {
         &mut context,
         BlockStyle {
             max_lines: core::num::NonZeroU32::new(2),
-            ..BlockStyle::default()
+            ..text_style()
         },
         &items,
         Some(&truncation),
@@ -358,7 +372,7 @@ fn a_truncation_node_inside_an_inline_view_never_registers() {
         BlockStyle {
             word_break: WordBreak::BreakAll,
             max_lines: core::num::NonZeroU32::new(1),
-            ..BlockStyle::default()
+            ..text_style()
         },
         &items,
         None,
@@ -392,7 +406,7 @@ fn a_truncation_node_inside_an_inline_view_never_registers() {
             word_break: WordBreak::BreakAll,
             max_lines: core::num::NonZeroU32::new(1),
             overflow: TextOverflow::Ellipsis,
-            ..BlockStyle::default()
+            ..text_style()
         },
         &items,
         None,
@@ -493,7 +507,7 @@ fn maxlength_cuts_the_flattened_run_and_tails_it_with_three_dots() {
         let style = |overflow| BlockStyle {
             max_chars: Some(max_chars),
             overflow,
-            ..BlockStyle::default()
+            ..text_style()
         };
         let source_len: u32 = parts
             .iter()
@@ -579,7 +593,7 @@ fn tail_color_convert_false_splices_the_dots_into_the_cut_run() {
         let style = |overflow| BlockStyle {
             max_chars: Some(max_chars),
             overflow,
-            ..BlockStyle::default()
+            ..text_style()
         };
 
         // The fixture's own declarations: the cut keeps every unit it spares
@@ -633,7 +647,7 @@ fn tail_color_convert_false_splices_the_dots_into_the_cut_run() {
     let adapted_style = |overflow| BlockStyle {
         max_chars: Some(2),
         overflow,
-        ..BlockStyle::default()
+        ..text_style()
     };
     // Ungated, the same cut is the kept glyphs alone: '1' at 10px and '2' at
     // 20px.
@@ -719,7 +733,7 @@ fn a_bare_maxline_clamp_marks_its_last_visible_line() {
             word_break: WordBreak::BreakAll,
             max_lines: core::num::NonZeroU32::new(clamp),
             overflow,
-            ..BlockStyle::default()
+            ..text_style()
         };
 
         // The fixture's own declarations: `text-overflow` at its initial `clip`.
@@ -808,7 +822,7 @@ fn tail_color_convert_false_backs_the_maxline_cut_off_by_three_units() {
             word_break: WordBreak::BreakAll,
             max_lines: core::num::NonZeroU32::new(clamp),
             overflow,
-            ..BlockStyle::default()
+            ..text_style()
         };
 
         // The fixture's own declarations: no retreat, so no dots to own.
@@ -887,7 +901,7 @@ fn custom_truncation_content_replaces_the_marker_at_the_clamp() {
         &mut context,
         BlockStyle {
             word_break: WordBreak::BreakAll,
-            ..BlockStyle::default()
+            ..text_style()
         },
         &unclamped_items,
         Some(&truncation),
@@ -911,7 +925,7 @@ fn custom_truncation_content_replaces_the_marker_at_the_clamp() {
             BlockStyle {
                 word_break: WordBreak::BreakAll,
                 max_lines: core::num::NonZeroU32::new(clamp),
-                ..BlockStyle::default()
+                ..text_style()
             },
             &items,
             Some(&truncation),
@@ -959,7 +973,7 @@ fn content_that_just_fits_the_clamp_leaves_the_truncation_content_unused() {
         BlockStyle {
             max_lines: core::num::NonZeroU32::new(2),
             overflow: TextOverflow::Ellipsis,
-            ..BlockStyle::default()
+            ..text_style()
         },
         &items,
         Some(&truncation),
@@ -995,7 +1009,7 @@ fn a_truncation_image_is_fitted_by_its_box_width() {
         BlockStyle {
             max_lines: core::num::NonZeroU32::new(1),
             overflow: TextOverflow::Ellipsis,
-            ..BlockStyle::default()
+            ..text_style()
         },
         &items,
         Some(&truncation),
@@ -1062,7 +1076,7 @@ fn a_paragraph_that_opens_with_inline_view_boxes_still_finds_its_cut() {
     let style = || BlockStyle {
         max_lines: core::num::NonZeroU32::new(2),
         overflow: TextOverflow::Ellipsis,
-        ..BlockStyle::default()
+        ..text_style()
     };
 
     // The fixture's own geometry: 700px of content over two 390px lines.
@@ -1147,7 +1161,7 @@ fn a_leading_image_survives_a_cut_that_retreats_only_trailing_content() {
         BlockStyle {
             max_lines: core::num::NonZeroU32::new(3),
             overflow: TextOverflow::Ellipsis,
-            ..BlockStyle::default()
+            ..text_style()
         },
         &items,
         Some(&truncation),
@@ -1219,7 +1233,7 @@ fn a_runs_line_height_is_not_taken_from_the_span_after_it() {
         BlockStyle {
             max_lines: core::num::NonZeroU32::new(3),
             overflow: TextOverflow::Ellipsis,
-            ..BlockStyle::default()
+            ..text_style()
         },
         &items,
         Some(&truncation),
@@ -1238,13 +1252,7 @@ fn a_runs_line_height_is_not_taken_from_the_span_after_it() {
     // The same defect with no truncation in sight: two runs, two declared
     // line heights, one line each. Line 0 holds only the 24px/32px run.
     let plain = [run(&body, "AAAAAAAAAA"), run(&more, "BBBBB")];
-    let plain = laid_out(
-        &mut context,
-        BlockStyle::default(),
-        &plain,
-        None,
-        Some(240.0),
-    );
+    let plain = laid_out(&mut context, text_style(), &plain, None, Some(240.0));
     assert_eq!(plain.lines().len(), 2);
     assert_close(plain.lines()[0].height, 32.0);
     assert_close(plain.lines()[1].height, 22.0);
@@ -1272,7 +1280,7 @@ fn an_overflowing_nowrap_line_is_marked_by_text_overflow_ellipsis() {
         BlockStyle {
             text_wrap: TextWrap::NoWrap,
             overflow: TextOverflow::Ellipsis,
-            ..BlockStyle::default()
+            ..text_style()
         },
         &items,
         None,
@@ -1319,7 +1327,7 @@ fn an_atom_clipped_past_the_clamp_leaves_the_paint_list() {
         &mut context,
         BlockStyle {
             max_lines: core::num::NonZeroU32::new(2),
-            ..BlockStyle::default()
+            ..text_style()
         },
         &items,
         Some(&truncation),
@@ -1409,7 +1417,7 @@ fn maxlength_counts_units_across_nested_runs_and_scripts() {
         let style = |overflow| BlockStyle {
             max_chars,
             overflow,
-            ..BlockStyle::default()
+            ..text_style()
         };
 
         // The fixture's own declarations: the cut, untailed.
@@ -1480,7 +1488,7 @@ fn the_truncation_tail_takes_the_block_style_not_the_cut_runs() {
         BlockStyle {
             max_chars: Some(3),
             overflow: TextOverflow::Ellipsis,
-            ..BlockStyle::default()
+            ..text_style()
         },
         &items,
         None,
@@ -1496,7 +1504,7 @@ fn the_truncation_tail_takes_the_block_style_not_the_cut_runs() {
         BlockStyle {
             max_chars: Some(10),
             overflow: TextOverflow::Ellipsis,
-            ..BlockStyle::default()
+            ..text_style()
         },
         &items,
         None,
@@ -1532,7 +1540,7 @@ fn the_truncation_tail_keeps_the_cut_run_s_font_under_the_native_default() {
         BlockStyle {
             max_chars: Some(3),
             overflow: TextOverflow::Ellipsis,
-            ..BlockStyle::default()
+            ..text_style()
         },
         &items,
         None,
@@ -1592,13 +1600,7 @@ fn word_break_policy_at_a_hundred_pixel_width() {
         ),
     ] {
         let items = [run(&base, text)];
-        let block = laid_out(
-            &mut context,
-            BlockStyle::default(),
-            &items,
-            None,
-            Some(100.0),
-        );
+        let block = laid_out(&mut context, text_style(), &items, None, Some(100.0));
 
         let ranges = block
             .lines()
@@ -1617,19 +1619,29 @@ fn word_break_policy_at_a_hundred_pixel_width() {
 /// the shaping path's alone. The storage half of the case belongs to the
 /// element PAPI; this is the shaping half.
 ///
-/// Collapsing a run of spaces to one and removing a collapsible space at the
-/// start of a line are two steps of the same white-space processing, so
-/// `"  Step 1 of 4"` shapes to eleven advances, not twelve, while the source
-/// units the line reports stay the pre-collapse thirteen.
+/// In `web-core` the browser collapses: a run of spaces to one, and a
+/// collapsible space at the start of a line removed, so `"  Step 1 of 4"`
+/// shapes to eleven advances, not twelve, while the source units the line
+/// reports stay the pre-collapse thirteen. A `<text>` here is laid out the
+/// way every native backend lays it out instead — verbatim, the two leading
+/// spaces kept and measured — so this replica asserts `web-core` and is
+/// ignored as a DEVIATION, and
+/// `leading_spaces_stay_in_a_text_the_way_native_lynx_keeps_them` asserts
+/// what the engine does.
 #[test]
-#[ignore = "GAP: a leading collapsible whitespace span emits its space instead \
-            of being removed at the start of the line \
-            (crates/hughie/src/text/paragraph/content.rs:460)"]
+#[ignore = "DEVIATION: this engine follows native Lynx, by the user's ruling \
+            of 2026-10-16. A `<text>` does no CSS white-space processing on \
+            any native backend (`raw_text_element.cc:16-46`, Android \
+            `BaseTextShadowNode.java:494-498`, iOS \
+            `LynxBaseTextShadowNode.m:240-249`), so the two leading spaces stay \
+            and the line is 130 wide rather than web-core's 110. \
+            `leading_spaces_stay_in_a_text_the_way_native_lynx_keeps_them` \
+            asserts that geometry and passes."]
 fn collapsible_whitespace_is_removed_at_the_start_of_a_line() {
     let base = ahem_at(10.0);
     let items = [run(&base, "  Step 1 of 4")];
     let mut context = text_context();
-    let block = laid_out(&mut context, BlockStyle::default(), &items, None, None);
+    let block = laid_out(&mut context, text_style(), &items, None, None);
 
     assert_eq!(block.lines().len(), 1);
     assert_eq!(
@@ -1638,4 +1650,23 @@ fn collapsible_whitespace_is_removed_at_the_start_of_a_line() {
         "the source range counts pre-collapse units",
     );
     assert_close(block.size().width, 110.0);
+}
+
+/// The native half of `collapsible_whitespace_is_removed_at_the_start_of_a_line`:
+/// the same `"  Step 1 of 4"` in a `<text>`, kept verbatim — thirteen
+/// advances, the two leading spaces included, over the same thirteen source
+/// units.
+#[test]
+fn leading_spaces_stay_in_a_text_the_way_native_lynx_keeps_them() {
+    let base = ahem_at(10.0);
+    let items = [run(&base, "  Step 1 of 4")];
+    let mut context = text_context();
+    let block = laid_out(&mut context, text_style(), &items, None, None);
+
+    assert_eq!(block.lines().len(), 1);
+    assert_eq!(
+        (block.lines()[0].source_start, block.lines()[0].source_end),
+        (0, 13),
+    );
+    assert_close(block.size().width, 130.0);
 }

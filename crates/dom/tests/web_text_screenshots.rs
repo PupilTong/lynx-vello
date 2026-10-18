@@ -173,12 +173,16 @@ fn capture_with_author_css(
 /// while the first run's stay black on the very same line — a per-run paint
 /// claim. A paragraph that painted every glyph with the establishing element's
 /// style would satisfy the metric test and fail here.
+///
+/// The fixture's newline and indent between the two runs are written as the
+/// one space the browser collapses them to: a `-lynx-text` paragraph keeps
+/// its white space verbatim, as a native `<text>` does, and the reference
+/// image is the browser's.
 #[test]
 fn a_nested_run_wears_its_own_colour_on_the_parent_s_line() {
     const FRAGMENT: &str = r#"
 <div style="display: flex; width: 400px; height: 70px; padding: 10px; box-sizing: border-box; background-color: white; font-family: Roboto">
-  <div class="text-block" style="width: 380px; font-size: 24px; font-weight: bold">I am bold
-    <span class="text-block" style="font-size: 24px; color: red">and red</span></div>
+  <div class="text-block" style="width: 380px; font-size: 24px; font-weight: bold">I am bold <span class="text-block" style="font-size: 24px; color: red">and red</span></div>
 </div>
 "#;
     let actual = screenshot::capture(

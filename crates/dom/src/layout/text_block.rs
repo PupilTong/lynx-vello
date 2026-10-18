@@ -438,10 +438,11 @@ pub(crate) fn refresh<T>(
         })
         .collect();
 
-    // Only the values parley *shapes* from force a new paragraph. Alignment
-    // and truncation are applied to a finished layout, so a change there is a
-    // re-break at most — which is the whole point of keeping the two evictions
-    // apart.
+    // Only the values parley *shapes* from force a new paragraph —
+    // `text-wrap-mode` among them, because it chooses whether native's
+    // `nowrap` cuts the text at its first newline. Alignment and truncation are applied
+    // to a finished layout, so a change there is a re-break at most — which is
+    // the whole point of keeping the two evictions apart.
     let needs_build = state.text_block(element).is_none_or(|store| {
         store.fingerprint != stamp
             || store.style.word_break != style.word_break
@@ -1125,10 +1126,8 @@ mod generated_content_tests {
     }
 
     #[test]
-    fn generated_content_wraps_and_preserves_requested_newlines() {
-        let (mut doc, text) = document(
-            "text { width: 40px; } text { content: attr(text); white-space-collapse: preserve-breaks; }",
-        );
+    fn generated_content_wraps_and_keeps_its_newlines() {
+        let (mut doc, text) = document("text { width: 40px; } text { content: attr(text); }");
         doc.set_attribute(text, "text", "AB\nCD");
         doc.layout();
         width(&doc, text, 40.0);
@@ -1136,14 +1135,16 @@ mod generated_content_tests {
         doc.set_attribute(text, "text", "A B C");
         doc.layout();
         assert!(doc.text_block_size(text).unwrap().height >= 60.0);
+        // A `-lynx-text` paragraph keeps its text verbatim: a wider box still
+        // breaks at the newline, and `white-space-collapse` is not read.
         doc.set_attribute(text, "text", "AB\nCD");
         doc.add_stylesheet(
             "text { width: 200px; } text { white-space-collapse: collapse; }",
             StylesheetOrigin::Author,
         );
         doc.layout();
-        width(&doc, text, 100.0);
-        assert!((doc.text_block_size(text).unwrap().height - 20.0).abs() < 0.001);
+        width(&doc, text, 40.0);
+        assert!((doc.text_block_size(text).unwrap().height - 40.0).abs() < 0.001);
     }
 
     #[test]
@@ -1406,175 +1407,5 @@ mod hit_tests {
         assert_eq!(doc.paragraph_of(out_of_flow), None, "not inline content");
         assert_eq!(doc.inline_source_range(atom), Some(2..3));
         assert_eq!(at(&doc, inner, 5.0, 5.0), Some(0));
-    }
-}
-
-#[cfg(test)]
-mod preserve_tests {
-    use euclid::default::{Point2D, Rect, Size2D};
-
-    use crate::{Document, FontBlob, NodeId, StylesheetOrigin};
-
-    /// A 10px Ahem paragraph holding `content`, styled by `inline`. Every
-    /// Ahem glyph, the space included, advances 10px.
-    fn paragraph(inline: &str, content: &str) -> (Document<()>, NodeId) {
-        let mut doc = Document::new(crate::tree::document::tests::device(), "page", ());
-        doc.register_fonts(FontBlob::from_static(include_bytes!(
-            "../../../hughie/tests/fixtures/Ahem.ttf"
-        )));
-        doc.add_stylesheet(
-            "page { display: flex; align-items: flex-start; } \
-             text { display: -lynx-text; font-family: Ahem; font-size: 10px; } \
-             span { display: -lynx-text; } \
-             .pre { white-space-collapse: preserve; }",
-            StylesheetOrigin::Author,
-        );
-        let text = doc.create_element("text", ());
-        doc.set_inline_style(text, inline);
-        doc.append_child(doc.document_element().id(), text);
-        let run = doc.create_text_node(content, ());
-        doc.append_child(text, run);
-        doc.layout();
-        (doc, text)
-    }
-
-    fn glyph(left: f32, top: f32, width: f32) -> Rect<f32> {
-        Rect::new(Point2D::new(left, top), Size2D::new(width, 10.0))
-    }
-
-    #[test]
-    fn preserved_indentation_is_four_advances_in() {
-        let (doc, text) = paragraph(
-            "white-space-collapse: preserve; text-wrap-mode: nowrap;",
-            "    x",
-        );
-        assert_eq!(
-            doc.text_range_boxes(text, 4, 5),
-            Some(vec![glyph(40.0, 0.0, 10.0)])
-        );
-        assert!((doc.text_block_size(text).unwrap().width - 50.0).abs() < 0.001);
-        // A preserved space is a cluster of its own: both queries answer it.
-        assert_eq!(
-            doc.text_range_boxes(text, 1, 2),
-            Some(vec![glyph(10.0, 0.0, 10.0)])
-        );
-        assert_eq!(
-            doc.text_range_boxes(text, 0, 4),
-            Some(vec![glyph(0.0, 0.0, 40.0)])
-        );
-        assert_eq!(
-            doc.text_index_at_point(text, Point2D::new(15.0, 5.0)),
-            Some(1)
-        );
-        assert_eq!(
-            doc.text_index_at_point(text, Point2D::new(39.9, 5.0)),
-            Some(3)
-        );
-
-        // `white-space: pre` is the same pair through the shorthand.
-        let (doc, text) = paragraph("white-space: pre;", "    x");
-        assert_eq!(
-            doc.text_range_boxes(text, 4, 5),
-            Some(vec![glyph(40.0, 0.0, 10.0)])
-        );
-
-        // Collapsed, the run of spaces is one space wide.
-        let (doc, text) = paragraph("", "    x");
-        assert_eq!(
-            doc.text_range_boxes(text, 4, 5),
-            Some(vec![glyph(10.0, 0.0, 10.0)])
-        );
-    }
-
-    #[test]
-    fn a_tab_lands_on_column_eight_and_each_break_restarts_the_columns() {
-        let (doc, text) = paragraph("white-space: pre;", "abc\tx\n\ty");
-        // `abc` ends at 30; the tab shifts to the stop at 8 spaces.
-        assert_eq!(
-            doc.text_range_boxes(text, 3, 4),
-            Some(vec![glyph(30.0, 0.0, 50.0)])
-        );
-        assert_eq!(
-            doc.text_range_boxes(text, 4, 5),
-            Some(vec![glyph(80.0, 0.0, 10.0)])
-        );
-        assert_eq!(
-            doc.text_range_boxes(text, 7, 8),
-            Some(vec![glyph(80.0, 10.0, 10.0)])
-        );
-        assert_eq!(
-            doc.text_index_at_point(text, Point2D::new(50.0, 5.0)),
-            Some(3)
-        );
-        assert_eq!(
-            doc.text_index_at_point(text, Point2D::new(10.0, 15.0)),
-            Some(6)
-        );
-    }
-
-    #[test]
-    fn preserve_breaks_still_collapses_the_spaces_around_a_break() {
-        let (doc, text) = paragraph("white-space-collapse: preserve-breaks;", "  a\n  b");
-        assert_eq!(
-            doc.text_range_boxes(text, 6, 7),
-            Some(vec![glyph(0.0, 10.0, 10.0)])
-        );
-    }
-
-    #[test]
-    fn preserve_inherits_into_a_nested_scope_alone() {
-        let mut doc = Document::new(crate::tree::document::tests::device(), "page", ());
-        doc.register_fonts(FontBlob::from_static(include_bytes!(
-            "../../../hughie/tests/fixtures/Ahem.ttf"
-        )));
-        doc.add_stylesheet(
-            "page { display: flex; align-items: flex-start; } \
-             text { display: -lynx-text; font-family: Ahem; font-size: 10px; } \
-             span { display: -lynx-text; } \
-             .pre { white-space-collapse: preserve; }",
-            StylesheetOrigin::Author,
-        );
-        let text = doc.create_element("text", ());
-        doc.append_child(doc.document_element().id(), text);
-        let before = doc.create_text_node("a  ", ());
-        doc.append_child(text, before);
-        let code = doc.create_element("span", ());
-        doc.add_class(code, "pre");
-        doc.append_child(text, code);
-        let inner = doc.create_text_node("  b", ());
-        doc.append_child(code, inner);
-        doc.layout();
-        // `a`, the collapsed pair as one space, then two preserved spaces:
-        // the collapsible space is kept by the preserved one after it.
-        assert_eq!(
-            doc.text_range_boxes(text, 5, 6),
-            Some(vec![glyph(40.0, 0.0, 10.0)])
-        );
-
-        // Turning the mode off rebuilds the paragraph.
-        doc.remove_class(code, "pre");
-        doc.layout();
-        assert_eq!(
-            doc.text_range_boxes(text, 5, 6),
-            Some(vec![glyph(20.0, 0.0, 10.0)])
-        );
-    }
-
-    #[test]
-    fn the_keywords_the_paragraph_does_not_model_stay_collapsed() {
-        // `break-spaces` parses and is read as `collapse`; `preserve-spaces`
-        // and `discard` do not parse in the fork, leaving the initial value.
-        for inline in [
-            "white-space-collapse: break-spaces;",
-            "white-space-collapse: preserve-spaces;",
-            "white-space-collapse: discard;",
-        ] {
-            let (doc, text) = paragraph(inline, "    x");
-            assert_eq!(
-                doc.text_range_boxes(text, 4, 5),
-                Some(vec![glyph(10.0, 0.0, 10.0)]),
-                "{inline}",
-            );
-        }
     }
 }
