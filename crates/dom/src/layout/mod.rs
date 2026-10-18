@@ -568,7 +568,7 @@ impl<T> Document<T> {
         let node = self.get(id)?;
         let style = StyleView::try_of(node)?;
         if matches!(
-            display_mode(style.display()),
+            style.display_mode(),
             DisplayMode::None | DisplayMode::Contents
         ) {
             return None;
@@ -994,7 +994,7 @@ impl<T> Document<T> {
                 let Some(style) = child.layout_computed_style() else {
                     continue;
                 };
-                if display_mode(*style.get_display()) == DisplayMode::None {
+                if display_mode(child, *style.get_display()) == DisplayMode::None {
                     continue;
                 }
                 match *style.get_box().get_position() {
@@ -1033,7 +1033,6 @@ impl<T> Document<T> {
     /// one: inside a `-lynx-text` subtree it is an atomic box, and its own
     /// runs end at it. The walk stops there.
     fn paragraph_container(&self, id: crate::NodeId) -> Option<crate::NodeId> {
-        use stylo::values::computed::Display;
         // Loose text is not under the anonymous box that lays it out
         // (`tree::anonymous`), so no walk up from it finds the box.
         if let Some(anonymous) = self.arenas().anonymous().box_of(id) {
@@ -1044,20 +1043,20 @@ impl<T> Document<T> {
         // belongs to the surrounding paragraph and must be removed from it.
         let own = start
             .layout_computed_style()
-            .map(|style| *style.get_display());
-        if own.is_some_and(style::is_block_flow) {
+            .map(|style| display_mode(start, *style.get_display()));
+        if own == Some(DisplayMode::BlockFlow) {
             return Some(id);
         }
-        let mut paragraph = (own == Some(Display::LynxText)).then_some(id);
+        let mut paragraph = (own == Some(DisplayMode::Text)).then_some(id);
         let mut current = start.flat_parent();
         while let Some(node) = current {
             let Some(style) = node.layout_computed_style() else {
                 break;
             };
-            match *style.get_display() {
-                Display::LynxText => paragraph = Some(node.id()),
-                Display::Contents => {}
-                display if style::is_block_flow(display) => return Some(node.id()),
+            match display_mode(node, *style.get_display()) {
+                DisplayMode::Text => paragraph = Some(node.id()),
+                DisplayMode::Contents => {}
+                DisplayMode::BlockFlow => return Some(node.id()),
                 _ => break,
             }
             current = node.flat_parent();
@@ -1195,7 +1194,7 @@ impl<'a, T> Iterator for ContainingBlockChain<'a, T> {
             return None;
         };
         let style = StyleView::of(ancestor);
-        if display_mode(style.display()) == DisplayMode::None {
+        if style.display_mode() == DisplayMode::None {
             self.end = Some(ChainEnd::Hidden);
             return None;
         }
@@ -1557,6 +1556,61 @@ mod tests {
     /// through the same damage harvest a flush does, so the text artifact is
     /// evicted before the paragraph is ever built — rather than after it was
     /// built at the wrong size.
+    /// A Lynx text element is a paragraph by its kind, not by a `display`
+    /// value: the author's `grid` is its computed value and still lays its
+    /// text out as one paragraph; `none` hides it; `contents` acts as computed
+    /// and crashes nothing.
+    #[test]
+    fn a_lynx_text_element_is_a_paragraph_whatever_its_display_computes_to() {
+        use stylo::values::computed::Display;
+
+        struct Paragraph;
+        impl crate::CustomElement<()> for Paragraph {
+            fn is_lynx_text(&self) -> bool {
+                true
+            }
+        }
+
+        let mut document: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
+        document.define("x-para", Box::new(Paragraph));
+        document.add_stylesheet(
+            "page { display: flex; align-items: flex-start;
+                    width: 400px; height: 300px; font-family: Ahem; font-size: 10px; }
+             x-para { display: grid; }",
+            StylesheetOrigin::Author,
+        );
+        assert_eq!(document.register_fonts(FontBlob::from_static(AHEM)), 1);
+        let root = document.document_element().id();
+        let paragraph = document.create_element("x-para", ());
+        document.append_child(root, paragraph);
+        let run = document.create_text_node("ab", ());
+        document.append_child(paragraph, run);
+        let display = |document: &Document<()>| {
+            document
+                .get(paragraph)
+                .and_then(crate::tree::node::Node::layout_computed_style)
+                .map(|style| *style.get_display())
+        };
+
+        document.layout();
+        assert_eq!(display(&document), Some(Display::Grid));
+        assert_eq!(
+            document.text_block_size(paragraph),
+            Some(Size::new(20.0, 10.0)),
+            "two Ahem glyphs of 10px, laid out as a Lynx paragraph"
+        );
+
+        document.set_inline_style(paragraph, "display: none");
+        document.layout();
+        assert_eq!(document.bounding_client_rect(paragraph), None);
+
+        document.set_inline_style(paragraph, "display: contents");
+        document.layout();
+        assert_eq!(display(&document), Some(Display::Contents));
+        assert_eq!(document.bounding_client_rect(paragraph), None);
+    }
+
     #[test]
     fn a_text_reader_under_a_container_is_shaped_once_at_the_container_size() {
         let mut document: Document<()> =

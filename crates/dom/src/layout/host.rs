@@ -31,7 +31,7 @@ use smallvec::SmallVec;
 
 use super::inline_flow::compute_inline_flow_layout;
 use super::paragraph::{establishes_paragraph, replaces_children};
-use super::style::{DisplayMode, StyleView, box_parent, display_mode, resolve_position};
+use super::style::{DisplayMode, StyleView, box_parent, resolve_position};
 use super::text_block::compute_text_block_layout;
 use super::{anchors, committed_box, hoisted};
 use crate::tree::document::{
@@ -56,7 +56,7 @@ impl<T> LayoutTree for TreeArenas<T> {
     /// anonymous boxes that wrap it replace it (`tree::anonymous`).
     fn children(&self, node: NodeSlot) -> Self::ChildIter<'_> {
         let node_ref = self.at(node);
-        if node_ref.may_override_children
+        if node_ref.may_override_children()
             && let Some(children) = self.anonymous().layout_children(node)
         {
             return children.iter().copied();
@@ -203,7 +203,7 @@ impl<T> LayoutTree for TreeArenas<T> {
             DisplayMode::Leaf
         } else {
             let view = self.style(node);
-            let display = display_mode(view.display());
+            let display = view.display_mode();
             if display == DisplayMode::None {
                 hide_subtree(self, state, node);
                 return LayoutOutput::HIDDEN;
@@ -913,7 +913,7 @@ fn pre_position<T: Sync>(
     let Some(style) = StyleView::try_of(node) else {
         return false;
     };
-    let display = display_mode(style.display());
+    let display = style.display_mode();
     if display == DisplayMode::None {
         return false;
     }
@@ -1015,7 +1015,7 @@ pub(super) fn sibling_paint_order<T>(
 fn sibling_effective_paint_order<T>(child: &Node<T>) -> Option<i32> {
     match StyleView::try_of(child) {
         Some(style) => {
-            if display_mode(style.display()) == DisplayMode::None {
+            if style.display_mode() == DisplayMode::None {
                 None
             } else if matches!(
                 *style.values().get_box().get_position(),

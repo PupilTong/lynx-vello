@@ -278,7 +278,7 @@ fn item_container<T>(tree: &TreeArenas<T>, node: NodeId) -> Option<NodeId> {
     loop {
         if current.is_element() {
             let style = current.layout_computed_style()?;
-            match display_mode(*style.get_display()) {
+            match display_mode(current, *style.get_display()) {
                 DisplayMode::Contents => {}
                 DisplayMode::Flex
                 | DisplayMode::Grid
@@ -313,7 +313,7 @@ fn may_hold_loose_text<T>(node: &Node<T>) -> bool {
     };
     !node.is_replaced()
         && matches!(
-            display_mode(*style.get_display()),
+            display_mode(node, *style.get_display()),
             DisplayMode::Contents
                 | DisplayMode::Flex
                 | DisplayMode::Grid
@@ -399,7 +399,7 @@ fn sequences<T>(tree: &TreeArenas<T>, container: NodeId) -> Vec<Sequence> {
             let Some(style) = node.layout_computed_style() else {
                 continue;
             };
-            match display_mode(*style.get_display()) {
+            match display_mode(node, *style.get_display()) {
                 DisplayMode::None => continue,
                 DisplayMode::Contents => {
                     let Some((_, items)) = generated_content(node) else {
@@ -558,7 +558,7 @@ impl<T> Document<T> {
             if !kept.contains(holder)
                 && let Some(node) = self.arenas_mut().get_mut(*holder)
             {
-                node.may_override_children = false;
+                node.set_may_override_children(false);
             }
         }
     }
@@ -685,7 +685,7 @@ impl<T: Sync> Document<T> {
         let overridden: Vec<NodeId> = overrides.iter().map(|(holder, _)| *holder).collect();
         self.clear_override_flags(&previous_overrides, &overridden);
         for &holder in &overridden {
-            self.live_node_mut(holder).may_override_children = true;
+            self.live_node_mut(holder).set_may_override_children(true);
         }
         let anonymous = self.arenas_mut().anonymous_mut();
         for (holder, children) in overrides {

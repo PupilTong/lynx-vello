@@ -68,10 +68,26 @@ pub(crate) fn block_flow_display() -> Display {
     Display::from_u16(BLOCK_FLOW).expect("every u16 is a display value")
 }
 
-pub(crate) fn display_mode(display: Display) -> DisplayMode {
+/// The layout algorithm `node` runs: from its kind first, then from its
+/// computed `display`.
+///
+/// `none` and `contents` act as computed on every element. Past them a Lynx
+/// text element ([`Node::is_lynx_text`]) lays out as a Lynx paragraph whatever
+/// its `display` says: that is what the element is, not a value of the
+/// property, as native Lynx fixes a text's layout structurally
+/// (`TextElement::ConvertToInlineElement`) and as an HTML `img` is replaced
+/// content under any `display`. `contents` on a text has no Lynx behaviour to
+/// follow; acting as computed is what keeps every reader of the style
+/// consistent.
+pub(crate) fn display_mode<T>(node: &Node<T>, display: Display) -> DisplayMode {
+    mode_of(display, node.is_lynx_text())
+}
+
+fn mode_of(display: Display, lynx_text: bool) -> DisplayMode {
     match display {
         Display::None => DisplayMode::None,
         Display::Contents => DisplayMode::Contents,
+        _ if lynx_text => DisplayMode::Text,
         Display::Flex => DisplayMode::Flex,
         Display::Grid => DisplayMode::Grid,
         Display::GridLanes => DisplayMode::GridLanes,
@@ -288,6 +304,11 @@ impl<'dom, T> StyleView<'dom, T> {
     pub(crate) fn values(&self) -> &'dom ComputedValues {
         self.style
     }
+
+    /// The layout algorithm the viewed node runs ([`display_mode`]).
+    pub(crate) fn display_mode(&self) -> DisplayMode {
+        display_mode(self.node, *self.style.get_display())
+    }
 }
 
 impl<T> CoreStyle for StyleView<'_, T> {
@@ -485,19 +506,36 @@ mod tests {
 
     use hughie::style::Display;
 
-    use super::{DisplayMode, StyleView, TextRunView, block_flow_display, display_mode};
+    use super::{DisplayMode, StyleView, TextRunView, block_flow_display, mode_of};
 
     #[test]
     fn supported_lynx_displays_map_to_layout_modes() {
-        assert_eq!(display_mode(Display::None), DisplayMode::None);
-        assert_eq!(display_mode(Display::Contents), DisplayMode::Contents);
-        assert_eq!(display_mode(Display::Flex), DisplayMode::Flex);
-        assert_eq!(display_mode(Display::Grid), DisplayMode::Grid);
-        assert_eq!(display_mode(Display::GridLanes), DisplayMode::GridLanes);
-        assert_eq!(display_mode(Display::Linear), DisplayMode::Linear);
-        assert_eq!(display_mode(Display::LynxRelative), DisplayMode::Relative);
-        assert_eq!(display_mode(Display::LynxText), DisplayMode::Text);
-        assert_eq!(display_mode(block_flow_display()), DisplayMode::BlockFlow);
+        assert_eq!(mode_of(Display::None, false), DisplayMode::None);
+        assert_eq!(mode_of(Display::Contents, false), DisplayMode::Contents);
+        assert_eq!(mode_of(Display::Flex, false), DisplayMode::Flex);
+        assert_eq!(mode_of(Display::Grid, false), DisplayMode::Grid);
+        assert_eq!(mode_of(Display::GridLanes, false), DisplayMode::GridLanes);
+        assert_eq!(mode_of(Display::Linear, false), DisplayMode::Linear);
+        assert_eq!(mode_of(Display::LynxRelative, false), DisplayMode::Relative);
+        assert_eq!(mode_of(Display::LynxText, false), DisplayMode::Text);
+        assert_eq!(mode_of(block_flow_display(), false), DisplayMode::BlockFlow);
+    }
+
+    #[test]
+    fn a_lynx_text_element_is_a_paragraph_under_every_display_but_none_and_contents() {
+        assert_eq!(mode_of(Display::None, true), DisplayMode::None);
+        assert_eq!(mode_of(Display::Contents, true), DisplayMode::Contents);
+        for display in [
+            Display::Flex,
+            Display::Grid,
+            Display::GridLanes,
+            Display::Linear,
+            Display::LynxRelative,
+            Display::LynxText,
+            block_flow_display(),
+        ] {
+            assert_eq!(mode_of(display, true), DisplayMode::Text, "{display:?}");
+        }
     }
 
     #[test]

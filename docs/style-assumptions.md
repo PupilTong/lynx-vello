@@ -275,20 +275,20 @@ the semantics are stylo's.** Everything below refines that sentence.
     which fails on any new important declaration until it earns the same
     argument.
 
-    - *Not `!important` since 2026-10-15:* `display: -lynx-text` on `text`,
-      on `inline-text`, and on a `text`'s own `inline-truncation` child. A
-      text's inline-ness is not a mode at all: Lynx establishes it at
-      tree-mutation time (`TextElement::OnNodeAdded` calls
-      `ConvertToInlineElement`, which renames the tag and marks the node
-      inline), the paragraph builder never reads `display`, and no author CSS
-      can undo any of it — but an author `display: none` still removes the
-      text, in native and in web-core alike. From 2026-09-03 to 2026-10-15
-      this was `display: -lynx-text !important`, which swallowed that `none`
-      too. The declaration is plain now, and the stylo fork's
-      `StyleAdjuster::adjust_for_lynx_text` computes any `display` other
-      than `none` on `text`, `inline-text` and `inline-truncation` to
-      `-lynx-text` (user ruling, 2026-10-15; native ignores such a value too,
-      the difference from web-core is in `docs/tracking/deviations.md`). With the
+    - *No declaration at all since 2026-10-17:* the `display` of `text`,
+      `inline-text` and a `text`'s own `inline-truncation` child. A text's
+      inline-ness is not a mode at all: Lynx establishes it at tree-mutation
+      time (`TextElement::OnNodeAdded` calls `ConvertToInlineElement`, which
+      renames the tag and marks the node inline), the paragraph builder
+      never reads `display`, and no author CSS can undo any of it — but an
+      author `display: none` still removes the text, in native and in
+      web-core alike. From 2026-09-03 to 2026-10-15 this was
+      `display: -lynx-text !important`, which swallowed that `none` too, and
+      until 2026-10-17 a plain `display: -lynx-text`. The paragraph is now
+      the element's kind (`CustomElement::is_lynx_text`), which
+      `dom::layout::display_mode` reads after `none` and `contents` (user
+      ruling, 2026-10-15; native ignores any other value too, the difference
+      from web-core is in `docs/tracking/deviations.md`). With the
       `!important` gone, a UA rule hiding an element's children
       (`list > *:not(list-item):not(wrapper)`, `x-swiper > :not(…)`,
       `image > *`, `svg > *`) now hides a `text` among them as well.

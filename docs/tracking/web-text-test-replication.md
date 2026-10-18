@@ -164,12 +164,12 @@ the wiring above it, in two places. The UA sheet gave the tag `display: none`
 with nothing to lift it, and `crates/dom` passed `None` for `TextBlock::new`'s
 truncation slice.
 
-- `text > inline-truncation { display: -lynx-text; --lynx-inline-truncation: 1; }`
+- `text > inline-truncation { --lynx-inline-truncation: 1; }`
   (`crates/bobcat-core/src/main/tree/text.rs`, with the property registered
-  beside it) makes a `text`'s **own** `inline-truncation` child a text scope and
-  flags it. That is web-core's scope — `XTextTruncation.ts` queries
-  `:scope > inline-truncation` — so a marker written through a wrapper or
-  outside a paragraph keeps the tag's default `display: none`.
+  beside it) flags a `text`'s **own** `inline-truncation` child, which is a text
+  scope by its element kind. That is web-core's scope — `XTextTruncation.ts`
+  queries `:scope > inline-truncation` — so a marker written through a wrapper
+  or outside a paragraph is hidden (`:not(text) > inline-truncation { display: none; }`).
 - `crates/dom` keys on the flag rather than on the tag
   (`is_truncation_marker`, `crates/dom/src/layout/text_block.rs:142`), collects
   the **first** such child's subtree as a second flow
@@ -529,9 +529,9 @@ Each blocks replicas that could not be written at all.
 - *Closed 2026-10-15, reversing the 2026-09-14 ruling:* `display: none` on a
   `text`. The UA sheet used to write `text { display: -lynx-text !important }`,
   which outranked an author's `display: none` too, so no `text` element could
-  be hidden. The declaration is plain now, and the stylo fork's adjuster
-  computes any other `display` on a text tag back to `-lynx-text`
-  (`docs/style-assumptions.md` §D.15, `docs/tracking/deviations.md`).
+  be hidden. The sheet declares no `display` for a text now: a text tag is a
+  paragraph by its element kind under every `display` but `none` and
+  `contents` (`docs/style-assumptions.md` §D.15, `docs/tracking/deviations.md`).
   `display: none` hides a block text or an inline run as it does in both
   references. The replica
   `display_none_removes_a_text_block_and_an_inline_run_alike` runs.

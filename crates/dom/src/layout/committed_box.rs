@@ -146,7 +146,7 @@ use stylo::properties::ComputedValues;
 use stylo::values::computed::Length;
 use stylo::values::generics::NonNegative;
 
-use super::style::{StyleView, display_mode, skips_contents};
+use super::style::{StyleView, skips_contents};
 use crate::tree::document::{NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 
@@ -632,7 +632,7 @@ fn debug_assert_estimate_agrees<T>(
 ) {
     if !cfg!(debug_assertions)
         || !is_container
-        || crate::layout::paragraph::establishes_paragraph(display_mode(view.display()))
+        || crate::layout::paragraph::establishes_paragraph(view.display_mode())
     {
         return;
     }

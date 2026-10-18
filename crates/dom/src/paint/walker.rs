@@ -1719,7 +1719,7 @@ fn collect_text_clip_under<'doc, T>(
     // (`tree::anonymous`).
     let tree = document.arenas();
     let children = node_ref
-        .may_override_children
+        .may_override_children()
         .then(|| tree.anonymous().layout_children(node))
         .flatten()
         .unwrap_or_else(|| node_ref.flat_children());

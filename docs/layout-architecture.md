@@ -70,7 +70,9 @@ state. Updating replaced metadata automatically invalidates the affected cache
 path. It is public on `Document` (`set_natural_size`/`natural_size`) because
 the decoder that produces it is a separate crate, but it is not exposed
 through any Element PAPI.
-`display: -lynx-text` flattens its subtree into `hughie::text::block`, with
+A Lynx text element (`text`, `inline-text`, `inline-truncation`, by their
+custom element definitions) or a `display: -lynx-text` element flattens its
+subtree into `hughie::text::block`, with
 atomic inline boxes and element-backed raw text. `LynxTextStyle::text_maxline`
 and `text_maxlength` carry the establishing element's computed custom properties
 into `BlockStyle`; computed `text-overflow` selects clip or ellipsis. Core reflects

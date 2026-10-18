@@ -31,7 +31,6 @@
 
 use std::hash::Hasher;
 
-use hughie::style::CoreStyle;
 use hughie::text::inline::{InlineFlow, InlineFlowStyle, InlineRun};
 use hughie::text::paragraph::{BreakStyle, OverflowWrap, RunStyle};
 use hughie::tree::LayoutTree;
@@ -41,7 +40,7 @@ use crate::layout::paragraph::{
     Collected, OwnedItem, TextStore, collect_generated, context_and_store, hash_flow,
     run_white_space,
 };
-use crate::layout::style::{DisplayMode, StyleView, TextRunView, display_mode};
+use crate::layout::style::{DisplayMode, StyleView, TextRunView};
 use crate::tree::document::{DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
 
 /// One block container's inline formatting context, plus the table that maps
@@ -100,7 +99,7 @@ fn collect_flow<T>(tree: &TreeArenas<T>, element: NodeSlot) -> Vec<Collected> {
             continue;
         }
         if node.is_element()
-            && display_mode(StyleView::of(node).display()) == DisplayMode::Contents
+            && StyleView::of(node).display_mode() == DisplayMode::Contents
             && !collect_generated(tree, slot, &mut collected)
         {
             let first = stack.len();
