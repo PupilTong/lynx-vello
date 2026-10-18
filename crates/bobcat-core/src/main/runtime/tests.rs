@@ -2060,6 +2060,304 @@ fn adopted_offsets_queue_scroll_events_only_for_a_name_something_hears() {
     );
 }
 
+/// A page of two 200px column scrollers over a 1000px child each: `a`, a
+/// child of the page that binds `scroll` and `scrollend`, and `b`, under an
+/// `outer` view, with no registration of its own. Answers `a`, `outer` and
+/// `b`.
+fn two_scrollers(
+    js_runtime: &mut ScriptRuntime,
+    runtime: &mut MainThreadRuntime,
+    elements: &DocumentProbe,
+) -> (dom::NodeId, dom::NodeId, dom::NodeId) {
+    runtime
+        .run_main_thread_script(
+            js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const scroller = (parent) => {
+                    const scroller = __CreateView(0);
+                    __AppendElement(parent, scroller);
+                    __SetInlineStyles(scroller, 'display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px;flex-shrink:0');
+                    const card = __CreateView(0);
+                    __AppendElement(scroller, card);
+                    __SetInlineStyles(card, 'flex-shrink:0;width:200px;height:1000px');
+                    return scroller;
+                  };
+                  const a = scroller(page);
+                  const outer = __CreateView(0);
+                  __AppendElement(page, outer);
+                  const b = scroller(outer);
+                  globalThis.held = [page, a, outer, b];
+                  __AddEvent(a, 'bindEvent', 'scroll', 'a:scroll');
+                  __AddEvent(a, 'bindEvent', 'scrollend', 'a:scrollend');
+                  __FlushElementTree();
+                };
+                ",
+            "app:///two-scrollers.js",
+        )
+        .expect("main-thread script");
+    let tree = elements.tree();
+    let page = tree.document_element().id();
+    let children = tree.get(page).expect("the page").child_ids();
+    let (a, outer) = (children[0], children[1]);
+    let b = tree.get(outer).expect("outer").child_ids()[0];
+    (a, outer, b)
+}
+
+/// A painter post of `node` at offset `y`, at rest or still moving.
+fn scroll_post(node: dom::NodeId, y: f32, rest: bool) -> (dom::NodeId, crate::link::ScrollEntry) {
+    (
+        node,
+        crate::link::ScrollEntry {
+            offset: dom::Vector2D::new(0.0, y),
+            at: 0.0,
+            rest: rest.then(|| dom::Vector2D::new(0.0, y)),
+            request: None,
+        },
+    )
+}
+
+/// A queued `scroll` at `node` with the change `delta_y`.
+fn queued_scroll(node: dom::NodeId, delta_y: f32) -> ComponentEvent {
+    ComponentEvent::Scroll {
+        node,
+        name: "scroll",
+        delta: dom::Vector2D::new(0.0, delta_y),
+    }
+}
+
+/// A queued `scrollend` at `node`.
+fn queued_scroll_end(node: dom::NodeId) -> ComponentEvent {
+    ComponentEvent::Scroll {
+        node,
+        name: "scrollend",
+        delta: dom::Vector2D::zero(),
+    }
+}
+
+/// `scroll` and `scrollend` are queued per container, where their dispatch
+/// would reach a registration ([`dom::Document::would_reach_listener`]),
+/// not wherever the page hears the name: `a`'s `bindscroll` and
+/// `bindscrollend` queue both at `a` and nothing at `b`. Neither bubbles, so
+/// a bubble registration on `b`'s ancestor `outer` does not make `b`'s
+/// events owed and a capture one does, for its name alone; a
+/// `global-bindscroll` anywhere does too. A `scrollend` registration made
+/// while `b` is scrolling is asked about at the rest, so it hears the end.
+/// A script-facing instant scroll follows the same rule.
+#[test]
+#[expect(clippy::too_many_lines, reason = "one page through every gate")]
+fn scroll_events_are_queued_only_where_they_would_reach_a_listener() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    let (a, _outer, b) = two_scrollers(&mut js_runtime, &mut runtime, &elements);
+    let steps = std::cell::Cell::new(0);
+    let run = |runtime: &mut MainThreadRuntime, js_runtime: &mut ScriptRuntime, source: &str| {
+        steps.set(steps.get() + 1);
+        let source = format!(
+            "import {{ __AddEvent, __FlushElementTree, __InvokeUIMethod }} from 'bobcat:element';
+             const [page, a, outer, b] = globalThis.held;
+             {source}"
+        );
+        let name = format!("app:///scroll-gate-{}.mjs", steps.get());
+        runtime
+            .evaluate_module(js_runtime, &source, &name, "a step")
+            .expect("the step runs");
+    };
+    let queued = |runtime: &MainThreadRuntime| runtime.slot.borrow().component_events.take();
+
+    runtime.adopt_scroll_offsets([scroll_post(a, 40.0, true)].into_iter());
+    assert_eq!(
+        queued(&runtime),
+        [queued_scroll(a, 40.0), queued_scroll_end(a)],
+        "`a`'s own registrations hear both"
+    );
+    runtime.adopt_scroll_offsets([scroll_post(b, 40.0, true)].into_iter());
+    assert_eq!(
+        elements.tree().scroll_offset(b),
+        dom::Vector2D::new(0.0, 40.0)
+    );
+    assert_eq!(queued(&runtime), [], "nothing on `b`'s path listens");
+
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        "__AddEvent(outer, 'bindEvent', 'scroll', 'outer:scroll');
+         __AddEvent(outer, 'bindEvent', 'scrollend', 'outer:scrollend');",
+    );
+    runtime.adopt_scroll_offsets([scroll_post(b, 80.0, true)].into_iter());
+    assert_eq!(
+        queued(&runtime),
+        [],
+        "neither name bubbles to an ancestor's bubble registration"
+    );
+
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        "__AddEvent(outer, 'capture-bind', 'scroll', 'outer:capture');",
+    );
+    runtime.adopt_scroll_offsets([scroll_post(b, 120.0, true)].into_iter());
+    assert_eq!(
+        queued(&runtime),
+        [queued_scroll(b, 40.0)],
+        "an ancestor's capture registration hears `scroll`, and `scrollend` still has none"
+    );
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        "__AddEvent(outer, 'capture-bind', 'scroll', null);
+         __AddEvent(page, 'global-bindEvent', 'scroll', 'page:global');",
+    );
+    runtime.adopt_scroll_offsets([scroll_post(b, 160.0, false)].into_iter());
+    assert_eq!(
+        queued(&runtime),
+        [queued_scroll(b, 40.0)],
+        "a global registration hears the name on every path"
+    );
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        "__AddEvent(page, 'global-bindEvent', 'scroll', null);",
+    );
+
+    runtime.adopt_scroll_offsets([scroll_post(b, 200.0, false)].into_iter());
+    assert_eq!(queued(&runtime), [], "`b` is scrolling, heard by nothing");
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        "__AddEvent(b, 'bindEvent', 'scrollend', 'b:scrollend');",
+    );
+    runtime.adopt_scroll_offsets([scroll_post(b, 200.0, true)].into_iter());
+    assert_eq!(
+        queued(&runtime),
+        [queued_scroll_end(b)],
+        "a `scrollend` registration made mid-scroll hears the end"
+    );
+
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        "__InvokeUIMethod(b, 'scrollTo', { top: 0 }, () => {});",
+    );
+    runtime.queue_instant_scroll_events();
+    assert_eq!(
+        elements.tree().scroll_offset(b),
+        dom::Vector2D::zero(),
+        "the instant scroll moved `b`"
+    );
+    assert_eq!(
+        queued(&runtime),
+        [],
+        "nothing hears `b`'s `scroll`, though `a`'s registration holds the name"
+    );
+    run(
+        &mut runtime,
+        &mut js_runtime,
+        "__InvokeUIMethod(a, 'scrollTo', { top: 0 }, () => {});",
+    );
+    runtime.queue_instant_scroll_events();
+    assert_eq!(queued(&runtime), [queued_scroll(a, -40.0)]);
+}
+
+/// What [`ScrollProbe`] heard, one entry per delivery.
+type ScrollLog = Rc<RefCell<Vec<String>>>;
+
+/// A test component that observes `scroll`, which no engine component does,
+/// and records each delivery as `name:target-is-self`.
+struct ScrollProbe {
+    log: ScrollLog,
+}
+
+impl dom::CustomElement<()> for ScrollProbe {
+    fn observed_events(&self) -> &'static [&'static str] {
+        &["scroll"]
+    }
+
+    fn handle_event(
+        &self,
+        _document: &mut LynxDocument,
+        element: dom::NodeId,
+        event: &mut dom::event::ElementEvent<'_>,
+    ) {
+        self.log.borrow_mut().push(format!(
+            "{}:{}",
+            event.type_name(),
+            event.target() == element
+        ));
+    }
+}
+
+/// A live element of a component observing `scroll` keeps the name owed
+/// with no realm registration at all: the probe's own scroll is queued and
+/// reaches it. Its `scrollend`, which nothing observes or registers, is not.
+#[test]
+fn a_component_observing_scroll_keeps_its_containers_scroll_queued() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  globalThis.held = [__CreatePage('card', 0)];
+                };
+                ",
+            "app:///scroll-probe.js",
+        )
+        .expect("main-thread script");
+    let log = ScrollLog::default();
+    runtime.with_document(|document| {
+        document.define(
+            "x-scroll-probe",
+            Box::new(ScrollProbe {
+                log: Rc::clone(&log),
+            }),
+        );
+    });
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import {
+                  __AppendElement, __CreateElement, __CreateView, __FlushElementTree,
+                  __SetInlineStyles,
+                } from 'bobcat:element';
+                const [page] = held;
+                const probe = __CreateElement('x-scroll-probe', 0);
+                __AppendElement(page, probe);
+                __SetInlineStyles(probe, 'display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px');
+                const card = __CreateView(0);
+                __AppendElement(probe, card);
+                __SetInlineStyles(card, 'flex-shrink:0;width:200px;height:1000px');
+                held.push(probe, card);
+                __FlushElementTree();
+                ",
+            "app:///scroll-probe-tree.js",
+            "tree",
+        )
+        .expect("the probe tree");
+    let probe = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        tree.get(page).expect("the page").child_ids()[0]
+    };
+    runtime.adopt_scroll_offsets([scroll_post(probe, 40.0, true)].into_iter());
+    let queued = runtime.slot.borrow().component_events.take();
+    assert_eq!(
+        queued,
+        [queued_scroll(probe, 40.0)],
+        "the observed `scroll` is owed; the unheard `scrollend` is not"
+    );
+    // Back in the queue, for the delivery.
+    runtime.slot.borrow().component_events.queue_scroll(
+        probe,
+        "scroll",
+        dom::Vector2D::new(0.0, 40.0),
+    );
+    let failures = runtime.dispatch_component_events(&mut js_runtime);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(*log.borrow(), ["scroll:true"]);
+}
+
 /// The painter's name set follows the realm's registration counts crossing
 /// zero with two adjustments: a `dblclick` registration routes `click` there
 /// too (the `dblclick` is decided from the `click`s the painter sends) and
@@ -9868,4 +10166,59 @@ fn a_freed_elements_last_registration_unpublishes_its_name_at_the_next_flush() {
         )
         .unwrap();
     assert!(!names.contains("longpress"));
+}
+
+/// A card's page goes with the card, and its exposure registration with it:
+/// with the card listening for `uiappear` on its own page root and the page
+/// realm for `uidisappear` there too, `resetFrame` frees the nested page, so
+/// both rows and the page's exposure observer leave through the document's
+/// free path, and the fresh page the next card gets is registered for
+/// nothing. No realm needs forgetting for it.
+#[test]
+fn a_reset_cards_page_takes_its_exposure_registration_with_it() {
+    let (mut js, mut runtime, elements, frame, _inner) = frame_calls();
+    let nested = frame_page_of(&elements.tree(), frame);
+    runtime
+        .evaluate_module(
+            &mut js,
+            &format!(
+                "import {{ framePage, listenerOpened }} from 'bobcat-internal:host';
+                 globalThis.realm.evaluate(
+                     `() => E.__AddEventListener(E.__CreatePage(), 'uiappear', () => {{}}, {{}})`,
+                 )();
+                 listenerOpened(framePage({frame}), 'uidisappear', 1);",
+                frame = packed_node_id(frame)
+            ),
+            "app:///expose-the-root.js",
+            "listening on the card's page",
+        )
+        .unwrap();
+    assert!(
+        exposure_observer(&elements, nested).is_some(),
+        "a listener registers the page for exposure detection"
+    );
+    runtime
+        .evaluate_module(
+            &mut js,
+            &format!(
+                "import {{ resetFrame }} from 'bobcat-internal:host';
+                 import {{ __FlushElementTree }} from 'bobcat:element';
+                 resetFrame({});
+                 __FlushElementTree();",
+                packed_node_id(frame)
+            ),
+            "app:///reset-exposing-frame.js",
+            "resetting the frame",
+        )
+        .unwrap();
+    assert!(elements.tree().get(nested).is_none(), "the page was freed");
+    assert_eq!(
+        exposure_observer(&elements, nested),
+        None,
+        "and its exposure registration with it"
+    );
+    let fresh = frame_page_of(&elements.tree(), frame);
+    assert!(!elements.tree().has_listener(fresh, "uiappear"));
+    assert!(!elements.tree().has_listener(fresh, "uidisappear"));
+    assert_eq!(exposure_observer(&elements, fresh), None);
 }
