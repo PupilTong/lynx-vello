@@ -33,7 +33,12 @@
 // `dispose` is the other half: `bobcat:frame` calls it when the frame lets
 // go of this card. It lets go of every card a frame of this card's loaded,
 // disposes of the card's BTS — its app cleanup runs and acknowledges — and
-// only then closes this realm.
+// only then closes this realm. The nested page is this card's alone: the
+// parent's `resetFrame`, right after `dispose` returns, frees it with
+// everything under it, so this realm's page root then names a freed node,
+// which nothing on the way to `closeRealm` reads: `__DestroyLifetime` runs
+// inside `dispose`, before the free, and what the BTS says meanwhile is
+// ignored.
 //
 // `bobcat:runtime` is imported before `bobcat:element`, as the boot module
 // imports them: the two import each other, and this order is what lets
@@ -184,9 +189,9 @@ function shadowRootOf(page: number): number {
  *
  * Returns at once. The host keeps this realm while its BTS runs, so the
  * acknowledgement is delivered here; a BTS that never answers keeps it until
- * the view ends. What the card built under the nested page is the parent's
- * to free, with `resetFrame`, right after this returns, and this realm
- * ignores what its BTS says meanwhile.
+ * the view ends. The nested page, with what the card built under it, is the
+ * parent's to free, with `resetFrame`, right after this returns, and this
+ * realm ignores what its BTS says meanwhile.
  */
 export function dispose(): void {
   __BobcatCloseFrames();

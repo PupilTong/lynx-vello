@@ -76,7 +76,7 @@ use std::rc::Rc;
 use dom::{Document, ImageOutcome, NodeId, StylesheetOrigin};
 
 pub(crate) use self::base_methods::invoke_base_method;
-pub(crate) use self::frame::{MAX_FRAME_DEPTH, frame_depth, nested_page};
+pub(crate) use self::frame::{MAX_FRAME_DEPTH, frame_depth, nested_page, reset_frame};
 pub(crate) use self::svg::is_svg;
 pub(crate) use self::swiper::Autoplays;
 pub use self::ua_sheet::PageConfig;

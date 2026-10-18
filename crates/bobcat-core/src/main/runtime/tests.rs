@@ -8808,8 +8808,9 @@ fn frame_page_refuses_past_eight_frames_deep() {
 /// A child's adoption names the frame's shadow root, and mounts there: a
 /// `.box` inside the frame takes the sheet, and the host's own `.box` does
 /// not. A target that is no shadow root is refused before anything is
-/// requested. `resetFrame` then frees what the child built under the nested
-/// page and removes the sheet, and the nested page stays.
+/// requested. `resetFrame` then frees the nested page with what the child
+/// built under it, removes the sheet, and builds the next card a fresh
+/// page, which `framePage` answers.
 #[test]
 #[expect(clippy::float_cmp, reason = "rounded widths are exact CSS pixels")]
 fn a_frames_sheet_styles_its_shadow_tree_alone_until_the_frame_is_reset() {
@@ -8882,33 +8883,33 @@ fn a_frames_sheet_styles_its_shadow_tree_alone_until_the_frame_is_reset() {
                 &mut js,
                 r"
                 import { __FlushElementTree, __GetElementUniqueID } from 'bobcat:element';
-                import { createElement, insertBefore, resetFrame, setAttribute } from 'bobcat-internal:host';
+                import {
+                    createElement, framePage, insertBefore, resetFrame, setAttribute,
+                } from 'bobcat-internal:host';
                 // In the order `bobcat:frame` lets go of a card: the child
                 // first, so its handles' drops are silent, then the frame.
                 globalThis.realm.evaluate('H.closeRealm()');
-                resetFrame(__GetElementUniqueID(globalThis.frame));
-                // A box the next card would build, through the host alone.
+                const frameId = __GetElementUniqueID(globalThis.frame);
+                resetFrame(frameId);
+                // A box the next card would build, through the host alone,
+                // under the page the next card's `framePage` reads.
                 const next = createElement('view');
                 setAttribute(next, 'class', 'box');
                 setAttribute(next, 'style', 'height:10px');
-                insertBefore(H_PAGE, next, undefined);
+                insertBefore(framePage(frameId), next, undefined);
                 globalThis.next = next;
                 __FlushElementTree();
-            "
-                .replace("H_PAGE", &packed_node_id(page).to_string())
-                .as_str(),
+            ",
                 "app:///reset-frame.js",
                 "resetting the frame",
             )
             .unwrap();
         let tree = elements.tree();
         assert!(tree.get(inner).is_none(), "the child's box was freed");
-        assert_eq!(
-            frame_page_of(&tree, first_frame(&tree)),
-            page,
-            "the nested page stays"
-        );
-        let next = tree.get(page).unwrap().child_ids()[0];
+        assert!(tree.get(page).is_none(), "and its nested page with it");
+        let fresh = frame_page_of(&tree, first_frame(&tree));
+        assert_ne!(fresh, page, "the next card's page is a fresh one");
+        let next = tree.get(fresh).unwrap().child_ids()[0];
         assert_eq!(
             tree.rounded_layout(next).unwrap().size.width,
             100.0,
@@ -9540,6 +9541,167 @@ fn close_realm_clears_the_childs_rows() {
     assert_eq!(
         frame_lines(&mut js, &mut runtime),
         [format!("page-frame tap {} 30,40", packed_node_id(frame))]
+    );
+}
+
+/// [`FRAME_CALLS`], with the card also binding `longpress` on its own page,
+/// a name nothing else holds, and filing a `global-bindtap` there; and a
+/// second `ShadowRealm` child, `next`, which has filed nothing and read no
+/// page yet: a new `src`'s card before its boot reads `framePage`. Each
+/// global handler reports whether the event's target is its own element. Answers the frame and its
+/// nested page beside the runtime.
+fn frame_calls_with_a_next_card() -> (
+    ScriptRuntime,
+    MainThreadRuntime,
+    DocumentProbe,
+    PublishedNames,
+    dom::NodeId,
+    dom::NodeId,
+) {
+    let (mut js, mut runtime, elements, names) = runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            &format!(
+                "{FRAME_REALM}{FRAME_CALLS}
+const global = `(label, report) => ({{ type: 'worklet', value: {{ body: (e) => report(
+    label + ' ' + e.type + ' ' +
+    (e.target.uid === e.currentTarget.uid ? 'own' : e.target.uid)) }} }})`;
+realm.evaluate(`(report) => {{
+    const global = ${{global}};
+    E.__AddEvent(E.__CreatePage(), 'bindEvent', 'longpress', {{ type: 'worklet', value: {{}} }});
+    E.__AddEvent(E.__CreatePage(), 'global-bindEvent', 'tap', global('old-global', report));
+}}`)((text) => report(text));
+globalThis.next = await frameRealm();
+next.evaluate(`(report) => {{
+    globalThis.runWorklet = (value, params) => value.body(params[0]);
+    globalThis.report = report;
+    globalThis.global = ${{global}};
+}}`)((text) => report(text));
+"
+            ),
+            "app:///reset-frame-rows.js",
+        )
+        .unwrap();
+    let (frame, nested) = {
+        let tree = elements.tree();
+        let frame = first_frame(&tree);
+        (frame, frame_page_of(&tree, frame))
+    };
+    (js, runtime, elements, names, frame, nested)
+}
+
+/// `resetFrame` frees the old card's page with everything under it, and the
+/// card's rows leave with its nodes: a name only it held is no longer
+/// routed by the painter from the next flush on, as for any freed element,
+/// though its realm is neither closed nor freed (its background thread's
+/// disposal runs first). The old card is not called afterwards — its
+/// `global-bindtap` went with its page — so a tap in the frame is the
+/// page's alone. The next card's `framePage` answers a different node, the
+/// fresh page, and a `global-bindtap` `next` files there is reached by the
+/// next tap in the frame.
+#[test]
+fn reset_frame_frees_the_old_cards_page_and_its_rows_with_it() {
+    let (mut js, mut runtime, elements, mut names, frame, nested) = frame_calls_with_a_next_card();
+    let inner = elements.tree().get(nested).unwrap().child_ids()[0];
+    let keys = runtime.core().children.keys();
+    let (old, next) = (
+        RealmId::Child(keys[0]).listener_key(),
+        RealmId::Child(keys[1]).listener_key(),
+    );
+    assert!(
+        names.contains("longpress"),
+        "the old card's own name is published"
+    );
+    let tap_rows = |key| {
+        let tree = elements.tree();
+        let steps = tree.event_steps(inner, true, true);
+        (
+            tree.listeners_on_path(&steps, "tap").contains(&key),
+            tree.global_registrants("tap").contains(&key),
+        )
+    };
+    assert_eq!(tap_rows(old), (true, true));
+    assert_eq!(tap_rows(next), (false, false));
+
+    runtime
+        .evaluate_module(
+            &mut js,
+            &format!(
+                "import {{ resetFrame }} from 'bobcat-internal:host';
+                 import {{ __FlushElementTree }} from 'bobcat:element';
+                 resetFrame({});
+                 __FlushElementTree();",
+                packed_node_id(frame)
+            ),
+            "app:///reset-frame.js",
+            "resetting the frame",
+        )
+        .unwrap();
+    for name in ["tap", "keydown", "longpress"] {
+        let tree = elements.tree();
+        assert!(
+            !tree.has_listener(inner, name)
+                && !tree.has_listener(nested, name)
+                && !tree.global_registrants(name).contains(&old),
+            "{name}"
+        );
+    }
+    assert!(
+        !names.contains("longpress"),
+        "a name only the old card held is no longer routed by the painter"
+    );
+    assert!(names.contains("tap"), "the page's own stays");
+    let fresh = {
+        let tree = elements.tree();
+        assert!(tree.get(nested).is_none(), "the old card's page was freed");
+        assert!(tree.get(inner).is_none(), "and what was under it");
+        frame_page_of(&tree, frame)
+    };
+    assert_ne!(fresh, nested, "the next card gets a page of its own");
+    assert_eq!(
+        runtime.core().children.release_unneeded(),
+        0,
+        "the old card's realm is neither closed nor freed"
+    );
+
+    runtime
+        .dispatch_for_test(&mut js, fresh, &tap(), dom::Point2D::new(30.0, 40.0))
+        .expect("dispatch");
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [format!("page-frame tap {} 30,40", packed_node_id(frame))]
+    );
+
+    runtime
+        .evaluate_module(
+            &mut js,
+            &format!(
+                "globalThis.next.evaluate(`frame => {{
+                     E.__BobcatUsePageRoot(H.framePage(frame));
+                     report('next-page ' + E.__GetElementUniqueID(E.__CreatePage()));
+                     E.__AddEvent(E.__CreatePage(), 'global-bindEvent', 'tap',
+                         global('next-global', report));
+                 }}`)({});",
+                packed_node_id(frame)
+            ),
+            "app:///next-page.js",
+            "booting the next card's page",
+        )
+        .unwrap();
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [format!("next-page {}", packed_node_id(fresh))]
+    );
+    runtime
+        .dispatch_for_test(&mut js, fresh, &tap(), dom::Point2D::new(30.0, 40.0))
+        .expect("dispatch");
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            format!("page-frame tap {} 30,40", packed_node_id(frame)),
+            "next-global tap own".to_owned(),
+        ]
     );
 }
 

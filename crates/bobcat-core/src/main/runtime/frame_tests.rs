@@ -378,25 +378,27 @@ fn a_frame_boots(src: &str) {
     assert_eq!(kept.nested_color, Some(red));
 
     write_src(&mut engine, &format!("{SECOND:?}"));
-    // The nested page is the frame's for its life; what is under it is the
-    // card's.
-    let page = nested[0];
+    // The nested page is the card's: the second card renders under a page
+    // of its own.
     let replaced = pump_until(
         &mut engine,
         &mut events,
         "the second card replaced the first",
-        |state| state.nested.len() == 2 && !nested[1..].contains(&state.nested[1]),
+        |state| state.nested.len() == 2 && !nested.contains(&state.nested[1]),
     );
-    assert_eq!(replaced.nested[0], page, "the nested page stays");
+    assert_ne!(replaced.nested[0], nested[0], "a fresh nested page");
     assert_eq!(
         replaced.nested_color,
         Some(AbsoluteColor::BLACK),
         "the second card has no page CSS, and the first card's is gone"
     );
     let freed = engine
-        .probe_document(move |tree| nested[1..].iter().all(|id| tree.get(*id).is_none()))
+        .probe_document(move |tree| nested.iter().all(|id| tree.get(*id).is_none()))
         .expect("the document answers");
-    assert!(freed, "a new src freed every node of the first card");
+    assert!(
+        freed,
+        "a new src freed every node of the first card, its page included"
+    );
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
@@ -538,9 +540,10 @@ fn nested_of(engine: &mut TestEngine, frame: dom::NodeId) -> Vec<dom::NodeId> {
 }
 
 /// Disconnecting a frame disposes of its card, as web-core's `LynxView`
-/// does on `disconnectedCallback`: the nested page is emptied, its sheet
-/// removed and the card's realm gone, so its timers stop. Connecting it
-/// again loads the frame's `src` again, as `connectedCallback` renders it.
+/// does on `disconnectedCallback`: the card's nested page is freed and an
+/// empty one put in its place, its sheet removed and the card's realm gone,
+/// so its timers stop. Connecting it again loads the frame's `src` again,
+/// into that page, as `connectedCallback` renders it.
 #[test]
 fn a_removed_frame_disposes_of_its_card_and_reappending_renders_it_again() {
     let mut engine = serving_a_root(CARD, &ticking_root()).create(Arc::new(NoWakeup));
@@ -569,10 +572,17 @@ fn a_removed_frame_disposes_of_its_card_and_reappending_renders_it_again() {
         events.extend(pump_for(&mut engine, Duration::from_millis(5)));
         assert!(Instant::now() < deadline, "the nested page was not emptied");
     }
-    assert_eq!(
-        nested_of(&mut engine, frame),
-        first[..1],
-        "the nested page stays"
+    let emptied = nested_of(&mut engine, frame);
+    assert_ne!(
+        emptied[0], first[0],
+        "an empty page of its own for the next card"
+    );
+    let gone = first.clone();
+    assert!(
+        engine
+            .probe_document(move |tree| gone.iter().all(|id| tree.get(*id).is_none()))
+            .expect("the document answers"),
+        "the card's page went with it"
     );
     assert_no_more_ticks(&mut engine, "the disconnected frame's card is disposed of");
 
@@ -583,7 +593,10 @@ fn a_removed_frame_disposes_of_its_card_and_reappending_renders_it_again() {
         "the card rendered again",
         |state| state.nested.len() == 2 && state.nested[1] != first[1],
     );
-    assert_eq!(again.nested[0], first[0]);
+    assert_eq!(
+        again.nested[0], emptied[0],
+        "rendered into the page the reset built"
+    );
     assert_eq!(
         again.nested_color,
         Some(AbsoluteColor::srgb_legacy(255, 0, 0, 1.0)),
@@ -1536,11 +1549,10 @@ fn a_frame_showing_no_card_leaves_its_taps_to_the_page() {
 /// A new `src` hands the frame's events to the new card; a disconnection
 /// to nobody, the page alone hearing what lands where the frame was.
 ///
-/// The tap waits for the first card's background thread to be destroyed as
-/// well as for the new card to be drawn: the first card's realm keeps its
-/// rows on the nested page, which `resetFrame` keeps, until its
-/// `closeRealm`, which runs once that thread acknowledged its disposal, and
-/// until then a dispatch inside the frame calls it too.
+/// The tap does not wait for the first card's `closeRealm`: the new `src`'s
+/// `resetFrame` freed that card's page, and its rows went with its nodes, so
+/// only the new card is called, whether or not the first card's background
+/// thread has acknowledged its disposal yet.
 #[test]
 fn a_frames_events_follow_its_card() {
     let mut engine = booted_event_view();
@@ -1550,12 +1562,6 @@ fn a_frames_events_follow_its_card() {
     pump_until_hit(&mut engine, &mut events, CV, |hit| {
         hit.0.as_deref() == Some("sv")
     });
-    pump_until_logged(
-        &mut engine,
-        &mut events,
-        &format!("bts {EVENT_CARD} destroyed"),
-    );
-    events.extend(pump_for(&mut engine, Duration::from_millis(30)));
     assert_eq!(reported(&events), Vec::<&str>::new());
     tap(&mut engine, CV);
     let lines = lines_until(&mut engine, "second-view tap sv 100,30");
@@ -1615,22 +1621,15 @@ fn a_frame_an_earlier_listener_removed_still_has_its_card_called() {
     );
 }
 
-/// A page listener that gives the frame a new `src` inside the tap: what
-/// #428 asserted, the page's walk alone and nothing reported.
-///
-/// Ignored: the kernel's call does not do this. The new `src` runs the first
-/// card's `teardown` inside the page's listener — its `dispose`, whose
-/// `closeRealm` waits for the card's background thread, and `resetFrame`,
-/// which frees the card's nodes at once and keeps the nested page — so the
-/// card's realm is still live and its root still on the path when the walk
-/// reaches the nested page. It is called with the steps encoded before the
-/// walk, whose nodes are freed, and its dispatch throws reading the target
-/// (`ListenerFailed`: `bobcat-internal:host.attributeNames received a stale
-/// element id`). The design (§4.5, §4.8) asks for freed steps to be skipped
-/// with no staleness error; which of the card's steps remain once they are
-/// is not ruled.
+/// A page listener that gives the frame a new `src` inside the tap: the
+/// page's walk goes on — the wrapper's bind and the page's global after the
+/// listener still run — the first card hears nothing, and nothing is
+/// reported, as #428 had it. The new `src` runs the first card's `teardown`
+/// inside the listener, and its `resetFrame` frees that card's page, whose
+/// nodes take the card's rows with them, so the card's call later at the
+/// same step finds it no registration for `tap` and is skipped, though its
+/// realm stays until its background thread acknowledges the disposal.
 #[test]
-#[ignore = "the kernel calls a card whose nodes resetFrame freed mid-dispatch with stale ids (design §4.5/§4.8)"]
 fn a_frame_an_earlier_listener_gave_a_new_src_mid_dispatch() {
     let mut engine = booted_event_view();
     event_op(&mut engine, "src-on-tap");

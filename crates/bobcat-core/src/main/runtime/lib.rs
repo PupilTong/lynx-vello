@@ -50,7 +50,7 @@ use crate::main::exposure::{Exposure, is_exposure_attribute};
 use crate::main::record::write_record_field;
 use crate::main::tree::{
     Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, LynxDocument, MAX_FRAME_DEPTH,
-    PageConfig, frame_depth, invoke_base_method, is_svg, nested_page, new_document,
+    PageConfig, frame_depth, invoke_base_method, is_svg, nested_page, new_document, reset_frame,
 };
 use crate::realm::child::{ChildHostModules, ChildHostState, ChildKey};
 use crate::realm::policy::context_of;
@@ -3586,7 +3586,8 @@ fn install_host_module(
 }
 
 /// Installs the three members a nested card's realms speak to, all generic:
-/// `framePage` reads a `frame`'s nested page, `resetFrame` empties it, and
+/// `framePage` reads a `frame`'s nested page, `resetFrame` frees it with the
+/// card under it and builds the next card's, and
 /// `closeRealm` retires the realm that calls it and lets go of every
 /// registration it filed. Which realm renders which frame, and when one is
 /// let go of, is `bobcat:frame`'s to decide; the host keeps no record of it.
@@ -3597,9 +3598,10 @@ fn install_nested_page_members(
     retired: Option<Rc<Cell<bool>>>,
 ) -> Result<(), MainThreadError> {
     tree_members! { engine, handle;
-        // The nested page a `frame` component built with the element, which
-        // lives as long as the frame. Refused past `MAX_FRAME_DEPTH` frames,
-        // so a card that embeds itself stops there. Nothing is recorded.
+        // The nested page a `frame` holds now, which belongs to the card
+        // rendered under it: `resetFrame` frees it with that card and builds
+        // the next card's. Refused past `MAX_FRAME_DEPTH` frames, so a card
+        // that embeds itself stops there. Nothing is recorded.
         fn framePage(frame: node_id_argument) |document| {
             validate_live_element(document, NAME, frame)?;
             let page = nested_page(document, frame)
@@ -3612,26 +3614,17 @@ fn install_nested_page_members(
             Ok(node_id_value(page))
         }
 
-        // Frees every child of a frame's nested page with its whole subtree
-        // — it is inside a shadow tree, so `dom` frees what is under it
-        // outright — and every sheet mounted on the frame's shadow root, so
-        // the card loaded next is styled by its own alone. The nested page
-        // stays.
+        // Lets go of the card a frame shows: frees its nested page with
+        // everything under it and the sheets on the frame's shadow root,
+        // and builds the next card a page of its own
+        // ([`crate::main::tree::reset_frame`]). The old card's listener rows
+        // and exposure registrations leave with its nodes, through the
+        // document's free path; its realm is the old card's own business,
+        // and no dispatch calls it for a name it holds nothing for.
         fn resetFrame(frame: node_id_argument) |document| {
             validate_live_element(document, NAME, frame)?;
-            let page = nested_page(document, frame)
+            reset_frame(document, frame)
                 .ok_or_else(|| format!("{NAME} requires a frame element"))?;
-            let shadow = document
-                .shadow_root(frame)
-                .expect("a nested page sits in its frame's shadow root");
-            let children: SmallVec<[dom::NodeId; 8]> = document
-                .get(page)
-                .map(|page| page.child_ids().iter().copied().collect())
-                .unwrap_or_default();
-            for child in children {
-                document.drop_element(child);
-            }
-            document.clear_shadow_stylesheets(shadow);
             Ok(HostValue::Undefined)
         }
     }

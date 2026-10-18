@@ -2756,8 +2756,10 @@ consequential choice about whether to follow the spec or the quirk.
   - *Events fire on transitions only.* web-core re-runs `showModal()` and
     fires `showoverlay` for every write of a showing value (`"true"` to
     `""`); here a rewrite that keeps the overlay shown fires nothing.
-- **`<frame>` renders its card in the host's document**, under the nested page
-  the frame's custom element keeps in its shadow root, driven by a
+- **`<frame>` renders its card in the host's document**, under a nested page
+  in the frame's shadow root that belongs to that card — letting go of the
+  card frees its page, and the next card gets a fresh one (user ruling
+  2026-10-19) — driven by a
   `ShadowRealm` child of the MTS realm (`bobcat-core`'s `main/tree/frame.rs`
   and `bobcat-element`'s `frame.ts`/`frame-boot.ts`, user rulings: one PAPI,
   no second engine; a custom-element ability). Native stands up a second
@@ -2856,7 +2858,7 @@ consequential choice about whether to follow the spec or the quirk.
       the nested view; here exposure is the document's.
     - *Disposal does not hold the frame* (my decision): a removal or a new
       `src` runs the old card's BTS `dispose` (ReactLynx's `destroyCard`,
-      its unmount effects) and empties the nested page at once, without
+      its unmount effects) and frees the card's nested page at once, without
       waiting for the acknowledgement; the old child is kept until its BTS
       acknowledges and ignores what that BTS says meanwhile. As the view ends
       the page closes its frames first, so each frame card's BTS gets
@@ -2865,11 +2867,12 @@ consequential choice about whether to follow the spec or the quirk.
       before terminating the Worker; native destroys the nested render with
       the frame.
   - *Events reach the card in its own realm, called by the kernel at the
-    frame's nested page* (user rulings 2026-10-16 and 2026-10-18, scheme D;
-    "Each realm's Lynx walk runs at its root's capture step", Event model &
-    gestures): the page realm is called at the path's first step, then the
-    card's, each running its own Lynx walk over its part of the path, with
-    no forwarding between them. Where the references disagree:
+    path's top* (user rulings 2026-10-16 and 2026-10-18, scheme D, and
+    2026-10-19; "Each realm's Lynx walk runs at the path's top step", Event
+    model & gestures): the page realm is called first, then the card's, at
+    the same step and with the same path, each running its own Lynx walk
+    over the steps it holds handles for, with no forwarding between them.
+    Where the references disagree:
     - *A catch stops one card's walk alone* (web-core): a `catchtap` in the
       card does not stop the page's `bindtap` on the frame's ancestors, and a
       page `capture-catch` does not stop the card, as each web-core
@@ -2877,10 +2880,13 @@ consequential choice about whether to follow the spec or the quirk.
       Native runs one propagation across both pages
       (`LynxEventEmitter.java:118-158`, `touch_event_handler.cc:1537-1931`),
       where either catch ends it; not adopted.
-    - *Every card hears every key* (web-core): a card that registered
-      `keydown`/`keyup` is called at the document element, so its
-      `global-bindkeydown`/`keyup` fires for each key, as web-core's nested
-      binding listens on `document`; native Android/iOS have no `keydown`.
+    - *Every card hears every key* (web-core): a card with a
+      `global-bindkeydown`/`keyup` is called for each key and, holding no
+      step of the key's path, runs that global pass alone, as web-core's
+      nested binding listens on `document`; native Android/iOS have no
+      `keydown`. Every other global registration of a card is reached only by
+      a path through its frame's shadow root, as web-core's card listens on
+      its own shadow root.
     - *The card's `detail.x/y` is frame-local* (my decision; both references
       agree): the card's pointer, wheel and touch `x/y` and its position
       `detail` are relative to the frame's border box, read once per
@@ -2890,8 +2896,11 @@ consequential choice about whether to follow the spec or the quirk.
       same dispatch removed — answers the viewport's origin.
     - *A frame an earlier listener removed still has its card called* in the
       same dispatch: the realms a dispatch calls are fixed before its walk,
-      and the card's realm keeps its root until its `closeRealm`, which the
-      disconnection starts in a later entry.
+      and the card keeps its registrations until the frame lets go of it,
+      which the disconnection starts in a later entry. A new `src` written
+      by an earlier listener lets go of the old card at once: `resetFrame`
+      frees its page, its registrations leave with its nodes, and its call
+      is skipped, since it holds nothing for the name any more.
     - *The card's exposure records go to the page's BTS* (deferred): a
       card's elements' `exposure`/`disexposure` lists still go to the page
       realm's BTS, where both references keep exposure per card.

@@ -459,15 +459,16 @@ declare module "bobcat-internal:host" {
   export const flushElementTree: BobcatNative["flushElementTree"];
   /**
    * The `NodeId` of the nested page (`page[part=page]`) the `frame` element
-   * `frame` built in its shadow root, which lives as long as the frame.
-   * Read-only. Throws for a node that is not a live frame, and for a frame
+   * `frame` holds in its shadow root now, which belongs to the card rendered
+   * under it until `resetFrame` frees it. Read-only. Throws for a node that is not a live frame, and for a frame
    * that sits more than eight frames deep.
    */
   export function framePage(frame: number): number;
   /**
-   * Frees every child of the `frame` element `frame`'s nested page, each
-   * with its whole subtree, and removes every sheet mounted on the frame's
-   * shadow root. The nested page stays.
+   * Lets go of the card the `frame` element `frame` shows: frees its nested
+   * page with its whole subtree, removes every sheet mounted on the frame's
+   * shadow root, and builds a fresh nested page, which the next card's
+   * `framePage` answers.
    */
   export function resetFrame(frame: number): void;
   /**
