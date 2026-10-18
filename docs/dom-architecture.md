@@ -946,7 +946,9 @@ whether anything listens on it, before producing a costly event),
 `would_reach_listener(target, name, bubbles, composed)` (whether an event it
 fires reaches any registration: no registration of the name is one lookup, a
 global one anywhere is `true`, otherwise a path probe), `hears(name)` (any
-registration, or a definition that observes the name), `listeners_on_path`
+registration, or a definition that observes the name), `has_listeners_for(name)`
+(any registration alone: the set the edges describe, which a host's router
+unions with its own live-element names), `listeners_on_path`
 (the registrants one dispatch reaches through a path registration — a capture
 registration on its node's capture step, a bubble one on its bubble step, so
 an ancestor's bubble registration misses a non-bubbling event), and

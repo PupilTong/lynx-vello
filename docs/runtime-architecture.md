@@ -1530,8 +1530,9 @@ The callback boundary carries only `quickjs-rust-bridge`'s primitive
 functions, raw VM values, and DOM handles cannot cross it. Bobcat registers its
 private callbacks as named exports of the native `bobcat-internal:host` ESM —
 the document member `createDocument`, the tree and attribute
-members, the two event-name members, the two exposure members
-(`exposureEvents`, `switchExposure`), the two timer members, and the three worker
+members, the two listener members (`listenerOpened`, `listenerClosed`, which
+file per-element registrations in the document's listener table), the
+exposure switch (`switchExposure`), the two timer members, and the three worker
 members — then preloads three kinds of ESM source: the core-owned
 `bobcat:runtime` named compatibility exports, the embedded `bobcat:element`
 named Element-PAPI exports, and the fetched entry under the URL boot imports
@@ -1541,9 +1542,11 @@ imports its native operations directly; nothing is installed as
 `globalThis.bobcat`. The entry is completed as the fetcher answered it: a
 card's entry carries its runtime and Element-PAPI import declarations because
 `bobcat-source` wrote them in front of its body. Event delivery travels back
-through the loaded `bobcat:element` namespace's `__BobcatDispatchEvent` export, once per
-dispatch, carrying the whole event path as two comma-joined id strings and
-everything else as primitives: whether the event bubbles — which decides how
+through the loaded `bobcat:element` namespace's `__BobcatDispatchEvent` export,
+once per listening realm per dispatch — the host's one walk over the path
+calls each realm the listener table says listens, at the step of its root
+(`MainThreadRuntime::dispatch`) — carrying that realm's part of the event path
+as two comma-joined id strings and everything else as primitives: whether the event bubbles — which decides how
 much of that path the bind pass runs on, and whether the `global-bindEvent`
 pass runs at all — the event's `timestamp`, and a numeric detail kind followed
 by the numbers that kind spends (a position and an optional wheel delta plus
