@@ -1188,13 +1188,12 @@ fn resolve_flexible_lengths<N>(
 /// the line.
 #[inline]
 fn baseline_participation<N>(item: &FlexItem<N>, axes: Axes) -> Option<BaselineSet> {
-    if axes.main != Axis::Horizontal
-        || item.margin_auto.flow_start(axes.cross, axes.cross_reverse)
-        || item.margin_auto.flow_end(axes.cross, axes.cross_reverse)
-    {
-        return None;
-    }
-    BaselineSet::of_alignment(item.align_self)
+    // The alignment first: most items align by no baseline at all.
+    let set = BaselineSet::of_alignment(item.align_self)?;
+    (axes.main == Axis::Horizontal
+        && !item.margin_auto.flow_start(axes.cross, axes.cross_reverse)
+        && !item.margin_auto.flow_end(axes.cross, axes.cross_reverse))
+    .then_some(set)
 }
 
 /// The item whose baseline a flex container exports as its first or last
@@ -1229,6 +1228,9 @@ fn exported_baseline_item<N>(
     lines: &[FlexLine],
     axes: Axes,
     set: BaselineSet,
+    // Whether any item of the container aligns by a baseline: without one
+    // no line has a group, and the line's items are not read.
+    baseline_aligned: bool,
 ) -> Option<(usize, usize, BaselineSet)> {
     // Whether the logically first line (or item) is the one wanted: the
     // first baseline wants the startmost, the last the endmost, and a flow
@@ -1255,9 +1257,11 @@ fn exported_baseline_item<N>(
                 BaselineSet::Last => range.clone().rfind(joins),
             }
         };
-        for group in [set, set.other()] {
-            if let Some(index) = in_group(group) {
-                return Some((line_index, index, group));
+        if baseline_aligned {
+            for group in [set, set.other()] {
+                if let Some(index) = in_group(group) {
+                    return Some((line_index, index, group));
+                }
             }
         }
         let index = match set {
@@ -1294,6 +1298,8 @@ fn determine_hypothetical_cross_sizes<T>(
     // The container's own measurement was asked for an exact last baseline
     // (`LayoutInput::reads_last_baseline`); never set on a commit.
     last_baseline_requested: bool,
+    // Whether any item aligns by a baseline ([`exported_baseline_item`]).
+    baseline_aligned: bool,
 ) where
     T: LayoutTree,
 {
@@ -1305,9 +1311,10 @@ fn determine_hypothetical_cross_sizes<T>(
     // from its border box, and a commit the committed run's
     // (`container_baselines`).
     let exported_first =
-        exported_baseline_item(items, lines, axes, BaselineSet::First).map(|(_, index, _)| index);
+        exported_baseline_item(items, lines, axes, BaselineSet::First, baseline_aligned)
+            .map(|(_, index, _)| index);
     let exported_last = if last_baseline_requested {
-        exported_baseline_item(items, lines, axes, BaselineSet::Last)
+        exported_baseline_item(items, lines, axes, BaselineSet::Last, baseline_aligned)
             .filter(|&(_, _, set)| set == BaselineSet::Last)
             .map(|(_, index, _)| index)
     } else {
@@ -1837,9 +1844,11 @@ fn container_baselines<N>(
     axes: Axes,
     inner_size: Size<f32>,
     content_origin: Point<f32>,
+    baseline_aligned: bool,
 ) -> [Option<f32>; 2] {
     BaselineSet::BOTH.map(|wanted| {
-        let (line_index, index, set) = exported_baseline_item(items, lines, axes, wanted)?;
+        let (line_index, index, set) =
+            exported_baseline_item(items, lines, axes, wanted, baseline_aligned)?;
         let item = &items[index];
         let location =
             item_border_box_location(item, lines[line_index], axes, inner_size, content_origin);
@@ -2193,18 +2202,23 @@ where
             if definite { size } else { None }
         },
     );
+    // Whether any item aligns by a baseline: a re-resolution below reads the
+    // same styles, so it keeps the answer.
+    let mut baseline_aligned = false;
     let mut items = generated
         .into_iter()
         .map(|item| {
             let key = item.key();
-            resolve_item(
+            let item = resolve_item(
                 &tree.style(key.node),
                 key,
                 percentage_basis,
                 axes,
                 rtl,
                 align_items,
-            )
+            );
+            baseline_aligned |= BaselineSet::of_alignment(item.align_self).is_some();
+            item
         })
         .collect::<Vec<_>>();
     determine_flex_base_sizes(
@@ -2335,6 +2349,7 @@ where
         inner_available_space,
         container_independent,
         last_baseline_requested,
+        baseline_aligned,
     );
     calculate_line_cross_sizes(
         &items,
@@ -2424,6 +2439,7 @@ where
             final_available_space,
             container_independent,
             last_baseline_requested,
+            baseline_aligned,
         );
         calculate_line_cross_sizes(&items, &mut lines, axes, flex_wrap, Some(inner_cross));
     }
@@ -2467,7 +2483,14 @@ where
         let [first, last] = if layout_contained {
             [None, None]
         } else {
-            container_baselines(&items, &lines, axes, inner_size, content_origin)
+            container_baselines(
+                &items,
+                &lines,
+                axes,
+                inner_size,
+                content_origin,
+                baseline_aligned,
+            )
         };
         return LayoutOutput::new(outer_size, padding_box_end(outer_size, border))
             .with_first_baselines(Point::new(None, first))
@@ -2523,7 +2546,14 @@ where
     let [first, last] = if layout_contained {
         [None, None]
     } else {
-        container_baselines(&items, &lines, axes, inner_size, content_origin)
+        container_baselines(
+            &items,
+            &lines,
+            axes,
+            inner_size,
+            content_origin,
+            baseline_aligned,
+        )
     };
     LayoutOutput::new(outer_size, content_size)
         .with_first_baselines(Point::new(None, first))
@@ -2760,6 +2790,7 @@ mod tests {
             ),
             Some(Size::new(false, false)),
             false,
+            true,
         );
     }
 
