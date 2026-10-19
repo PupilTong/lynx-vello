@@ -49,6 +49,7 @@ use super::{
     CLICK_EVENT, DOUBLE_CLICK_MILLISECONDS, ListenerFailures, MainThreadError, MainThreadRuntime,
     ScriptRuntime,
 };
+use crate::editing::TextInputSource;
 use crate::link::{InputEventPayload, ViewNotice};
 use crate::main::tree::LynxDocument;
 
@@ -138,12 +139,20 @@ fn is_insertable(text: &str) -> bool {
 /// The browser's editing default action for a `keydown` at a focused
 /// editing host, or `None` for a key that has none here.
 ///
+/// With [`TextInputSource::Keys`] (every host but the browser's):
+///
 /// - The text a key typed (`text`, which the host reports with the key: never `key`) is inserted,
 ///   unless ctrl or meta is held (a shortcut, not text) or it is a control character. A host whose
 ///   platform delivers typed text through its input method reports `None` here and sends the text
 ///   as an input-method commit, so it is inserted once.
 /// - `"Enter"` inserts a line break; `"Backspace"` and `"Delete"` delete the character before or
 ///   after the caret, or the word with alt; with ctrl or meta held they do nothing.
+///
+/// With [`TextInputSource::Commands`] the host's text proxy reports every insertion, deletion and
+/// line break as an input event of its own (a browser `<textarea>`'s `beforeinput`), which arrives
+/// as a [`Command`], so the two items above do nothing — a Backspace deletes once, by its command —
+/// and only the items below run.
+///
 /// - `"ArrowLeft"` and `"ArrowRight"` move by a character, by a word with alt, to the line's edge
 ///   with meta; `"ArrowUp"` and `"ArrowDown"` by a line, or to the value's start or end with meta;
 ///   `"Home"` and `"End"` to the line's edge. Shift extends the selection instead of moving the
@@ -151,7 +160,12 @@ fn is_insertable(text: &str) -> bool {
 /// - Ctrl-A or meta-A selects everything. Copy, cut and paste do nothing (clipboard access is
 ///   deferred), and so do `"Process"` (a key the input method consumed: its text arrives as an
 ///   input-method command) and `"Dead"`.
-pub(super) fn key_command(key: &str, text: Option<&str>, modifiers: Modifiers) -> Option<Command> {
+pub(super) fn key_command(
+    key: &str,
+    text: Option<&str>,
+    modifiers: Modifiers,
+    source: TextInputSource,
+) -> Option<Command> {
     let shortcut = modifiers.ctrl || modifiers.meta;
     let movement = |granularity, direction| {
         Some(Command::Move {
@@ -186,7 +200,7 @@ pub(super) fn key_command(key: &str, text: Option<&str>, modifiers: Modifiers) -
         "Home" => movement(Granularity::LineBoundary, Direction::Backward),
         "End" => movement(Granularity::LineBoundary, Direction::Forward),
         "a" | "A" if shortcut => Some(Command::SelectAll),
-        _ if shortcut => None,
+        _ if shortcut || source == TextInputSource::Commands => None,
         "Enter" => Some(Command::InsertLineBreak),
         "Backspace" if modifiers.alt => Some(Command::DeleteWordBackward),
         "Backspace" => Some(Command::DeleteBackward),
@@ -321,7 +335,8 @@ impl MainThreadRuntime {
             ) => {
                 let focused = self.slot.borrow().document_ref().focused();
                 if focused.is_some()
-                    && let Some(command) = key_command(key, text.as_deref(), *modifiers)
+                    && let Some(command) =
+                        key_command(key, text.as_deref(), *modifiers, self.text_input_source)
                 {
                     failures.extend(self.apply_edit(js_runtime, command, timestamp));
                 }
@@ -548,6 +563,12 @@ impl MainThreadRuntime {
         failures
     }
 
+    /// What a host's [`crate::link::ToMain::TextInputSource`] sets: what a
+    /// `keydown`'s editing default action does from the next key on.
+    pub(crate) fn set_text_input_source(&mut self, source: TextInputSource) {
+        self.text_input_source = source;
+    }
+
     /// [`Self::apply_edit`] for a host's [`crate::link::ToMain::Edit`]: the
     /// command carries no reading of the view's timeline, so its events are
     /// stamped with the last one this side was handed.
@@ -665,6 +686,12 @@ mod tests {
         shift: true,
         ..NONE
     };
+
+    /// [`super::key_command`] for a host that reports typed text with its
+    /// keys, which every test below but the last is about.
+    fn key_command(key: &str, text: Option<&str>, modifiers: Modifiers) -> Option<Command> {
+        super::key_command(key, text, modifiers, TextInputSource::Keys)
+    }
 
     /// Two modifiers held together.
     fn both(first: Modifiers, second: Modifiers) -> Modifiers {
@@ -802,5 +829,48 @@ mod tests {
             key_command("End", None, SHIFT),
             moved(Granularity::LineBoundary, Direction::Forward, true)
         );
+    }
+
+    /// A host whose text proxy reports insertions, deletions and line
+    /// breaks as commands of their own gets only movement and select-all
+    /// from a `keydown`: its Backspace deletes once, by the proxy's command.
+    #[test]
+    fn a_host_that_sends_commands_gets_only_movement_and_select_all_from_keys() {
+        let commands = |key, text, modifiers| {
+            super::key_command(key, text, modifiers, TextInputSource::Commands)
+        };
+        for (key, text, modifiers) in [
+            ("x", Some("x"), NONE),
+            ("Unidentified", Some("中"), NONE),
+            ("Enter", Some("\r"), NONE),
+            ("Enter", None, NONE),
+            ("Backspace", Some("\u{8}"), NONE),
+            ("Backspace", None, ALT),
+            ("Delete", None, NONE),
+            ("Delete", None, ALT),
+            ("v", Some("v"), META),
+        ] {
+            assert_eq!(commands(key, text, modifiers), None, "{key:?} {text:?}");
+        }
+        for key in [
+            "ArrowLeft",
+            "ArrowRight",
+            "ArrowUp",
+            "ArrowDown",
+            "Home",
+            "End",
+        ] {
+            for modifiers in [NONE, SHIFT, ALT, META, both(META, SHIFT)] {
+                assert_eq!(
+                    commands(key, None, modifiers),
+                    key_command(key, None, modifiers),
+                    "{key:?} moves alike"
+                );
+                assert!(commands(key, None, modifiers).is_some(), "{key:?}");
+            }
+        }
+        for shortcut in [CTRL, META] {
+            assert_eq!(commands("a", None, shortcut), Some(Command::SelectAll));
+        }
     }
 }
