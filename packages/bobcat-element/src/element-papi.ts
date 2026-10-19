@@ -203,7 +203,19 @@ import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 //   shift 8). They become `key`, `code`, `repeat`, `altKey`, `ctrlKey`,
 //   `metaKey` and `shiftKey` on the event object itself, where
 //   `KeyboardEvent` and web-core (`createCrossThreadEvent.ts`) put them; the
-//   `detail` is `{}`. With no focus model the target is the page element.
+//   `detail` is `{}`. The target is the focused editing host, or the page
+//   element when nothing is focused.
+// - `DETAIL_INPUT` — `beforeinput` and `input` (Input Events Level 2): the
+//   `inputType` string, `data` as a string or null, and `isComposing` as a
+//   boolean, which become those three members of the event object itself,
+//   where `InputEvent` puts them; the `detail` is `{}`.
+// - `DETAIL_COMPOSITION` — `compositionstart`, `compositionupdate` and
+//   `compositionend`: the `data` string, `CompositionEvent.data` on the event
+//   object; the `detail` is `{}`.
+// - `DETAIL_FOCUS` — `focus`, `blur`, `focusin` and `focusout`: the
+//   `relatedTarget`'s node id, or null. The event's `relatedTarget` is that
+//   element's descriptor, or null when there is none or script holds no
+//   handle of it (an element of a UA shadow tree); the `detail` is `{}`.
 // - `DETAIL_EXPOSURE` — an element's `uiappear` or `uidisappear`: no values
 //   either. The `detail` is web-core's (`ExposureServices.ts:198-208`), built
 //   here out of the event's own target: its node id as `unique-id`, and its
@@ -322,9 +334,14 @@ import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 // `componentAtIndexes` batch callback, which is filed and never called, as
 // in web-core.
 //
-// There is no `preventDefault` and no `cancelable`: Lynx dispatches no
-// cancelable event, and suppressing a built-in behavior goes through gesture
-// arbitration, on the separate `InputEvent::default_prevented` seam.
+// There is no `preventDefault`, no `cancelable` and no `defaultPrevented`
+// (the 2026-08-17 ruling, which stands): a Lynx event object has no
+// `preventDefault`, and web-core registers its root listeners
+// `passive: true`, so no Lynx handler cancels anything there either. The
+// editing events (`beforeinput` among them) are dispatched not cancelable,
+// and their default actions run whatever a listener does. Suppressing a
+// built-in behavior goes through gesture arbitration, on the separate
+// `InputEvent::default_prevented` seam.
 //
 // # Identity and lifecycle
 //
@@ -2873,6 +2890,12 @@ interface DispatchedEvent {
   ctrlKey?: boolean;
   metaKey?: boolean;
   shiftKey?: boolean;
+  // `InputEvent`'s members, on `beforeinput` and `input` alone.
+  inputType?: string;
+  data?: string | null;
+  isComposing?: boolean;
+  // `FocusEvent.relatedTarget`, on the four focus events alone.
+  relatedTarget?: ReturnType<typeof targetInfo> | null;
 }
 
 /**
@@ -2936,6 +2959,9 @@ const DETAIL_POSITION = 0;
 const DETAIL_EMPTY = 2;
 const DETAIL_EXPOSURE = 3;
 const DETAIL_KEY = 4;
+const DETAIL_INPUT = 5;
+const DETAIL_COMPOSITION = 6;
+const DETAIL_FOCUS = 7;
 
 /** The modifier bits a key event's last argument carries. */
 const MODIFIER_ALT = 1;
@@ -3082,11 +3108,43 @@ function keyMembers(values: unknown[]): {
 }
 
 /**
+ * The members one `DETAIL_INPUT`, `DETAIL_COMPOSITION` or `DETAIL_FOCUS`
+ * dispatch puts on its event: `InputEvent`'s `inputType`, `data` and
+ * `isComposing`; `CompositionEvent.data`; `FocusEvent.relatedTarget`, as the
+ * related element's descriptor or null. Undefined for every other kind.
+ */
+function editingMembers(
+  kind: number,
+  values: unknown[],
+): Partial<DispatchedEvent> | undefined {
+  if (kind === DETAIL_INPUT) {
+    return {
+      inputType: String(values[0]),
+      data: values[1] === null || values[1] === undefined ? null : String(values[1]),
+      isComposing: values[2] === true,
+    };
+  }
+  if (kind === DETAIL_COMPOSITION) {
+    return { data: String(values[0] ?? "") };
+  }
+  if (kind === DETAIL_FOCUS) {
+    const related = values[0];
+    return {
+      relatedTarget: typeof related === "number" && handleOf(related) !== undefined
+        ? targetInfo(related)
+        : null,
+    };
+  }
+  return undefined;
+}
+
+/**
  * The `detail` object one kind's numbers make, for an event at `target`.
  *
  * `DETAIL_EMPTY` spends none and is web-core's `error` detail exactly.
  * `DETAIL_KEY`'s values are the event's own members ([`keyMembers`]), and
- * its `detail` is `{}` too.
+ * its `detail` is `{}` too; so are `DETAIL_INPUT`'s, `DETAIL_COMPOSITION`'s
+ * and `DETAIL_FOCUS`'s ([`editingMembers`]).
  * `DETAIL_EXPOSURE` spends none either: it is web-core's exposure detail,
  * read off `target` itself — the event's own target, which the host resolved
  * before it called, so its attributes answer — and is the only kind that
@@ -3103,7 +3161,10 @@ function detailOf(
   target: number,
   origin: PageOrigin,
 ): EventDetail {
-  if (kind === DETAIL_EMPTY || kind === DETAIL_KEY) {
+  if (
+    kind === DETAIL_EMPTY || kind === DETAIL_KEY || kind === DETAIL_INPUT ||
+    kind === DETAIL_COMPOSITION || kind === DETAIL_FOCUS
+  ) {
     return {};
   }
   if (kind === DETAIL_EXPOSURE) {
@@ -3225,8 +3286,9 @@ function backgroundTargetInfo(
  *
  * The two stop methods are destructured out rather than overwritten with
  * `undefined`, because the transport carries an `undefined`-valued key as one
- * rather than dropping it — and the handles in `target`/`currentTarget` are
- * replaced with the values that describe them. A touch event's three lists
+ * rather than dropping it — and the handles in `target`, `currentTarget` and
+ * a focus event's `relatedTarget` are replaced with the values that describe
+ * them. A touch event's three lists
  * are values already, so they cross with the rest. The copy itself is the
  * transport's, taken at send time: a new object here is only what keeps this
  * event's own later mutations, and the walk clearing `currentTarget`, out of
@@ -3238,11 +3300,15 @@ function backgroundEvent(event: DispatchedEvent): Record<string, unknown> {
     stopImmediatePropagation: _stopImmediate,
     ...rest
   } = event;
-  return {
+  const published: Record<string, unknown> = {
     ...rest,
     target: backgroundTargetInfo(event.target),
     currentTarget: backgroundTargetInfo(event.currentTarget),
   };
+  if (event.relatedTarget !== undefined) {
+    published["relatedTarget"] = backgroundTargetInfo(event.relatedTarget);
+  }
+  return published;
 }
 
 /**
@@ -3543,6 +3609,10 @@ function dispatchEvent(
   }
   if (kind === DETAIL_KEY) {
     Object.assign(event, keyMembers(detailNumbers));
+  }
+  const editing = editingMembers(kind, detailNumbers);
+  if (editing !== undefined) {
+    Object.assign(event, editing);
   }
 
   // Points the event at one delivery. `currentTarget` is rebuilt per step,

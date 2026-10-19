@@ -15,11 +15,12 @@
 //! replaced ranges, the selection and composition after it, and the event
 //! list — and touches nothing but layout. Committing applies it. An embedder
 //! that dispatches into script calls the two halves itself: it dispatches
-//! [`PreparedEdit::events`] up to [`PreparedEdit::commit_index`], drops the
-//! edit when a cancelable `beforeinput` was canceled, commits, then
-//! dispatches the rest. A commit whose host lost focus, or whose value a
-//! listener changed in between, applies nothing (last write wins, as the
-//! design rules), and reports `applied: false`.
+//! [`PreparedEdit::events`] up to [`PreparedEdit::commit_index`], commits,
+//! then dispatches the rest. None of the events cancels the edit: this
+//! engine's script events are not cancelable
+//! (`docs/tracking/deviations.md`). A commit whose host lost focus, or whose
+//! value a listener changed in between, applies nothing (last write wins, as
+//! the design rules), and reports `applied: false`.
 //!
 //! # Event order
 //!
@@ -207,14 +208,6 @@ impl EditEvent {
             data: data.map(str::to_owned),
             is_composing: composing,
         }
-    }
-
-    /// Whether `preventDefault` can cancel the change: a `beforeinput`,
-    /// except Input Events Level 2's `insertCompositionText`, which an IME
-    /// has already shown and which is therefore not cancelable.
-    #[must_use]
-    pub fn cancelable(&self) -> bool {
-        self.kind == EditEventKind::BeforeInput && self.input_type != INSERT_COMPOSITION_TEXT
     }
 }
 

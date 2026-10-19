@@ -120,10 +120,13 @@ const TAP_EVENT: &str = "tap";
 /// realm reads the discriminator alone and the one dispatch export stays
 /// general. Mirrored by the realm's own `DETAIL_*` constants in
 /// `element-papi.ts`. (1 was a `load`'s size, which crosses as extras now.)
-const DETAIL_INPUT: f64 = 0.0;
+const DETAIL_POSITION: f64 = 0.0;
 const DETAIL_EMPTY: f64 = 2.0;
 const DETAIL_EXPOSURE: f64 = 3.0;
 const DETAIL_KEY: f64 = 4.0;
+const DETAIL_INPUT: f64 = 5.0;
+const DETAIL_COMPOSITION: f64 = 6.0;
+const DETAIL_FOCUS: f64 = 7.0;
 
 /// The bits a key event's modifiers cross as, in [`DETAIL_KEY`]'s last
 /// number. Mirrored by `element-papi.ts`.
@@ -304,9 +307,9 @@ fn pointer_type(device: dom::input::PointerKind) -> &'static str {
 /// carries; this is only how it crosses, and the object is built in the
 /// realm, because its shape is JavaScript's.
 ///
-/// - [`DETAIL_INPUT`] for a pointer, wheel or touch event, eight values: the device position; the
-///   wheel delta; W3C `button`, `buttons`, `pointerId` and `pointerType` — each `undefined` for a
-///   shape that has none, which is how the realm tells the three apart — then four numbers per
+/// - [`DETAIL_POSITION`] for a pointer, wheel or touch event, eight values: the device position;
+///   the wheel delta; W3C `button`, `buttons`, `pointerId` and `pointerType` — each `undefined` for
+///   a shape that has none, which is how the realm tells the three apart — then four numbers per
 ///   touch point. The realm puts the W3C members on the event object.
 /// - [`DETAIL_EXPOSURE`] for a `uiappear`/`uidisappear`: nothing. The realm builds web-core's
 ///   detail (`ExposureServices.ts:202-208`) from the target's own unique id and its `exposure-id`
@@ -315,6 +318,14 @@ fn pointer_type(device: dom::input::PointerKind) -> &'static str {
 /// - [`DETAIL_KEY`] for `keydown`/`keyup`: the W3C `key` and `code` strings, borrowed from the
 ///   detail, `repeat` as a boolean and the modifiers as one bitmask. The realm puts them on the
 ///   event object itself, as `KeyboardEvent` and web-core do.
+/// - [`DETAIL_INPUT`] for `beforeinput`/`input`: the W3C `inputType` string, `data` as a string or
+///   `null`, and `isComposing` as a boolean — `InputEvent`'s members, which the realm puts on the
+///   event object itself.
+/// - [`DETAIL_COMPOSITION`] for `compositionstart`/`compositionupdate`/`compositionend`: the `data`
+///   string, `CompositionEvent.data` on the event object.
+/// - [`DETAIL_FOCUS`] for `focus`/`blur`/`focusin`/`focusout`: the `relatedTarget`'s packed node
+///   id, or `null` when there is none. The realm resolves it to the element's descriptor, or to
+///   `null` for an element script holds no handle of.
 /// - [`DETAIL_EMPTY`] for everything else: nothing.
 fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut Arguments<'a>) {
     let (position, delta, pointer, points): (_, _, _, &[dom::event::TouchPoint]) = match detail {
@@ -334,6 +345,32 @@ fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut Arguments<'a>) {
         EventDetail::Touch { position, points } => (*position, None, None, points),
         EventDetail::Exposure => {
             arguments.push(HostArgument::Number(DETAIL_EXPOSURE));
+            return;
+        }
+        EventDetail::Input {
+            input_type,
+            data,
+            is_composing,
+        } => {
+            arguments.push(HostArgument::Number(DETAIL_INPUT));
+            arguments.push(HostArgument::String(input_type));
+            arguments.push(
+                data.as_deref()
+                    .map_or(HostArgument::Null, HostArgument::String),
+            );
+            arguments.push(HostArgument::Boolean(*is_composing));
+            return;
+        }
+        EventDetail::Composition { data } => {
+            arguments.push(HostArgument::Number(DETAIL_COMPOSITION));
+            arguments.push(HostArgument::String(data));
+            return;
+        }
+        EventDetail::Focus { related_target } => {
+            arguments.push(HostArgument::Number(DETAIL_FOCUS));
+            arguments.push(related_target.map_or(HostArgument::Null, |node| {
+                HostArgument::Number(packed_node_id(node))
+            }));
             return;
         }
         EventDetail::Key {
@@ -368,7 +405,7 @@ fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut Arguments<'a>) {
         }
     };
     let number = |value: Option<f64>| value.map_or(HostArgument::Undefined, HostArgument::Number);
-    arguments.push(HostArgument::Number(DETAIL_INPUT));
+    arguments.push(HostArgument::Number(DETAIL_POSITION));
     arguments.push(HostArgument::Number(f64::from(position.x)));
     arguments.push(HostArgument::Number(f64::from(position.y)));
     arguments.push(number(delta.map(|delta| f64::from(delta.x))));
@@ -391,6 +428,7 @@ fn encode_detail<'a>(detail: &'a EventDetail, arguments: &mut Arguments<'a>) {
 /// heap. Compiled `ReactLynx` records are a handful of properties.
 const INLINE_DECLARATIONS: usize = 16;
 
+mod editing;
 mod style_sheets;
 
 /// A card's MTS body as the entry `bobcat-source` registers for it:
@@ -713,6 +751,12 @@ struct DocumentSlot {
     exposure: Exposure,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
+    /// Which [`editing::EditingRoute`]s the editing account routes in the
+    /// painter's name set, one bit per route
+    /// ([`editing::EditingRoute::bit`]). Beside the listener table rather
+    /// than in it: the kernel is no realm, and a row of its would be an
+    /// invitee [`realm_calls`] has no realm to call for.
+    editing_routes: u8,
     /// The event names the document's components observe on an element that
     /// exists, as [`dom::Document::take_observed_name_changes`] said when last
     /// drained ([`Self::sync_names`]). With the document's listener
@@ -790,6 +834,7 @@ impl DocumentSlot {
             autoplays: Autoplays::default(),
             exposure: Exposure::new(),
             removals: 0,
+            editing_routes: 0,
             observed: FxHashSet::default(),
             scrolling: SmallVec::new(),
             outbox,
@@ -804,6 +849,11 @@ impl DocumentSlot {
     /// and nothing empties the slot until the realm itself is freed.
     fn document_mut(&mut self) -> &mut LynxDocument {
         self.document.as_mut().expect(DOCUMENT_EXISTS)
+    }
+
+    /// [`Self::document_mut`], shared.
+    fn document_ref(&self) -> &LynxDocument {
+        self.document.as_ref().expect(DOCUMENT_EXISTS)
     }
 
     /// Turns every `x-swiper` whose autoplay timer has come due. One test on
@@ -1132,7 +1182,7 @@ impl DocumentSlot {
         };
         let changes = document.take_observed_name_changes();
         for (name, live) in changes {
-            self.change_names(name, |slot| {
+            self.change_names(&[name], |slot| {
                 if live {
                     slot.observed.insert(name);
                 } else {
@@ -1142,38 +1192,97 @@ impl DocumentSlot {
         }
     }
 
-    /// Runs `change` on [`Self::observed`] for `name`, then tells the
-    /// painter whatever moved in what [`Self::routes`] says: the painter's
-    /// set is the union of the two sides, so the painter routes a name from
-    /// when either side first wants it until neither does, and a realm
-    /// registration for a name an element already observes moves nothing
-    /// there. The `dblclick` pairing is [`Self::publish_route_change`]'s.
-    fn change_names(&mut self, name: &str, change: impl FnOnce(&mut Self)) {
-        let paired = (name == DOUBLE_CLICK_EVENT).then_some(CLICK_EVENT);
-        let before = (self.routes(name), paired.map(|paired| self.routes(paired)));
-        change(self);
-        if self.routes(name) != before.0 {
-            self.outbox.set_name_routed(Arc::from(name), !before.0);
+    /// Runs `change` on what decides [`Self::routes`] for `names` other than
+    /// the listener table — [`Self::observed`], or the editing account —
+    /// then tells the painter whatever moved in what [`Self::routes`] says,
+    /// name by name in the order given: the painter's set is the union of
+    /// the sides, so the painter routes a name from when any side first
+    /// wants it until none does, and a realm registration for a name an
+    /// element already observes moves nothing there. The `dblclick` pairing
+    /// is [`Self::publish_route_change`]'s: a `dblclick` among `names` is
+    /// followed by `click`.
+    fn change_names(&mut self, names: &[&str], change: impl FnOnce(&mut Self)) {
+        let mut moved: SmallVec<[(&str, bool); 6]> = SmallVec::new();
+        for &name in names {
+            moved.push((name, self.routes(name)));
+            if name == DOUBLE_CLICK_EVENT {
+                moved.push((CLICK_EVENT, self.routes(CLICK_EVENT)));
+            }
         }
-        if let (Some(paired), Some(was)) = (paired, before.1)
-            && self.routes(paired) != was
-        {
-            self.outbox.set_name_routed(Arc::from(paired), !was);
+        change(self);
+        for (name, was) in moved {
+            if self.routes(name) != was {
+                self.outbox.set_name_routed(Arc::from(name), !was);
+            }
         }
     }
 
     /// Whether the painter's name set must hold `name`: a realm
     /// registration or a live component element wants it
-    /// ([`Self::listens`]), or, for `click`, a `dblclick`.
+    /// ([`Self::listens`]), or, for `click`, a `dblclick`; or, on the editing
+    /// account, it is a name of an open [`editing::EditingRoute`].
     fn routes(&self, name: &str) -> bool {
         self.routes_given(name, &|name| self.registered(name))
     }
 
     /// [`Self::routes`] with `registered` answering which names a realm
-    /// registration holds.
+    /// registration holds. The editing account is read as it stands: a
+    /// registration change never moves it.
     fn routes_given(&self, name: &str, registered: &impl Fn(&str) -> bool) -> bool {
         let wants = |name: &str| registered(name) || self.observed.contains(name);
-        wants(name) || (name == CLICK_EVENT && wants(DOUBLE_CLICK_EVENT))
+        wants(name)
+            || (name == CLICK_EVENT && wants(DOUBLE_CLICK_EVENT))
+            || self.editing_routes(name)
+    }
+
+    /// Whether an [`editing::EditingRoute`] the editing account holds
+    /// routes `name`.
+    fn editing_routes(&self, name: &str) -> bool {
+        editing::EditingRoute::ALL
+            .into_iter()
+            .any(|route| self.editing_routes & route.bit() != 0 && route.names().contains(&name))
+    }
+
+    /// Routes or stops routing one [`editing::EditingRoute`]'s names in the
+    /// painter's name set. Published through [`Self::change_names`], after
+    /// the waiting last removals ([`Self::apply_pending_last_removals`]), so
+    /// each of its names moves only where [`Self::routes`] changes — a name
+    /// a realm or a component wants anyway, or another route holds, is not
+    /// touched — and in order with the listener table's own changes. Nothing
+    /// at all when the route is already in that state.
+    ///
+    /// The change is a `watch` write ([`ViewOutbox::set_name_routed`]),
+    /// with no acknowledgement and no wakeup, which the painter adopts at the
+    /// start of its next routing pass ([`crate::Painter::dispatch_input`]
+    /// polls the link first). So a route opened inside a job routes every
+    /// event the painter decides after that job wrote it; one it decided
+    /// before was filtered against the old set and never crossed.
+    fn set_editing_route(&mut self, route: editing::EditingRoute, open: bool) {
+        if (self.editing_routes & route.bit() != 0) == open {
+            return;
+        }
+        self.apply_pending_last_removals();
+        self.change_names(route.names(), |slot| {
+            if open {
+                slot.editing_routes |= route.bit();
+            } else {
+                slot.editing_routes &= !route.bit();
+            }
+        });
+    }
+
+    /// Moves the two routes the document's state decides, once per entry
+    /// from the page's epilogue: [`editing::EditingRoute::Hosts`] while
+    /// [`dom::Document::has_editing_hosts`], [`editing::EditingRoute::Focus`]
+    /// while an element is focused. One counter read and one field read when
+    /// nothing changed. The drag route is the press's own
+    /// ([`MainThreadRuntime::set_pressed`]).
+    fn sync_editing_routes(&mut self) {
+        let (hosts, focused) = self.document.as_ref().map_or((false, false), |document| {
+            (document.has_editing_hosts(), document.focused().is_some())
+        });
+        self.set_editing_route(editing::EditingRoute::Hosts, hosts);
+        self.set_editing_route(editing::EditingRoute::Focus, focused);
     }
 
     /// An exposure attribute of the live element `node` was written or
@@ -1495,6 +1604,13 @@ pub(crate) struct MainThreadRuntime {
     /// target and its timestamp. A second `click` at the same target within
     /// [`DOUBLE_CLICK_MILLISECONDS`] is a `dblclick`, and clears it.
     last_click: Option<(dom::NodeId, f64)>,
+    /// What the pointer's editing default actions remember between events:
+    /// the press a mouse drag extends, and the presses a quick second and
+    /// third one count from.
+    pointer_editing: editing::PointerEditing,
+    /// The last [`dom::editing::TextInputState`] published to the host; the
+    /// default ("nothing editable is focused") until the first focus.
+    text_input: dom::editing::TextInputState,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -1601,6 +1717,8 @@ impl MainThreadRuntime {
                 slot,
                 timeline_milliseconds: 0.0,
                 last_click: None,
+                pointer_editing: editing::PointerEditing::default(),
+                text_input: dom::editing::TextInputState::default(),
                 screen: startup.screen,
                 config,
                 entry: startup.entry,
@@ -2433,6 +2551,11 @@ impl MainThreadRuntime {
     /// A call that throws is kept and the walk goes on, so every realm still
     /// hears the event; [`Self::finish_batch`] runs once, at the end; and
     /// every failure is answered, in the order the calls ran.
+    ///
+    /// No event is cancelable from script (the 2026-08-17 ruling stands,
+    /// `docs/tracking/deviations.md`): no realm call answers anything about
+    /// a default action, and the editing default actions
+    /// (`main/runtime/editing.rs`) run whatever a listener did.
     ///
     /// Answers whether some realm published the export, which is all the host
     /// can know: nothing here says whether anything ran.

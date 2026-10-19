@@ -305,6 +305,34 @@ fn a_detached_host_cannot_be_focused_and_a_removed_one_loses_focus_silently() {
     assert_eq!(doc.focused(), None);
 }
 
+/// The host count an embedder routes editing input by: set and removed with
+/// the attribute, kept while a host is detached, dropped when it is freed.
+#[test]
+fn the_editing_host_count_follows_the_attribute_and_the_free() {
+    let mut doc = document();
+    let page = doc.document_element().id();
+    assert!(!doc.has_editing_hosts());
+    let host = doc.create_element("view", ());
+    doc.set_attribute(host, "contenteditable", "false");
+    assert!(!doc.has_editing_hosts(), "\"false\" makes no host");
+    doc.set_attribute(host, "contenteditable", "");
+    assert!(doc.has_editing_hosts(), "a detached host counts");
+    doc.set_attribute(host, "contenteditable", "true");
+    let other = doc.create_element("view", ());
+    doc.set_attribute(other, "contenteditable", "plaintext-only");
+    doc.append_child(page, host);
+    doc.append_child(host, other);
+    doc.remove_attribute(host, "contenteditable");
+    assert!(doc.has_editing_hosts(), "one host is left");
+    doc.remove_element(other);
+    assert!(doc.has_editing_hosts(), "a removed host is still allocated");
+    doc.drop_element(other);
+    assert!(!doc.has_editing_hosts(), "the last host was freed");
+    doc.set_attribute(host, "contenteditable", "");
+    doc.set_attribute(host, "contenteditable", "FALSE");
+    assert!(!doc.has_editing_hosts());
+}
+
 // --- Commands --------------------------------------------------------------
 
 #[test]
@@ -322,8 +350,6 @@ fn focus_places_the_caret_at_the_start_and_insert_types_there() {
                 ("input", "insertText", Some("X"), false),
             ]
         );
-        assert!(outcome.events[0].cancelable());
-        assert!(!outcome.events[1].cancelable());
         assert_eq!(value(&doc), format!("X{MIXED}"));
         assert_eq!(selection(&doc), 1..1);
         assert!(!doc.apply_editing(Command::Insert(String::new())).applied);
@@ -543,7 +569,6 @@ fn a_composition_starts_updates_and_commits() {
                 ("input", "insertCompositionText", Some("に"), true),
             ]
         );
-        assert!(!start.events[1].cancelable(), "Input Events Level 2");
         assert_eq!(value(&doc), "aにb");
         assert_eq!(state(&doc).composition, Some(1..2));
         assert_eq!(selection(&doc), 2..2);
@@ -1021,7 +1046,6 @@ fn an_empty_composition_outside_a_composition_deletes_the_selection() {
                 ("input", "deleteContentBackward", None, false),
             ]
         );
-        assert!(outcome.events[0].cancelable());
         assert_eq!(value(&doc), "ad");
         assert_eq!(selection(&doc), 1..1);
         assert_eq!(state(&doc).composition, None);

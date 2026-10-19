@@ -30,6 +30,14 @@ Other rulings that shape the design:
   caret and composition character bounds). Both are proven on five platforms.
 - Value authority races (a stale script write overtaking a keystroke) are
   **not managed**: last write wins.
+- **No event is cancelable from script** (user ruling 2026-10-19, keeping the
+  2026-08-17 one): `beforeinput` and the other editing events are dispatched
+  not cancelable, an edit always applies, and the `keydown` and pointer
+  editing default actions run whatever a listener does. A Lynx event object
+  has no `preventDefault`, and web-core's root listeners are
+  `passive: true`. The embedder's `InputEvent::default_prevented` is the only
+  veto; a Rust component that ever needs one sets a `canceled` flag on `dom`'s
+  `EventWalk` beside its stop flag (`docs/tracking/deviations.md`).
 - Pointer events over an editing host are routed exactly like any other
   element's; the engine, not the host, turns them into caret placement.
 - Platform-specific text features that need a real native control
@@ -58,7 +66,7 @@ every synchronous OS query from it with no wait.
  │    paragraph (its own, or its anonymous  │    │  headless: test driver                    │
  │    box's), offsets via its source map    │    │                                           │
  │  • composition range                     │    │                                           │
- │  • commands (insert, delete, move, …)    │◀───│ LynxView::ime(ImeCommand)  (counted FIFO) │
+ │  • commands (insert, delete, move, …)    │◀───│ LynxView::edit(Command)    (counted FIFO) │
  │  • TextInputState snapshot per change    │───▶│ ViewNotice::TextInputState(TextInputState)│
  │ paint::text paints caret/selection/      │    │ Painter unchanged: text is vello content  │
  │   composition underline from that state  │    └──────────────────────────────────────────┘
@@ -130,9 +138,10 @@ Chromium's set plus the local editing actions a keyboard produces:
 | `SelectFromPoint { point, extend }` / `SelectWordAtPoint` / `SelectLineAtPoint` | pointer placement, host-local CSS px |
 | `Insert(text)`, `InsertLineBreak`, `DeleteBackward`, `DeleteForward`, `DeleteWordBackward`, `DeleteWordForward`, `Move(Granularity, Direction, extend)`, `SelectAll` | keyboard editing |
 
-Every command that changes the value dispatches `beforeinput` (cancelable)
-then `input` with the standard `inputType`; composition commands dispatch the
-`composition*` events, and `isComposing` is true on inputs inside one.
+Every command that changes the value dispatches `beforeinput` (not
+cancelable, see the ruling) then `input` with the standard `inputType`;
+composition commands dispatch the `composition*` events, and `isComposing` is
+true on inputs inside one.
 
 ### `TextInputState` (published to the host)
 
@@ -158,21 +167,22 @@ geometry query over `CommittedFrame` is the recorded follow-up if that matters.
 
 ### Host → engine
 
-`LynxView::ime(ImeCommand)` on the host thread sends a counted
-`ToMain::Ime(..)`, so it is ordered with pointer input and acknowledged by the
-next frame post. Keyboard keys travel as `InputKind::Key` (PR #407); a
-printable key additionally carries the text the platform produced for it, and
-main inserts that text as the key's **default action** when the `keydown` was
-not canceled and an editing host is focused. Keys the IME consumed arrive as
-`Ime` commands instead and the platform's `keydown` for them carries
-`key = "Process"`, matching browsers.
+`LynxView::edit(Command)` on the host thread sends a counted
+`ToMain::Edit(..)`, so it is ordered with pointer input and acknowledged by the
+next frame post (E2 named it after `dom::editing::Command`, which it carries
+as it is, rather than `ime`/`ImeCommand`: the same call carries a host's own
+selection and editing commands). Keyboard keys travel as `InputKind::Key` (PR
+#407); main inserts a printable key's W3C `key` value as the key's **default
+action** when an editing host is focused.
+Keys the IME consumed arrive as `Edit` commands instead and the platform's
+`keydown` for them carries `key = "Process"`, matching browsers.
 
 ## Series (one PR each, not stacked)
 
 | PR | Crates | Scope | Depends on |
 |---|---|---|---|
 | **E1** | dom, bobcat-core (UA sheet) | editing host, focus model, selection/caret/composition state, commands, caret + selection + composition painting, `TextInputState`, unit tests + goldens | — |
-| **E2** | bobcat-core, bobcat-element | `ToMain::Ime`, `LynxView::ime`, `ViewNotice::TextInputState`, standard events into the realm (`EventDetail::Text` with string data), pointer → caret placement in `gesture.rs`, keyboard default actions | E1, #407 |
+| **E2** | bobcat-core, bobcat-element (dom: two small additions) | `ToMain::Edit`, `LynxView::edit`, `ViewNotice::TextInputState` → `EngineEvent::TextInputStateChanged`, standard events into the realm (`EventDetail::{Input, Composition, Focus}` with string data), no cancellation channel (ruled 2026-10-19), pointer → caret placement and keyboard default actions on the main thread | E1, #407 |
 | **E3** | bobcat-cli (macOS) | winit `Ime` → commands, `set_ime_allowed` / `set_ime_cursor_area` from the state, `KeyEvent.text` insertion, headless driver | E2 |
 | **E4** | bobcat-wasm | hidden `<textarea>` proxy in `facade.ts` (`beforeinput`/`composition*` → messages → `LynxView::ime`), keyboard focus, `EditContext` where available | E2 |
 | **E5** | bobcat-core (components), bobcat-element | `x-input` / `x-textarea`: UA shadow tree with a plain-text editing host, attributes (`value`, `placeholder`, `type`, `maxlength`, `confirm-type`, `disabled`, `readonly`, `input-filter`, `send-composing-input`), `lynxinput`/`confirm`/`selection`/`focus`/`blur` in web-core's shape, methods (`setValue`, `getValue`, `focus`, `blur`, `setSelectionRange`, `select`) | E2 |
@@ -242,12 +252,13 @@ Public surface:
   `compositionstart`, then per update `beforeinput` (`insertCompositionText`),
   `compositionupdate`, the change, `input`; `compositionend` alone at the
   end. A commit with text is `insertCompositionText` (Chromium), not Safari's
-  `deleteCompositionText` + `insertFromComposition`. `beforeinput` of
-  `insertCompositionText` is not cancelable (`EditEvent::cancelable`), as in
-  Level 2. `Insert` during a composition ends it first (`compositionend`, then
-  `insertText`). `DeleteSurrounding` reports one `beforeinput`/`input` pair
-  for both sides (`deleteContentBackward` when anything before the selection
-  goes, else `deleteContentForward`) where Blink reports two;
+  `deleteCompositionText` + `insertFromComposition`. No `beforeinput` is
+  cancelable here (the ruling above; Level 2 makes all but
+  `insertCompositionText` cancelable). `Insert` during a composition ends it
+  first (`compositionend`, then `insertText`). `DeleteSurrounding` reports
+  one `beforeinput`/`input` pair for both sides (`deleteContentBackward` when
+  anything before the selection goes, else `deleteContentForward`) where
+  Blink reports two;
   `ExtendSelectionAndDelete` is `deleteContentBackward`. `deleteByCut` and
   `insertFromComposition` are not produced.
 - **The prepare/commit seam.** `prepare_editing` computes the replacements,
@@ -256,8 +267,7 @@ Public surface:
   before the change. `commit_editing` refuses (`applied: false`) when the host
   lost focus or its value changed since the edit was prepared, so a listener
   that rewrote the value wins (last write wins). E2 dispatches the first part,
-  drops the edit on a canceled cancelable `beforeinput`, commits, dispatches
-  the rest.
+  commits, dispatches the rest.
 - **Layout-reading commands lay out first.** Pointer placement, movement and
   the cluster and word deletions run `Document::layout` before they measure,
   as an editor must; offset-only commands do not. After a value change the
@@ -367,4 +377,144 @@ Public surface:
 - **No transforms in geometry.** `TextInputState` geometry, like
   `bounding_client_rect`, ignores transforms.
 - **Not built yet:** caret blink, `::selection`, `selectionchange`,
-  clipboard, undo, the realm wiring of the focus and edit events (E2).
+  clipboard, undo. (The realm wiring of the focus and edit events is E2,
+  below.)
+
+## E2: what was built
+
+The realm and host wiring of E1's kernel, in `bobcat-core` and
+`packages/bobcat-element`: `crates/bobcat-core/src/main/runtime/editing.rs`
+(the default actions, the edit and focus dispatches, the routing account, the
+`TextInputState` publication), `LynxView::edit`, `ToMain::Edit`,
+`ViewNotice::TextInputState`, `EngineEvent::TextInputStateChanged`, the new
+detail kinds in `main/runtime/lib.rs` and `element-papi.ts`, and two small
+`dom` additions: `Document::has_editing_hosts` and
+`EventDetail::{Input, Composition, Focus}`.
+
+Public surface:
+
+- `LynxView::edit(&self, command: bobcat_core::editing::Command) ->
+  Result<(), EngineError>` (`NotReady` before MTS boot or after the end, like
+  the page updates).
+- `EngineEvent::TextInputStateChanged(Box<bobcat_core::editing::TextInputState>)`.
+- `bobcat_core::editing::{Command, Direction, Granularity, TextInputState,
+  InputType, InputMode, EnterKeyHint}` (re-exports of `dom::editing`).
+- `dom::Document::has_editing_hosts`; `dom::event::EventDetail::{Input,
+  Composition, Focus}`.
+
+### How an edit runs
+
+`MainThreadRuntime::apply_edit` is the one path for every editing command,
+whatever produced it (`ToMain::Edit`, a `keydown`'s default action, a press's
+caret placement): `prepare_editing`; dispatch `events()[..commit_index]` at
+the host, bubbling and composed; `commit_editing`; stop if the commit refused
+(a listener moved the focus or rewrote the value); dispatch the rest. Every
+dispatch is the kernel's one `MainThreadRuntime::dispatch` (#448–#451): it
+asks the listener table whether any realm or component hears the name and
+builds no path when none does, then walks the path once, components at their
+steps and each invited realm called once at the top. No event is cancelable
+(the ruling above): `__BobcatDispatchEvent` keeps its signature, answers
+nothing, and its event object has no `cancelable`, `defaultPrevented` or
+`preventDefault()`. A listener that throws is reported as `ListenerFailed`
+and stops nothing.
+
+New detail kinds: `DETAIL_INPUT` (5: `inputType`, `data` or null,
+`isComposing`), `DETAIL_COMPOSITION` (6: `data`), `DETAIL_FOCUS` (7: the
+`relatedTarget`'s id or null). Each puts its W3C members on the event object
+and leaves the `detail` `{}`, as `DETAIL_KEY` does. The Rust constant for the
+pointer/wheel/touch kind was renamed `DETAIL_POSITION` to match the realm's.
+
+### Choices made where the brief left one
+
+- **The command is `edit`, not `ime`.** `LynxView::edit(Command)` carries
+  `dom::editing::Command` unchanged, which holds the keyboard and selection
+  commands as well as Chromium's IME set.
+- **Focus events are drained right after the press, not in the epilogue.**
+  `dom` queues focus events only from `Document::focus`/`blur`, which only the
+  press default action calls, and HTML runs the focus update inside the
+  `mousedown` default action, before the `mouseup` and `click` of the same
+  burst; draining in the epilogue would deliver `focus` after them. The fixup
+  rule (a removed or uneditable host) fires nothing, so nothing else can queue
+  one. A future `focus()`/`blur()` element method (E5) drains its own.
+- **Routing: an editing account in the painter's name set, by state.** The
+  painter forwards an event only when its name is in the published routed
+  set. Since #449 that set is derived from `dom`'s listener table and the
+  components' observed names in one function, `DocumentSlot::routes_given`;
+  the editing account (`EditingRoute`, a bit per route in
+  `DocumentSlot::editing_routes`) is one more term of it. A route flipping
+  goes out through `DocumentSlot::change_names` after the waiting last
+  removals (`apply_pending_last_removals`), the path an observed name's
+  change takes, so each name moves only where the union changes, in order
+  with the table's own changes. The kernel is not a registrant in the
+  listener table: a row of its would be an invitee the dispatch has no realm
+  to call for. The routes:
+  - `pointerdown` and `click` while `Document::has_editing_hosts` (a counter
+    `dom` keeps in the `contenteditable` setters and `free_node`; a detached
+    host counts until it is freed);
+  - `keydown` while `Document::focused()` is some;
+  - `pointermove`, `pointerup` and `pointercancel` only while a mouse drag
+    that placed a caret is held, opened by the press and closed when the
+    drag ends (release, cancellation, a move with the button up, the focus
+    moved, the next press) — `MainThreadRuntime::set_pressed`.
+
+  The first two are synced by the page's epilogue before its commit
+  (`DocumentSlot::sync_editing_routes`); the drag route is written inside
+  the press's own job. The replica is a `watch` write with no
+  acknowledgement and no wakeup, and `Painter::dispatch_input` polls the
+  link before it routes, so every event the painter decides after the write
+  sees it; one decided before it was filtered against the old set and never
+  crossed. For a drag that means the first moves can be lost (the first one
+  that crosses extends to its own position, so the selection catches up), and
+  a release decided that early leaves the drag held until the next move with
+  the button up or the next press. Likewise keys typed before the epilogue of
+  the tap that focused a host are not routed. No hosted-node table reaches
+  the committed frame. An event routed only on this account invites no realm
+  and builds no path (the dispatch's own `hears` gate); `deliver_input_event`
+  gates the default action on the account itself (`editing_routes(name)`),
+  so it runs whether or not anything heard the event.
+- **Touch and pen focus on the tap, a mouse on the press.** A mouse's
+  primary `pointerdown` focuses the host and places the caret, as a
+  browser's `mousedown` does. A finger's or pen's does it on the `click` the
+  release produces (`deliver_input_event`, after `dispatch_click`, at the
+  release target and position), as touch
+  browsers do, so a drag the scroller consumed — which produces no `click`
+  — does not focus the host it began on.
+- **Multi-click counts presses, not clicks, for a mouse.** A browser selects
+  the word on the second `mousedown`, so the main thread counts primary
+  presses on the same host within `DOUBLE_CLICK_MILLISECONDS` (500 ms)
+  itself, rather than reading `dispatch_click`'s count, which lands after the
+  release. Two presses select the word, three or more the line. For touch
+  and pen the same count runs over taps.
+- **Only a mouse drags a selection.** A held mouse button's `pointermove`
+  extends; a finger or pen dragging over a host is the scroll gesture, as on a
+  touch browser.
+- **A press outside every editing host blurs the focused one**, as a press on
+  an unfocusable area does in a browser.
+- **Keyboard mapping.** As the brief lists, plus meta-ArrowUp/ArrowDown to the
+  value's start and end (`Granularity::Document`, the macOS binding), and
+  Backspace/Delete doing nothing with ctrl or meta held rather than deleting
+  one character. No platform-specific bindings (ctrl-arrow on Windows,
+  emacs keys on macOS).
+- **`TextInputState` is compared every epilogue while a host is focused**,
+  after the commit, so a geometry-only change (a relayout, a scroll the page
+  adopted and committed) is published as well; nothing is computed while
+  nothing is focused and nothing was.
+
+### Limitations
+
+- **No shift-click extension.** `InputKind::Pointer` carries no modifiers, so
+  a press cannot say shift is held; extending by shift-click needs that field
+  in `dom::input` and every host filling it in.
+- **No listener stops an edit or an editing default action** (the ruling):
+  a browser's `beforeinput`, `keydown`, `pointerdown` or `mousedown` listener
+  could.
+- **A touch drag that scrolls nothing still taps.** This engine's `click`
+  has no movement slop (only a consumed scroll or a cancel suppresses it), so
+  a finger dragged over a host outside any scroller focuses it on release.
+- **`relatedTarget` is not retargeted.** An element of a UA shadow tree
+  reports `null` rather than its host.
+- **`LynxView::edit` before boot is refused** (`NotReady`), as the page
+  updates are.
+- **A typed key's text is its W3C `key` value.** A host that knows the text a
+  key produced (winit's `KeyEvent.text`) sends it as `Command::Insert` and
+  lets the `keydown` carry `"Process"`, or relies on `key` (E3's choice).

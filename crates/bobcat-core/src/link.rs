@@ -165,6 +165,14 @@ pub(crate) enum ToMain {
         release: Option<NodeId>,
     },
     Vsync(f64),
+    /// One editing command for the focused editing host, from
+    /// [`LynxView::edit`](crate::LynxView::edit): an input method's
+    /// composition, a commit, a selection change. Counted and ordered with
+    /// the painter's routed input, so a frame post sent after it is
+    /// acknowledged only once it has been applied. Main dispatches the
+    /// events it owes (`beforeinput`, `input`, `composition*`) around the
+    /// change, which no listener can stop.
+    Edit(dom::editing::Command),
     /// The view's [`ScrollMailbox`] holds something to take: scroll offsets,
     /// a frame post, or both. Queued once per take, however many passes the
     /// painter posts meanwhile.
@@ -262,6 +270,14 @@ pub(crate) enum ViewNotice {
         request: SourceRequest,
         completion: SourceCompletion,
     },
+    /// The focused editing host's state changed since the last one sent
+    /// ([`dom::Document::text_input_state`]): the value, the selection, the
+    /// composition, the geometry of the commit that showed them, or the
+    /// focus itself (a default state is "nothing editable is focused").
+    /// Sent from a page's epilogue after its commit, at most once per
+    /// entry; `LynxView::pump` hands it on as
+    /// [`EngineEvent::TextInputStateChanged`].
+    TextInputState(Box<dom::editing::TextInputState>),
     /// One `NativeModules.<module>.<method>(...)` a realm of this view made,
     /// for the embedder's own module of that name to serve.
     ///
