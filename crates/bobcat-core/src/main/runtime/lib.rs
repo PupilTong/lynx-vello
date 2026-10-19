@@ -78,10 +78,6 @@ const DOCUMENT_LEVEL_EVENTS: [&str; 2] = ["keydown", "keyup"];
 /// handed to; see [`MainThreadRuntime::dispatch_component_events`].
 const FRAME_CONNECTED_EXPORT: &str = "__BobcatFrameConnected";
 const FRAME_DISCONNECTED_EXPORT: &str = "__BobcatFrameDisconnected";
-/// The `bobcat:runtime` export one global exposure record list is handed to;
-/// see [`MainThreadRuntime::send_exposure_records`].
-const EXPOSURE_EXPORT: &str = "__BobcatSendExposure";
-
 /// What an element hears when its exposure moves. web-core's names
 /// (`ExposureServices.ts:209-220`), dispatched non-bubbling and not composed
 /// as web-core dispatches them.
@@ -93,6 +89,12 @@ const DISAPPEAR_EVENT: &str = "uidisappear";
 /// for exposure, and so the listener-table row that registers the element
 /// here ([`Exposure::set_registered`]). The `bobcat:` prefix keeps it apart
 /// from every name an app can file.
+///
+/// Dispatched at the element, non-bubbling and not composed, with no W3C
+/// payload and three extras the listener builds the record from:
+/// `exposureID`, `exposureScene` and `appeared` (true for an `exposure`
+/// record, false for a `disexposure`); see
+/// [`MainThreadRuntime::notify_intersection_observers`].
 const EXPOSURE_RECORD_EVENT: &str = "bobcat:exposure";
 
 /// CSSOM-View's two scroll events, fired at a scroll container on this
@@ -2930,20 +2932,23 @@ impl MainThreadRuntime {
     /// That half is web-core's order (`ExposureServices.ts:209-275`): each
     /// `uiappear`/`uidisappear` in the order the changes formed — one
     /// non-bubbling, non-composed dispatch at the element, with
-    /// [`EventDetail::Exposure`] — then one `exposure` record list, then one
-    /// `disexposure` list, each one call of `bobcat:runtime`'s
-    /// `__BobcatSendExposure` (see [`Self::send_exposure_records`]). An
-    /// element freed since its change formed hears nothing, as a routed
-    /// event at a freed target does, and its record is still sent: the id
-    /// and scene were copied when it formed.
+    /// [`EventDetail::Exposure`] — then, in the same order, one
+    /// [`EXPOSURE_RECORD_EVENT`] dispatch at the element of every change that
+    /// has an `exposure-id`, non-bubbling and non-composed too, its id, scene
+    /// and direction as extras. The realm holding the element's handle has
+    /// the record listener's row, so it is the one called: the listener
+    /// table answers which realm a record reaches, a detached element's
+    /// included, whose path starts at itself. The realm's Lynx layer turns
+    /// the records into the `exposure` and `disexposure` lists and orders
+    /// them. An element freed since its change formed hears nothing, as a
+    /// routed event at a freed target does, record included.
     ///
     /// A hook or a listener may mutate the tree. Whatever it wrote is
     /// committed by the delivery entry's own epilogue, whose update then runs
     /// again against the new frame.
     ///
-    /// Returns what failed: a listener that threw, or a record list the realm
-    /// did not take. Each is nonfatal and reported as `ListenerFailed`; the
-    /// rest is still delivered.
+    /// Returns what failed: a listener that threw. Each is nonfatal and
+    /// reported as `ListenerFailed`; the rest is still delivered.
     pub(crate) fn notify_intersection_observers(
         &mut self,
         js: &mut ScriptRuntime,
@@ -2958,7 +2963,7 @@ impl MainThreadRuntime {
         }
         let timestamp = self.timeline_milliseconds;
         let mut failures = Vec::new();
-        for change in changes.iter().filter(|t| t.element_event) {
+        for change in changes.iter().filter(|change| change.element_event) {
             let name = if change.appeared {
                 APPEAR_EVENT
             } else {
@@ -2979,75 +2984,29 @@ impl MainThreadRuntime {
                 failures.extend(error.into_errors());
             }
         }
-        for (kind, appeared) in [("exposure", true), ("disexposure", false)] {
-            let mut record = String::new();
-            for change in changes.iter().filter(|t| t.appeared == appeared) {
-                let Some(id) = &change.exposure_id else {
-                    continue;
-                };
-                write_record_field(&mut record, &packed_node_id(change.node).to_string());
-                write_record_field(&mut record, id);
-                write_record_field(&mut record, &change.scene);
-            }
-            if record.is_empty() {
+        for change in &changes {
+            let Some(id) = &change.exposure_id else {
                 continue;
-            }
-            if let Err(error) = self.send_exposure_records(js, kind, &record) {
-                failures.push(error);
+            };
+            let extras = [
+                ("exposureID", Extra::Str(id)),
+                ("exposureScene", Extra::Str(&change.scene)),
+                ("appeared", Extra::Bool(change.appeared)),
+            ];
+            if let Err(error) = self.dispatch(
+                js,
+                change.node,
+                EXPOSURE_RECORD_EVENT,
+                false,
+                false,
+                timestamp,
+                &EventDetail::None,
+                &extras,
+            ) {
+                failures.extend(error.into_errors());
             }
         }
         failures
-    }
-
-    /// Hands one global record list to the realm: `bobcat:runtime`'s
-    /// `__BobcatSendExposure(kind, record)`, `kind` being `"exposure"` or
-    /// `"disexposure"` and `record` a `bobcat:record` payload of three fields
-    /// per element — its packed node id, its `exposure-id`, its scene. The
-    /// realm builds web-core's record objects out of them and sends the list
-    /// to the BTS as the global event of that name; nothing about their shape
-    /// is decided here.
-    ///
-    /// A realm that publishes no such export is a failure rather than a
-    /// silent drop, as it is not for the exports a bundle may lack: this one
-    /// is the engine's own, and records that reach nobody are lost.
-    fn send_exposure_records(
-        &mut self,
-        js: &mut ScriptRuntime,
-        kind: &str,
-        record: &str,
-    ) -> Result<(), MainThreadError> {
-        const CONTEXT: &str = "delivering exposure records";
-        let called = self
-            .core
-            .engine
-            .call_module_export(
-                js,
-                RUNTIME_MODULE_SPECIFIER,
-                EXPOSURE_EXPORT,
-                &[HostArgument::String(kind), HostArgument::String(record)],
-            )
-            .map_err(|error| MainThreadError::from_engine(CONTEXT, error));
-        let finished = self.finish_batch(js, called.is_ok());
-        called
-            .and_then(|published| {
-                if published {
-                    Ok(())
-                } else {
-                    Err(MainThreadError::from_engine(
-                        CONTEXT,
-                        ScriptError {
-                            kind: crate::script::ScriptErrorKind::Other,
-                            phase: crate::script::ScriptErrorPhase::CallModuleExport,
-                            message: format!(
-                                "{RUNTIME_MODULE_SPECIFIER} publishes no {EXPOSURE_EXPORT}"
-                            )
-                            .into(),
-                            location: None,
-                        },
-                    ))
-                }
-            })
-            .and(finished)
     }
 
     /// When the earliest armed timer comes due, if one is armed, for a test

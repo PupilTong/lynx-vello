@@ -382,13 +382,12 @@ impl Page {
     /// calls its `intersections_changed` hook through `dom::ElementHandler`,
     /// and an exposure registration's records a change. What enters the
     /// realm is the exposure drain after the loop — each element's
-    /// `uiappear`/`uidisappear`, then the `exposure` and `disexposure` record
-    /// lists (`crate::main::exposure`) — and that is why this is also the
+    /// `uiappear`/`uidisappear`, then each element's `bobcat:exposure` record
+    /// event (`crate::main::exposure`) — and that is why this is also the
     /// entry posted for exposure changes that formed outside any update:
     /// a teardown or a `stopExposure` that sent records. A
-    /// listener that throws, or a record list the realm did not take, is
-    /// nonfatal — `ListenerFailed`, the standing every listener here has —
-    /// and the rest is still delivered.
+    /// listener that throws is nonfatal — `ListenerFailed`, the standing
+    /// every listener here has — and the rest is still delivered.
     ///
     /// One entry for every observer's queue, in creation order: `dom` runs
     /// the loop and calls each observer's handler. The latch is cleared at

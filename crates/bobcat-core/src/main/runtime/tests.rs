@@ -8216,8 +8216,8 @@ fn an_add_event_for_uiappear_arms_and_disarms_exposure() {
 /// unique id, and its `exposure-id` and `exposure-scene` under both of
 /// web-core's spellings. The closure is itself what registers the element,
 /// as any registration form does. The element carries an `exposure-id` too,
-/// so the same delivery sends the `exposure` record list, which `bobcat:runtime`
-/// now takes — the delivery reports no failure.
+/// so the same delivery dispatches its `bobcat:exposure` record event, which
+/// the realm's Lynx layer takes — the delivery reports no failure.
 #[test]
 fn a_uiappear_listener_hears_web_cores_exposure_detail() {
     let (mut js, mut runtime, elements) = runtime();
@@ -8297,6 +8297,215 @@ fn a_uiappear_listener_hears_web_cores_exposure_detail() {
             "reading what the listeners heard",
         )
         .expect("the listeners heard web-core's detail");
+}
+
+/// A page of three 100px views down the viewport for the record-event tests
+/// below, each with a record listener that reports
+/// `<type> <uid> <detail as JSON>` into `seen` ([`frame_lines`]): `a` and `b`
+/// carry an `exposure-id` (`b` an `exposure-scene` too) and `uiappear`/
+/// `uidisappear` listeners that report `<type> <uid>`, `bare` has no id. The
+/// script files the record listener itself, as the realm's Lynx layer does
+/// for an element it registers.
+const EXPOSURE_RECORDS: &str = r"
+globalThis.seen = [];
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  const views = {};
+  for (const name of ['a', 'b', 'bare']) {
+    const view = __CreateView(0);
+    __SetInlineStyles(view, 'width:100px;height:100px');
+    __AppendElement(page, view);
+    views[name] = view;
+  }
+  __SetAttribute(views.a, 'exposure-id', 'id-a');
+  __SetAttribute(views.b, 'exposure-id', 'id-b');
+  __SetAttribute(views.b, 'exposure-scene', 'feed');
+  for (const view of Object.values(views)) {
+    __AddEventListener(view, 'bobcat:exposure', (event) => {
+      seen.push(`${event.type} ${event.target.uid} ${JSON.stringify(event.detail)}`);
+    }, {});
+    for (const name of ['uiappear', 'uidisappear']) {
+      __AddEventListener(view, name, (event) => {
+        seen.push(`${event.type} ${event.target.uid}`);
+      }, {});
+    }
+  }
+  globalThis.views = views;
+};
+";
+
+/// [`EXPOSURE_RECORDS`] booted, with the packed ids of `a`, `b` and `bare`.
+fn exposure_records() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe, [f64; 3]) {
+    let (mut js, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(&mut js, EXPOSURE_RECORDS, "app:///exposure-records.js")
+        .expect("main-thread script");
+    let ids = {
+        let tree = elements.tree();
+        let page = tree.document_element();
+        let children = page.child_ids();
+        [0, 1, 2].map(|index| packed_node_id(children[index]))
+    };
+    (js, runtime, elements, ids)
+}
+
+/// One update and one intersection delivery entry, which reports no
+/// failure.
+fn deliver_exposure(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) {
+    runtime.update_intersection_observations();
+    notify_exposure(js, runtime);
+}
+
+/// One intersection delivery entry with no update before it, which
+/// reports no failure.
+fn notify_exposure(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) {
+    let failures = runtime.notify_intersection_observers(js);
+    assert!(
+        failures.is_empty(),
+        "{:?}",
+        failures
+            .into_iter()
+            .map(|failure| failure.into_script_error().message)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Runs `source` in the page realm, with `bobcat:element` and the host's
+/// `switchExposure` imported.
+fn run_exposure_script(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime, source: &str) {
+    runtime
+        .evaluate_module(
+            js,
+            &format!(
+                "import {{ __AppendElement, __FlushElementTree, __GetPageElement, __RemoveElement,
+                     __SetAttribute, __SetInlineStyles }} from 'bobcat:element';
+                 import {{ switchExposure }} from 'bobcat-internal:host';
+                 const views = globalThis.views;
+                 {source}"
+            ),
+            "app:///exposure-records-step.js",
+            "running an exposure step",
+        )
+        .expect("the exposure step");
+}
+
+/// Every change with an `exposure-id` is the `bobcat:exposure` event at its
+/// element, after every `uiappear`: non-bubbling, its `detail` the three
+/// extras — the id, the scene (`""` when absent) and `appeared` — and its
+/// target the element itself. `bare`, registered with no id, hears its
+/// `uiappear` and no record.
+#[test]
+fn a_change_with_an_id_is_the_record_event_at_its_element() {
+    let (mut js, mut runtime, _elements, [a, b, bare]) = exposure_records();
+    deliver_exposure(&mut js, &mut runtime);
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            format!("uiappear {a}"),
+            format!("uiappear {b}"),
+            format!("uiappear {bare}"),
+            format!(
+                r#"bobcat:exposure {a} {{"exposureID":"id-a","exposureScene":"","appeared":true}}"#
+            ),
+            format!(
+                r#"bobcat:exposure {b} {{"exposureID":"id-b","exposureScene":"feed","appeared":true}}"#
+            ),
+        ]
+    );
+
+    // Out of view: `uidisappear`s first, then the records, `appeared`
+    // false.
+    run_exposure_script(
+        &mut js,
+        &mut runtime,
+        "for (const view of Object.values(views)) {
+           __SetInlineStyles(view, 'width:100px;height:100px;margin-top:2000px');
+         }
+         __FlushElementTree();",
+    );
+    deliver_exposure(&mut js, &mut runtime);
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            format!("uidisappear {a}"),
+            format!("uidisappear {b}"),
+            format!("uidisappear {bare}"),
+            format!(
+                r#"bobcat:exposure {a} {{"exposureID":"id-a","exposureScene":"","appeared":false}}"#
+            ),
+            format!(
+                r#"bobcat:exposure {b} {{"exposureID":"id-b","exposureScene":"feed","appeared":false}}"#
+            ),
+        ]
+    );
+}
+
+/// `stopExposure` with `sendEvent` and an id change send records only: one
+/// `appeared: false` record per exposed element, under the id it was exposed
+/// under, and no `uidisappear`.
+#[test]
+fn a_stop_and_an_id_change_send_records_and_no_element_event() {
+    let (mut js, mut runtime, _elements, [a, b, _bare]) = exposure_records();
+    deliver_exposure(&mut js, &mut runtime);
+    frame_lines(&mut js, &mut runtime);
+
+    run_exposure_script(&mut js, &mut runtime, "switchExposure(0, 1);");
+    notify_exposure(&mut js, &mut runtime);
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            format!(
+                r#"bobcat:exposure {a} {{"exposureID":"id-a","exposureScene":"","appeared":false}}"#
+            ),
+            format!(
+                r#"bobcat:exposure {b} {{"exposureID":"id-b","exposureScene":"feed","appeared":false}}"#
+            ),
+        ]
+    );
+    run_exposure_script(&mut js, &mut runtime, "switchExposure(1, 1);");
+    deliver_exposure(&mut js, &mut runtime);
+    frame_lines(&mut js, &mut runtime);
+
+    run_exposure_script(
+        &mut js,
+        &mut runtime,
+        "__SetAttribute(views.a, 'exposure-id', 'id-a2');",
+    );
+    notify_exposure(&mut js, &mut runtime);
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [format!(
+            r#"bobcat:exposure {a} {{"exposureID":"id-a","exposureScene":"","appeared":false}}"#
+        )],
+        "the old id leaves before any update, with no `uidisappear`"
+    );
+}
+
+/// An element that is detached but alive, its handle held, stops
+/// intersecting and still hears its record: its own row invites its realm,
+/// and its path starts at itself.
+#[test]
+fn a_detached_element_still_hears_its_record() {
+    let (mut js, mut runtime, _elements, [a, _b, _bare]) = exposure_records();
+    deliver_exposure(&mut js, &mut runtime);
+    frame_lines(&mut js, &mut runtime);
+
+    run_exposure_script(
+        &mut js,
+        &mut runtime,
+        "__RemoveElement(__GetPageElement(), views.a);
+         __FlushElementTree();",
+    );
+    deliver_exposure(&mut js, &mut runtime);
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            format!("uidisappear {a}"),
+            format!(
+                r#"bobcat:exposure {a} {{"exposureID":"id-a","exposureScene":"","appeared":false}}"#
+            ),
+        ]
+    );
 }
 
 fn requested_stylesheet(
@@ -9994,6 +10203,49 @@ fn exposure_follows_every_realms_rows_for_an_element() {
         )
         .unwrap();
     assert_eq!(exposure_observer(&elements, view), None);
+}
+
+/// A record reaches the realm whose row its element has, and that realm
+/// alone: the page realm's record listener on its `frame` hears the frame's
+/// record, the card's on its own `inner` hears `inner`'s, and neither hears
+/// the other's — the listener table is what decides, with no realm record.
+#[test]
+fn each_realm_hears_only_its_own_elements_records() {
+    let (mut js, mut runtime, _elements, frame, inner) = frame_calls();
+    runtime
+        .evaluate_module(
+            &mut js,
+            &format!(
+                "import {{ __AddEventListener, __BobcatHandleOf, __SetAttribute }}
+                     from 'bobcat:element';
+                 const record = (label) => (event) => report(
+                     `${{label}} ${{event.target.uid}} ${{event.detail.exposureID}} ${{event.detail.appeared}}`);
+                 const frame = __BobcatHandleOf({frame});
+                 __SetAttribute(frame, 'exposure-id', 'frame');
+                 __AddEventListener(frame, 'bobcat:exposure', record('page'), {{}});
+                 realm.evaluate(`(inner, report) => {{
+                     const handle = E.__BobcatHandleOf(inner);
+                     E.__SetAttribute(handle, 'exposure-id', 'inner');
+                     E.__AddEventListener(handle, 'bobcat:exposure', (event) => report(
+                         'card ' + event.target.uid + ' ' + event.detail.exposureID + ' ' + event.detail.appeared), {{}});
+                 }}`)({inner}, (text) => report(text));",
+                frame = packed_node_id(frame),
+                inner = packed_node_id(inner),
+            ),
+            "app:///exposure-two-realm-records.js",
+            "filing a record listener in each realm",
+        )
+        .unwrap();
+    runtime.update_intersection_observations();
+    let failures = runtime.notify_intersection_observers(&mut js);
+    assert!(failures.is_empty());
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            format!("page {} frame true", packed_node_id(frame)),
+            format!("card {} inner true", packed_node_id(inner)),
+        ]
+    );
 }
 
 /// A freed element takes its registrations with it, in the document's free

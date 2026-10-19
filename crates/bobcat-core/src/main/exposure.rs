@@ -1,6 +1,7 @@
 //! Lynx exposure (曝光): which elements a page registered for exposure are on
-//! screen, told to script as an element's `uiappear`/`uidisappear` and as the
-//! global `exposure`/`disexposure` record lists.
+//! screen, told to script as an element's `uiappear`/`uidisappear` and as its
+//! `bobcat:exposure` record event, out of which the realm's Lynx layer builds
+//! the global `exposure`/`disexposure` record lists.
 //!
 //! Exposure is a Lynx-only extension (standards bucket 2): no W3C feature has
 //! its attributes, its events or its records. It lives here rather than in
@@ -61,9 +62,10 @@
 //! the changes are delivered by the page's intersection delivery entry,
 //! the one the epilogue posts after an update that queued entries
 //! (`docs/runtime-architecture.md`): first each `uiappear`/`uidisappear`, in
-//! the order the changes formed, then one `exposure` list, then one
-//! `disexposure` list, web-core's order. `lynx.setObserverFrameRate` has no
-//! rate to set.
+//! the order the changes formed, then each record event, in the same order,
+//! all inside the one entry, so the realm's Lynx layer sends one `exposure`
+//! list and then one `disexposure` list, web-core's order.
+//! `lynx.setObserverFrameRate` has no rate to set.
 //!
 //! # Where the references differ, and what is chosen
 //!
