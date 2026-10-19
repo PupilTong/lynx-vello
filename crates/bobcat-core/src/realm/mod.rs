@@ -37,9 +37,9 @@ pub(crate) mod policy;
 
 use std::rc::{Rc, Weak};
 
-use quickjs_rust_bridge::HostValue;
+use quickjs_rust_bridge::{HostArgument, HostValue};
 
-use self::child::{ChildHostModules, ChildRealms, ShadowRealmHook};
+use self::child::{ChildHostModules, ChildKey, ChildRealms, ShadowRealmHook};
 use self::policy::context_of;
 use crate::background::WorkerKey;
 use crate::esm::HOST_MODULE_SPECIFIER;
@@ -70,6 +70,77 @@ pub(crate) struct RealmCore {
     /// Every host-backed operation this realm holds a `Future` for, every
     /// `fetchResource` included.
     pub(crate) futures: Rc<FutureTable>,
+}
+
+/// One JavaScript context of an owner's realm tree on this runtime: the
+/// owner's own realm, or one of its `ShadowRealm` children, grandchildren
+/// included, by the key [`ChildRealms`] keeps it under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum RealmId {
+    /// The owner's own realm: a view's page realm, or a worker's.
+    Page,
+    /// A `ShadowRealm` child.
+    Child(ChildKey),
+}
+
+impl RealmId {
+    /// This id as one opaque number, for a table that files what a realm
+    /// reports under a [`dom::event::ListenerKey`]: 0 for [`Self::Page`],
+    /// the child key's own number for a child. Child keys are handed out
+    /// from 1 and never reused, so no child is ever 0 and a released child's
+    /// number is never a newer child's.
+    pub(crate) fn listener_key(self) -> dom::event::ListenerKey {
+        match self {
+            Self::Page => dom::event::ListenerKey(0),
+            Self::Child(key) => {
+                debug_assert_ne!(key.number(), 0, "child keys start at 1");
+                dom::event::ListenerKey(key.number())
+            }
+        }
+    }
+
+    /// The realm [`Self::listener_key`] answered `key` for.
+    pub(crate) fn from_listener_key(key: dom::event::ListenerKey) -> Self {
+        match key.0 {
+            0 => Self::Page,
+            number => Self::Child(ChildKey::from_number(number)),
+        }
+    }
+}
+
+impl RealmCore {
+    /// Every realm of this core, the owner's own first, then its children in
+    /// construction order.
+    pub(crate) fn realm_ids(&self) -> impl Iterator<Item = RealmId> + use<> {
+        std::iter::once(RealmId::Page).chain(self.children.keys().into_iter().map(RealmId::Child))
+    }
+
+    /// Calls an export of a module the realm `id` has loaded, through
+    /// [`ScriptEngine::call_module_export`] for the owner's own realm and
+    /// [`ChildRealms::call_module_export`] for a child, so the checkpoint
+    /// that ends the call is that realm's. `None` is a child that is gone,
+    /// which drops the call; the owner's own realm is always there.
+    pub(crate) fn call_module_export(
+        &mut self,
+        js: &mut ScriptRuntime,
+        id: RealmId,
+        module_specifier: &str,
+        export_name: &str,
+        arguments: &[HostArgument<'_>],
+    ) -> Option<Result<bool, ScriptError>> {
+        match id {
+            RealmId::Page => {
+                Some(
+                    self.engine
+                        .call_module_export(js, module_specifier, export_name, arguments),
+                )
+            }
+            RealmId::Child(key) => {
+                self.children
+                    .call_module_export(js, key, module_specifier, export_name, arguments)
+            }
+        }
+    }
 }
 
 /// Opens one realm on `js`: creates it, enables module loading, installs the

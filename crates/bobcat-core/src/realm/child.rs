@@ -63,19 +63,19 @@ use crate::view::ScriptSource;
 /// Which child of an owner's realm a module load or a future settle is for,
 /// handed out in construction order and never reused, so a load that arrives
 /// for a released child finds nothing rather than a newer one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct ChildKey(u64);
 
 impl ChildKey {
-    /// The registrant this child's event registrations are filed under in
-    /// the document's listener table ([`dom::event::ListenerKey`]): the key's
-    /// own number. [`ChildRealms`] hands keys out from 1, so no child is ever
-    /// [`dom::event::ListenerKey`]`(0)`, which is the page realm's; and since
-    /// a key is never reused, a released child's rows can never be read as a
-    /// newer child's.
-    pub(crate) fn listener_key(self) -> dom::event::ListenerKey {
-        debug_assert_ne!(self.0, 0, "child keys start at 1");
-        dom::event::ListenerKey(self.0)
+    /// The key's own number, which [`super::RealmId::listener_key`] files a
+    /// child under.
+    pub(super) fn number(self) -> u64 {
+        self.0
+    }
+
+    /// The key whose [`Self::number`] is `number`.
+    pub(super) fn from_number(number: u64) -> Self {
+        Self(number)
     }
 }
 
@@ -114,8 +114,8 @@ impl ChildRealms {
     pub(crate) fn new() -> Self {
         Self {
             live: RefCell::new(Vec::new()),
-            // From 1: 0 is the page realm's listener key
-            // ([`ChildKey::listener_key`]).
+            // From 1: 0 is the owner's own realm's number
+            // ([`super::RealmId::listener_key`]).
             next: Cell::new(1),
         }
     }

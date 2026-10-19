@@ -969,6 +969,21 @@ mod listener_table {
         names.iter().map(|name| &**name).collect()
     }
 
+    /// Which of the two lists `key` is on for `name`: a path registration
+    /// a dispatch at `target` reaches, and a global registration anywhere.
+    fn reached(
+        document: &Document<()>,
+        target: NodeId,
+        name: &str,
+        key: ListenerKey,
+    ) -> (bool, bool) {
+        let steps = document.event_steps(target, true, true);
+        (
+            document.listeners_on_path(&steps, name).contains(&key),
+            document.global_registrants(name).contains(&key),
+        )
+    }
+
     #[test]
     fn a_repeated_add_replaces_the_kinds_and_moves_the_counts_by_the_difference() {
         let (mut document, _page, _outer, inner) = nested();
@@ -976,29 +991,27 @@ mod listener_table {
             document.add_listener(inner, "tap", BUBBLE, PAGE),
             RegistrationChange::FirstAdded
         );
-        assert_eq!(document.realm_registration_counts(PAGE, "tap"), (1, 0));
-        assert!(!document.realm_has_global(PAGE, "tap"));
+        assert_eq!(reached(&document, inner, "tap", PAGE), (true, false));
 
         assert_eq!(
             document.add_listener(inner, "tap", BUBBLE | GLOBAL, PAGE),
             RegistrationChange::Unchanged,
             "the same (node, name, registrant) is one registration"
         );
-        assert_eq!(document.realm_registration_counts(PAGE, "tap"), (1, 1));
-        assert!(document.realm_has_global(PAGE, "tap"));
+        assert_eq!(reached(&document, inner, "tap", PAGE), (true, true));
 
         assert_eq!(
             document.add_listener(inner, "tap", GLOBAL, PAGE),
             RegistrationChange::Unchanged
         );
-        assert_eq!(document.realm_registration_counts(PAGE, "tap"), (0, 1));
+        assert_eq!(reached(&document, inner, "tap", PAGE), (false, true));
 
         assert_eq!(
             document.add_listener(inner, "tap", ListenerKinds::empty(), PAGE),
             RegistrationChange::LastRemoved,
             "an empty set is a removal"
         );
-        assert_eq!(document.realm_registration_counts(PAGE, "tap"), (0, 0));
+        assert_eq!(reached(&document, inner, "tap", PAGE), (false, false));
         assert!(!document.hears("tap"));
     }
 
@@ -1074,8 +1087,10 @@ mod listener_table {
         );
         assert!(document.hears("tap"));
         assert!(!document.hears("scroll"));
-        assert_eq!(document.realm_registration_counts(PAGE, "tap"), (0, 0));
-        assert_eq!(document.realm_registration_counts(CARD, "tap"), (1, 0));
+        assert_eq!(reached(&document, inner, "tap", PAGE), (false, false));
+        assert_eq!(reached(&document, inner, "tap", CARD), (true, false));
+        assert!(document.global_registrants("scroll").is_empty());
+        assert!(document.global_registrants("keydown").is_empty());
         assert!(!document.has_listener(outer, "tap"));
         assert!(document.has_listener(inner, "tap"));
         assert!(document.remove_listeners_of(PAGE).is_empty());
@@ -1109,8 +1124,8 @@ mod listener_table {
             "`scroll` is still heard on `outer`"
         );
         assert!(document.take_pending_last_removals().is_empty(), "drained");
-        assert_eq!(document.realm_registration_counts(CARD, "scroll"), (0, 0));
-        assert_eq!(document.realm_registration_counts(PAGE, "scroll"), (1, 0));
+        assert_eq!(reached(&document, outer, "scroll", CARD), (false, false));
+        assert_eq!(reached(&document, outer, "scroll", PAGE), (true, false));
         assert!(!document.hears("tap"));
     }
 
@@ -1274,7 +1289,11 @@ mod listener_table {
                 .is_empty(),
             "the document element's path"
         );
-        assert!(document.realm_has_global(CARD, "tap"), "held all the same");
+        assert_eq!(
+            document.global_registrants("tap").as_slice(),
+            [CARD],
+            "held all the same"
+        );
     }
 
     /// A global registration in the document tree is reached by every
@@ -1332,15 +1351,18 @@ mod listener_table {
         document.add_listener(outer, "tap", GLOBAL, CARD);
         document.add_listener(page, "tap", GLOBAL, PAGE);
         assert_eq!(reached(&document).as_slice(), [CARD, PAGE]);
+        assert_eq!(document.global_registrants("tap").as_slice(), [CARD, PAGE]);
 
         document.add_listener(outer, "tap", BUBBLE, CARD);
         assert_eq!(reached(&document).as_slice(), [PAGE], "kinds replaced");
+        assert_eq!(document.global_registrants("tap").as_slice(), [PAGE]);
         document.add_listener(outer, "tap", GLOBAL, CARD);
         assert_eq!(
             reached(&document).as_slice(),
             [PAGE, CARD],
             "filed again, last"
         );
+        assert_eq!(document.global_registrants("tap").as_slice(), [PAGE, CARD]);
 
         document.remove_listener(page, "tap", PAGE);
         assert_eq!(reached(&document).as_slice(), [CARD]);
@@ -1356,6 +1378,7 @@ mod listener_table {
             [CARD],
             "a freed node's global row left with it"
         );
+        assert_eq!(document.global_registrants("tap").as_slice(), [CARD]);
 
         document.remove_listeners_of(CARD);
         assert!(
@@ -1363,6 +1386,7 @@ mod listener_table {
                 .global_registrants_on_path(&steps, "tap")
                 .is_empty()
         );
+        assert!(document.global_registrants("tap").is_empty());
     }
 
     #[test]

@@ -1625,7 +1625,8 @@ and name nodes `resetFrame` already freed. `dropElement` of a frame host does
 nothing frame-specific: its shadow tree goes with it. Nodes a closed child
 created and never attached stay until the view ends. A child's event
 registrations are filed in `dom`'s listener table under its
-`ChildKey::listener_key()` (never `ListenerKey(0)`, the page realm's); the
+`RealmId::Child(key).listener_key()` (never `ListenerKey(0)`,
+`RealmId::Page`'s); the
 host keeps no record of which page a child renders, and a dispatch calls it
 like any other realm (below); `closeRealm` — and the drop of its host state
 when the release step frees it — removes its rows (`remove_listeners_of`).
@@ -1930,8 +1931,8 @@ own shadow root); and, for web-core's document-level names
 (`DOCUMENT_LEVEL_EVENTS`: `keydown`, `keyup`, `WASMJSBinding.ts:30`), with a
 `global-bindEvent` for it anywhere, so a card hears every key. A realm with nothing to run is
 not called; an event nothing on its path listens for calls no realm at all;
-a realm that lost every registration for the name before its call
-(`Document::realm_registration_counts` is `(0, 0)`) is skipped then. For a
+a realm no longer invited when its call comes (the same three queries, read
+again after each call that ran) is skipped then. For a
 path in the document tree the page realm runs exactly the steps the one call
 before the table carried. Each call checkpoints on its own; a call that throws is
 collected and the walk goes on (`ListenerFailures`). The realm reports per

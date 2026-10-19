@@ -9085,6 +9085,7 @@ fn whole_path_encoding(
 /// that holds nothing there.
 #[test]
 fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
+    let page_realm = RealmId::Page.listener_key();
     let (mut js, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(&mut js, "__CreatePage();", "app:///path-encoding.js")
@@ -9105,7 +9106,7 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
         let detached = document.create_element("view", ());
         document.append_child(loose, detached);
         for node in [outer, loose] {
-            document.add_listener(node, "tap", ListenerKinds::PATH_CAPTURE, PAGE_REALM);
+            document.add_listener(node, "tap", ListenerKinds::PATH_CAPTURE, page_realm);
         }
         (inner, shadowed, detached)
     };
@@ -9117,9 +9118,8 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
     };
     for target in [inner, detached] {
         let steps = document.event_steps(target, true, true);
-        let calls = realm_calls(document, &steps, "tap", &[]);
-        assert_eq!(calls.len(), 1, "{target:?}");
-        assert_eq!(calls[0].child, None);
+        let calls = realm_calls(document, &steps, "tap", std::iter::once(page_realm));
+        assert_eq!(calls.as_slice(), [page_realm], "{target:?}");
         assert_eq!(
             encoded(&steps),
             whole_path_encoding(document, &steps),
@@ -9127,7 +9127,10 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
         );
     }
     let steps = document.event_steps(shadowed, true, true);
-    assert_eq!(realm_calls(document, &steps, "tap", &[]).len(), 1);
+    assert_eq!(
+        realm_calls(document, &steps, "tap", std::iter::once(page_realm)).len(),
+        1
+    );
     let (nodes, targets) = encoded(&steps);
     let outside: (Vec<&str>, Vec<&str>) = nodes
         .split(',')
@@ -9170,7 +9173,7 @@ fn the_page_realms_call_carries_exactly_the_path_it_always_did() {
     );
     let steps = document.event_steps(shadowed, true, false);
     assert!(
-        realm_calls(document, &steps, "tap", &[]).is_empty(),
+        realm_calls(document, &steps, "tap", std::iter::once(page_realm)).is_empty(),
         "a non-composed path inside a shadow tree invites no realm with nothing there"
     );
 }
@@ -9511,11 +9514,16 @@ fn a_page_global_registration_hears_a_tap_inside_a_card() {
 #[test]
 fn close_realm_clears_the_childs_rows() {
     let (mut js, mut runtime, elements, frame, inner) = frame_calls();
-    let child = runtime.core().children.keys()[0].listener_key();
-    assert_eq!(
-        elements.tree().realm_registration_counts(child, "tap"),
-        (1, 0)
-    );
+    let child = RealmId::Child(runtime.core().children.keys()[0]).listener_key();
+    let card_rows = |elements: &DocumentProbe| {
+        let tree = elements.tree();
+        let steps = tree.event_steps(inner, true, true);
+        (
+            tree.listeners_on_path(&steps, "tap").contains(&child),
+            tree.global_registrants("keydown").contains(&child),
+        )
+    };
+    assert_eq!(card_rows(&elements), (true, true));
     runtime
         .evaluate_module(
             &mut js,
@@ -9524,14 +9532,7 @@ fn close_realm_clears_the_childs_rows() {
             "closing the card's realm",
         )
         .unwrap();
-    assert_eq!(
-        elements.tree().realm_registration_counts(child, "tap"),
-        (0, 0)
-    );
-    assert_eq!(
-        elements.tree().realm_registration_counts(child, "keydown"),
-        (0, 0)
-    );
+    assert_eq!(card_rows(&elements), (false, false));
 
     runtime
         .dispatch_for_test(&mut js, inner, &tap(), dom::Point2D::new(30.0, 40.0))

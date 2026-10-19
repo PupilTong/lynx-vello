@@ -54,18 +54,13 @@ use crate::main::tree::{
 };
 use crate::realm::child::{ChildHostModules, ChildHostState, ChildKey};
 use crate::realm::policy::context_of;
-use crate::realm::{RealmCore, open_realm, string_argument};
+use crate::realm::{RealmCore, RealmId, open_realm, string_argument};
 use crate::script::ScriptError;
 use crate::timers::run_due_timers;
 use crate::view::{LynxViewError, ScreenMetrics, ScriptSource, StartupSource, Viewport};
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
-
-/// The registrant the page realm's event registrations are filed under in
-/// the document's listener table. A `ShadowRealm` child's is its
-/// [`ChildKey::listener_key`], which is never 0.
-const PAGE_REALM: ListenerKey = ListenerKey(0);
 
 /// web-core's rule for which events a nested card hears from the whole
 /// document: the names web-core listens for on `document` rather than on the
@@ -76,7 +71,7 @@ const PAGE_REALM: ListenerKey = ListenerKey(0);
 /// invited whatever tree the registering node is in, so a frame's card hears
 /// every key, whose target is the document element; every other global
 /// registration is reached only by a path through its node's tree root
-/// ([`dom::Document::global_registrants_on_path`]).
+/// ([`dom::Document::global_registrants_on_path`]). See [`Invited`].
 const DOCUMENT_LEVEL_EVENTS: [&str; 2] = ["keydown", "keyup"];
 
 /// The `bobcat:frame` exports a `frame`'s connection and disconnection are
@@ -188,25 +183,44 @@ fn push_detail_strings<'a>(
 /// points spill.
 type Arguments<'a> = SmallVec<[HostArgument<'a>; 15]>;
 
-/// One realm one dispatch calls. Every one is called at the path's top
-/// step and handed the same [`EncodedPath`].
-struct RealmCall {
-    /// The child to call, or `None` for the page realm.
-    child: Option<ChildKey>,
-    /// The registrant the realm's registrations are filed under.
-    key: ListenerKey,
-}
-
-/// The realms a dispatch of `name` over `steps` calls, in the order they are
-/// called — the page realm, then `children` in construction order: each one
-/// with a path registration for the name that the path's passes reach
-/// ([`dom::Document::listeners_on_path`]), with a `global-bindEvent`
+/// The registrants a dispatch of `name` over `steps` invites, as the
+/// document's listener table holds them when this is read: each with a path
+/// registration for the name that the path's passes reach
+/// ([`dom::Document::listeners_on_path`]), or with a `global-bindEvent`
 /// registration for it that the path reaches — one whose node's tree root
 /// (the document node, or the shadow root it sits in) is a node of the path
 /// ([`dom::Document::global_registrants_on_path`]) — or, for a
 /// [`DOCUMENT_LEVEL_EVENTS`] name, with a `global-bindEvent` registration
-/// for it anywhere ([`dom::Document::realm_has_global`]). None for a path
-/// with no capture step. See [`MainThreadRuntime::dispatch`].
+/// for it anywhere ([`dom::Document::global_registrants`]), which includes
+/// every one the path reaches.
+struct Invited {
+    on_path: SmallVec<[ListenerKey; 2]>,
+    globals: SmallVec<[ListenerKey; 2]>,
+}
+
+impl Invited {
+    fn read(document: &LynxDocument, steps: &dom::event::EventSteps, name: &str) -> Self {
+        let globals = if DOCUMENT_LEVEL_EVENTS.contains(&name) {
+            document.global_registrants(name)
+        } else {
+            document.global_registrants_on_path(steps, name)
+        };
+        Self {
+            on_path: document.listeners_on_path(steps, name),
+            globals,
+        }
+    }
+
+    fn contains(&self, key: ListenerKey) -> bool {
+        self.on_path.contains(&key) || self.globals.contains(&key)
+    }
+}
+
+/// The registrants a dispatch of `name` over `steps` calls, in the order
+/// they are called, which is the order of `registrants`: each one
+/// [`Invited`]. None for a path with no capture step. Every one is called at
+/// the path's top step and handed the same [`EncodedPath`]. See
+/// [`MainThreadRuntime::dispatch`].
 ///
 /// Decided while the document is borrowed and before the walk takes a step,
 /// so they are read against the tree the path was computed over.
@@ -214,32 +228,13 @@ fn realm_calls(
     document: &LynxDocument,
     steps: &dom::event::EventSteps,
     name: &str,
-    children: &[ChildKey],
-) -> SmallVec<[RealmCall; 2]> {
+    registrants: impl Iterator<Item = ListenerKey>,
+) -> SmallVec<[ListenerKey; 2]> {
     if !steps.steps().iter().any(|step| step.capture) {
         return SmallVec::new();
     }
-    let on_path = document.listeners_on_path(steps, name);
-    let globals = document.global_registrants_on_path(steps, name);
-    let document_level = DOCUMENT_LEVEL_EVENTS.contains(&name);
-    let invited = |key: ListenerKey| {
-        on_path.contains(&key)
-            || globals.contains(&key)
-            || (document_level && document.realm_has_global(key, name))
-    };
-    let page = invited(PAGE_REALM).then_some(RealmCall {
-        child: None,
-        key: PAGE_REALM,
-    });
-    page.into_iter()
-        .chain(children.iter().filter_map(|&child| {
-            let key = child.listener_key();
-            invited(key).then_some(RealmCall {
-                child: Some(child),
-                key,
-            })
-        }))
-        .collect()
+    let invited = Invited::read(document, steps, name);
+    registrants.filter(|&key| invited.contains(key)).collect()
 }
 
 /// The path every realm a dispatch calls is handed, as two comma-joined
@@ -1580,7 +1575,12 @@ impl MainThreadRuntime {
             Some(Rc::clone(&document) as Rc<dyn ChildHostModules>),
             |engine| {
                 document
-                    .install_members(engine, startup_strings(&mut startup), PAGE_REALM, None)
+                    .install_members(
+                        engine,
+                        startup_strings(&mut startup),
+                        RealmId::Page.listener_key(),
+                        None,
+                    )
                     .map_err(MainThreadError::into_script_error)?;
                 // The transport alone: the view's modules are the BTS's, and
                 // this realm has no `NativeModules`. What the transport is
@@ -2354,12 +2354,13 @@ impl MainThreadRuntime {
     /// frame, as web-core's card listens on its own shadow root. web-core's
     /// document-level names ([`DOCUMENT_LEVEL_EVENTS`], `keydown` and
     /// `keyup`) are the exception: every realm with a global registration
-    /// for one is invited. A realm with nothing to run is not called, so an event nothing on its
-    /// path listens for costs no crossing at all. A realm invited that lost
-    /// every registration for the name before its call — a listener of a
-    /// realm called before it freed its nodes, or closed it — is skipped
-    /// then; a child already freed is skipped by
-    /// `ChildRealms::call_module_export` answering nothing.
+    /// for one is invited ([`Invited`]). A realm with nothing to run is not
+    /// called, so an event nothing on its path listens for costs no crossing
+    /// at all. An invitee no longer invited when its call comes — a listener
+    /// of a realm called before it freed its nodes, or closed it — is
+    /// skipped then; a child already freed is skipped by
+    /// [`RealmCore::call_module_export`] answering nothing. Each realm is
+    /// named in the table by its [`RealmId::listener_key`] alone.
     ///
     /// **Where they are called** is the first capture step the walk
     /// reports, the path's top: the document node above the document element
@@ -2456,7 +2457,7 @@ impl MainThreadRuntime {
         } else {
             name
         };
-        let children = self.core.children.keys();
+        let registrants = self.core.realm_ids().map(RealmId::listener_key);
         let (steps, calls) = {
             let slot = self.slot.borrow();
             let document = slot.document.as_ref().expect(DOCUMENT_EXISTS);
@@ -2466,7 +2467,7 @@ impl MainThreadRuntime {
                 return Ok(false);
             }
             let steps = document.event_steps(target, bubbles, composed);
-            let calls = realm_calls(document, &steps, registered, &children);
+            let calls = realm_calls(document, &steps, registered, registrants);
             (steps, calls)
         };
         // Taken at the first capture step, the path's top, where every
@@ -2501,25 +2502,29 @@ impl MainThreadRuntime {
                 self.slot.borrow().document.as_ref().expect(DOCUMENT_EXISTS),
                 &steps,
             );
-            for call in &calls {
-                // A realm that has lost every registration for the name since
-                // it was invited has nothing left to run.
-                let left = self
-                    .slot
-                    .borrow()
-                    .document
-                    .as_ref()
-                    .expect(DOCUMENT_EXISTS)
-                    .realm_registration_counts(call.key, registered);
-                if left == (0, 0) {
+            // Who is still invited, read from the table as the calls before
+            // left it: a realm no longer invited has nothing left to run. Read
+            // once for every realm up to the next call that runs, since
+            // between two calls only a call's listeners change the table.
+            let mut live: Option<Invited> = None;
+            for &key in &calls {
+                let invited = live.get_or_insert_with(|| {
+                    Invited::read(
+                        self.slot.borrow().document.as_ref().expect(DOCUMENT_EXISTS),
+                        &steps,
+                        registered,
+                    )
+                });
+                if !invited.contains(key) {
                     continue;
                 }
                 match self.call_realm(
-                    js_runtime, call, &path, name, bubbles, timestamp, detail, extras,
+                    js_runtime, key, &path, name, bubbles, timestamp, detail, extras,
                 ) {
                     Ok(published) => called |= published,
                     Err(error) => failures.push(error),
                 }
+                live = None;
             }
         }
         // Listeners remove elements too; the count they ran up is settled
@@ -2531,8 +2536,9 @@ impl MainThreadRuntime {
     }
 
     /// One realm's call in one dispatch: `__BobcatDispatchEvent(nodes,
-    /// targets, name, bubbles, timestamp, extras…, detail…)` in the page
-    /// realm, or in the child `call` names. A child already freed is not
+    /// targets, name, bubbles, timestamp, extras…, detail…)` in the realm
+    /// whose registrations are filed under `key`
+    /// ([`RealmId::from_listener_key`]). A child already freed is not
     /// called.
     #[allow(
         clippy::too_many_arguments,
@@ -2541,7 +2547,7 @@ impl MainThreadRuntime {
     fn call_realm(
         &mut self,
         js_runtime: &mut ScriptRuntime,
-        call: &RealmCall,
+        key: ListenerKey,
         path: &EncodedPath,
         name: &str,
         bubbles: bool,
@@ -2560,25 +2566,14 @@ impl MainThreadRuntime {
         encode_extras(extras, &mut arguments);
         encode_detail(detail, &mut arguments);
 
-        let called = match call.child {
-            None => self.core.engine.call_module_export(
-                js_runtime,
-                ELEMENT_MODULE_SPECIFIER,
-                EVENT_DISPATCH_EXPORT,
-                &arguments,
-            ),
-            Some(child) => {
-                let Some(called) = self.core.children.call_module_export(
-                    js_runtime,
-                    child,
-                    ELEMENT_MODULE_SPECIFIER,
-                    EVENT_DISPATCH_EXPORT,
-                    &arguments,
-                ) else {
-                    return Ok(false);
-                };
-                called
-            }
+        let Some(called) = self.core.call_module_export(
+            js_runtime,
+            RealmId::from_listener_key(key),
+            ELEMENT_MODULE_SPECIFIER,
+            EVENT_DISPATCH_EXPORT,
+            &arguments,
+        ) else {
+            return Ok(false);
         };
         called.map_err(|error| MainThreadError::from_engine("delivering an event", error))
     }
@@ -3339,7 +3334,7 @@ await Promise.resolve().then(() => __FlushElementTree());
 /// `bobcat:frame-boot` handed it (`__BobcatUsePageRoot`), and its card's
 /// sheet goes to the frame's shadow root because `adoptStyleSheet` was told
 /// so. What a child differs in is the registrant its event registrations are
-/// filed under ([`ChildKey::listener_key`]), its `retired` flag, which its
+/// filed under (its [`RealmId::listener_key`]), its `retired` flag, which its
 /// `closeRealm` sets, what it does not get —
 /// the startup strings answer `undefined`, and the native module members
 /// are the page realm's, installed beside these by
@@ -3364,10 +3359,9 @@ struct DocumentHost {
 impl DocumentHost {
     /// Installs the document members into one realm, with `startup` as its
     /// one-shot strings, `key` as the registrant its event registrations are
-    /// filed under — [`PAGE_REALM`], or a child's
-    /// [`ChildKey::listener_key`] — and `retired` as the flag its
-    /// `closeRealm` sets: `None` for the page realm, which cannot close
-    /// itself.
+    /// filed under — the realm's [`RealmId::listener_key`] — and `retired`
+    /// as the flag its `closeRealm` sets: `None` for the page realm, which
+    /// cannot close itself.
     fn install_members(
         &self,
         engine: &mut ScriptEngine,
@@ -3390,8 +3384,8 @@ impl DocumentHost {
 
 impl ChildHostModules for DocumentHost {
     /// A child's members: the page realm's, with no startup strings, which
-    /// are the page's, its event registrations filed under `key`'s
-    /// [`ChildKey::listener_key`], and a `closeRealm` that retires the child;
+    /// are the page's, its event registrations filed under its
+    /// [`RealmId::listener_key`], and a `closeRealm` that retires the child;
     /// then the `Worker` members over a worker owner of the child's, recorded
     /// under `key` so the workers it creates are delivered to it. What the
     /// child keeps is that owner and the release of its registrations
@@ -3402,10 +3396,11 @@ impl ChildHostModules for DocumentHost {
         key: ChildKey,
         retired: Rc<Cell<bool>>,
     ) -> Result<Box<dyn ChildHostState>, ScriptError> {
+        let listener_key = RealmId::Child(key).listener_key();
         self.install_members(
             engine,
             STARTUP_STRINGS.map(|name| (name, None)),
-            key.listener_key(),
+            listener_key,
             Some(retired),
         )
         .map_err(MainThreadError::into_script_error)?;
@@ -3423,7 +3418,7 @@ impl ChildHostModules for DocumentHost {
         Ok(Box::new(ChildDocumentState {
             workers: Box::new(workers),
             slot: Rc::clone(&self.slot),
-            key: key.listener_key(),
+            key: listener_key,
         }))
     }
 }
