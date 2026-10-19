@@ -76,11 +76,11 @@ use crate::text::block::PlacedBox;
 use crate::text::paragraph::content::WhiteSpaceProcessing;
 use crate::text::paragraph::memo::{BreakMemo, Retained};
 use crate::text::paragraph::query::{Displayed, LineSpan};
-use crate::text::paragraph::shape::NaturalLine;
+use crate::text::paragraph::shape::{self, NaturalLine};
 use crate::text::paragraph::style::resolve_alignment;
 use crate::text::paragraph::{
     BlockConstraint, BlockMetrics, BreakStyle, Direction, Flow, IndentKeywords, InlineBoxSpec,
-    InlineItem, LineGeometry, NaturalBreak, OwnedItem, Paragraph, ParagraphRoot, RunBreaking,
+    InlineItem, LineGeometry, OverflowWrap, OwnedItem, Paragraph, ParagraphRoot, RunBreaking,
     RunStyle, TextAlign, TextRunItem, VerticalAlign, WhiteSpaceCollapse,
 };
 
@@ -249,6 +249,14 @@ pub struct InlineFlow {
     /// The intrinsic widths at the indent last asked about. Independent of
     /// the constraint, so one entry serves every width a pass asks at.
     intrinsic: Option<Intrinsic>,
+    /// Whether the content is of the kind whose intrinsic widths parley
+    /// measures in one pass, without a break (`one_pass_content`). Fixed at
+    /// construction; the atoms' sizes and the indent are checked per call.
+    one_pass: bool,
+    /// Whether the intrinsic widths' break at zero left the natural layout
+    /// with line storage for a line per word, which is freed after the next
+    /// break at a constraint.
+    excess_lines: bool,
     /// Every atom's margin box and baseline as the last commit laid them out.
     ///
     /// An atom's size depends on the width it is laid out at (the host
@@ -299,6 +307,7 @@ impl InlineFlow {
             root,
         );
         boxes.areas = boxes::content_areas(context, &boxes.specs);
+        let one_pass = one_pass_content(&paragraph.content, &breaking, style.direction);
         Self {
             style,
             paragraph,
@@ -307,6 +316,8 @@ impl InlineFlow {
             result: None,
             memo: BreakMemo::new(),
             intrinsic: None,
+            one_pass,
+            excess_lines: false,
             committed_atoms: Vec::new(),
         }
     }
@@ -752,11 +763,19 @@ impl InlineFlow {
             return Vec::new();
         }
         let mut atoms = Vec::with_capacity(content.block.boxes.len());
+        // Only a line holding atoms is walked for their positions, up to its
+        // last atom.
+        let mut line_boxes = shape::line_boxes(&self.paragraph.natural);
         for (index, line) in self.paragraph.natural.lines().take(line_count).enumerate() {
-            for item in line.items() {
-                let PositionedLayoutItem::InlineBox(inline_box) = item else {
-                    continue;
-                };
+            let count = line_boxes.on(&line).len();
+            if count == 0 {
+                continue;
+            }
+            let placed = line.items().filter_map(|item| match item {
+                PositionedLayoutItem::InlineBox(inline_box) => Some(inline_box),
+                PositionedLayoutItem::GlyphRun(_) => None,
+            });
+            for inline_box in placed.take(count) {
                 let slot = usize::try_from(inline_box.id).expect("slot ids are table indexes");
                 let spec = content.box_spec(content.block.boxes[slot].item);
                 let (before, _) = content.block.box_advance(slot);
@@ -778,7 +797,11 @@ impl InlineFlow {
     }
 
     /// Breaks the natural layout at `constraint`, counting the break.
-    fn break_at(&mut self, context: &mut TextContext, constraint: BlockConstraint) -> NaturalBreak {
+    fn break_at(
+        &mut self,
+        context: &mut TextContext,
+        constraint: BlockConstraint,
+    ) -> Vec<NaturalLine> {
         self.memo.begin_break();
         self.paragraph.break_lines(
             context,
@@ -789,8 +812,49 @@ impl InlineFlow {
         )
     }
 
+    /// The intrinsic widths at `indent`.
+    ///
+    /// For the content `one_pass_content` admits, at indent zero and with no
+    /// atom of negative width, they are parley's content widths, which it
+    /// measures in one pass over the shaped content without breaking it
+    /// ([`Self::break_widths`] answers the same there; a debug build checks
+    /// it). Otherwise they come from the two breaks.
+    fn intrinsic(&mut self, context: &mut TextContext, indent: f32) -> Intrinsic {
+        if let Some(intrinsic) = self.intrinsic
+            && intrinsic.indent.to_bits() == indent.to_bits()
+        {
+            return intrinsic;
+        }
+        let one_pass =
+            self.one_pass && indent == 0.0 && self.paragraph.box_widths().all(|width| width >= 0.0);
+        let (min, max) = if one_pass {
+            let widths = self.paragraph.content_widths_at(indent, self.style.indent);
+            #[cfg(debug_assertions)]
+            {
+                let (min, max) = self.break_widths(context, indent, false);
+                assert_eq!(
+                    (widths.min.to_bits(), widths.max.to_bits()),
+                    (min.to_bits(), max.to_bits()),
+                    "parley's one-pass content widths are the two breaks' here",
+                );
+            }
+            (widths.min, widths.max)
+        } else {
+            self.excess_lines = true;
+            self.break_widths(context, indent, true)
+        };
+        let intrinsic = Intrinsic { indent, min, max };
+        // The natural layout is now broken at zero, or has the boxes and the
+        // indent written in that no result's lines were broken at.
+        self.result = None;
+        self.intrinsic = Some(intrinsic);
+        intrinsic
+    }
+
     /// The intrinsic widths at `indent`, from two breaks of the natural
     /// layout: unconstrained for max-content, at zero for min-content.
+    /// `counted` counts them in the memo, as every break a layout makes is;
+    /// a debug build's check of the one-pass widths leaves the memo alone.
     ///
     /// Both are read as parley's widest line, trailing whitespace excluded
     /// and the indent added on the lines it applies to, which is what makes
@@ -798,30 +862,37 @@ impl InlineFlow {
     /// arbitrary break `overflow-wrap: break-word` allows would also be
     /// taken there, and contributes nothing to min-content (css-text-3
     /// §5.5), so parley's own minimum — which honours that — is the floor.
-    fn intrinsic(&mut self, context: &mut TextContext, indent: f32) -> Intrinsic {
-        if let Some(intrinsic) = self.intrinsic
-            && intrinsic.indent.to_bits() == indent.to_bits()
-        {
-            return intrinsic;
-        }
-        self.break_at(context, BlockConstraint::new(None, indent));
+    fn break_widths(
+        &mut self,
+        context: &mut TextContext,
+        indent: f32,
+        counted: bool,
+    ) -> (f32, f32) {
+        let breaking = RunBreaking::PerItem(&self.breaking);
+        let keywords = self.style.indent;
+        let mut break_at = |paragraph: &mut Paragraph<Option<u32>>, width| {
+            if counted {
+                self.memo.begin_break();
+            }
+            paragraph.break_lines(
+                context,
+                breaking,
+                BlockConstraint::new(width, indent),
+                None,
+                keywords,
+            );
+        };
+        break_at(&mut self.paragraph, None);
         let unconstrained = self.paragraph.natural.width();
-        let narrowest = self.break_at(context, BlockConstraint::new(Some(0.0), indent));
-        let min = narrowest
-            .content_widths
+        break_at(&mut self.paragraph, Some(0.0));
+        let min = self
+            .paragraph
+            .content_widths()
             .min
             .max(self.paragraph.natural.width());
         // A hanging indent can make the narrowest layout wider than the
         // unconstrained one; max-content is never below min-content.
-        let intrinsic = Intrinsic {
-            indent,
-            min,
-            max: unconstrained.max(min),
-        };
-        // The natural layout is now broken at zero, which no result names.
-        self.result = None;
-        self.intrinsic = Some(intrinsic);
-        intrinsic
+        (min, unconstrained.max(min))
     }
 }
 
@@ -870,6 +941,61 @@ fn lay_in(items: &[InlineFlowItem<'_>]) -> (Flow, InlineBoxes) {
     (flow, boxes)
 }
 
+/// Whether parley's one-pass content widths are the intrinsic widths the
+/// two breaks find (`InlineFlow::break_widths`) for this content, at indent
+/// zero and with no atom of negative width.
+///
+/// The two agree but for content with one of these, and an indent other
+/// than zero, which the caller checks; `tests/inline_flow.rs` and
+/// `tests/inline_boxes.rs` pin an input of each where they differ:
+///
+/// - A preserved tab: its advance is settled per break, from where it falls on its line
+///   (`paragraph::tab`).
+/// - A run that is `overflow-wrap: anywhere`, whose opportunities the one pass and the break at
+///   zero take differently around white space and in bidi text.
+/// - A negative advance: a negative `letter-spacing`, or an inline box edge with a negative margin.
+///   The one pass lets a negative running width skip a soft wrap opportunity.
+/// - A bidi level other than zero in any of the content: a right-to-left paragraph, or a character
+///   that is right-to-left, an Arabic number or an explicit embedding, override or isolate.
+///   Parley's one pass only lets white space at the paragraph's own level hang, and documents its
+///   widths as possibly wrong for mixed directions. Only a right-to-left paragraph was found to
+///   differ; the rest is excluded with it.
+fn one_pass_content(flow: &Flow, breaking: &[BreakStyle], direction: Direction) -> bool {
+    use icu_properties::CodePointMapData;
+    use icu_properties::props::BidiClass;
+
+    let bidi = CodePointMapData::<BidiClass>::new();
+    direction == Direction::Ltr
+        && flow.block.tabs.is_empty()
+        && breaking
+            .iter()
+            .all(|breaking| breaking.overflow_wrap != OverflowWrap::Anywhere)
+        && flow.items.iter().all(|item| match item {
+            OwnedItem::Run { style, .. } => style.letter_spacing >= 0.0,
+            OwnedItem::Box(_) | OwnedItem::Marker => true,
+        })
+        && flow
+            .block
+            .inserted
+            .iter()
+            .all(|segment| segment.style.letter_spacing + segment.extra_spacing >= 0.0)
+        && !flow.block.text.chars().any(|character| {
+            matches!(
+                bidi.get(character),
+                BidiClass::RightToLeft
+                    | BidiClass::ArabicLetter
+                    | BidiClass::ArabicNumber
+                    | BidiClass::LeftToRightEmbedding
+                    | BidiClass::LeftToRightOverride
+                    | BidiClass::RightToLeftEmbedding
+                    | BidiClass::RightToLeftOverride
+                    | BidiClass::LeftToRightIsolate
+                    | BidiClass::RightToLeftIsolate
+                    | BidiClass::FirstStrongIsolate
+            )
+        })
+}
+
 impl Retained for InlineFlow {
     fn memo(&self) -> &BreakMemo {
         &self.memo
@@ -889,6 +1015,9 @@ impl Retained for InlineFlow {
         }
         let intrinsic = self.intrinsic(context, constraint.indent);
         let natural = self.break_at(context, constraint);
+        if core::mem::take(&mut self.excess_lines) {
+            self.paragraph.release_line_capacity();
+        }
         let alignment = resolve_alignment(self.style.text_align, self.style.direction);
         self.paragraph
             .natural
@@ -899,10 +1028,10 @@ impl Retained for InlineFlow {
             .paragraph
             .natural
             .lines()
-            .take(natural.lines.len())
+            .take(natural.len())
             .map(|line| LineGeometry::of(&line))
             .collect();
-        let atoms = self.place_atoms(natural.lines.len());
+        let atoms = self.place_atoms(natural.len());
         // css-sizing-3's fit-content size: the available width clamped between
         // the intrinsic widths. Max-content is the unconstrained answer.
         let width = constraint.max_advance().map_or(intrinsic.max, |available| {
@@ -917,7 +1046,7 @@ impl Retained for InlineFlow {
         self.result = Some(FlowResult {
             constraint,
             lines,
-            natural: natural.lines,
+            natural,
             metrics,
             atoms,
             fragments: OnceLock::new(),

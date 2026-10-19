@@ -11,7 +11,7 @@ use parley::{
     LineHeight as ParleyLineHeight, PositionedLayoutItem, TextStyle as ParleyTextStyle,
 };
 
-use super::content::SourceMap;
+use super::content::{BoxAt, SourceMap};
 use super::style::{BreakStyle, RunStyle, WordBreak};
 use crate::style::TextBrush;
 use crate::text::TextContext;
@@ -301,11 +301,91 @@ pub(in crate::text) fn break_clamped(
 /// last line ([`capture_lines`]).
 pub(in crate::text) fn is_blank_line(line: &parley::Line<'_, TextBrush>) -> bool {
     let range = line.text_range();
-    range.start >= range.end
-        && !line
-            .items()
-            .any(|item| matches!(item, PositionedLayoutItem::InlineBox(_)))
+    range.start >= range.end && box_count(line) == 0
 }
+
+/// How many inline boxes `line` holds: its items are its runs and its boxes.
+///
+/// Counting the runs reads each item's kind only. `Line::items` would also
+/// position every glyph run of the line, which is most of a re-break's cost
+/// on a long paragraph.
+fn box_count(line: &parley::Line<'_, TextBrush>) -> usize {
+    line.len() - line.runs().count()
+}
+
+/// The inline boxes of a layout's committed lines, line by line, in logical
+/// order, without positioning anything.
+///
+/// Parley commits a layout's items to its lines in text order and each
+/// inline box to exactly one line, so the boxes of each line are the next
+/// [`box_count`] boxes of [`Layout::inline_boxes`], which is in text order
+/// too. Every line is read in order, from the first; a layout without boxes
+/// answers each line without reading it.
+pub(in crate::text) struct LineBoxes<I> {
+    boxes: I,
+    /// How many boxes of the line read last are still to be yielded.
+    unread: usize,
+}
+
+/// The inline boxes of `layout`'s committed lines ([`LineBoxes`]).
+pub(in crate::text) fn line_boxes(
+    layout: &Layout<TextBrush>,
+) -> LineBoxes<impl ExactSizeIterator<Item = &InlineBox> + '_> {
+    LineBoxes {
+        boxes: layout.inline_boxes(),
+        unread: 0,
+    }
+}
+
+impl<'a, I: ExactSizeIterator<Item = &'a InlineBox>> LineBoxes<I> {
+    /// The boxes on `line`, the line after the one the last call read, in
+    /// logical order. Boxes left unread are skipped by the next call.
+    pub(in crate::text) fn on(
+        &mut self,
+        line: &parley::Line<'_, TextBrush>,
+    ) -> impl ExactSizeIterator<Item = &'a InlineBox> + '_ {
+        for _ in 0..core::mem::take(&mut self.unread) {
+            self.boxes.next();
+        }
+        let count = if self.boxes.len() == 0 {
+            0
+        } else {
+            box_count(line)
+        };
+        debug_assert_eq!(
+            count,
+            line.items()
+                .filter(|item| matches!(item, PositionedLayoutItem::InlineBox(_)))
+                .count(),
+            "a line's items are its runs and its boxes",
+        );
+        self.unread = count;
+        Unread { lines: self }
+    }
+}
+
+/// The boxes [`LineBoxes::on`] has not yielded yet.
+struct Unread<'b, I> {
+    lines: &'b mut LineBoxes<I>,
+}
+
+impl<'a, I: Iterator<Item = &'a InlineBox>> Iterator for Unread<'_, I> {
+    type Item = &'a InlineBox;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.lines.unread == 0 {
+            return None;
+        }
+        self.lines.unread -= 1;
+        self.lines.boxes.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.lines.unread, Some(self.lines.unread))
+    }
+}
+
+impl<'a, I: Iterator<Item = &'a InlineBox>> ExactSizeIterator for Unread<'_, I> {}
 
 /// One committed line's place in both offset spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,16 +432,19 @@ pub(in crate::text) fn capture_lines(
     layout: &Layout<TextBrush>,
     text: &str,
     map: &SourceMap,
-    slot_bytes: &[u32],
-    slot_units: &[u32],
+    slots: &[BoxAt],
 ) -> Vec<NaturalLine> {
     let mut lines = Vec::with_capacity(layout.len());
     let mut blank_tail = 0;
     // Whether the last line with content ends with the newline that ends
     // the text.
     let mut ends_with_break = false;
+    let mut line_boxes = line_boxes(layout);
     for line in layout.lines() {
-        if is_blank_line(&line) {
+        let boxes = line_boxes.on(&line);
+        let range = line.text_range();
+        // `is_blank_line`, with the boxes already counted.
+        if range.start >= range.end && boxes.len() == 0 {
             // Blank lines only ever trail (every interior line carries its
             // break byte or a box) and are about to be popped; a zeroed
             // record keeps the indexes aligned without consulting the map at
@@ -377,7 +460,6 @@ pub(in crate::text) fn capture_lines(
             continue;
         }
         blank_tail = 0;
-        let range = line.text_range();
         let has_text = range.start <= range.end;
         ends_with_break = has_text
             && range.end == text.len()
@@ -386,16 +468,16 @@ pub(in crate::text) fn capture_lines(
         let mut end_unit = 0;
         let mut consumed_end = 0;
         let mut first_box_byte = None;
-        for item in line.items() {
-            if let PositionedLayoutItem::InlineBox(inline_box) = item {
-                let slot = usize::try_from(inline_box.id).expect("slot ids are table indexes");
-                let unit = slot_units[slot];
-                start_unit = start_unit.min(unit);
-                end_unit = end_unit.max(unit + 1);
-                consumed_end = consumed_end.max(unit + 1);
-                if first_box_byte.is_none() {
-                    first_box_byte = Some(slot_bytes[slot]);
-                }
+        // The boxes come in logical order rather than parley's visual one;
+        // only the first one's byte is read, for a line without text, whose
+        // boxes all sit at one byte because no text lies between them.
+        for inline_box in boxes {
+            let slot = &slots[usize::try_from(inline_box.id).expect("slot ids are table indexes")];
+            start_unit = start_unit.min(slot.unit);
+            end_unit = end_unit.max(slot.unit + 1);
+            consumed_end = consumed_end.max(slot.unit + 1);
+            if first_box_byte.is_none() {
+                first_box_byte = Some(slot.byte);
             }
         }
         let (start_byte, end_byte) = if has_text {
@@ -407,7 +489,7 @@ pub(in crate::text) fn capture_lines(
             let visible_end = map.visible_end(text, start, end);
             start_unit = start_unit.min(map.byte_to_unit(text, start));
             // End offsets go through the end-sided lookup: a box sharing the
-            // end byte belongs to a later line unless the items walk above
+            // end byte belongs to a later line unless the box walk above
             // already counted it as this line's.
             end_unit = end_unit.max(map.unit_before(text, visible_end));
             consumed_end = consumed_end.max(map.unit_before(text, end));

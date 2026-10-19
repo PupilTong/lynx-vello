@@ -350,18 +350,6 @@ impl<S: Copy> ParagraphRoot<S> {
     }
 }
 
-/// What one natural break reports, in the content's own offset spaces.
-pub(in crate::text) struct NaturalBreak {
-    /// The committed lines, trailing blank lines dropped.
-    pub(in crate::text) lines: Vec<NaturalLine>,
-    /// The source unit of each atomic box slot, in slot order.
-    pub(in crate::text) slot_units: Vec<u32>,
-    /// Min- and max-content widths of the full content, read off the
-    /// unjustified, pre-alignment layout with the current box sizes written
-    /// in, so a justified alignment can never leak into them.
-    pub(in crate::text) content_widths: ContentWidths,
-}
-
 impl<S: Copy> Paragraph<S> {
     /// Builds and shapes the content flow of `items`.
     ///
@@ -439,7 +427,8 @@ impl<S: Copy> Paragraph<S> {
     }
 
     /// Breaks the natural layout at `constraint`, committing at most
-    /// `max_lines` lines, and reads the committed lines back.
+    /// `max_lines` lines, and reads the committed lines back in the
+    /// content's own offset spaces, trailing blank lines dropped.
     ///
     /// The atomic boxes' current sizes, baselines and `vertical-align` values
     /// are written in first, and the constraint's indent goes
@@ -454,20 +443,12 @@ impl<S: Copy> Paragraph<S> {
         constraint: BlockConstraint,
         max_lines: Option<u32>,
         keywords: IndentKeywords,
-    ) -> NaturalBreak {
+    ) -> Vec<NaturalLine> {
         let width = constraint.max_advance();
 
         // Box sizes, baselines and alignments feed the breaker, which sizes
         // and places the line boxes around them.
-        for (slot, entry) in self.natural.inline_boxes_mut().enumerate() {
-            let spec = self.content.box_spec(self.content.block.boxes[slot].item);
-            let sized = sized_box(spec, slot, entry.index, self.percent_basis);
-            let (before, after) = self.content.block.box_advance(slot);
-            entry.width = sized.width + before + after;
-            entry.height = sized.height;
-            entry.baseline = sized.baseline;
-            entry.vertical_align = sized.vertical_align;
-        }
+        self.write_boxes();
 
         let indent = constraint.indent;
         let mut tab_rounds = 0;
@@ -494,36 +475,77 @@ impl<S: Copy> Paragraph<S> {
             self.reshape(context, breaking);
             tab_rounds += 1;
         }
-        // Content widths are read off the just-unjustified, pre-alignment
-        // layout, with the current box sizes written in.
-        let content_widths = self.natural.calculate_content_widths();
-
-        let slot_bytes: Vec<u32> = self
-            .content
-            .block
-            .boxes
-            .iter()
-            .map(|entry| entry.byte)
-            .collect();
-        let slot_units: Vec<u32> = self
-            .content
-            .block
-            .boxes
-            .iter()
-            .map(|entry| entry.unit)
-            .collect();
-        let lines = shape::capture_lines(
+        shape::capture_lines(
             &self.natural,
             &self.content.block.text,
             &self.content.block.map,
-            &slot_bytes,
-            &slot_units,
-        );
-        NaturalBreak {
-            lines,
-            slot_units,
-            content_widths,
+            &self.content.block.boxes,
+        )
+    }
+
+    /// Writes the atomic boxes' current sizes, baselines and alignments into
+    /// the natural layout, each widened by the advance laid beside it.
+    fn write_boxes(&mut self) {
+        for (slot, entry) in self.natural.inline_boxes_mut().enumerate() {
+            let spec = self.content.box_spec(self.content.block.boxes[slot].item);
+            let sized = sized_box(spec, slot, entry.index, self.percent_basis);
+            let (before, after) = self.content.block.box_advance(slot);
+            entry.width = sized.width + before + after;
+            entry.height = sized.height;
+            entry.baseline = sized.baseline;
+            entry.vertical_align = sized.vertical_align;
         }
+    }
+
+    /// The min- and max-content widths of the full content at `indent`, on
+    /// the lines `keywords` name, at the atomic boxes' current sizes and the
+    /// tab stops the last break settled: [`Self::content_widths`] with no
+    /// break. The committed lines are left as they were, while the boxes
+    /// and the indent written in are this call's.
+    pub(in crate::text) fn content_widths_at(
+        &mut self,
+        indent: f32,
+        keywords: IndentKeywords,
+    ) -> ContentWidths {
+        self.write_boxes();
+        self.natural.set_text_indent(indent, keywords.options());
+        self.content_widths()
+    }
+
+    /// The width of every atomic box as the next break writes it in.
+    pub(in crate::text) fn box_widths(&self) -> impl Iterator<Item = f32> + '_ {
+        self.content
+            .block
+            .boxes
+            .iter()
+            .enumerate()
+            .map(|(slot, entry)| {
+                let (before, after) = self.content.block.box_advance(slot);
+                self.content.box_spec(entry.item).size.width + before + after
+            })
+    }
+
+    /// Frees the line storage an earlier break left in the natural layout
+    /// beyond what its current lines hold.
+    ///
+    /// Parley keeps a layout's line and line item buffers across breaks and
+    /// never shrinks them, so after a break at a narrow width they hold
+    /// about one line per word for as long as the paragraph lives. A copy of
+    /// the layout holds exactly its current contents.
+    pub(in crate::text) fn release_line_capacity(&mut self) {
+        self.natural = self.natural.clone();
+    }
+
+    /// The min- and max-content widths of the full content at the box sizes,
+    /// indent and tab stops the last [`Self::break_lines`] wrote in.
+    ///
+    /// Read on demand rather than with every break: parley measures them
+    /// from the shaped content, the inline boxes and the indent alone, never
+    /// from the committed lines or an alignment, so the widths are the same
+    /// whenever after that break they are asked for, and a justified
+    /// alignment does not change them.
+    pub(in crate::text) fn content_widths(&self) -> ContentWidths {
+        self.natural.calculate_content_widths()
     }
 
     /// Shapes the natural layout again, at the content's current tab

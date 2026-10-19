@@ -14,12 +14,12 @@
 //! cluster granularity rather than the web's raw UTF-16 stepping, so a cut
 //! never splits a surrogate pair or grapheme — a recorded deviation.
 
-use parley::{Layout, PositionedLayoutItem};
+use parley::Layout;
 
 use super::style::{BlockStyle, TextOverflow};
 use crate::style::TextBrush;
-use crate::text::paragraph::content::{SourceMap, StyledRange};
-use crate::text::paragraph::shape::NaturalLine;
+use crate::text::paragraph::content::{BoxAt, SourceMap, StyledRange};
+use crate::text::paragraph::shape::{self, NaturalLine};
 
 /// How many units the dots-form ellipsis backs the maxline cut off, and how
 /// many dots it appends.
@@ -75,7 +75,7 @@ pub(in crate::text::block) fn plan(
     text: &str,
     map: &SourceMap,
     ranges: &[StyledRange],
-    slot_units: &[u32],
+    slots: &[BoxAt],
     style: &BlockStyle,
     maxline_overflow: bool,
     has_truncation: bool,
@@ -104,7 +104,7 @@ pub(in crate::text::block) fn plan(
                     last,
                     text,
                     map,
-                    slot_units,
+                    slots,
                     truncation_width,
                 )
             }
@@ -202,10 +202,10 @@ pub(in crate::text::block) fn retreat_for_width(
     line: NaturalLine,
     text: &str,
     map: &SourceMap,
-    slot_units: &[u32],
+    slots: &[BoxAt],
     needed: f32,
 ) -> u32 {
-    let atoms = line_atoms(natural, line_index, line, text, map, slot_units);
+    let atoms = line_atoms(natural, line_index, line, text, map, slots);
 
     let mut freed = 0.0;
     let mut cut = line.start_unit;
@@ -227,7 +227,7 @@ fn line_atoms(
     line: NaturalLine,
     text: &str,
     map: &SourceMap,
-    slot_units: &[u32],
+    slots: &[BoxAt],
 ) -> Vec<(u32, f32)> {
     let parley_line = natural.get(line_index).expect("the cut line is committed");
     let mut atoms = Vec::new();
@@ -240,13 +240,16 @@ fn line_atoms(
             }
         }
     }
-    for item in parley_line.items() {
-        if let PositionedLayoutItem::InlineBox(inline_box) = item {
-            let slot = usize::try_from(inline_box.id).expect("slot ids are table indexes");
-            let unit = slot_units[slot];
-            if unit < line.end_unit {
-                atoms.push((unit, inline_box.width));
-            }
+    // The lines before it are read for which boxes they hold, not walked.
+    let mut line_boxes = shape::line_boxes(natural);
+    for earlier in natural.lines().take(line_index) {
+        let _ = line_boxes.on(&earlier);
+    }
+    for inline_box in line_boxes.on(&parley_line) {
+        let slot = usize::try_from(inline_box.id).expect("slot ids are table indexes");
+        let unit = slots[slot].unit;
+        if unit < line.end_unit {
+            atoms.push((unit, inline_box.width));
         }
     }
     atoms.sort_unstable_by_key(|atom| atom.0);
@@ -264,10 +267,10 @@ pub(in crate::text::block) fn clip_boundary(
     line: NaturalLine,
     text: &str,
     map: &SourceMap,
-    slot_units: &[u32],
+    slots: &[BoxAt],
     limit: f32,
 ) -> u32 {
-    let atoms = line_atoms(natural, line_index, line, text, map, slot_units);
+    let atoms = line_atoms(natural, line_index, line, text, map, slots);
     let mut advance = 0.0;
     for &(unit, atom) in &atoms {
         advance += atom;

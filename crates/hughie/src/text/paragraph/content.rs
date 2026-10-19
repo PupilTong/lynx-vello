@@ -7,6 +7,10 @@
 //! between them. The map is a segment list proportional to structure (runs,
 //! boxes, collapse events), never a second copy of the text: intra-segment
 //! queries re-decode the one normalized `String` the paragraph needs anyway.
+//! Every lookup is a binary search over the segments, and an intra-segment
+//! offset is either arithmetic, in an ASCII segment, or a decode of at most
+//! [`VERBATIM_DECODE`] bytes, the longest a segment with any other character
+//! grows.
 //!
 //! The collapse rules are css-text-3 §4.1's, with two additions: source-unit
 //! accounting, and boxes as content (an atomic box flushes pending whitespace
@@ -258,6 +262,30 @@ enum SegmentKind {
     Inserted,
 }
 
+/// The longest a verbatim segment holding a character other than ASCII
+/// grows, in bytes: the most an intra-segment lookup decodes. An ASCII
+/// segment grows without bound, since its offsets in both spaces are equal.
+const VERBATIM_DECODE: u32 = 128;
+
+impl Segment {
+    /// Whether every character of this verbatim segment is ASCII: one byte
+    /// and one unit each. Any other character is longer in UTF-8 than in
+    /// UTF-16, so the two lengths are equal exactly then.
+    const fn is_ascii(&self) -> bool {
+        self.units.end - self.units.start == self.norm.end - self.norm.start
+    }
+
+    /// The source units of this verbatim segment's text before `byte`, a
+    /// char boundary inside it.
+    fn units_before(&self, text: &str, byte: u32) -> u32 {
+        if self.is_ascii() {
+            byte - self.norm.start
+        } else {
+            utf16_len(&text[self.norm.start as usize..byte as usize])
+        }
+    }
+}
+
 impl SourceMap {
     pub(in crate::text) const fn source_len(&self) -> u32 {
         self.source_len
@@ -281,16 +309,19 @@ impl SourceMap {
     /// sharing the byte lies before that character and is not part of what
     /// starts here.
     pub(in crate::text) fn byte_to_unit(&self, text: &str, byte: u32) -> u32 {
+        // The segments are in text order and the ones with bytes cover the
+        // text, so the first ending after `byte` holds it; a segment of no
+        // bytes never does.
         let segment = self
             .segments
-            .iter()
-            .find(|segment| segment.norm.start <= byte && byte < segment.norm.end)
+            .get(
+                self.segments
+                    .partition_point(|segment| segment.norm.end <= byte),
+            )
             .expect("a start offset lies inside the normalized text");
+        debug_assert!(segment.norm.start <= byte, "the segments cover the text");
         match segment.kind {
-            SegmentKind::Verbatim => {
-                let prefix = &text[segment.norm.start as usize..byte as usize];
-                segment.units.start + utf16_len(prefix)
-            }
+            SegmentKind::Verbatim => segment.units.start + segment.units_before(text, byte),
             SegmentKind::Collapsed | SegmentKind::Inserted => segment.units.start,
             SegmentKind::Box => unreachable!("a box segment spans no bytes"),
         }
@@ -302,11 +333,18 @@ impl SourceMap {
     /// boundary is content of whatever follows, and a caller whose range
     /// includes the box accounts for its unit separately.
     pub(in crate::text) fn unit_before(&self, text: &str, byte: u32) -> u32 {
-        let mut result = 0;
-        for segment in &self.segments {
-            if segment.norm.end < byte || (segment.norm.end == byte && segment.norm.start < byte) {
-                result = segment.units.end;
-            } else if segment.norm.start == byte && segment.norm.end == byte {
+        // Everything strictly before the byte: every segment ending before
+        // it, and one with bytes ending at it. In text order these are a
+        // prefix of the segments, and the last of them ends at the unit they
+        // all end before.
+        let before = self.segments.partition_point(|segment| {
+            segment.norm.end < byte || (segment.norm.end == byte && segment.norm.start < byte)
+        });
+        let mut result = before
+            .checked_sub(1)
+            .map_or(0, |last| self.segments[last].units.end);
+        for segment in &self.segments[before..] {
+            if segment.norm.start == byte && segment.norm.end == byte {
                 match segment.kind {
                     SegmentKind::Box => break,
                     SegmentKind::Collapsed => result = segment.units.end,
@@ -315,8 +353,7 @@ impl SourceMap {
                     }
                 }
             } else if segment.kind == SegmentKind::Verbatim && segment.norm.start < byte {
-                let prefix = &text[segment.norm.start as usize..byte as usize];
-                result = segment.units.start + utf16_len(prefix);
+                result = segment.units.start + segment.units_before(text, byte);
                 break;
             } else {
                 break;
@@ -370,12 +407,21 @@ impl SourceMap {
         if unit >= self.shown_len {
             return None;
         }
+        // The units are in segment order and every shown unit is in one
+        // segment, so the first ending after `unit` holds it; an inserted
+        // segment, holding none, never does.
         let segment = self
             .segments
-            .iter()
-            .find(|segment| segment.units.start <= unit && unit < segment.units.end)
+            .get(
+                self.segments
+                    .partition_point(|segment| segment.units.end <= unit),
+            )
             .expect("every source unit lies in a segment");
+        debug_assert!(segment.units.start <= unit, "the segments cover the units");
         match segment.kind {
+            SegmentKind::Verbatim if segment.is_ascii() => {
+                Some(segment.norm.start + (unit - segment.units.start))
+            }
             SegmentKind::Verbatim => {
                 let mut remaining = unit - segment.units.start;
                 let mut byte = segment.norm.start;
@@ -703,7 +749,8 @@ impl Normalizer {
     }
 
     /// Appends or extends a segment; adjacent verbatim segments coalesce
-    /// because they are contiguous in both offset spaces.
+    /// because they are contiguous in both offset spaces, as long as the
+    /// result is all ASCII or at most [`VERBATIM_DECODE`] bytes long.
     fn push_segment(&mut self, kind: SegmentKind, norm: Range<u32>, units: u32) {
         let unit_end = self.units + units;
         if kind == SegmentKind::Verbatim
@@ -711,6 +758,8 @@ impl Normalizer {
             && last.kind == SegmentKind::Verbatim
             && last.norm.end == norm.start
             && last.units.end == self.units
+            && (norm.end - last.norm.start <= VERBATIM_DECODE
+                || unit_end - last.units.start == norm.end - last.norm.start)
         {
             last.norm.end = norm.end;
             last.units.end = unit_end;
@@ -1475,6 +1524,232 @@ mod tests {
         // A collapsible span before a preserved one is still at the line
         // start, and goes.
         assert_eq!(normalize(&[run(&style, " "), pre(&style, " a")]).text, " a");
+    }
+
+    /// The lookups as linear scans over every segment, each verbatim offset
+    /// decoded from the segment's start: the definition the binary searches,
+    /// the ASCII arithmetic and the bounded verbatim segments must answer
+    /// exactly as.
+    mod scan {
+        use super::super::{SegmentKind, SourceMap, utf16_len};
+
+        pub(super) fn byte_to_unit(map: &SourceMap, text: &str, byte: u32) -> u32 {
+            let segment = map
+                .segments
+                .iter()
+                .find(|segment| segment.norm.start <= byte && byte < segment.norm.end)
+                .expect("a start offset lies inside the normalized text");
+            match segment.kind {
+                SegmentKind::Verbatim => {
+                    segment.units.start
+                        + utf16_len(&text[segment.norm.start as usize..byte as usize])
+                }
+                SegmentKind::Collapsed | SegmentKind::Inserted => segment.units.start,
+                SegmentKind::Box => unreachable!(),
+            }
+        }
+
+        pub(super) fn unit_before(map: &SourceMap, text: &str, byte: u32) -> u32 {
+            let mut result = 0;
+            for segment in &map.segments {
+                if segment.norm.end < byte
+                    || (segment.norm.end == byte && segment.norm.start < byte)
+                {
+                    result = segment.units.end;
+                } else if segment.norm.start == byte && segment.norm.end == byte {
+                    match segment.kind {
+                        SegmentKind::Box => break,
+                        SegmentKind::Collapsed => result = segment.units.end,
+                        SegmentKind::Verbatim | SegmentKind::Inserted => unreachable!(),
+                    }
+                } else if segment.kind == SegmentKind::Verbatim && segment.norm.start < byte {
+                    result = segment.units.start
+                        + utf16_len(&text[segment.norm.start as usize..byte as usize]);
+                    break;
+                } else {
+                    break;
+                }
+            }
+            result
+        }
+
+        pub(super) fn unit_to_byte(map: &SourceMap, text: &str, unit: u32) -> Option<u32> {
+            if unit >= map.shown_len {
+                return None;
+            }
+            let segment = map
+                .segments
+                .iter()
+                .find(|segment| segment.units.start <= unit && unit < segment.units.end)
+                .expect("every source unit lies in a segment");
+            match segment.kind {
+                SegmentKind::Verbatim => {
+                    let mut remaining = unit - segment.units.start;
+                    let mut byte = segment.norm.start;
+                    for character in
+                        text[segment.norm.start as usize..segment.norm.end as usize].chars()
+                    {
+                        let width = u32::try_from(character.len_utf16()).unwrap();
+                        if remaining < width {
+                            break;
+                        }
+                        remaining -= width;
+                        byte += u32::try_from(character.len_utf8()).unwrap();
+                    }
+                    Some(byte)
+                }
+                SegmentKind::Collapsed | SegmentKind::Box => Some(segment.norm.start),
+                SegmentKind::Inserted => unreachable!(),
+            }
+        }
+    }
+
+    /// Every lookup at every byte and unit of `block` against [`scan`].
+    fn assert_lookups_match_the_scan(block: &NormalizedBlock) {
+        let text = block.text.as_str();
+        let map = &block.map;
+        for byte in (0..text.len()).filter(|&byte| text.is_char_boundary(byte)) {
+            let byte = u32::try_from(byte).unwrap();
+            assert_eq!(
+                map.byte_to_unit(text, byte),
+                scan::byte_to_unit(map, text, byte),
+                "byte_to_unit({byte}) of {text:?}",
+            );
+        }
+        for byte in (0..=text.len()).filter(|&byte| text.is_char_boundary(byte)) {
+            let byte = u32::try_from(byte).unwrap();
+            assert_eq!(
+                map.unit_before(text, byte),
+                scan::unit_before(map, text, byte),
+                "unit_before({byte}) of {text:?}",
+            );
+        }
+        for unit in 0..=map.source_len() + 1 {
+            assert_eq!(
+                map.unit_to_byte(text, unit),
+                scan::unit_to_byte(map, text, unit),
+                "unit_to_byte({unit}) of {text:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn lookups_answer_as_a_scan_of_every_segment() {
+        let style = RunStyle::default();
+        let cjk =
+            "活动规则在期间带话题暑假科普手抄报发布优质原创图文作品图片数量张上榜作者能赢取周边"
+                .repeat(4);
+        let emoji = "😀a😀".repeat(30);
+        let latin = "word ".repeat(60);
+        let mixed = format!("{latin}{cjk}{latin}é{latin}");
+        let cases: Vec<(Vec<InlineItem<'_>>, WhiteSpaceProcessing)> = vec![
+            (vec![run(&style, &latin)], WhiteSpaceProcessing::Css),
+            (vec![run(&style, &cjk)], WhiteSpaceProcessing::Css),
+            (vec![run(&style, &mixed)], WhiteSpaceProcessing::Css),
+            (
+                vec![pre(&style, &emoji), atom(0), raw(&style, &cjk)],
+                WhiteSpaceProcessing::Css,
+            ),
+            (
+                vec![
+                    run(&style, "  a  b \n "),
+                    atom(0),
+                    atom(1),
+                    run(&style, " \n c"),
+                    pre(&style, "\t x\r  \n"),
+                    run(&style, &cjk),
+                    atom(2),
+                    run(&style, "  "),
+                ],
+                WhiteSpaceProcessing::Css,
+            ),
+            (
+                vec![run(&style, &mixed), atom(0), run(&style, "\n\t z")],
+                WhiteSpaceProcessing::Verbatim {
+                    first_line_only: false,
+                },
+            ),
+            (
+                vec![
+                    run(&style, &cjk),
+                    run(&style, "\n"),
+                    atom(0),
+                    run(&style, &latin),
+                ],
+                WhiteSpaceProcessing::Verbatim {
+                    first_line_only: true,
+                },
+            ),
+        ];
+        for (items, processing) in &cases {
+            let mut block = super::normalize(items, *processing);
+            assert_lookups_match_the_scan(&block);
+            // The same content with text a consumer inserts: inside a long
+            // verbatim segment, at an atomic box and at the text's end.
+            let boxes: Vec<(u32, u32)> = block
+                .boxes
+                .iter()
+                .enumerate()
+                .map(|(slot, entry)| (entry.byte, u32::try_from(slot).unwrap()))
+                .collect();
+            let length = u32::try_from(block.text.len()).unwrap();
+            let mut points: Vec<(u32, u32)> = [length / 3, length / 2, length]
+                .into_iter()
+                .filter(|&at| block.text.is_char_boundary(at as usize))
+                .map(|at| {
+                    (
+                        at,
+                        u32::try_from(block.boxes.iter().filter(|entry| entry.byte < at).count())
+                            .unwrap(),
+                    )
+                })
+                .chain(boxes.first().copied())
+                .collect();
+            points.sort_unstable();
+            points.dedup();
+            block.splice(
+                points
+                    .into_iter()
+                    .map(|(at, atoms_before)| Insertion {
+                        at,
+                        atoms_before,
+                        text: "\u{200B}x".to_owned(),
+                        style: style.clone(),
+                        extra_spacing: 0.0,
+                        item: 0,
+                    })
+                    .collect(),
+            );
+            assert_lookups_match_the_scan(&block);
+        }
+    }
+
+    #[test]
+    fn verbatim_segments_with_other_than_ascii_stay_short() {
+        let style = RunStyle::default();
+        let cjk = "活动规则".repeat(100);
+        let block = normalize(&[run(
+            &style,
+            &format!("{}{cjk}{}", "a".repeat(500), "b".repeat(500)),
+        )]);
+        let lengths: Vec<(bool, u32)> = block
+            .map
+            .segments
+            .iter()
+            .map(|segment| (segment.is_ascii(), segment.norm.end - segment.norm.start))
+            .collect();
+        assert!(
+            lengths
+                .iter()
+                .all(|&(ascii, length)| ascii || length <= VERBATIM_DECODE),
+            "{lengths:?}",
+        );
+        assert_eq!(
+            lengths.first(),
+            Some(&(true, 500)),
+            "ASCII coalesces in full"
+        );
+        assert_lookups_match_the_scan(&block);
     }
 
     #[test]
