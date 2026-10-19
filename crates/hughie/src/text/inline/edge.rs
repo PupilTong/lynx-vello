@@ -1213,6 +1213,38 @@ mod tests {
         assert_eq!(block.spans[1].parent, Some(0));
     }
 
+    /// One box closing and the next opening inside one stretch of text put
+    /// an end cluster and a start cluster at one byte of the text before
+    /// insertion. The source map holds the text on either side of the pair
+    /// and the two clusters, nothing between them, so every offset from the
+    /// end cluster to the box's first character maps to the unit between
+    /// `x` and `y` — as a start and as an end, which a line breaking right
+    /// after the start cluster asks for.
+    #[test]
+    fn an_end_and_a_start_cluster_at_one_byte_map_to_the_unit_between_them() {
+        let style = RunStyle::default();
+        let siblings = [
+            open(&style, 3.0, 3.0),
+            run(&style, "x"),
+            InlineFlowItem::Close,
+            open(&style, 3.0, 3.0),
+            run(&style, "y"),
+            InlineFlowItem::Close,
+        ];
+        let block = css(&siblings);
+        assert_eq!(shown(&block), "<xx><yy>");
+        let end = block.edges[1].bytes.clone();
+        let start = block.edges[2].bytes.clone();
+        assert_eq!(block.edges[1].members, [(0, EdgeSide::End)]);
+        assert_eq!(block.edges[2].members, [(1, EdgeSide::Start)]);
+        assert_eq!(end.end, start.start);
+        for byte in [end.start, start.start, start.end] {
+            assert_eq!(block.map.byte_to_unit(&block.text, byte), 1, "{byte}");
+            assert_eq!(block.map.unit_before(&block.text, byte), 1, "{byte}");
+        }
+        assert_eq!(block.map.unit_to_byte(&block.text, 1), Some(start.end));
+    }
+
     #[test]
     fn an_empty_box_is_one_start_cluster_carrying_both_its_edges() {
         let style = RunStyle::default();

@@ -702,10 +702,12 @@ fn styled<'src>(
 
 /// Awkward combinations — edges around preserved breaks and tabs, boxes of
 /// collapsible white space only, empty boxes nested in each other, atoms
-/// carrying edges on both sides, a box spanning a forced break, every one in
-/// both directions — laid out at several widths, with every range and a
-/// grid of points asked about. The answers are not checked; that the source
-/// map and the fragments hold together everywhere is.
+/// carrying edges on both sides, a box spanning a forced break, sibling
+/// boxes whose text `overflow-wrap: anywhere` breaks right after a start
+/// edge, every one in both directions — laid out at several widths, with
+/// every range and a grid of points asked about. The answers are not
+/// checked; that the source map and the fragments hold together everywhere
+/// is.
 #[test]
 fn awkward_boxes_lay_out_and_answer_every_query() {
     let style = ahem();
@@ -715,6 +717,17 @@ fn awkward_boxes_lay_out_and_answer_every_query() {
         })
     };
     let pre = |text| styled(&style, text, WhiteSpaceCollapse::Preserve);
+    let anywhere = |text| {
+        InlineFlowItem::Run(InlineRun {
+            text,
+            style: &style,
+            white_space: WhiteSpaceCollapse::Collapse,
+            breaking: BreakStyle {
+                overflow_wrap: OverflowWrap::Anywhere,
+                ..BreakStyle::default()
+            },
+        })
+    };
     let cases: Vec<Vec<InlineFlowItem<'_>>> = vec![
         vec![
             open(&style, 5.0, 5.0),
@@ -771,6 +784,14 @@ fn awkward_boxes_lay_out_and_answer_every_query() {
         ],
         vec![open(&style, 3.0, 3.0), CLOSE],
         vec![open(&style, 3.0, 3.0)],
+        vec![
+            open(&style, 3.0, 3.0),
+            anywhere("a"),
+            CLOSE,
+            open(&style, 3.0, 3.0),
+            anywhere("b"),
+            CLOSE,
+        ],
     ];
     for direction in [Direction::Ltr, Direction::Rtl] {
         for items in &cases {
