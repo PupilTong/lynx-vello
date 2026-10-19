@@ -87,6 +87,11 @@ pub struct Document<T> {
     /// [`TreeArenas`] table: nothing in style, layout or paint reads it, and
     /// its one reader, the update, holds the document mutably.
     pub(crate) intersections: crate::visual::intersection::IntersectionObservers<T>,
+    /// The event listener table ([`crate::event`]'s `listeners` module, which
+    /// says why it is a side table). A field rather than a [`TreeArenas`]
+    /// table for the reason `intersections` is one: style, layout and paint
+    /// never read it.
+    pub(crate) listeners: crate::event::listeners::Listeners,
     pending_snapshots: SnapshotMap,
     relayout_roots: Vec<PendingRelayout>,
     relayout_root_ids: FxHashSet<NodeId>,
@@ -141,6 +146,7 @@ impl<T> Document<T> {
             images: crate::render::image::ImageRegistry::default(),
             content_visibility_changes: Vec::new(),
             intersections: crate::visual::intersection::IntersectionObservers::default(),
+            listeners: crate::event::listeners::Listeners::default(),
             pending_snapshots: SnapshotMap::new(),
             relayout_roots: Vec::new(),
             relayout_root_ids: FxHashSet::default(),
@@ -888,6 +894,15 @@ impl<T> Document<T> {
         // when nothing observes.
         if !self.intersections.is_empty() {
             self.intersections.forget_node(id);
+        }
+        // The listener table names nodes as registration targets, and the
+        // same retired-id rule makes this its one cleanup: a freed node's
+        // registrations leave here, and a name they were the last of is
+        // queued for `Document::take_pending_last_removals`, since no caller
+        // of a free has a change to return. One test when nothing is
+        // registered.
+        if !self.listeners.is_empty() {
+            self.listeners.forget_node(id);
         }
         // A container takes the anonymous boxes it generated with it; a
         // source or a node whose layout children were overridden leaves its

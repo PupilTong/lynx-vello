@@ -226,12 +226,14 @@ pub trait CustomElement<T> {
     /// Two kinds of event arrive here. One is the engine's own, which never
     /// reaches script: a `slotchange`, a `content-visibility: auto` element
     /// starting or stopping to skip its contents. The other is every event
-    /// script hears too (routed input, a component's `load`, `scroll`): the
-    /// host's one dispatch runs this walk first, over the path it then hands
-    /// to the realm. [`ElementEvent::stop_propagation`] ends this walk only;
-    /// the script dispatch runs regardless. An `addEventListener`
-    /// registration in a realm is unrelated state, in another layer, and is
-    /// not consulted here.
+    /// script hears too (routed input, a component's `load`, `scroll`), on
+    /// the path the host's one dispatch also hands to the realm.
+    /// [`ElementEvent::stop_propagation`] ends the walk, and with it every
+    /// later step a host drives with [`Document::advance`]; a host that runs
+    /// script after a walk run to its end
+    /// ([`Document::dispatch_element_event_over`]) runs it regardless. The
+    /// listener table ([`Document::add_listener`]) is not consulted here:
+    /// whether a component hears an event is its definition's answer.
     ///
     /// Called *inline*, unlike a reaction: the walk has no queue of its own,
     /// because it is not inside a tree mutation that a callback could

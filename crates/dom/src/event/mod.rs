@@ -1,20 +1,18 @@
-//! DOM event paths: the ordered set of node visits one event resolves to,
-//! and the one dispatch over them this crate runs itself.
+//! DOM events: the ordered set of node visits one event resolves to, the
+//! table of who listens where, and the one walk over a path that this crate
+//! runs and a host drives.
 //!
-//! This crate does not dispatch to *script*. It cannot: a listener there is a
+//! This crate does not call *script*. It cannot: a listener's callback is a
 //! JavaScript value in a realm this crate knows nothing about, and reaching
-//! one means leaving the thread that owns the document. What it can do is the
-//! half that needs the tree, and that no caller could do correctly from
-//! outside — work out *which* nodes an event visits, in which order, and
-//! which target each of them is allowed to see.
+//! one means releasing the document first. What it does is everything around
+//! that call that needs the tree, and that no caller could do correctly from
+//! outside.
 //!
-//! [`Document::event_steps`] returns exactly that: the capture pass
+//! **The path.** [`Document::event_steps`] works out which nodes an event
+//! visits, in which order, and which target each may see: the capture pass
 //! root-inward followed by the bubble pass target-outward, one [`EventStep`]
 //! per visit, computed in a single borrow and owning no reference to the
-//! document afterwards. The host takes the list, releases the document, and
-//! delivers the steps at its own pace — which is what lets a listener mutate
-//! the tree, and what keeps a walk from holding a lock across a call into
-//! script.
+//! document afterwards.
 //!
 //! ```
 //! # use dom::{Document, NodeId};
@@ -26,25 +24,46 @@
 //! # }
 //! ```
 //!
+//! **The listener table.** [`Document::add_listener`] and
+//! [`Document::remove_listener`] record the standard's event listener list
+//! minus the callbacks: per node, which registrant ([`ListenerKey`], a realm
+//! to the host) listens for which type in which passes ([`ListenerKinds`]).
+//! From it a component learns whether anything listens on it
+//! ([`Document::has_listener`]) or would hear an event it fires
+//! ([`Document::would_reach_listener`]), a host learns which registrants one
+//! dispatch reaches ([`Document::listeners_on_path`],
+//! [`Document::realm_has_global`]) and whether anything hears a type at all
+//! ([`Document::hears`]), and a router learns when a type's registration
+//! count crosses zero ([`RegistrationChange`]). A freed node's registrations
+//! leave in the document's one free path; `listeners`' module doc says why
+//! the table sits beside the tree.
+//!
+//! **The walk.** [`Document::event_walk`] starts an [`EventWalk`] over a
+//! path, and [`Document::advance`] visits one step at a time: it runs the
+//! engine component on that step, if any, and reports the step
+//! ([`StepOutcome`]) so the host can run what it has there — a realm call —
+//! with the document released in between. The walk holds the dispatch's one
+//! stop flag. That is what lets a listener mutate the tree, and what keeps a
+//! walk from holding a borrow across a call into script.
+//!
 //! # The engine's own listeners
 //!
-//! An engine component is the other case: a
-//! [`CustomElement`](crate::CustomElement) handler is Rust owned by this
-//! document, so this crate walks the path for it.
-//! [`Document::dispatch_element_event_over`] walks steps the caller already
-//! computed and calls
+//! An engine component is a [`CustomElement`](crate::CustomElement) whose
+//! handler is Rust owned by this document, so the walk calls it directly:
 //! [`CustomElement::handle_event`](crate::CustomElement::handle_event) on
-//! every defined element along them; the host's one dispatch entry computes
-//! the steps once, runs that walk, and hands the same steps to the realm.
+//! every defined element along the path, before [`Document::advance`]
+//! reports the step. [`Document::dispatch_element_event_over`] drives a walk
+//! to its end for a caller with nothing of its own per step, and
 //! [`Document::dispatch_element_event`] computes the steps itself, for the
 //! two events only the engine hears (`slotchange`,
 //! `contentvisibilityautostatechange`). [`ElementEvent`] is what a handler is
 //! given: the W3C type name, an [`EventDetail`] (one variant per payload
 //! shape, owned by this crate and carried unchanged by every layer above),
-//! the timestamp, and the stop methods, which end this walk and nothing else.
-//! A type no definition lists in
+//! the timestamp, and the stop methods, which end the walk — the host's
+//! later steps with it. A type no definition lists in
 //! [`CustomElement::observed_events`](crate::CustomElement::observed_events)
-//! is one set lookup and walks nothing.
+//! looks no component up; a type nothing hears at all is one
+//! [`Document::hears`] check and builds no walk.
 //!
 //! A shadow root is not an element and has no handler, yet it is where a
 //! component listens for its own shadow tree's non-composed events
@@ -88,10 +107,10 @@
 //!   optional.
 //! - **No `relatedTarget`, and no touch target lists.** Both exist for event interfaces this crate
 //!   does not model; their retargeting steps are absent with them.
-//! - **No *script* event object, no listener registry, no `preventDefault`.** For an event whose
-//!   listeners are script's, the name, the payload, and whether anything cancels are all above this
-//!   boundary. Lynx dispatches no cancelable event in any case, and suppressing a user-agent
-//!   default action arrives on
+//! - **No *script* event object, no callbacks, no `preventDefault`.** The listener table records
+//!   who listens where and nothing a listener runs: for an event whose listeners are script's, the
+//!   event object and whether anything cancels are above this boundary. Lynx dispatches no
+//!   cancelable event in any case, and suppressing a user-agent default action arrives on
 //!   [`InputEvent::default_prevented`](crate::input::InputEvent::default_prevented) instead. The
 //!   engine-component path has an event object of its own ([`ElementEvent`]) because there is no
 //!   layer above it to build one; it is not cancelable either.
@@ -101,13 +120,15 @@
 
 mod detail;
 mod element;
+pub(crate) mod listeners;
 
 use smallvec::SmallVec;
 
 pub use self::detail::{
     EventDetail, TOUCH_ACTIVE, TOUCH_CHANGED, TOUCH_TARGET, TouchPoint, TouchPoints,
 };
-pub use self::element::{ElementEvent, EventPhase};
+pub use self::element::{ElementEvent, EventPhase, EventWalk, StepOutcome};
+pub use self::listeners::{ListenerKey, ListenerKinds, RegistrationChange};
 use crate::tree::document::{Document, NodeId};
 use crate::tree::node::Node;
 
@@ -157,6 +178,10 @@ pub struct EventSteps {
     /// target outside every shadow tree. Recorded while the path is built, so
     /// a walk over these steps never asks a document that may have changed.
     boundary: Option<NodeId>,
+    /// Whether the bubble pass keeps the non-target steps: what tells a
+    /// listener-table probe that walks the capture pass alone whether a node
+    /// above the target also has a bubble step.
+    bubbles: bool,
 }
 
 impl EventSteps {
@@ -232,6 +257,7 @@ impl<T> Document<T> {
             steps,
             target,
             boundary,
+            bubbles,
         }
     }
 
