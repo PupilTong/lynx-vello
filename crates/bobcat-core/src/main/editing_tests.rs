@@ -753,3 +753,69 @@ fn the_ng_aliases_are_fields_and_the_html_names_are_not() {
         assert_eq!(focused, None, "{tag}");
     }
 }
+
+/// An empty, focused `x-input` paints its caret: the editor's paragraph has
+/// one empty line even with no value, and the caret stands on it, one line
+/// tall at the content box's origin, in the field's text colour.
+#[test]
+fn an_empty_focused_x_input_paints_its_caret() {
+    const SOURCE: &str = r"
+    globalThis.renderPage = function () {
+      const page = __CreatePage('card', 0);
+      __SetInlineStyles(page, 'background-color:white');
+      const field = __CreateElement('x-input', 0);
+      __AppendElement(page, field);
+      globalThis.held = [page, field];
+      __SetInlineStyles(field, 'width:200px;height:40px;font-family:Ahem;font-size:10px;line-height:10px;color:black;background-color:white');
+      __FlushElementTree();
+    };
+    ";
+    let mut engine = TestViewSpec::new(SOURCE)
+        .with_font("Ahem", AHEM)
+        .offscreen(200.0, 40.0)
+        .boot();
+    let mut states = States::default();
+    engine.dispatch_input(touch(PointerPhase::Down, 100.0, 20.0));
+    engine.dispatch_input(touch(PointerPhase::Up, 100.0, 20.0));
+    let state = states.wait(&mut engine, "focusing the editor", |state| {
+        state.host.is_some()
+    });
+    // The editor is centred in the 40px field: a 10px line from y = 15.
+    assert_eq!(
+        state.caret,
+        dom::Rect::new(dom::Point2D::new(0.0, 15.0), dom::Size2D::new(1.0, 10.0))
+    );
+
+    let pixel = |shot: &crate::view::Screenshot, x: u32, y: u32| {
+        let at = ((y * shot.size.width + x) * 4) as usize;
+        [
+            shot.pixels[at],
+            shot.pixels[at + 1],
+            shot.pixels[at + 2],
+            shot.pixels[at + 3],
+        ]
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        engine.tick(true).expect("a frame");
+        let shot = engine.capture().expect("capture the committed page");
+        assert_eq!(shot.size.width, 200);
+        if pixel(&shot, 0, 20) == [0, 0, 0, 255] {
+            // The caret alone: one column, one line.
+            assert_eq!(pixel(&shot, 0, 14), [255, 255, 255, 255], "above the line");
+            assert_eq!(pixel(&shot, 0, 25), [255, 255, 255, 255], "below the line");
+            assert_eq!(
+                pixel(&shot, 3, 20),
+                [255, 255, 255, 255],
+                "beside the caret"
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no caret painted at the content origin; (0,20) is {:?}",
+            pixel(&shot, 0, 20)
+        );
+        std::thread::yield_now();
+    }
+}
