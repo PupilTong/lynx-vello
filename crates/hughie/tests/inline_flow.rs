@@ -539,6 +539,67 @@ fn empty_and_whitespace_only_content_has_no_line_box() {
     }
 }
 
+/// An editing host's paragraph is never shorter than one line: with no
+/// content — none at all, or white space that collapses away — it lays out
+/// one empty line of its strut, the line its caret sits on, zero wide and as
+/// tall as the strut's `line-height`.
+#[test]
+fn empty_content_that_keeps_a_strut_line_lays_out_one_empty_line() {
+    let style = ahem(10.0, LineHeight::Px(24.0));
+    for runs in [vec![], vec![run(&style, "  \n\t ")], vec![run(&style, "")]] {
+        for width in [Some(100.0), Some(0.0), None] {
+            let keeping = InlineFlowStyle {
+                strut_line_when_empty: true,
+                ..container(style.clone())
+            };
+            let mut context = text_context();
+            let mut flow = InlineFlow::new(&mut context, keeping, &runs);
+            flow.commit(&mut context, BlockConstraint::new(width, 0.0));
+            let [line] = flow.line_geometry() else {
+                panic!("one line expected, got {:?}", flow.line_geometry())
+            };
+            // Ahem's 10px em centred in the 24px line: 7px of half-leading
+            // above its 8px ascent.
+            assert_line(*line, 0.0, 24.0, 15.0);
+            assert_close(flow.size().width, 0.0);
+            assert_close(flow.size().height, 24.0);
+            assert_eq!(flow.first_baseline(), Some(15.0));
+            assert_eq!(flow.last_baseline(), Some(15.0));
+            assert_close(flow.min_content_width(&mut context, 0.0), 0.0);
+            assert_close(flow.max_content_width(&mut context, 0.0), 0.0);
+            assert!(flow.atoms().is_empty());
+            assert!(flow.fragments().is_empty());
+            assert_eq!(
+                flow.range_boxes(0, 0).map(|boxes| boxes.len()),
+                Some(1),
+                "an empty range has the line's box"
+            );
+            assert_eq!(
+                flow.index_at_point(hughie::geometry::Point::new(2.0, 5.0)),
+                None
+            );
+        }
+    }
+}
+
+/// Without the flag, empty content still has no line box; with it, content
+/// keeps its own lines.
+#[test]
+fn the_strut_line_is_only_for_empty_content_that_asks_for_it() {
+    let style = ahem(10.0, LineHeight::Normal);
+    let flow = committed(container(style.clone()), &[], Some(100.0));
+    assert!(flow.line_geometry().is_empty());
+
+    let keeping = InlineFlowStyle {
+        strut_line_when_empty: true,
+        ..container(style.clone())
+    };
+    let flow = committed(keeping, &[run(&style, "aa bb")], Some(30.0));
+    assert_eq!(flow.line_geometry().len(), 2);
+    assert_close(flow.size().width, 30.0);
+    assert_close(flow.size().height, 20.0);
+}
+
 #[test]
 fn a_probe_never_moves_the_committed_lines_and_a_restore_puts_them_back() {
     let style = ahem(10.0, LineHeight::Normal);

@@ -1573,8 +1573,9 @@ fn paint_item<T>(
             border::paint(sink.scene_for(space), &mut scratch.paths, style, &fragment);
             border::paint_outline(sink.scene_for(space), &mut scratch.paths, style, &fragment);
             // The focused editing host with no paragraph to paint its caret
-            // in — empty, or white space only — paints it here, over its own
-            // box. One `Option` test for every other element.
+            // in — one that establishes none, empty or white space only —
+            // paints it here, over its own box. One `Option` test for every
+            // other element.
             if let Some((caret, color)) = text::empty_host_caret(document, item.node, style) {
                 sink.scene_for(space)
                     .fill(Fill::NonZero, transform, color, None, &caret);

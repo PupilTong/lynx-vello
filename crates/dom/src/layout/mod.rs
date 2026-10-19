@@ -695,8 +695,9 @@ impl<T> Document<T> {
     /// commit: the lines it shows, wrapped lines and the lines its preserved
     /// line breaks start included. A Lynx paragraph whose text ends in a line
     /// break counts the empty line after it, which it shows; an inline
-    /// formatting context does not, having no line box there (CSS). Lines a
-    /// truncation cut hides are not counted. `None` as for
+    /// formatting context does not, having no line box there (CSS). An empty
+    /// paragraph has no line, except an editing host's, which has one empty
+    /// line of its strut. Lines a truncation cut hides are not counted. `None` as for
     /// [`Self::paragraph_kind`]. Nothing here runs a pass.
     #[must_use]
     pub fn paragraph_line_count(&self, id: crate::NodeId) -> Option<usize> {

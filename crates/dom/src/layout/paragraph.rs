@@ -303,13 +303,17 @@ impl PaintedParagraph<'_> {
     /// Whether the glyph run of a parley style index is drawn: every one but
     /// an inline box's edge cluster, which is advance and no ink — no glyph,
     /// no decoration, no shadow (css-text-decor-3 draws a decoration across a
-    /// box's text, not across its padding).
+    /// box's text, not across its padding) — and the strut's. The strut
+    /// carries a glyph run only in a paragraph with no content that keeps
+    /// one empty line (an editing host's): the substitute space parley
+    /// shapes there is no text, so it takes no decoration either.
     pub(crate) fn draws(&self, style_index: u16) -> bool {
         match self.kind {
-            PaintedKind::Block(_) => true,
-            PaintedKind::Flow(flow, _) => {
-                !matches!(flow.source_of(style_index), FlowSource::Edge(_))
-            }
+            PaintedKind::Block(block) => !matches!(block.source_of(style_index), SourceItem::Strut),
+            PaintedKind::Flow(flow, _) => !matches!(
+                flow.source_of(style_index),
+                FlowSource::Edge(_) | FlowSource::Strut
+            ),
         }
     }
 
