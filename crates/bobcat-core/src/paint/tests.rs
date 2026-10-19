@@ -111,14 +111,14 @@ fn frame_size_rejects_unbounded_targets() {
 }
 
 /// One poll applies every kind of thing that reaches the painting side — a
-/// listener edge, a frame post acknowledgement, and the redraw a new frame
+/// name being routed, a frame post acknowledgement, and the redraw a new frame
 /// asks for — and applies each of them exactly once.
 #[test]
 fn one_poll_adopts_every_kind_of_published_state() {
     let (mut painter, main) = detached();
     assert!(!painter.take_redraw(), "a fresh painter owes no frame");
 
-    main.outbox.listener_edge(Arc::from("tap"), true);
+    main.outbox.set_name_routed(Arc::from("tap"), true);
     main.outbox.begin_frame_serviced(7);
     main.outbox.publish_frame(document().commit());
 
@@ -270,7 +270,7 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
         "an empty listener set sends nothing"
     );
 
-    main.outbox.listener_edge(Arc::from("pointerup"), true);
+    main.outbox.set_name_routed(Arc::from("pointerup"), true);
     painter.poll_link();
     emit(&mut painter);
     assert!(
@@ -281,11 +281,11 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     // An update that has not been polled for yet is not yet visible: the
     // snapshot moves at pass boundaries, which is the one pass of
     // staleness this design accepts in exchange for the lock.
-    main.outbox.listener_edge(Arc::from(TAP_EVENT), true);
+    main.outbox.set_name_routed(Arc::from(TAP_EVENT), true);
     emit(&mut painter);
     assert!(
         main.commands.try_recv().is_err(),
-        "an unadopted registration does not open the name mid-pass"
+        "an unadopted registration does not route the name mid-pass"
     );
 
     painter.poll_link();
@@ -310,14 +310,14 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     // The pass's clock reading, in milliseconds.
     assert!((payload.timestamp - 250.0).abs() < f64::EPSILON);
 
-    // And the edge closes the name again: the main thread publishes the
-    // last removal, and from the next poll nothing crosses.
-    main.outbox.listener_edge(Arc::from(TAP_EVENT), false);
+    // And the name stops being routed: the main thread publishes the last
+    // removal, and from the next poll nothing crosses.
+    main.outbox.set_name_routed(Arc::from(TAP_EVENT), false);
     painter.poll_link();
     emit(&mut painter);
     assert!(
         main.commands.try_recv().is_err(),
-        "the closing edge stops the crossing"
+        "a name no longer routed stops the crossing"
     );
 }
 
@@ -333,8 +333,8 @@ fn a_wheel_delta_and_touch_points_cross_as_values() {
 
     let (mut painter, mut main) = detached();
     let target = dom::NodeId::from_bits(2).expect("a well-formed packed handle");
-    main.outbox.listener_edge(Arc::from("wheel"), true);
-    main.outbox.listener_edge(Arc::from("touchmove"), true);
+    main.outbox.set_name_routed(Arc::from("wheel"), true);
+    main.outbox.set_name_routed(Arc::from("touchmove"), true);
     painter.poll_link();
 
     let mut touches = TouchPoints::new();
@@ -400,11 +400,11 @@ fn a_wheel_delta_and_touch_points_cross_as_values() {
 /// A poll adopts whatever arrived, in order, and stops at the last of
 /// it — never blocking on a main thread that may be mid-registration.
 ///
-/// The ordering matters because the two edges for one name are a pair:
-/// a name registered and unregistered between two passes must leave the
-/// snapshot closed, not open.
+/// The ordering matters because the two route changes for one name are a
+/// pair: a name registered and unregistered between two passes must leave
+/// the snapshot without it, not with it.
 #[test]
-fn a_poll_adopts_arrived_edges_in_order_and_does_not_block() {
+fn a_poll_adopts_arrived_route_changes_in_order_and_does_not_block() {
     let (mut painter, main) = detached();
 
     painter.poll_link();
@@ -413,17 +413,17 @@ fn a_poll_adopts_arrived_edges_in_order_and_does_not_block() {
         "nothing has been published yet"
     );
 
-    main.outbox.listener_edge(Arc::from("tap"), true);
-    main.outbox.listener_edge(Arc::from("scroll"), true);
-    main.outbox.listener_edge(Arc::from("tap"), false);
+    main.outbox.set_name_routed(Arc::from("tap"), true);
+    main.outbox.set_name_routed(Arc::from("scroll"), true);
+    main.outbox.set_name_routed(Arc::from("tap"), false);
     painter.poll_link();
     assert!(
         !painter.published.listeners.contains("tap"),
-        "the closing edge follows the opening one and wins"
+        "the name unrouted after it was routed is not in the set"
     );
     assert!(
         painter.published.listeners.contains("scroll"),
-        "the other name stays open"
+        "the other name stays routed"
     );
 
     // The main thread going away is not an unregistration: what it
@@ -650,7 +650,7 @@ fn two_painters() -> [(Painter, FarEnd); 2] {
 fn a_views_published_state_is_independent_of_a_siblings() {
     let [(mut first, first_end), (mut second, second_end)] = two_painters();
 
-    second_end.outbox.listener_edge(Arc::from("tap"), true);
+    second_end.outbox.set_name_routed(Arc::from("tap"), true);
     let _asked = second_end
         .outbox
         .request_source(SourceRequest::Module("app:///second.js".into()));
@@ -1220,7 +1220,7 @@ fn a_dispatch_in_a_scrolling_pass_follows_the_marker() {
     use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
 
     let (mut painter, mut main, scroller) = scrolling("");
-    main.outbox.listener_edge(Arc::from(TAP_EVENT), true);
+    main.outbox.set_name_routed(Arc::from(TAP_EVENT), true);
     painter.poll_link();
     let frame = painter.frame().cloned().expect("a frame is adopted");
     let mut decisions = InputDecisions::new();
@@ -1277,7 +1277,7 @@ fn a_frame_post_is_fenced_behind_every_command_sent_before_it() {
     use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
 
     let (mut painter, mut main, scroller) = scrolling("");
-    main.outbox.listener_edge(Arc::from(TAP_EVENT), true);
+    main.outbox.set_name_routed(Arc::from(TAP_EVENT), true);
     painter.poll_link();
     let frame = painter.frame().cloned().expect("a frame is adopted");
     let mut decisions = InputDecisions::new();

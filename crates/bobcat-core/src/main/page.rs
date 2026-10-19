@@ -590,10 +590,12 @@ impl Page {
                 payload,
                 release,
             } => {
-                if let Err(error) =
+                if let Err(failed) =
                     runtime.dispatch_input_event(js, target, name, &payload, release)
                 {
-                    policy::report(self, Scene::Listener, error.into_script_error());
+                    for error in failed.into_errors() {
+                        policy::report(self, Scene::Listener, error.into_script_error());
+                    }
                 }
             }
             ToMain::Vsync(milliseconds) => {

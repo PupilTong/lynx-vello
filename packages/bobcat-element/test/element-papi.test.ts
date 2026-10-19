@@ -43,9 +43,8 @@ rstest.mockRequire("bobcat-internal:host", () => {
     swapElement: native.swapElement,
     dropElement: native.dropElement,
     flushElementTree: native.flushElementTree,
-    listenerNameOpened: native.listenerNameOpened,
-    listenerNameClosed: native.listenerNameClosed,
-    exposureEvents: native.exposureEvents,
+    listenerOpened: native.listenerOpened,
+    listenerClosed: native.listenerClosed,
     setTimer: native.setTimer,
     clearTimer: native.clearTimer,
   };
@@ -447,14 +446,11 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
     flushElementTree: () => {
       calls.push(["flushElementTree"]);
     },
-    listenerNameOpened: (eventName: unknown) => {
-      calls.push(["listenerNameOpened", eventName]);
+    listenerOpened: (node: unknown, eventName: unknown, kinds: unknown) => {
+      calls.push(["listenerOpened", nodeId("listenerOpened", node), eventName, kinds]);
     },
-    listenerNameClosed: (eventName: unknown) => {
-      calls.push(["listenerNameClosed", eventName]);
-    },
-    exposureEvents: (nodeId: number, wants: 0 | 1) => {
-      calls.push(["exposureEvents", nodeId, wants]);
+    listenerClosed: (node: unknown, eventName: unknown) => {
+      calls.push(["listenerClosed", nodeId("listenerClosed", node), eventName]);
     },
     switchExposure: (on: 0 | 1, sendEvent: 0 | 1) => {
       calls.push(["switchExposure", on, sendEvent]);
@@ -1596,21 +1592,22 @@ interface ListenerEvent {
 }
 
 describe("event listeners", () => {
-  it("opens the name with the host once, however many handles want it", () => {
+  it("tells the host each element's first registration for a name, once", () => {
     const { outer, inner } = tree();
 
     __AddEventListener(inner, "tap", () => {}, {});
     __AddEventListener(inner, "tap", () => {}, {});
     __AddEventListener(outer, "tap", () => {}, {});
 
-    // The host keeps no per-element index: all it hears is that the name
-    // went from wanted by nobody to wanted by somebody.
-    expect(mock.named("listenerNameOpened")).toEqual([
-      ["listenerNameOpened", "tap"],
+    // Per (element, name), with the passes it runs in: a second bubble
+    // closure on `inner` changes nothing the host was told.
+    expect(mock.named("listenerOpened")).toEqual([
+      ["listenerOpened", __GetElementUniqueID(inner), "tap", 1],
+      ["listenerOpened", __GetElementUniqueID(outer), "tap", 1],
     ]);
   });
 
-  it("closes the name when the last handle anywhere gives it up", () => {
+  it("closes an element's name when its own last registration for it goes", () => {
     const { outer, inner } = tree();
     const a = () => {};
     const b = () => {};
@@ -1619,35 +1616,74 @@ describe("event listeners", () => {
     __AddEventListener(outer, "tap", a, {});
 
     __RemoveEventListener(inner, "tap", a, {});
-    expect(mock.named("listenerNameClosed")).toEqual([]);
+    expect(mock.named("listenerClosed")).toEqual([]);
     __RemoveEventListener(inner, "tap", b, {});
-    expect(mock.named("listenerNameClosed")).toEqual([]);
+    expect(mock.named("listenerClosed")).toEqual([
+      ["listenerClosed", __GetElementUniqueID(inner), "tap"],
+    ]);
 
     __RemoveEventListener(outer, "tap", a, {});
-    expect(mock.named("listenerNameClosed")).toEqual([
-      ["listenerNameClosed", "tap"],
+    expect(mock.named("listenerClosed")).toEqual([
+      ["listenerClosed", __GetElementUniqueID(inner), "tap"],
+      ["listenerClosed", __GetElementUniqueID(outer), "tap"],
     ]);
   });
 
-  it("counts a handle once per name, whichever passes it registers in", () => {
+  it("reports the union of the passes, and reports it again when it changes", () => {
     const { inner } = tree();
+    const id = __GetElementUniqueID(inner);
     const handler = () => {};
 
     __AddEventListener(inner, "tap", handler, {});
     __AddEventListener(inner, "tap", handler, { capture: true });
-
-    expect(mock.named("listenerNameOpened")).toEqual([
-      ["listenerNameOpened", "tap"],
-    ]);
-
     // Capture is part of the identity, so a bubble removal leaves the capture
-    // registration — and that one still wants the name.
+    // registration: the kinds narrow to the capture pass.
     __RemoveEventListener(inner, "tap", handler, {});
-    expect(mock.named("listenerNameClosed")).toEqual([]);
+    expect(mock.named("listenerOpened")).toEqual([
+      ["listenerOpened", id, "tap", 1],
+      ["listenerOpened", id, "tap", 3],
+      ["listenerOpened", id, "tap", 2],
+    ]);
+    expect(mock.named("listenerClosed")).toEqual([]);
 
     __RemoveEventListener(inner, "tap", handler, { capture: true });
-    expect(mock.named("listenerNameClosed")).toEqual([
-      ["listenerNameClosed", "tap"],
+    expect(mock.named("listenerClosed")).toEqual([
+      ["listenerClosed", id, "tap"],
+    ]);
+  });
+
+  it("files each __AddEvent form under its kind: bind and catch 1, capture 2, global 4", () => {
+    const { inner } = tree();
+    const id = __GetElementUniqueID(inner);
+    const forms: [string, number][] = [
+      ["bindEvent", 1],
+      ["catchEvent", 1],
+      ["capture-bind", 2],
+      ["capture-catch", 2],
+      ["global-bindEvent", 4],
+    ];
+    for (const [form, kinds] of forms) {
+      mock.calls.length = 0;
+      __AddEvent(inner, form, "tap", "3:0:handler");
+      expect(mock.named("listenerOpened"), form).toEqual([
+        ["listenerOpened", id, "tap", kinds],
+      ]);
+      __AddEvent(inner, form, "tap", null);
+      expect(mock.named("listenerClosed"), form).toEqual([
+        ["listenerClosed", id, "tap"],
+      ]);
+    }
+
+    // The forms or together across the two slots and the closures: a worklet
+    // capture, a global string beside it, and a bubble closure.
+    mock.calls.length = 0;
+    __AddEvent(inner, "capture-bind", "tap", { type: "worklet", value: {} });
+    __AddEvent(inner, "global-bindEvent", "tap", "3:0:global");
+    __AddEventListener(inner, "tap", () => {}, {});
+    expect(mock.named("listenerOpened")).toEqual([
+      ["listenerOpened", id, "tap", 2],
+      ["listenerOpened", id, "tap", 6],
+      ["listenerOpened", id, "tap", 7],
     ]);
   });
 
@@ -1691,8 +1727,8 @@ describe("event listeners", () => {
     dispatch([inner], "tap");
 
     expect(runs).toBe(1);
-    expect(mock.named("listenerNameClosed")).toEqual([
-      ["listenerNameClosed", "tap"],
+    expect(mock.named("listenerClosed")).toEqual([
+      ["listenerClosed", __GetElementUniqueID(inner), "tap"],
     ]);
   });
 
@@ -1714,7 +1750,7 @@ describe("event listeners", () => {
   it("ignores a non-callable registration", () => {
     const { inner } = tree();
     __AddEventListener(inner, "tap", "handlerName", {});
-    expect(mock.named("listenerNameOpened")).toEqual([]);
+    expect(mock.named("listenerOpened")).toEqual([]);
     expect(() => dispatch([inner], "tap")).not.toThrow();
   });
 
@@ -1935,10 +1971,11 @@ describe("event listeners", () => {
 
     dispatch([inner, outer], "tap");
 
-    // Nothing about the stop crosses the boundary: the walk it ends is here.
+    // Nothing about the stop crosses the boundary: the walk it ends is here,
+    // and all the host ever heard is the two registrations.
     expect(order).toEqual(["inner"]);
-    expect(mock.calls.filter(([name]) => String(name).startsWith("listenerName")))
-      .toHaveLength(1);
+    expect(mock.calls.filter(([name]) => String(name).startsWith("listener")))
+      .toHaveLength(2);
   });
 
   it("stops a capture-pass listener from reaching the bubble pass at all", () => {
@@ -2138,23 +2175,20 @@ describe("event listeners", () => {
     papi.__AppendElement(page, view);
     papi.__AddEventListener(view, "tap", () => {}, {});
     papi.__AddEvent(view, "global-bindEvent", "swipe", "3:0:swipe");
-    expect(mock.named("listenerNameOpened")).toEqual([
-      ["listenerNameOpened", "tap"],
-      ["listenerNameOpened", "swipe"],
+    const id = papi.__GetElementUniqueID(view);
+    expect(mock.named("listenerOpened")).toEqual([
+      ["listenerOpened", id, "tap", 1],
+      ["listenerOpened", id, "swipe", 4],
     ]);
     const held = registered.at(-1)?.held;
 
-    // What a collection does: the cleanup gets the record the handle left,
-    // which is the only place its registrations are still named.
+    // What a collection does: the cleanup gets the record the handle left.
+    // It tells the host nothing about the registrations — the host drops a
+    // freed element's rows itself — and frees the element.
     cleanup(held as never);
 
-    expect(mock.named("listenerNameClosed")).toEqual([
-      ["listenerNameClosed", "tap"],
-      ["listenerNameClosed", "swipe"],
-    ]);
-    expect(mock.named("dropElement")).toEqual([
-      ["dropElement", papi.__GetElementUniqueID(view)],
-    ]);
+    expect(mock.named("listenerClosed")).toEqual([]);
+    expect(mock.named("dropElement")).toEqual([["dropElement", id]]);
   });
 });
 
@@ -2207,8 +2241,8 @@ describe("__AddEvent", () => {
     __AddEvent(inner, "bindEvent", "tap", undefined);
 
     expect(__GetEvents(inner)).toEqual([]);
-    expect(mock.named("listenerNameClosed")).toEqual([
-      ["listenerNameClosed", "tap"],
+    expect(mock.named("listenerClosed")).toEqual([
+      ["listenerClosed", __GetElementUniqueID(inner), "tap"],
     ]);
   });
 
@@ -2222,36 +2256,39 @@ describe("__AddEvent", () => {
     expect(order).toEqual(["outer", "inner"]);
 
     // The same name, the other form: the entry moves to the bubble pass, and
-    // the host hears nothing, because the name it holds open is the same one.
+    // the host hears the element's new kinds, with no close between.
     order.length = 0;
     __AddEvent(outer, "bindEvent", "tap", worklet(() => order.push("outer")));
 
     dispatch([inner, outer], "tap");
     expect(order).toEqual(["inner", "outer"]);
-    expect(mock.named("listenerNameOpened")).toEqual([
-      ["listenerNameOpened", "tap"],
+    expect(mock.named("listenerOpened")).toEqual([
+      ["listenerOpened", __GetElementUniqueID(inner), "tap", 1],
+      ["listenerOpened", __GetElementUniqueID(outer), "tap", 2],
+      ["listenerOpened", __GetElementUniqueID(outer), "tap", 1],
     ]);
-    expect(mock.named("listenerNameClosed")).toEqual([]);
+    expect(mock.named("listenerClosed")).toEqual([]);
   });
 
-  it("shares the name count with __AddEventListener, and neither closes it for the other", () => {
+  it("shares an element's report with __AddEventListener, and neither closes it for the other", () => {
     const { inner } = tree();
+    const id = __GetElementUniqueID(inner);
     const callback = () => {};
 
     __AddEventListener(inner, "tap", callback, {});
     __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
-    // One count per handle and name, so the second registration says nothing
-    // new.
-    expect(mock.named("listenerNameOpened")).toEqual([
-      ["listenerNameOpened", "tap"],
+    // Both run on the bubble pass, so the second registration changes
+    // nothing the host was told.
+    expect(mock.named("listenerOpened")).toEqual([
+      ["listenerOpened", id, "tap", 1],
     ]);
 
     __RemoveEventListener(inner, "tap", callback, {});
-    expect(mock.named("listenerNameClosed")).toEqual([]);
+    expect(mock.named("listenerClosed")).toEqual([]);
 
     __AddEvent(inner, "bindEvent", "tap", null);
-    expect(mock.named("listenerNameClosed")).toEqual([
-      ["listenerNameClosed", "tap"],
+    expect(mock.named("listenerClosed")).toEqual([
+      ["listenerClosed", id, "tap"],
     ]);
   });
 
@@ -2274,7 +2311,7 @@ describe("__AddEvent", () => {
     __AddEvent(inner, "bindEvent", "tap", () => {});
 
     expect(__GetEvents(inner)).toEqual([]);
-    expect(mock.named("listenerNameOpened")).toEqual([]);
+    expect(mock.named("listenerOpened")).toEqual([]);
   });
 
   it("runs a worklet handler through the realm's own runWorklet", () => {
@@ -2310,8 +2347,8 @@ describe("__AddEvent", () => {
     __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
 
     expect(__GetEvent(inner, "tap", "bindEvent")).toBe("3:0:bindtap");
-    expect(mock.named("listenerNameOpened")).toEqual([
-      ["listenerNameOpened", "tap"],
+    expect(mock.named("listenerOpened")).toEqual([
+      ["listenerOpened", uid, "tap", 1],
     ]);
     dispatch([inner], "tap", { x: 12, y: 30 });
 
@@ -2494,9 +2531,9 @@ describe("__AddEvent", () => {
         function: { type: "worklet", value: {} },
       },
     ]);
-    // One name count covers both kinds.
-    expect(mock.named("listenerNameOpened")).toEqual([
-      ["listenerNameOpened", "tap"],
+    // One report covers both kinds: both run on the bubble pass.
+    expect(mock.named("listenerOpened")).toEqual([
+      ["listenerOpened", __GetElementUniqueID(inner), "tap", 1],
     ]);
 
     __AddEventListener(inner, "tap", () => order.push("closure"), {});
@@ -2521,14 +2558,15 @@ describe("__AddEvent", () => {
     __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
 
     // Each kind keeps its own form, so this node is delivered to in both
-    // passes — and holds the one name open once.
+    // passes, which is what the host is told.
     expect(__GetEvent(inner, "tap", "bindEvent")).toBe("3:0:bindtap");
     expect(__GetEvents(inner)).toEqual([
       { type: "bindevent", name: "tap", function: "3:0:bindtap" },
       { type: "capture-bind", name: "tap", function: handler },
     ]);
-    expect(mock.named("listenerNameOpened")).toEqual([
-      ["listenerNameOpened", "tap"],
+    expect(mock.named("listenerOpened")).toEqual([
+      ["listenerOpened", __GetElementUniqueID(inner), "tap", 2],
+      ["listenerOpened", __GetElementUniqueID(inner), "tap", 3],
     ]);
 
     dispatch([inner], "tap");
@@ -2559,8 +2597,8 @@ describe("__AddEvent", () => {
     __AddEvent(inner, "bindEvent", "tap", null);
 
     expect(__GetEvents(inner)).toEqual([]);
-    expect(mock.named("listenerNameClosed")).toEqual([
-      ["listenerNameClosed", "tap"],
+    expect(mock.named("listenerClosed")).toEqual([
+      ["listenerClosed", __GetElementUniqueID(inner), "tap"],
     ]);
   });
 
@@ -2598,10 +2636,10 @@ describe("__AddEvent", () => {
     expect(__GetEvents(inner)).toEqual([
       { type: "global-bindevent", name: "tap", function: handler },
     ]);
-    // A global registration alone is enough to make the painting side route
-    // the name, because the event it wants took no particular path.
-    expect(mock.named("listenerNameOpened")).toEqual([
-      ["listenerNameOpened", "tap"],
+    // A global registration alone is reported, as its own kind: the host
+    // calls this realm for every event of the name, whatever its path.
+    expect(mock.named("listenerOpened")).toEqual([
+      ["listenerOpened", __GetElementUniqueID(inner), "tap", 4],
     ]);
 
     // Not a step of the path, and not filtered by one either: the delivery
@@ -2615,15 +2653,15 @@ describe("__AddEvent", () => {
     const { inner } = tree();
     __AddEvent(inner, "global-bindEvent", "tap", "3:0:globaltap");
     __AddEvent(inner, "global-bindEvent", "tap", { type: "worklet", value: {} });
-    expect(mock.named("listenerNameOpened")).toEqual([
-      ["listenerNameOpened", "tap"],
+    expect(mock.named("listenerOpened")).toEqual([
+      ["listenerOpened", __GetElementUniqueID(inner), "tap", 4],
     ]);
 
     __AddEvent(inner, "global-bindEvent", "tap", undefined);
 
     expect(__GetEvents(inner)).toEqual([]);
-    expect(mock.named("listenerNameClosed")).toEqual([
-      ["listenerNameClosed", "tap"],
+    expect(mock.named("listenerClosed")).toEqual([
+      ["listenerClosed", __GetElementUniqueID(inner), "tap"],
     ]);
 
     // And nothing is delivered for it afterwards.
@@ -3295,8 +3333,8 @@ describe("__GetEvents and __SetEvents", () => {
 
     expect(__GetEvent(inner, "tap", "bindEvent")).toBeUndefined();
     expect(__GetEvent(inner, "longpress", "bindEvent")).toBe("new");
-    expect(mock.named("listenerNameClosed")).toEqual([
-      ["listenerNameClosed", "tap"],
+    expect(mock.named("listenerClosed")).toEqual([
+      ["listenerClosed", __GetElementUniqueID(inner), "tap"],
     ]);
   });
 
@@ -3345,34 +3383,33 @@ describe("exposure", () => {
   const recorded = (uid: number, exposureId: string, scene: string) =>
     field(String(uid)) + field(exposureId) + field(scene);
 
-  it("tells the host on an element's first exposure handler and its last, and on nothing between", () => {
+  it("reports an exposure handler as any other registration, and tells exposure nothing", () => {
     const { outer, inner } = tree();
     const id = __GetElementUniqueID(inner);
 
     __AddEvent(inner, "bindEvent", "uiappear", "3:0:appear");
-    expect(mock.named("exposureEvents")).toEqual([["exposureEvents", id, 1]]);
-
     // A handler of the other name, a worklet beside the string, and a
-    // replacement in another form: the element had one, and still has.
+    // replacement in another form of the same kind.
     __AddEvent(inner, "bindEvent", "uidisappear", "3:0:disappear");
     __AddEvent(inner, "bindEvent", "uiappear", { type: "worklet", value: {} });
     __AddEvent(inner, "catchEvent", "uiappear", "3:0:replaced");
-    // Removing one name of the two leaves the other.
     __AddEvent(inner, "bindEvent", "uidisappear", null);
-    // Another element's other name is no edge of this one's.
     __AddEvent(outer, "bindEvent", "tap", "3:0:tap");
-    expect(mock.named("exposureEvents")).toHaveLength(1);
-
-    // web-core's disable mark: a nullish handler clears both kinds, and that
-    // was the element's last exposure handler.
     __AddEvent(inner, "bindEvent", "uiappear", undefined);
-    expect(mock.named("exposureEvents")).toEqual([
-      ["exposureEvents", id, 1],
-      ["exposureEvents", id, 0],
+
+    // Whether the element is detected is the host's, read off its listener
+    // table: the realm reports each change of what an element has registered
+    // for a name, and nothing more.
+    expect(mock.calls.filter(([name]) => String(name).startsWith("listener"))).toEqual([
+      ["listenerOpened", id, "uiappear", 1],
+      ["listenerOpened", id, "uidisappear", 1],
+      ["listenerClosed", id, "uidisappear"],
+      ["listenerOpened", __GetElementUniqueID(outer), "tap", 1],
+      ["listenerClosed", id, "uiappear"],
     ]);
   });
 
-  it("counts an __AddEventListener closure and a global form, in any case", () => {
+  it("reports an __AddEventListener closure and a global form, in any case", () => {
     const { inner } = tree();
     const id = __GetElementUniqueID(inner);
     const listener = () => {};
@@ -3380,30 +3417,17 @@ describe("exposure", () => {
     __AddEventListener(inner, "UIAppear", listener, {});
     __AddEvent(inner, "global-bindEvent", "uidisappear", "3:0:global");
     __RemoveEventListener(inner, "uiappear", listener, {});
-    expect(mock.named("exposureEvents")).toEqual([["exposureEvents", id, 1]]);
-
     __AddEvent(inner, "global-bindEvent", "uidisappear", null);
-    expect(mock.named("exposureEvents")).toEqual([
-      ["exposureEvents", id, 1],
-      ["exposureEvents", id, 0],
+
+    expect(mock.calls.filter(([name]) => String(name).startsWith("listener"))).toEqual([
+      ["listenerOpened", id, "uiappear", 1],
+      ["listenerOpened", id, "uidisappear", 4],
+      ["listenerClosed", id, "uiappear"],
+      ["listenerClosed", id, "uidisappear"],
     ]);
   });
 
-  it("tells each element its own edges", () => {
-    const { outer, inner } = tree();
-
-    __AddEvent(inner, "bindEvent", "uiappear", "3:0:appear");
-    __AddEvent(outer, "bindEvent", "uiappear", "3:0:appear");
-    __AddEvent(inner, "bindEvent", "uiappear", null);
-
-    expect(mock.named("exposureEvents")).toEqual([
-      ["exposureEvents", __GetElementUniqueID(inner), 1],
-      ["exposureEvents", __GetElementUniqueID(outer), 1],
-      ["exposureEvents", __GetElementUniqueID(inner), 0],
-    ]);
-  });
-
-  it("tells nothing when __SetEvents hands an exposure handler back, and 0 when it drops the last", () => {
+  it("tells nothing when __SetEvents hands an exposure handler back, and closes it when it drops the last", () => {
     const { inner } = tree();
     const id = __GetElementUniqueID(inner);
     __AddEvent(inner, "bindEvent", "uiappear", "3:0:appear");
@@ -3411,16 +3435,15 @@ describe("exposure", () => {
     mock.calls.length = 0;
 
     // The element before and after the call is what is reconciled, so a
-    // round trip neither unregisters it nor closes and reopens a name.
+    // round trip neither closes nor reopens anything.
     __SetEvents(inner, __GetEvents(inner));
     expect(mock.calls).toEqual([]);
 
     __SetEvents(inner, [{ type: "bindEvent", name: "tap", function: "3:0:tap" }]);
-    expect(mock.named("exposureEvents")).toEqual([["exposureEvents", id, 0]]);
-    expect(mock.named("listenerNameClosed")).toEqual([
-      ["listenerNameClosed", "uiappear"],
+    expect(mock.named("listenerClosed")).toEqual([
+      ["listenerClosed", id, "uiappear"],
     ]);
-    expect(mock.named("listenerNameOpened")).toEqual([]);
+    expect(mock.named("listenerOpened")).toEqual([]);
   });
 
   it("builds web-core's global records out of the host's record", () => {
@@ -4462,5 +4485,219 @@ describe("__BobcatComputedStyleMap", () => {
     expect([...map]).toEqual([]);
     // Nothing is in it, so nothing non-custom is a valid name to it.
     expect(() => map.get("color")).toThrow(TypeError);
+  });
+});
+
+describe("a frame's card", () => {
+  /** One `bobcat:record` field, as the host writes it. */
+  const field = (text: string) => `${text.length}:${text}`;
+
+  /**
+   * This realm as a frame's card: a frame element whose shadow root holds
+   * the nested page, made this realm's page root as `bobcat:frame-boot`
+   * makes it, with a `view` under that page. The frame's border box starts
+   * at (20, 30) in the viewport.
+   */
+  function card() {
+    const frameId = mock.createElement("frame");
+    const shadowId = mock.createElement("shadow-root");
+    const pageId = mock.createElement("page");
+    mock.insertBefore(frameId, shadowId, null);
+    mock.insertBefore(shadowId, pageId, null);
+    mock.answerElementMethod = (id: number, method: string) =>
+      id === frameId && method === "boundingClientRect"
+        ? field("0") + field("20") + field("30") + field("200") + field("100")
+        : 3;
+    elementModule.__BobcatUsePageRoot(pageId);
+    const page = __CreatePage("0", 0);
+    const view = __CreateView(0);
+    __AppendElement(page, view);
+    mock.calls.length = 0;
+    return { frameId, page, view };
+  }
+
+  it("makes x and y relative to its frame's border box, and keeps client and page coordinates the viewport's", () => {
+    const { frameId, page, view } = card();
+    let received!: ListenerEvent & Record<string, unknown>;
+    __AddEventListener(view, "tap", (event: ListenerEvent & Record<string, unknown>) => {
+      received = {
+        ...event,
+        touches: structuredClone(event["touches"]),
+      } as ListenerEvent & Record<string, unknown>;
+    }, {});
+
+    dispatch([view, page], "tap", {
+      x: 120,
+      y: 60,
+      button: 0,
+      buttons: 0,
+      touchNumbers: [1, 120, 60, 1],
+    });
+
+    expect(received.detail).toEqual({ x: 100, y: 30 });
+    expect([received["x"], received["y"]]).toEqual([100, 30]);
+    expect([received["clientX"], received["clientY"]]).toEqual([120, 60]);
+    expect([received["pageX"], received["pageY"]]).toEqual([120, 60]);
+    expect(received["touches"]).toEqual([
+      { identifier: 1, x: 100, y: 30, pageX: 120, pageY: 60, clientX: 120, clientY: 60 },
+    ]);
+    // One readback per dispatch, of the frame — the shadow root's host.
+    expect(mock.named("callElementMethod")).toEqual([
+      ["callElementMethod", frameId, "boundingClientRect", ""],
+    ]);
+  });
+
+  it("reads no origin for a dispatch without a position", () => {
+    const { view } = card();
+    let runs = 0;
+    __AddEventListener(view, "load", () => {
+      runs += 1;
+    }, {});
+
+    dispatch([view], "load", { empty: true }, undefined, false);
+
+    expect(runs).toBe(1);
+    expect(mock.named("callElementMethod")).toEqual([]);
+  });
+
+  it("skips the steps it holds no handle for, and aims at the first one it holds", () => {
+    const { frameId, page, view } = card();
+    const outer = mock.createElement("page");
+    const seen: unknown[] = [];
+    __AddEventListener(page, "tap", (event: ListenerEvent) => {
+      seen.push(["page", event.target.uid, event.currentTarget.uid, event.eventPhase]);
+    }, { capture: true });
+    __AddEventListener(view, "tap", (event: ListenerEvent) => {
+      seen.push(["view", event.target.uid, event.currentTarget.uid, event.eventPhase]);
+    }, {});
+    const uid = __GetElementUniqueID(view);
+    const pageUid = __GetElementUniqueID(page);
+
+    // The whole path, as the host hands it to every realm: the card's own
+    // steps, then the frame and the page realm's page, which this realm
+    // holds no handle for, retargeted to the frame.
+    elementModule.__BobcatDispatchEvent(
+      [uid, pageUid, frameId, outer].join(","),
+      [uid, uid, frameId, frameId].join(","),
+      "tap",
+      true,
+      0,
+      0,
+      DETAIL_EMPTY,
+    );
+
+    expect(seen).toEqual([
+      ["page", uid, pageUid, 1],
+      ["view", uid, uid, 2],
+    ]);
+  });
+
+  it("takes its target from the first step it holds when the steps before it are another realm's", () => {
+    const { frameId, view } = card();
+    const shadowContent = mock.createElement("view");
+    let target: unknown;
+    __AddEventListener(view, "tap", (event: ListenerEvent) => {
+      target = event.target.uid;
+    }, {});
+    const uid = __GetElementUniqueID(view);
+
+    elementModule.__BobcatDispatchEvent(
+      [shadowContent, uid, frameId].join(","),
+      [shadowContent, uid, frameId].join(","),
+      "tap",
+      true,
+      0,
+      0,
+      DETAIL_EMPTY,
+    );
+
+    expect(target).toBe(uid);
+  });
+
+  it("runs its global pass alone when it holds no step of the path, aimed at the element that registered", () => {
+    const { view } = card();
+    const documentElement = mock.createElement("page");
+    const seen: unknown[] = [];
+    globalThis.runWorklet = (value, params) => {
+      (value as { body: (event: unknown) => void }).body(params[0]);
+    };
+    const body = (event: ListenerEvent & { key?: string }) =>
+      seen.push([event.type, event.target.uid, event.currentTarget.uid, event.eventPhase, event.key]);
+    __AddEvent(view, "global-bindEvent", "keydown", { type: "worklet", value: { body } });
+    __AddEvent(view, "bindEvent", "keydown", { type: "worklet", value: { body: () => seen.push("bind") } });
+    const uid = __GetElementUniqueID(view);
+
+    // A key's target is the document element, which is no node of a card's
+    // tree: the host hands the card the page's path, none of which it holds.
+    elementModule.__BobcatDispatchEvent(
+      String(documentElement),
+      String(documentElement),
+      "keydown",
+      true,
+      0,
+      0,
+      DETAIL_KEY,
+      "a",
+      "KeyA",
+      false,
+      0,
+    );
+
+    expect(seen).toEqual([["keydown", uid, uid, 0, "a"]]);
+  });
+
+  it("runs its global pass alone when handed no step", () => {
+    const { view } = card();
+    let target: unknown;
+    globalThis.runWorklet = (value, params) => {
+      (value as { body: (event: unknown) => void }).body(params[0]);
+    };
+    __AddEvent(view, "global-bindEvent", "keydown", {
+      type: "worklet",
+      value: { body: (event: ListenerEvent) => (target = event.target.uid) },
+    });
+
+    elementModule.__BobcatDispatchEvent("", "", "keydown", true, 0, 0, DETAIL_KEY, "a", "KeyA", false, 0);
+
+    expect(target).toBe(__GetElementUniqueID(view));
+  });
+
+  it("runs nothing for an event that does not bubble when it holds no step", () => {
+    const { frameId, view } = card();
+    __AddEvent(view, "global-bindEvent", "load", "3:0:load");
+
+    elementModule.__BobcatDispatchEvent("", "", "load", false, 0, 0, DETAIL_EMPTY);
+    elementModule.__BobcatDispatchEvent(
+      String(frameId),
+      String(frameId),
+      "load",
+      false,
+      0,
+      0,
+      DETAIL_EMPTY,
+    );
+
+    // A non-bubbling event runs no global pass, so there is nothing to run.
+    expect(mock.named("publishEvent")).toEqual([]);
+  });
+});
+
+describe("the page realm", () => {
+  it("shapes positions in the viewport and reads no origin", () => {
+    const { inner } = tree();
+    let detail: unknown;
+    let x: unknown;
+    __AddEventListener(inner, "tap", (event: ListenerEvent & { x?: number }) => {
+      detail = event.detail;
+      x = event.x;
+    }, {});
+    mock.calls.length = 0;
+
+    dispatch([inner], "tap", { x: 120, y: 60, button: 0, buttons: 0 });
+
+    expect(detail).toEqual({ x: 120, y: 60 });
+    expect(x).toBe(120);
+    expect(mock.named("callElementMethod")).toEqual([]);
+    expect(mock.named("parentNode")).toEqual([]);
   });
 });

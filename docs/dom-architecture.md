@@ -925,7 +925,8 @@ seam.
 
 The module also keeps the standard's event listener lists, minus the
 callbacks, in one side table (`event::listeners`): per node, which registrant
-(`ListenerKey`, a realm to the host) listens for which type in which passes
+(`ListenerKey`, an opaque number the host allocates; a realm's `RealmId` to
+`bobcat-core`) listens for which type in which passes
 (`ListenerKinds`: `PATH_BUBBLE`, `PATH_CAPTURE`, and Lynx's `GLOBAL`).
 `Document::add_listener(node, name, kinds, key)` records one registration per
 (node, name, registrant) — a repeated add replaces the kinds — and returns a
@@ -934,7 +935,8 @@ count went from zero to one, `LastRemoved` when it went from one to zero,
 `Unchanged` otherwise; `remove_listener` and `remove_listeners_of(key)` (a
 realm going away) are its inverses. It is a side
 table because registrations are sparse and a field on `Node` would make every
-node pay for an empty list; it is keyed by node so the one free path
+node pay for an empty list; nothing is kept per registrant beyond the key on
+each row; it is keyed by node so the one free path
 (`free_node`) drops a freed node's rows in one probe, and costs no probe at
 all while the table is empty. A name whose last registration left with a freed
 node reaches zero there, with no caller to hand the change to, so the name
@@ -946,11 +948,21 @@ whether anything listens on it, before producing a costly event),
 `would_reach_listener(target, name, bubbles, composed)` (whether an event it
 fires reaches any registration: no registration of the name is one lookup, a
 global one anywhere is `true`, otherwise a path probe), `hears(name)` (any
-registration, or a definition that observes the name), `listeners_on_path`
+registration, or a definition that observes the name), `has_listeners_for(name)`
+(any registration alone: the set whose membership `RegistrationChange`
+reports, which a host's router
+unions with its own live-element names), `listeners_on_path`
 (the registrants one dispatch reaches through a path registration — a capture
 registration on its node's capture step, a bubble one on its bubble step, so
-an ancestor's bubble registration misses a non-bubbling event), and
-`realm_has_global`/`realm_registration_counts`.
+an ancestor's bubble registration misses a non-bubbling event),
+`global_registrants_on_path` (the registrants one dispatch reaches through a
+global registration: one whose node's tree root — the document node for a
+node in the document tree, the shadow root for one in a shadow tree — is a
+node of the path, which is the scope a listener on that root would have; the
+table indexes the global rows per name, so this scans the name's few global
+rows), and `global_registrants` (the registrants holding a global
+registration for the name whatever tree its node is in, the same scan without
+the path).
 
 The walk over a path is this crate's too, and it is driven one step at a
 time. `Document::event_walk(&steps, type_name, &detail, timestamp)` starts an
@@ -992,7 +1004,7 @@ nothing observes.
 Which of those names have an instance is tracked beside it: the registry
 counts the elements of each definition (counted where an element is given its
 definition, uncounted where it is freed) and, per name, the definitions with
-an element alive, and `Document::take_observed_name_edges` hands out the
+an element alive, and `Document::take_observed_name_changes` hands out the
 names whose liveness changed since the last call — the input a host's router
 is fed per instance, while the walk's gate (`observes_event`) stays per
 definition. The

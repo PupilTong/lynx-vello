@@ -210,8 +210,8 @@ fn dispatch_to_listeners(bencher: divan::Bencher) {
 /// The painting side answers this from its own listener-name replica — a
 /// pass resync and a set lookup, no lock — so the realistic cost is what
 /// `has_listeners` measures here. The dispatch below covers a stale replica:
-/// the path is built and crosses, and the realm finds nothing registered for
-/// the name on any of its steps.
+/// the host's own listener table answers that nothing hears the name, so no
+/// path is built and nothing crosses into the realm.
 #[divan::bench]
 fn dispatch_with_no_listener(bencher: divan::Bencher) {
     let name: Arc<str> = Arc::from("scroll");
@@ -219,7 +219,7 @@ fn dispatch_with_no_listener(bencher: divan::Bencher) {
         .with_inputs(listening_harness)
         .bench_local_refs(|(harness, label)| {
             assert!(!harness.has_listeners(&name));
-            assert!(harness.dispatch(*label, &name));
+            assert!(!harness.dispatch(*label, &name));
         });
 }
 
@@ -227,9 +227,10 @@ fn dispatch_with_no_listener(bencher: divan::Bencher) {
 ///
 /// A list update that discards its cells does exactly this, in this order:
 /// `__RemoveElement` detaches the cell, and the collector then calls
-/// `dropElement` for the handle it takes — after the realm's own cleanup has
-/// given up every event name that handle was counted under. The removal is
-/// not decoration: a
+/// `dropElement` for the handle it takes, whose free path takes the row's
+/// registrations out of the host's listener table — each registration was
+/// one `listenerOpened` crossing when it was added. The removal is not
+/// decoration: a
 /// connected element cannot be dropped, because its handle cannot be
 /// collected while its parent's holds it. Each iteration gets its own booted
 /// realm, because a drop is final — the ids the previous one used name

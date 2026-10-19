@@ -63,8 +63,21 @@ use crate::view::ScriptSource;
 /// Which child of an owner's realm a module load or a future settle is for,
 /// handed out in construction order and never reused, so a load that arrives
 /// for a released child finds nothing rather than a newer one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct ChildKey(u64);
+
+impl ChildKey {
+    /// The key's own number, which [`super::RealmId::listener_key`] files a
+    /// child under.
+    pub(super) fn number(self) -> u64 {
+        self.0
+    }
+
+    /// The key whose [`Self::number`] is `number`.
+    pub(super) fn from_number(number: u64) -> Self {
+        Self(number)
+    }
+}
 
 /// One `ShadowRealm` child: its realm, the two tables its core members
 /// write to, and what its owner's host modules keep for it.
@@ -101,6 +114,8 @@ impl ChildRealms {
     pub(crate) fn new() -> Self {
         Self {
             live: RefCell::new(Vec::new()),
+            // From 1: 0 is the owner's own realm's number
+            // ([`super::RealmId::listener_key`]).
             next: Cell::new(1),
         }
     }
@@ -126,7 +141,8 @@ impl ChildRealms {
         ChildKey(id)
     }
 
-    fn keys(&self) -> Vec<ChildKey> {
+    /// Every live child's key, in construction order.
+    pub(crate) fn keys(&self) -> Vec<ChildKey> {
         self.live.borrow().iter().map(|child| child.key).collect()
     }
 

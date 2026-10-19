@@ -603,10 +603,10 @@ mod rust_walk {
     }
 
     /// A name is live while any definition observing it has an element: the
-    /// first element of either probe opens `pointerdown`, freeing one of two
-    /// closes nothing, freeing the last closes it, and a create-and-free
-    /// between two drains reports nothing. The definition-based gate stays
-    /// open throughout.
+    /// first element of either probe makes `pointerdown` live, freeing one of
+    /// two changes nothing, freeing the last ends its liveness, and a
+    /// create-and-free between two drains reports nothing. The
+    /// definition-based gate observes the name throughout.
     #[test]
     fn an_observed_name_is_live_while_an_element_observing_it_exists() {
         let mut document: Document<()> = Document::new(device(), "page", ());
@@ -622,32 +622,35 @@ mod rust_walk {
             );
         }
         assert!(
-            document.take_observed_name_edges().is_empty(),
+            document.take_observed_name_changes().is_empty(),
             "a definition alone makes nothing live"
         );
         assert!(document.observes_event("pointerdown"));
 
         let page = document.document_element().id();
         let outer = document.create_element("probe-outer", ());
-        assert_eq!(document.take_observed_name_edges(), [("pointerdown", true)]);
+        assert_eq!(
+            document.take_observed_name_changes(),
+            [("pointerdown", true)]
+        );
         let inner = document.create_element("probe-inner", ());
         let second = document.create_element("probe-inner", ());
         document.append_child(page, outer);
         document.append_child(outer, inner);
         assert!(
-            document.take_observed_name_edges().is_empty(),
+            document.take_observed_name_changes().is_empty(),
             "already live: connecting and more instances change nothing"
         );
 
         document.drop_element(inner);
         document.drop_element(outer);
         assert!(
-            document.take_observed_name_edges().is_empty(),
+            document.take_observed_name_changes().is_empty(),
             "`second` still observes it, unconnected"
         );
         document.drop_element(second);
         assert_eq!(
-            document.take_observed_name_edges(),
+            document.take_observed_name_changes(),
             [("pointerdown", false)]
         );
         assert!(document.observes_event("pointerdown"));
@@ -655,8 +658,8 @@ mod rust_walk {
         let brief = document.create_element("probe-outer", ());
         document.drop_element(brief);
         assert!(
-            document.take_observed_name_edges().is_empty(),
-            "an edge undone before the drain is not reported"
+            document.take_observed_name_changes().is_empty(),
+            "a change undone before the drain is not reported"
         );
         assert!(take(&log).is_empty());
     }
@@ -966,6 +969,21 @@ mod listener_table {
         names.iter().map(|name| &**name).collect()
     }
 
+    /// Which of the two lists `key` is on for `name`: a path registration
+    /// a dispatch at `target` reaches, and a global registration anywhere.
+    fn reached(
+        document: &Document<()>,
+        target: NodeId,
+        name: &str,
+        key: ListenerKey,
+    ) -> (bool, bool) {
+        let steps = document.event_steps(target, true, true);
+        (
+            document.listeners_on_path(&steps, name).contains(&key),
+            document.global_registrants(name).contains(&key),
+        )
+    }
+
     #[test]
     fn a_repeated_add_replaces_the_kinds_and_moves_the_counts_by_the_difference() {
         let (mut document, _page, _outer, inner) = nested();
@@ -973,29 +991,27 @@ mod listener_table {
             document.add_listener(inner, "tap", BUBBLE, PAGE),
             RegistrationChange::FirstAdded
         );
-        assert_eq!(document.realm_registration_counts(PAGE, "tap"), (1, 0));
-        assert!(!document.realm_has_global(PAGE, "tap"));
+        assert_eq!(reached(&document, inner, "tap", PAGE), (true, false));
 
         assert_eq!(
             document.add_listener(inner, "tap", BUBBLE | GLOBAL, PAGE),
             RegistrationChange::Unchanged,
             "the same (node, name, registrant) is one registration"
         );
-        assert_eq!(document.realm_registration_counts(PAGE, "tap"), (1, 1));
-        assert!(document.realm_has_global(PAGE, "tap"));
+        assert_eq!(reached(&document, inner, "tap", PAGE), (true, true));
 
         assert_eq!(
             document.add_listener(inner, "tap", GLOBAL, PAGE),
             RegistrationChange::Unchanged
         );
-        assert_eq!(document.realm_registration_counts(PAGE, "tap"), (0, 1));
+        assert_eq!(reached(&document, inner, "tap", PAGE), (false, true));
 
         assert_eq!(
             document.add_listener(inner, "tap", ListenerKinds::empty(), PAGE),
             RegistrationChange::LastRemoved,
             "an empty set is a removal"
         );
-        assert_eq!(document.realm_registration_counts(PAGE, "tap"), (0, 0));
+        assert_eq!(reached(&document, inner, "tap", PAGE), (false, false));
         assert!(!document.hears("tap"));
     }
 
@@ -1071,8 +1087,10 @@ mod listener_table {
         );
         assert!(document.hears("tap"));
         assert!(!document.hears("scroll"));
-        assert_eq!(document.realm_registration_counts(PAGE, "tap"), (0, 0));
-        assert_eq!(document.realm_registration_counts(CARD, "tap"), (1, 0));
+        assert_eq!(reached(&document, inner, "tap", PAGE), (false, false));
+        assert_eq!(reached(&document, inner, "tap", CARD), (true, false));
+        assert!(document.global_registrants("scroll").is_empty());
+        assert!(document.global_registrants("keydown").is_empty());
         assert!(!document.has_listener(outer, "tap"));
         assert!(document.has_listener(inner, "tap"));
         assert!(document.remove_listeners_of(PAGE).is_empty());
@@ -1106,8 +1124,8 @@ mod listener_table {
             "`scroll` is still heard on `outer`"
         );
         assert!(document.take_pending_last_removals().is_empty(), "drained");
-        assert_eq!(document.realm_registration_counts(CARD, "scroll"), (0, 0));
-        assert_eq!(document.realm_registration_counts(PAGE, "scroll"), (1, 0));
+        assert_eq!(reached(&document, outer, "scroll", CARD), (false, false));
+        assert_eq!(reached(&document, outer, "scroll", PAGE), (true, false));
         assert!(!document.hears("tap"));
     }
 
@@ -1179,6 +1197,15 @@ mod listener_table {
         assert!(document.hears("tap"));
         document.remove_listener(page, "tap", PAGE);
         assert!(!document.hears("tap"));
+        assert!(
+            !document.has_listeners_for("pointerdown"),
+            "a definition is no registration"
+        );
+        document.add_listener(page, "pointerdown", GLOBAL, CARD);
+        assert!(document.has_listeners_for("pointerdown"));
+        document.remove_listener(page, "pointerdown", CARD);
+        assert!(!document.has_listeners_for("pointerdown"));
+        assert!(document.hears("pointerdown"));
         // An observed type still walks the components when nothing registered.
         document.dispatch_element_event(page, "pointerdown", &EventDetail::None, true, true, 0.0);
     }
@@ -1223,6 +1250,143 @@ mod listener_table {
             [ListenerKey(5)],
             "the path is probed for its own name alone"
         );
+    }
+
+    /// A global registration in a shadow tree is reached by a path through
+    /// that shadow root — the composed path from inside it, and the
+    /// non-composed one, which ends there — and not by a path outside it.
+    #[test]
+    fn a_global_registration_in_a_shadow_tree_is_reached_only_through_its_shadow_root() {
+        let (mut document, _host, _root, button) = shadow_tree(ShadowRootMode::Open);
+        let page = document.document_element().id();
+        let outside = document.create_element("view", ());
+        document.append_child(page, outside);
+        let inner = document.create_element("view", ());
+        document.append_child(button, inner);
+        document.add_listener(button, "tap", GLOBAL, CARD);
+
+        for composed in [true, false] {
+            let steps = document.event_steps(inner, true, composed);
+            assert_eq!(
+                document
+                    .global_registrants_on_path(&steps, "tap")
+                    .as_slice(),
+                [CARD],
+                "composed {composed}"
+            );
+        }
+        let steps = document.event_steps(outside, true, true);
+        assert!(
+            document
+                .global_registrants_on_path(&steps, "tap")
+                .is_empty(),
+            "a path outside the shadow tree"
+        );
+        let steps = document.event_steps(page, true, true);
+        assert!(
+            document
+                .global_registrants_on_path(&steps, "tap")
+                .is_empty(),
+            "the document element's path"
+        );
+        assert_eq!(
+            document.global_registrants("tap").as_slice(),
+            [CARD],
+            "held all the same"
+        );
+    }
+
+    /// A global registration in the document tree is reached by every
+    /// connected composed path, one from inside a shadow tree included,
+    /// since each ends at the document node; not by a detached tree's path,
+    /// nor by a non-composed path that ends at a shadow root. Each
+    /// registrant once, in the order its first global row was made.
+    #[test]
+    fn a_light_tree_global_registration_is_reached_by_every_connected_path() {
+        let (mut document, _host, _root, button) = shadow_tree(ShadowRootMode::Open);
+        let page = document.document_element().id();
+        let view = document.create_element("view", ());
+        document.append_child(page, view);
+        let loose = document.create_element("view", ());
+        document.add_listener(view, "tap", GLOBAL, CARD);
+        document.add_listener(page, "tap", GLOBAL | BUBBLE, PAGE);
+        document.add_listener(page, "longpress", GLOBAL, CARD);
+        document.add_listener(view, "tap", GLOBAL | CAPTURE, CARD);
+
+        for target in [page, view, button] {
+            let steps = document.event_steps(target, true, true);
+            assert_eq!(
+                document
+                    .global_registrants_on_path(&steps, "tap")
+                    .as_slice(),
+                [CARD, PAGE],
+                "{target:?}"
+            );
+        }
+        let steps = document.event_steps(loose, true, true);
+        assert!(
+            document
+                .global_registrants_on_path(&steps, "tap")
+                .is_empty(),
+            "a detached tree's path"
+        );
+        let steps = document.event_steps(button, true, false);
+        assert!(
+            document
+                .global_registrants_on_path(&steps, "tap")
+                .is_empty(),
+            "a non-composed path that ends at a shadow root"
+        );
+    }
+
+    /// The global rows follow every removal: a kinds change that drops
+    /// `GLOBAL`, a removal, a freed node and a registrant going away.
+    #[test]
+    fn the_global_rows_follow_every_removal() {
+        let (mut document, page, outer, inner) = nested();
+        let reached = |document: &Document<()>| {
+            let steps = document.event_steps(inner, true, true);
+            document.global_registrants_on_path(&steps, "tap")
+        };
+        document.add_listener(outer, "tap", GLOBAL, CARD);
+        document.add_listener(page, "tap", GLOBAL, PAGE);
+        assert_eq!(reached(&document).as_slice(), [CARD, PAGE]);
+        assert_eq!(document.global_registrants("tap").as_slice(), [CARD, PAGE]);
+
+        document.add_listener(outer, "tap", BUBBLE, CARD);
+        assert_eq!(reached(&document).as_slice(), [PAGE], "kinds replaced");
+        assert_eq!(document.global_registrants("tap").as_slice(), [PAGE]);
+        document.add_listener(outer, "tap", GLOBAL, CARD);
+        assert_eq!(
+            reached(&document).as_slice(),
+            [PAGE, CARD],
+            "filed again, last"
+        );
+        assert_eq!(document.global_registrants("tap").as_slice(), [PAGE, CARD]);
+
+        document.remove_listener(page, "tap", PAGE);
+        assert_eq!(reached(&document).as_slice(), [CARD]);
+
+        document.add_listener(inner, "tap", GLOBAL, PAGE);
+        document.remove_element(inner);
+        document.drop_element(inner);
+        let steps = document.event_steps(outer, true, true);
+        assert_eq!(
+            document
+                .global_registrants_on_path(&steps, "tap")
+                .as_slice(),
+            [CARD],
+            "a freed node's global row left with it"
+        );
+        assert_eq!(document.global_registrants("tap").as_slice(), [CARD]);
+
+        document.remove_listeners_of(CARD);
+        assert!(
+            document
+                .global_registrants_on_path(&steps, "tap")
+                .is_empty()
+        );
+        assert!(document.global_registrants("tap").is_empty());
     }
 
     #[test]

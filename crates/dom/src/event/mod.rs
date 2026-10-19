@@ -32,7 +32,7 @@
 //! ([`Document::has_listener`]) or would hear an event it fires
 //! ([`Document::would_reach_listener`]), a host learns which registrants one
 //! dispatch reaches ([`Document::listeners_on_path`],
-//! [`Document::realm_has_global`]) and whether anything hears a type at all
+//! [`Document::global_registrants_on_path`]) and whether anything hears a type at all
 //! ([`Document::hears`]), and a router learns when a type's registration
 //! count crosses zero ([`RegistrationChange`]). A freed node's registrations
 //! leave in the document's one free path; `listeners`' module doc says why

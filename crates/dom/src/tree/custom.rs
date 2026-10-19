@@ -151,7 +151,7 @@ pub trait CustomElement<T> {
     /// by `element`.
     ///
     /// A name is *live* while at least one element of a definition naming it
-    /// exists ([`Document::take_observed_name_edges`]): the host publishes
+    /// exists ([`Document::take_observed_name_changes`]): the host publishes
     /// the live names as listened-for names, so its input router routes them
     /// whether or not a realm listens too, and only while an element is there
     /// to hear them.
@@ -411,9 +411,9 @@ pub(crate) struct CustomElementRegistry<T> {
     /// alive: a name is live while this is non-zero.
     live_observers: FxHashMap<&'static str, usize>,
     /// The names whose liveness changed since the last
-    /// [`Document::take_observed_name_edges`], each at most once, with the
-    /// liveness it changed to. An edge that undoes a pending one removes it.
-    observed_name_edges: Vec<(&'static str, bool)>,
+    /// [`Document::take_observed_name_changes`], each at most once, with the
+    /// liveness it changed to. A change that undoes a pending one removes it.
+    observed_name_changes: Vec<(&'static str, bool)>,
     element_queue: Vec<NodeId>,
     reactions: FxHashMap<NodeId, VecDeque<Reaction>>,
     pinned: SmallVec<[NodeId; 4]>,
@@ -434,7 +434,7 @@ impl<T> Default for CustomElementRegistry<T> {
             by_name: FxHashMap::default(),
             observed_events: FxHashSet::default(),
             live_observers: FxHashMap::default(),
-            observed_name_edges: Vec::new(),
+            observed_name_changes: Vec::new(),
             element_queue: Vec::new(),
             reactions: FxHashMap::default(),
             pinned: SmallVec::new(),
@@ -455,7 +455,7 @@ impl<T> CustomElementRegistry<T> {
         self.depth.load(Ordering::Acquire) != 0
     }
 
-    /// One more element of `definition`. Its first opens each name it
+    /// One more element of `definition`. Its first makes live each name it
     /// observes that no other definition's element kept live.
     fn instance_created(&mut self, definition: DefinitionId) {
         let entry = &mut self.definitions[definition.index()];
@@ -467,13 +467,13 @@ impl<T> CustomElementRegistry<T> {
             let count = self.live_observers.entry(name).or_insert(0);
             *count += 1;
             if *count == 1 {
-                Self::observed_name_edge(&mut self.observed_name_edges, name, true);
+                Self::record_observed_name_change(&mut self.observed_name_changes, name, true);
             }
         }
     }
 
-    /// One element of `definition` fewer. Its last closes each name it
-    /// observes that no other definition's element keeps live.
+    /// One element of `definition` fewer. Its last ends the liveness of each name
+    /// it observes that no other definition's element keeps live.
     fn instance_freed(&mut self, definition: DefinitionId) {
         let entry = &mut self.definitions[definition.index()];
         entry.instances = entry
@@ -491,20 +491,27 @@ impl<T> CustomElementRegistry<T> {
             *count -= 1;
             if *count == 0 {
                 self.live_observers.remove(name);
-                Self::observed_name_edge(&mut self.observed_name_edges, name, false);
+                Self::record_observed_name_change(&mut self.observed_name_changes, name, false);
             }
         }
     }
 
-    /// Records that `name` became live or stopped being. A name's edges
-    /// alternate, so a pending one for it is the opposite of this one, and
-    /// the two cancel.
-    fn observed_name_edge(edges: &mut Vec<(&'static str, bool)>, name: &'static str, live: bool) {
-        if let Some(pending) = edges.iter().position(|&(held, _)| held == name) {
-            debug_assert_ne!(edges[pending].1, live, "a name's edges alternate");
-            edges.remove(pending);
+    /// Records that `name` became live or stopped being. A name's liveness
+    /// changes alternate, so a pending one for it is the opposite of this
+    /// one, and the two cancel.
+    fn record_observed_name_change(
+        changes: &mut Vec<(&'static str, bool)>,
+        name: &'static str,
+        live: bool,
+    ) {
+        if let Some(pending) = changes.iter().position(|&(held, _)| held == name) {
+            debug_assert_ne!(
+                changes[pending].1, live,
+                "a name's liveness changes alternate"
+            );
+            changes.remove(pending);
         } else {
-            edges.push((name, live));
+            changes.push((name, live));
         }
     }
 }
@@ -841,7 +848,7 @@ impl<T> Document<T> {
     /// Every event type some definition observes, in no particular order,
     /// whether or not an element of it exists: the set
     /// [`Self::observes_event`] reads. What a host routes is the live subset,
-    /// which [`Self::take_observed_name_edges`] reports as it changes.
+    /// which [`Self::take_observed_name_changes`] reports as it changes.
     pub fn observed_event_names(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.custom_elements.observed_events.iter().copied()
     }
@@ -855,14 +862,14 @@ impl<T> Document<T> {
     /// in [`CustomElement::observed_events`] exists, connected or not; an
     /// element of a shadow tree counts as any other. A change undone before
     /// the call (an element created and freed in between) is not reported,
-    /// so applying the edges in order to the set of live names the previous
+    /// so applying the changes in order to the set of live names the previous
     /// calls described gives the set of live names now. Empty, and
     /// allocation-free, when nothing changed: what a host drains after every
     /// mutation batch to keep the names its router routes per instance
     /// rather than per definition. [`Self::observes_event`] stays per
     /// definition.
-    pub fn take_observed_name_edges(&mut self) -> Vec<(&'static str, bool)> {
-        std::mem::take(&mut self.custom_elements.observed_name_edges)
+    pub fn take_observed_name_changes(&mut self) -> Vec<(&'static str, bool)> {
+        std::mem::take(&mut self.custom_elements.observed_name_changes)
     }
 
     /// The set's own `'static` spelling of `type_name`, which is how the

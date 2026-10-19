@@ -149,7 +149,7 @@
 //!
 //! `tap` is routed per instance: the painter forwards taps to the main
 //! thread only while some element observing `tap` is alive
-//! ([`dom::Document::take_observed_name_edges`]), so a page with no markdown
+//! ([`dom::Document::take_observed_name_changes`]), so a page with no markdown
 //! and no tap listener pays nothing for the component's definition.
 //!
 //! ## UI methods

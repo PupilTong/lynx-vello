@@ -282,26 +282,24 @@ interface BobcatNative {
    */
   flushElementTree(): void;
   /**
-   * Records that something in the realm is now registered for `eventName`,
-   * where nothing was — the first registration anywhere in the document.
-   * The painting side routes against that name set; the host keeps no
-   * per-element listener index at all, and never hears a second
-   * registration for a name already open.
+   * Records that this realm listens for `eventName` on the element in the
+   * passes `kinds` names, replacing what it reported there before: the or of
+   * 1 (the bubble pass: `__AddEventListener`'s bubble list, `bindEvent`,
+   * `catchEvent`), 2 (the capture pass: the capture list, `capture-bind`,
+   * `capture-catch`) and 4 (`global-bindEvent`), at least one. Called on a
+   * change of that union alone. The host keeps it in the document's listener
+   * table, which decides which realms a dispatch calls, routes the painting
+   * side's name set, and detects an element with any registration for
+   * `uiappear` or `uidisappear` for exposure. A node that is no longer live
+   * registers nothing.
    */
-  listenerNameOpened(eventName: string): void;
-  /** The reverse: the last registration for that name anywhere went away. */
-  listenerNameClosed(eventName: string): void;
+  listenerOpened(nodeId: number, eventName: string, kinds: number): void;
   /**
-   * Tells the host whether the element has any registration for `uiappear`
-   * or `uidisappear` — an `__AddEvent` handler of either kind in either slot,
-   * or an `__AddEventListener` closure — each time that answer changes: `1`
-   * when it now has one, `0` when its last went. An element with one is
-   * detected for exposure whether or not it carries an `exposure-id`, and
-   * hears those two events, dispatched by the host's intersection delivery
-   * with the exposure detail kind. Its exposure attributes are read by the
-   * host from the element itself.
+   * The reverse: the realm's last registration for `eventName` on the
+   * element went away. A collected element's rows leave with it, so a
+   * collection calls nothing.
    */
-  exposureEvents(nodeId: number, wants: 0 | 1): void;
+  listenerClosed(nodeId: number, eventName: string): void;
   /**
    * `lynx.stopExposure({sendEvent})` (`on` `0`) and `lynx.resumeExposure()`
    * (`on` `1`), as native runs them. Stopping drops every detection; with
@@ -479,9 +477,8 @@ declare module "bobcat-internal:host" {
    * itself.
    */
   export function closeRealm(): void;
-  export const listenerNameOpened: BobcatNative["listenerNameOpened"];
-  export const listenerNameClosed: BobcatNative["listenerNameClosed"];
-  export const exposureEvents: BobcatNative["exposureEvents"];
+  export const listenerOpened: BobcatNative["listenerOpened"];
+  export const listenerClosed: BobcatNative["listenerClosed"];
   export const switchExposure: BobcatNative["switchExposure"];
   export const setTimer: BobcatNative["setTimer"];
   export const clearTimer: BobcatNative["clearTimer"];

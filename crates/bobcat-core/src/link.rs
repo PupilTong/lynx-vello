@@ -296,9 +296,10 @@ pub(crate) struct Published {
     /// The newest committed frame, and only ever the newest.
     pub(crate) frame: Option<Arc<CommittedFrame>>,
     /// The event names the realm currently has a listener for anywhere in
-    /// the document. Rebuilt on a global edge — a name's first registration
-    /// and its last removal — which is rare enough that the whole set is
-    /// cheaper than a protocol for the difference.
+    /// the document. Rebuilt whenever a name's registration count crosses
+    /// zero — its first registration added or its last removed — which is
+    /// rare enough that the whole set is cheaper than a protocol for the
+    /// difference.
     pub(crate) listeners: Arc<FxHashSet<Arc<str>>>,
     /// The newest frame post the view has serviced.
     pub(crate) begin_frame_serviced: u64,
@@ -739,18 +740,19 @@ impl ViewOutbox {
         self.requester.request_event();
     }
 
-    /// Publishes one edge of the painter's listener-name set: a name the
-    /// main thread starts or stops wanting routed, because a realm
-    /// registration or a live component element wants it (`DocumentSlot`'s
-    /// `routes` in `main::runtime`).
+    /// Tells the painter whether `name` is routed: adds it to the painter's
+    /// listener-name set when the main thread starts wanting it routed, and
+    /// takes it out when the main thread stops — a realm registration or a
+    /// live component element wants it (`DocumentSlot`'s `routes` in
+    /// `main::runtime`).
     ///
     /// No wakeup. Nothing a host does depends on it — the painter reads the
     /// set at the start of its next routing pass, which is a turn the host
     /// was taking anyway.
-    pub(crate) fn listener_edge(&self, name: Arc<str>, available: bool) {
+    pub(crate) fn set_name_routed(&self, name: Arc<str>, routed: bool) {
         self.frames.send_modify(|published| {
             let mut names = published.listeners.as_ref().clone();
-            if available {
+            if routed {
                 names.insert(name);
             } else {
                 names.remove(&name);

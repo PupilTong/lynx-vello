@@ -1530,8 +1530,9 @@ The callback boundary carries only `quickjs-rust-bridge`'s primitive
 functions, raw VM values, and DOM handles cannot cross it. Bobcat registers its
 private callbacks as named exports of the native `bobcat-internal:host` ESM —
 the document member `createDocument`, the tree and attribute
-members, the two event-name members, the two exposure members
-(`exposureEvents`, `switchExposure`), the two timer members, and the three worker
+members, the two listener members (`listenerOpened`, `listenerClosed`, which
+file per-element registrations in the document's listener table), the
+exposure switch (`switchExposure`), the two timer members, and the three worker
 members — then preloads three kinds of ESM source: the core-owned
 `bobcat:runtime` named compatibility exports, the embedded `bobcat:element`
 named Element-PAPI exports, and the fetched entry under the URL boot imports
@@ -1541,9 +1542,12 @@ imports its native operations directly; nothing is installed as
 `globalThis.bobcat`. The entry is completed as the fetcher answered it: a
 card's entry carries its runtime and Element-PAPI import declarations because
 `bobcat-source` wrote them in front of its body. Event delivery travels back
-through the loaded `bobcat:element` namespace's `__BobcatDispatchEvent` export, once per
-dispatch, carrying the whole event path as two comma-joined id strings and
-everything else as primitives: whether the event bubbles — which decides how
+through the loaded `bobcat:element` namespace's `__BobcatDispatchEvent` export,
+once per listening realm per dispatch — the host's one walk over the path
+calls each realm the listener table says listens, at the path's top step
+(`MainThreadRuntime::dispatch`) — carrying the whole event path, which each
+realm walks over the steps it holds handles for,
+as two comma-joined id strings and everything else as primitives: whether the event bubbles — which decides how
 much of that path the bind pass runs on, and whether the `global-bindEvent`
 pass runs at all — the event's `timestamp`, and a numeric detail kind followed
 by the numbers that kind spends (a position and an optional wheel delta plus
@@ -2071,9 +2075,10 @@ view published before its task ended is still the frame the painter must draw.
 Every publication from the
 main thread wakes the embedder through its `EventRequester`, always after the
 state it announces is in place, and the `Painter::pump` that answers is the
-turn that draws it. A listener-name edge is the one exception that wakes
-nobody: the painter reads the set at the start of its next routing pass, which
-is a turn the host was taking anyway.
+turn that draws it. Telling the painter whether a name is routed
+(`ViewOutbox::set_name_routed`) is the one exception that wakes nobody: the
+painter reads the set at the start of its next routing pass, which is a turn
+the host was taking anyway.
 A frame the painter asks of *itself* wakes nothing either — it is asked
 inside one of the embedder's own calls, and the turn that embedder is already
 in is the turn that answers it. Nothing announces the main thread's exit:

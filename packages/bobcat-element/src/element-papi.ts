@@ -6,13 +6,12 @@ import {
   createElement,
   createPage,
   dropElement,
-  exposureEvents,
   flushElementTree,
   getAttribute,
   getComputedStyleMap,
   insertBefore,
-  listenerNameClosed,
-  listenerNameOpened,
+  listenerClosed,
+  listenerOpened,
   parentNode,
   removeAttribute,
   removeElement,
@@ -124,7 +123,7 @@ import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 //
 // An element handle is an `EventTarget`. Listeners are JavaScript closures
 // filed on the handle itself, under this file's symbols, and they die with
-// it — nothing about a handler ever crosses into Rust. On the handle rather
+// it — no callback ever crosses into Rust. On the handle rather
 // than in a `WeakMap` keyed by it, because QuickJS's `WeakMap` holds its
 // values strongly whatever becomes of the key (it marks every value; it is
 // not an ephemeron), so a listener that captured its own element would have
@@ -136,17 +135,35 @@ import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 // capture), a second add of those four is ignored outright, and `once` and
 // capture behave as `addEventListener`'s do.
 //
-// **The whole walk is this file's.** The host computes the event path while
-// it holds the document, releases it, and makes one call:
+// **The kernel walks; this file runs the Lynx walk over the steps it holds.**
+// The host computes the event path while it holds the document and walks it
+// once, in Rust: the engine's components hear each step there, and at the
+// path's top step the host releases the document and calls each realm that
+// listens once, the page realm first, with the whole path:
 // `__BobcatDispatchEvent(nodes, targets, name, bubbles, timestamp,
 // extraCount, ...extraNameValuePairs, detailKind, ...detailValues)`, where
-// `nodes` is the path in target-first order as comma-joined decimal node ids
-// and `targets` carries, position for position, the shadow-retargeted target
-// of that step. Two strings because the boundary takes primitives and
-// structured clones only, a clone can be minted by the realm alone, and a
-// decimal id cannot contain the separator — the same encoding
-// `childElementIds` uses. Releasing the document before the call is what
-// lets a listener mutate the tree.
+// `nodes` is the path in target-first order as comma-joined decimal node
+// ids — every step but the shadow roots and the nodes freed since the path
+// was computed — and `targets` carries, position for position, the
+// shadow-retargeted target of that step. Two strings because the boundary
+// takes primitives and structured clones only, a clone can be minted by the
+// realm alone, and a decimal id cannot contain the separator — the same
+// encoding `childElementIds` uses. Releasing the document before the call is
+// what lets a listener mutate the tree. This file runs the Lynx walk over
+// the steps it holds handles for and skips the rest: in the page realm a UA
+// component's shadow content and every frame's card, in a frame's card
+// everything outside its nested page. `event.target` is the target of the
+// first step it holds. The host calls this realm only when it has something
+// to run: a registration on the path that the path's passes reach, a
+// `global-bindEvent` for the name on a node whose tree root (the document
+// node, or the frame's shadow root for a card) is on the path, or, for
+// `keydown` and `keyup`, a `global-bindEvent` for the name anywhere — web-core
+// listens for those on `document`. A realm that holds no step of the path —
+// a frame's card hearing a key, whose target is the document element — runs
+// its global pass alone, with each delivery's `target` the element that
+// registered. Several realms on one path each run their own walk, the
+// page's first: one realm's `catch` ends its own walk and no other's, as
+// web-core walks each card's shadow root apart.
 //
 // **Kernel events are W3C; this file is the Lynx layer** (user ruling,
 // 2026-10-13). The host dispatches every event whose name exists in W3C with
@@ -220,29 +237,30 @@ import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 // events this carries today: web-core builds both with `bubbles: false`
 // (`web-elements/src/elements/common/commonEventInitConfiguration.ts`).
 //
-// Both stop methods are pure local state now. `stopPropagation` ends the
-// remaining steps and `stopImmediatePropagation` also skips the rest of the
-// current node's registrations; neither crosses the boundary, because there
-// is no longer a walk on the other side to end.
+// Both stop methods are pure local state. `stopPropagation` ends the
+// remaining steps of this realm's walk and `stopImmediatePropagation` also
+// skips the rest of the current node's registrations; neither crosses the
+// boundary, as web-core's never reach the DOM event: the kernel's walk, the
+// components' and the other realms' go on.
 //
-// What the host does learn is the *name* set, and only its global edges: the
-// first handle anywhere to carry a registration for a name calls the native
-// `listenerNameOpened`, and the last to give one up calls
-// `listenerNameClosed`. The painting side routes against that set, so a name
-// nothing listens for never becomes a dispatch. The count behind those edges
-// is kept here, per name, because every registration kind lives here — two
-// closure lists and four `__AddEvent` maps — and only this file can know when
-// a name's first registration appears or its last disappears. A handle's own
-// counted names travel with it into the `FinalizationRegistry`'s held record,
-// so a collected element closes what it held open.
-//
-// It learns one fact per element as well: whether the element has any
-// registration at all for `uiappear` or `uidisappear`, which is what makes the
-// host detect it for exposure whether or not it carries an `exposure-id`. The
-// native `exposureEvents` is told on each change of that answer and at no
-// other time, from the same reconciliation, and the answer it is told from is
-// the handle's own counted names. A collected element tells nothing: the host
-// lets go of a freed element's registration itself.
+// **What the host learns is the registrations, minus the callbacks.** Per
+// (element, name), the passes this realm's registrations there run in:
+// `listenerOpened(node, name, kinds)` — `kinds` 1 for the bubble pass
+// (`__AddEventListener`'s bubble list, `bindEvent`, `catchEvent`), 2 for the
+// capture pass (the capture list, `capture-bind`, `capture-catch`), 4 for
+// `global-bindEvent`, or'ed — when the element's first registration for the
+// name appears or its kinds change, and `listenerClosed(node, name)` when its
+// last goes. Only this file can know those transitions, because every
+// registration kind lives here — two closure lists and four `__AddEvent`
+// maps — so [`reconcile`] decides them, and keeps the kinds it last reported
+// on the handle's collection record. The host keeps them in the document's
+// listener table, which decides which realms a dispatch calls and where, the
+// name set the painting side routes against (a name nothing listens for never
+// becomes a dispatch), whether a component produces an event no one would
+// hear, and which elements are detected for exposure: an element with a
+// registration of any form for `uiappear` or `uidisappear` is, whether or not
+// it carries an `exposure-id`. A collected element tells nothing: the host
+// drops a freed element's rows itself.
 //
 // # `__AddEvent`, the other registration form
 //
@@ -506,19 +524,20 @@ type HandlerKinds = [Map<string, FiledHandler>, Map<string, FiledHandler>];
 type HandlerMaps = [HandlerKinds, HandlerKinds];
 
 /**
- * How many handles currently carry *any* registration for an event name —
- * a closure in either pass, or a handler in any of the four `__AddEvent`
- * maps.
+ * The kinds bits a registration reports to the host, the document listener
+ * table's: which passes of a dispatch it runs in. `listenerOpened(node, name,
+ * kinds)` carries their union for one (element, name).
  *
- * The host keeps no listener index at all now, only the set of names the
- * painting side routes against, and it learns that set through the two
- * global edges of this count: 0 to 1 opens a name, 1 to 0 closes it. The
- * count has to live here because every registration does. A handle is
- * counted once per name however many registrations it holds for it, which
- * is what makes the reconciliation below a per-(handle, name) decision
- * rather than a sum.
+ * - `KIND_BUBBLE`: the bubble list of `__AddEventListener`, and `bindEvent`
+ *   and `catchEvent`, which run at the target and on the bubble pass.
+ * - `KIND_CAPTURE`: the capture list, and `capture-bind` and
+ *   `capture-catch`, which run on the capture pass.
+ * - `KIND_GLOBAL`: `global-bindEvent`, heard for every event of its name on
+ *   any path.
  */
-const listenerNameCounts: Map<string, number> = new Map();
+const KIND_BUBBLE = 1;
+const KIND_CAPTURE = 2;
+const KIND_GLOBAL = 4;
 
 /**
  * The node ids holding a `global-bindEvent` handler of either kind, per
@@ -622,23 +641,25 @@ const ownerSymbol = Symbol("owner");
 
 /**
  * What a handle leaves behind for the collection that frees its element:
- * its node id, and the event names it is counted under in
- * [`listenerNameCounts`].
+ * its node id, and the kinds the host was last told it registered per event
+ * name ([`reconcile`]).
  *
- * A record rather than the bare id, because a name a dead handle held open
- * has to be closed and its entry in [`globalNodes`] pruned, and the cleanup
- * runs when the handle — and every set on it — is already unreachable. The
- * handle points at this record and the record never points back: a held
- * value that reached its target would keep it alive forever, and a
- * `FinalizationRegistry` is specified to reject exactly that.
+ * A record rather than the bare id, because a dead handle's entries in
+ * [`globalNodes`] have to be pruned, and the cleanup runs when the handle —
+ * and every map on it — is already unreachable. The host is told nothing
+ * about the names: the element's rows in its listener table leave with the
+ * element, in the free path `dropElement` runs. The handle points at this
+ * record and the record never points back: a held value that reached its
+ * target would keep it alive forever, and a `FinalizationRegistry` is
+ * specified to reject exactly that.
  *
- * The `names` set is created on first registration. Most elements never get
+ * The `kinds` map is created on first registration. Most elements never get
  * one, so most handles pay this record and nothing more.
  */
 const collectedSymbol = Symbol("collected");
 interface Collected {
   readonly nodeId: number;
-  names: Set<string> | undefined;
+  kinds: Map<string, number> | undefined;
 }
 
 /**
@@ -669,12 +690,12 @@ function handlersOf(handle: Handle): HandlerMaps | undefined {
 /**
  * The record this handle's collection will hand the cleanup, created on
  * first use. The page handle never reaches a registry, and gets one all the
- * same: it is where its counted names live.
+ * same: it is where its reported kinds live.
  */
 function collectedOf(handle: Handle): Collected {
   return handle[collectedSymbol] ??= {
     nodeId: nodeIdOf(handle),
-    names: undefined,
+    kinds: undefined,
   };
 }
 
@@ -700,18 +721,17 @@ const handlesByNodeId: Map<number, WeakRef<Handle>> = new Map();
  * still be connected, because a connected element's handle is held by its
  * parent's, up to the permanent page handle.
  *
- * Its registrations died with the handle, so the counts they held have to
- * come down here: an element that took the last registration for a name with
- * it closes that name, exactly as an explicit removal would have.
+ * Its registrations died with the handle. The host's listener table drops
+ * the element's rows itself when it frees the element, so nothing about them
+ * crosses; what is pruned here is this realm's own global-bind registry.
  */
 const registry = new FinalizationRegistry(
   (collected: Collected) => {
     handlesByNodeId.delete(collected.nodeId);
-    for (const name of collected.names ?? []) {
-      closeName(name);
+    for (const name of collected.kinds?.keys() ?? []) {
       forgetGlobalNode(name, collected.nodeId);
     }
-    collected.names = undefined;
+    collected.kinds = undefined;
     dropElement(collected.nodeId);
   },
 );
@@ -2271,32 +2291,6 @@ function filedHandler(
 }
 
 /**
- * Opens a name with the host when this is the first handle to want it.
- */
-function openName(name: string): undefined {
-  const count = listenerNameCounts.get(name) ?? 0;
-  listenerNameCounts.set(name, count + 1);
-  if (count === 0) {
-    listenerNameOpened(name);
-  }
-  return undefined;
-}
-
-/**
- * The reverse, called once per handle that was counted under `name`.
- */
-function closeName(name: string): undefined {
-  const count = listenerNameCounts.get(name) ?? 0;
-  if (count > 1) {
-    listenerNameCounts.set(name, count - 1);
-    return undefined;
-  }
-  listenerNameCounts.delete(name);
-  listenerNameClosed(name);
-  return undefined;
-}
-
-/**
  * Takes one node out of a name's global-bind registry, dropping the name's
  * entry with its last member so the registry holds only names something is
  * registered for.
@@ -2314,84 +2308,63 @@ function forgetGlobalNode(name: string, nodeId: number): undefined {
 }
 
 /**
- * Whether anything at all on this handle is registered for `name`: a closure
- * in either pass, or a handler in any of the four `__AddEvent` maps.
+ * The kinds of everything registered on this handle for `name`, as the
+ * host's listener table takes them: the closures of either pass, and the
+ * handlers of both kinds in both `__AddEvent` slots, each by its form. `0`
+ * is nothing registered.
  */
-function hasRegistration(handle: Handle, name: string): boolean {
+function kindsOf(handle: Handle, name: string): number {
+  let kinds = 0;
   const lists = listenersOf(handle)?.get(name);
-  if (lists !== undefined && (lists[BUBBLE].length > 0 || lists[CAPTURE].length > 0)) {
-    return true;
+  if (lists !== undefined) {
+    if (lists[BUBBLE].length > 0) kinds |= KIND_BUBBLE;
+    if (lists[CAPTURE].length > 0) kinds |= KIND_CAPTURE;
   }
   const maps = handlersOf(handle);
-  if (maps === undefined) {
-    return false;
+  if (maps !== undefined) {
+    for (const kind of maps[STATIC]) {
+      const filed = kind.get(name);
+      if (filed !== undefined) {
+        kinds |= phaseOfType(filed.type) === CAPTURE ? KIND_CAPTURE : KIND_BUBBLE;
+      }
+    }
+    if (maps[GLOBAL].some((kind) => kind.has(name))) kinds |= KIND_GLOBAL;
   }
-  return maps.some((slot) => slot.some((kind) => kind.has(name)));
+  return kinds;
 }
 
 /**
- * The two names an element hears its exposure by. A registration for either
- * is what registers the element for exposure detection; see [`reconcile`].
- */
-const APPEAR = "uiappear";
-const DISAPPEAR = "uidisappear";
-
-/**
- * Whether a handle's counted names include either exposure name: the answer
- * the host was last told through `exposureEvents`, since every change of it
- * goes through [`reconcile`].
- */
-function hearsExposure(collected: Collected): boolean {
-  return collected.names !== undefined &&
-    (collected.names.has(APPEAR) || collected.names.has(DISAPPEAR));
-}
-
-/**
- * Reconciles the two realm-wide registries for one (handle, name) against
- * everything registered on that handle now. Every registration change calls
- * it, and it is where a name edge reaches the host.
+ * Reconciles what the host and this realm's global-bind registry know of one
+ * (handle, name) against everything registered on that handle now. Every
+ * registration change calls it, and it is the only place a registration
+ * reaches the host.
  *
- * A handle is counted once per name however many registrations it holds, so
- * the decision is a membership test rather than a sum, and the transitions
- * are the only thing that crosses: the first handle to want a name opens it,
- * the last to give it up closes it.
- *
- * The exposure edge is a transition of the same kind, taken over the two
- * exposure names together: the host is told through `exposureEvents` when the
- * handle's first registration for `uiappear` or `uidisappear` appears, and
- * when its last for either goes, and never in between — a second handler, of
- * the other name or the other kind, changes nothing it was told. Every
- * registration form counts, the `__AddEventListener` closures included. That
- * is native's rule: `FiberAddEventListener` syncs the name into the element's
- * event set for every form it files
- * (`core/runtime/lepus/bindings/renderer_functions.cc:1077`), and native
- * exposure fires `uiappear` at an element whose event set has it
- * (`UIExposure.java:543-547`). web-core marks an element from `__AddEvent`
- * alone (`createElementAPI.ts:160-170`), so a closure-only listener there is
- * never detected and never hears the event.
+ * The host keeps the document's listener table: per element and name, which
+ * realm listens in which passes ([`kindsOf`]). It is told on a change of
+ * that answer alone, so a second handler of a form already reported crosses
+ * nothing: `listenerOpened(node, name, kinds)` when the kinds become
+ * non-zero or change — the host replaces what it had for this element, name
+ * and realm, so a `global-bindEvent` filed beside a `bindEvent` reports the
+ * union again — and `listenerClosed(node, name)` when they drop to zero.
+ * What the host does with the table is its own: which realms a dispatch
+ * calls and where, what the painting side routes, whether a component's
+ * event is produced at all, and whether an element is detected for
+ * exposure, which a registration of any form for `uiappear` or
+ * `uidisappear` asks for (native's rule; see the host's `hears_exposure`).
  */
 function reconcile(handle: Handle, name: string): undefined {
   const collected = collectedOf(handle);
-  const wanted = hasRegistration(handle, name);
-  if (wanted !== (collected.names?.has(name) ?? false)) {
-    const exposure = name === APPEAR || name === DISAPPEAR;
-    const heard = exposure && hearsExposure(collected);
-    if (wanted) {
-      (collected.names ??= new Set()).add(name);
-      openName(name);
+  const kinds = kindsOf(handle, name);
+  if (kinds !== (collected.kinds?.get(name) ?? 0)) {
+    if (kinds === 0) {
+      collected.kinds?.delete(name);
+      listenerClosed(collected.nodeId, name);
     } else {
-      collected.names?.delete(name);
-      closeName(name);
-    }
-    if (exposure && heard !== hearsExposure(collected)) {
-      exposureEvents(collected.nodeId, heard ? 0 : 1);
+      (collected.kinds ??= new Map()).set(name, kinds);
+      listenerOpened(collected.nodeId, name, kinds);
     }
   }
-  const maps = handlersOf(handle);
-  const global = maps !== undefined &&
-    (maps[GLOBAL][STRING_HANDLER].has(name) ||
-      maps[GLOBAL][WORKLET_HANDLER].has(name));
-  if (global) {
+  if ((kinds & KIND_GLOBAL) !== 0) {
     let nodes = globalNodes.get(name);
     if (nodes === undefined) {
       nodes = new Set();
@@ -2682,10 +2655,11 @@ export function __GetEvents(
  * Every name the element held or is handed is reconciled once, after the
  * whole replacement: what the host is told describes the element before and
  * after the call, not the empty element between the clear and the adds. So a
- * name handed back neither closes nor reopens, a `global-bindEvent` handed
- * back keeps its delivery position, and an element that keeps a `uiappear`
- * handler is not unregistered from exposure and registered again — which
- * would have made a visible element hear `uiappear` a second time.
+ * name handed back is neither reported removed nor added again, a
+ * `global-bindEvent` handed back keeps its delivery position, and an element
+ * that keeps a `uiappear` handler is not unregistered from exposure and
+ * registered again — which would have made a visible element hear
+ * `uiappear` a second time.
  */
 export function __SetEvents(element: unknown, events: unknown): undefined {
   const handle = element as Handle;
@@ -2983,10 +2957,56 @@ function extrasOf(pairs: unknown[]): EventDetail {
 }
 
 /**
+ * Where a realm's own page sits in the viewport, in CSS px: `0, 0` for the
+ * page realm, whose page is the view, and a frame's border-box origin for
+ * that frame's card ([`pageOrigin`]). `x` and `y` — a pointer's, a touch
+ * point's, a position `detail`'s — are relative to it, as both references
+ * make them lynx-view-local (web-core's `createCrossThreadEvent`, native's
+ * frame-local point); `clientX`/`clientY` and `pageX`/`pageY` stay the
+ * viewport's.
+ */
+interface PageOrigin {
+  x: number;
+  y: number;
+}
+
+const VIEW_ORIGIN: PageOrigin = { x: 0, y: 0 };
+
+/**
+ * This realm's [`PageOrigin`], read once per dispatch that carries a
+ * position. The page realm's page is the view, so it reads nothing. A
+ * frame's card — a realm `__BobcatUsePageRoot` handed a nested page — reads
+ * the border box of its frame, the host of the shadow root the nested page
+ * sits in, from the base set's `boundingClientRect`: the last layout pass's,
+ * ancestor scroll offsets applied and transforms ignored. A frame with no
+ * box, or none at all, answers the view's origin.
+ */
+function pageOrigin(): PageOrigin {
+  if (pageRootHandle === undefined) {
+    return VIEW_ORIGIN;
+  }
+  const shadowRoot = parentNode(nodeIdOf(pageRootHandle));
+  const frame = shadowRoot === null ? null : parentNode(shadowRoot);
+  if (frame === null) {
+    return VIEW_ORIGIN;
+  }
+  const answer = callElementMethod(frame, "boundingClientRect", "");
+  if (typeof answer === "number") {
+    return VIEW_ORIGIN;
+  }
+  const fields = splitRecord(answer);
+  const x = Number(fields[1] ?? 0);
+  const y = Number(fields[2] ?? 0);
+  return { x: Number.isNaN(x) ? 0 : x, y: Number.isNaN(y) ? 0 : y };
+}
+
+/**
  * The W3C members a position detail puts on the event object itself, by
  * which shape the host's values make — never by the event's name, save the
- * one `PointerEvent` pair. Every coordinate is the one viewport CSS px the
- * `detail` reports: this runtime has no separate client or page space.
+ * one `PointerEvent` pair. `clientX`/`clientY` and `pageX`/`pageY` are the
+ * viewport CSS px the host sends, which this runtime has no separate page
+ * space for; `x`/`y` are the same point relative to the realm's page
+ * (`origin`), which is the viewport for the page realm.
  *
  * - A pointer shape (`button` sent): `x`, `y`, `clientX`, `clientY`, `pageX`,
  *   `pageY`, `button` and `buttons` — `MouseEvent`'s, which every event a
@@ -3000,10 +3020,18 @@ function extrasOf(pairs: unknown[]): EventDetail {
 function positionMembers(
   name: string,
   values: unknown[],
+  origin: PageOrigin,
 ): Record<string, number | string> | undefined {
   const x = Number(values[0]);
   const y = Number(values[1]);
-  const coordinates = { x, y, clientX: x, clientY: y, pageX: x, pageY: y };
+  const coordinates = {
+    x: x - origin.x,
+    y: y - origin.y,
+    clientX: x,
+    clientY: y,
+    pageX: x,
+    pageY: y,
+  };
   if (values[2] !== undefined) {
     return {
       ...coordinates,
@@ -3062,12 +3090,18 @@ function keyMembers(values: unknown[]): {
  * read off `target` itself — the event's own target, which the host resolved
  * before it called, so its attributes answer — and is the only kind that
  * reads the target at all.
- * `DETAIL_POSITION` is `{x, y}` for a pointer or touch shape and `{}` for a
- * wheel (native's); its other values are the event's own members
- * ([`positionMembers`]) and the touch numbers ([`touchLists`]). Extras,
- * when the host sends any, replace all of this.
+ * `DETAIL_POSITION` is `{x, y}` for a pointer or touch shape, relative to
+ * the realm's page (`origin`), and `{}` for a wheel (native's); its other
+ * values are the event's own members ([`positionMembers`]) and the touch
+ * numbers ([`touchLists`]). Extras, when the host sends any, replace all of
+ * this.
  */
-function detailOf(kind: number, numbers: unknown[], target: number): EventDetail {
+function detailOf(
+  kind: number,
+  numbers: unknown[],
+  target: number,
+  origin: PageOrigin,
+): EventDetail {
   if (kind === DETAIL_EMPTY || kind === DETAIL_KEY) {
     return {};
   }
@@ -3083,17 +3117,21 @@ function detailOf(kind: number, numbers: unknown[], target: number): EventDetail
   if (numbers[2] !== undefined) {
     return {};
   }
-  return { x: Number(numbers[0]), y: Number(numbers[1]) };
+  return {
+    x: Number(numbers[0]) - origin.x,
+    y: Number(numbers[1]) - origin.y,
+  };
 }
 
 /**
  * One entry of a touch event's lists.
  *
- * Every coordinate is the same viewport CSS pixel the raw pointer events
- * report, under all three of the standard's names: web-core's `x`/`y` are
- * lynx-view-local rather than native Lynx's element-local, and this runtime
- * has no separate screen space to report. `identifier` is the host's pointer
- * id. `screenX`/`screenY`, `radiusX`/`radiusY`, `force` and `rotationAngle`
+ * `clientX`/`clientY` and `pageX`/`pageY` are the viewport CSS px the raw
+ * pointer events report, and `x`/`y` the same point relative to the realm's
+ * page — web-core's lynx-view-local `x`/`y` rather than native Lynx's
+ * element-local — which is the viewport for the page realm and the frame's
+ * border box for a frame's card. This runtime has no separate screen space
+ * to report. `identifier` is the host's pointer id. `screenX`/`screenY`, `radiusX`/`radiusY`, `force` and `rotationAngle`
  * are recorded gaps, not values withheld.
  */
 interface TouchPointValues {
@@ -3121,7 +3159,7 @@ const TOUCH_CHANGED = 4;
  * finger — nothing observes the identity, and one object per finger is what
  * the lists mean.
  */
-function touchLists(numbers: unknown[]): {
+function touchLists(numbers: unknown[], origin: PageOrigin): {
   touches: TouchPointValues[];
   targetTouches: TouchPointValues[];
   changedTouches: TouchPointValues[];
@@ -3137,8 +3175,8 @@ function touchLists(numbers: unknown[]): {
     const y = Number(numbers[at + 2]);
     const point: TouchPointValues = {
       identifier: Number(numbers[at]),
-      x,
-      y,
+      x: x - origin.x,
+      y: y - origin.y,
       pageX: x,
       pageY: y,
       clientX: x,
@@ -3394,13 +3432,16 @@ function handlerInPass(
 }
 
 /**
- * One whole dispatch, the single call the host makes per event.
+ * One whole dispatch in this realm, the single call the host makes into it
+ * per event, at the path's top step, with the whole path.
  *
  * The host computed the path while it held the document and released it
  * before calling, which is what lets a listener mutate the tree. Everything
- * after that is this file's: the standard's capture pass from the path's
- * far end inwards, its bubble pass back out, then the `global-bindEvent`
- * pass, which is not over the path at all.
+ * after that is this file's: the standard's capture pass from the far end of
+ * the path inwards over the steps this realm holds handles for, its bubble
+ * pass back out, then the `global-bindEvent` pass, which is not over the
+ * path at all. A path with no step this realm holds — a frame's card
+ * hearing a key — runs the global pass alone.
  *
  * `bubbles` narrows the last two and never the first: a non-bubbling event
  * binds on its at-target steps alone and runs no global pass. See the header.
@@ -3438,25 +3479,38 @@ function dispatchEvent(
   const detailKind = rest[pairs];
   const detailNumbers = rest.slice(pairs + 1);
   const steps = pathSteps(pathIds, targetIds);
-  const first = steps[0];
-  if (first === undefined) {
+  // The first step this realm holds a handle for, whose target is this
+  // realm's `event.target`: the steps before it are another realm's or a UA
+  // component's shadow content. None — a frame's card hearing a key at the
+  // document element, which is no node of its tree — leaves a global pass
+  // to run, or nothing at all.
+  const first = steps.find((step) => handleOf(step.node) !== undefined);
+  if (first === undefined && !bubbles) {
     return undefined;
   }
   const name = String(eventName).toLowerCase();
   let stopped = false;
   let immediate = false;
-  let targetNodeId = first.target;
+  // No node yet for a dispatch with no step held: its first delivery names
+  // one.
+  let targetNodeId = first?.target ?? NaN;
   // A reading the host could not take — a detached painter's, say — reports
   // the time origin rather than `NaN`.
   const stamp = Number(timestamp ?? 0);
   const kind = Number(detailKind);
+  // Read once, and only for a dispatch with a position to shape.
+  const origin = kind === DETAIL_POSITION ? pageOrigin() : VIEW_ORIGIN;
   // The Lynx `detail`: the extras when the host sent any, the default
   // shaping of the W3C payload otherwise.
-  const detail = extras ?? detailOf(kind, detailNumbers, targetNodeId);
+  const detail = extras ?? detailOf(kind, detailNumbers, targetNodeId, origin);
   const event: DispatchedEvent = {
     type: name,
     eventPhase: NONE,
-    target: targetInfo(targetNodeId),
+    // With no step held, it is set by the first delivery, before any
+    // listener reads it.
+    target: first === undefined
+      ? (null as unknown as DispatchedEvent["target"])
+      : targetInfo(targetNodeId),
     currentTarget: null,
     detail,
     timestamp: Number.isNaN(stamp) ? 0 : stamp,
@@ -3475,13 +3529,13 @@ function dispatchEvent(
   // position detail can have any: its first eight values are the position,
   // the wheel delta and the pointer members, and the points follow them.
   const lists = kind === DETAIL_POSITION
-    ? touchLists(detailNumbers.slice(8))
+    ? touchLists(detailNumbers.slice(8), origin)
     : undefined;
   if (lists !== undefined) {
     Object.assign(event, lists);
   }
   if (kind === DETAIL_POSITION) {
-    const members = positionMembers(name, detailNumbers);
+    const members = positionMembers(name, detailNumbers, origin);
     if (members !== undefined) {
       Object.assign(event, members);
     }
@@ -3588,7 +3642,8 @@ function dispatchEvent(
   // `common_event_handler` does when it calls `dispatch_global_bind_event`
   // unconditionally. It runs no closures: `__AddEventListener` carries no
   // Lynx form and so never files globally. `eventPhase` is `NONE`, since no
-  // step of any path produced the delivery, and `target` is the event's own.
+  // step of any path produced the delivery, and `target` is the event's own,
+  // or, with no step held, the registering element itself.
   const runGlobalPass = (): undefined => {
     const registered = globalNodes.get(name);
     if (registered === undefined) {
@@ -3607,7 +3662,7 @@ function dispatchEvent(
       if (published === undefined && worklet === undefined) {
         continue;
       }
-      aim(nodeId, first.target, NONE);
+      aim(nodeId, first?.target ?? nodeId, NONE);
       if (published !== undefined) {
         runEventHandler(published.handler, event);
       }
