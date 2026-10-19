@@ -1086,6 +1086,144 @@ fn an_empty_host_shows_a_caret_one_line_tall() {
     }
 }
 
+/// A host that establishes its own paragraph keeps one empty line of its
+/// strut when it is empty, so its caret is that line's: at the content
+/// origin, as tall as the line box. With `line-height: normal` that is
+/// Ahem's 10px em, where the fallback for a host with no paragraph (the
+/// flex `view`, whose loose text has no anonymous box while it has none)
+/// takes `normal` as 1.2em.
+#[test]
+fn an_empty_host_s_caret_is_its_paragraph_s_one_empty_line() {
+    for kind in KINDS {
+        let mut doc = document();
+        let host = kind.create(&mut doc);
+        doc.set_attribute(host, "contenteditable", "plaintext-only");
+        doc.set_inline_style(host, "width: 200px; padding: 3px 5px; line-height: normal;");
+        doc.append_child(doc.document_element().id(), host);
+        doc.layout();
+        assert!(doc.focus(host), "{kind:?}");
+        doc.layout();
+        let origin = doc.bounding_client_rect(host).unwrap().origin;
+        let caret = state(&doc).caret;
+        if kind == Kind::View {
+            assert!(doc.editable_paragraph(host).is_none());
+            assert_eq!(caret, rect(origin.x + 5.0, origin.y + 3.0, 1.0, 12.0));
+        } else {
+            let paragraph = doc
+                .editable_paragraph(host)
+                .expect("the host's own paragraph");
+            assert_eq!(paragraph.node, host, "{kind:?}");
+            assert_eq!(doc.paragraph_line_count(host), Some(1), "{kind:?}");
+            assert_eq!(
+                caret,
+                rect(origin.x + 5.0, origin.y + 3.0, 1.0, 10.0),
+                "{kind:?}"
+            );
+            // The host is that line tall: its padding box is the line and
+            // the padding around it.
+            assert_eq!(
+                doc.bounding_client_rect(host).unwrap().size.height,
+                16.0,
+                "{kind:?}"
+            );
+        }
+    }
+}
+
+/// The empty line of an empty host's own paragraph holds no value text:
+/// every pointer and move command over it lands at offset 0, and typing
+/// into it and deleting back to empty leaves the line in place.
+#[test]
+fn commands_over_an_empty_host_s_one_line_stay_at_its_start() {
+    use Direction::{Backward, Forward};
+    use Granularity::{Character, Document as Whole, Line, LineBoundary, Word};
+    for kind in [Kind::Text, Kind::Block] {
+        eprintln!("kind {kind:?}");
+        let (mut doc, host) = host_in(kind, &[], 200.0);
+        assert!(doc.editable_paragraph(host).is_some());
+        // Left of, on and right of where parley's substitute space sits.
+        for x in [1.0, 6.0, 13.0, 40.0] {
+            for command in [
+                Command::SelectFromPoint {
+                    point: Point2D::new(x, 8.0),
+                    extend: false,
+                },
+                Command::SelectWordAtPoint {
+                    point: Point2D::new(x, 8.0),
+                },
+                Command::SelectLineAtPoint {
+                    point: Point2D::new(x, 8.0),
+                },
+            ] {
+                doc.apply_editing(command);
+                assert_eq!(selection(&doc), 0..0, "{kind:?} at {x}");
+            }
+        }
+        for granularity in [Character, Word, LineBoundary, Line, Whole] {
+            for direction in [Forward, Backward] {
+                doc.apply_editing(Command::Move {
+                    granularity,
+                    direction,
+                    extend: false,
+                });
+                assert_eq!(selection(&doc), 0..0, "{kind:?} {granularity:?}");
+            }
+        }
+        assert!(doc.apply_editing(Command::Insert("ab".to_owned())).applied);
+        doc.layout();
+        assert_eq!((value(&doc), selection(&doc)), ("ab".to_owned(), 2..2));
+        assert!(doc.apply_editing(Command::DeleteBackward).applied);
+        assert!(doc.apply_editing(Command::DeleteBackward).applied);
+        doc.layout();
+        assert_eq!((value(&doc), selection(&doc)), (String::new(), 0..0));
+        assert_eq!(doc.paragraph_line_count(host), Some(1), "{kind:?}");
+        let origin = doc.bounding_client_rect(host).unwrap().origin;
+        assert_eq!(
+            state(&doc).caret,
+            rect(origin.x + 5.0, origin.y + 3.0, 1.0, 10.0)
+        );
+    }
+}
+
+/// The empty line of an empty host's own paragraph is zero wide, so
+/// `text-align` puts its caret where it puts a zero-wide line: at the start,
+/// the exact centre or the end of the 190px content box, as a browser places
+/// the caret of an empty centred or right-aligned `<input>`.
+#[test]
+fn an_empty_host_s_caret_follows_text_align_exactly() {
+    for kind in [Kind::Text, Kind::Block] {
+        for (align, offset) in [
+            ("start", 0.0),
+            ("left", 0.0),
+            ("center", 95.0),
+            ("right", 190.0),
+            ("end", 190.0),
+            ("justify", 0.0),
+        ] {
+            let mut doc = document();
+            let host = kind.create(&mut doc);
+            doc.set_attribute(host, "contenteditable", "");
+            doc.set_inline_style(
+                host,
+                &format!(
+                    "width: 200px; box-sizing: border-box; padding: 3px 5px; \
+                     text-align: {align};"
+                ),
+            );
+            doc.append_child(doc.document_element().id(), host);
+            doc.layout();
+            assert!(doc.focus(host), "{kind:?}");
+            doc.layout();
+            let origin = doc.bounding_client_rect(host).unwrap().origin;
+            assert_eq!(
+                state(&doc).caret,
+                rect(origin.x + 5.0 + offset, origin.y + 3.0, 1.0, 10.0),
+                "{kind:?} text-align: {align}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_paragraph_that_does_not_show_the_value_refuses_edits_but_takes_selections() {
     // Generated `content` replaces the children of a paragraph's own

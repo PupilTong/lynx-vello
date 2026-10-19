@@ -42,6 +42,13 @@ pub struct BlockStyle {
     /// paint. `None` leaves the strut to the first content run, which is
     /// what a paragraph built without a host has.
     pub strut: Option<RunStyle>,
+    /// Whether a block with no content — no text and no atomic box — lays
+    /// out one empty line of the strut rather than none: set for an editing
+    /// host's paragraph, which is never shorter than one line, so that its
+    /// caret has a line to sit on. A block built with it and no `strut`
+    /// takes [`RunStyle::default`] as its strut. A shaping input: a change
+    /// needs a new block.
+    pub strut_line_when_empty: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -125,6 +132,7 @@ impl BlockStyle {
             max_lines: style.text_maxline(),
             max_chars: style.text_maxlength(),
             strut: Some(RunStyle::from_run_style(own_font)),
+            strut_line_when_empty: false,
         }
     }
 }
@@ -216,6 +224,7 @@ mod tests {
         assert_eq!(style.overflow, TextOverflow::Clip);
         assert_eq!(style.max_lines, None);
         assert_eq!(style.max_chars, None);
+        assert!(!style.strut_line_when_empty);
         assert_eq!(
             style.breaking(),
             BreakStyle {

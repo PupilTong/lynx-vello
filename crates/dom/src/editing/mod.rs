@@ -80,9 +80,13 @@
 //! a command that must measure there is refused. A paragraph that is not
 //! built from the value alone (generated `content`, an element child) leaves
 //! only `SetSelection` and `SelectAll`, which work on value offsets alone.
-//! A host with no paragraph — empty, or holding only white space a flex
-//! container does not render — is edited on value offsets alone, a cluster
-//! being one code point there.
+//! A host that establishes its own paragraph (a Lynx text element, a block
+//! container) always has one: with no content, that paragraph lays out one
+//! empty line of the host's strut, so the host is one line tall and its
+//! caret sits on that line, as an HTML text control is never shorter than
+//! one line. A host with no paragraph — a flex, grid, linear or relative
+//! host that is empty, or holds only white space it does not render — is
+//! edited on value offsets alone, a cluster being one code point there.
 //!
 //! Commands that read the layout — pointer placement, caret movement,
 //! cluster and word deletion — run a layout pass first
@@ -276,8 +280,16 @@ pub(crate) struct EditingState {
 
 /// Whether an attribute value makes its element an editing host: present
 /// and not an ASCII case-insensitive match for `"false"`.
-fn makes_host(value: Option<&str>) -> bool {
+pub(crate) fn makes_host(value: Option<&str>) -> bool {
     value.is_some_and(|value| !value.eq_ignore_ascii_case("false"))
+}
+
+/// Whether `node` is an editing host ([`Document::is_editing_host`]), read
+/// off the node itself: what layout asks of the element establishing a
+/// paragraph, whose paragraph then keeps one empty line when it has no
+/// content.
+pub(crate) fn is_host_node<T>(node: &crate::Node<T>) -> bool {
+    node.is_element() && makes_host(node.attribute(CONTENTEDITABLE))
 }
 
 impl<T> Document<T> {
@@ -286,11 +298,7 @@ impl<T> Document<T> {
     /// `"false"`.
     #[must_use]
     pub fn is_editing_host(&self, node: NodeId) -> bool {
-        makes_host(
-            self.get(node)
-                .filter(|node| node.is_element())
-                .and_then(|node| node.attribute(CONTENTEDITABLE)),
-        )
+        self.get(node).is_some_and(is_host_node)
     }
 
     /// Whether any element of this document is an editing host, connected
@@ -317,6 +325,13 @@ impl<T> Document<T> {
         } else if was && !is {
             self.editing.hosts -= 1;
         }
+        if is != was {
+            // A paragraph the element establishes keeps one empty line for
+            // no content only while it is a host, which is a shaping input
+            // of that paragraph: lay it out again. Nothing in the style
+            // system sees the attribute unless a selector names it.
+            self.invalidate_layout(node);
+        }
     }
 
     /// Records that a node being freed leaves the count if it was a host,
@@ -326,10 +341,7 @@ impl<T> Document<T> {
         if !self.editing.retained.is_empty() {
             self.editing.retained.remove(&node.id());
         }
-        if self.editing.hosts > 0
-            && node.is_element()
-            && makes_host(node.attribute(CONTENTEDITABLE))
-        {
+        if self.editing.hosts > 0 && is_host_node(node) {
             self.editing.hosts -= 1;
         }
     }

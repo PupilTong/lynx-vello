@@ -1041,6 +1041,189 @@ fn an_empty_block_lays_out_to_nothing() {
     assert!(!block.truncated());
 }
 
+/// An editing host's paragraph is never shorter than one line: with no
+/// content it lays out one empty line of its strut, the line its caret sits
+/// on, which is zero wide and as tall as the strut's `line-height`.
+#[test]
+fn an_empty_block_that_keeps_a_strut_line_lays_out_one_empty_line() {
+    let mut context = text_context();
+    let strut = RunStyle {
+        line_height: hughie::text::block::LineHeight::Px(24.0),
+        ..ahem_style()
+    };
+    for max_lines in [None, core::num::NonZeroU32::new(1)] {
+        for max_chars in [None, Some(0)] {
+            for text_wrap in [TextWrap::Wrap, TextWrap::NoWrap] {
+                let style = BlockStyle {
+                    strut: Some(strut.clone()),
+                    strut_line_when_empty: true,
+                    max_lines,
+                    max_chars,
+                    text_wrap,
+                    overflow: TextOverflow::Ellipsis,
+                    ..BlockStyle::default()
+                };
+                let empty = run(&strut, "");
+                for items in [&[][..], &[empty][..]] {
+                    let block = laid_out(&mut context, style.clone(), items, None, Some(50.0));
+                    let [line] = block.lines() else {
+                        panic!("one line expected, got {:?}", block.lines())
+                    };
+                    assert_eq!((line.source_start, line.source_end), (0, 0));
+                    assert_eq!(line.ellipsis_count, 0);
+                    // Ahem's 10px em centred in the 24px line: 7px of
+                    // half-leading above its 8px ascent.
+                    assert_close(line.top, 0.0);
+                    assert_close(line.height, 24.0);
+                    assert_close(line.baseline, 15.0);
+                    let [geometry] = block.line_geometry() else {
+                        panic!("one line geometry expected")
+                    };
+                    assert_close(geometry.height, 24.0);
+                    assert_close(block.size().width, 0.0);
+                    assert_close(block.size().height, 24.0);
+                    assert_eq!(block.first_baseline(), Some(15.0));
+                    assert_eq!(block.last_baseline(), Some(15.0));
+                    assert!(!block.truncated());
+                    assert!(block.boxes().is_empty());
+                    // The substitute space parley shapes is in the strut.
+                    for index in 0..block.style_count() {
+                        assert_eq!(
+                            block.source_of(u16::try_from(index).unwrap()),
+                            SourceItem::Strut
+                        );
+                    }
+                    // It is no content: an empty range has the line's height,
+                    // a point on the line hits nothing, and the block's
+                    // intrinsic widths are zero.
+                    assert_eq!(
+                        block.range_boxes(0, 0),
+                        Some(vec![Rect::new(Point::new(0.0, 0.0), Size::new(0.0, 24.0))])
+                    );
+                    assert_eq!(block.range_boxes(0, 1), None);
+                    assert_eq!(block.index_at_point(Point::new(2.0, 5.0)), None);
+                    let widths = block.content_widths();
+                    assert_eq!((widths.min, widths.max), (0.0, 0.0));
+                }
+            }
+        }
+    }
+
+    // Without a strut of its own the block takes the initial font's, which
+    // this context, holding Ahem alone, has no face for: the line is still
+    // there, as tall as that font's metrics.
+    let block = laid_out(
+        &mut context,
+        BlockStyle {
+            strut_line_when_empty: true,
+            ..BlockStyle::default()
+        },
+        &[],
+        None,
+        Some(50.0),
+    );
+    assert_eq!(block.lines().len(), 1);
+    assert_close(block.size().width, 0.0);
+}
+
+/// The one empty line is zero wide, so `text-align` places it where it
+/// places a zero-wide line: a caret on it sits at the start, the exact
+/// centre or the end of the measure, never shifted by the substitute
+/// space parley shaped for it.
+#[test]
+fn the_empty_strut_line_aligns_as_a_zero_wide_line() {
+    let mut context = text_context();
+    let strut = ahem_style();
+    for (text_align, direction, expected) in [
+        (TextAlign::Start, Direction::Ltr, 0.0),
+        (TextAlign::Left, Direction::Ltr, 0.0),
+        (TextAlign::Center, Direction::Ltr, 95.0),
+        (TextAlign::Right, Direction::Ltr, 190.0),
+        (TextAlign::End, Direction::Ltr, 190.0),
+        (TextAlign::Justify, Direction::Ltr, 0.0),
+        (TextAlign::End, Direction::Rtl, 0.0),
+    ] {
+        let style = BlockStyle {
+            strut: Some(strut.clone()),
+            strut_line_when_empty: true,
+            text_align,
+            direction,
+            ..BlockStyle::default()
+        };
+        let block = laid_out(&mut context, style, &[], None, Some(190.0));
+        let layout = block.display();
+        let line = layout.get(0).expect("the one line");
+        assert_close(line.metrics().offset, expected);
+        let caret = parley::Cursor::from_byte_index(layout, 0, parley::Affinity::Downstream)
+            .geometry(layout, 1.0);
+        assert!((caret.x0 - f64::from(expected)).abs() <= f64::from(EPSILON));
+        assert_close(block.size().width, 0.0);
+    }
+}
+
+/// Content keeps its own lines whatever the flag says, and the flag alone
+/// makes no line: without it an empty block is still empty.
+#[test]
+fn the_strut_line_is_only_for_empty_content() {
+    let style = ahem_style();
+    let mut context = text_context();
+    let keeping = BlockStyle {
+        strut: Some(style.clone()),
+        strut_line_when_empty: true,
+        ..BlockStyle::default()
+    };
+    let block = laid_out(
+        &mut context,
+        keeping.clone(),
+        &[run(&style, "aa")],
+        None,
+        Some(50.0),
+    );
+    assert_eq!(block.lines().len(), 1);
+    assert_eq!(block.size(), Size::new(20.0, 10.0));
+    // A newline that ends the text adds its own empty line, as without the
+    // flag.
+    let block = laid_out(
+        &mut context,
+        keeping.clone(),
+        &[run(&style, "a\n")],
+        None,
+        Some(50.0),
+    );
+    assert_eq!(block.lines().len(), 2);
+    // Content a cut leaves nothing of is no empty content: the block reports
+    // what it reports without the flag.
+    for keeps in [true, false] {
+        let block = laid_out(
+            &mut context,
+            BlockStyle {
+                max_chars: Some(0),
+                strut_line_when_empty: keeps,
+                ..keeping.clone()
+            },
+            &[run(&style, "abc")],
+            None,
+            Some(50.0),
+        );
+        assert!(block.truncated());
+        assert_eq!(block.lines().len(), 1, "keeps {keeps}");
+        assert_eq!(block.size(), Size::new(0.0, 10.0), "keeps {keeps}");
+    }
+
+    let block = laid_out(
+        &mut context,
+        BlockStyle {
+            strut: Some(style),
+            ..BlockStyle::default()
+        },
+        &[],
+        None,
+        Some(50.0),
+    );
+    assert!(block.lines().is_empty());
+    assert_close(block.size().height, 0.0);
+}
+
 #[test]
 fn the_paragraph_direction_is_detected_from_the_content() {
     let style = ahem_style();

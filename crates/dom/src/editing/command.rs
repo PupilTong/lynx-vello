@@ -690,8 +690,9 @@ fn select_at_point(
 ) -> Option<PreparedEdit> {
     let composition = context.composition();
     let Some(paragraph) = paragraph else {
-        // No paragraph: an empty host, or one whose white space renders
-        // nothing. Every point is at the end of the value.
+        // No paragraph: a host that establishes none and is empty, or whose
+        // white space renders nothing. Every point is at the end of the
+        // value.
         let end = context.value.len();
         return Some(PreparedEdit::select(
             context.host,
@@ -797,9 +798,9 @@ fn move_selection(
 /// box's start and end edges, nested a few deep, before the next character.
 const MAX_EDGE_STEPS: usize = 8;
 
-/// A move with no paragraph to measure in — an empty host, or one whose
-/// white space renders nothing: one code point for a character, the value's
-/// ends for every other granularity.
+/// A move with no paragraph to measure in — a host that establishes none and
+/// is empty, or whose white space renders nothing: one code point for a
+/// character, the value's ends for every other granularity.
 fn move_in_value(
     context: &Context,
     granularity: Granularity,

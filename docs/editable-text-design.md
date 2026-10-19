@@ -300,8 +300,10 @@ Public surface:
 - **`TextInputState`** carries the selection as `start ≤ end`; `caret` is the
   focus's caret box, 1 CSS px wide; `composition_bounds` gives each UTF-16
   unit the box of the grapheme cluster it belongs to (both halves of a pair
-  share one). An empty host's caret is one used line tall (`line-height`,
-  `normal` as 1.2 × `font-size`). Geometry is the last committed layout's;
+  share one). An empty host that establishes its own paragraph has one
+  empty line (below), and its caret is that line's; the caret of a host with
+  no paragraph is one used line tall (`line-height`, `normal` as 1.2 ×
+  `font-size`). Geometry is the last committed layout's;
   `text_input_state` runs no pass.
 - **Painting.** The selection highlight is a UA constant (`#B4D5FE`), painted
   over inline backgrounds and under shadows and glyphs; the caret only shows
@@ -311,13 +313,33 @@ Public surface:
   itself when it establishes a paragraph (a Lynx text element, a block
   container), else the anonymous block box of its first text child, whose
   container is the host. A host with element children can have several
-  boxes; it is read-only, so the first one serves its selection. An empty
-  host, or one holding only white space — which a flex, grid, linear or
-  relative container does not render (css-flexbox-1 §4) — has no paragraph:
-  it is edited on value offsets alone (a cluster is one code point there,
-  a word or line move goes to the value's end), its caret sits at the
-  content box's origin, one used line tall, and the walker paints that
-  caret with the host's own box.
+  boxes; it is read-only, so the first one serves its selection.
+- **An empty host is one line tall.** A paragraph an editing host
+  establishes (a Lynx text element's, a block container's) that has no
+  content — no text and no atomic box; for an inline formatting context
+  also text white space processing collapses to nothing — lays out exactly
+  one empty line of the strut: the host's own font and `line-height` (CSS
+  2.2 §10.8.1). The host is that line tall and the caret sits on it, as an
+  HTML `<input>` or `<textarea>` is never shorter than one line;
+  `Document::paragraph_line_count` answers 1. The layout host sets
+  `strut_line_when_empty` on `BlockStyle`/`InlineFlowStyle` from
+  `contenteditable` (`editing::is_host_node`); it is a shaping input, so
+  toggling the attribute invalidates the element's layout and rebuilds its
+  paragraph. Parley shapes a substitute space for empty text in style 0,
+  the strut, which gives the line its box; that space is no content — the
+  line is zero wide, so `text-align` puts it and the caret at the start, the
+  exact centre or the end (the line is aligned within its width plus the
+  space's advance), it selects and hits nothing, and paint skips the
+  strut's glyph run. Every other empty paragraph still lays out no line.
+  (The editors' shadow sheet once asked for this with `min-height: 1lh`,
+  which the fork's `lynx` grammar does not parse.)
+- **A host with no paragraph.** A host that establishes no paragraph of its
+  own — a flex, grid, linear or relative host — and is empty, or holds only
+  white space, which such a container does not render (css-flexbox-1 §4),
+  has none: it is edited on value offsets alone (a cluster is one code
+  point there, a word or line move goes to the value's end), its caret sits
+  at the content box's origin, one used line tall, and the walker paints
+  that caret with the host's own box.
 - **Offsets through the source map.** A value byte becomes a UTF-16 unit
   (`offsets.rs`), then a layout byte (`OffsetMap::unit_to_byte_or_end`); a
   layout byte becomes a unit read as a start (`byte_to_unit`) or, for a

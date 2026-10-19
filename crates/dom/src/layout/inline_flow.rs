@@ -421,10 +421,22 @@ fn breaking_of(style: &ComputedValues) -> BreakStyle {
     }
 }
 
-/// The block's own parameters, from its computed style.
+/// The block's own parameters, from its computed style and, for an editing
+/// host, its `contenteditable` attribute: a host's paragraph keeps one empty
+/// line of its strut when it has no content, so the host is one line tall and
+/// its caret has a line to sit on, as an HTML text control is never shorter
+/// than one line.
+///
+/// An anonymous block box is never a host: a host that establishes no
+/// paragraph of its own (a flex `view`) lays its loose text out in one, and
+/// is left to `crate::editing`'s caret for a host with no paragraph.
 fn flow_style<T>(tree: &TreeArenas<T>, element: NodeSlot) -> InlineFlowStyle {
-    let view = StyleView::of(tree.at(element));
-    InlineFlowStyle::from_container_style(&view, &TextRunView::from_values(view.values()))
+    let node = tree.at(element);
+    let view = StyleView::of(node);
+    InlineFlowStyle {
+        strut_line_when_empty: crate::editing::is_host_node(node),
+        ..InlineFlowStyle::from_container_style(&view, &TextRunView::from_values(view.values()))
+    }
 }
 
 /// What [`refresh`] found in the block's content.
@@ -466,8 +478,9 @@ fn refresh<T>(
         .collect();
 
     // The strut is parley's style 0 and the direction its bidi paragraph
-    // level, both read when the flow is shaped, so a change to either is a
-    // new flow, like an item change.
+    // level, and whether empty content keeps one line of the strut decides
+    // whether it is shaped at all: all are read when the flow is shaped, so
+    // a change to any is a new flow, like an item change.
     let needs_build = state
         .text_store(element)
         .and_then(TextStore::as_flow)
@@ -476,6 +489,7 @@ fn refresh<T>(
                 || store.keys != keys
                 || store.style.strut != style.strut
                 || store.style.direction != style.direction
+                || store.style.strut_line_when_empty != style.strut_line_when_empty
         });
 
     if needs_build {

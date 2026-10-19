@@ -303,7 +303,10 @@ differs from `<text>` in exactly the places CSS does:
 Both kinds share parley 0.12's CSS 2.2 §10.8.1 line boxes — the root inline box's strut on every
 line and each run's own half-leading box around the shared baseline — the strut being the block's
 own font here and the establishing element's for a `<text>`; and both report a first and a last
-baseline (`BlockMetrics`).
+baseline (`BlockMetrics`). An empty paragraph has no line box, except that an editing host's
+(`contenteditable`) has exactly one empty line of its strut, so the host is one line tall and its
+caret sits on that line, as an HTML text control is never shorter than one line
+(`strut_line_when_empty`, `docs/editable-text-design.md`).
 
 `text-overflow` does not apply there: its producers compute `overflow:
 visible`, the case css-overflow-3 leaves the property inert in, or are

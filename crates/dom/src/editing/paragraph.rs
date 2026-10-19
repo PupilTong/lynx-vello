@@ -135,11 +135,13 @@ impl<T> Document<T> {
     /// The node whose committed paragraph lays `host`'s text out: `host`
     /// when it establishes a paragraph itself (a Lynx text element, a block
     /// container), else the anonymous block box of its first text child,
-    /// whose container is `host`. `None` when no committed paragraph holds
-    /// the text: an empty host, one whose text is all white space (which a
-    /// flex, grid or other item container does not render, css-flexbox-1
-    /// §4), a host no pass has laid out, an inline box or a `display:
-    /// contents` host, whose text is laid out by a paragraph around it.
+    /// whose container is `host`. A host that establishes a paragraph has it
+    /// even when empty: one empty line of its strut. `None` when no committed
+    /// paragraph holds the text: a host that establishes none and has no
+    /// text, or text that is all white space (which a flex, grid or other
+    /// item container does not render, css-flexbox-1 §4), a host no pass has
+    /// laid out, an inline box or a `display: contents` host, whose text is
+    /// laid out by a paragraph around it.
     pub(crate) fn paragraph_node_of(&self, host: NodeId) -> Option<NodeId> {
         let node = self.get(host)?;
         let view = StyleView::try_of(node)?;
