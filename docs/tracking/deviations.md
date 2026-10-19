@@ -3110,10 +3110,14 @@ consequential choice about whether to follow the spec or the quirk.
     field takes focus and a caret but no edit; here `readonly`, like
     `disabled`, turns the editor's `contenteditable` off, so a tap focuses
     nothing and no `focus` fires.
-  - *A `password` field is not masked.* web-core's `<input type=password>`
-    shows bullets; here the text shows as typed, because masking needs a
-    paragraph built from other text than the value, over which `dom`
-    refuses edits. `TextInputState::input_type` is `Password`.
+  - *A `password` field masks per character, not per UTF-16 unit.* The
+    shadow sheet gives a `password` editor `-webkit-text-security: disc`,
+    so it shows one disc per character, white space and line breaks
+    included, and edits the value as typed (`TextInputState::input_type` is
+    `Password`). web-core's `<input type=password>` masks through the
+    browser's UA sheet, and Blink fills one disc per UTF-16 code unit, so a
+    character outside the BMP (an emoji) shows two discs there and one here,
+    where a caret can never land between the halves of a surrogate pair.
   - *No intrinsic width.* An unsized field in a row is as wide as its text;
     a browser's `<input>` is about 20 characters wide.
   - *The single-line field does not follow its caret.* Text wider than the

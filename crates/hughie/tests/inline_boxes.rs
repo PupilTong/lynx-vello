@@ -17,7 +17,7 @@ use hughie::text::inline::{
 };
 use hughie::text::paragraph::{
     BlockConstraint, BreakStyle, Direction, IndentKeywords, LineHeight, OverflowWrap, RunStyle,
-    TextWrap, VerticalAlign, WhiteSpaceCollapse,
+    TextSecurity, TextWrap, VerticalAlign, WhiteSpaceCollapse,
 };
 use hughie::text::{FontBlob, TextContext};
 use parley::PositionedLayoutItem;
@@ -59,6 +59,7 @@ fn run<'src>(style: &'src RunStyle, text: &'src str) -> InlineFlowItem<'src> {
         text,
         style,
         white_space: WhiteSpaceCollapse::Collapse,
+        text_security: TextSecurity::None,
         breaking: BreakStyle::default(),
     })
 }
@@ -499,6 +500,7 @@ fn a_box_ending_with_a_forced_break_ends_on_the_line_the_break_ends() {
             text: "ab\n",
             style: &style,
             white_space: WhiteSpaceCollapse::Preserve,
+            text_security: TextSecurity::None,
             breaking: BreakStyle::default(),
         }),
         CLOSE,
@@ -696,6 +698,7 @@ fn styled<'src>(
         text,
         style,
         white_space,
+        text_security: TextSecurity::None,
         breaking: BreakStyle::default(),
     })
 }
@@ -722,6 +725,7 @@ fn awkward_boxes_lay_out_and_answer_every_query() {
             text,
             style: &style,
             white_space: WhiteSpaceCollapse::Collapse,
+            text_security: TextSecurity::None,
             breaking: BreakStyle {
                 overflow_wrap: OverflowWrap::Anywhere,
                 ..BreakStyle::default()
@@ -939,6 +943,7 @@ fn overflow_wrap_anywhere_keeps_the_intrinsic_widths_of_two_breaks() {
             text: " ",
             style: &style,
             white_space: WhiteSpaceCollapse::Collapse,
+            text_security: TextSecurity::None,
             breaking: BreakStyle {
                 text_wrap: TextWrap::NoWrap,
                 overflow_wrap: OverflowWrap::Anywhere,

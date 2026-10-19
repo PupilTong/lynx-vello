@@ -85,7 +85,8 @@ use stylo::properties::ComputedValues;
 
 use crate::layout::paragraph::{
     AtomOffset, BlockBox, Collected, OutOfFlowBox, OwnedItem, Placement, TextStore,
-    collect_generated, context_and_store, hash_flow, place_and_hide, run_white_space,
+    collect_generated, context_and_store, hash_flow, place_and_hide, run_text_security,
+    run_white_space,
 };
 use crate::layout::style::{DisplayMode, StyleView, TextRunView, box_parent};
 use crate::layout::text_block::{ATOM_SPACE, Atom, margin_box, out_of_flow};
@@ -242,6 +243,7 @@ fn collect_flow<T>(
                     text: text.to_owned(),
                     style: RunStyle::from_run_style(&TextRunView::of(node)),
                     white_space: run_white_space(node),
+                    text_security: run_text_security(node),
                 },
                 // The element the run's style came from: its flat parent.
                 source: node
@@ -577,13 +579,17 @@ fn items_of<'a>(collected: &'a [Collected], keys: &'a [ItemKey]) -> Vec<InlineFl
         .map(|(entry, key)| match (&entry.item, key) {
             (
                 OwnedItem::Run {
-                    text, white_space, ..
+                    text,
+                    white_space,
+                    text_security,
+                    ..
                 },
                 ItemKey::Run(run_style, breaking),
             ) => InlineFlowItem::Run(InlineRun {
                 text,
                 style: run_style,
                 white_space: *white_space,
+                text_security: *text_security,
                 breaking: *breaking,
             }),
             (OwnedItem::Atom { vertical_align }, _) => InlineFlowItem::Atom(InlineAtom {
@@ -1759,6 +1765,51 @@ mod tests {
         // Turning the mode off rebuilds the flow: `a b`.
         doc.remove_class(span, "pre");
         doc.layout();
+        assert_eq!(flow_size(&doc, block).width, 30.0);
+    }
+
+    #[test]
+    fn a_run_takes_its_text_security_from_computed_style() {
+        // Inherited into the anonymous block: every character, the spaces
+        // and the newline included, is one mask, and nothing collapses.
+        let (doc, block, _) = page(
+            &format!("{WIDE} page {{ -webkit-text-security: disc; }}"),
+            "a  b\n",
+        );
+        let flow = doc.inline_flow(block).expect("a flow");
+        assert_eq!(flow.offset_map().display_text(), "\u{2022}".repeat(5));
+        assert_eq!(flow.line_geometry().len(), 1);
+        assert_eq!(flow_size(&doc, block), Size::new(50.0, 10.0));
+    }
+
+    #[test]
+    fn a_contents_scope_s_text_security_reaches_its_runs_alone_and_toggles() {
+        let (mut doc, block, _) = page(
+            &format!(
+                "{WIDE} span {{ display: contents; }}
+                 .masked {{ -webkit-text-security: circle; }}"
+            ),
+            "a  ",
+        );
+        let span = doc.create_element("span", ());
+        doc.add_class(span, "masked");
+        doc.append_child(block, span);
+        let inner = doc.create_text_node("  b", ());
+        doc.append_child(span, inner);
+        doc.layout();
+        // `a`, the collapsible pair as one space the first mask keeps, then
+        // three masks.
+        let flow = doc.inline_flow(block).expect("a flow");
+        assert_eq!(
+            flow.offset_map().display_text(),
+            format!("a {}", "\u{25E6}".repeat(3))
+        );
+
+        // Turning the mask off rebuilds the flow: `a b`.
+        doc.remove_class(span, "masked");
+        doc.layout();
+        let flow = doc.inline_flow(block).expect("a flow");
+        assert_eq!(flow.offset_map().display_text(), "a b");
         assert_eq!(flow_size(&doc, block).width, 30.0);
     }
 

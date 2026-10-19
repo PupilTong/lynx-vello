@@ -166,7 +166,7 @@ mod tests {
     use super::super::tests::{ahem_style, text_context};
     use super::super::{
         BlockConstraint, BlockStyle, InlineBoxSpec, InlineItem, RunStyle, TextBlock, TextOverflow,
-        TextRunItem, VerticalAlign, WhiteSpaceCollapse,
+        TextRunItem, TextSecurity, VerticalAlign, WhiteSpaceCollapse,
     };
     use crate::geometry::{Point, Rect, Size};
 
@@ -175,6 +175,7 @@ mod tests {
             text,
             style,
             white_space: WhiteSpaceCollapse::Collapse,
+            text_security: TextSecurity::None,
         })
     }
 

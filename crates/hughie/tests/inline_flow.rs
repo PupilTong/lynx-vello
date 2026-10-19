@@ -8,7 +8,7 @@
 use hughie::text::inline::{InlineFlow, InlineFlowItem, InlineFlowStyle, InlineRun};
 use hughie::text::paragraph::{
     BlockConstraint, BreakStyle, Direction, IndentKeywords, LineGeometry, LineHeight, OverflowWrap,
-    RunStyle, TextAlign, TextWrap, WhiteSpaceCollapse, WordBreak,
+    RunStyle, TextAlign, TextSecurity, TextWrap, WhiteSpaceCollapse, WordBreak,
 };
 use hughie::text::{FontBlob, TextContext};
 use parley::PositionedLayoutItem;
@@ -69,6 +69,7 @@ fn styled<'src>(
         text,
         style,
         white_space,
+        text_security: TextSecurity::None,
         breaking,
     })
 }

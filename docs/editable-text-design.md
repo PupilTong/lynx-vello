@@ -324,7 +324,10 @@ Public surface:
   between two collapsed spaces is shown on the one space and, once a layout
   pass has placed it, reported at the span's start. An inline box's edge
   bytes read as the unit after them, and a character move that only
-  crossed an edge cluster steps on.
+  crossed an edge cluster steps on. Under `-webkit-text-security` every
+  layout character is a mask standing for one character of the value, one
+  or two units, so a caret is placed, moved and deleted by masks and a
+  unit inside a masked surrogate pair lands on the pair's mask.
 - **Trust is structural.** A paragraph's units are the value's when every
   child of the host is a text node, no generated `content` replaces them,
   and every run of the paragraph is the host's own
@@ -977,8 +980,11 @@ Public surface:
 
 ### Limitations
 
-- A `password` field is not masked (masking needs a paragraph built from
-  other text than the value, over which `dom` refuses edits).
+- A `password` field shows one disc per character (the shadow sheet's
+  `-webkit-text-security: disc`), where Blink shows one per UTF-16 code
+  unit: an emoji is one disc here, two in a browser. The paragraph
+  normalizer masks the text and its source map keeps every offset in the
+  value's units, so editing reads the value as typed.
 - The single-line field does not scroll to follow the caret; text past its
   width is clipped.
 - No intrinsic width: an unsized field in a row is as wide as its text.

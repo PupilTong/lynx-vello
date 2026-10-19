@@ -2056,6 +2056,47 @@ mod tests {
         (document, label, run)
     }
 
+    /// `-webkit-text-security` masks every character of a `<text>`'s runs,
+    /// its newline included, one mask per scalar value; toggling it rebuilds
+    /// the paragraph.
+    #[test]
+    fn a_masked_text_shows_one_mask_per_character_and_follows_the_property() {
+        let (mut document, label, _run) = label_document_parts("a b\n\u{1F600}", 200.0);
+        document.layout();
+        let plain = document.text_block(label).expect("committed");
+        assert_eq!(plain.offset_map().display_text(), "a b\n\u{1F600}");
+        assert_eq!(plain.lines().len(), 2);
+
+        for (security, mask) in [("disc", '\u{2022}'), ("square", '\u{25A0}')] {
+            document.set_inline_style(label, &format!("-webkit-text-security: {security}"));
+            document.layout();
+            let block = document.text_block(label).expect("committed");
+            let map = block.offset_map();
+            assert_eq!(map.display_text(), mask.to_string().repeat(5), "{security}");
+            // Still the six source units, the emoji's mask standing for both.
+            assert_eq!(map.source_len(), 6);
+            assert_eq!(map.unit_to_byte(4), Some(12));
+            assert_eq!(map.unit_to_byte(5), Some(12));
+            // The newline is a mask: one line.
+            assert_eq!(block.lines().len(), 1, "{security}");
+        }
+        // Ahem has a disc glyph: five 16px squares.
+        document.set_inline_style(label, "-webkit-text-security: disc");
+        document.layout();
+        assert_eq!(
+            document.text_block_size(label).map(|size| size.width),
+            Some(80.0)
+        );
+
+        let rebuilds = document.text_block_rebuilds(label).expect("a store");
+        document.set_inline_style(label, "");
+        document.layout();
+        let block = document.text_block(label).expect("committed");
+        assert_eq!(block.offset_map().display_text(), "a b\n\u{1F600}");
+        assert_eq!(block.lines().len(), 2);
+        assert_eq!(document.text_block_rebuilds(label), Some(rebuilds + 1));
+    }
+
     /// The number this whole path exists to hold down.
     ///
     /// Nine measurements reach a flex text child in one pass — max-content,
