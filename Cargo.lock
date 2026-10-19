@@ -1865,6 +1865,7 @@ dependencies = [
  "codspeed-divan-compat",
  "dom",
  "euclid",
+ "icu_properties",
  "parley",
  "smallvec",
  "stylo",

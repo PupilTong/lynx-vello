@@ -14,11 +14,9 @@
 
 use core::ops::Range;
 
-use parley::Line;
-
 use super::TextBlock;
-use crate::geometry::{Point, Rect, Size};
-use crate::style::TextBrush;
+use crate::geometry::{Point, Rect};
+use crate::text::paragraph::query::{Displayed, LineSpan};
 
 impl TextBlock {
     /// The boxes the source range `[start, end)` occupies in the committed
@@ -56,50 +54,9 @@ impl TextBlock {
     /// [`Self::has_committed`] first, as for every other reader.
     #[must_use]
     pub fn range_boxes(&self, start: u32, end: u32) -> Option<Vec<Rect<f32>>> {
-        let block = &self.paragraph.content.block;
-        if start > end || end > block.map.source_len() {
-            return None;
-        }
-        let lines = self.lines();
-        let geometry = self.line_geometry();
-        if start == end {
-            let line = lines
-                .iter()
-                .rposition(|line| line.source_start <= start)
-                .or_else(|| (!lines.is_empty()).then_some(0))?;
-            return Some(vec![Rect::new(
-                Point::new(0.0, 0.0),
-                Size::new(0.0, geometry[line].height),
-            )]);
-        }
-
-        let mut boxes = Vec::new();
-        // The display layout's lines are the reported lines, index for
-        // index: `assemble` builds one from the other.
-        for ((line, info), place) in self.display().lines().zip(lines).zip(geometry) {
-            // Clipping to the line's own range is what drops its trailing
-            // collapsible whitespace, which the range excludes.
-            let low = start.max(info.source_start);
-            let high = end.min(info.source_end);
-            if low >= high {
-                continue;
-            }
-            let mut extent: Option<(f32, f32)> = None;
-            self.for_each_extent(&line, |units, left, right| {
-                if units.start < high && units.end > low {
-                    extent = Some(
-                        extent.map_or((left, right), |(min, max)| (min.min(left), max.max(right))),
-                    );
-                }
-            });
-            if let Some((left, right)) = extent {
-                boxes.push(Rect::new(
-                    Point::new(left, place.top),
-                    Size::new(right - left, place.height),
-                ));
-            }
-        }
-        Some(boxes)
+        let lines = self.line_spans();
+        self.paragraph
+            .range_boxes_in(&self.displayed(&lines), start, end)
     }
 
     /// The source unit of the cluster or atomic box under `point` in the
@@ -141,25 +98,9 @@ impl TextBlock {
     /// [`Self::has_committed`] first, as for every other reader.
     #[must_use]
     pub fn index_at_point(&self, point: Point<f32>) -> Option<u32> {
-        let (line, info) = self
-            .display()
-            .lines()
-            .zip(self.lines())
-            .zip(self.line_geometry())
-            .find(|(_, place)| place.top <= point.y && point.y < place.top + place.height)
-            .map(|(pair, _)| pair)?;
-        let mut hit = None;
-        self.for_each_extent(&line, |units, left, right| {
-            if hit.is_none()
-                && left <= point.x
-                && point.x < right
-                && units.start < info.source_end
-                && units.end > info.source_start
-            {
-                hit = Some(units.start.max(info.source_start));
-            }
-        });
-        hit
+        let lines = self.line_spans();
+        self.paragraph
+            .index_at_point_in(&self.displayed(&lines), point)
     }
 
     /// The source units content item `item` contributed, in the units
@@ -178,16 +119,23 @@ impl TextBlock {
         self.paragraph.item_source_range(item)
     }
 
-    /// Calls `visit(units, left, right)` once per cluster or atomic box of
-    /// the display `line` that shows source content, in visual order, with
-    /// the source units it covers and its inline extent.
+    /// The reported lines' source ranges, for the core's range queries.
+    fn line_spans(&self) -> Vec<LineSpan> {
+        self.lines()
+            .iter()
+            .map(|line| LineSpan {
+                start: line.source_start,
+                end: line.source_end,
+            })
+            .collect()
+    }
+
+    /// The display layout as the core's range queries read it.
     ///
-    /// What is no source text is skipped here, once, for every reader: the
+    /// What is no source text is cut off here, once, for every reader: the
     /// tail past a truncation cut — the dots, and the inline-truncation
-    /// content's clusters and boxes. Clipping to the line's own source range,
-    /// which is what drops the whitespace hanging at its end, is the
-    /// caller's.
-    fn for_each_extent(&self, line: &Line<'_, TextBrush>, visit: impl FnMut(Range<u32>, f32, f32)) {
+    /// content's clusters and boxes.
+    fn displayed<'a>(&'a self, lines: &'a [LineSpan]) -> Displayed<'a> {
         let block = &self.paragraph.content.block;
         let (cut_byte, content_slots) = self
             .expect_result()
@@ -196,8 +144,15 @@ impl TextBlock {
             .map_or((block.text.len(), block.boxes.len()), |part| {
                 (part.cut_byte as usize, part.content_slots)
             });
-        self.paragraph
-            .for_each_extent(line, cut_byte, content_slots, visit);
+        // The display layout's lines are the reported lines, index for
+        // index: `assemble` builds one from the other.
+        Displayed {
+            layout: self.display(),
+            lines,
+            geometry: self.line_geometry(),
+            cut_byte,
+            content_slots,
+        }
     }
 }
 

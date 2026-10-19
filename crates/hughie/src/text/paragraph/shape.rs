@@ -7,8 +7,8 @@
 use core::ops::Range;
 
 use parley::{
-    BaseDirection, CHROMIUM_LINE_BREAK_OVERRIDE, InlineBox, Layout, LineHeight as ParleyLineHeight,
-    PositionedLayoutItem, TextStyle as ParleyTextStyle,
+    BaseDirection, CHROMIUM_LINE_BREAK_OVERRIDE, InlineBox, Layout, LineBreakOverrideFn,
+    LineHeight as ParleyLineHeight, PositionedLayoutItem, TextStyle as ParleyTextStyle,
 };
 
 use super::content::SourceMap;
@@ -63,6 +63,27 @@ impl<S> LineRoot<'_, S> {
     };
 }
 
+/// A consumer's own line-break override, asked before the paragraph's for
+/// every pair: one function for each override a paragraph may be analysed
+/// with — Chromium's pair table, or none when a span is `break-all` — since
+/// parley takes one static function per builder. Each answers the pairs its
+/// consumer settles and defers every other one to the base it is named for.
+#[derive(Clone, Copy)]
+pub(in crate::text) struct BreakOverride {
+    /// Used where the paragraph is analysed with Chromium's override.
+    pub(in crate::text) over_chromium: &'static LineBreakOverrideFn,
+    /// Used where it is analysed with UAX #14 alone.
+    pub(in crate::text) over_icu: &'static LineBreakOverrideFn,
+}
+
+impl core::fmt::Debug for BreakOverride {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("BreakOverride")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Shapes one paragraph into a layout the caller keeps. `sources` receives
 /// the parley style-index → source identity table: push order is the style
 /// index, which is the run-identity channel that leaves `TextBrush = ()`
@@ -87,13 +108,57 @@ pub(in crate::text) fn shape<S: Copy>(
     sources: &mut Vec<S>,
     root: LineRoot<'_, S>,
 ) -> Layout<TextBrush> {
-    if !build_into_scratch(context, text, spans, boxes, sources, root) {
+    shape_overriding(context, text, spans, boxes, sources, root, None)
+}
+
+/// [`shape`], with `overriding`, a consumer's own line-break override, in
+/// front of the paragraph's.
+pub(in crate::text) fn shape_overriding<S: Copy>(
+    context: &mut TextContext,
+    text: &str,
+    spans: &[ShapeSpan<'_, S>],
+    boxes: Vec<InlineBox>,
+    sources: &mut Vec<S>,
+    root: LineRoot<'_, S>,
+    overriding: Option<BreakOverride>,
+) -> Layout<TextBrush> {
+    if !build_into_scratch(context, text, spans, boxes, sources, root, overriding) {
         return Layout::default();
     }
     let (_, _, scratch) = context.shaping_parts();
     let layout = scratch.clone();
     context.trim_scratch(text.len());
     layout
+}
+
+/// Shapes a measurement probe in the context's scratch layout and answers
+/// what `read` reads from it there, keeping nothing: no layout is copied,
+/// and the scratch is trimmed after, as after [`shape`]. The probe has no
+/// strut and first-strong direction ([`LineRoot::PROBE`]); `read` breaks it
+/// if it needs lines. `None`, without calling `read`, for fully empty
+/// content.
+pub(in crate::text) fn with_probe<S: Copy, R>(
+    context: &mut TextContext,
+    text: &str,
+    spans: &[ShapeSpan<'_, S>],
+    boxes: Vec<InlineBox>,
+    read: impl FnOnce(&mut Layout<TextBrush>) -> R,
+) -> Option<R> {
+    if !build_into_scratch(
+        context,
+        text,
+        spans,
+        boxes,
+        &mut Vec::new(),
+        LineRoot::PROBE,
+        None,
+    ) {
+        return None;
+    }
+    let (_, _, scratch) = context.shaping_parts();
+    let answer = read(scratch);
+    context.trim_scratch(text.len());
+    Some(answer)
 }
 
 /// Shapes a measurement probe in the context's scratch layout, breaks it as
@@ -104,21 +169,11 @@ pub(in crate::text) fn probe_width<S: Copy>(
     spans: &[ShapeSpan<'_, S>],
     boxes: Vec<InlineBox>,
 ) -> f32 {
-    if !build_into_scratch(
-        context,
-        text,
-        spans,
-        boxes,
-        &mut Vec::new(),
-        LineRoot::PROBE,
-    ) {
-        return 0.0;
-    }
-    let (_, _, scratch) = context.shaping_parts();
-    scratch.break_all_lines(None);
-    let width = scratch.width();
-    context.trim_scratch(text.len());
-    width
+    with_probe(context, text, spans, boxes, |layout| {
+        layout.break_all_lines(None);
+        layout.width()
+    })
+    .unwrap_or(0.0)
 }
 
 /// Builds `text` into the context's scratch layout, reusing its buffers.
@@ -127,7 +182,8 @@ pub(in crate::text) fn probe_width<S: Copy>(
 /// The line-break override is one decision per parley builder, so it cannot
 /// follow each span's `word-break`: the paragraph takes it unless a span is
 /// `break-all`, whose opportunities between ASCII letters the override's
-/// pair table would suppress.
+/// pair table would suppress. A consumer's own override, `overriding`, goes
+/// in front of whichever of the two that leaves.
 fn build_into_scratch<S: Copy>(
     context: &mut TextContext,
     text: &str,
@@ -135,6 +191,7 @@ fn build_into_scratch<S: Copy>(
     boxes: Vec<InlineBox>,
     sources: &mut Vec<S>,
     root: LineRoot<'_, S>,
+    overriding: Option<BreakOverride>,
 ) -> bool {
     sources.clear();
     if text.is_empty() && boxes.is_empty() {
@@ -157,14 +214,20 @@ fn build_into_scratch<S: Copy>(
     // `white-space-collapse: preserve` needs nothing from parley beyond it:
     // the normalizer keeps every space, and the tab stops are `super::tab`'s.
     let mut builder = layout_context.style_run_builder(font_context, text, 1.0, false);
-    if spans
+    // Parley 0.12 takes a mandatory break before it looks for a wrap
+    // opportunity, so the override's opportunity after the space of `"a \nb"`
+    // no longer swallows the newline's break.
+    let chromium = spans
         .iter()
-        .all(|span| span.breaking.word_break != WordBreak::BreakAll)
-    {
-        // Parley 0.12 takes a mandatory break before it looks for a wrap
-        // opportunity, so the override's opportunity after the space of
-        // `"a \nb"` no longer swallows the newline's break.
-        builder.set_line_break_override(Some(CHROMIUM_LINE_BREAK_OVERRIDE));
+        .all(|span| span.breaking.word_break != WordBreak::BreakAll);
+    let line_break_override = match (overriding, chromium) {
+        (None, true) => Some(CHROMIUM_LINE_BREAK_OVERRIDE),
+        (None, false) => None,
+        (Some(overriding), true) => Some(overriding.over_chromium),
+        (Some(overriding), false) => Some(overriding.over_icu),
+    };
+    if let Some(overrides) = line_break_override {
+        builder.set_line_break_override(Some(overrides));
     }
     builder.set_base_direction(root.direction);
     builder.reserve(spans.len() + 1, spans.len());

@@ -46,12 +46,17 @@ euclid = "0.22"
 flume = { version = "0.12", default-features = false, features = ["async"] }
 html5ever = "0.39"
 http = "1"
+# Unicode character properties for `hughie`'s inline box edges
+# (`text::inline::edge`): General_Category, Grapheme_Cluster_Break,
+# Line_Break, Joining_Type and Indic_Conjunct_Break. parley's shaping engine
+# already depends on this version with `compiled_data` on every target, so
+# naming it adds no crate and no data to the build.
+icu_properties = { version = "2.3", default-features = false, features = [
+    "compiled_data",
+] }
 image = { version = "0.25.10", default-features = false }
 getrandom = "0.4.3"
 markup5ever_rcdom = "0.39"
-# `dom` builds stylo's internal `(block, flow)` display — which the `lynx`
-# grammar never parses — from its public bit layout through the
-# `FromPrimitive` that `stylo::values::specified::box_::Display` derives.
 # `<markdown>`'s source parser (`bobcat-core`'s `tree::markdown::parse`):
 # CommonMark plus GFM tables and strikethrough. No default feature: the
 # `html` writer and the `getopts` binary are not used, and `simd` only

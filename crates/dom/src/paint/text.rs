@@ -24,7 +24,10 @@
 //!   paragraph is flattened and its slot hidden — so `background-color`/`background-image` declared
 //!   on it paints as an *inline box*: one fragment per line, behind that scope's own glyphs
 //!   ([`inline_background_fragments`]). The fragments are handed back to the walker, which paints
-//!   them with the same `background::paint` an element box uses.
+//!   them with the same `background::paint` an element box uses. That is a Lynx paragraph's: a CSS
+//!   inline formatting context's inline boxes report fragments of their own, border and padding
+//!   included, which the walker paints (`paint_inline_boxes`), and an inline box's edge cluster is
+//!   advance with no ink ([`PaintedParagraph::draws`]), skipped here.
 //! - The whole painter works in the text item's local space (origin at the text box's top-left,
 //!   which is also the Parley layout origin); `transform` already includes the device scale.
 //! - Everything parley positioned on a line — glyphs, decoration bands, background fragments,
@@ -177,6 +180,10 @@ impl<'doc> RunPaints<'doc> {
         let convert_tail = crate::layout::converts_tail_color(block_style);
         let sources = paragraph.sources;
         let truncation_sources = paragraph.truncation_sources;
+        // An inline formatting context's inline boxes paint their own
+        // fragments (`paint::walker`); only a Lynx paragraph's scopes paint
+        // backgrounds from their runs.
+        let scope_backgrounds = paragraph.paints_scope_backgrounds();
         let mut by_style = Vec::new();
         // The style indices a nested element's own ramp paints, with that
         // element. Empty for every paragraph whose runs are solid-coloured or
@@ -209,7 +216,7 @@ impl<'doc> RunPaints<'doc> {
                     if !converted && node != element && needs_gradient_box(style) {
                         nested.push((index, node));
                     }
-                    if node != element {
+                    if node != element && scope_backgrounds {
                         let chain = background_chain(document, node, element);
                         if !chain.is_empty() {
                             backgrounds.push((index, chain));
@@ -237,7 +244,7 @@ impl<'doc> RunPaints<'doc> {
         // through the element-box path; what it can still sit inside is a
         // backgrounded scope, which is why the walk starts at its parent.
         let mut atom_backgrounds: SmallVec<[(u64, BackgroundChain); 1]> = SmallVec::new();
-        for placed in paragraph.boxes() {
+        for placed in paragraph.boxes().iter().filter(|_| scope_backgrounds) {
             let PlacedBox::Visible { id, .. } = *placed else {
                 continue;
             };
@@ -676,6 +683,10 @@ fn paint_pass(
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                 continue;
             };
+            // An inline box's edge cluster is advance, not ink.
+            if !paragraph.draws(glyph_run.style_index()) {
+                continue;
+            }
             // parley splits a glyph run at every style-index change, so the
             // glyph run's style index answers for every glyph in it.
             let run = if glyph_run.glyphs().next().is_some() {

@@ -24,6 +24,17 @@
 //! `white-space-collapse` is read, every run is processed as `preserve`, and
 //! with `first_line_only` everything after the first forced break is dropped
 //! from the text while its source units stay counted.
+//!
+//! Two hooks serve a consumer that marks places in its content and lays
+//! text of its own in there:
+//!
+//! - A marker ([`InlineItem::Marker`]) counts no source unit, emits no text, and leaves white space
+//!   collapsing as it would be without it. The normalizer reports where each one fell
+//!   ([`MarkerAt`]): the text length when it was met, and the collapsible white space sequence open
+//!   then, with whether that sequence kept its space ([`NormalizedBlock::space_kept`]).
+//! - [`NormalizedBlock::splice`] inserts consumer text into the normalized text after the fact:
+//!   bytes with no source unit, each shaped in a style of its own and listed in
+//!   [`NormalizedBlock::inserted`]. Every offset a caller reads is unchanged by them.
 
 use core::ops::Range;
 
@@ -35,6 +46,12 @@ use crate::geometry::Size;
 pub enum InlineItem<'src> {
     Run(TextRunItem<'src>),
     Box(InlineBoxSpec),
+    /// A place in the content that is no content: no source unit, no
+    /// text, and no break in white space collapsing — the white space around
+    /// it collapses as if it were not there. Opaque to the core, which
+    /// reports where it fell ([`NormalizedBlock::markers`]); what it marks is
+    /// the consumer's.
+    Marker,
 }
 
 /// One text run carrying the fully resolved style of its innermost enclosing
@@ -97,8 +114,10 @@ pub(in crate::text) enum WhiteSpaceProcessing {
 #[derive(Debug)]
 pub(in crate::text) struct NormalizedBlock {
     pub(in crate::text) text: String,
-    /// Contiguous, non-overlapping, covering `0..text.len()` — the
-    /// `style_run_builder` precondition. `item` indexes the input slice.
+    /// Contiguous, non-overlapping, covering `0..text.len()` but for the
+    /// inserted segments in `inserted`, which `super::Flow::spans`
+    /// interleaves to meet the `style_run_builder` precondition. `item`
+    /// indexes the input slice.
     pub(in crate::text) ranges: Vec<StyledRange>,
     pub(in crate::text) boxes: Vec<BoxAt>,
     pub(in crate::text) map: SourceMap,
@@ -116,6 +135,53 @@ pub(in crate::text) struct NormalizedBlock {
     /// The box items a `first_line_only` processing dropped, in order: they
     /// have a source unit and no place in the text.
     pub(in crate::text) dropped_boxes: Vec<u32>,
+    /// Where each [`InlineItem::Marker`] fell, in item order.
+    pub(in crate::text) markers: Vec<MarkerAt>,
+    /// Whether each collapsible white space sequence kept a space, by the
+    /// sequence's index ([`MarkerAt::space`]).
+    pub(in crate::text) space_kept: Vec<bool>,
+    /// The segments [`Self::splice`] inserted into `text`, ascending.
+    /// `ranges` covers every byte but theirs.
+    pub(in crate::text) inserted: Vec<InsertedSegment>,
+}
+
+/// Where the normalizer met one [`InlineItem::Marker`].
+#[derive(Debug, Clone, Copy)]
+pub(in crate::text) struct MarkerAt {
+    /// The marker's item.
+    pub(in crate::text) item: u32,
+    /// The text length when it was met.
+    pub(in crate::text) byte: u32,
+    /// The collapsible white space sequence open when it was met, if any:
+    /// the marker lies after that sequence's first character in source
+    /// order, and a space the sequence keeps ([`NormalizedBlock::space_kept`])
+    /// sits at `byte`.
+    pub(in crate::text) space: Option<u32>,
+}
+
+/// Text a consumer inserts into the normalized text ([`NormalizedBlock::splice`]).
+#[derive(Debug, Clone)]
+pub(in crate::text) struct Insertion {
+    /// The byte of the text before any insertion it goes in front of.
+    pub(in crate::text) at: u32,
+    pub(in crate::text) text: String,
+    /// The style it is shaped in.
+    pub(in crate::text) style: RunStyle,
+    /// Added to the style's letter-spacing: the advance parley adds after
+    /// each of its clusters.
+    pub(in crate::text) extra_spacing: f32,
+    /// The item whose paint identity and line-breaking values it is shaped
+    /// with.
+    pub(in crate::text) item: u32,
+}
+
+/// One inserted segment in the normalized text: bytes with no source unit.
+#[derive(Debug, Clone, PartialEq)]
+pub(in crate::text) struct InsertedSegment {
+    pub(in crate::text) bytes: Range<u32>,
+    pub(in crate::text) style: RunStyle,
+    pub(in crate::text) extra_spacing: f32,
+    pub(in crate::text) item: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,6 +242,9 @@ enum SegmentKind {
     Collapsed,
     /// One source unit, zero bytes; `norm.start` is the box's byte index.
     Box,
+    /// An inserted segment ([`NormalizedBlock::splice`]): bytes and no
+    /// source unit, so `units` is empty.
+    Inserted,
 }
 
 impl SourceMap {
@@ -211,7 +280,7 @@ impl SourceMap {
                 let prefix = &text[segment.norm.start as usize..byte as usize];
                 segment.units.start + utf16_len(prefix)
             }
-            SegmentKind::Collapsed => segment.units.start,
+            SegmentKind::Collapsed | SegmentKind::Inserted => segment.units.start,
             SegmentKind::Box => unreachable!("a box segment spans no bytes"),
         }
     }
@@ -230,7 +299,9 @@ impl SourceMap {
                 match segment.kind {
                     SegmentKind::Box => break,
                     SegmentKind::Collapsed => result = segment.units.end,
-                    SegmentKind::Verbatim => unreachable!("verbatim segments are never empty"),
+                    SegmentKind::Verbatim | SegmentKind::Inserted => {
+                        unreachable!("verbatim and inserted segments are never empty")
+                    }
                 }
             } else if segment.kind == SegmentKind::Verbatim && segment.norm.start < byte {
                 let prefix = &text[segment.norm.start as usize..byte as usize];
@@ -310,6 +381,7 @@ impl SourceMap {
                 Some(byte)
             }
             SegmentKind::Collapsed | SegmentKind::Box => Some(segment.norm.start),
+            SegmentKind::Inserted => unreachable!("an inserted segment holds no source unit"),
         }
     }
 }
@@ -338,6 +410,9 @@ struct Pending {
     unit_start: u32,
     item: u32,
     kind: PendingKind,
+    /// Which sequence this is, for the markers met while it was open
+    /// ([`MarkerAt::space`]): an index into [`Normalizer::space_kept`].
+    id: u32,
 }
 
 struct Normalizer {
@@ -358,6 +433,11 @@ struct Normalizer {
     /// and dropped.
     dropped_from: Option<u32>,
     dropped_boxes: Vec<u32>,
+    /// Every marker, in source order.
+    markers: Vec<MarkerAt>,
+    /// Whether each collapsible white space sequence kept its space, by
+    /// [`Pending::id`].
+    space_kept: Vec<bool>,
 }
 
 /// The sentinel handed to the segment-break predicate when the next content
@@ -381,6 +461,8 @@ pub(in crate::text) fn normalize(
         processing,
         dropped_from: None,
         dropped_boxes: Vec::new(),
+        markers: Vec::new(),
+        space_kept: Vec::new(),
     };
 
     let mut item_units = Vec::with_capacity(items.len());
@@ -390,6 +472,7 @@ pub(in crate::text) fn normalize(
         match item {
             InlineItem::Run(run) => state.consume_run(run, item_index),
             InlineItem::Box(_) => state.consume_box(item_index),
+            InlineItem::Marker => state.mark(item_index),
         }
         item_units.push(start..state.units);
     }
@@ -426,6 +509,23 @@ impl Normalizer {
         }
     }
 
+    /// A marker: no source unit, no text, and the white space around it
+    /// untouched; only where it fell is recorded.
+    fn mark(&mut self, item: u32) {
+        self.markers.push(MarkerAt {
+            item,
+            byte: self.byte_len(),
+            space: self.pending.as_ref().map(|pending| pending.id),
+        });
+    }
+
+    /// The id the next collapsible white space sequence takes.
+    fn next_pending_id(&mut self) -> u32 {
+        let id = u32::try_from(self.space_kept.len()).expect("sequence count fits u32");
+        self.space_kept.push(false);
+        id
+    }
+
     fn consume_box(&mut self, item: u32) {
         if self.dropped_from.is_some() {
             self.units += 1;
@@ -448,6 +548,7 @@ impl Normalizer {
     fn queue_space(&mut self, character: char, item: u32) {
         debug_assert_eq!(character.len_utf16(), 1);
         if self.pending.is_none() {
+            let id = self.next_pending_id();
             self.pending = Some(Pending {
                 unit_start: self.units,
                 item,
@@ -456,6 +557,7 @@ impl Normalizer {
                 } else {
                     PendingKind::Space
                 },
+                id,
             });
         }
         self.units += 1;
@@ -464,24 +566,23 @@ impl Normalizer {
     /// A collapsible newline upgrades the span to a segment break unless a
     /// preserved break directly precedes it.
     fn queue_segment_break(&mut self, item: u32) {
-        match &mut self.pending {
-            Some(pending) => {
-                if pending.kind == PendingKind::Space {
-                    pending.kind = PendingKind::SegmentBreak;
-                    pending.item = item;
-                }
+        if let Some(pending) = &mut self.pending {
+            if pending.kind == PendingKind::Space {
+                pending.kind = PendingKind::SegmentBreak;
+                pending.item = item;
             }
-            None => {
-                self.pending = Some(Pending {
-                    unit_start: self.units,
-                    item,
-                    kind: if self.at_line_start {
-                        PendingKind::Suppressed
-                    } else {
-                        PendingKind::SegmentBreak
-                    },
-                });
-            }
+        } else {
+            let id = self.next_pending_id();
+            self.pending = Some(Pending {
+                unit_start: self.units,
+                item,
+                kind: if self.at_line_start {
+                    PendingKind::Suppressed
+                } else {
+                    PendingKind::SegmentBreak
+                },
+                id,
+            });
         }
         self.units += 1;
     }
@@ -553,6 +654,7 @@ impl Normalizer {
             self.text.push(' ');
             self.record_style(start, pending.item);
             self.close_collapsed(pending.unit_start, 1);
+            self.space_kept[pending.id as usize] = true;
         } else {
             self.close_collapsed(pending.unit_start, 0);
         }
@@ -646,6 +748,7 @@ impl Normalizer {
                 let start = self.byte_len();
                 self.text.push(' ');
                 self.record_style(start, pending.item);
+                self.space_kept[pending.id as usize] = true;
                 self.segments.push(Segment {
                     norm: Range2 {
                         start,
@@ -684,7 +787,235 @@ impl Normalizer {
             item_units,
             tabs: self.tabs,
             dropped_boxes: self.dropped_boxes,
+            markers: self.markers,
+            space_kept: self.space_kept,
+            inserted: Vec::new(),
         }
+    }
+}
+
+impl NormalizedBlock {
+    /// Inserts `insertions`, in text order, into the normalized text: each
+    /// before the byte `at` of the text as it was, and before an atomic box
+    /// at that byte. Every byte
+    /// offset after one moves past it, a styled range or segment it falls
+    /// inside is cut there, and the source map counts its bytes as no source
+    /// unit, so every source offset a caller sees is unchanged. Each lands in
+    /// [`Self::inserted`], which the shaper interleaves with the styled
+    /// ranges.
+    pub(in crate::text) fn splice(&mut self, insertions: Vec<Insertion>) {
+        if insertions.is_empty() {
+            return;
+        }
+        debug_assert!(
+            insertions.windows(2).all(|pair| pair[0].at <= pair[1].at),
+            "insertions come in text order",
+        );
+        let shifts = Shifts {
+            insertions: &insertions,
+        };
+        let box_bytes: Vec<u32> = self
+            .boxes
+            .iter()
+            .map(|entry| entry.byte + shifts.before(entry.byte, true))
+            .collect();
+        for (entry, &byte) in self.boxes.iter_mut().zip(&box_bytes) {
+            entry.byte = byte;
+        }
+
+        // A styled range an insertion falls inside is cut there, so no range
+        // covers inserted bytes.
+        let mut ranges = Vec::with_capacity(self.ranges.len() + insertions.len());
+        for range in &self.ranges {
+            let mut from = range.bytes.start;
+            for point in shifts.cuts(range.bytes.start, range.bytes.end) {
+                if from < point {
+                    let moved = shifts.before(from, true);
+                    ranges.push(StyledRange {
+                        bytes: from + moved..point + moved,
+                        item: range.item,
+                    });
+                }
+                from = point;
+            }
+        }
+        self.ranges = ranges;
+        for tab in &mut self.tabs {
+            *tab += shifts.before(*tab, true);
+        }
+        let segments = self.spliced_segments(&shifts, &box_bytes);
+        self.map.segments = segments;
+
+        let mut text = String::with_capacity(
+            self.text.len()
+                + insertions
+                    .iter()
+                    .map(|insertion| insertion.text.len())
+                    .sum::<usize>(),
+        );
+        let mut copied = 0;
+        let mut moved = 0;
+        for insertion in insertions {
+            text.push_str(&self.text[copied..insertion.at as usize]);
+            text.push_str(&insertion.text);
+            copied = insertion.at as usize;
+            let length = u32::try_from(insertion.text.len()).expect("fits u32");
+            let start = insertion.at + moved;
+            moved += length;
+            self.inserted.push(InsertedSegment {
+                bytes: start..start + length,
+                style: insertion.style,
+                extra_spacing: insertion.extra_spacing,
+                item: insertion.item,
+            });
+        }
+        text.push_str(&self.text[copied..]);
+        self.text = text;
+    }
+
+    /// The source map's segments in the spliced text: cut like the styled
+    /// ranges, with one inserted segment per insertion, sorted by where they
+    /// start — a segment of no bytes before an inserted one starting at the
+    /// same byte, and an inserted one before text starting there. An
+    /// inserted segment holds no unit: it sits at the unit the segment before
+    /// it ends at.
+    fn spliced_segments(&mut self, shifts: &Shifts<'_>, box_bytes: &[u32]) -> Vec<Segment> {
+        let old = core::mem::take(&mut self.map.segments);
+        let mut sorted: Vec<(u32, u8, Segment)> =
+            Vec::with_capacity(old.len() + shifts.insertions.len());
+        let at = |byte: u32| Range2 {
+            start: byte,
+            end: byte,
+        };
+        let mut box_slots = box_bytes.iter();
+        for segment in old {
+            if segment.kind == SegmentKind::Box {
+                let byte = *box_slots.next().expect("one box segment per atom");
+                sorted.push((
+                    byte,
+                    0,
+                    Segment {
+                        norm: at(byte),
+                        ..segment
+                    },
+                ));
+            } else if segment.norm.start == segment.norm.end {
+                let byte = segment.norm.start + shifts.before(segment.norm.start, false);
+                sorted.push((
+                    byte,
+                    0,
+                    Segment {
+                        norm: at(byte),
+                        ..segment
+                    },
+                ));
+            } else if segment.kind == SegmentKind::Verbatim {
+                // A verbatim segment re-decodes its text for intra-segment
+                // offsets, so inserted bytes inside it would count as source:
+                // it is cut at every insertion point.
+                let mut from = segment.norm.start;
+                let mut unit = segment.units.start;
+                for point in shifts.cuts(segment.norm.start, segment.norm.end) {
+                    let units = utf16_len(&self.text[from as usize..point as usize]);
+                    let moved = shifts.before(from, true);
+                    sorted.push((
+                        from + moved,
+                        2,
+                        Segment {
+                            norm: Range2 {
+                                start: from + moved,
+                                end: point + moved,
+                            },
+                            units: Range2 {
+                                start: unit,
+                                end: unit + units,
+                            },
+                            kind: SegmentKind::Verbatim,
+                        },
+                    ));
+                    unit += units;
+                    from = point;
+                }
+            } else {
+                let moved = shifts.before(segment.norm.start, true);
+                sorted.push((
+                    segment.norm.start + moved,
+                    2,
+                    Segment {
+                        norm: Range2 {
+                            start: segment.norm.start + moved,
+                            end: segment.norm.end + moved,
+                        },
+                        ..segment
+                    },
+                ));
+            }
+        }
+        let mut moved = 0;
+        for insertion in shifts.insertions {
+            let length = u32::try_from(insertion.text.len()).expect("fits u32");
+            let start = insertion.at + moved;
+            sorted.push((
+                start,
+                1,
+                Segment {
+                    norm: Range2 {
+                        start,
+                        end: start + length,
+                    },
+                    units: at(0),
+                    kind: SegmentKind::Inserted,
+                },
+            ));
+            moved += length;
+        }
+        sorted.sort_by_key(|&(start, rank, _)| (start, rank));
+        let mut unit = 0;
+        sorted
+            .into_iter()
+            .map(|(_, _, mut segment)| {
+                if segment.kind == SegmentKind::Inserted {
+                    segment.units = at(unit);
+                } else {
+                    unit = segment.units.end;
+                }
+                segment
+            })
+            .collect()
+    }
+}
+
+/// Where a list of insertions moves the bytes of the text before them.
+struct Shifts<'a> {
+    insertions: &'a [Insertion],
+}
+
+impl Shifts<'_> {
+    /// The bytes inserted before old byte `byte`: strictly before it, or,
+    /// `inclusive`, at it as well — which is where text starting at `byte`
+    /// moves to, past the insertions in front of it.
+    fn before(&self, byte: u32, inclusive: bool) -> u32 {
+        self.insertions
+            .iter()
+            .take_while(|insertion| {
+                if inclusive {
+                    insertion.at <= byte
+                } else {
+                    insertion.at < byte
+                }
+            })
+            .map(|insertion| u32::try_from(insertion.text.len()).expect("fits u32"))
+            .sum()
+    }
+
+    /// The insertion points strictly inside `start..end`, then `end`: where
+    /// a range from `start` is cut into pieces no insertion falls inside.
+    fn cuts(&self, start: u32, end: u32) -> impl Iterator<Item = u32> + '_ {
+        self.insertions
+            .iter()
+            .map(|insertion| insertion.at)
+            .filter(move |&point| start < point && point < end)
+            .chain(core::iter::once(end))
     }
 }
 

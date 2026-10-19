@@ -713,6 +713,15 @@ pub(crate) enum PaintItemKind {
     Backdrop {
         element: NodeId,
     },
+    /// One fragment of a non-atomic inline box — the item's node — in the
+    /// inline formatting context `paragraph` establishes: its border box on
+    /// one line, in paragraph order after the paragraph's own record. The
+    /// paragraph's record draws it; this one only answers hits, so a point
+    /// in a fragment, its padding included, targets the inline box, and the
+    /// boxes it is nested in after it.
+    InlineFragment {
+        paragraph: NodeId,
+    },
 }
 
 /// One node's entry in the paint order.

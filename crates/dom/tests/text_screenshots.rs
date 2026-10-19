@@ -189,3 +189,58 @@ fn generated_text_matches_literal_runs() {
         );
     }
 }
+
+/// The flow layout an engine sheet writes, which an author sheet cannot:
+/// `.flow` a block container, `.inline` an inline box in its inline
+/// formatting context. A UA sheet stands in for the engine's own here.
+const FLOW_SHEET: &str = ".flow { display: block; } .inline { display: inline; }";
+
+/// Inline boxes in a block container's inline formatting context, with
+/// `box-decoration-break: slice`: a padded, bordered, rounded box wrapped
+/// over two lines shows its start border, padding and corners on the first
+/// line only and its end ones on the last; a gradient background runs across
+/// the wrap as one strip; a nested box paints over its parent's background;
+/// an empty box with a border and padding still takes up its line; vertical
+/// padding paints past the line box without moving it.
+#[test]
+fn text_inline_boxes() {
+    const FRAGMENT: &str = r#"
+<div style="display: flex; flex-direction: column; width: 440px; height: 260px; padding: 16px 20px; gap: 18px; box-sizing: border-box; background-color: white; font-family: Roboto; font-size: 20px; color: #111827">
+  <div class="flow" style="width: 300px; line-height: 1.8">Text before <span class="inline" style="background-color: #fde68a; border: 2px solid #b45309; border-radius: 8px; padding: 2px 10px">a padded box that wraps onto the next line</span> and after.</div>
+  <div class="flow" style="width: 330px; line-height: 1.8">Nested <span class="inline" style="background-color: #bfdbfe; padding: 0 6px">outer <span class="inline" style="background-color: #1d4ed8; color: white; border-radius: 4px; padding: 0 4px">inner</span> box</span>, an empty <span class="inline" style="border-left: 3px solid #dc2626; padding-right: 12px; background-color: #fecaca"></span> one, and <span class="inline" style="background-image: linear-gradient(90deg, #f43f5e, #6366f1); color: white; padding: 0 8px">a gradient that runs across the wrap</span>.</div>
+</div>
+"#;
+    let mut doc = html::parse(FRAGMENT, 440.0, 260.0);
+    doc.dom
+        .register_fonts(dom::FontBlob::from_static(screenshot::ROBOTO));
+    doc.dom
+        .add_stylesheet(FLOW_SHEET, dom::StylesheetOrigin::UserAgent);
+    let actual =
+        screenshot::capture_prebuilt_document("text_inline_boxes", &mut doc.dom, &dom::NoImages);
+    assert_text_golden("inline-boxes", &actual);
+}
+
+/// A nested inline box sliced across a wrap, inside a box that is sliced
+/// too: each box shows its start border, padding and corners on its first
+/// fragment only and its end ones on its last, its middle fragments are
+/// open on both sides, and the inner box's fragments paint over the outer
+/// box's on every line.
+#[test]
+fn text_nested_inline_box_across_a_wrap() {
+    const FRAGMENT: &str = r#"
+<div style="display: flex; flex-direction: column; width: 300px; height: 200px; padding: 16px 20px; box-sizing: border-box; background-color: white; font-family: Roboto; font-size: 20px; color: #111827">
+  <div class="flow" style="width: 220px; line-height: 1.8">Start <span class="inline" style="background-color: #bfdbfe; border: 2px solid #1d4ed8; border-radius: 6px; padding: 0 8px">outer <span class="inline" style="background-color: #1d4ed8; color: white; border: 2px solid #f59e0b; border-radius: 4px; padding: 0 6px">inner text that wraps over lines</span> tail</span> end.</div>
+</div>
+"#;
+    let mut doc = html::parse(FRAGMENT, 300.0, 200.0);
+    doc.dom
+        .register_fonts(dom::FontBlob::from_static(screenshot::ROBOTO));
+    doc.dom
+        .add_stylesheet(FLOW_SHEET, dom::StylesheetOrigin::UserAgent);
+    let actual = screenshot::capture_prebuilt_document(
+        "text_nested_inline_box_across_a_wrap",
+        &mut doc.dom,
+        &dom::NoImages,
+    );
+    assert_text_golden("nested-inline-box-wrap", &actual);
+}

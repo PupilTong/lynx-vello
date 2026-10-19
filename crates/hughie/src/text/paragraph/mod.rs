@@ -13,6 +13,17 @@
 //! - `position` places atomic boxes by `vertical-align`.
 //! - `memo` remembers the constraints a paragraph has already answered and the one it committed.
 //! - `extent` walks a laid-out line cluster by cluster in source units.
+//! - `query` answers source-range boxes and hit points over a laid-out paragraph, for both
+//!   consumers.
+//!
+//! A consumer that lays text of its own into the content uses three generic
+//! hooks, none of which the Lynx block needs: markers in the item stream,
+//! whose places the normalizer reports (`content::MarkerAt`); segments it
+//! splices into the normalized text, with no source unit and a style of
+//! their own (`content::NormalizedBlock::splice`); and a line-break override
+//! of its own for the pairs those segments take part in
+//! ([`shape::BreakOverride`]). It builds the flow ([`Flow::build`]), uses
+//! them, then shapes ([`Paragraph::from_flow`]).
 //!
 //! `Paragraph` owns one shaped natural layout over one flow of items and
 //! re-breaks it in place: a new constraint, or a resized atomic box, never
@@ -42,6 +53,7 @@ pub(in crate::text) mod content;
 mod extent;
 pub(in crate::text) mod memo;
 pub(in crate::text) mod position;
+pub(in crate::text) mod query;
 pub(in crate::text) mod shape;
 pub(in crate::text) mod style;
 mod tab;
@@ -54,7 +66,7 @@ pub use memo::{BlockConstraint, BlockMetrics};
 use parley::{
     ContentWidths, InlineBox, InlineBoxKind, Layout, WhiteSpaceCollapse as ParleyWhiteSpace,
 };
-use shape::{NaturalLine, ShapeSpan};
+use shape::{BreakOverride, NaturalLine, ShapeSpan};
 pub use style::{
     BreakStyle, Direction, IndentKeywords, LineHeight, OverflowWrap, RunStyle, TextAlign,
     TextIndent, TextWrap, VerticalAlign, WhiteSpaceCollapse, WordBreak,
@@ -117,6 +129,8 @@ pub(in crate::text) enum OwnedItem {
         hanging: ParleyWhiteSpace,
     },
     Box(InlineBoxSpec),
+    /// A marker ([`InlineItem::Marker`]).
+    Marker,
 }
 
 /// One owned flattened flow: the main content, or the truncation content.
@@ -131,6 +145,10 @@ pub(in crate::text) struct Flow {
     /// Each preserved tab's `0.5ch`, the shortest shift it takes; indexed
     /// like `block.tabs`. Measured once, for the content flow only.
     pub(in crate::text) tab_min: Vec<f32>,
+    /// The consumer's own line-break override, for the pairs its inserted
+    /// segments take part in ([`content::NormalizedBlock::splice`]). `None`
+    /// shapes with the paragraph's alone.
+    pub(in crate::text) break_override: Option<BreakOverride>,
 }
 
 impl Flow {
@@ -149,11 +167,13 @@ impl Flow {
                         hanging: white_space_hanging(processing, run.white_space),
                     },
                     InlineItem::Box(spec) => OwnedItem::Box(*spec),
+                    InlineItem::Marker => OwnedItem::Marker,
                 })
                 .collect(),
             block,
             tab_spacing: vec![0.0; tabs],
             tab_min: vec![0.0; tabs],
+            break_override: None,
         }
     }
 
@@ -166,14 +186,14 @@ impl Flow {
     pub(in crate::text) fn run_style(&self, item: u32) -> &RunStyle {
         match &self.items[item as usize] {
             OwnedItem::Run { style, .. } => style,
-            OwnedItem::Box(_) => unreachable!("styled ranges only reference run items"),
+            _ => unreachable!("styled ranges only reference run items"),
         }
     }
 
     pub(in crate::text) fn box_spec(&self, item: u32) -> &InlineBoxSpec {
         match &self.items[item as usize] {
             OwnedItem::Box(spec) => spec,
-            OwnedItem::Run { .. } => unreachable!("box slots only reference box items"),
+            _ => unreachable!("box slots only reference box items"),
         }
     }
 
@@ -182,7 +202,7 @@ impl Flow {
     pub(in crate::text) fn hanging(&self, item: u32) -> ParleyWhiteSpace {
         match &self.items[item as usize] {
             OwnedItem::Run { hanging, .. } => *hanging,
-            OwnedItem::Box(_) => unreachable!("styled ranges only reference run items"),
+            _ => unreachable!("styled ranges only reference run items"),
         }
     }
 
@@ -190,7 +210,9 @@ impl Flow {
     ///
     /// One span per styled range, except that every preserved tab's space is
     /// a span of its own carrying its tab spacing — the only way to give one
-    /// cluster an advance of its own in parley.
+    /// cluster an advance of its own in parley — and every inserted segment
+    /// is one in its own style, with its extra spacing and the paint identity
+    /// of its item.
     pub(in crate::text) fn spans<S>(
         &self,
         byte_offset: u32,
@@ -198,34 +220,61 @@ impl Flow {
         breaking: RunBreaking<'_>,
     ) -> Vec<ShapeSpan<'_, S>> {
         let tabs = &self.block.tabs;
-        let mut spans = Vec::with_capacity(self.block.ranges.len() + 2 * tabs.len());
-        let mut push = |bytes: core::ops::Range<u32>, item: u32, extra_spacing: f32| {
-            spans.push(ShapeSpan {
-                bytes: (bytes.start + byte_offset) as usize..(bytes.end + byte_offset) as usize,
-                style: self.run_style(item),
-                breaking: breaking.of(item),
-                hanging: self.hanging(item),
-                source: source(item),
-                extra_spacing,
-            });
+        let inserted = &self.block.inserted;
+        let mut spans =
+            Vec::with_capacity(self.block.ranges.len() + 2 * tabs.len() + inserted.len());
+        let shifted = |bytes: &core::ops::Range<u32>| {
+            (bytes.start + byte_offset) as usize..(bytes.end + byte_offset) as usize
+        };
+        let inserted_span = |index: usize| {
+            let segment = &inserted[index];
+            ShapeSpan {
+                bytes: shifted(&segment.bytes),
+                style: &segment.style,
+                breaking: breaking.of(segment.item),
+                hanging: ParleyWhiteSpace::Collapse,
+                source: source(segment.item),
+                extra_spacing: segment.extra_spacing,
+            }
+        };
+        let mut next_inserted = 0;
+        let run_span = |bytes: core::ops::Range<u32>, item: u32, extra_spacing: f32| ShapeSpan {
+            bytes: shifted(&bytes),
+            style: self.run_style(item),
+            breaking: breaking.of(item),
+            hanging: self.hanging(item),
+            source: source(item),
+            extra_spacing,
         };
         let mut next_tab = 0;
         for range in &self.block.ranges {
+            // Inserted segments sit between styled ranges, never inside one.
+            while let Some(segment) = inserted.get(next_inserted)
+                && segment.bytes.start < range.bytes.start
+            {
+                spans.push(inserted_span(next_inserted));
+                next_inserted += 1;
+            }
             let mut start = range.bytes.start;
             while let Some(&tab) = tabs.get(next_tab)
                 && tab < range.bytes.end
             {
                 if start < tab {
-                    push(start..tab, range.item, 0.0);
+                    spans.push(run_span(start..tab, range.item, 0.0));
                 }
-                push(tab..tab + 1, range.item, self.tab_spacing[next_tab]);
+                spans.push(run_span(
+                    tab..tab + 1,
+                    range.item,
+                    self.tab_spacing[next_tab],
+                ));
                 start = tab + 1;
                 next_tab += 1;
             }
             if start < range.bytes.end {
-                push(start..range.bytes.end, range.item, 0.0);
+                spans.push(run_span(start..range.bytes.end, range.item, 0.0));
             }
         }
+        spans.extend((next_inserted..inserted.len()).map(inserted_span));
         spans
     }
 }
@@ -326,7 +375,22 @@ impl<S: Copy> Paragraph<S> {
         source: fn(u32) -> S,
         root: ParagraphRoot<S>,
     ) -> Self {
-        let mut flow = Flow::build(items, processing);
+        let flow = Flow::build(items, processing);
+        Self::from_flow(context, breaking, processing, flow, source, root)
+    }
+
+    /// Shapes `flow`, a flow [`Flow::build`] built with `processing`, once a
+    /// consumer has used the hooks between building and shaping: its
+    /// markers' places, the segments it splices in, and its line-break
+    /// override. The rest is as [`Self::new`].
+    pub(in crate::text) fn from_flow(
+        context: &mut TextContext,
+        breaking: RunBreaking<'_>,
+        processing: WhiteSpaceProcessing,
+        mut flow: Flow,
+        source: fn(u32) -> S,
+        root: ParagraphRoot<S>,
+    ) -> Self {
         let tab_stops = match processing {
             WhiteSpaceProcessing::Verbatim { .. } => tab::TabStops::Native,
             WhiteSpaceProcessing::Css => {
@@ -341,13 +405,14 @@ impl<S: Copy> Paragraph<S> {
         // percentage basis is not known yet, and nothing reads the boxes.
         let boxes = parley_boxes(&flow, 0, 0, 0.0);
         let mut natural_sources = Vec::new();
-        let natural = shape::shape(
+        let natural = shape::shape_overriding(
             context,
             &flow.block.text,
             &spans,
             boxes,
             &mut natural_sources,
             root.line_root(),
+            flow.break_override,
         );
         drop(spans);
         // With no strut the first run stands in for the root, as it does as
@@ -355,7 +420,7 @@ impl<S: Copy> Paragraph<S> {
         let basis_style = root.strut.as_ref().map(|(style, _)| style).or_else(|| {
             flow.items.iter().find_map(|item| match item {
                 OwnedItem::Run { style, .. } => Some(style),
-                OwnedItem::Box(_) => None,
+                _ => None,
             })
         });
         let percent_basis = position::percent_basis(&natural, basis_style);
@@ -463,13 +528,14 @@ impl<S: Copy> Paragraph<S> {
     fn reshape(&mut self, context: &mut TextContext, breaking: RunBreaking<'_>) {
         let spans = self.content.spans(0, self.source, breaking);
         let boxes = parley_boxes(&self.content, 0, 0, self.percent_basis);
-        self.natural = shape::shape(
+        self.natural = shape::shape_overriding(
             context,
             &self.content.block.text,
             &spans,
             boxes,
             &mut self.natural_sources,
             self.root.line_root(),
+            self.content.break_override,
         );
     }
 }

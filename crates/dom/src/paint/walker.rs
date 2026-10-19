@@ -1527,6 +1527,11 @@ fn paint_item<T>(
         scale,
         ..
     } = painting;
+    // An inline box fragment is drawn by its paragraph's record; its own
+    // record only answers hits.
+    if matches!(item.kind, PaintItemKind::InlineFragment { .. }) {
+        return;
+    }
     sync_clips(sink, scratch, frame, item, scale);
     let space = item.space;
     let transform = scale * local;
@@ -1568,6 +1573,7 @@ fn paint_item<T>(
             border::paint(sink.scene_for(space), &mut scratch.paths, style, &fragment);
             border::paint_outline(sink.scene_for(space), &mut scratch.paths, style, &fragment);
         }
+        PaintItemKind::InlineFragment { .. } => {}
         PaintItemKind::TextRun { element } => {
             let Some(style) = document.paint_style(element) else {
                 return;
@@ -1575,6 +1581,20 @@ fn paint_item<T>(
             let Some(paragraph) = document.painted_paragraph(item.node) else {
                 return;
             };
+            // An inline formatting context's inline boxes: their backgrounds
+            // and borders, in tree order, under every glyph (CSS2 Appendix E
+            // step 7.2.1).
+            if !paragraph.fragments().is_empty() {
+                paint_inline_boxes(
+                    sink,
+                    &mut scratch.paths,
+                    space,
+                    document,
+                    &paragraph,
+                    transform,
+                    images,
+                );
+            }
             let gradient_box = text::needs_gradient_box(style)
                 .then(|| color_gradient_box(document, item, element));
             // One entry per parley style index, so a glyph run resolves its own
@@ -1593,6 +1613,143 @@ fn paint_item<T>(
             text::paint(sink.scene_for(space), &paragraph, transform, &runs);
         }
     }
+}
+
+/// Paints every inline box of an inline formatting context — its background
+/// and its border, fragment by fragment, box by box in tree order — through
+/// the same `background::paint` and `border::paint` an element box uses.
+///
+/// `box-decoration-break: slice` (css-break-3 §5.4; the fork has no other
+/// value): a box is painted as if it were not broken — its fragments placed
+/// end to end in its own inline direction, one strip whose start edge is on
+/// the first fragment and whose end edge is on the last — and that strip is
+/// sliced back into the fragments. So the start side's border, padding and
+/// two corner radii show only on the first fragment and the end side's only
+/// on the last, and a background image is positioned over the whole strip.
+/// A box with one fragment is the whole strip and is painted with no clip.
+///
+/// `background-clip: text` on an inline box clips to its border box, as on
+/// a Lynx scope ([`paint_inline_backgrounds`]); `box-shadow` and `outline`
+/// on an inline box are not painted. A `visibility: hidden` box paints
+/// nothing of its own.
+fn paint_inline_boxes<T>(
+    sink: &mut WalkSink<'_>,
+    paths: &mut PathScratch,
+    space: Option<u32>,
+    document: &Document<T>,
+    paragraph: &crate::layout::paragraph::PaintedParagraph<'_>,
+    transform: Affine,
+    images: &ImageRegistry,
+) {
+    use stylo::computed_values::direction::T as Direction;
+    use stylo::computed_values::visibility::T as Visibility;
+
+    let fragments = paragraph.fragments();
+    let mut start = 0;
+    while start < fragments.len() {
+        let item = fragments[start].item;
+        let count = fragments[start..]
+            .iter()
+            .take_while(|fragment| fragment.item == item)
+            .count();
+        let run = &fragments[start..start + count];
+        start += count;
+        let Some(node) = paragraph.sources.get(item as usize).copied() else {
+            continue;
+        };
+        let (Some(style), Some(insets)) = (document.paint_style(node), paragraph.insets(item))
+        else {
+            continue;
+        };
+        if style.get_inherited_box().visibility != Visibility::Visible
+            || !decorates_inline_box(style, &insets.border)
+        {
+            continue;
+        }
+        let total: f64 = run
+            .iter()
+            .map(|fragment| f64::from(fragment.rect.size.width))
+            .sum();
+        let rtl = style.get_inherited_box().direction == Direction::Rtl;
+        let sliced = run.len() > 1;
+        let border = insets.border;
+        let padding = insets.padding;
+        let mut before = 0.0;
+        for fragment in run {
+            let width = f64::from(fragment.rect.size.width);
+            let height = f64::from(fragment.rect.size.height);
+            // The strip, in this fragment's own space: the fragments before
+            // it lie towards the box's start side.
+            let left = if rtl {
+                -(total - before - width)
+            } else {
+                -before
+            };
+            before += width;
+            let border_box = Rect::new(left, 0.0, left + total, height);
+            let padding_box = Rect::new(
+                border_box.x0 + f64::from(border.left),
+                border_box.y0 + f64::from(border.top),
+                (border_box.x1 - f64::from(border.right)).max(border_box.x0),
+                (border_box.y1 - f64::from(border.bottom)).max(border_box.y0),
+            );
+            let content_box = Rect::new(
+                padding_box.x0 + f64::from(padding.left),
+                padding_box.y0 + f64::from(padding.top),
+                (padding_box.x1 - f64::from(padding.right)).max(padding_box.x0),
+                (padding_box.y1 - f64::from(padding.bottom)).max(padding_box.y0),
+            );
+            #[allow(clippy::cast_possible_truncation, reason = "CSS px fit f32")]
+            let strip = crate::Size2D::new(total as f32, fragment.rect.size.height);
+            let box_fragment = BoxFragment {
+                transform: transform
+                    * Affine::translate((
+                        f64::from(fragment.rect.origin.x),
+                        f64::from(fragment.rect.origin.y),
+                    )),
+                border_box,
+                padding_box,
+                content_box,
+                radii: crate::visual::geometry::resolve_corner_radii(style, strip),
+                border_widths: border,
+                padding_widths: padding,
+            };
+            if sliced {
+                sink.push_clip_box(
+                    space,
+                    Fill::NonZero,
+                    box_fragment.transform,
+                    BoxShape::new(
+                        Rect::new(0.0, 0.0, width, height),
+                        &crate::visual::CornerRadii::ZERO,
+                    ),
+                );
+            }
+            background::paint(sink, space, style, &box_fragment, images, None);
+            border::paint(sink.scene_for(space), paths, style, &box_fragment);
+            if sliced {
+                sink.pop();
+            }
+        }
+    }
+}
+
+/// Whether an inline box has a background or a border to paint at all, so
+/// one with neither costs no clip.
+fn decorates_inline_box(
+    style: &stylo::properties::ComputedValues,
+    border: &crate::layout::Edges<f32>,
+) -> bool {
+    let background = style.get_background();
+    convert::resolve_color(style, &background.background_color).components[3] > 0.0
+        || background
+            .background_image
+            .0
+            .iter()
+            .any(|image| !matches!(image, stylo::values::computed::Image::None))
+        || [border.top, border.right, border.bottom, border.left]
+            .iter()
+            .any(|&width| width > 0.0)
 }
 
 /// Paints one fragment per line per backgrounded nested scope, outermost scope
@@ -2406,6 +2563,11 @@ fn extents<T>(document: &Document<T>, item: &PaintItem) -> Extents {
                 cull: reach,
             }
         }
+        // Drawn by its paragraph's record: no ink of its own.
+        PaintItemKind::InlineFragment { .. } => Extents {
+            layer: 0.0,
+            cull: 0.0,
+        },
         PaintItemKind::TextRun { element } => {
             let layer = document.paint_style(element).map_or(4.0, |style| {
                 0.5 * f64::from(style.get_font().slow_clone_font_size().computed_size().px())

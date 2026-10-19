@@ -13,6 +13,9 @@ impl<S> Paragraph<S> {
     /// `line` that shows source content, in visual order, with the source
     /// units it covers and its inline extent.
     ///
+    /// An inserted segment's cluster covers no source unit and is skipped
+    /// (`content::NormalizedBlock::splice`).
+    ///
     /// `line` belongs to a layout whose text starts with this paragraph's
     /// normalized content: the natural layout, or one a consumer built over a
     /// prefix of the content followed by text of its own. `cut_byte` is where
@@ -55,7 +58,9 @@ impl<S> Paragraph<S> {
                                 text,
                                 u32::try_from(bytes.end.min(cut_byte)).expect("text fits u32"),
                             );
-                            visit(first..last, x, x + advance);
+                            if first < last {
+                                visit(first..last, x, x + advance);
+                            }
                         }
                         x += advance;
                     }
