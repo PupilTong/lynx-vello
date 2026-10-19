@@ -16,7 +16,8 @@ use hughie::text::inline::{
     InlineFlowStyle, InlineFragment, InlineRun,
 };
 use hughie::text::paragraph::{
-    BlockConstraint, BreakStyle, Direction, LineHeight, RunStyle, VerticalAlign, WhiteSpaceCollapse,
+    BlockConstraint, BreakStyle, Direction, IndentKeywords, LineHeight, OverflowWrap, RunStyle,
+    TextWrap, VerticalAlign, WhiteSpaceCollapse,
 };
 use hughie::text::{FontBlob, TextContext};
 use parley::PositionedLayoutItem;
@@ -856,4 +857,113 @@ fn restoring_the_committed_layout_restores_the_committed_atom_sizes() {
     assert_eq!(flow.size().height, 22.0);
     // Nothing to put back the second time.
     assert!(!flow.restore_committed(&mut context));
+}
+
+/// The flow's intrinsic widths at `indent` with its atoms at `atoms`'
+/// widths, how many breaks finding them took, and parley's one-pass content
+/// widths of the same content at the same indent, read off a layout of it.
+fn intrinsic_widths(
+    style: InlineFlowStyle,
+    items: &[InlineFlowItem<'_>],
+    atoms: &[(u32, f32)],
+    indent: f32,
+) -> ((f32, f32), u32, (f32, f32)) {
+    let mut context = text_context();
+    let mut flow = InlineFlow::new(&mut context, style, items);
+    for &(item, width) in atoms {
+        flow.set_atom_size(item, Size::new(width, 10.0), None);
+    }
+    let intrinsic = (
+        flow.min_content_width(&mut context, indent),
+        flow.max_content_width(&mut context, indent),
+    );
+    let breaks = flow.break_count();
+    flow.commit(&mut context, BlockConstraint::new(None, indent));
+    let one_pass = flow.display().calculate_content_widths();
+    (intrinsic, breaks, (one_pass.min, one_pass.max))
+}
+
+const ATOM: InlineFlowItem<'static> = InlineFlowItem::Atom(InlineAtom {
+    vertical_align: VerticalAlign::Baseline,
+});
+
+#[test]
+fn a_hanging_indent_keeps_the_intrinsic_widths_of_two_breaks() {
+    // The break at zero width ends the atom's line with a soft wrap, and the
+    // empty line after it takes the hanging indent; the one pass has no
+    // line there.
+    let style = InlineFlowStyle {
+        indent: IndentKeywords {
+            each_line: false,
+            hanging: true,
+        },
+        ..container(Direction::Ltr)
+    };
+    let (intrinsic, breaks, one_pass) = intrinsic_widths(style, &[ATOM], &[(0, 5.0)], 10.0);
+    assert_eq!(intrinsic, (10.0, 10.0));
+    assert_eq!(one_pass, (5.0, 5.0), "parley's one pass");
+    assert_eq!(breaks, 2);
+}
+
+#[test]
+fn overflow_wrap_anywhere_keeps_the_intrinsic_widths_of_two_breaks() {
+    // A space that is `nowrap` and `anywhere` before an atom: the one pass
+    // breaks before the space, as `anywhere` allows; the break at zero width
+    // keeps one line, since the space fits by hanging and the atom after it
+    // follows a `nowrap` run.
+    let style = ahem();
+    let items = [
+        run(&style, "bbb"),
+        InlineFlowItem::Run(InlineRun {
+            text: " ",
+            style: &style,
+            white_space: WhiteSpaceCollapse::Collapse,
+            breaking: BreakStyle {
+                text_wrap: TextWrap::NoWrap,
+                overflow_wrap: OverflowWrap::Anywhere,
+                ..BreakStyle::default()
+            },
+        }),
+        ATOM,
+    ];
+    let (intrinsic, breaks, one_pass) =
+        intrinsic_widths(container(Direction::Ltr), &items, &[(2, 5.0)], 0.0);
+    assert_eq!(intrinsic, (45.0, 45.0));
+    assert_eq!(one_pass, (30.0, 45.0), "parley's one pass");
+    assert_eq!(breaks, 2);
+}
+
+#[test]
+fn a_negative_advance_keeps_the_intrinsic_widths_of_two_breaks() {
+    // An atom narrower than nothing, and an inline box start edge of −35px:
+    // the one pass skips a wrap opportunity while its running width is
+    // negative.
+    let (intrinsic, breaks, one_pass) = intrinsic_widths(
+        container(Direction::Ltr),
+        &[ATOM, ATOM],
+        &[(0, -5.0), (1, 25.0)],
+        0.0,
+    );
+    assert_eq!(intrinsic, (25.0, 25.0));
+    assert_eq!(one_pass, (20.0, 20.0), "parley's one pass");
+    assert_eq!(breaks, 2);
+
+    let style = ahem();
+    let items = [
+        open_in(
+            &style,
+            Direction::Ltr,
+            InlineEdges {
+                start_margin: -35.0,
+                ..InlineEdges::default()
+            },
+        ),
+        run(&style, "aa bb"),
+        CLOSE,
+    ];
+    let (intrinsic, breaks, one_pass) =
+        intrinsic_widths(container(Direction::Ltr), &items, &[], 0.0);
+    assert_eq!(intrinsic, (20.0, 20.0));
+    assert_eq!(one_pass, (15.0, 15.0), "parley's one pass");
+    assert_eq!(breaks, 2);
 }

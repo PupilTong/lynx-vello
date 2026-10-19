@@ -937,3 +937,161 @@ fn a_preserved_newline_that_ends_the_text_opens_no_line() {
     );
     assert_eq!(flow.line_geometry().len(), 1);
 }
+
+/// The flow's intrinsic widths at `indent`, how many breaks finding them
+/// took, and parley's one-pass content widths of the same content at the
+/// same indent, read off a layout of it.
+fn intrinsic_widths(
+    style: InlineFlowStyle,
+    items: &[InlineFlowItem<'_>],
+    indent: f32,
+) -> ((f32, f32), u32, (f32, f32)) {
+    let mut context = text_context();
+    let mut flow = InlineFlow::new(&mut context, style, items);
+    let intrinsic = (
+        flow.min_content_width(&mut context, indent),
+        flow.max_content_width(&mut context, indent),
+    );
+    let breaks = flow.break_count();
+    flow.commit(&mut context, BlockConstraint::new(None, indent));
+    let one_pass = flow.display().calculate_content_widths();
+    (intrinsic, breaks, (one_pass.min, one_pass.max))
+}
+
+#[test]
+fn intrinsic_widths_take_no_break_where_parley_measures_them_in_one_pass() {
+    // `overflow-wrap: break-word` included: its arbitrary breaks count
+    // toward neither width, in one pass as in two breaks.
+    let style = ahem(10.0, LineHeight::Normal);
+    for breaking in [
+        BreakStyle::default(),
+        BreakStyle {
+            overflow_wrap: OverflowWrap::BreakWord,
+            ..BreakStyle::default()
+        },
+    ] {
+        let items = [styled(
+            &style,
+            "aaaa bb",
+            WhiteSpaceCollapse::Collapse,
+            breaking,
+        )];
+        let (intrinsic, breaks, one_pass) = intrinsic_widths(container(style.clone()), &items, 0.0);
+        assert_eq!(intrinsic, (40.0, 70.0), "{breaking:?}");
+        assert_eq!(one_pass, intrinsic, "{breaking:?}");
+        assert_eq!(breaks, 0, "{breaking:?}");
+    }
+}
+
+#[test]
+fn a_negative_indent_keeps_the_intrinsic_widths_of_two_breaks() {
+    // Parley's widest line counts a negative indent as none; its one-pass
+    // measure subtracts it.
+    let style = ahem(10.0, LineHeight::Normal);
+    let (intrinsic, breaks, one_pass) =
+        intrinsic_widths(container(style.clone()), &[run(&style, "aaaa")], -10.0);
+    assert_eq!(intrinsic, (40.0, 40.0));
+    assert_eq!(one_pass, (30.0, 30.0), "parley's one pass");
+    assert_eq!(breaks, 2);
+}
+
+#[test]
+fn a_positive_indent_keeps_the_intrinsic_widths_of_two_breaks() {
+    let style = ahem(10.0, LineHeight::Normal);
+    // White space processing removes the lone space: the empty flow still
+    // breaks into one line, which takes the indent, and the one pass
+    // measures no line.
+    let (intrinsic, breaks, one_pass) =
+        intrinsic_widths(container(style.clone()), &[run(&style, " ")], 10.0);
+    assert_eq!(intrinsic, (10.0, 10.0));
+    assert_eq!(one_pass, (0.0, 0.0), "parley's one pass");
+    assert_eq!(breaks, 2);
+    // A break takes no wrap opportunity after content of no advance, so the
+    // zero width space and "aa" share the indented first line; the one pass
+    // ends a fragment after the zero width space.
+    let (intrinsic, breaks, one_pass) = intrinsic_widths(
+        container(style.clone()),
+        &[run(&style, "\u{200B}aa bb")],
+        10.0,
+    );
+    assert_eq!(intrinsic, (30.0, 60.0));
+    assert_eq!(one_pass, (20.0, 60.0), "parley's one pass");
+    assert_eq!(breaks, 2);
+}
+
+#[test]
+fn a_preserved_tab_keeps_the_intrinsic_widths_of_two_breaks() {
+    // Each break settles the tab's advance from where it falls on its line:
+    // at zero width the tab starts a line of its own and reaches the first
+    // stop, 80px, while the unconstrained line holds it after "a ".
+    let style = ahem(10.0, LineHeight::Normal);
+    let items = [styled(
+        &style,
+        "a \tbbb",
+        WhiteSpaceCollapse::BreakSpaces,
+        BreakStyle::default(),
+    )];
+    let (intrinsic, breaks, one_pass) = intrinsic_widths(container(style.clone()), &items, 0.0);
+    assert_eq!(intrinsic, (80.0, 110.0));
+    assert_eq!(one_pass, (60.0, 110.0), "parley's one pass");
+    assert_eq!(breaks, 2);
+}
+
+#[test]
+fn a_negative_letter_spacing_keeps_the_intrinsic_widths_of_two_breaks() {
+    // The zero width space advances −3px: the one pass skips the wrap
+    // opportunity after it while its running width is negative.
+    let style = RunStyle {
+        letter_spacing: -3.0,
+        ..ahem(10.0, LineHeight::Normal)
+    };
+    let (intrinsic, breaks, one_pass) = intrinsic_widths(
+        container(ahem(10.0, LineHeight::Normal)),
+        &[run(&style, "\u{200B}x-y")],
+        0.0,
+    );
+    assert_eq!(intrinsic, (14.0, 18.0));
+    assert_eq!(one_pass, (11.0, 18.0), "parley's one pass");
+    assert_eq!(breaks, 2);
+}
+
+#[test]
+fn right_to_left_content_keeps_the_intrinsic_widths_of_two_breaks() {
+    // Parley's one pass lets only white space at the paragraph's own bidi
+    // level hang, and documents its widths as possibly wrong for mixed
+    // directions. A left-to-right paragraph holding right-to-left text
+    // takes the two breaks as well; no input found makes them differ there.
+    let spaced = RunStyle {
+        letter_spacing: 0.5,
+        ..ahem(13.0, LineHeight::Normal)
+    };
+    let wide = RunStyle {
+        letter_spacing: 2.0,
+        ..ahem(10.0, LineHeight::Normal)
+    };
+    let items = [
+        styled(
+            &spaced,
+            "c \n  ",
+            WhiteSpaceCollapse::BreakSpaces,
+            BreakStyle::default(),
+        ),
+        styled(
+            &wide,
+            "  dd",
+            WhiteSpaceCollapse::Preserve,
+            BreakStyle::default(),
+        ),
+    ];
+    let (intrinsic, breaks, one_pass) = intrinsic_widths(
+        InlineFlowStyle {
+            direction: Direction::Rtl,
+            ..container(ahem(10.0, LineHeight::Normal))
+        },
+        &items,
+        0.0,
+    );
+    assert_eq!(intrinsic, (37.5, 75.0));
+    assert_eq!(one_pass, (27.0, 75.0), "parley's one pass");
+    assert_eq!(breaks, 2);
+}

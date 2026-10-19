@@ -53,8 +53,7 @@ pub use super::paragraph::{
     TextAlign, TextIndent, TextRunItem, TextWrap, VerticalAlign, WhiteSpaceCollapse, WordBreak,
 };
 use super::paragraph::{
-    Flow, LineGeometry, NaturalBreak, OwnedItem, Paragraph, ParagraphRoot, RunBreaking,
-    parley_boxes, sized_box,
+    Flow, LineGeometry, OwnedItem, Paragraph, ParagraphRoot, RunBreaking, parley_boxes, sized_box,
 };
 use crate::geometry::{Point, Size};
 use crate::style::TextBrush;
@@ -138,10 +137,6 @@ struct LayoutResult {
     first_baseline: Option<f32>,
     truncated: bool,
     truncation_visible: bool,
-    /// Read off the unjustified pre-alignment layout with the box sizes this
-    /// layout used, so a justified alignment or a pending box resize can
-    /// never leak into it.
-    content_widths: ContentWidths,
 }
 
 struct DisplayPart {
@@ -360,7 +355,7 @@ impl TextBlock {
             self.layout_at(context, constraint);
             self.remember(constraint);
         }
-        let width = self.expect_result().content_widths.min;
+        let width = self.paragraph.content_widths().min;
         self.memo.set_min_content(indent, width);
         width
     }
@@ -424,7 +419,6 @@ impl TextBlock {
         &mut self,
         natural_lines: &[NaturalLine],
         constraint: BlockConstraint,
-        content_widths: ContentWidths,
     ) -> LayoutResult {
         let alignment = resolve_alignment(self.style.text_align, self.style.direction);
         self.paragraph
@@ -478,7 +472,6 @@ impl TextBlock {
             first_baseline,
             truncated: false,
             truncation_visible: false,
-            content_widths,
         }
     }
 
@@ -488,7 +481,6 @@ impl TextBlock {
         plan: &CutPlan,
         natural_lines: &[NaturalLine],
         constraint: BlockConstraint,
-        content_widths: ContentWidths,
     ) -> LayoutResult {
         let width = constraint.max_advance();
         let alignment = resolve_alignment(self.style.text_align, self.style.direction);
@@ -537,7 +529,6 @@ impl TextBlock {
             first_baseline,
             truncated: true,
             truncation_visible: plan.truncation_visible,
-            content_widths,
         }
     }
 
@@ -559,7 +550,6 @@ impl TextBlock {
         &mut self,
         context: &mut TextContext,
         natural_lines: &[NaturalLine],
-        slot_units: &[u32],
         width: Option<f32>,
     ) -> Option<OverflowCut> {
         if self.style.text_wrap != TextWrap::NoWrap {
@@ -587,7 +577,7 @@ impl TextBlock {
             line,
             text,
             map,
-            slot_units,
+            &self.paragraph.content.block.boxes,
             width,
         );
 
@@ -610,7 +600,7 @@ impl TextBlock {
                 },
                 &self.paragraph.content.block.text,
                 &self.paragraph.content.block.map,
-                slot_units,
+                &self.paragraph.content.block.boxes,
                 marker,
             );
             return Some(OverflowCut {
@@ -640,7 +630,7 @@ impl TextBlock {
             line,
             &self.paragraph.content.block.text,
             &self.paragraph.content.block.map,
-            slot_units,
+            &self.paragraph.content.block.boxes,
             (width - dots).max(0.0),
         );
         Some(OverflowCut {
@@ -930,7 +920,8 @@ impl TextBlock {
     /// the box sizes the last layout used. Valid after [`Self::commit`].
     #[must_use]
     pub fn content_widths(&self) -> ContentWidths {
-        self.expect_result().content_widths
+        self.expect_result();
+        self.paragraph.content_widths()
     }
 
     fn expect_result(&self) -> &LayoutResult {
@@ -965,11 +956,7 @@ impl Retained for TextBlock {
         self.memo.begin_break();
         let width = constraint.max_advance();
 
-        let NaturalBreak {
-            lines: natural_lines,
-            slot_units,
-            content_widths,
-        } = self.paragraph.break_lines(
+        let natural_lines = self.paragraph.break_lines(
             context,
             RunBreaking::Uniform(self.style.breaking()),
             constraint,
@@ -992,7 +979,7 @@ impl Retained for TextBlock {
             None
         };
 
-        let overflow_cut = self.overflow_cut(context, &natural_lines, &slot_units, width);
+        let overflow_cut = self.overflow_cut(context, &natural_lines, width);
 
         let plan = truncate::plan(
             &self.paragraph.natural,
@@ -1000,7 +987,7 @@ impl Retained for TextBlock {
             &self.paragraph.content.block.text,
             &self.paragraph.content.block.map,
             &self.paragraph.content.block.ranges,
-            &slot_units,
+            &self.paragraph.content.block.boxes,
             &self.style,
             more_content,
             self.truncation.is_some(),
@@ -1010,10 +997,8 @@ impl Retained for TextBlock {
         );
 
         let result = match plan {
-            None => self.finish_untruncated(&natural_lines, constraint, content_widths),
-            Some(plan) => {
-                self.finish_truncated(context, &plan, &natural_lines, constraint, content_widths)
-            }
+            None => self.finish_untruncated(&natural_lines, constraint),
+            Some(plan) => self.finish_truncated(context, &plan, &natural_lines, constraint),
         };
         self.result = Some(result);
     }
@@ -1092,19 +1077,27 @@ fn assemble(
         });
     }
 
-    // Parley places every box by its `vertical-align` (`position`).
+    // Parley places every box by its `vertical-align` (`position`). Only a
+    // line holding boxes is walked for their positions, up to its last box.
+    let mut line_boxes = shape::line_boxes(final_layout);
     for (index, line) in final_layout.lines().enumerate() {
-        for item in line.items() {
-            if let PositionedLayoutItem::InlineBox(inline_box) = item {
-                let slot = usize::try_from(inline_box.id).expect("slot ids are table indexes");
-                let spec = &slot_specs[slot];
-                boxes.push(PlacedBox::Visible {
-                    id: spec.id,
-                    line: u32::try_from(index).expect("line count fits u32"),
-                    origin: Point::new(inline_box.x, inline_box.y),
-                    size: spec.size,
-                });
-            }
+        let count = line_boxes.on(&line).len();
+        if count == 0 {
+            continue;
+        }
+        let placed = line.items().filter_map(|item| match item {
+            PositionedLayoutItem::InlineBox(inline_box) => Some(inline_box),
+            PositionedLayoutItem::GlyphRun(_) => None,
+        });
+        for inline_box in placed.take(count) {
+            let slot = usize::try_from(inline_box.id).expect("slot ids are table indexes");
+            let spec = &slot_specs[slot];
+            boxes.push(PlacedBox::Visible {
+                id: spec.id,
+                line: u32::try_from(index).expect("line count fits u32"),
+                origin: Point::new(inline_box.x, inline_box.y),
+                size: spec.size,
+            });
         }
     }
     boxes.extend(hidden);
