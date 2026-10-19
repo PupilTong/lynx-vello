@@ -897,13 +897,11 @@ impl NormalizedBlock {
         for range in &self.ranges {
             let mut from = range.bytes.start;
             for point in shifts.cuts(range.bytes.start, range.bytes.end) {
-                if from < point {
-                    let moved = shifts.before(from, true);
-                    ranges.push(StyledRange {
-                        bytes: from + moved..point + moved,
-                        item: range.item,
-                    });
-                }
+                let moved = shifts.before(from, true);
+                ranges.push(StyledRange {
+                    bytes: from + moved..point + moved,
+                    item: range.item,
+                });
                 from = point;
             }
         }
@@ -912,6 +910,13 @@ impl NormalizedBlock {
             *tab += shifts.before(*tab, true);
         }
         let segments = self.spliced_segments(&shifts, &box_bytes);
+        debug_assert!(
+            segments.iter().all(|segment| {
+                matches!(segment.kind, SegmentKind::Collapsed | SegmentKind::Box)
+                    || segment.norm.start < segment.norm.end
+            }),
+            "verbatim and inserted segments are never empty",
+        );
         self.map.segments = segments;
 
         let mut text = String::with_capacity(
@@ -1094,14 +1099,23 @@ impl Shifts<'_> {
             .sum()
     }
 
-    /// The insertion points strictly inside `start..end`, then `end`: where
-    /// a range from `start` is cut into pieces no insertion falls inside.
+    /// The insertion points strictly inside `start..end`, then `end`, each
+    /// once: where a range from `start` is cut into pieces no insertion
+    /// falls inside, none of them empty. Insertions at one byte — an end
+    /// cluster and a start cluster where one box closes and the next opens —
+    /// cut there once.
     fn cuts(&self, start: u32, end: u32) -> impl Iterator<Item = u32> + '_ {
+        let mut last = start;
         self.insertions
             .iter()
             .map(|insertion| insertion.at)
             .filter(move |&point| start < point && point < end)
             .chain(core::iter::once(end))
+            .filter(move |&point| {
+                let fresh = last < point;
+                last = point;
+                fresh
+            })
     }
 }
 
@@ -1681,11 +1695,17 @@ mod tests {
                 },
             ),
         ];
-        for (items, processing) in &cases {
+        for ((items, processing), per_point) in cases
+            .iter()
+            .flat_map(|case| [1, 2].map(|per_point| (case, per_point)))
+        {
             let mut block = super::normalize(items, *processing);
             assert_lookups_match_the_scan(&block);
             // The same content with text a consumer inserts: inside a long
-            // verbatim segment, at an atomic box and at the text's end.
+            // verbatim segment, at an atomic box and at the text's end; then
+            // two insertions at each of those places, as an end edge cluster
+            // and a start edge cluster where one inline box closes and the
+            // next opens.
             let boxes: Vec<(u32, u32)> = block
                 .boxes
                 .iter()
@@ -1710,6 +1730,7 @@ mod tests {
             block.splice(
                 points
                     .into_iter()
+                    .flat_map(|point| core::iter::repeat_n(point, per_point))
                     .map(|(at, atoms_before)| Insertion {
                         at,
                         atoms_before,
