@@ -1574,3 +1574,127 @@ fn the_strut_is_the_root_inline_box_every_line_starts_with() {
     let block = laid_out(&mut context, BlockStyle::default(), &items, None, None);
     assert_close(block.lines()[0].height, 6.0);
 }
+
+/// `white-space: pre-wrap`: spaces are kept, a space before a newline does
+/// not swallow the newline's forced break (the Chromium override trap in
+/// `shape.rs`), and a carriage return is a space (CSS Text 3 §4.1.1), so
+/// `"a\r\nb"` is two lines, the first one square wide once its hanging
+/// space is set aside.
+#[test]
+fn preserved_runs_keep_spaces_and_their_forced_breaks() {
+    let mut context = text_context();
+    let style = ahem_style();
+    for (text, width, lines) in [
+        ("a  b", 40.0, 1),
+        ("a\nb", 10.0, 2),
+        ("a \nb", 10.0, 2),
+        ("a\r\nb", 10.0, 2),
+        ("a\rb", 30.0, 1),
+    ] {
+        let block = laid_out(
+            &mut context,
+            BlockStyle::default(),
+            &[pre(&style, text)],
+            None,
+            Some(200.0),
+        );
+        assert_eq!(block.lines().len(), lines, "{text:?}");
+        assert_close(block.size().width, width);
+        assert_eq!(
+            block.offset_map().display_text().len(),
+            text.len(),
+            "{text:?}"
+        );
+    }
+}
+
+/// The offset bridge of a verbatim paragraph: every source unit is one
+/// character's, so units and bytes walk together, a surrogate pair's second
+/// unit rounding down to its start; the end answers the text's end.
+#[test]
+fn a_verbatim_offset_map_walks_units_and_bytes_together() {
+    let mut context = text_context();
+    let style = ahem_style();
+    let text = "a  b\tc😀d";
+    let block = laid_out(
+        &mut context,
+        BlockStyle::default(),
+        &[run(&style, text)],
+        None,
+        Some(400.0),
+    );
+    let map = block.offset_map();
+    assert_eq!(map.display_text().len(), text.len());
+    assert_eq!(map.source_len(), 9);
+    assert!(!map.truncated());
+    assert_eq!(map.cut_byte(), text.len());
+    let mut unit = 0;
+    for (byte, character) in text.char_indices() {
+        assert_eq!(map.unit_to_byte(unit), Some(byte), "unit {unit}");
+        assert_eq!(map.byte_to_unit(byte), unit, "byte {byte}");
+        assert_eq!(map.unit_before(byte), unit, "byte {byte}");
+        unit += u32::try_from(character.len_utf16()).unwrap();
+    }
+    // Inside the surrogate pair: its start.
+    assert_eq!(map.unit_to_byte(7), Some(6));
+    assert_eq!(map.unit_to_byte(9), None, "the end has no character");
+    assert_eq!(map.unit_to_byte_or_end(9), Some(text.len()));
+    assert_eq!(map.unit_to_byte_or_end(10), None);
+    assert_eq!(map.byte_to_unit(text.len()), 9);
+    assert_eq!(map.unit_before(text.len()), 9);
+}
+
+/// A clamp's cut: the display layout holds the dots past `cut_byte`, which
+/// are no source text, while every unit keeps its content byte.
+#[test]
+fn a_truncated_offset_map_reports_its_cut() {
+    let mut context = text_context();
+    let style = ahem_style();
+    let block = laid_out(
+        &mut context,
+        BlockStyle {
+            max_lines: core::num::NonZeroU32::new(1),
+            overflow: TextOverflow::Ellipsis,
+            ..BlockStyle::default()
+        },
+        &[run(&style, "aaaa bbbb cccc")],
+        None,
+        Some(60.0),
+    );
+    assert!(block.truncated());
+    let map = block.offset_map();
+    assert!(map.truncated());
+    assert!(map.cut_byte() < map.display_text().len());
+    assert_eq!(map.unit_to_byte(0), Some(0));
+    assert_eq!(
+        map.unit_to_byte(12),
+        Some(12),
+        "past the cut: a content byte"
+    );
+}
+
+/// `white-space: nowrap` shows a `<text>`'s first line only: the units after
+/// its first newline are in no byte, and the end of what it shows is the
+/// text's end.
+#[test]
+fn a_first_line_offset_map_shows_no_unit_past_its_line() {
+    let mut context = text_context();
+    let style = ahem_style();
+    let block = laid_out(
+        &mut context,
+        BlockStyle {
+            text_wrap: TextWrap::NoWrap,
+            ..BlockStyle::default()
+        },
+        &[run(&style, "ab\ncd")],
+        None,
+        Some(400.0),
+    );
+    let map = block.offset_map();
+    assert_eq!(map.display_text(), "ab\n");
+    assert_eq!(map.source_len(), 5);
+    assert_eq!(map.unit_to_byte(2), Some(2));
+    assert_eq!(map.unit_to_byte_or_end(3), Some(3));
+    assert_eq!(map.unit_to_byte_or_end(4), None);
+    assert_eq!(map.unit_to_byte_or_end(5), None);
+}

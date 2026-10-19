@@ -49,8 +49,9 @@ use super::paragraph::memo::{BreakMemo, Retained};
 use super::paragraph::shape::{self, NaturalLine, ShapeSpan};
 use super::paragraph::style::resolve_alignment;
 pub use super::paragraph::{
-    BlockConstraint, BlockMetrics, Direction, InlineBoxSpec, InlineItem, LineHeight, RunStyle,
-    TextAlign, TextIndent, TextRunItem, TextWrap, VerticalAlign, WhiteSpaceCollapse, WordBreak,
+    BlockConstraint, BlockMetrics, Direction, InlineBoxSpec, InlineItem, LineHeight, OffsetMap,
+    RunStyle, TextAlign, TextIndent, TextRunItem, TextWrap, VerticalAlign, WhiteSpaceCollapse,
+    WordBreak,
 };
 use super::paragraph::{
     Flow, LineGeometry, OwnedItem, Paragraph, ParagraphRoot, RunBreaking, parley_boxes, sized_box,
@@ -835,6 +836,22 @@ impl TextBlock {
             .display
             .as_ref()
             .map_or(&self.paragraph.natural, |part| &part.layout)
+    }
+
+    /// The offset bridge between [`Self::display`]'s bytes and the source
+    /// units the block was built from ([`OffsetMap`]): the content's
+    /// normalized text, its source map, and the truncation cut's byte, past
+    /// which the display layout shows the tail rather than source text.
+    /// Valid after [`Self::commit`].
+    #[must_use]
+    pub fn offset_map(&self) -> OffsetMap<'_> {
+        let block = &self.paragraph.content.block;
+        let cut_byte = self
+            .expect_result()
+            .display
+            .as_ref()
+            .map_or(block.text.len(), |part| part.cut_byte as usize);
+        OffsetMap::new(&block.text, &block.map, cut_byte)
     }
 
     /// How many parley style indices this block's display layout has.

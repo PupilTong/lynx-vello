@@ -80,8 +80,8 @@ use crate::text::paragraph::shape::{self, NaturalLine};
 use crate::text::paragraph::style::resolve_alignment;
 use crate::text::paragraph::{
     BlockConstraint, BlockMetrics, BreakStyle, Direction, Flow, IndentKeywords, InlineBoxSpec,
-    InlineItem, LineGeometry, OverflowWrap, OwnedItem, Paragraph, ParagraphRoot, RunBreaking,
-    RunStyle, TextAlign, TextRunItem, VerticalAlign, WhiteSpaceCollapse,
+    InlineItem, LineGeometry, OffsetMap, OverflowWrap, OwnedItem, Paragraph, ParagraphRoot,
+    RunBreaking, RunStyle, TextAlign, TextRunItem, VerticalAlign, WhiteSpaceCollapse,
 };
 
 /// The block container's own parameters: CSS properties only.
@@ -445,6 +445,17 @@ impl InlineFlow {
     pub fn display(&self) -> &Layout<TextBrush> {
         self.expect_result();
         &self.paragraph.natural
+    }
+
+    /// The offset bridge between [`Self::display`]'s bytes and the source
+    /// units the flow was built from ([`OffsetMap`]). An inline box's edges
+    /// are spliced text with no source unit; nothing is ever cut, so the
+    /// source content runs to the text's end.
+    #[must_use]
+    pub fn offset_map(&self) -> OffsetMap<'_> {
+        self.expect_result();
+        let block = &self.paragraph.content.block;
+        OffsetMap::new(&block.text, &block.map, block.text.len())
     }
 
     /// The CSS line boxes, one per laid-out line.

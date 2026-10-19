@@ -92,6 +92,10 @@ pub struct Document<T> {
     /// table for the reason `intersections` is one: style, layout and paint
     /// never read it.
     pub(crate) listeners: crate::event::listeners::Listeners,
+    /// The focused element, its selection and composition, and the focus
+    /// events not yet taken ([`crate::editing`]). A field, not a
+    /// [`TreeArenas`] table: it names at most one element.
+    pub(crate) editing: crate::editing::EditingState,
     pending_snapshots: SnapshotMap,
     relayout_roots: Vec<PendingRelayout>,
     relayout_root_ids: FxHashSet<NodeId>,
@@ -147,6 +151,7 @@ impl<T> Document<T> {
             content_visibility_changes: Vec::new(),
             intersections: crate::visual::intersection::IntersectionObservers::default(),
             listeners: crate::event::listeners::Listeners::default(),
+            editing: crate::editing::EditingState::default(),
             pending_snapshots: SnapshotMap::new(),
             relayout_roots: Vec::new(),
             relayout_root_ids: FxHashSet::default(),
@@ -736,6 +741,8 @@ impl<T> Document<T> {
         // HTML's removing steps: an element that left the document leaves
         // the top layer with it (`tree::top_layer`, "Removal").
         self.drop_disconnected_top_layer_entries();
+        // ...and is no longer focused (the focus fixup rule, `editing`).
+        self.fix_up_focus();
     }
 
     /// Frees `id`, returning its payload. Its element children are unlinked

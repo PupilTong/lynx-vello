@@ -3258,6 +3258,18 @@ Subsystems:
   container to its first one — `scrollIntoView`'s position with
   `block: start`, `inline: nearest` — as an instant scroll request and
   rebuilds the frame in the same commit.
+- `editing/` — HTML `contenteditable` plain-text editing
+  (`docs/editable-text-design.md`): editing hosts, the one focused element
+  and its queued focus events, a parley `Selection` and an IME composition
+  over the committed paragraph that lays the host's text out — a Lynx text
+  element's own, a block container's own, or the anonymous block box around
+  a flex host's loose text — with every offset converted through that
+  paragraph's source map (`hughie::text::paragraph::OffsetMap`), the
+  Chromium-shaped command set with
+  its `beforeinput`/`input`/`composition*` events reported as data
+  (`prepare_editing`/`commit_editing`), and `TextInputState`. The caret,
+  selection highlight and composition underline are painted by
+  `paint/text.rs`. Nothing reaches a realm yet (PR E2).
 - `input/` and `event/` — the `InputEvent` host seam, `Document::event_steps`,
   which computes a path for a *script* dispatch above,
   `Document::dispatch_element_event_over`, which walks those same steps here
@@ -3551,7 +3563,10 @@ with each run's `BreakStyle`), shaping, breaking and line capture
 memo and the `Retained` trait both consumers run the protocol through
 (`memo.rs`, whose `BlockMetrics` carries the first and last line boxes'
 baselines), the per-cluster extent walk (`extent.rs`), the source-range and hit queries
-both kinds answer through (`query.rs`), `LineGeometry` — where each laid-out
+both kinds answer through (`query.rs`), the read-only bridge between a
+committed paragraph's layout bytes and its source units that an editor
+addresses either kind through (`offsets.rs`, `OffsetMap`, from
+`TextBlock::offset_map` and `InlineFlow::offset_map`), `LineGeometry` — where each laid-out
 line sits, parley 0.12's own CSS 2.2 §10.8.1 line box — and `Paragraph`, which
 owns one shaped natural layout and re-breaks it in place, starting every line
 with its root inline box (`ParagraphRoot`: the strut, which is parley's style
