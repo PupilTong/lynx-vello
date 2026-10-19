@@ -55,7 +55,7 @@ import {
   type ContextEvent,
   createCrossThreadContext,
 } from "bobcat:cross-thread-context";
-import { __BobcatExposureEvents, __BobcatQueryNodes } from "bobcat:element";
+import { __BobcatQueryNodes, type ExposureRecord } from "bobcat:element";
 // The whole PAPI as one namespace, for the binding list a named Lepus
 // chunk is called with: the export names are this module's only source of
 // truth for what `MTS_CHUNK_PREAMBLE` imports.
@@ -534,17 +534,28 @@ export function __BobcatSendGlobalEvent(name: string, json: string) {
 }
 
 /**
- * Sends one global exposure record list to the BTS. The host calls this from
- * its intersection delivery entry, `exposure` before `disexposure`, with
- * `kind` the list's name and `record` the `bobcat:record` payload
- * `bobcat:element`'s `__BobcatExposureEvents` builds the list out of. The
- * list is the global event's one argument, as web-core sends it
- * (`sendGlobalEvent(kind, [list])`, `ExposureServices.ts:256-271`), so a BTS
- * `GlobalEventEmitter` listener for `kind` receives the array itself.
+ * Sends the exposure records one delivery queued to the BTS: the `exposure`
+ * list, then the `disexposure` list, web-core's order
+ * (`ExposureServices.ts:256-271`), skipping a list that is empty.
+ * `bobcat:element` builds each record where the element state is and calls
+ * this from the one promise job its first record scheduled.
+ *
+ * Each list is its global event's one argument, as web-core sends it
+ * (`sendGlobalEvent(kind, [list])`), so a BTS `GlobalEventEmitter` listener
+ * for `exposure` receives the array itself. Every entry gets the same
+ * epoch `timestamp`, read once here with web-core's `Date.now()`, where a
+ * dispatched event's is on the view's timeline.
  */
-export function __BobcatSendExposure(kind: string, record: string) {
-  sendToBackground({bobcat:"runtime", method:"sendGlobalEvent", name:kind,
-    args:[__BobcatExposureEvents(kind, record)]});
+export function __BobcatSendExposureRecords(
+  exposure: ExposureRecord[],
+  disexposure: ExposureRecord[],
+) {
+  const timestamp = Date.now();
+  for (const [name, list] of [["exposure", exposure], ["disexposure", disexposure]] as const) {
+    if (list.length === 0) continue;
+    sendToBackground({bobcat:"runtime", method:"sendGlobalEvent", name,
+      args:[list.map((record) => ({...record, timestamp}))]});
+  }
 }
 
 /**

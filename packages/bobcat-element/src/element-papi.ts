@@ -25,7 +25,7 @@ import {
   tagName,
 } from "bobcat-internal:host";
 import type { NodeQueryRequest, QueryNode } from "bobcat:selector-query";
-import { __BobcatPublishEvent } from "bobcat:runtime";
+import { __BobcatPublishEvent, __BobcatSendExposureRecords } from "bobcat:runtime";
 import { splitRecord } from "bobcat:record";
 // Read only when a frame's `src`, `data` or `global-props` is written, never
 // as this module evaluates: `bobcat:frame` imports `bobcat:runtime`, which
@@ -222,6 +222,10 @@ import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 //   `exposure-id` (null when it has none) and `exposure-scene` (`""` when it
 //   has none), each under both of web-core's spellings. The target is live,
 //   because the host resolves it before it calls, so its attributes answer.
+//   An element's global exposure records are not this kind: each is an
+//   event of its own, `bobcat:exposure`, dispatched at the element, not
+//   bubbling, with three extras (`exposureID`, `exposureScene`, `appeared`)
+//   — see "Exposure records" below.
 //
 // From there this file runs the standard's dispatch over that path: the
 // capture pass from the last entry to the first, the bubble pass from the
@@ -270,9 +274,27 @@ import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 // name set the painting side routes against (a name nothing listens for never
 // becomes a dispatch), whether a component produces an event no one would
 // hear, and which elements are detected for exposure: an element with a
-// registration of any form for `uiappear` or `uidisappear` is, whether or not
-// it carries an `exposure-id`. A collected element tells nothing: the host
+// `bobcat:exposure` row is, and one with a `uiappear` or `uidisappear` row
+// besides hears those two. A collected element tells nothing: the host
 // drops a freed element's rows itself.
+//
+// # Exposure records
+//
+// The `exposure` and `disexposure` global events the background thread
+// hears are built here, one entry per element, out of the
+// `bobcat:exposure` events the host dispatches at each element whose
+// exposure changed and which carries a non-empty `exposure-id`. This file
+// files its own listener for that name on an element while the element
+// wants its records — while its `exposure-id` is non-empty, or while any
+// registration of any form for `uiappear` or `uidisappear` is filed on it —
+// and that row is what registers the element with the host. An exposed
+// element keeps the row until its `disexposure` arrives, so the record the
+// host owes for an `exposure-id` removed or changed still reaches it
+// ([`syncExposureListener`]). One delivery's records are dispatched under
+// one microtask checkpoint, and one promise job sends them as one
+// `exposure` list and then one `disexposure` list through `bobcat:runtime`
+// ([`queueExposureRecord`]). A freed element is sent no record: nothing is
+// left to dispatch at.
 //
 // # `__AddEvent`, the other registration form
 //
@@ -602,6 +624,16 @@ const attributeValuesSymbol = Symbol("attributeValues");
  */
 const frameSymbol = Symbol("frame");
 
+/**
+ * Set on a handle while it has this file's own exposure record listener
+ * filed ([`syncExposureListener`]), with whether the last record that
+ * listener heard for it had the element appear.
+ */
+const exposureSymbol = Symbol("exposure");
+interface ExposureState {
+  exposed: boolean;
+}
+
 function markFrame(handle: object): object {
   (handle as Handle)[frameSymbol] = true;
   return handle;
@@ -694,6 +726,7 @@ interface Handle {
   [ownedChildrenSymbol]?: OwnedChildren;
   [ownerSymbol]?: number | undefined;
   [frameSymbol]?: true;
+  [exposureSymbol]?: ExposureState;
 }
 
 function listenersOf(handle: Handle): ListenerLists | undefined {
@@ -1920,6 +1953,9 @@ export function __SetAttribute(
     setAttribute(nodeId, key, written);
     values.set(key, copyElementValue(value));
   }
+  if (key === EXPOSURE_ID) {
+    syncExposureListener(element as Handle);
+  }
   if ((element as Handle)[frameSymbol] === true) {
     if (key === "src") {
       frameSourceChanged(element as object, nodeId, written);
@@ -2383,8 +2419,11 @@ function kindsOf(handle: Handle, name: string): number {
  * What the host does with the table is its own: which realms a dispatch
  * calls and where, what the painting side routes, whether a component's
  * event is produced at all, and whether an element is detected for
- * exposure, which a registration of any form for `uiappear` or
- * `uidisappear` asks for (native's rule; see the host's `hears_exposure`).
+ * exposure, which its `bobcat:exposure` row asks for. A change for
+ * `uiappear` or `uidisappear` also re-checks that row
+ * ([`syncExposureListener`]): a registration of any form for either is one
+ * of the two things that make an element want it (native's rule; see the
+ * host's `hears_exposure`).
  */
 function reconcile(handle: Handle, name: string): undefined {
   const collected = collectedOf(handle);
@@ -2409,6 +2448,9 @@ function reconcile(handle: Handle, name: string): undefined {
     nodes.add(nodeIdOf(handle));
   } else {
     forgetGlobalNode(name, nodeIdOf(handle));
+  }
+  if (name === APPEAR_EVENT || name === DISAPPEAR_EVENT) {
+    syncExposureListener(handle);
   }
   return undefined;
 }
@@ -3339,89 +3381,187 @@ interface ExposureTarget {
 }
 
 /**
- * web-core's `GlobalExposureEvent` (`ExposureServices.ts:229-240`): one
- * element's entry in the list a background `exposure` or `disexposure`
- * listener receives.
+ * web-core's `GlobalExposureEvent` (`ExposureServices.ts:229-240`) without
+ * its `timestamp`: one element's entry in the list a background `exposure`
+ * or `disexposure` listener receives. `bobcat:runtime`'s
+ * [`__BobcatSendExposureRecords`] writes the `timestamp`, one per list it
+ * sends.
  */
-interface GlobalExposureEvent extends ExposureDetail {
+export interface ExposureRecord extends ExposureDetail {
   dataset: Record<string, unknown>;
   type: string;
   target: ExposureTarget;
   currentTarget: ExposureTarget;
   detail: ExposureDetail;
-  timestamp: number;
 }
 
 /**
- * The descriptor of one element a global exposure record names, read now.
- *
- * Unlike an event's target, that element may be gone: a `disexposure` is owed
- * to an exposed element that was freed, and the entry that delivers it runs
- * after the free. The host refuses every read of a freed element, so a read
- * that throws for an element whose handle is gone answers what a freed
- * element has left — no dataset and no id. A live handle holds its element,
- * so a read that throws while the handle is live is something else, and is
- * thrown on. An element whose handle is gone and which the collection has not
- * freed yet still answers its attributes; its typed dataset went with the
- * handle, and what is left of it is the strings it was reflected as, as
- * [`datasetOf`] says.
+ * The name of the event the host dispatches at an element for each of its
+ * exposure records, and the name this file's own listener for them is filed
+ * under. No app registers it: the host reserves nothing about the name, and
+ * no app knows it.
  */
-function exposureTarget(nodeId: number): ExposureTarget {
-  try {
-    return {
-      dataset: datasetOf(nodeId),
-      id: getAttribute(nodeId, "id") || null,
-      uid: nodeId,
-    };
-  } catch (error) {
-    if (handleOf(nodeId) !== undefined) {
-      throw error;
-    }
-    return { dataset: {}, id: null, uid: nodeId };
-  }
+const EXPOSURE_RECORD_EVENT = "bobcat:exposure";
+
+/** The two element events an element hears its own exposure by. */
+const APPEAR_EVENT = "uiappear";
+const DISAPPEAR_EVENT = "uidisappear";
+
+/**
+ * Whether `handle` wants its exposure records: while its `exposure-id` is
+ * non-empty, or while any registration of any form for `uiappear` or
+ * `uidisappear` is filed on it. Either is what makes native and web-core
+ * detect an element for exposure.
+ */
+function wantsExposureRecords(handle: Handle): boolean {
+  // `__SetAttribute` is the one writer of the attribute, and the text it
+  // wrote is the value's string, so the value it kept answers without asking
+  // the host.
+  const exposureId = handle[attributeValuesSymbol]?.get(EXPOSURE_ID);
+  return (exposureId !== undefined && String(exposureId) !== "") ||
+    kindsOf(handle, APPEAR_EVENT) !== 0 ||
+    kindsOf(handle, DISAPPEAR_EVENT) !== 0;
 }
 
 /**
- * The list one `exposure` or `disexposure` global event carries, out of the
- * host's record: three `bobcat:record` fields per element — its node id, and
- * the `exposure-id` and `exposure-scene` it was exposed under. The host copied
- * those two when the transition formed, so a `disexposure` names what the
- * element was exposed under even after its attributes changed or it was
- * freed; the `dataset` and `id` are read now, from the element as it is.
+ * Files or removes this file's [`EXPOSURE_RECORD_EVENT`] listener on
+ * `handle` to match [`wantsExposureRecords`], and is called after every
+ * change that can change the answer: an `exposure-id` write, a registration
+ * change for `uiappear` or `uidisappear`, and a `disexposure` record.
  *
- * Each entry is web-core's exactly (`ExposureServices.ts:221-240`): the
+ * The listener's row in the host's listener table is what keeps the element
+ * registered for exposure detection, so an element that is exposed keeps it
+ * after it stops wanting it: the host sends the `disexposure` it owes under
+ * the old `exposure-id` (an `exposure-id` removed or changed, the last
+ * handler gone) to the element it still has registered, and only once that
+ * record arrives does the listener go. An element with no `exposure-id`
+ * never gets a record, so it is never exposed here and its listener goes as
+ * soon as its last handler does.
+ *
+ * Filed through [`addListener`] like any closure, so the row reaches the
+ * host through [`reconcile`]. No app can name the listener, so no app
+ * removal takes it away, and nothing an app reads lists it.
+ */
+function syncExposureListener(handle: Handle): undefined {
+  const state = handle[exposureSymbol];
+  if (wantsExposureRecords(handle)) {
+    if (state === undefined) {
+      handle[exposureSymbol] = { exposed: false };
+      addListener(handle, EXPOSURE_RECORD_EVENT, exposureRecordListener, undefined);
+    }
+  } else if (state !== undefined && !state.exposed) {
+    delete handle[exposureSymbol];
+    removeListener(handle, EXPOSURE_RECORD_EVENT, exposureRecordListener, undefined);
+  }
+  return undefined;
+}
+
+/**
+ * The extras the host sends with an [`EXPOSURE_RECORD_EVENT`], which
+ * become its `detail`: the `exposure-id` and `exposure-scene` the element
+ * was exposed under, copied by the host when the change formed, and whether
+ * it appeared.
+ */
+interface ExposureRecordDetail {
+  exposureID: string;
+  exposureScene: string;
+  appeared: boolean;
+}
+
+/**
+ * The one [`EXPOSURE_RECORD_EVENT`] listener every element files: one
+ * function rather than a closure per element, so it holds no element, and
+ * identifies its element by the event's `currentTarget`. The event does not
+ * bubble and is heard in the bubble pass, so `currentTarget` is the record's
+ * own element.
+ *
+ * It queues web-core's entry for the element ([`queueExposureRecord`]) and
+ * records whether the element is now exposed; a `disexposure` is also when a
+ * listener kept past its last want ([`syncExposureListener`]) goes.
+ */
+function exposureRecordListener(event: DispatchedEvent): undefined {
+  const current = event.currentTarget;
+  if (current === null) {
+    return undefined;
+  }
+  const handle = current.elementRefptr as Handle;
+  const { exposureID, exposureScene, appeared } = event
+    .detail as unknown as ExposureRecordDetail;
+  const state = handle[exposureSymbol];
+  if (state !== undefined) {
+    state.exposed = appeared;
+  }
+  queueExposureRecord(
+    appeared ? exposureRecords : disexposureRecords,
+    appeared ? "exposure" : "disexposure",
+    backgroundTargetInfo(current)!,
+    String(exposureID),
+    String(exposureScene),
+  );
+  if (!appeared) {
+    syncExposureListener(handle);
+  }
+  return undefined;
+}
+
+/**
+ * The records queued since the last flush, one list per global event, in
+ * the order their events were dispatched.
+ */
+let exposureRecords: ExposureRecord[] = [];
+let disexposureRecords: ExposureRecord[] = [];
+/** Whether a flush of the two lists is scheduled. */
+let exposureFlushScheduled = false;
+
+/**
+ * Appends web-core's entry for one element to `list`, and schedules the one
+ * flush that sends whatever the lists hold.
+ *
+ * The entry is web-core's exactly (`ExposureServices.ts:221-240`): the
  * detail's five keys at the top level beside the target's `dataset`, `type`
  * as the list's own name, one descriptor as both `target` and
- * `currentTarget`, a `detail` whose `unique-id` is `0`, and an epoch
- * `timestamp` from `Date.now()` — read once for the list, where a dispatched
- * event's is on the view's timeline.
+ * `currentTarget` — the element's `dataset` and `id` as they are now, on a
+ * detached element too — and a `detail` whose `unique-id` is `0`. The
+ * `exposure-id` and `exposure-scene` are the record's, so a `disexposure`
+ * names what the element was exposed under after its attributes changed.
  *
- * `bobcat:runtime`'s `__BobcatSendExposure` is the caller, and sends the list
- * to the background thread; it lives here because the element state it reads
- * does.
+ * The flush runs as a promise job (the MTS realm has no `queueMicrotask`;
+ * see [`updateListInfo`]). The host dispatches one delivery's records under
+ * one microtask checkpoint, so all of them are queued before it runs, and
+ * each list leaves as one global event.
  */
-export function __BobcatExposureEvents(
-  kind: string,
-  record: string,
-): GlobalExposureEvent[] {
-  const fields = splitRecord(record);
-  const timestamp = Date.now();
-  const events: GlobalExposureEvent[] = [];
-  for (let at = 0; at + 2 < fields.length; at += 3) {
-    const uid = Number(fields[at]);
-    const detail = exposureDetail(uid, fields[at + 1]!, fields[at + 2]!);
-    const target = exposureTarget(uid);
-    events.push({
-      dataset: target.dataset,
-      ...detail,
-      type: kind,
-      target,
-      currentTarget: target,
-      detail: { ...detail, "unique-id": 0 },
-      timestamp,
-    });
+function queueExposureRecord(
+  list: ExposureRecord[],
+  type: string,
+  target: ExposureTarget,
+  exposureId: string,
+  scene: string,
+): undefined {
+  const detail = exposureDetail(target.uid, exposureId, scene);
+  list.push({
+    dataset: target.dataset,
+    ...detail,
+    type,
+    target,
+    currentTarget: target,
+    detail: { ...detail, "unique-id": 0 },
+  });
+  if (!exposureFlushScheduled) {
+    exposureFlushScheduled = true;
+    void Promise.resolve().then(flushExposureRecords);
   }
-  return events;
+  return undefined;
+}
+
+/** Hands the queued lists to `bobcat:runtime` and starts two empty ones. */
+function flushExposureRecords(): undefined {
+  const exposure = exposureRecords;
+  const disexposure = disexposureRecords;
+  exposureRecords = [];
+  disexposureRecords = [];
+  exposureFlushScheduled = false;
+  __BobcatSendExposureRecords(exposure, disexposure);
+  return undefined;
 }
 
 /**
