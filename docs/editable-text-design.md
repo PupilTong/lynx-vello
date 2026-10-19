@@ -843,16 +843,19 @@ Public surface:
   (`tree::focus_delegate`, called by the press when the target is in no
   editing host: HTML's `delegatesFocus` for this component), and places the
   caret from that point, clamped into the paragraph.
-- **Single line.** The editing-host UA rule now pins only
-  `white-space-collapse: preserve` (`!important`), the half of `pre-wrap`
-  the invariant "the paragraph shows the value byte for byte" needs;
-  `text-wrap-mode` cascades. The single-line editor is `white-space: pre`
-  from the shadow sheet, and the value never holds a line break: after each
+- **The editor is a block container, not a `<text>`.** The shadow sheet is
+  an engine sheet (`Document::add_engine_shadow_stylesheet`) that makes the
+  editor and the placeholder's text `display: block`, so each lays its text
+  out in its own standard inline formatting context; a shadow `<text>`
+  would bring Lynx's verbatim white space and truncation into a form
+  field. (Before the 2026-10-19 rework the editing-host UA rule forced
+  `display: -lynx-text` and pinned `white-space-collapse: preserve`.)
+- **Single line.** The single-line editor is `white-space: pre` and the
+  textarea's `pre-wrap`, from the shadow sheet, which outranks the UA
+  rule's `pre-wrap` default. The value never holds a line break: after each
   edit the component removes `\n` and `\r` (an `<input>`'s value
   sanitization), so a paste is one line and Enter's `insertLineBreak`
-  leaves the value as it was and fires `confirm`. Both ways keep the
-  invariant; the carve-out alone would have needed a second `!important`
-  rule naming the editor.
+  leaves the value as it was and fires `confirm`.
 - **The placeholder is CSS.** `#placeholder`, after the editor, is shown by
   `.editor:empty ~ #placeholder`, absolutely positioned over the content box
   (`padding: inherit` from the host), `pointer-events: none`; its colour,
@@ -898,8 +901,8 @@ Public surface:
 
 ### Limitations
 
-- A `password` field is not masked (masking needs a paragraph showing other
-  text than the value, which `dom` refuses to edit).
+- A `password` field is not masked (masking needs a paragraph built from
+  other text than the value, over which `dom` refuses edits).
 - The single-line field does not scroll to follow the caret; text past its
   width is clipped.
 - No intrinsic width: an unsized field in a row is as wide as its text.

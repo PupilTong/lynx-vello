@@ -13,12 +13,14 @@
 //! [`TextField::constructed`] attaches a UA shadow tree of two elements:
 //!
 //! - `#input` (`#textarea` on a textarea), `part` of the same name: the **editor**, a
-//!   `contenteditable="plaintext-only"` element — one `dom` editing host, laid out as one paragraph
-//!   whose text is the field's value. Its `enterkeyhint`, `inputmode` and `type` carry what
-//!   `confirm-type` and `type` say into [`dom::editing::TextInputState`].
+//!   `contenteditable="plaintext-only"` element — one `dom` editing host, a `display: block`
+//!   container from the engine's shadow sheet, so its own standard inline formatting context lays
+//!   out the field's value (not a Lynx `<text>`, whose verbatim white space and truncation a form
+//!   field does not have). Its `enterkeyhint`, `inputmode` and `type` carry what `confirm-type` and
+//!   `type` say into [`dom::editing::TextInputState`].
 //! - `#placeholder`, `part="placeholder"`: an absolutely positioned box over the host's content box
-//!   holding one text block with the `placeholder` text, shown by the shadow sheet only while the
-//!   editor is `:empty` (`#input:empty ~ #placeholder`), so no component code decides when it
+//!   holding one block container with the `placeholder` text, shown by the shadow sheet only while
+//!   the editor is `:empty` (`#input:empty ~ #placeholder`), so no component code decides when it
 //!   shows.
 //!
 //! **The host is the field's box.** web-core's host is `display: contents` and its inner
@@ -29,10 +31,9 @@
 //! vertically centred line — focuses the editor ([`focus_delegate`], HTML's `delegatesFocus`
 //! for this one component).
 //!
-//! **Single line.** An `x-input`'s editor is `white-space: pre`: every character kept (the
-//! `dom` invariant that the paragraph shows the value byte for byte) and no wrapping. The UA
-//! editing-host rule pins only `white-space-collapse: preserve` (the part of the invariant
-//! wrapping cannot break), so the shadow sheet's `text-wrap-mode` applies. The value never
+//! **Single line.** An `x-input`'s editor is `white-space: pre`: every character kept and no
+//! wrapping; an `x-textarea`'s is `pre-wrap`. Both come from the shadow sheet, which outranks
+//! the UA editing-host rule's `pre-wrap` default. The value never
 //! contains a line break: an `input` that inserted one is followed by the component removing
 //! every `\n` and `\r` from the value, as HTML's value sanitization strips them from an
 //! `<input>`, and Enter (`insertLineBreak`) becomes `confirm`. Text wider than the field is
@@ -167,10 +168,13 @@ textarea, x-textarea, x-textarea-ng { flex-direction: column; align-items: stret
 ";
 
 /// The shadow sheet common to both kinds; [`INPUT_SHADOW_RULES`] and
-/// [`TEXTAREA_SHADOW_RULES`] follow it.
+/// [`TEXTAREA_SHADOW_RULES`] follow it. An engine sheet
+/// ([`dom::Document::add_engine_shadow_stylesheet`]): the editor and the
+/// placeholder's text are `display: block`, which the `lynx` grammar keeps
+/// from author sheets.
 const SHADOW_RULES: &str = r"
 .editor {
-  display: -lynx-text; min-width: 0; min-height: 1lh; overflow: clip;
+  display: block; min-width: 0; min-height: 1lh; overflow: clip;
 }
 #placeholder {
   display: none; position: absolute; top: 0; right: 0; bottom: 0; left: 0;
@@ -181,7 +185,7 @@ const SHADOW_RULES: &str = r"
   font-family: var(--placeholder-font-family);
 }
 .editor:empty ~ #placeholder { display: flex; }
-#placeholder > div { display: -lynx-text; min-width: 0; flex: 1 1 auto; overflow: clip; }
+#placeholder > div { display: block; min-width: 0; flex: 1 1 auto; overflow: clip; }
 ";
 
 /// One line, vertically centred, as a browser's `<input>` draws it.
@@ -469,7 +473,7 @@ impl TextField {
             Kind::Input => INPUT_SHADOW_RULES,
             Kind::Textarea => TEXTAREA_SHADOW_RULES,
         };
-        document.add_shadow_stylesheet(shadow, &format!("{SHADOW_RULES}{kind_rules}"));
+        document.add_engine_shadow_stylesheet(shadow, &format!("{SHADOW_RULES}{kind_rules}"));
         let editor = document.create_element("div", ());
         let id = self.kind.editor_id();
         document.set_id_attribute(editor, Some(id));

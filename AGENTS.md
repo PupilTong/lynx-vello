@@ -2301,7 +2301,8 @@ web-core's `parseFloat` — the one tag module with no UA rules of its own,
 since a blur view is a container and nothing else), and `tree::text_field`
 (`x-input`/`x-textarea` under the JSX tags `input`/`textarea` and the `-ng`
 aliases, `docs/editable-text-design.md` E5: a UA shadow tree of one
-`contenteditable="plaintext-only"` editor — `white-space: pre` for the
+`contenteditable="plaintext-only"` editor — an engine-sheet `display: block`
+container, its own inline formatting context, `white-space: pre` for the
 single-line field — and a `#placeholder` shown while the editor is `:empty`;
 the host is the field's box; the placeholder style attributes as UA `attr()`
 custom properties; `value`, `type`, `confirm-type`, `disabled`/`readonly`

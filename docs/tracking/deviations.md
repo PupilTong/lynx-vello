@@ -3112,8 +3112,8 @@ consequential choice about whether to follow the spec or the quirk.
     nothing and no `focus` fires.
   - *A `password` field is not masked.* web-core's `<input type=password>`
     shows bullets; here the text shows as typed, because masking needs a
-    paragraph that shows other text than the value, which `dom` refuses to
-    edit. `TextInputState::input_type` is `Password`.
+    paragraph built from other text than the value, over which `dom`
+    refuses edits. `TextInputState::input_type` is `Password`.
   - *No intrinsic width.* An unsized field in a row is as wide as its text;
     a browser's `<input>` is about 20 characters wide.
   - *The single-line field does not follow its caret.* Text wider than the
