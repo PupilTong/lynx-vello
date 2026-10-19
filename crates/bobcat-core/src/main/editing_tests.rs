@@ -175,37 +175,34 @@ fn an_edit_from_the_host_fires_beforeinput_then_input_and_changes_the_value() {
     assert_eq!(state.composition, None);
 }
 
-/// A listener that cancels the `beforeinput` drops the edit: no `input`, no
-/// change. The next edit, not canceled, goes through.
+/// What a listener runs first to show the event carries no cancellation
+/// member: a listener that throws logs nothing, so the expected log is
+/// never reached.
+const NO_CANCELLATION: &str = "if ('preventDefault' in event || 'cancelable' in event \
+     || 'defaultPrevented' in event) throw new Error('a cancellation member');";
+
+/// A `beforeinput` listener cannot stop the edit: the event has no
+/// `preventDefault` (`docs/tracking/deviations.md`), the value changes and
+/// `input` follows.
 #[test]
-fn a_canceled_beforeinput_drops_the_edit() {
-    let mut engine = booted(
-        &["beforeinput", "input"],
-        "if (event.type === 'beforeinput' && event.data === 'x') event.preventDefault();",
-    );
+fn a_beforeinput_listener_cannot_stop_the_edit() {
+    let mut engine = booted(&["beforeinput", "input"], NO_CANCELLATION);
     let mut states = States::default();
     focus_host(&mut engine, &mut states);
 
     engine.view.edit(Command::Insert("x".to_owned())).unwrap();
-    engine.view.edit(Command::Insert("y".to_owned())).unwrap();
     wait_for_log(
         &mut engine,
-        "beforeinput:insertText:x:false|beforeinput:insertText:y:false|input:insertText:y:false",
+        "beforeinput:insertText:x:false|input:insertText:x:false",
     );
-    states.wait(&mut engine, "with the value y", |state| state.value == "y");
-    assert!(
-        states.0.iter().all(|state| !state.value.contains('x')),
-        "the canceled insertion never reached the value: {:?}",
-        states.0
-    );
+    states.wait(&mut engine, "with the value x", |state| state.value == "x");
 }
 
 /// An input method's composition and commit fire the composition events
 /// with their `data`, and `beforeinput`/`input` of `insertCompositionText`
-/// with `isComposing` — which a listener cannot cancel (Input Events
-/// Level 2), so the `preventDefault` here changes nothing.
+/// with `isComposing`.
 #[test]
-fn a_composition_fires_the_composition_events_and_cannot_be_canceled() {
+fn a_composition_fires_the_composition_events() {
     let mut engine = booted(
         &[
             "compositionstart",
@@ -214,7 +211,7 @@ fn a_composition_fires_the_composition_events_and_cannot_be_canceled() {
             "beforeinput",
             "input",
         ],
-        "if (event.type === 'beforeinput') event.preventDefault();",
+        NO_CANCELLATION,
     );
     let mut states = States::default();
     focus_host(&mut engine, &mut states);
@@ -303,26 +300,20 @@ fn the_text_input_state_is_published_when_it_changes_and_only_then() {
     }
 }
 
-/// A key goes to the focused host, and a `keydown` nobody canceled inserts
-/// the text it typed; one a listener canceled does not.
+/// A key goes to the focused host, and a `keydown` inserts the text it
+/// typed whatever its listener does: the event has no `preventDefault`.
 #[test]
-fn a_keydown_types_into_the_focused_host_unless_canceled() {
-    let mut engine = booted(
-        &["keydown"],
-        "if (event.key === 'q') event.preventDefault();",
-    );
+fn a_keydown_types_into_the_focused_host_whatever_its_listener_does() {
+    let mut engine = booted(&["keydown"], NO_CANCELLATION);
     let mut states = States::default();
     focus_host(&mut engine, &mut states);
 
     engine.dispatch_input(key("q"));
     engine.dispatch_input(key("x"));
     wait_for_log(&mut engine, "keydown|keydown");
-    states.wait(&mut engine, "with the value x", |state| state.value == "x");
-    assert!(
-        states.0.iter().all(|state| !state.value.contains('q')),
-        "the canceled key typed nothing: {:?}",
-        states.0
-    );
+    states.wait(&mut engine, "with the value qx", |state| {
+        state.value == "qx"
+    });
     let target = engine.probe_document(|tree| tree.focused()).flatten();
     assert_eq!(target, Some(node_id(HOST)));
 }

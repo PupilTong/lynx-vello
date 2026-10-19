@@ -181,11 +181,10 @@ fn push_detail_strings<'a>(
     }
 }
 
-/// Inline arguments for one dispatch: the seven of the header (the two
-/// paths, the name, `bubbles`, `cancelable`, the timestamp and the extras
-/// count), then an input event's discriminator and eight detail numbers.
-/// Extras and touch points spill.
-type Arguments<'a> = SmallVec<[HostArgument<'a>; 16]>;
+/// Inline arguments for one dispatch: the six of the header, then an
+/// input event's discriminator and eight detail numbers. Extras and touch
+/// points spill.
+type Arguments<'a> = SmallVec<[HostArgument<'a>; 15]>;
 
 /// The registrants a dispatch of `name` over `steps` invites, as the
 /// document's listener table holds them when this is read: each with a path
@@ -274,46 +273,6 @@ fn encode_path(document: &LynxDocument, steps: &dom::event::EventSteps) -> Encod
         write!(targets, "{}", packed_node_id(step.target)).expect("writing to a String");
     }
     EncodedPath { nodes, targets }
-}
-
-/// An event's three flags, as DOM's `EventInit` has them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct EventFlags {
-    pub(crate) bubbles: bool,
-    pub(crate) composed: bool,
-    pub(crate) cancelable: bool,
-}
-
-impl EventFlags {
-    /// A component's own event — an image's `load`, a dialog's `close`, a
-    /// `scroll`, `uiappear` — and the like: it neither bubbles, leaves its
-    /// tree nor can be canceled, as HTML and web-core fire every one of
-    /// them.
-    pub(crate) const COMPONENT: Self = Self {
-        bubbles: false,
-        composed: false,
-        cancelable: false,
-    };
-
-    /// A routed input event: every one bubbles and is composed, as UI
-    /// Events' are, and every one but a cancellation can be canceled
-    /// (`pointercancel` and `touchcancel` are not cancelable in their
-    /// specifications).
-    pub(crate) fn routed(name: &str) -> Self {
-        Self {
-            bubbles: true,
-            composed: true,
-            cancelable: !matches!(name, "pointercancel" | "touchcancel"),
-        }
-    }
-}
-
-/// What one dispatch answered: whether the realm published the dispatch
-/// export at all, and whether a listener canceled a cancelable event.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Dispatched {
-    pub(crate) delivered: bool,
-    pub(crate) default_prevented: bool,
 }
 
 /// Appends the extras channel: the count, then each name and its value.
@@ -526,13 +485,10 @@ impl ListenerFailures {
         self.0.into_iter()
     }
 
-    /// `failures` as a dispatch's answer: `Ok(answered)` when there are none.
-    fn or_answered(
-        failures: SmallVec<[MainThreadError; 1]>,
-        answered: Dispatched,
-    ) -> Result<Dispatched, Self> {
+    /// `failures` as a dispatch's answer: `Ok(called)` when there are none.
+    fn or_called(failures: SmallVec<[MainThreadError; 1]>, called: bool) -> Result<bool, Self> {
         if failures.is_empty() {
-            Ok(answered)
+            Ok(called)
         } else {
             Err(Self(failures))
         }
@@ -2312,10 +2268,8 @@ impl MainThreadRuntime {
                 js_runtime,
                 target,
                 name,
-                EventFlags {
-                    composed,
-                    ..EventFlags::COMPONENT
-                },
+                false,
+                composed,
                 timestamp,
                 &EventDetail::None,
                 &extras,
@@ -2395,7 +2349,7 @@ impl MainThreadRuntime {
         name: &str,
         payload: &InputEventPayload,
         release: Option<dom::NodeId>,
-    ) -> Result<Dispatched, ListenerFailures> {
+    ) -> Result<bool, ListenerFailures> {
         if let Some(release) = release {
             return self.dispatch_click(js_runtime, target, release, payload);
         }
@@ -2408,7 +2362,8 @@ impl MainThreadRuntime {
             js_runtime,
             target,
             name,
-            EventFlags::routed(name),
+            true,
+            true,
             payload.timestamp,
             &payload.detail,
             &[],
@@ -2433,11 +2388,11 @@ impl MainThreadRuntime {
         down: dom::NodeId,
         release: dom::NodeId,
         payload: &InputEventPayload,
-    ) -> Result<Dispatched, ListenerFailures> {
+    ) -> Result<bool, ListenerFailures> {
         let (target, click, double) = {
             let slot = self.slot.borrow();
             let Some(document) = slot.document.as_ref() else {
-                return Ok(Dispatched::default());
+                return Ok(false);
             };
             (
                 document.nearest_common_event_ancestor(down, release),
@@ -2447,7 +2402,7 @@ impl MainThreadRuntime {
         };
         let Some(target) = target else {
             self.last_click = None;
-            return Ok(Dispatched::default());
+            return Ok(false);
         };
         let at = payload.timestamp;
         let clicked = if click {
@@ -2455,13 +2410,14 @@ impl MainThreadRuntime {
                 js_runtime,
                 target,
                 CLICK_EVENT,
-                EventFlags::routed(CLICK_EVENT),
+                true,
+                true,
                 at,
                 &payload.detail,
                 &[],
             )
         } else {
-            Ok(Dispatched::default())
+            Ok(false)
         };
         let completes = self
             .last_click
@@ -2476,21 +2432,19 @@ impl MainThreadRuntime {
                 js_runtime,
                 target,
                 DOUBLE_CLICK_EVENT,
-                EventFlags::routed(DOUBLE_CLICK_EVENT),
+                true,
+                true,
                 at,
                 &payload.detail,
                 &[],
             )
         } else {
-            Ok(Dispatched::default())
+            Ok(false)
         };
         // What a `click` listener threw does not keep the `dblclick` from
         // running, and both are answered, the `click`'s first.
         match (clicked, doubled) {
-            (Ok(clicked), Ok(doubled)) => Ok(Dispatched {
-                delivered: clicked.delivered || doubled.delivered,
-                default_prevented: clicked.default_prevented || doubled.default_prevented,
-            }),
+            (Ok(clicked), Ok(doubled)) => Ok(clicked || doubled),
             (Err(failed), Ok(_)) | (Ok(_), Err(failed)) => Err(failed),
             (Err(mut clicked), Err(doubled)) => {
                 clicked.0.extend(doubled.0);
@@ -2598,37 +2552,28 @@ impl MainThreadRuntime {
     /// hears the event; [`Self::finish_batch`] runs once, at the end; and
     /// every failure is answered, in the order the calls ran.
     ///
-    /// `cancelable` is the event's own flag as well, and crosses to every
-    /// call after `bubbles`: a listener's `preventDefault()` cancels only a
-    /// cancelable event, and each realm answers whether one of its listeners
-    /// did. The dispatch's [`Dispatched::default_prevented`] is true when any
-    /// realm called answered so; a realm whose call threw counts as not
-    /// canceled. That is what decides an editing default action — the
-    /// `beforeinput` before an edit, the `keydown` and `pointerdown` the
-    /// editing default actions follow.
+    /// No event is cancelable from script (the 2026-08-17 ruling stands,
+    /// `docs/tracking/deviations.md`): no realm call answers anything about
+    /// a default action, and the editing default actions
+    /// (`main/runtime/editing.rs`) run whatever a listener did.
     ///
-    /// Answers whether some realm published the export and whether the
-    /// event's default was prevented: nothing here says whether any listener
-    /// ran.
+    /// Answers whether some realm published the export, which is all the host
+    /// can know: nothing here says whether anything ran.
     #[allow(
         clippy::too_many_arguments,
-        reason = "the event's three flags, the first two as `dom::Document::event_steps` takes them"
+        reason = "the event's two flags, as `dom::Document::event_steps` takes them"
     )]
     fn dispatch(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         target: dom::NodeId,
         name: &str,
-        flags: EventFlags,
+        bubbles: bool,
+        composed: bool,
         timestamp: f64,
         detail: &EventDetail,
         extras: Extras<'_>,
-    ) -> Result<Dispatched, ListenerFailures> {
-        let EventFlags {
-            bubbles,
-            composed,
-            cancelable,
-        } = flags;
+    ) -> Result<bool, ListenerFailures> {
         // The realm files every name lowercased — `element-papi.ts`
         // lowercases both halves of a registration, and its dispatch the
         // name it is handed — so the listener table is asked in that
@@ -2649,7 +2594,7 @@ impl MainThreadRuntime {
             if document.get(target).is_none()
                 || !(document.hears(registered) || document.observes_event(name))
             {
-                return Ok(Dispatched::default());
+                return Ok(false);
             }
             let steps = document.event_steps(target, bubbles, composed);
             let calls = realm_calls(document, &steps, registered, registrants);
@@ -2667,7 +2612,7 @@ impl MainThreadRuntime {
             .expect(DOCUMENT_EXISTS)
             .event_walk(&steps, name, detail, timestamp);
         let mut failures: SmallVec<[MainThreadError; 1]> = SmallVec::new();
-        let mut answered = Dispatched::default();
+        let mut called = false;
         loop {
             // The document is borrowed for one step's components alone: a
             // realm call below runs listeners that mutate the tree.
@@ -2704,12 +2649,9 @@ impl MainThreadRuntime {
                     continue;
                 }
                 match self.call_realm(
-                    js_runtime, key, &path, name, bubbles, cancelable, timestamp, detail, extras,
+                    js_runtime, key, &path, name, bubbles, timestamp, detail, extras,
                 ) {
-                    Ok(answer) => {
-                        answered.delivered |= answer.is_some();
-                        answered.default_prevented |= answer == Some(true);
-                    }
+                    Ok(published) => called |= published,
                     Err(error) => failures.push(error),
                 }
                 live = None;
@@ -2720,15 +2662,14 @@ impl MainThreadRuntime {
         if let Err(error) = self.finish_batch(js_runtime, failures.is_empty()) {
             failures.push(error);
         }
-        ListenerFailures::or_answered(failures, answered)
+        ListenerFailures::or_called(failures, called)
     }
 
     /// One realm's call in one dispatch: `__BobcatDispatchEvent(nodes,
-    /// targets, name, bubbles, cancelable, timestamp, extras…, detail…)` in
-    /// the realm whose registrations are filed under `key`
-    /// ([`RealmId::from_listener_key`]), answering what it returned: `None`
-    /// when it published no such export or is a child already freed, which
-    /// is not called, and otherwise whether it answered `defaultPrevented`.
+    /// targets, name, bubbles, timestamp, extras…, detail…)` in the realm
+    /// whose registrations are filed under `key`
+    /// ([`RealmId::from_listener_key`]). A child already freed is not
+    /// called.
     #[allow(
         clippy::too_many_arguments,
         reason = "the dispatch's own arguments, which every call carries"
@@ -2740,11 +2681,10 @@ impl MainThreadRuntime {
         path: &EncodedPath,
         name: &str,
         bubbles: bool,
-        cancelable: bool,
         timestamp: f64,
         detail: &EventDetail,
         extras: Extras<'_>,
-    ) -> Result<Option<bool>, MainThreadError> {
+    ) -> Result<bool, MainThreadError> {
         // The detail last, because a touch event's points make it the one
         // part of variable length besides the extras before it.
         let mut arguments = Arguments::new();
@@ -2752,21 +2692,20 @@ impl MainThreadRuntime {
         arguments.push(HostArgument::String(&path.targets));
         arguments.push(HostArgument::String(name));
         arguments.push(HostArgument::Boolean(bubbles));
-        arguments.push(HostArgument::Boolean(cancelable));
         arguments.push(HostArgument::Number(timestamp));
         encode_extras(extras, &mut arguments);
         encode_detail(detail, &mut arguments);
 
-        let Some(answer) = self.core.call_module_export_for_flag(
+        let Some(called) = self.core.call_module_export(
             js_runtime,
             RealmId::from_listener_key(key),
             ELEMENT_MODULE_SPECIFIER,
             EVENT_DISPATCH_EXPORT,
             &arguments,
         ) else {
-            return Ok(None);
+            return Ok(false);
         };
-        answer.map_err(|error| MainThreadError::from_engine("delivering an event", error))
+        called.map_err(|error| MainThreadError::from_engine("delivering an event", error))
     }
 
     /// Fires a non-composed `tap` at `target` for the engine's own
@@ -2835,7 +2774,6 @@ impl MainThreadRuntime {
             },
             None,
         )
-        .map(|dispatched| dispatched.delivered)
     }
 
     /// Whether the commits since the last delivery left any
@@ -2980,7 +2918,8 @@ impl MainThreadRuntime {
                 js,
                 transition.node,
                 name,
-                EventFlags::COMPONENT,
+                false,
+                false,
                 timestamp,
                 &EventDetail::Exposure,
                 &[],

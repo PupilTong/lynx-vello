@@ -171,8 +171,7 @@ pub(crate) enum ToMain {
     /// the painter's routed input, so a frame post sent after it is
     /// acknowledged only once it has been applied. Main dispatches the
     /// events it owes (`beforeinput`, `input`, `composition*`) around the
-    /// change, and drops a change whose cancelable `beforeinput` was
-    /// canceled.
+    /// change, which no listener can stop.
     Edit(dom::editing::Command),
     /// The view's [`ScrollMailbox`] holds something to take: scroll offsets,
     /// a frame post, or both. Queued once per take, however many passes the

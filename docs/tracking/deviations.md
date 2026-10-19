@@ -958,6 +958,24 @@ consequential choice about whether to follow the spec or the quirk.
   compatibility" decision bought a boundary with no producer. Recognizers stay
   keyed off the gesture arbitration API, which is also what will drive the
   one surviving suppression seam, `InputEvent::default_prevented`.
+  - **`beforeinput` is not cancelable either** (user ruling 2026-10-19,
+    editable text E2). UI Events and Input Events Level 2 make `beforeinput`
+    (all but `insertCompositionText`), `keydown` and `pointerdown`
+    cancelable, and canceling them drops the edit or the editing default
+    action. Here every editing event — `beforeinput`, `input`, the
+    composition and focus events — is dispatched not cancelable, an edit
+    always applies, a `keydown` at a focused host always runs its editing
+    command and a press always places the caret, whatever a listener does.
+    Why: a Lynx event object has no `preventDefault`; web-core registers its
+    root listeners `passive: true` (`WASMJSBinding.ts:270,278`), so no Lynx
+    handler cancels anything there either; a bit with no producer is not
+    worth a boundary, so the 2026-08-17 ruling stands. E2 had briefly carried
+    a `cancelable` argument into `__BobcatDispatchEvent` and a
+    `defaultPrevented` answer back; both are gone. The only veto left on a
+    default action is the embedder's `InputEvent::default_prevented`.
+    Agreed future shape: a Rust component that needs to veto a default
+    action sets a `canceled` flag on `dom`'s `EventWalk` beside its stop
+    flag, never a script channel.
 - **`tap` suppressed by `longpress`** — Lynx hardcodes "tap doesn't fire if
   longpress was consumed earlier in the same touch sequence," a global rule
   with no DOM equivalent. **Decision: derive this from gesture-recognizer

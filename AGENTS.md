@@ -392,8 +392,8 @@ a `DispatchEvent` (one event's type and target, plus the payload the router
 decided as values: the position, the wheel delta, the timestamp and — for the
 four touch events — its touch points), an `Edit` (one `dom::editing::Command`
 for the focused editing host, from `LynxView::edit`; main dispatches the
-`beforeinput`/`input`/`composition*` events it owes around the change and
-drops it on a canceled cancelable `beforeinput`), a `Vsync` (the display-frame reading a realm that called
+`beforeinput`/`input`/`composition*` events it owes around the change, which
+no listener can stop), a `Vsync` (the display-frame reading a realm that called
 `requestScriptFrame` asked for), `Posted` (payload-free: the view's
 `ScrollMailbox` holds the painter's latest offset per scroll container and one
 coalesced frame post — a timeline reading, the sequence number the
@@ -1927,8 +1927,8 @@ walks it once (`dom`'s `EventWalk`), and at the path's first capture step
 releases the document and makes one call to each listening realm's Element
 module `__BobcatDispatchEvent` export, the page realm first, then the
 children in construction order — the page realm's through
-`quickjs::ScriptEngine::call_module_export_for_flag`, a `frame`'s card's
-through `ChildRealms::call_module_export_for_flag` — every call carrying the same path,
+`quickjs::ScriptEngine::call_module_export`, a `frame`'s card's through
+`ChildRealms::call_module_export` — every call carrying the same path,
 encoded once before the first (`encode_path`): the standard's bubble steps,
 target-first, as two comma-joined decimal id strings — the nodes, and
 position for position each step's shadow-retargeted target, less the steps
@@ -1940,8 +1940,7 @@ none of, and every card; a card everything outside its nested page — and its
 shadow chrome reaches the page realm at its host (routed input events are
 composed, the components' events are not, as HTML and web-core fire them);
 a realm holding no step runs its `global-bindEvent` pass alone, aimed at each
-registering element. Then the name and primitives alone: `bubbles`,
-`cancelable`, the
+registering element. Then the name and primitives alone: `bubbles`, the
 `timestamp` (milliseconds on the view's timeline); the extras channel
 (`extraCount`, then name/value pairs: what a Lynx handler reads beside the W3C
 payload, such as a `load`'s size or a `scroll`'s metrics, which the realm makes
@@ -1988,35 +1987,36 @@ kinds)` (1 bubble, 2 capture, 4 global, or'ed; the host replaces the kinds on
 a repeat) and `listenerClosed(node, name)`, from `element-papi.ts`'s
 `reconcile` only; a freed node's rows leave in the document's free path, so a
 collected handle tells the host nothing.
-What crosses back is each realm's answer, `event.defaultPrevented`
-(`preventDefault()` sets it on a cancelable event alone; it is a read-only
-getter over a flag local to the dispatch, as `stopPropagation`'s are, so no
-member of the event captures the event itself and it is freed when the
-dispatch ends rather than by the cycle collector), which
-`MainThreadRuntime::dispatch` ORs over the realms it called into
-`Dispatched { delivered, default_prevented }` (a realm whose call threw
-counts as not canceled): the editing default actions read it
-(`main/runtime/editing.rs` — a canceled `beforeinput` drops its edit, a
-canceled `keydown` or `pointerdown` runs no editing action).
+Nothing crosses back: no event is cancelable from script. The realm's event
+object has no `preventDefault`, `cancelable` or `defaultPrevented` (the
+2026-08-17 ruling stands, `docs/tracking/deviations.md`: a Lynx event object
+has none, and web-core's root listeners are `passive: true`), the editing
+events are dispatched not cancelable, and the editing default actions run
+whatever a listener did. The one veto on a built-in behavior is the embedder's
+`InputEvent::default_prevented`, answered by the input router.
 
 Editable text (`docs/editable-text-design.md`, E2) is wired here.
 `LynxView::edit` sends `ToMain::Edit`; `MainThreadRuntime::apply_edit`
 prepares the command in `dom`, dispatches the events before the change at the
-host, commits unless a cancelable `beforeinput` was canceled, and dispatches
-the rest. A routed `keydown`/`keyup` is delivered at `Document::focused()`
-when there is one, and a `keydown` nobody canceled runs the keyboard's editing
-command (`key_command`); a mouse's primary `pointerdown`, or a finger's or
-pen's tap (the `click`), nobody canceled inside an editing host focuses it
+host, commits, and dispatches the rest. A routed `keydown`/`keyup` is
+delivered at `Document::focused()` when there is one, and a `keydown` at a
+focused host runs the keyboard's editing command (`key_command`); a mouse's
+primary `pointerdown`, or a finger's or pen's tap (the `click`), inside an
+editing host focuses it
 (dispatching `focus`/`focusin`, and `blur`/`focusout` at the host that lost
 it — drained from `dom` right after the press) and places the caret, a second
 and third quick press select the word and the line, and a held mouse drag
 extends. The slot routes those names on an editing account of its own, by
-state (`editing::EditingRoute`): `pointerdown` and `click` while
-`Document::has_editing_hosts()`, `keydown` while an element is focused (both
-from the page's epilogue, `DocumentSlot::sync_editing_routes`), and
-`pointermove`/`pointerup`/`pointercancel` only while a mouse drag is held
-(`MainThreadRuntime::set_pressed`, inside the press's job). An event routed
-only on that account skips the realm. The epilogue publishes the focused host's `TextInputState`
+state (`editing::EditingRoute`), one more term of `DocumentSlot::routes_given`
+beside the listener table and the observed names, whose changes go out through
+`DocumentSlot::change_names` after the waiting last removals: `pointerdown`
+and `click` while `Document::has_editing_hosts()`, `keydown` while an element
+is focused (both from the page's epilogue, `DocumentSlot::sync_editing_routes`),
+and `pointermove`/`pointerup`/`pointercancel` only while a mouse drag is held
+(`MainThreadRuntime::set_pressed`, inside the press's job). The kernel is not
+a registrant in the listener table, so an event routed only on that account
+invites no realm and builds no path; `deliver_input_event` runs the default
+action whenever the account routes the name. The epilogue publishes the focused host's `TextInputState`
 after its commit when it changed.
 
 That host side is one function, `MainThreadRuntime::dispatch`, the only place

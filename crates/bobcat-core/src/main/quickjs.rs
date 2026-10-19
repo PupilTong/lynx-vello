@@ -724,9 +724,7 @@ impl ScriptEngine {
     /// There is no return value, because the one thing a callee needs to tell
     /// the host — that a walk should end — is a host call of its own, and
     /// making it a return value would mean the host could only hear it once
-    /// the callee finished. [`Self::call_module_export_for_flag`] is the one
-    /// call that reads one, for an answer that only exists once the callee
-    /// has finished: whether an event's default action was canceled.
+    /// the callee finished.
     pub(crate) fn call_module_export(
         &mut self,
         runtime: &mut ScriptRuntime,
@@ -738,29 +736,6 @@ impl ScriptEngine {
         // The checkpoint runs through `finish_operation`, never inline:
         // draining the job queue while this call is still on the stack would
         // run promise jobs re-entrantly, inside the very walk they belong to.
-        self.finish_operation(runtime, result, ScriptErrorPhase::CallModuleExport)
-    }
-
-    /// [`Self::call_module_export`], answering what the export returned when
-    /// it returned a boolean: `None` when the module exported no such
-    /// function, `Some(true)` only for a returned `true`, `Some(false)` for
-    /// anything else it returned.
-    pub(crate) fn call_module_export_for_flag(
-        &mut self,
-        runtime: &mut ScriptRuntime,
-        module_specifier: &str,
-        export_name: &str,
-        arguments: &[quickjs::HostArgument<'_>],
-    ) -> Result<Option<bool>, ScriptError> {
-        let result = self.invoke_module_export_reading(
-            module_specifier,
-            export_name,
-            arguments,
-            |outcome| match outcome {
-                quickjs::CallOutcome::MemberAbsent => None,
-                quickjs::CallOutcome::Called(value) => Some(value.as_boolean() == Some(true)),
-            },
-        )?;
         self.finish_operation(runtime, result, ScriptErrorPhase::CallModuleExport)
     }
 
@@ -798,22 +773,6 @@ impl ScriptEngine {
         export_name: &str,
         arguments: &[quickjs::HostArgument<'_>],
     ) -> Result<Result<bool, ScriptError>, ScriptError> {
-        self.invoke_module_export_reading(module_specifier, export_name, arguments, |outcome| {
-            // The realm published nothing here. Not an error: a bundle with
-            // no listener runtime simply has no member to call.
-            matches!(outcome, quickjs::CallOutcome::Called(_))
-        })
-    }
-
-    /// [`Self::invoke_module_export`], handing the call's outcome to `read`
-    /// while the realm is still borrowed.
-    fn invoke_module_export_reading<T>(
-        &mut self,
-        module_specifier: &str,
-        export_name: &str,
-        arguments: &[quickjs::HostArgument<'_>],
-        read: impl FnOnce(quickjs::CallOutcome) -> T,
-    ) -> Result<Result<T, ScriptError>, ScriptError> {
         let (object, member) = self.module_export(module_specifier, export_name)?;
         // One crossing carries the lookup and every argument, and nothing
         // here allocates: the primitives are described in place and a string
@@ -822,7 +781,12 @@ impl ScriptEngine {
         Ok(self
             .realm
             .call_member(&object, &member, arguments)
-            .map(read)
+            .map(|outcome| match outcome {
+                // The realm published nothing here. Not an error: a bundle
+                // with no listener runtime simply has no member to call.
+                quickjs::CallOutcome::MemberAbsent => false,
+                quickjs::CallOutcome::Called(_) => true,
+            })
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::CallModuleExport)))
     }
 }

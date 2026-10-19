@@ -30,6 +30,14 @@ Other rulings that shape the design:
   caret and composition character bounds). Both are proven on five platforms.
 - Value authority races (a stale script write overtaking a keystroke) are
   **not managed**: last write wins.
+- **No event is cancelable from script** (user ruling 2026-10-19, keeping the
+  2026-08-17 one): `beforeinput` and the other editing events are dispatched
+  not cancelable, an edit always applies, and the `keydown` and pointer
+  editing default actions run whatever a listener does. A Lynx event object
+  has no `preventDefault`, and web-core's root listeners are
+  `passive: true`. The embedder's `InputEvent::default_prevented` is the only
+  veto; a Rust component that ever needs one sets a `canceled` flag on `dom`'s
+  `EventWalk` beside its stop flag (`docs/tracking/deviations.md`).
 - Pointer events over an editing host are routed exactly like any other
   element's; the engine, not the host, turns them into caret placement.
 - Platform-specific text features that need a real native control
@@ -130,9 +138,10 @@ Chromium's set plus the local editing actions a keyboard produces:
 | `SelectFromPoint { point, extend }` / `SelectWordAtPoint` / `SelectLineAtPoint` | pointer placement, host-local CSS px |
 | `Insert(text)`, `InsertLineBreak`, `DeleteBackward`, `DeleteForward`, `DeleteWordBackward`, `DeleteWordForward`, `Move(Granularity, Direction, extend)`, `SelectAll` | keyboard editing |
 
-Every command that changes the value dispatches `beforeinput` (cancelable)
-then `input` with the standard `inputType`; composition commands dispatch the
-`composition*` events, and `isComposing` is true on inputs inside one.
+Every command that changes the value dispatches `beforeinput` (not
+cancelable, see the ruling) then `input` with the standard `inputType`;
+composition commands dispatch the `composition*` events, and `isComposing` is
+true on inputs inside one.
 
 ### `TextInputState` (published to the host)
 
@@ -164,7 +173,7 @@ next frame post (E2 named it after `dom::editing::Command`, which it carries
 as it is, rather than `ime`/`ImeCommand`: the same call carries a host's own
 selection and editing commands). Keyboard keys travel as `InputKind::Key` (PR
 #407); main inserts a printable key's W3C `key` value as the key's **default
-action** when the `keydown` was not canceled and an editing host is focused.
+action** when an editing host is focused.
 Keys the IME consumed arrive as `Edit` commands instead and the platform's
 `keydown` for them carries `key = "Process"`, matching browsers.
 
@@ -173,7 +182,7 @@ Keys the IME consumed arrive as `Edit` commands instead and the platform's
 | PR | Crates | Scope | Depends on |
 |---|---|---|---|
 | **E1** | dom, bobcat-core (UA sheet) | editing host, focus model, selection/caret/composition state, commands, caret + selection + composition painting, `TextInputState`, unit tests + goldens | — |
-| **E2** | bobcat-core, bobcat-element (dom: two small additions) | `ToMain::Edit`, `LynxView::edit`, `ViewNotice::TextInputState` → `EngineEvent::TextInputStateChanged`, standard events into the realm (`EventDetail::{Input, Composition, Focus}` with string data), `preventDefault`/`defaultPrevented` across the dispatch, pointer → caret placement and keyboard default actions on the main thread | E1, #407 |
+| **E2** | bobcat-core, bobcat-element (dom: two small additions) | `ToMain::Edit`, `LynxView::edit`, `ViewNotice::TextInputState` → `EngineEvent::TextInputStateChanged`, standard events into the realm (`EventDetail::{Input, Composition, Focus}` with string data), no cancellation channel (ruled 2026-10-19), pointer → caret placement and keyboard default actions on the main thread | E1, #407 |
 | **E3** | bobcat-cli (macOS) | winit `Ime` → commands, `set_ime_allowed` / `set_ime_cursor_area` from the state, `KeyEvent.text` insertion, headless driver | E2 |
 | **E4** | bobcat-wasm | hidden `<textarea>` proxy in `facade.ts` (`beforeinput`/`composition*` → messages → `LynxView::ime`), keyboard focus, `EditContext` where available | E2 |
 | **E5** | bobcat-core (components), bobcat-element | `x-input` / `x-textarea`: UA shadow tree with a plain-text editing host, attributes (`value`, `placeholder`, `type`, `maxlength`, `confirm-type`, `disabled`, `readonly`, `input-filter`, `send-composing-input`), `lynxinput`/`confirm`/`selection`/`focus`/`blur` in web-core's shape, methods (`setValue`, `getValue`, `focus`, `blur`, `setSelectionRange`, `select`) | E2 |
@@ -243,12 +252,13 @@ Public surface:
   `compositionstart`, then per update `beforeinput` (`insertCompositionText`),
   `compositionupdate`, the change, `input`; `compositionend` alone at the
   end. A commit with text is `insertCompositionText` (Chromium), not Safari's
-  `deleteCompositionText` + `insertFromComposition`. `beforeinput` of
-  `insertCompositionText` is not cancelable (`EditEvent::cancelable`), as in
-  Level 2. `Insert` during a composition ends it first (`compositionend`, then
-  `insertText`). `DeleteSurrounding` reports one `beforeinput`/`input` pair
-  for both sides (`deleteContentBackward` when anything before the selection
-  goes, else `deleteContentForward`) where Blink reports two;
+  `deleteCompositionText` + `insertFromComposition`. No `beforeinput` is
+  cancelable here (the ruling above; Level 2 makes all but
+  `insertCompositionText` cancelable). `Insert` during a composition ends it
+  first (`compositionend`, then `insertText`). `DeleteSurrounding` reports
+  one `beforeinput`/`input` pair for both sides (`deleteContentBackward` when
+  anything before the selection goes, else `deleteContentForward`) where
+  Blink reports two;
   `ExtendSelectionAndDelete` is `deleteContentBackward`. `deleteByCut` and
   `insertFromComposition` are not produced.
 - **The prepare/commit seam.** `prepare_editing` computes the replacements,
@@ -257,8 +267,7 @@ Public surface:
   before the change. `commit_editing` refuses (`applied: false`) when the host
   lost focus or its value changed since the edit was prepared, so a listener
   that rewrote the value wins (last write wins). E2 dispatches the first part,
-  drops the edit on a canceled cancelable `beforeinput`, commits, dispatches
-  the rest.
+  commits, dispatches the rest.
 - **Layout-reading commands lay out first.** Pointer placement, movement and
   the cluster and word deletions run `Document::layout` before they measure,
   as an editor must; offset-only commands do not. After a value change the
@@ -398,21 +407,16 @@ Public surface:
 `MainThreadRuntime::apply_edit` is the one path for every editing command,
 whatever produced it (`ToMain::Edit`, a `keydown`'s default action, a press's
 caret placement): `prepare_editing`; dispatch `events()[..commit_index]` at
-the host, bubbling and composed, cancelable per `EditEvent::cancelable`; stop
-if a cancelable `beforeinput` came back canceled; `commit_editing`; stop if
-the commit refused (a listener moved the focus or rewrote the value); dispatch
-the rest. An event no realm listener or component hears is not dispatched at
-all. A listener that throws is reported as `ListenerFailed` and does not
-cancel.
-
-`__BobcatDispatchEvent` gained a `cancelable` argument after `bubbles` and now
-answers `event.defaultPrevented`; the event object has `cancelable`,
-`defaultPrevented` and `preventDefault()`, none of which a background handler
-receives. `MainThreadRuntime::dispatch` returns
-`Dispatched { delivered, default_prevented }`; the existing callers keep
-reading `delivered`. This reverses the 2026-08-17 decision to keep
-`preventDefault` out of the realm (`docs/tracking/dom-events.md`), whose
-reason — no cancelable event had a producer — no longer holds.
+the host, bubbling and composed; `commit_editing`; stop if the commit refused
+(a listener moved the focus or rewrote the value); dispatch the rest. Every
+dispatch is the kernel's one `MainThreadRuntime::dispatch` (#448–#451): it
+asks the listener table whether any realm or component hears the name and
+builds no path when none does, then walks the path once, components at their
+steps and each invited realm called once at the top. No event is cancelable
+(the ruling above): `__BobcatDispatchEvent` keeps its signature, answers
+nothing, and its event object has no `cancelable`, `defaultPrevented` or
+`preventDefault()`. A listener that throws is reported as `ListenerFailed`
+and stops nothing.
 
 New detail kinds: `DETAIL_INPUT` (5: `inputType`, `data` or null,
 `isComposing`), `DETAIL_COMPOSITION` (6: `data`), `DETAIL_FOCUS` (7: the
@@ -433,10 +437,17 @@ pointer/wheel/touch kind was renamed `DETAIL_POSITION` to match the realm's.
   rule (a removed or uneditable host) fires nothing, so nothing else can queue
   one. A future `focus()`/`blur()` element method (E5) drains its own.
 - **Routing: an editing account in the painter's name set, by state.** The
-  painter forwards an event only when its name is in the published
-  listener-name set. The slot opens names there on an account of its own
-  (`EditingRoute`), through the same edge path a realm registration uses, so
-  a name the realm listens for anyway is never touched:
+  painter forwards an event only when its name is in the published routed
+  set. Since #449 that set is derived from `dom`'s listener table and the
+  components' observed names in one function, `DocumentSlot::routes_given`;
+  the editing account (`EditingRoute`, a bit per route in
+  `DocumentSlot::editing_routes`) is one more term of it. A route flipping
+  goes out through `DocumentSlot::change_names` after the waiting last
+  removals (`apply_pending_last_removals`), the path an observed name's
+  change takes, so each name moves only where the union changes, in order
+  with the table's own changes. The kernel is not a registrant in the
+  listener table: a row of its would be an invitee the dispatch has no realm
+  to call for. The routes:
   - `pointerdown` and `click` while `Document::has_editing_hosts` (a counter
     `dom` keeps in the `contenteditable` setters and `free_node`; a detached
     host counts until it is freed);
@@ -457,13 +468,15 @@ pointer/wheel/touch kind was renamed `DETAIL_POSITION` to match the realm's.
   a release decided that early leaves the drag held until the next move with
   the button up or the next press. Likewise keys typed before the epilogue of
   the tap that focused a host are not routed. No hosted-node table reaches
-  the committed frame, and an event routed only on this account skips the
-  realm (`deliver_input_event`) and runs its default action alone.
+  the committed frame. An event routed only on this account invites no realm
+  and builds no path (the dispatch's own `hears` gate); `deliver_input_event`
+  gates the default action on the account itself (`editing_routes(name)`),
+  so it runs whether or not anything heard the event.
 - **Touch and pen focus on the tap, a mouse on the press.** A mouse's
   primary `pointerdown` focuses the host and places the caret, as a
   browser's `mousedown` does. A finger's or pen's does it on the `click` the
   release produces (`deliver_input_event`, after `dispatch_click`, at the
-  release target and position, unless the `click` was canceled), as touch
+  release target and position), as touch
   browsers do, so a drag the scroller consumed — which produces no `click`
   — does not focus the host it began on.
 - **Multi-click counts presses, not clicks, for a mouse.** A browser selects
@@ -486,18 +499,15 @@ pointer/wheel/touch kind was renamed `DETAIL_POSITION` to match the realm's.
   after the commit, so a geometry-only change (a relayout, a scroll the page
   adopted and committed) is published as well; nothing is computed while
   nothing is focused and nothing was.
-- **Every routed input event is cancelable** except `pointercancel` and
-  `touchcancel`; the components' events, `input`, the composition and the
-  focus events are not.
 
 ### Limitations
 
 - **No shift-click extension.** `InputKind::Pointer` carries no modifiers, so
   a press cannot say shift is held; extending by shift-click needs that field
   in `dom::input` and every host filling it in.
-- **A mouse press runs on `pointerdown`, not `mousedown`.** A listener that
-  cancels the compatibility `mousedown` does not stop the focus change or the
-  caret placement, where a browser's would.
+- **No listener stops an edit or an editing default action** (the ruling):
+  a browser's `beforeinput`, `keydown`, `pointerdown` or `mousedown` listener
+  could.
 - **A touch drag that scrolls nothing still taps.** This engine's `click`
   has no movement slop (only a consumed scroll or a cancel suppresses it), so
   a finger dragged over a host outside any scroller focuses it on release.

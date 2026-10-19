@@ -140,8 +140,8 @@ import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 // once, in Rust: the engine's components hear each step there, and at the
 // path's top step the host releases the document and calls each realm that
 // listens once, the page realm first, with the whole path:
-// `__BobcatDispatchEvent(nodes, targets, name, bubbles, cancelable,
-// timestamp, extraCount, ...extraNameValuePairs, detailKind, ...detailValues)`, where
+// `__BobcatDispatchEvent(nodes, targets, name, bubbles, timestamp,
+// extraCount, ...extraNameValuePairs, detailKind, ...detailValues)`, where
 // `nodes` is the path in target-first order as comma-joined decimal node
 // ids — every step but the shadow roots and the nodes freed since the path
 // was computed — and `targets` carries, position for position, the
@@ -249,14 +249,6 @@ import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 // events this carries today: web-core builds both with `bubbles: false`
 // (`web-elements/src/elements/common/commonEventInitConfiguration.ts`).
 //
-// `cancelable` is the event's own flag. `preventDefault()` sets
-// `defaultPrevented` on a cancelable event and does nothing on any other,
-// and the dispatch answers `defaultPrevented` when it ends, which is how the
-// host learns that a listener canceled a `beforeinput` (the edit is dropped)
-// or a `keydown` or `pointerdown` (its editing default action does not run).
-// The three are the realm's: none of them is part of the event a background
-// handler receives, which is web-core's cross-thread shape.
-//
 // Both stop methods are pure local state. `stopPropagation` ends the
 // remaining steps of this realm's walk and `stopImmediatePropagation` also
 // skips the rest of the current node's registrations; neither crosses the
@@ -342,13 +334,13 @@ import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 // `componentAtIndexes` batch callback, which is filed and never called, as
 // in web-core.
 //
-// Every event carries the host's `cancelable` flag, and `preventDefault()`
-// sets `defaultPrevented` on a cancelable one only. The dispatch answers
-// `defaultPrevented` to the host, which is how a listener drops an edit (a
-// cancelable `beforeinput`) or stops an editing default action (a `keydown`,
-// a `pointerdown`, a touch tap's `click`). None of the three is published to
-// a background handler. Suppressing the user-agent scroll is not this: it
-// goes through gesture arbitration, on the separate
+// There is no `preventDefault`, no `cancelable` and no `defaultPrevented`
+// (the 2026-08-17 ruling, which stands): a Lynx event object has no
+// `preventDefault`, and web-core registers its root listeners
+// `passive: true`, so no Lynx handler cancels anything there either. The
+// editing events (`beforeinput` among them) are dispatched not cancelable,
+// and their default actions run whatever a listener does. Suppressing a
+// built-in behavior goes through gesture arbitration, on the separate
 // `InputEvent::default_prevented` seam.
 //
 // # Identity and lifecycle
@@ -2869,13 +2861,6 @@ interface DispatchedEvent {
   params: Record<string, unknown>;
   stopPropagation: () => void;
   stopImmediatePropagation: () => void;
-  // DOM's cancellation: `preventDefault()` sets `defaultPrevented` when the
-  // event is `cancelable`, and the dispatch answers it to the host.
-  // `defaultPrevented` is read-only, as DOM's is: a getter over the
-  // dispatch's own flag.
-  cancelable: boolean;
-  readonly defaultPrevented: boolean;
-  preventDefault: () => void;
   // The three lists only a touch event carries. Absent — not
   // `undefined`-valued — on every other event, because the transport carries
   // an `undefined`-valued key as one.
@@ -3299,12 +3284,11 @@ function backgroundTargetInfo(
 /**
  * What is published in place of the event: values only.
  *
- * The two stop methods, `preventDefault` and the two cancellation flags are
- * destructured out rather than overwritten with `undefined`, because the
- * transport carries an `undefined`-valued key as one rather than dropping it
- * — cancellation is the realm's, and web-core's cross-thread event carries
- * none of it — and the handles in `target`, `currentTarget` and a focus
- * event's `relatedTarget` are replaced with the values that describe them. A touch event's three lists
+ * The two stop methods are destructured out rather than overwritten with
+ * `undefined`, because the transport carries an `undefined`-valued key as one
+ * rather than dropping it — and the handles in `target`, `currentTarget` and
+ * a focus event's `relatedTarget` are replaced with the values that describe
+ * them. A touch event's three lists
  * are values already, so they cross with the rest. The copy itself is the
  * transport's, taken at send time: a new object here is only what keeps this
  * event's own later mutations, and the walk clearing `currentTarget`, out of
@@ -3314,9 +3298,6 @@ function backgroundEvent(event: DispatchedEvent): Record<string, unknown> {
   const {
     stopPropagation: _stop,
     stopImmediatePropagation: _stopImmediate,
-    preventDefault: _prevent,
-    cancelable: _cancelable,
-    defaultPrevented: _defaultPrevented,
     ...rest
   } = event;
   const published: Record<string, unknown> = {
@@ -3548,23 +3529,16 @@ function handlerInPass(
  * and — for a position detail — the three touch lists out of the four numbers
  * per point that follow. An event with no touch points carries no such keys
  * at all.
- *
- * Answers the event's `defaultPrevented` as the dispatch left it: `true`
- * only for a `cancelable` event a listener called `preventDefault()` on.
- * The host runs an event's default action — committing an edit after its
- * `beforeinput`, a key's editing command, a press's caret placement — only
- * on `false`. A path with no step answers `false`.
  */
 function dispatchEvent(
   pathIds: unknown,
   targetIds: unknown,
   eventName: unknown,
   bubbles: unknown,
-  cancelable: unknown,
   timestamp: unknown,
   extraCount: unknown,
   ...rest: unknown[]
-): boolean {
+): undefined {
   // The extras' name/value pairs first, then the detail kind and its values,
   // which run to the end because a touch event's points have no fixed count.
   const pairs = Number(extraCount ?? 0) * 2;
@@ -3579,18 +3553,11 @@ function dispatchEvent(
   // to run, or nothing at all.
   const first = steps.find((step) => handleOf(step.node) !== undefined);
   if (first === undefined && !bubbles) {
-    return false;
+    return undefined;
   }
   const name = String(eventName).toLowerCase();
   let stopped = false;
   let immediate = false;
-  // The canceled flag lives here, beside the two stop flags, and the event
-  // reads it through a getter: a `preventDefault` that wrote
-  // `event.defaultPrevented` would capture `event`, which holds that
-  // closure, and the cycle would keep every dispatched event alive until
-  // the cycle collector ran instead of freeing it when the dispatch ends.
-  const isCancelable = cancelable === true;
-  let prevented = false;
   // No node yet for a dispatch with no step held: its first delivery names
   // one.
   let targetNodeId = first?.target ?? NaN;
@@ -3621,15 +3588,6 @@ function dispatchEvent(
     stopImmediatePropagation: () => {
       stopped = true;
       immediate = true;
-    },
-    cancelable: isCancelable,
-    get defaultPrevented() {
-      return prevented;
-    },
-    preventDefault: () => {
-      if (isCancelable) {
-        prevented = true;
-      }
     },
   };
   // Assigned rather than declared above, so an event that carries no touches
@@ -3805,7 +3763,7 @@ function dispatchEvent(
     event.eventPhase = NONE;
     event.currentTarget = null;
   }
-  return prevented;
+  return undefined;
 }
 
 export function __AddEventListener(

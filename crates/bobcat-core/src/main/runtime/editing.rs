@@ -7,8 +7,9 @@
 //!
 //! - **An editing command** — a host's [`LynxView::edit`](crate::LynxView::edit), a key's default
 //!   action, a pointer's caret placement — is [`MainThreadRuntime::apply_edit`]: `dom` prepares it,
-//!   the events before the change are dispatched at the host, a canceled cancelable `beforeinput`
-//!   drops it, `dom` commits it, and the events after the change follow.
+//!   the events before the change are dispatched at the host, `dom` commits it, and the events
+//!   after the change follow. No listener can stop it: no event is cancelable from script (the
+//!   2026-08-17 ruling, `docs/tracking/deviations.md`).
 //! - **Focus events** are drained from `dom` ([`dom::Document::take_focus_events`]) by
 //!   [`MainThreadRuntime::dispatch_focus_events`] right after the one operation here that moves
 //!   focus — a pointer press — so `focus` and `focusin` reach script before the events the rest of
@@ -16,7 +17,7 @@
 //!   `dom` queues focus events only from [`dom::Document::focus`] and [`dom::Document::blur`], and
 //!   only this module calls them; the focus fixup rule (a removed or no longer editable host) fires
 //!   nothing.
-//! - **Key events** go to the focused element when there is one, and a `keydown` nobody canceled
+//! - **Key events** go to the focused element when there is one, and a `keydown` at a focused host
 //!   runs the keyboard's editing action ([`key_command`]).
 //! - **Pointer events** over an editing host place the caret. A mouse's primary press focuses the
 //!   host and places it ([`Command::SelectFromPoint`]), a second and third quick press select the
@@ -24,14 +25,17 @@
 //!   does the same on the tap — the `click` — rather than the press, as touch browsers do, so a
 //!   scroll that begins on a host does not focus it; it never drags a selection.
 //! - **The painter routes those names by state.** It forwards an event only when its name is in the
-//!   published listener-name set, so the slot opens names there on an editing account of its own
-//!   ([`EditingRoute`]), through the same edges a realm registration moves: `pointerdown` and
-//!   `click` while the document has an editing host, `keydown` while an element is focused (both
-//!   from the page's epilogue, [`super::DocumentSlot::sync_editing_routes`]), and `pointermove`,
-//!   `pointerup` and `pointercancel` only while a mouse drag is held, opened by the press and
-//!   closed when the drag ends ([`MainThreadRuntime::set_pressed`]). An event routed only on that
-//!   account calls no listener: [`MainThreadRuntime::deliver_input_event`] skips the realm when
-//!   nothing hears the name.
+//!   published routed set, so the slot routes names there on an editing account of its own
+//!   ([`EditingRoute`]), one more term of what the slot routes beside the listener table and the
+//!   components' observed names, published through the same path an observed name's change takes
+//!   (`DocumentSlot::change_names`): `pointerdown` and `click` while the document has an editing
+//!   host, `keydown` while an element is focused (both from the page's epilogue,
+//!   [`super::DocumentSlot::sync_editing_routes`]), and `pointermove`, `pointerup` and
+//!   `pointercancel` only while a mouse drag is held, opened by the press and closed when the drag
+//!   ends ([`MainThreadRuntime::set_pressed`]). An event routed only on that account calls no
+//!   listener — the kernel's dispatch builds no path for a name nothing hears — and
+//!   [`MainThreadRuntime::deliver_input_event`] runs the default action whenever the account routes
+//!   the name.
 //! - **[`TextInputState`](dom::editing::TextInputState)** is compared after each epilogue's commit
 //!   and published to the host when it changed ([`MainThreadRuntime::publish_text_input_state`]).
 
@@ -42,8 +46,8 @@ use dom::event::EventDetail;
 use dom::input::{Modifiers, PointerId, PointerKind};
 
 use super::{
-    DOUBLE_CLICK_MILLISECONDS, Dispatched, EventFlags, ListenerFailures, MainThreadError,
-    MainThreadRuntime, ScriptRuntime,
+    CLICK_EVENT, DOUBLE_CLICK_MILLISECONDS, ListenerFailures, MainThreadError, MainThreadRuntime,
+    ScriptRuntime,
 };
 use crate::link::{InputEventPayload, ViewNotice};
 use crate::main::tree::LynxDocument;
@@ -210,14 +214,17 @@ fn edit_detail(event: &EditEvent) -> EventDetail {
 
 impl MainThreadRuntime {
     /// Delivers one routed event the painting side decided, then runs the
-    /// editing default action it has, if nobody canceled it. What the page
-    /// applies a [`crate::link::ToMain::DispatchEvent`] with.
+    /// editing default action it has. What the page applies a
+    /// [`crate::link::ToMain::DispatchEvent`] with.
     ///
     /// A key event goes to the focused element when there is one, and to
-    /// the target the painter named (the document element) otherwise. An
-    /// event nothing in the document hears — routed only because the
-    /// document has an editing host — skips the realm and runs its default
-    /// action alone.
+    /// the target the painter named (the document element) otherwise. The
+    /// dispatch is the kernel's ([`Self::dispatch_input_event`]), which
+    /// builds no path for a name no realm and no component hears — one the
+    /// editing account alone routes. The default action is gated on that
+    /// account itself (`DocumentSlot::editing_routes`), not on the dispatch:
+    /// it runs whenever the account routes the name, heard or not, and
+    /// whatever a listener did, since no event is cancelable from script.
     ///
     /// Returns what the listeners threw, in order; a listener that throws is
     /// nonfatal and its event's default action still runs.
@@ -231,16 +238,15 @@ impl MainThreadRuntime {
     ) -> Vec<MainThreadError> {
         let mut failures = Vec::new();
         if let Some(release) = release {
-            let dispatched = self
-                .dispatch_input_event(js_runtime, target, name, payload, Some(release))
-                .unwrap_or_else(|failed| {
-                    failures.extend(failed.into_errors());
-                    Dispatched::default()
-                });
+            if let Err(failed) =
+                self.dispatch_input_event(js_runtime, target, name, payload, Some(release))
+            {
+                failures.extend(failed.into_errors());
+            }
             // A finger's or a pen's tap is its press, as a touch browser
             // focuses and places the caret on the tap: at the release, where
             // the tap landed.
-            if !dispatched.default_prevented
+            if self.slot.borrow().editing_routes(CLICK_EVENT)
                 && let EventDetail::Pointer {
                     position,
                     id,
@@ -260,7 +266,7 @@ impl MainThreadRuntime {
             }
             return failures;
         }
-        let (target, heard) = {
+        let (target, editing) = {
             let slot = self.slot.borrow();
             let Some(document) = slot.document.as_ref() else {
                 return failures;
@@ -269,32 +275,27 @@ impl MainThreadRuntime {
                 EventDetail::Key { .. } => document.focused().unwrap_or(target),
                 _ => target,
             };
-            (target, slot.listens(name))
+            (target, slot.editing_routes(name))
         };
-        let dispatched = if heard {
-            self.dispatch_input_event(js_runtime, target, name, payload, None)
-                .unwrap_or_else(|failed| {
-                    failures.extend(failed.into_errors());
-                    Dispatched::default()
-                })
-        } else {
-            Dispatched::default()
-        };
-        self.input_default_action(js_runtime, target, name, payload, dispatched, &mut failures);
+        if let Err(failed) = self.dispatch_input_event(js_runtime, target, name, payload, None) {
+            failures.extend(failed.into_errors());
+        }
+        if editing {
+            self.input_default_action(js_runtime, target, name, payload, &mut failures);
+        }
         failures
     }
 
     /// The editing default actions of a routed event: the keyboard's
     /// editing commands after a `keydown`, the caret placement and selection
-    /// drag after the pointer events. Nothing runs for a canceled event,
-    /// except that a pointer's release or cancellation always ends its drag.
+    /// drag after the pointer events. A pointer's release or cancellation
+    /// ends its drag.
     fn input_default_action(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         target: dom::NodeId,
         name: &str,
         payload: &InputEventPayload,
-        dispatched: Dispatched,
         failures: &mut Vec<MainThreadError>,
     ) {
         let timestamp = payload.timestamp;
@@ -307,8 +308,6 @@ impl MainThreadRuntime {
             {
                 self.set_pressed(None);
             }
-            (_, "pointerup" | "pointercancel") => {}
-            _ if dispatched.default_prevented => {}
             (EventDetail::Key { key, modifiers, .. }, "keydown") => {
                 let focused = self.slot.borrow().document_ref().focused();
                 if focused.is_some()
@@ -366,7 +365,7 @@ impl MainThreadRuntime {
         }
     }
 
-    /// A mouse's primary press, or a finger's or pen's tap, nobody canceled:
+    /// A mouse's primary press, or a finger's or pen's tap:
     /// inside an editing host it focuses the host and places the caret —
     /// or, as the second or third in quick succession on that host, selects
     /// the word or the line — and outside one it takes the focus away, as a
@@ -449,8 +448,9 @@ impl MainThreadRuntime {
     /// release reach this thread while it is held, and nothing of a mouse
     /// that is only hovering does.
     ///
-    /// The edge is written inside this job and seen by the painter at its
-    /// next routing pass (`DocumentSlot::set_editing_route`), so a move the
+    /// The routed-name change is written inside this job and seen by the
+    /// painter at its next routing pass (`DocumentSlot::set_editing_route`,
+    /// through `DocumentSlot::change_names`), so a move the
     /// painter decided before the press ran here was dropped there: the
     /// first move that crosses extends to its own position, which catches
     /// the selection up. A release decided that early never crosses either;
@@ -488,16 +488,16 @@ impl MainThreadRuntime {
 
     /// Applies one editing command to the focused editing host with the
     /// events it owes, by the prepare/commit seam: the events before the
-    /// change are dispatched at the host in order, a canceled cancelable
-    /// `beforeinput` drops the edit (nothing is committed and no later
-    /// event fires), then the change is committed and the events after it
-    /// are dispatched. A command with nothing focused, or one the host
-    /// refuses, does nothing; so does a commit a listener made stale by
-    /// moving the focus or rewriting the value (last write wins).
+    /// change are dispatched at the host in order, then the change is
+    /// committed and the events after it are dispatched. No listener can
+    /// stop the change: none of the events is cancelable from script (the
+    /// 2026-08-17 ruling, `docs/tracking/deviations.md`). A command with
+    /// nothing focused, or one the host refuses, does nothing; so does a
+    /// commit a listener made stale by moving the focus or rewriting the
+    /// value (last write wins).
     ///
-    /// Returns what the listeners threw. A listener that throws does not
-    /// cancel: its event counts as not canceled, as an uncaught exception in
-    /// a browser's listener does not cancel the event either.
+    /// Returns what the listeners threw; a listener that throws stops
+    /// nothing either.
     pub(crate) fn apply_edit(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -517,14 +517,8 @@ impl MainThreadRuntime {
         let events = edit.events().to_vec();
         let (before, after) = events.split_at(edit.commit_index());
         for event in before {
-            let canceled = self
-                .dispatch_edit_event(js_runtime, host, event, timestamp)
-                .unwrap_or_else(|failed| {
-                    failures.extend(failed.into_errors());
-                    false
-                });
-            if canceled && event.cancelable() {
-                return failures;
+            if let Err(failed) = self.dispatch_edit_event(js_runtime, host, event, timestamp) {
+                failures.extend(failed.into_errors());
             }
         }
         if !self
@@ -557,36 +551,35 @@ impl MainThreadRuntime {
     }
 
     /// One edit event at `host`: bubbling and composed, as Input Events and
-    /// UI Events fire all five, cancelable as [`EditEvent::cancelable`]
-    /// says. Answers whether a listener canceled it; an event nothing hears
-    /// is not dispatched at all.
+    /// UI Events fire all five, and not cancelable (the 2026-08-17 ruling).
+    /// An event nothing hears builds no path ([`Self::dispatch`]).
     fn dispatch_edit_event(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         host: dom::NodeId,
         event: &EditEvent,
         timestamp: f64,
-    ) -> Result<bool, ListenerFailures> {
-        let name = event.kind.name();
-        if !self.slot.borrow().listens(name) {
-            return Ok(false);
-        }
-        let flags = EventFlags {
-            bubbles: true,
-            composed: true,
-            cancelable: event.cancelable(),
-        };
+    ) -> Result<(), ListenerFailures> {
         let detail = edit_detail(event);
-        self.dispatch(js_runtime, host, name, flags, timestamp, &detail, &[])
-            .map(|dispatched| dispatched.default_prevented)
+        self.dispatch(
+            js_runtime,
+            host,
+            event.kind.name(),
+            true,
+            true,
+            timestamp,
+            &detail,
+            &[],
+        )
+        .map(|_| ())
     }
 
     /// Dispatches the focus events `dom` has queued, in the order they
     /// formed: `blur` and `focusout` at the element that lost focus, then
     /// `focus` and `focusin` at the one that gained it, each naming the
-    /// other as its `relatedTarget`. All four are composed and none is
-    /// cancelable; `focusin` and `focusout` bubble. An event nothing hears
-    /// is not dispatched.
+    /// other as its `relatedTarget`. All four are composed; `focusin` and
+    /// `focusout` bubble. An event nothing hears builds no path
+    /// ([`Self::dispatch`]).
     pub(crate) fn dispatch_focus_events(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -595,23 +588,15 @@ impl MainThreadRuntime {
         let events = self.slot.borrow_mut().document_mut().take_focus_events();
         let mut failures = Vec::new();
         for event in events {
-            let name = event.kind.name();
-            if !self.slot.borrow().listens(name) {
-                continue;
-            }
-            let flags = EventFlags {
-                bubbles: event.kind.bubbles(),
-                composed: true,
-                cancelable: false,
-            };
             let detail = EventDetail::Focus {
                 related_target: event.related_target,
             };
             if let Err(error) = self.dispatch(
                 js_runtime,
                 event.target,
-                name,
-                flags,
+                event.kind.name(),
+                event.kind.bubbles(),
+                true,
                 timestamp,
                 &detail,
                 &[],

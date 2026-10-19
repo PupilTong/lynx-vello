@@ -1287,8 +1287,8 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
     /// [`Painter::dispatch_input`](crate::Painter::dispatch_input)'s events
     /// are. On the main thread the command dispatches the events it owes at
     /// the host — `beforeinput`, `compositionstart`/`update`/`end`, `input`
-    /// — around the change, and a listener that cancels a cancelable
-    /// `beforeinput` drops it. A command with nothing focused, or one the
+    /// — around the change, which no listener can stop (none of them is
+    /// cancelable from script). A command with nothing focused, or one the
     /// editing host refuses, does nothing at all. What it did reaches the
     /// host as [`EngineEvent::TextInputStateChanged`].
     ///
