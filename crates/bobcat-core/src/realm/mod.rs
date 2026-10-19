@@ -141,6 +141,50 @@ impl RealmCore {
             }
         }
     }
+
+    /// [`Self::call_module_export`] without the checkpoint that ends the
+    /// call: [`ScriptEngine::call_module_export_before_operation`] for the
+    /// owner's own realm and [`ChildRealms::call_module_export_before_operation`]
+    /// for a child. The caller ends the run with
+    /// [`Self::checkpoint_after_calls`] for each realm it called.
+    pub(crate) fn call_module_export_before_operation(
+        &mut self,
+        js: &mut ScriptRuntime,
+        id: RealmId,
+        module_specifier: &str,
+        export_name: &str,
+        arguments: &[HostArgument<'_>],
+    ) -> Option<Result<bool, ScriptError>> {
+        match id {
+            RealmId::Page => Some(self.engine.call_module_export_before_operation(
+                js,
+                module_specifier,
+                export_name,
+                arguments,
+            )),
+            RealmId::Child(key) => self.children.call_module_export_before_operation(
+                js,
+                key,
+                module_specifier,
+                export_name,
+                arguments,
+            ),
+        }
+    }
+
+    /// The checkpoint of the realm `id` that ends a run of
+    /// [`Self::call_module_export_before_operation`] calls. `None` is a
+    /// child that is gone.
+    pub(crate) fn checkpoint_after_calls(
+        &mut self,
+        js: &mut ScriptRuntime,
+        id: RealmId,
+    ) -> Option<Result<(), ScriptError>> {
+        match id {
+            RealmId::Page => Some(self.engine.checkpoint_after_calls(js)),
+            RealmId::Child(key) => self.children.checkpoint_after_calls(js, key),
+        }
+    }
 }
 
 /// Opens one realm on `js`: creates it, enables module loading, installs the

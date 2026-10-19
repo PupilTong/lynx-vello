@@ -512,6 +512,20 @@ impl fmt::Display for MainThreadError {
     }
 }
 
+/// Where the realm calls of a dispatch checkpoint.
+enum Checkpoint<'a> {
+    /// Each call ends in its realm's microtask checkpoint, and the dispatch
+    /// in [`MainThreadRuntime::finish_batch`]: every dispatch but the
+    /// exposure records'.
+    Each,
+    /// No call checkpoints, and the dispatch does not end the batch: each
+    /// realm called is added to the list, once, for the caller to
+    /// checkpoint after its last dispatch
+    /// ([`RealmCore::checkpoint_after_calls`]). So a run of dispatches is
+    /// one checkpoint per realm, after all of them.
+    Deferred(&'a mut SmallVec<[RealmId; 2]>),
+}
+
 /// What one dispatch's listeners threw: one failure per realm call that
 /// failed, in the order the calls ran, never empty.
 ///
@@ -2601,7 +2615,9 @@ impl MainThreadRuntime {
     /// JSON is formatted here and none is parsed there.
     ///
     /// Each call is its own module-export call with its own microtask
-    /// checkpoint, as a browser checkpoints after each listener invocation.
+    /// checkpoint, as a browser checkpoints after each listener invocation —
+    /// except the exposure records', which [`Self::dispatch_checkpointed`]
+    /// runs as one checkpoint per realm after the entry's last record.
     /// A call that throws is kept and the walk goes on, so every realm still
     /// hears the event; [`Self::finish_batch`] runs once, at the end; and
     /// every failure is answered, in the order the calls ran.
@@ -2627,6 +2643,38 @@ impl MainThreadRuntime {
         timestamp: f64,
         detail: &EventDetail,
         extras: Extras<'_>,
+    ) -> Result<bool, ListenerFailures> {
+        self.dispatch_checkpointed(
+            js_runtime,
+            target,
+            name,
+            bubbles,
+            composed,
+            timestamp,
+            detail,
+            extras,
+            Checkpoint::Each,
+        )
+    }
+
+    /// [`Self::dispatch`], with its realm calls checkpointed as `checkpoint`
+    /// says: each on its own, or none, for the caller to checkpoint once per
+    /// realm after a run of dispatches.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the dispatch's own arguments, and where its calls checkpoint"
+    )]
+    fn dispatch_checkpointed(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+        target: dom::NodeId,
+        name: &str,
+        bubbles: bool,
+        composed: bool,
+        timestamp: f64,
+        detail: &EventDetail,
+        extras: Extras<'_>,
+        mut checkpoint: Checkpoint<'_>,
     ) -> Result<bool, ListenerFailures> {
         // The realm files every name lowercased — `element-papi.ts`
         // lowercases both halves of a registration, and its dispatch the
@@ -2702,18 +2750,29 @@ impl MainThreadRuntime {
                 if !invited.contains(key) {
                     continue;
                 }
+                let defer = matches!(checkpoint, Checkpoint::Deferred(_));
                 match self.call_realm(
-                    js_runtime, key, &path, name, bubbles, timestamp, detail, extras,
+                    js_runtime, key, &path, name, bubbles, timestamp, detail, extras, defer,
                 ) {
                     Ok(published) => called |= published,
                     Err(error) => failures.push(error),
+                }
+                if let Checkpoint::Deferred(realms) = &mut checkpoint {
+                    let realm = RealmId::from_listener_key(key);
+                    if !realms.contains(&realm) {
+                        realms.push(realm);
+                    }
                 }
                 live = None;
             }
         }
         // Listeners remove elements too; the count they ran up is settled
-        // here, at the end of the dispatch, as long as nothing failed.
-        if let Err(error) = self.finish_batch(js_runtime, failures.is_empty()) {
+        // here, at the end of the dispatch, as long as nothing failed — or by
+        // the caller of a deferred run, after its checkpoints, since a
+        // collection checkpoints too.
+        if matches!(checkpoint, Checkpoint::Each)
+            && let Err(error) = self.finish_batch(js_runtime, failures.is_empty())
+        {
             failures.push(error);
         }
         ListenerFailures::or_called(failures, called)
@@ -2723,7 +2782,8 @@ impl MainThreadRuntime {
     /// targets, name, bubbles, timestamp, extras…, detail…)` in the realm
     /// whose registrations are filed under `key`
     /// ([`RealmId::from_listener_key`]). A child already freed is not
-    /// called.
+    /// called. With `defer`, the call has no checkpoint of its own
+    /// ([`Checkpoint::Deferred`]).
     #[allow(
         clippy::too_many_arguments,
         reason = "the dispatch's own arguments, which every call carries"
@@ -2738,6 +2798,7 @@ impl MainThreadRuntime {
         timestamp: f64,
         detail: &EventDetail,
         extras: Extras<'_>,
+        defer: bool,
     ) -> Result<bool, MainThreadError> {
         // The detail last, because a touch event's points make it the one
         // part of variable length besides the extras before it.
@@ -2750,13 +2811,25 @@ impl MainThreadRuntime {
         encode_extras(extras, &mut arguments);
         encode_detail(detail, &mut arguments);
 
-        let Some(called) = self.core.call_module_export(
-            js_runtime,
-            RealmId::from_listener_key(key),
-            ELEMENT_MODULE_SPECIFIER,
-            EVENT_DISPATCH_EXPORT,
-            &arguments,
-        ) else {
+        let realm = RealmId::from_listener_key(key);
+        let called = if defer {
+            self.core.call_module_export_before_operation(
+                js_runtime,
+                realm,
+                ELEMENT_MODULE_SPECIFIER,
+                EVENT_DISPATCH_EXPORT,
+                &arguments,
+            )
+        } else {
+            self.core.call_module_export(
+                js_runtime,
+                realm,
+                ELEMENT_MODULE_SPECIFIER,
+                EVENT_DISPATCH_EXPORT,
+                &arguments,
+            )
+        };
+        let Some(called) = called else {
             return Ok(false);
         };
         called.map_err(|error| MainThreadError::from_engine("delivering an event", error))
@@ -2943,6 +3016,12 @@ impl MainThreadRuntime {
     /// them. An element freed since its change formed hears nothing, as a
     /// routed event at a freed target does, record included.
     ///
+    /// The record dispatches share one microtask checkpoint per realm called,
+    /// run after the last of them ([`Checkpoint::Deferred`]), so what a
+    /// record listener queues runs once every record of the entry is in:
+    /// that is what lets the realm send one list of each kind per entry, as
+    /// web-core sends one per batch.
+    ///
     /// A hook or a listener may mutate the tree. Whatever it wrote is
     /// committed by the delivery entry's own epilogue, whose update then runs
     /// again against the new frame.
@@ -2984,6 +3063,12 @@ impl MainThreadRuntime {
                 failures.extend(error.into_errors());
             }
         }
+        // One checkpoint per realm after every record, rather than one per
+        // call: what a record listener queues runs once all of the entry's
+        // records are in, so the realm sends one `exposure` and one
+        // `disexposure` list.
+        let mut realms = SmallVec::new();
+        let mut recorded = true;
         for change in &changes {
             let Some(id) = &change.exposure_id else {
                 continue;
@@ -2993,7 +3078,7 @@ impl MainThreadRuntime {
                 ("exposureScene", Extra::Str(&change.scene)),
                 ("appeared", Extra::Bool(change.appeared)),
             ];
-            if let Err(error) = self.dispatch(
+            if let Err(error) = self.dispatch_checkpointed(
                 js,
                 change.node,
                 EXPOSURE_RECORD_EVENT,
@@ -3002,9 +3087,20 @@ impl MainThreadRuntime {
                 timestamp,
                 &EventDetail::None,
                 &extras,
+                Checkpoint::Deferred(&mut realms),
             ) {
+                recorded = false;
                 failures.extend(error.into_errors());
             }
+        }
+        for realm in realms {
+            if let Some(Err(error)) = self.core.checkpoint_after_calls(js, realm) {
+                recorded = false;
+                failures.push(MainThreadError::from_engine("delivering an event", error));
+            }
+        }
+        if let Err(error) = self.finish_batch(js, recorded) {
+            failures.push(error);
         }
         failures
     }

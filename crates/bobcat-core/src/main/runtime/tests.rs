@@ -8508,6 +8508,46 @@ fn a_detached_element_still_hears_its_record() {
     );
 }
 
+/// One entry's records are one microtask checkpoint per realm, after all of
+/// them: a record listener that collects into a list and flushes it from a
+/// microtask flushes once, with every record of the entry, as the realm's
+/// Lynx layer needs to send one `exposure` list. A promise job, because the
+/// MTS realm has no `queueMicrotask` (`element-papi.ts` says why).
+#[test]
+fn one_entrys_records_run_under_one_checkpoint() {
+    let (mut js, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        globalThis.seen = [];
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const pending = [];
+          for (let index = 0; index < 3; index++) {
+            const view = __CreateView(0);
+            __SetInlineStyles(view, 'width:100px;height:100px');
+            __AppendElement(page, view);
+            __SetAttribute(view, 'exposure-id', 'row' + index);
+            __AddEventListener(view, 'bobcat:exposure', (event) => {
+              if (pending.length === 0) {
+                Promise.resolve().then(() => {
+                  seen.push('flush ' + pending.join(','));
+                  pending.length = 0;
+                });
+              }
+              pending.push(event.detail.exposureID);
+            }, {});
+          }
+        };
+        ",
+            "app:///exposure-one-checkpoint.js",
+        )
+        .expect("main-thread script");
+    deliver_exposure(&mut js, &mut runtime);
+    assert_eq!(frame_lines(&mut js, &mut runtime), ["flush row0,row1,row2"]);
+}
+
 fn requested_stylesheet(
     notices: &mut mpsc::UnboundedReceiver<ViewNotice>,
 ) -> (String, crate::resource::SourceCompletion) {

@@ -763,6 +763,17 @@ impl ScriptEngine {
         }
     }
 
+    /// The checkpoint that ends a run of
+    /// [`Self::call_module_export_before_operation`] calls with nothing after
+    /// them: the one [`Self::call_module_export`] would have ended the last
+    /// of them with, run on its own.
+    pub(crate) fn checkpoint_after_calls(
+        &mut self,
+        runtime: &mut ScriptRuntime,
+    ) -> Result<(), ScriptError> {
+        self.finish_operation(runtime, Ok(()), ScriptErrorPhase::CallModuleExport)
+    }
+
     /// The call both [`Self::call_module_export`] and
     /// [`Self::call_module_export_before_operation`] make. The outer error is
     /// a lookup that failed before JavaScript ran, which needs no checkpoint;
