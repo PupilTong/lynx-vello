@@ -149,8 +149,8 @@ pub(in crate::text) struct NormalizedBlock {
 pub(in crate::text) struct MarkerPlaces {
     /// Where each marker fell, in item order.
     pub(in crate::text) markers: Vec<MarkerAt>,
-    /// Whether each collapsible white space sequence kept a space, by the
-    /// sequence's index ([`MarkerAt::space`]).
+    /// Whether each collapsible white space sequence a marker was met in
+    /// kept a space, by the sequence's index ([`MarkerAt::space`]).
     pub(in crate::text) space_kept: Vec<bool>,
 }
 
@@ -468,8 +468,9 @@ struct Pending {
     item: u32,
     kind: PendingKind,
     /// Which sequence this is, for the markers met while it was open
-    /// ([`MarkerAt::space`]): an index into [`Normalizer::space_kept`].
-    id: u32,
+    /// ([`MarkerAt::space`]): an index into [`Normalizer::space_kept`],
+    /// given when the first of them is met. `None` while none is.
+    id: Option<u32>,
 }
 
 struct Normalizer {
@@ -492,8 +493,8 @@ struct Normalizer {
     dropped_boxes: Vec<u32>,
     /// Every marker, in source order.
     markers: Vec<MarkerAt>,
-    /// Whether each collapsible white space sequence kept its space, by
-    /// [`Pending::id`].
+    /// Whether each collapsible white space sequence a marker was met in
+    /// kept its space, by [`Pending::id`].
     space_kept: Vec<bool>,
 }
 
@@ -570,19 +571,19 @@ impl Normalizer {
     /// A marker: no source unit, no text, and the white space around it
     /// untouched; only where it fell is recorded.
     fn mark(&mut self, item: u32) {
+        let space_kept = &mut self.space_kept;
+        let space = self.pending.as_mut().map(|pending| {
+            *pending.id.get_or_insert_with(|| {
+                space_kept.push(false);
+                u32::try_from(space_kept.len() - 1).expect("sequence count fits u32")
+            })
+        });
         self.markers.push(MarkerAt {
             item,
             byte: self.byte_len(),
-            space: self.pending.as_ref().map(|pending| pending.id),
+            space,
             atoms_before: u32::try_from(self.boxes.len()).expect("box count fits u32"),
         });
-    }
-
-    /// The id the next collapsible white space sequence takes.
-    fn next_pending_id(&mut self) -> u32 {
-        let id = u32::try_from(self.space_kept.len()).expect("sequence count fits u32");
-        self.space_kept.push(false);
-        id
     }
 
     fn consume_box(&mut self, item: u32) {
@@ -607,7 +608,6 @@ impl Normalizer {
     fn queue_space(&mut self, character: char, item: u32) {
         debug_assert_eq!(character.len_utf16(), 1);
         if self.pending.is_none() {
-            let id = self.next_pending_id();
             self.pending = Some(Pending {
                 unit_start: self.units,
                 item,
@@ -616,7 +616,7 @@ impl Normalizer {
                 } else {
                     PendingKind::Space
                 },
-                id,
+                id: None,
             });
         }
         self.units += 1;
@@ -631,7 +631,6 @@ impl Normalizer {
                 pending.item = item;
             }
         } else {
-            let id = self.next_pending_id();
             self.pending = Some(Pending {
                 unit_start: self.units,
                 item,
@@ -640,7 +639,7 @@ impl Normalizer {
                 } else {
                     PendingKind::SegmentBreak
                 },
-                id,
+                id: None,
             });
         }
         self.units += 1;
@@ -713,7 +712,9 @@ impl Normalizer {
             self.text.push(' ');
             self.record_style(start, pending.item);
             self.close_collapsed(pending.unit_start, 1);
-            self.space_kept[pending.id as usize] = true;
+            if let Some(id) = pending.id {
+                self.space_kept[id as usize] = true;
+            }
         } else {
             self.close_collapsed(pending.unit_start, 0);
         }
@@ -810,7 +811,9 @@ impl Normalizer {
                 let start = self.byte_len();
                 self.text.push(' ');
                 self.record_style(start, pending.item);
-                self.space_kept[pending.id as usize] = true;
+                if let Some(id) = pending.id {
+                    self.space_kept[id as usize] = true;
+                }
                 self.segments.push(Segment {
                     norm: Range2 {
                         start,
@@ -1781,5 +1784,30 @@ mod tests {
         );
         // Only whitespace: nothing at all.
         assert!(normalize(&[run(&style, " \n\t ")]).text.is_empty());
+    }
+
+    #[test]
+    fn only_a_white_space_sequence_a_marker_falls_in_is_reported() {
+        let style = RunStyle::default();
+        let (_, plain) = super::normalize(&[run(&style, "a  b \n c ")], WhiteSpaceProcessing::Css);
+        assert!(plain.markers.is_empty());
+        assert!(plain.space_kept.is_empty());
+
+        // A removed sequence at the start, a kept one between `a` and `b`,
+        // and a marker in none.
+        let items = [
+            run(&style, "  "),
+            InlineItem::Marker,
+            run(&style, "a "),
+            InlineItem::Marker,
+            run(&style, " b"),
+            InlineItem::Marker,
+            run(&style, "c"),
+        ];
+        let (block, places) = super::normalize(&items, WhiteSpaceProcessing::Css);
+        assert_eq!(block.text, "a bc");
+        let spaces: Vec<Option<u32>> = places.markers.iter().map(|marker| marker.space).collect();
+        assert_eq!(spaces, [Some(0), Some(1), None]);
+        assert_eq!(places.space_kept, [false, true]);
     }
 }
