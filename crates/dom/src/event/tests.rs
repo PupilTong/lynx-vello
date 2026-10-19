@@ -1423,4 +1423,103 @@ mod listener_table {
             "a global registration hears the name on any path"
         );
     }
+
+    /// The answer [`Document::would_reach_listener`] must agree with: the
+    /// path built and probed for a path registration, or a global one
+    /// anywhere.
+    fn reaches_by_path(
+        document: &Document<()>,
+        target: NodeId,
+        name: &str,
+        bubbles: bool,
+        composed: bool,
+    ) -> bool {
+        let steps = document.event_steps(target, bubbles, composed);
+        !document.listeners_on_path(&steps, name).is_empty()
+            || !document.global_registrants(name).is_empty()
+    }
+
+    #[test]
+    fn a_non_bubbling_non_composed_probe_agrees_with_the_path_with_and_without_capture() {
+        let (mut document, page, outer, inner) = nested();
+        let sibling = document.create_element("view", ());
+        document.append_child(page, sibling);
+        let every = [page, outer, inner, sibling];
+        let agrees = |document: &Document<()>| {
+            for node in every {
+                assert_eq!(
+                    document.would_reach_listener(node, "scroll", false, false),
+                    reaches_by_path(document, node, "scroll", false, false),
+                    "{node:?}"
+                );
+            }
+        };
+
+        // Bubble registrations only: the target's own rows are the answer.
+        document.add_listener(outer, "scroll", BUBBLE, PAGE);
+        document.add_listener(sibling, "scroll", BUBBLE, CARD);
+        agrees(&document);
+        assert!(document.would_reach_listener(outer, "scroll", false, false));
+        assert!(
+            !document.would_reach_listener(inner, "scroll", false, false),
+            "an ancestor's bubble registration misses a non-bubbling event"
+        );
+
+        // A capture registration on an ancestor reaches its descendants,
+        // which no row of theirs says.
+        document.add_listener(page, "scroll", CAPTURE, CARD);
+        agrees(&document);
+        assert!(document.would_reach_listener(inner, "scroll", false, false));
+        assert!(!document.has_listener(inner, "scroll"));
+
+        // Gone again: back to the target's rows.
+        document.remove_listener(page, "scroll", CARD);
+        agrees(&document);
+        assert!(!document.would_reach_listener(inner, "scroll", false, false));
+
+        // A capture kind that a repeated add drops is counted out too.
+        document.add_listener(outer, "scroll", BUBBLE | CAPTURE, PAGE);
+        agrees(&document);
+        assert!(document.would_reach_listener(inner, "scroll", false, false));
+        document.add_listener(outer, "scroll", BUBBLE, PAGE);
+        agrees(&document);
+        assert!(!document.would_reach_listener(inner, "scroll", false, false));
+    }
+
+    #[test]
+    fn a_composed_non_bubbling_probe_still_walks_to_the_hosts_bubble_turn() {
+        let (mut document, host, _root, button) = shadow_tree(ShadowRootMode::Open);
+        document.add_listener(host, "scroll", BUBBLE, PAGE);
+        assert!(
+            document.would_reach_listener(button, "scroll", false, true),
+            "the host is at target for a composed event leaving its shadow tree"
+        );
+        assert_eq!(
+            document.would_reach_listener(button, "scroll", false, true),
+            reaches_by_path(&document, button, "scroll", false, true)
+        );
+        assert!(
+            !document.would_reach_listener(button, "scroll", false, false),
+            "a non-composed one stops at the shadow root"
+        );
+        assert_eq!(
+            document.would_reach_listener(button, "scroll", false, false),
+            reaches_by_path(&document, button, "scroll", false, false)
+        );
+    }
+
+    #[test]
+    fn a_bubbling_probe_still_walks_the_path() {
+        let (mut document, _page, outer, inner) = nested();
+        document.add_listener(outer, "scroll", BUBBLE, PAGE);
+        assert!(!document.has_listener(inner, "scroll"));
+        assert!(
+            document.would_reach_listener(inner, "scroll", true, false),
+            "a bubbling event reaches an ancestor's bubble registration"
+        );
+        assert_eq!(
+            document.would_reach_listener(inner, "scroll", true, false),
+            reaches_by_path(&document, inner, "scroll", true, false)
+        );
+    }
 }

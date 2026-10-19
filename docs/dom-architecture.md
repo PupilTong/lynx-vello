@@ -947,7 +947,10 @@ The questions it answers: `has_listener(node, name)` (a component asking
 whether anything listens on it, before producing a costly event),
 `would_reach_listener(target, name, bubbles, composed)` (whether an event it
 fires reaches any registration: no registration of the name is one lookup, a
-global one anywhere is `true`, otherwise a path probe), `hears(name)` (any
+global one anywhere is `true`, an event that neither bubbles nor is composed,
+of a name no capture registration holds, is the target's own rows — one node
+probe, since only a registration on the target runs on that path — and
+otherwise a path probe), `hears(name)` (any
 registration, or a definition that observes the name), `has_listeners_for(name)`
 (any registration alone: the set whose membership `RegistrationChange`
 reports, which a host's router

@@ -3844,7 +3844,10 @@ impl ScrollGate {
     /// registration anywhere, or a path registration — a capture one on an
     /// ancestor, or any on `node` itself, since neither name bubbles). Asked
     /// when the event is due, so a registration made since the scroll began
-    /// counts. Two tests on a page that hears neither name.
+    /// counts. Two tests on a page that hears neither name. Otherwise one
+    /// node probe at the container while no capture registration holds the
+    /// name (a global one answers at once), and the path built and probed
+    /// only when one does.
     fn reaches(self, document: &LynxDocument, node: dom::NodeId) -> bool {
         self.observed
             || (self.registered
