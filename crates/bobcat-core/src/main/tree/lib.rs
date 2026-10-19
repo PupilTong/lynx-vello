@@ -33,7 +33,9 @@
 //! shadow root with the nested page in it, and the
 //! `connected`/`disconnected` signals its card's lifecycle follows
 //! ([`frame`]), and the text fields' UA shadow tree around one editing
-//! host, their attributes, events and UI methods ([`text_field`]). A
+//! host, their attributes, their `input`, `confirm`, `selection`, `focus`
+//! and `blur` events, queued like the markdown element's as
+//! [`ComponentEvent::Detailed`], and their UI methods ([`text_field`]). A
 //! component's UI methods are its
 //! [`dom::CustomElement::invoke`], which the runtime's `callElementMethod`
 //! reaches through [`dom::Document::invoke_element_method`]. The methods
@@ -74,6 +76,7 @@ mod viewpager;
 mod web_text_replication;
 
 use std::cell::RefCell;
+use std::ops::Range;
 use std::rc::Rc;
 
 use dom::{Document, ImageOutcome, NodeId, StylesheetOrigin};
@@ -192,24 +195,6 @@ pub(super) fn element_children(
         .filter(|child| document.get(*child).is_some_and(dom::Node::is_element))
 }
 
-/// What an `x-input`'s or `x-textarea`'s event carries, read when the
-/// component queued it ([`text_field`]); the runtime makes each field one
-/// extra of the Lynx `detail`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TextFieldDetail {
-    /// `{value}`: `focus`, `blur` and `confirm`.
-    Value(String),
-    /// `input`: `{value, textLength, cursor, isComposing, selectionStart,
-    /// selectionEnd}`, offsets and length in UTF-16 units.
-    Input {
-        value: String,
-        selection: std::ops::Range<u32>,
-        is_composing: bool,
-    },
-    /// `selection`: `{selectionStart, selectionEnd}`.
-    Selection(std::ops::Range<u32>),
-}
-
 /// One event a component owes script, at the element the component belongs
 /// to. None of them bubbles; a [`ComponentEvent::Detailed`] alone is
 /// composed. A [`ComponentEvent::Frame`] is the one that script does not
@@ -233,9 +218,11 @@ pub(crate) enum ComponentEvent {
         name: &'static str,
         delta: dom::Vector2D<f32>,
     },
-    /// An event whose detail is made of strings the component read when it
-    /// queued the event, named by that component. [`ComponentDetail`] is the
-    /// detail's shape.
+    /// An event whose detail the component read when it queued the event,
+    /// named by that component: `<x-markdown>`'s `parseEnd`, `link` and
+    /// `imageTap` ([`markdown`]), and an `x-input`'s or `x-textarea`'s
+    /// `input`, `confirm`, `selection`, `focus` and `blur`
+    /// ([`text_field`]). [`ComponentDetail`] is the detail's shape.
     ///
     /// Dispatched not bubbling and composed (ruled 2026-10-14). Not bubbling
     /// is native's: Lynx fires `<markdown>`'s `link`, `imageTap` and
@@ -243,9 +230,12 @@ pub(crate) enum ComponentEvent {
     /// (`lynx/core/renderer/events/touch_event_handler.cc:388-403`,
     /// `lynx/core/event/custom_event.h:17-23`), so only a `bindEvent` on the
     /// element itself hears one, never an ancestor's nor the
-    /// `global-bindEvent` pass. Composed is so that an event queued at a node
-    /// of a UA shadow tree retargets to the host for script, whose `target`
-    /// is then the component's element.
+    /// `global-bindEvent` pass; a text field's events do not bubble in
+    /// web-core either (`XInputEvents.ts`). Composed is so that an event
+    /// queued at a node of a UA shadow tree retargets to the host for
+    /// script, whose `target` is then the component's element; a text
+    /// field queues its events at the field element itself, outside its
+    /// shadow tree, where composed changes nothing.
     Detailed {
         node: NodeId,
         name: &'static str,
@@ -256,13 +246,6 @@ pub(crate) enum ComponentEvent {
     /// `bobcat:frame`, which loads the frame's card on a connection and
     /// disposes of it on a disconnection.
     Frame { node: NodeId, connected: bool },
-    /// An `x-input`'s or `x-textarea`'s `input`, `confirm`, `selection`,
-    /// `focus` or `blur`, with the detail it carries ([`text_field`]).
-    TextField {
-        node: NodeId,
-        name: &'static str,
-        detail: TextFieldDetail,
-    },
 }
 
 /// The `detail` of a [`ComponentEvent::Detailed`]: one variant per *shape*
@@ -270,12 +253,12 @@ pub(crate) enum ComponentEvent {
 /// the same keys share one.
 ///
 /// Owned, because the event outlives the call that queued it: the component
-/// reads its attributes or its content at that moment, and the runtime
-/// delivers from an entry of its own. The event itself is `EventDetail::None`
-/// on the kernel's side; each string crosses as one entry of the extras
-/// channel (`"id"`, `"url"`, `"content"`, `"contentId"`), from which the
-/// realm's Lynx layer builds the `detail` object, so no JSON is written or
-/// parsed. A `None` pushes no entry, and the key is absent from the object —
+/// reads its attributes, its content or its value at that moment, and the
+/// runtime delivers from an entry of its own. The event itself is
+/// `EventDetail::None` on the kernel's side; each member crosses as one entry
+/// of the extras channel (`"id"`, `"url"`, `"value"`, `"selectionStart"`,
+/// ...), from which the realm's Lynx layer builds the `detail` object, so no
+/// JSON is written or parsed. A `None` pushes no entry, and the key is absent from the object —
 /// neither `undefined`-valued nor `""`: web-core's `{id: undefined}` loses
 /// that key when it is serialized, and the transport here would carry an
 /// `undefined`-valued key as one.
@@ -297,6 +280,23 @@ pub(crate) enum ComponentDetail {
         url: String,
         content_id: Option<String>,
     },
+    /// `{value}`: a text field's value, such as an `x-input`'s or
+    /// `x-textarea`'s `focus`, `blur` and `confirm` report.
+    Value { value: String },
+    /// `{value, textLength, cursor, isComposing, selectionStart,
+    /// selectionEnd}`: a text field's value after an edit, its selection
+    /// and whether a composition is in progress, such as an `x-input`'s or
+    /// `x-textarea`'s `input` reports. Offsets in UTF-16 units; `textLength`
+    /// (the value's UTF-16 length) and the deprecated `cursor` (the
+    /// selection's start) are computed when the runtime expands the detail.
+    Input {
+        value: String,
+        selection: Range<u32>,
+        is_composing: bool,
+    },
+    /// `{selectionStart, selectionEnd}`: a text field's selection in UTF-16
+    /// units, such as an `x-input`'s or `x-textarea`'s `selection` reports.
+    Selection { selection: Range<u32> },
 }
 
 /// The events this document's components have produced and not delivered
@@ -365,18 +365,6 @@ impl ComponentEvents {
         self.0
             .borrow_mut()
             .push(ComponentEvent::Frame { node, connected });
-    }
-
-    /// Queues an `x-input`'s or `x-textarea`'s event at `node`.
-    pub(crate) fn queue_text_field(
-        &self,
-        node: NodeId,
-        name: &'static str,
-        detail: TextFieldDetail,
-    ) {
-        self.0
-            .borrow_mut()
-            .push(ComponentEvent::TextField { node, name, detail });
     }
 
     /// Takes everything queued since the last drain.

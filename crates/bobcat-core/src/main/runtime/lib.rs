@@ -50,8 +50,7 @@ use crate::main::exposure::{Exposure, is_exposure_attribute};
 use crate::main::record::write_record_field;
 use crate::main::tree::{
     Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, LynxDocument, MAX_FRAME_DEPTH,
-    PageConfig, TextFieldDetail, frame_depth, invoke_base_method, is_svg, nested_page,
-    new_document, reset_frame,
+    PageConfig, frame_depth, invoke_base_method, is_svg, nested_page, new_document, reset_frame,
 };
 use crate::realm::child::{ChildHostModules, ChildHostState, ChildKey};
 use crate::realm::policy::context_of;
@@ -156,30 +155,61 @@ pub(crate) enum Extra<'a> {
 /// every event.
 type Extras<'a> = &'a [(&'static str, Extra<'a>)];
 
-/// Appends a [`ComponentDetail`]'s strings as extras, under the keys
-/// web-core's `<x-markdown>` details carry: `id`; `url`, `content` and
-/// `contentId`; `url` and `contentId`. An `id` or `contentId` the component
-/// had no value for pushes nothing, so the realm's `detail` has no such key.
-fn push_detail_strings<'a>(
+/// Appends a [`ComponentDetail`] as extras, one per key of the Lynx
+/// `detail`, under the keys and in the member order web-core's details
+/// carry: `<x-markdown>`'s `id`; `url`, `content` and `contentId`; `url`
+/// and `contentId` — an `id` or `contentId` the component had no value for
+/// pushes nothing, so the realm's `detail` has no such key — and a text
+/// field's (`XInputEvents.ts`) `value`; `value`, `textLength`, `cursor`,
+/// `isComposing`, `selectionStart` and `selectionEnd`, where `textLength`
+/// is the value's UTF-16 length and the deprecated `cursor` the selection's
+/// start; `selectionStart` and `selectionEnd`.
+fn push_detail_extras<'a>(
     detail: &'a ComponentDetail,
     extras: &mut SmallVec<[(&'static str, Extra<'a>); 7]>,
 ) {
-    let (url, content, id_key, id) = match detail {
-        ComponentDetail::Id { id } => (None, None, "id", id),
+    let unit = |offset: u32| Extra::Number(f64::from(offset));
+    let optional =
+        |key, value: &'a Option<String>| value.as_deref().map(|value| (key, Extra::Str(value)));
+    match detail {
+        ComponentDetail::Id { id } => extras.extend(optional("id", id)),
         ComponentDetail::UrlContent {
             url,
             content,
             content_id,
-        } => (Some(url), Some(content), "contentId", content_id),
-        ComponentDetail::Url { url, content_id } => (Some(url), None, "contentId", content_id),
-    };
-    for (key, value) in [("url", url), ("content", content)] {
-        if let Some(value) = value {
-            extras.push((key, Extra::Str(value)));
+        } => {
+            extras.extend([("url", Extra::Str(url)), ("content", Extra::Str(content))]);
+            extras.extend(optional("contentId", content_id));
         }
-    }
-    if let Some(id) = id {
-        extras.push((id_key, Extra::Str(id)));
+        ComponentDetail::Url { url, content_id } => {
+            extras.push(("url", Extra::Str(url)));
+            extras.extend(optional("contentId", content_id));
+        }
+        ComponentDetail::Value { value } => extras.push(("value", Extra::Str(value))),
+        ComponentDetail::Input {
+            value,
+            selection,
+            is_composing,
+        } => {
+            let length: usize = value.chars().map(char::len_utf16).sum();
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a field's length, far inside an f64's integers"
+            )]
+            let length = length as f64;
+            extras.extend([
+                ("value", Extra::Str(value)),
+                ("textLength", Extra::Number(length)),
+                ("cursor", unit(selection.start)),
+                ("isComposing", Extra::Bool(*is_composing)),
+                ("selectionStart", unit(selection.start)),
+                ("selectionEnd", unit(selection.end)),
+            ]);
+        }
+        ComponentDetail::Selection { selection } => extras.extend([
+            ("selectionStart", unit(selection.start)),
+            ("selectionEnd", unit(selection.end)),
+        ]),
     }
 }
 
@@ -291,43 +321,6 @@ fn encode_extras<'a>(extras: Extras<'a>, arguments: &mut Arguments<'a>) {
             Extra::Bool(flag) => HostArgument::Boolean(flag),
             Extra::Str(text) => HostArgument::String(text),
         });
-    }
-}
-
-/// An `x-input`'s or `x-textarea`'s detail as extras, in web-core's member
-/// order (`XInputEvents.ts`): `input`'s `textLength` is the value's UTF-16
-/// length and its deprecated `cursor` the selection's start.
-fn text_field_extras<'a>(
-    detail: &'a TextFieldDetail,
-    extras: &mut SmallVec<[(&'static str, Extra<'a>); 7]>,
-) {
-    let unit = |offset: u32| Extra::Number(f64::from(offset));
-    match detail {
-        TextFieldDetail::Value(value) => extras.push(("value", Extra::Str(value))),
-        TextFieldDetail::Input {
-            value,
-            selection,
-            is_composing,
-        } => {
-            let length: usize = value.chars().map(char::len_utf16).sum();
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "a field's length, far inside an f64's integers"
-            )]
-            let length = length as f64;
-            extras.extend([
-                ("value", Extra::Str(value)),
-                ("textLength", Extra::Number(length)),
-                ("cursor", unit(selection.start)),
-                ("isComposing", Extra::Bool(*is_composing)),
-                ("selectionStart", unit(selection.start)),
-                ("selectionEnd", unit(selection.end)),
-            ]);
-        }
-        TextFieldDetail::Selection(selection) => extras.extend([
-            ("selectionStart", unit(selection.start)),
-            ("selectionEnd", unit(selection.end)),
-        ]),
     }
 }
 
@@ -2241,11 +2234,10 @@ impl MainThreadRuntime {
             // by (0 for a `scrollend`), and `isDragging`, which this step
             // reports false, as web-core does.
             //
-            // A detailed event carries the strings its component read when it
-            // queued it, as extras borrowed from the queue for the call, one
-            // per key the component had a value for. An `x-input`'s or
-            // `x-textarea`'s events carry web-core's detail the same way
-            // ([`crate::main::tree::text_field`]).
+            // A detailed event carries the detail its component read when it
+            // queued it — `<x-markdown>`'s strings, a text field's value and
+            // selection — as extras borrowed from the queue for the call, one
+            // per key the component had a value for.
             let mut extras: SmallVec<[(&'static str, Extra<'_>); 7]> = SmallVec::new();
             let (target, name, composed) = match *event {
                 ComponentEvent::Image(dom::ImageOutcome::Loaded {
@@ -2283,14 +2275,6 @@ impl MainThreadRuntime {
                     }
                     continue;
                 }
-                ComponentEvent::TextField {
-                    node,
-                    name,
-                    ref detail,
-                } => {
-                    text_field_extras(detail, &mut extras);
-                    (node, name, false)
-                }
                 ComponentEvent::Scroll { node, name, delta } => {
                     let scroll_box = self.slot.borrow_mut().document_mut().scroll_box(node);
                     let (offset, size) = scroll_box.map_or_else(
@@ -2317,7 +2301,7 @@ impl MainThreadRuntime {
                     name,
                     ref detail,
                 } => {
-                    push_detail_strings(detail, &mut extras);
+                    push_detail_extras(detail, &mut extras);
                     (node, name, true)
                 }
             };

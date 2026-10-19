@@ -832,9 +832,9 @@ Public surface:
 - `TextInputState::input_type` is read from the host's `type` attribute with
   `<input type>`'s keywords (`password`, `search`, `email`, `number`, `tel`,
   `url`; anything else `Text`).
-- `bobcat-core`: `ComponentEvent::TextField` with `TextFieldDetail`, and string
-  values on the extras channel (`Extra::String`); a new dependency,
-  `regex-lite`, for `input-filter`.
+- `bobcat-core`: three `ComponentDetail` shapes for the field events —
+  `Value`, `Input` and `Selection` — queued as `ComponentEvent::Detailed`
+  like `<x-markdown>`'s; a new dependency, `regex-lite`, for `input-filter`.
 
 ### Choices made where the brief left one
 
@@ -901,8 +901,17 @@ Public surface:
   The component runs on `input` (bubble pass), `compositionend`, `focus`,
   `blur` and the engine-only `selectionchange` (capture pass), which the
   runtime fires at the host after every command it applied. Each Lynx event
-  is queued on `ComponentEvents` with its detail read at that moment and
-  dispatched under the Lynx name (`input`, not web-core's `lynxinput`).
+  is queued at the field element through `ComponentEvents::queue_detailed`,
+  the path `<x-markdown>`'s events take, with its detail read at that moment
+  as one `ComponentDetail` shape: `Value` (`{value}`: `focus`, `blur`,
+  `confirm`), `Input` (`{value, textLength, cursor, isComposing,
+  selectionStart, selectionEnd}`, UTF-16 units, `textLength` computed when
+  the runtime expands the detail into extras) or `Selection`
+  (`{selectionStart, selectionEnd}`). It is dispatched under the Lynx name
+  (`input`, not web-core's `lynxinput`), not bubbling, as web-core's
+  `commonComponentEventSetting` fires it; the path's composed flag changes
+  nothing, since the target is the field element and not a node of its
+  shadow tree.
   `input` fires once per edit that changed the value since the last one
   reported (the focused editor's last reported value and selection are one
   slot, not a per-element table), so an edit `maxlength` or a filter undid

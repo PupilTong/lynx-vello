@@ -151,7 +151,7 @@ use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, ShadowR
 use serde_json::Value;
 
 use super::text::TEXT_TAG;
-use super::{ComponentEvents, InvalidParams, LynxDocument, TextFieldDetail};
+use super::{ComponentDetail, ComponentEvents, InvalidParams, LynxDocument};
 use crate::main::record::write_record_field;
 
 /// The single-line tags: web-core's element name and its `-ng` alias. Not
@@ -783,10 +783,10 @@ impl TextField {
             value: value.clone(),
             selection: selection.clone(),
         });
-        self.shared.events.queue_text_field(
+        self.shared.events.queue_detailed(
             field,
             "input",
-            TextFieldDetail::Input {
+            ComponentDetail::Input {
                 value,
                 selection,
                 is_composing: composing,
@@ -804,7 +804,7 @@ impl TextField {
         let (value, ..) = Self::snapshot(document, editor);
         self.shared
             .events
-            .queue_text_field(field, name, TextFieldDetail::Value(value));
+            .queue_detailed(field, name, ComponentDetail::Value { value });
     }
 
     /// Queues `selection` when the selection moved with no change of value
@@ -818,10 +818,10 @@ impl TextField {
         let moved = last.value == value && last.selection != selection;
         last.selection = selection.clone();
         if moved && !selection.is_empty() {
-            self.shared.events.queue_text_field(
+            self.shared.events.queue_detailed(
                 field,
                 "selection",
-                TextFieldDetail::Selection(selection),
+                ComponentDetail::Selection { selection },
             );
         }
     }
@@ -911,7 +911,7 @@ impl TextField {
         });
         self.shared
             .events
-            .queue_text_field(field, "focus", TextFieldDetail::Value(value));
+            .queue_detailed(field, "focus", ComponentDetail::Value { value });
     }
 
     /// A selection a method set: applied when the editor is focused, then
@@ -1216,7 +1216,7 @@ mod tests {
 
     use super::super::test_support::{style_of, with_component_events};
     use super::super::{
-        ComponentEvent, ComponentEvents, LynxDocument, PageConfig, TextFieldDetail,
+        ComponentDetail, ComponentEvent, ComponentEvents, LynxDocument, PageConfig,
     };
     use super::{
         INPUT_TAGS, SELECTION_CHANGE, TEXTAREA_TAGS, editor, focus_delegate, placeholder_block,
@@ -1276,27 +1276,29 @@ mod tests {
     }
 
     /// The events queued since the last call, as `(name, detail)`.
-    fn queued(events: &ComponentEvents) -> Vec<(&'static str, TextFieldDetail)> {
+    fn queued(events: &ComponentEvents) -> Vec<(&'static str, ComponentDetail)> {
         events
             .take()
             .into_iter()
             .map(|event| match event {
-                ComponentEvent::TextField { name, detail, .. } => (name, detail),
+                ComponentEvent::Detailed { name, detail, .. } => (name, detail),
                 other => panic!("no such event here: {other:?}"),
             })
             .collect()
     }
 
-    fn input(value: &str, selection: std::ops::Range<u32>, is_composing: bool) -> TextFieldDetail {
-        TextFieldDetail::Input {
+    fn input(value: &str, selection: std::ops::Range<u32>, is_composing: bool) -> ComponentDetail {
+        ComponentDetail::Input {
             value: value.to_owned(),
             selection,
             is_composing,
         }
     }
 
-    fn text_value(value: &str) -> TextFieldDetail {
-        TextFieldDetail::Value(value.to_owned())
+    fn text_value(value: &str) -> ComponentDetail {
+        ComponentDetail::Value {
+            value: value.to_owned(),
+        }
     }
 
     /// What the runtime does for one command at the focused editor: the
@@ -1797,7 +1799,7 @@ mod tests {
         edit(&mut document, Command::SetSelection { range: 1..3 });
         assert_eq!(
             queued(&events),
-            [("selection", TextFieldDetail::Selection(1..3))]
+            [("selection", ComponentDetail::Selection { selection: 1..3 })]
         );
         assert_eq!(
             invoke(&mut document, field, "select", "{}"),
@@ -1805,7 +1807,7 @@ mod tests {
         );
         assert_eq!(
             queued(&events),
-            [("selection", TextFieldDetail::Selection(0..5))]
+            [("selection", ComponentDetail::Selection { selection: 0..5 })]
         );
     }
 
