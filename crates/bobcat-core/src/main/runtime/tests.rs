@@ -6741,11 +6741,12 @@ fn dropping_a_connected_element_is_refused() {
 /// element it was swapped with.
 #[test]
 fn a_child_of_a_let_go_parent_is_still_attached_for_the_host() {
-    let (mut js_runtime, mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
             &mut js_runtime,
             r"
+                import { parentNode } from 'bobcat-internal:host';
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
                   const visible = __CreateView(0);
@@ -6760,6 +6761,14 @@ fn a_child_of_a_let_go_parent_is_still_attached_for_the_host() {
                     return cell;
                   })();
                   __SwapElement(globalThis.cell, visible);
+                  // Read in the same job as the swap: a collection that the
+                  // realm's allocations trigger later frees the wrapper, and
+                  // its cleanup, at the job's checkpoint, detaches what the
+                  // swap left under it.
+                  globalThis.parents = [
+                    parentNode(__GetElementUniqueID(globalThis.cell)),
+                    parentNode(__GetElementUniqueID(visible)),
+                  ];
                 };
                 ",
             "app:///let-go-parent.js",
@@ -6767,18 +6776,22 @@ fn a_child_of_a_let_go_parent_is_still_attached_for_the_host() {
         .expect("main-thread script");
 
     // page 2, visible 3, wrapper 4, cell 5.
-    let tree = elements.tree();
-    assert_eq!(
-        tree.get(node_id(5)).and_then(dom::Node::parent_id),
-        Some(node_id(2)),
-        "the swap moved the cell under the page"
-    );
-    assert_eq!(
-        tree.get(node_id(3)).and_then(dom::Node::parent_id),
-        Some(node_id(4)),
-        "and moved the visible element under the wrapper, rather than \
-             deleting it as a replace would have"
-    );
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+            const [cell, visible] = globalThis.parents;
+            // The swap moved the cell under the page, and the visible element
+            // under the wrapper, rather than deleting it as a replace would
+            // have.
+            if (cell !== 2 || visible !== 4) {
+              throw Error(JSON.stringify(globalThis.parents));
+            }
+            ",
+            "app:///let-go-parent-check.js",
+            "reading the parents the swap left",
+        )
+        .expect("the swap kept both elements attached");
 }
 
 /// A drop frees one node. A descendant script still names is unlinked
