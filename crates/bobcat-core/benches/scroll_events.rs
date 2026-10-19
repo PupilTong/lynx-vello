@@ -6,8 +6,17 @@
 //! which queues the events each container owes, then the delivery of what was
 //! queued, as the page's epilogue posts it
 //! ([`ScriptHarness::scroll_frame`]). What varies is where the one listener is
-//! and which containers move, so the cases separate the cost of a container
-//! nothing listens at from the cost of the one that is listened to.
+//! and which containers move.
+//!
+//! Whether a container's event is queued is decided by name over the whole
+//! document, not per container: once any registration of the name exists,
+//! every container that moves queues its event, and the delivery dispatches
+//! each one — at a container with no registration on its path, that is the
+//! path built and walked without a realm call. So `scroll_nobody_listens` is
+//! the cost with nothing queued, the two `*_one_listened_elsewhere` cases the
+//! cost of a frame's events dispatched to no realm (`scroll` while moving,
+//! `scrollend` at rest), and `scroll_the_listened_container` one event that
+//! does call the realm.
 //!
 //! The realm boots once per case, outside the timed region. Every timed frame
 //! moves its containers: the posts alternate between two offsets.
