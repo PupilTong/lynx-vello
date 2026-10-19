@@ -50,8 +50,8 @@ use super::paragraph::shape::{self, NaturalLine, ShapeSpan};
 use super::paragraph::style::resolve_alignment;
 pub use super::paragraph::{
     BlockConstraint, BlockMetrics, Direction, InlineBoxSpec, InlineItem, LineHeight, OffsetMap,
-    RunStyle, TextAlign, TextIndent, TextRunItem, TextWrap, VerticalAlign, WhiteSpaceCollapse,
-    WordBreak,
+    RunStyle, TextAlign, TextIndent, TextRunItem, TextSecurity, TextWrap, VerticalAlign,
+    WhiteSpaceCollapse, WordBreak,
 };
 use super::paragraph::{
     Flow, LineGeometry, OwnedItem, Paragraph, ParagraphRoot, RunBreaking, parley_boxes, sized_box,
@@ -1185,6 +1185,7 @@ mod tests {
                 text: "aaaa aaaa",
                 style: &style,
                 white_space: WhiteSpaceCollapse::Collapse,
+                text_security: TextSecurity::None,
             }),
             InlineItem::Box(InlineBoxSpec {
                 id: 1,
@@ -1222,12 +1223,14 @@ mod tests {
             text: "aaaa aaaa aaaa",
             style: &style,
             white_space: WhiteSpaceCollapse::Collapse,
+            text_security: TextSecurity::None,
         })];
         let tail_style = ahem_style();
         let tail = [InlineItem::Run(TextRunItem {
             text: "XX",
             style: &tail_style,
             white_space: WhiteSpaceCollapse::Collapse,
+            text_security: TextSecurity::None,
         })];
         let block_style = BlockStyle {
             max_lines: core::num::NonZeroU32::new(2),
@@ -1269,6 +1272,7 @@ mod tests {
             text: "ab c\td",
             style: &style,
             white_space: WhiteSpaceCollapse::Preserve,
+            text_security: TextSecurity::None,
         })];
         let mut block = TextBlock::new(&mut context, BlockStyle::default(), &items, None);
         assert_eq!(

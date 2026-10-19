@@ -73,7 +73,7 @@
 //! | `value` | the value, cut to `maxlength` UTF-16 units when that attribute is present (web-core's `_handleValue`); nothing when equal to the current value; the caret at the end when focused |
 //! | `placeholder` | the placeholder's text |
 //! | `placeholder-color`, `-font-size`, `-font-weight`, `-font-family` | UA `attr()` declarations on the host, read by `#placeholder` (web-core's `--placeholder-*` properties, grey and `normal` by default) and inherited by its `::placeholder` block, where an author's `::placeholder` rule overrides them |
-//! | `type` | `text`, `number`, `digit`, `password`, `tel`, `email`: the editor's `type` (`password` or `text`) and `inputmode` (web-core's `_handleType`); `number` also keeps digits and the last `.` only |
+//! | `type` | `text`, `number`, `digit`, `password`, `tel`, `email`: the editor's `type` (`password` or `text`) and `inputmode` (web-core's `_handleType`); a `password` editor shows a disc per character (`-webkit-text-security: disc` in the shadow sheet); `number` also keeps digits and the last `.` only |
 //! | `maxlength` | UTF-16 units, 140 when absent (web-core's default); see below |
 //! | `confirm-type` | the editor's `enterkeyhint`, `send` when absent |
 //! | `disabled`, `readonly` | present and not `"false"`: the editor is `contenteditable="false"`, so it cannot be focused or edited |
@@ -248,11 +248,14 @@ const SHADOW_RULES: &str = r"
 ";
 
 /// One line, vertically centred, as a browser's `<input>` draws it, in the
-/// editor's own inline formatting context.
-const INPUT_SHADOW_RULES: &str = r"
+/// editor's own inline formatting context. A `password` editor masks its
+/// value as a browser's `<input type=password>` does: a disc per character,
+/// the value itself unchanged.
+const INPUT_SHADOW_RULES: &str = r#"
 .editor { display: block; flex: 1 1 0%; white-space: pre; }
+.editor[type="password"] { -webkit-text-security: disc; }
 #placeholder { align-items: center; }
-";
+"#;
 
 /// Lines from the top, wrapping, in the editor's Lynx paragraph. `color:
 /// inherit` undoes `text`'s UA `color: initial`: the value wears the field's
@@ -1626,6 +1629,34 @@ mod tests {
             document.text_input_state().enter_key_hint,
             dom::editing::EnterKeyHint::Search
         );
+    }
+
+    /// `type=password` masks the input's editor with a disc per character,
+    /// through the shadow sheet; any other type, and a textarea, does not.
+    #[test]
+    fn a_password_input_masks_its_value_and_a_text_one_does_not() {
+        // A tab is the tell: shown, it runs to the stop at 80px under
+        // `white-space: pre`; masked, it is one 10px Ahem disc.
+        let (mut document, _, field) = make("x-input", &[("type", "password"), ("value", "a\tb")]);
+        let editor = editor_of(&document, field);
+        assert_eq!(value_of(&document, editor, "-webkit-text-security"), "disc");
+        assert_eq!(value(&document, field), "a\tb");
+        let width = |document: &LynxDocument| {
+            let boxes = document
+                .text_range_boxes(editor, 0, 3)
+                .expect("a committed paragraph");
+            boxes.iter().map(|rect| rect.size.width).sum::<f32>()
+        };
+        assert_eq!(width(&document), 30.0);
+
+        document.set_attribute(field, "type", "text");
+        document.layout();
+        assert_eq!(value_of(&document, editor, "-webkit-text-security"), "none");
+        assert_eq!(width(&document), 90.0);
+
+        let (document, _, field) = make("x-textarea", &[("type", "password")]);
+        let editor = editor_of(&document, field);
+        assert_eq!(value_of(&document, editor, "-webkit-text-security"), "none");
     }
 
     /// `value` is cut to `maxlength` only when that attribute is present,

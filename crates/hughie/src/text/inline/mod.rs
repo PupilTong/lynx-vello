@@ -82,7 +82,7 @@ use crate::text::paragraph::style::resolve_alignment;
 use crate::text::paragraph::{
     Additions, BlockConstraint, BlockMetrics, BreakStyle, Direction, Flow, IndentKeywords,
     InlineBoxSpec, InlineItem, LineGeometry, OffsetMap, OverflowWrap, OwnedItem, Paragraph,
-    ParagraphRoot, RunBreaking, RunStyle, TextAlign, TextRunItem, VerticalAlign,
+    ParagraphRoot, RunBreaking, RunStyle, TextAlign, TextRunItem, TextSecurity, VerticalAlign,
     WhiteSpaceCollapse,
 };
 
@@ -133,6 +133,8 @@ pub struct InlineRun<'src> {
     pub style: &'src RunStyle,
     /// The run's `white-space-collapse`.
     pub white_space: WhiteSpaceCollapse,
+    /// The run's `-webkit-text-security` ([`TextRunItem::text_security`]).
+    pub text_security: TextSecurity,
     /// The run's `word-break`, `text-wrap-mode` and `overflow-wrap`.
     pub breaking: BreakStyle,
 }
@@ -927,6 +929,7 @@ fn lay_in(items: &[InlineFlowItem<'_>]) -> (Flow<EdgeAdditions>, InlineBoxes) {
                 text: run.text,
                 style: run.style,
                 white_space: run.white_space,
+                text_security: run.text_security,
             }),
             InlineFlowItem::Atom(atom) => InlineItem::Box(InlineBoxSpec {
                 id: index as u64,

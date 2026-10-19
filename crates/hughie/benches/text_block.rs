@@ -29,7 +29,7 @@ use divan::counter::ItemsCount;
 use hughie::geometry::Size;
 use hughie::text::block::{
     BlockConstraint, BlockStyle, InlineBoxSpec, InlineItem, RunStyle, TextAlign, TextBlock,
-    TextOverflow, TextRunItem, VerticalAlign, WhiteSpaceCollapse, WordBreak,
+    TextOverflow, TextRunItem, TextSecurity, VerticalAlign, WhiteSpaceCollapse, WordBreak,
 };
 use hughie::text::{FontBlob, TextContext};
 use stylo::values::computed::font::{
@@ -461,6 +461,7 @@ fn inline_items<'case>(
                     text,
                     style,
                     white_space: WhiteSpaceCollapse::Collapse,
+                    text_security: TextSecurity::None,
                 })
             }
             ItemSpec::Box {
@@ -749,6 +750,7 @@ fn cold_thousand_style_runs(bencher: divan::Bencher<'_, '_>) {
                             text: "-",
                             style,
                             white_space: WhiteSpaceCollapse::Collapse,
+                            text_security: TextSecurity::None,
                         })
                     })
                     .collect();

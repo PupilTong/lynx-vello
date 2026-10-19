@@ -985,7 +985,7 @@ mod tests {
     use crate::text::inline::InlineEdges;
     use crate::text::paragraph::content::SourceMap;
     use crate::text::paragraph::{
-        BreakStyle, Direction, RunStyle, VerticalAlign, WhiteSpaceCollapse,
+        BreakStyle, Direction, RunStyle, TextSecurity, VerticalAlign, WhiteSpaceCollapse,
     };
 
     fn run<'src>(style: &'src RunStyle, text: &'src str) -> InlineFlowItem<'src> {
@@ -993,6 +993,7 @@ mod tests {
             text,
             style,
             white_space: WhiteSpaceCollapse::Collapse,
+            text_security: TextSecurity::None,
             breaking: BreakStyle::default(),
         })
     }
@@ -1158,6 +1159,7 @@ mod tests {
                 text,
                 style: &style,
                 white_space: WhiteSpaceCollapse::Preserve,
+                text_security: TextSecurity::None,
                 breaking: BreakStyle::default(),
             })
         };

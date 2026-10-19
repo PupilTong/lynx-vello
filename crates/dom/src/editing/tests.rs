@@ -1068,6 +1068,81 @@ fn a_tab_is_shown_as_a_space_and_edits_stay_aligned() {
 }
 
 #[test]
+fn a_masked_host_edits_its_value_over_a_layout_of_masks() {
+    // `a 😀 space b`: UTF-16 units 0..5, one disc each in the layout but the
+    // emoji's, which stands for two units. Ahem has a disc glyph, so every
+    // mask is one 10px square.
+    for kind in KINDS {
+        eprintln!("kind {kind:?}");
+        let (mut doc, host) = host_in(kind, &["a\u{1F600} b"], 200.0);
+        doc.set_inline_style(
+            host,
+            "width: 200px; padding: 3px 5px; -webkit-text-security: disc;",
+        );
+        doc.layout();
+        assert!(doc.editable_paragraph(host).unwrap().shows_value);
+        assert_eq!(paragraph_size(&doc, host), (40.0, 10.0));
+        let origin = doc.bounding_client_rect(host).unwrap().origin;
+
+        // From after `a`, one character move steps over the emoji's mask:
+        // both of its units.
+        select(&mut doc, 1..1);
+        assert!(
+            doc.apply_editing(Command::Move {
+                granularity: Granularity::Character,
+                direction: Direction::Forward,
+                extend: false,
+            })
+            .applied
+        );
+        // After the emoji: two masks in.
+        doc.layout();
+        doc.layout();
+        let input = state(&doc);
+        assert_eq!(input.value, "a\u{1F600} b");
+        assert_eq!(input.selection, 3..3);
+        assert_eq!(
+            input.caret,
+            rect(origin.x + 5.0 + 20.0, origin.y + 3.0, 1.0, 10.0)
+        );
+
+        // Typing lands in the value, unmasked, and the caret moves one mask.
+        assert!(doc.apply_editing(Command::Insert("x".to_owned())).applied);
+        doc.layout();
+        let input = state(&doc);
+        assert_eq!(input.value, "a\u{1F600}x b");
+        assert_eq!(input.selection, 4..4);
+        assert_eq!(
+            input.caret,
+            rect(origin.x + 5.0 + 30.0, origin.y + 3.0, 1.0, 10.0)
+        );
+
+        // Deleting backward twice takes the `x`, then both units of the
+        // emoji behind its one mask.
+        assert!(doc.apply_editing(Command::DeleteBackward).applied);
+        assert!(doc.apply_editing(Command::DeleteBackward).applied);
+        doc.layout();
+        let input = state(&doc);
+        assert_eq!(input.value, "a b");
+        assert_eq!(input.selection, 1..1);
+        assert_eq!(
+            input.caret,
+            rect(origin.x + 5.0 + 10.0, origin.y + 3.0, 1.0, 10.0)
+        );
+        // A character move steps over one mask: the space, one unit.
+        assert!(
+            doc.apply_editing(Command::Move {
+                granularity: Granularity::Character,
+                direction: Direction::Forward,
+                extend: false,
+            })
+            .applied
+        );
+        assert_eq!(selection(&doc), 2..2);
+    }
+}
+
+#[test]
 fn a_carriage_return_is_shaped_as_a_space_and_edits_stay_aligned() {
     for kind in KINDS {
         eprintln!("kind {kind:?}");

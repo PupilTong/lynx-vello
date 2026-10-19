@@ -77,7 +77,7 @@ pub use position::used_line_height;
 use shape::{BreakOverride, NaturalLine, ShapeSpan};
 pub use style::{
     BreakStyle, Direction, IndentKeywords, LineHeight, OverflowWrap, RunStyle, TextAlign,
-    TextIndent, TextWrap, VerticalAlign, WhiteSpaceCollapse, WordBreak,
+    TextIndent, TextSecurity, TextWrap, VerticalAlign, WhiteSpaceCollapse, WordBreak,
 };
 
 use crate::style::TextBrush;

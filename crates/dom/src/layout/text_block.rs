@@ -37,7 +37,7 @@ use hughie::text::block::{
 use crate::layout::paragraph::{
     AtomOffset, BlockBox, Collected, OutOfFlowBox, OwnedItem, Placement, TextStore,
     collect_generated, context_and_store, generated_content, hash_flow, place_and_hide,
-    run_white_space,
+    run_text_security, run_white_space,
 };
 use crate::layout::style::{DisplayMode, StyleView, TextRunView};
 use crate::tree::document::{DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
@@ -229,6 +229,7 @@ fn collect_content<T>(
                     text: text.to_owned(),
                     style: RunStyle::from_run_style(&run),
                     white_space: run_white_space(node),
+                    text_security: run_text_security(node),
                 },
                 // The *element* the run's style came from, not the text node:
                 // a text node carries no computed style, so it could never
@@ -307,10 +308,12 @@ fn as_items(collected: &[Collected], id_offset: usize) -> Vec<InlineItem<'_>> {
                 text,
                 style,
                 white_space,
+                text_security,
             } => InlineItem::Run(TextRunItem {
                 text,
                 style,
                 white_space: *white_space,
+                text_security: *text_security,
             }),
             OwnedItem::Atom { vertical_align } => InlineItem::Box(InlineBoxSpec {
                 // The item index is the box id, so one table answers for

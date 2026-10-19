@@ -7,8 +7,8 @@
 use hughie::geometry::{Point, Rect, Size};
 use hughie::text::block::{
     BlockConstraint, BlockStyle, Direction, InlineBoxSpec, InlineItem, PlacedBox, RunStyle,
-    SourceItem, TextAlign, TextBlock, TextIndent, TextOverflow, TextRunItem, TextWrap,
-    VerticalAlign, WhiteSpaceCollapse,
+    SourceItem, TextAlign, TextBlock, TextIndent, TextOverflow, TextRunItem, TextSecurity,
+    TextWrap, VerticalAlign, WhiteSpaceCollapse,
 };
 use hughie::text::{FontBlob, TextContext};
 use stylo::Atom;
@@ -60,6 +60,7 @@ fn run<'src>(style: &'src RunStyle, text: &'src str) -> InlineItem<'src> {
         text,
         style,
         white_space: WhiteSpaceCollapse::Collapse,
+        text_security: TextSecurity::None,
     })
 }
 
@@ -68,6 +69,7 @@ fn raw<'src>(style: &'src RunStyle, text: &'src str) -> InlineItem<'src> {
         text,
         style,
         white_space: WhiteSpaceCollapse::PreserveBreaks,
+        text_security: TextSecurity::None,
     })
 }
 
@@ -1450,6 +1452,7 @@ fn pre<'src>(style: &'src RunStyle, text: &'src str) -> InlineItem<'src> {
         text,
         style,
         white_space: WhiteSpaceCollapse::Preserve,
+        text_security: TextSecurity::None,
     })
 }
 

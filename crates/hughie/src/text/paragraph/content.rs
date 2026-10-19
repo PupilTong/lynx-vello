@@ -8,9 +8,9 @@
 //! boxes, collapse events), never a second copy of the text: intra-segment
 //! queries re-decode the one normalized `String` the paragraph needs anyway.
 //! Every lookup is a binary search over the segments, and an intra-segment
-//! offset is either arithmetic, in an ASCII segment, or a decode of at most
-//! [`VERBATIM_DECODE`] bytes, the longest a segment with any other character
-//! grows.
+//! offset is either arithmetic, in an ASCII or a masked segment, or a decode
+//! of at most [`VERBATIM_DECODE`] bytes, the longest a segment with any other
+//! character grows.
 //!
 //! The collapse rules are css-text-3 §4.1's, with two additions: source-unit
 //! accounting, and boxes as content (an atomic box flushes pending whitespace
@@ -23,6 +23,14 @@
 //! source units survive — never how they are counted. A preserved tab is
 //! emitted as a space and listed in [`NormalizedBlock::tabs`]; its advance is
 //! the tab stop's business (`super::tab`), not the glyph's.
+//!
+//! A run under `-webkit-text-security` ([`TextRunItem::text_security`]) is
+//! masked before any of that: every source character, white space and
+//! newlines included, emits one mask character, so the run opens no
+//! collapsible span and forces no break. Its characters are a
+//! [`SegmentKind::Masked`] segment, whose offsets in both spaces are
+//! arithmetic: one mask of [`MASK_BYTES`] bytes per source character, and
+//! one or two units each.
 //!
 //! [`WhiteSpaceProcessing::Verbatim`] is the native Lynx `<text>`: no run's
 //! `white-space-collapse` is read, every run is processed as `preserve`, and
@@ -44,7 +52,7 @@
 
 use core::ops::Range;
 
-use super::style::{RunStyle, VerticalAlign, WhiteSpaceCollapse};
+use super::style::{RunStyle, TextSecurity, VerticalAlign, WhiteSpaceCollapse};
 use crate::geometry::Size;
 
 /// One flattened paragraph item, in source order.
@@ -70,6 +78,10 @@ pub struct TextRunItem<'src> {
     /// literal newlines (`preserve-breaks` on the web target); a `pre`
     /// block preserves everything.
     pub white_space: WhiteSpaceCollapse,
+    /// The run's computed `-webkit-text-security`: under any value but
+    /// `none` every character shows as the value's mask, one per Unicode
+    /// scalar value, before white-space processing reads it.
+    pub text_security: TextSecurity,
 }
 
 /// One atomic inline — a Lynx inline image or inline view, or an atom of a
@@ -260,7 +272,15 @@ enum SegmentKind {
     /// An inserted segment ([`NormalizedBlock::splice`]): bytes and no
     /// source unit, so `units` is empty.
     Inserted,
+    /// A masked run's characters (`-webkit-text-security`): every char of
+    /// the segment is a mask of [`MASK_BYTES`] bytes standing for one source
+    /// char, and every source char in it has the same UTF-16 length, one or
+    /// two units, so intra-segment offsets are arithmetic.
+    Masked,
 }
+
+/// The UTF-8 length of every mask character [`TextSecurity::mask`] answers.
+pub(in crate::text) const MASK_BYTES: u32 = 3;
 
 /// The longest a verbatim segment holding a character other than ASCII
 /// grows, in bytes: the most an intra-segment lookup decodes. An ASCII
@@ -275,10 +295,17 @@ impl Segment {
         self.units.end - self.units.start == self.norm.end - self.norm.start
     }
 
-    /// The source units of this verbatim segment's text before `byte`, a
-    /// char boundary inside it.
+    /// The source units each mask of this masked segment stands for.
+    const fn units_per_mask(&self) -> u32 {
+        (self.units.end - self.units.start) / ((self.norm.end - self.norm.start) / MASK_BYTES)
+    }
+
+    /// The source units of this verbatim or masked segment's text before
+    /// `byte`, a char boundary inside it.
     fn units_before(&self, text: &str, byte: u32) -> u32 {
-        if self.is_ascii() {
+        if self.kind == SegmentKind::Masked {
+            (byte - self.norm.start) / MASK_BYTES * self.units_per_mask()
+        } else if self.is_ascii() {
             byte - self.norm.start
         } else {
             utf16_len(&text[self.norm.start as usize..byte as usize])
@@ -321,7 +348,9 @@ impl SourceMap {
             .expect("a start offset lies inside the normalized text");
         debug_assert!(segment.norm.start <= byte, "the segments cover the text");
         match segment.kind {
-            SegmentKind::Verbatim => segment.units.start + segment.units_before(text, byte),
+            SegmentKind::Verbatim | SegmentKind::Masked => {
+                segment.units.start + segment.units_before(text, byte)
+            }
             SegmentKind::Collapsed | SegmentKind::Inserted => segment.units.start,
             SegmentKind::Box => unreachable!("a box segment spans no bytes"),
         }
@@ -348,11 +377,13 @@ impl SourceMap {
                 match segment.kind {
                     SegmentKind::Box => break,
                     SegmentKind::Collapsed => result = segment.units.end,
-                    SegmentKind::Verbatim | SegmentKind::Inserted => {
-                        unreachable!("verbatim and inserted segments are never empty")
+                    SegmentKind::Verbatim | SegmentKind::Masked | SegmentKind::Inserted => {
+                        unreachable!("verbatim, masked and inserted segments are never empty")
                     }
                 }
-            } else if segment.kind == SegmentKind::Verbatim && segment.norm.start < byte {
+            } else if matches!(segment.kind, SegmentKind::Verbatim | SegmentKind::Masked)
+                && segment.norm.start < byte
+            {
                 result = segment.units.start + segment.units_before(text, byte);
                 break;
             } else {
@@ -400,9 +431,9 @@ impl SourceMap {
     /// [`Self::shown_len`] the text already ends.
     ///
     /// Snap rules: a unit inside a surrogate pair rounds down to the char
-    /// start; a unit inside a collapsed span lands on the span's emitted
-    /// byte; a unit on a box lands on the box's byte (cutting there hides
-    /// the box).
+    /// start, or to its mask's start in a masked run; a unit inside a
+    /// collapsed span lands on the span's emitted byte; a unit on a box lands
+    /// on the box's byte (cutting there hides the box).
     pub(in crate::text) fn unit_to_byte(&self, text: &str, unit: u32) -> Option<u32> {
         if unit >= self.shown_len {
             return None;
@@ -437,6 +468,10 @@ impl SourceMap {
                 }
                 Some(byte)
             }
+            SegmentKind::Masked => Some(
+                segment.norm.start
+                    + (unit - segment.units.start) / segment.units_per_mask() * MASK_BYTES,
+            ),
             SegmentKind::Collapsed | SegmentKind::Box => Some(segment.norm.start),
             SegmentKind::Inserted => unreachable!("an inserted segment holds no source unit"),
         }
@@ -549,9 +584,22 @@ impl Normalizer {
             white_space,
             WhiteSpaceCollapse::Preserve | WhiteSpaceCollapse::BreakSpaces
         );
+        let mask = run.text_security.mask();
         for character in run.text.chars() {
             if self.dropped_from.is_some() {
                 self.units += u32::try_from(character.len_utf16()).expect("1 or 2");
+                continue;
+            }
+            if let Some(mask) = mask {
+                // Masking comes before white-space processing: a masked
+                // space or newline is content like any other character.
+                self.flush_pending(mask);
+                self.emit_masked(
+                    mask,
+                    u32::try_from(character.len_utf16()).expect("1 or 2"),
+                    item,
+                );
+                self.at_line_start = false;
                 continue;
             }
             match character {
@@ -750,12 +798,32 @@ impl Normalizer {
         );
     }
 
+    /// Emits `mask` for one source character of `units` UTF-16 units.
+    fn emit_masked(&mut self, mask: char, units: u32, item: u32) {
+        debug_assert_eq!(mask.len_utf8(), MASK_BYTES as usize);
+        let start = self.byte_len();
+        self.text.push(mask);
+        self.record_style(start, item);
+        self.push_segment(SegmentKind::Masked, start..self.byte_len(), units);
+    }
+
     /// Appends or extends a segment; adjacent verbatim segments coalesce
     /// because they are contiguous in both offset spaces, as long as the
-    /// result is all ASCII or at most [`VERBATIM_DECODE`] bytes long.
+    /// result is all ASCII or at most [`VERBATIM_DECODE`] bytes long, and
+    /// adjacent masked segments as long as their source chars have the same
+    /// UTF-16 length.
     fn push_segment(&mut self, kind: SegmentKind, norm: Range<u32>, units: u32) {
         let unit_end = self.units + units;
-        if kind == SegmentKind::Verbatim
+        if kind == SegmentKind::Masked
+            && let Some(last) = self.segments.last_mut()
+            && last.kind == SegmentKind::Masked
+            && last.norm.end == norm.start
+            && last.units.end == self.units
+            && last.units_per_mask() == units
+        {
+            last.norm.end = norm.end;
+            last.units.end = unit_end;
+        } else if kind == SegmentKind::Verbatim
             && let Some(last) = self.segments.last_mut()
             && last.kind == SegmentKind::Verbatim
             && last.norm.end == norm.start
@@ -920,7 +988,7 @@ impl NormalizedBlock {
                 matches!(segment.kind, SegmentKind::Collapsed | SegmentKind::Box)
                     || segment.norm.start < segment.norm.end
             }),
-            "verbatim and inserted segments are never empty",
+            "verbatim, masked and inserted segments are never empty",
         );
         self.map.segments = segments;
 
@@ -989,14 +1057,16 @@ impl NormalizedBlock {
                         ..segment
                     },
                 ));
-            } else if segment.kind == SegmentKind::Verbatim {
+            } else if matches!(segment.kind, SegmentKind::Verbatim | SegmentKind::Masked) {
                 // A verbatim segment re-decodes its text for intra-segment
-                // offsets, so inserted bytes inside it would count as source:
-                // it is cut at every insertion point.
+                // offsets, and a masked one counts its bytes, so inserted
+                // bytes inside either would count as source: it is cut at
+                // every insertion point.
                 let mut from = segment.norm.start;
                 let mut unit = segment.units.start;
                 for point in shifts.cuts(segment.norm.start, segment.norm.end) {
-                    let units = utf16_len(&self.text[from as usize..point as usize]);
+                    let units = segment.units_before(&self.text, point)
+                        - segment.units_before(&self.text, from);
                     let moved = shifts.before(from, true);
                     sorted.push((
                         from + moved,
@@ -1010,7 +1080,7 @@ impl NormalizedBlock {
                                 start: unit,
                                 end: unit + units,
                             },
-                            kind: SegmentKind::Verbatim,
+                            kind: segment.kind,
                         },
                     ));
                     unit += units;
@@ -1167,6 +1237,7 @@ mod tests {
             text,
             style,
             white_space: WhiteSpaceCollapse::Collapse,
+            text_security: TextSecurity::None,
         })
     }
 
@@ -1175,6 +1246,7 @@ mod tests {
             text,
             style,
             white_space: WhiteSpaceCollapse::PreserveBreaks,
+            text_security: TextSecurity::None,
         })
     }
 
@@ -1183,6 +1255,16 @@ mod tests {
             text,
             style,
             white_space: WhiteSpaceCollapse::Preserve,
+            text_security: TextSecurity::None,
+        })
+    }
+
+    fn masked<'src>(style: &'src RunStyle, text: &'src str) -> InlineItem<'src> {
+        InlineItem::Run(TextRunItem {
+            text,
+            style,
+            white_space: WhiteSpaceCollapse::Collapse,
+            text_security: TextSecurity::Disc,
         })
     }
 
@@ -1546,7 +1628,20 @@ mod tests {
     /// the ASCII arithmetic and the bounded verbatim segments must answer
     /// exactly as.
     mod scan {
-        use super::super::{SegmentKind, SourceMap, utf16_len};
+        use super::super::{MASK_BYTES, Segment, SegmentKind, SourceMap, utf16_len};
+
+        /// The source units of a masked segment's masks before `byte`: each
+        /// mask's share of the segment's units.
+        fn masked_units(segment: &Segment, text: &str, byte: u32) -> u32 {
+            let masks = text[segment.norm.start as usize..segment.norm.end as usize]
+                .chars()
+                .count();
+            let per_mask = (segment.units.end - segment.units.start) as usize / masks;
+            let before = text[segment.norm.start as usize..byte as usize]
+                .chars()
+                .count();
+            u32::try_from(before * per_mask).unwrap()
+        }
 
         pub(super) fn byte_to_unit(map: &SourceMap, text: &str, byte: u32) -> u32 {
             let segment = map
@@ -1559,6 +1654,7 @@ mod tests {
                     segment.units.start
                         + utf16_len(&text[segment.norm.start as usize..byte as usize])
                 }
+                SegmentKind::Masked => segment.units.start + masked_units(segment, text, byte),
                 SegmentKind::Collapsed | SegmentKind::Inserted => segment.units.start,
                 SegmentKind::Box => unreachable!(),
             }
@@ -1575,11 +1671,16 @@ mod tests {
                     match segment.kind {
                         SegmentKind::Box => break,
                         SegmentKind::Collapsed => result = segment.units.end,
-                        SegmentKind::Verbatim | SegmentKind::Inserted => unreachable!(),
+                        SegmentKind::Verbatim | SegmentKind::Masked | SegmentKind::Inserted => {
+                            unreachable!()
+                        }
                     }
                 } else if segment.kind == SegmentKind::Verbatim && segment.norm.start < byte {
                     result = segment.units.start
                         + utf16_len(&text[segment.norm.start as usize..byte as usize]);
+                    break;
+                } else if segment.kind == SegmentKind::Masked && segment.norm.start < byte {
+                    result = segment.units.start + masked_units(segment, text, byte);
                     break;
                 } else {
                     break;
@@ -1610,6 +1711,18 @@ mod tests {
                         }
                         remaining -= width;
                         byte += u32::try_from(character.len_utf8()).unwrap();
+                    }
+                    Some(byte)
+                }
+                SegmentKind::Masked => {
+                    // The mask holding the unit, a pair's second half
+                    // included.
+                    let mut byte = segment.norm.start;
+                    while byte + MASK_BYTES < segment.norm.end
+                        && segment.units.start + masked_units(segment, text, byte + MASK_BYTES)
+                            <= unit
+                    {
+                        byte += MASK_BYTES;
                     }
                     Some(byte)
                 }
@@ -1645,6 +1758,59 @@ mod tests {
                 scan::unit_to_byte(map, text, unit),
                 "unit_to_byte({unit}) of {text:?}",
             );
+        }
+    }
+
+    /// [`assert_lookups_match_the_scan`] over `items` normalized, and again
+    /// with text a consumer splices in.
+    fn assert_spliced_lookups_match_the_scan(
+        items: &[InlineItem<'_>],
+        processing: WhiteSpaceProcessing,
+    ) {
+        for per_point in [1, 2] {
+            let (mut block, _) = super::normalize(items, processing);
+            assert_lookups_match_the_scan(&block);
+            // The same content with text a consumer inserts: inside a long
+            // verbatim segment, at an atomic box and at the text's end; then
+            // two insertions at each of those places, as an end edge cluster
+            // and a start edge cluster where one inline box closes and the
+            // next opens.
+            let boxes: Vec<(u32, u32)> = block
+                .boxes
+                .iter()
+                .enumerate()
+                .map(|(slot, entry)| (entry.byte, u32::try_from(slot).unwrap()))
+                .collect();
+            let length = u32::try_from(block.text.len()).unwrap();
+            let mut points: Vec<(u32, u32)> = [length / 3, length / 2, length]
+                .into_iter()
+                .filter(|&at| block.text.is_char_boundary(at as usize))
+                .map(|at| {
+                    (
+                        at,
+                        u32::try_from(block.boxes.iter().filter(|entry| entry.byte < at).count())
+                            .unwrap(),
+                    )
+                })
+                .chain(boxes.first().copied())
+                .collect();
+            points.sort_unstable();
+            points.dedup();
+            block.splice(
+                points
+                    .into_iter()
+                    .flat_map(|point| core::iter::repeat_n(point, per_point))
+                    .map(|(at, atoms_before)| Insertion {
+                        at,
+                        atoms_before,
+                        text: "\u{200B}x".to_owned(),
+                        style: RunStyle::default(),
+                        extra_spacing: 0.0,
+                        item: 0,
+                    })
+                    .collect(),
+            );
+            assert_lookups_match_the_scan(&block);
         }
     }
 
@@ -1696,54 +1862,37 @@ mod tests {
                 },
             ),
         ];
-        for ((items, processing), per_point) in cases
-            .iter()
-            .flat_map(|case| [1, 2].map(|per_point| (case, per_point)))
-        {
-            let (mut block, _) = super::normalize(items, *processing);
-            assert_lookups_match_the_scan(&block);
-            // The same content with text a consumer inserts: inside a long
-            // verbatim segment, at an atomic box and at the text's end; then
-            // two insertions at each of those places, as an end edge cluster
-            // and a start edge cluster where one inline box closes and the
-            // next opens.
-            let boxes: Vec<(u32, u32)> = block
-                .boxes
-                .iter()
-                .enumerate()
-                .map(|(slot, entry)| (entry.byte, u32::try_from(slot).unwrap()))
-                .collect();
-            let length = u32::try_from(block.text.len()).unwrap();
-            let mut points: Vec<(u32, u32)> = [length / 3, length / 2, length]
-                .into_iter()
-                .filter(|&at| block.text.is_char_boundary(at as usize))
-                .map(|at| {
-                    (
-                        at,
-                        u32::try_from(block.boxes.iter().filter(|entry| entry.byte < at).count())
-                            .unwrap(),
-                    )
-                })
-                .chain(boxes.first().copied())
-                .collect();
-            points.sort_unstable();
-            points.dedup();
-            block.splice(
-                points
-                    .into_iter()
-                    .flat_map(|point| core::iter::repeat_n(point, per_point))
-                    .map(|(at, atoms_before)| Insertion {
-                        at,
-                        atoms_before,
-                        text: "\u{200B}x".to_owned(),
-                        style: style.clone(),
-                        extra_spacing: 0.0,
-                        item: 0,
-                    })
-                    .collect(),
-            );
-            assert_lookups_match_the_scan(&block);
+        for (items, processing) in &cases {
+            assert_spliced_lookups_match_the_scan(items, *processing);
         }
+    }
+
+    #[test]
+    fn masked_lookups_answer_as_a_scan_of_every_segment() {
+        let style = RunStyle::default();
+        let emoji = "😀a😀".repeat(30);
+        let mixed = format!("{}活动规则é{}", "word ".repeat(30), "word ".repeat(30));
+        assert_spliced_lookups_match_the_scan(
+            &[
+                run(&style, "a  "),
+                masked(&style, &mixed),
+                masked(&style, &emoji),
+                atom(0),
+                masked(&style, " \n x"),
+                run(&style, " b"),
+            ],
+            WhiteSpaceProcessing::Css,
+        );
+        assert_spliced_lookups_match_the_scan(
+            &[
+                masked(&style, "ab\ncd"),
+                run(&style, "\n"),
+                masked(&style, &emoji),
+            ],
+            WhiteSpaceProcessing::Verbatim {
+                first_line_only: true,
+            },
+        );
     }
 
     #[test]
@@ -1784,6 +1933,124 @@ mod tests {
         );
         // Only whitespace: nothing at all.
         assert!(normalize(&[run(&style, " \n\t ")]).text.is_empty());
+    }
+    #[test]
+    fn a_masked_run_shows_one_mask_per_source_character_white_space_included() {
+        let style = RunStyle::default();
+        // ASCII, a surrogate pair, a space, a newline, a tab.
+        let block = normalize(&[masked(&style, "a\u{1F600} \n\tb")]);
+        assert_eq!(block.text, "\u{2022}".repeat(6));
+        // Nothing collapses, nothing breaks, no tab stop.
+        assert!(block.tabs.is_empty());
+        assert_eq!(block.map.source_len(), 7);
+        assert_eq!(block.item_units.first(), Some(&(0..7)));
+        // Masks start at bytes 0, 3, …, 15; their source chars at units
+        // 0, 1, 3, 4, 5, 6.
+        let starts = [0, 1, 3, 4, 5, 6];
+        for (mask, &unit) in starts.iter().enumerate() {
+            let byte = u32::try_from(mask).unwrap() * MASK_BYTES;
+            assert_eq!(block.map.byte_to_unit(&block.text, byte), unit);
+            assert_eq!(block.map.unit_before(&block.text, byte), unit);
+            assert_eq!(block.map.unit_to_byte(&block.text, unit), Some(byte));
+        }
+        // The second half of the pair rounds down to its mask.
+        assert_eq!(block.map.unit_to_byte(&block.text, 2), Some(3));
+        assert_eq!(block.map.unit_before(&block.text, 18), 7);
+        assert_eq!(block.map.unit_to_byte(&block.text, 7), None);
+        // A mask is content, never line-end white space.
+        assert_eq!(block.map.visible_end(&block.text, 0, 18), 18);
+        assert_lookups_match_the_scan(&block);
+
+        // Every value has its own mask, each three bytes long.
+        for (security, mask) in [
+            (TextSecurity::Circle, '\u{25E6}'),
+            (TextSecurity::Disc, '\u{2022}'),
+            (TextSecurity::Square, '\u{25A0}'),
+        ] {
+            assert_eq!(security.mask(), Some(mask));
+            assert_eq!(mask.len_utf8(), MASK_BYTES as usize);
+        }
+        assert_eq!(TextSecurity::None.mask(), None);
+    }
+
+    #[test]
+    fn a_masked_run_resolves_the_white_space_an_unmasked_neighbour_left_open() {
+        let style = RunStyle::default();
+        // The collapsible spaces before the masked run collapse to one
+        // space, which the mask after them keeps; the masked run's own
+        // spaces are masks.
+        let block = normalize(&[run(&style, "a  "), masked(&style, "  "), run(&style, "  b")]);
+        assert_eq!(block.text, "a \u{2022}\u{2022} b");
+        assert_eq!(block.item_units, [0..3, 3..5, 5..8]);
+        assert_eq!(block.map.byte_to_unit(&block.text, 1), 1);
+        assert_eq!(block.map.byte_to_unit(&block.text, 2), 3);
+        assert_eq!(block.map.byte_to_unit(&block.text, 5), 4);
+        assert_eq!(block.map.byte_to_unit(&block.text, 8), 5);
+        assert_eq!(block.map.unit_to_byte(&block.text, 4), Some(5));
+        assert_lookups_match_the_scan(&block);
+
+        // At the paragraph start a masked space is content too.
+        let leading = normalize(&[masked(&style, " "), run(&style, " a")]);
+        assert_eq!(leading.text, "\u{2022} a");
+
+        // Under a verbatim `nowrap` processing a masked newline is no
+        // forced break; the unmasked one after it is, and what follows it is
+        // counted and dropped, masked or not.
+        let first_line = super::normalize(
+            &[
+                masked(&style, "a\nb"),
+                run(&style, "\n"),
+                masked(&style, "c\u{1F600}"),
+            ],
+            WhiteSpaceProcessing::Verbatim {
+                first_line_only: true,
+            },
+        )
+        .0;
+        assert_eq!(first_line.text, format!("{}\n", "\u{2022}".repeat(3)));
+        assert_eq!(first_line.map.source_len(), 7);
+        assert_eq!(first_line.map.shown_len(), 4);
+        assert_lookups_match_the_scan(&first_line);
+    }
+
+    #[test]
+    fn a_splice_cuts_a_masked_segment_and_keeps_its_units() {
+        let style = RunStyle::default();
+        let mut block = normalize(&[masked(&style, "ab\u{1F600}\u{1F600}cd")]);
+        // Three segments: two one-unit chars, two pairs, two one-unit chars.
+        assert_eq!(block.map.segments.len(), 3);
+        block.splice(vec![
+            Insertion {
+                at: 3,
+                atoms_before: 0,
+                text: "x".to_owned(),
+                style: style.clone(),
+                extra_spacing: 0.0,
+                item: 0,
+            },
+            Insertion {
+                at: 9,
+                atoms_before: 0,
+                text: "yz".to_owned(),
+                style: style.clone(),
+                extra_spacing: 0.0,
+                item: 0,
+            },
+        ]);
+        let bullet = "\u{2022}";
+        assert_eq!(
+            block.text,
+            format!("{bullet}x{bullet}{bullet}yz{bullet}{bullet}{bullet}"),
+        );
+        // Every mask keeps its source unit; the inserted bytes have none.
+        for (byte, unit) in [(0, 0), (4, 1), (7, 2), (12, 4), (15, 6), (18, 7)] {
+            assert_eq!(block.map.byte_to_unit(&block.text, byte), unit, "{byte}");
+        }
+        assert_eq!(block.map.unit_before(&block.text, 4), 1);
+        assert_eq!(block.map.unit_to_byte(&block.text, 3), Some(7));
+        assert_eq!(block.map.unit_to_byte(&block.text, 5), Some(12));
+        assert_eq!(block.map.unit_before(&block.text, 21), 8);
+        assert_lookups_match_the_scan(&block);
     }
 
     #[test]
