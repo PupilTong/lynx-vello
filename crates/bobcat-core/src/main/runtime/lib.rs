@@ -880,17 +880,18 @@ impl DocumentSlot {
     }
 
     /// Queues a `scroll` at every container a script-facing instant scroll
-    /// moved ([`dom::Document::take_instant_scrolls`]), if something hears
-    /// it, and records the container as scrolling. Its `scrollend` comes
-    /// from the painter, which carries the request out and then posts the
-    /// container at rest — or, during a drag or a fling, once that ends —
-    /// so nothing here ends a scroll.
+    /// moved ([`dom::Document::take_instant_scrolls`]), if its `scroll`
+    /// would be heard there ([`ScrollGate::reaches`]), and records the
+    /// container as scrolling. Its `scrollend` comes from the painter, which
+    /// carries the request out and then posts the container at rest — or,
+    /// during a drag or a fling, once that ends — so nothing here ends a
+    /// scroll.
     fn instant_scrolls(&mut self) {
-        let hears_scroll = self.listens(SCROLL_EVENT);
+        let gate = ScrollGate::of(self, SCROLL_EVENT);
         let document = self.document.as_mut().expect(DOCUMENT_EXISTS);
         let moved = document.take_instant_scrolls();
         for (node, previous) in moved {
-            if hears_scroll {
+            if gate.reaches(document, node) {
                 let delta = document.scroll_offset(node) - previous;
                 self.component_events
                     .queue_scroll(node, SCROLL_EVENT, delta);
@@ -1874,10 +1875,14 @@ impl MainThreadRuntime {
     /// painter: an adopted post that moved its container queues one
     /// `scroll` there and records it as scrolling, and a post naming a
     /// scrolling container at rest queues a `scrollend` after it. Each is
-    /// queued only while a realm listener or a component hears its name at
-    /// that moment, so a page that hears neither allocates nothing; the
-    /// record of who is scrolling is kept regardless, so a `scrollend`
-    /// listener added mid-scroll hears the end.
+    /// queued only where it would be heard at that moment
+    /// ([`ScrollGate::reaches`]): a realm registration its dispatch at that
+    /// container would reach, or a component observing its name. A page
+    /// that hears neither name allocates nothing and asks no container, and
+    /// a container nothing on its path listens at queues nothing while
+    /// another container's listener is heard. The record of who is
+    /// scrolling is kept regardless, so a `scrollend` listener added
+    /// mid-scroll hears the end.
     pub(crate) fn adopt_scroll_offsets(
         &mut self,
         entries: impl Iterator<Item = (dom::NodeId, crate::link::ScrollEntry)>,
@@ -1885,8 +1890,9 @@ impl MainThreadRuntime {
         let mut slot = self.slot.borrow_mut();
         // Asked once per take: two set lookups each, and while neither name
         // is heard the loop below reads nothing more and queues nothing.
-        let hears_scroll = slot.listens(SCROLL_EVENT);
-        let hears_end = slot.listens(SCROLL_END_EVENT);
+        // Where one is, each container is asked when its event is due.
+        let scroll_gate = ScrollGate::of(&slot, SCROLL_EVENT);
+        let end_gate = ScrollGate::of(&slot, SCROLL_END_EVENT);
         let DocumentSlot {
             document,
             component_events,
@@ -1914,7 +1920,7 @@ impl MainThreadRuntime {
             // take), and has scrolled until it comes to rest — in this post or
             // a later one.
             if applied != before {
-                if hears_scroll {
+                if scroll_gate.reaches(document, node) {
                     component_events.queue_scroll(node, SCROLL_EVENT, applied - before);
                 }
                 if !scrolling.contains(&node) {
@@ -1923,12 +1929,13 @@ impl MainThreadRuntime {
             }
             // A rest ends a scroll only where one happened, so a container
             // posted at rest with nothing moved since its last rest fires
-            // nothing. Whether `scrollend` is heard is asked now, at the end.
+            // nothing. Whether `scrollend` is heard at this container is
+            // asked now, at the end.
             if entry.rest.is_some()
                 && let Some(index) = scrolling.iter().position(|&held| held == node)
             {
                 scrolling.swap_remove(index);
-                if hears_end {
+                if end_gate.reaches(document, node) {
                     component_events.queue_scroll(node, SCROLL_END_EVENT, dom::Vector2D::zero());
                 }
             }
@@ -2125,7 +2132,7 @@ impl MainThreadRuntime {
                         extras.push((key, Extra::Number(f64::from(value))));
                     }
                     extras.push(("isDragging", Extra::Bool(false)));
-                    (node, name, false)
+                    (node, name, ScrollGate::COMPOSED)
                 }
                 ComponentEvent::Detailed {
                     node,
@@ -3794,6 +3801,55 @@ fn install_event_members(
     })?;
 
     Ok(())
+}
+
+/// Whether a `scroll` or `scrollend` at a container would be heard: what
+/// [`DocumentSlot::instant_scrolls`] and
+/// [`MainThreadRuntime::adopt_scroll_offsets`] ask before they queue one.
+///
+/// Read once per take from the slot ([`Self::of`]): whether an element of a
+/// component observing the name exists, and whether any realm registration
+/// holds it — two set lookups, after which a page that hears neither asks
+/// nothing per container. A component's half stays document-wide, as the
+/// painter's routing does: the live elements are what is counted, not the
+/// observing definitions ([`dom::Document::hears`] reads those, so a UA
+/// definition observing the name would make every scroll owe an event). The
+/// realm half is refined per container ([`Self::reaches`]).
+#[derive(Debug, Clone, Copy)]
+struct ScrollGate {
+    name: &'static str,
+    observed: bool,
+    registered: bool,
+}
+
+impl ScrollGate {
+    /// Neither name bubbles, and neither is composed: the flags
+    /// [`MainThreadRuntime::dispatch_component_events`] dispatches every
+    /// [`ComponentEvent::Scroll`] with, so the path asked about here is the
+    /// one the dispatch walks.
+    const BUBBLES: bool = false;
+    const COMPOSED: bool = false;
+
+    fn of(slot: &DocumentSlot, name: &'static str) -> Self {
+        Self {
+            name,
+            observed: slot.observed.contains(name),
+            registered: slot.registered(name),
+        }
+    }
+
+    /// Whether the event at `node` would be heard now: by a component, or by
+    /// a realm whose registration its dispatch at `node` reaches
+    /// ([`dom::Document::would_reach_listener`]: a `global-bindEvent`
+    /// registration anywhere, or a path registration — a capture one on an
+    /// ancestor, or any on `node` itself, since neither name bubbles). Asked
+    /// when the event is due, so a registration made since the scroll began
+    /// counts. Two tests on a page that hears neither name.
+    fn reaches(self, document: &LynxDocument, node: dom::NodeId) -> bool {
+        self.observed
+            || (self.registered
+                && document.would_reach_listener(node, self.name, Self::BUBBLES, Self::COMPOSED))
+    }
 }
 
 /// Whether `name` is one of the two an element hears its exposure by, so a
