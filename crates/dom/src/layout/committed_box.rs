@@ -79,8 +79,8 @@
 //!
 //! The loop is still there, and still owns everything the estimate cannot
 //! predict: a `container-type: inline-size` box, whose block axis really is
-//! its contents' (there is nothing to publish before them), and a
-//! `display: -lynx-text` one, whose algorithm implements no size containment.
+//! its contents' (there is nothing to publish before them), and a Lynx text
+//! element, whose paragraph algorithm implements no size containment.
 //! A prediction that disagreed with its algorithm would land there too, which
 //! is what makes it a `debug_assert` rather than a correctness question — see
 //! [`debug_assert_estimate_agrees`].
@@ -617,7 +617,7 @@ pub(crate) fn note_container_estimate<T>(
 /// `debug_assert`: it costs a release build nothing and tells a debug one that
 /// a page just paid the extra pass.
 ///
-/// `display: -lynx-text` is exempt, and so is a block container: the paragraph
+/// A Lynx text element is exempt, and so is a block container: the paragraph
 /// algorithms ([`crate::layout::text_block`], [`crate::layout::inline_flow`])
 /// implement no size containment at all, so a paragraph element that is also
 /// a size query container really does answer to its contents.

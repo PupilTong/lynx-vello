@@ -8,9 +8,9 @@
 //! one item like any element child, and a sequence holding nothing but white
 //! space renders nothing at all. The block container is the internal
 //! `(block, flow)` display, which lays its text out as a CSS inline
-//! formatting context ([`crate::layout::inline_flow`]) — not as a
-//! `display: -lynx-text` paragraph, whose Lynx semantics a CSS anonymous box
-//! does not have.
+//! formatting context ([`crate::layout::inline_flow`]) — not as the Lynx
+//! paragraph a Lynx text element lays out, whose Lynx semantics a CSS
+//! anonymous box does not have.
 //!
 //! # Sources and sequences
 //!
@@ -100,8 +100,8 @@
 //!
 //! A hit on an anonymous box targets its container
 //! ([`Document::hit_target`]): an event's path starts at an element the
-//! embedder knows. A paragraph is hit as a whole here — a `-lynx-text`
-//! paragraph's hit targets its element, not the run under the point — so
+//! embedder knows. A paragraph is hit as a whole here — a hit on a Lynx text
+//! element's paragraph targets the element, not the run under the point — so
 //! the container is the element that owns every run the box shows.
 //!
 //! # Cost
@@ -1126,9 +1126,16 @@ mod tests {
         assert_eq!(rect(&doc, span).0, 20.0);
     }
 
+    /// A flex container that becomes a block container lays its text out in
+    /// its own inline formatting context, so the box around the text goes.
+    /// The block container stands for every paragraph mode here: a Lynx text
+    /// element is one by its kind, which never changes, and `display: block`
+    /// is the one paragraph a restyle can switch to. It is engine-only, so a
+    /// UA sheet writes it.
     #[test]
     fn a_container_that_becomes_a_paragraph_releases_its_boxes() {
-        let mut doc = doc(".paragraph { display: -lynx-text; }");
+        let mut doc = doc("");
+        doc.add_ua_css(".paragraph { display: block; }");
         let root = doc.root;
         let div = doc.el(root, "div");
         text(&mut doc, div, "abc");
@@ -1476,7 +1483,8 @@ mod tests {
 
     #[test]
     fn a_document_with_its_text_in_paragraphs_records_nothing() {
-        let mut doc = doc("p { display: -lynx-text; }");
+        let mut doc = doc("");
+        doc.define_lynx_text("p");
         let root = doc.root;
         let paragraph = doc.el(root, "p");
         text(&mut doc, paragraph, "abc");
@@ -1495,9 +1503,12 @@ mod tests {
         assert!(boxes(&doc, root).is_empty());
     }
 
+    /// A block container stands for every paragraph mode a restyle can
+    /// leave: a Lynx text element is one by its kind, which never changes.
     #[test]
     fn a_paragraph_restyled_to_a_container_boxes_its_text() {
-        let mut doc = doc(".paragraph { display: -lynx-text; }");
+        let mut doc = doc("");
+        doc.add_ua_css(".paragraph { display: block; }");
         let root = doc.root;
         let div = doc.el(root, "div.paragraph");
         text(&mut doc, div, "abc");
@@ -1514,7 +1525,8 @@ mod tests {
 
     #[test]
     fn a_styled_contents_element_moved_out_of_a_paragraph_brings_its_text() {
-        let mut doc = doc("p { display: -lynx-text; } span { display: contents; }");
+        let mut doc = doc("span { display: contents; }");
+        doc.define_lynx_text("p");
         let root = doc.root;
         let paragraph = doc.el(root, "p");
         let carrier = doc.el(paragraph, "span");

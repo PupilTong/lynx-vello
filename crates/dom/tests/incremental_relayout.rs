@@ -88,8 +88,20 @@ const BADGED: Kind = Kind {
     ..FLEX
 };
 
+/// `text` as `crates/bobcat-core` defines it, minus its method: a Lynx text
+/// element ([`dom::CustomElement::is_lynx_text`]), so each label lays out as
+/// a Lynx paragraph.
+struct TextKind;
+
+impl dom::CustomElement<()> for TextKind {
+    fn is_lynx_text(&self) -> bool {
+        true
+    }
+}
+
 fn doc() -> Document<()> {
     let mut doc = Document::new(Device::new(390.0, 844.0, 2.0), "page", ());
+    doc.define("text", Box::new(TextKind));
     doc.add_stylesheet(CSS, StylesheetOrigin::Author);
     doc
 }

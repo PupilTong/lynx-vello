@@ -1,7 +1,7 @@
 //! What the two paragraph-establishing boxes share.
 //!
-//! A `display: -lynx-text` element lays its flattened subtree out as one
-//! Lynx paragraph (`text_block`); a block container — the `(block, flow)`
+//! A Lynx text element lays its flattened subtree out as one Lynx paragraph
+//! (`text_block`); a block container — the `(block, flow)`
 //! display — lays its inline content out as a CSS inline formatting context
 //! (`inline_flow`). Both keep one retained parley paragraph in layout state,
 //! collect their runs with the same per-run reads, measure and place their
@@ -51,7 +51,7 @@ use crate::tree::node::Node;
               difference costs no other node anything"
 )]
 pub(crate) enum TextStore {
-    /// A `display: -lynx-text` element's flattened Lynx paragraph.
+    /// A Lynx text element's flattened Lynx paragraph.
     Block(TextBlockStore),
     /// A block container's inline formatting context.
     Flow(InlineFlowStore),
@@ -526,7 +526,7 @@ pub(crate) fn measure<T>(
 /// Walks up by the two content walks' own rules (`text_block::collect_content`
 /// and `inline_flow::collect_flow`), so a node answers exactly when one of
 /// them would reach it: through text nodes, `contents` wrappers, a Lynx
-/// paragraph's nested `-lynx-text` scopes and an inline formatting context's
+/// paragraph's nested Lynx text scopes and an inline formatting context's
 /// inline boxes, with `node` itself also allowed to be an in-flow atom.
 /// Anything the walks never enter answers `None`: a node inside an atom's own
 /// subtree (unless a paragraph nearer to it is found first), a `display: none`

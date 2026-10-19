@@ -634,12 +634,12 @@ fn clip_border_radius_rounds_descendant_hit_regions() {
 fn text_runs_paint_with_their_element_and_hit_as_the_element() {
     let mut h = Harness::new(
         "page { display: flex; position: relative; width: 800px; height: 600px; }
-         .label { display: -lynx-text; width: 200px; height: 50px;
-                  font-family: Ahem; font-size: 20px; }",
+         .label { width: 200px; height: 50px; font-family: Ahem; font-size: 20px; }",
     );
+    h.doc.define_lynx_text("text");
     h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
     let root = h.root();
-    let label = h.el(root, "view.label");
+    let label = h.el(root, "text.label");
     let text = h.doc.dom.create_text_node("hello", ());
     h.doc.dom.append_child(label, text);
     let paint = h.paint();
@@ -905,12 +905,13 @@ fn pointer_events_none_on_a_context_root_lets_auto_descendants_hit() {
 fn text_runs_are_clipped_by_their_element() {
     let mut h = Harness::new(
         "page { display: flex; position: relative; width: 800px; height: 600px; }
-         .clipper { display: -lynx-text; overflow: hidden; width: 60px; height: 20px;
+         .clipper { overflow: hidden; width: 60px; height: 20px;
                     font-family: Ahem; font-size: 20px; }",
     );
+    h.doc.define_lynx_text("text");
     h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
     let root = h.root();
-    let clipper = h.el(root, "view.clipper");
+    let clipper = h.el(root, "text.clipper");
     let text = h.doc.dom.create_text_node("hellohello", ());
     h.doc.dom.append_child(clipper, text);
     let paint = h.paint();
@@ -933,12 +934,13 @@ fn text_runs_are_clipped_by_their_element() {
 fn text_runs_are_clipped_by_their_element_outside_a_stacking_context() {
     let mut h = Harness::new(
         "page { display: flex; position: relative; width: 800px; height: 600px; }
-         .clipper { display: -lynx-text; overflow: clip; width: 60px; height: 20px;
+         .clipper { overflow: clip; width: 60px; height: 20px;
                     font-family: Ahem; font-size: 20px; }",
     );
+    h.doc.define_lynx_text("text");
     h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
     let root = h.root();
-    let clipper = h.el(root, "view.clipper");
+    let clipper = h.el(root, "text.clipper");
     let text = h.doc.dom.create_text_node("hellohello", ());
     h.doc.dom.append_child(clipper, text);
     let paint = h.paint();
@@ -1105,10 +1107,13 @@ fn visibility_and_pointer_events_inherit_through_contents() {
 #[test]
 fn text_in_contents_hits_the_contents_element() {
     let mut h = Harness::new(
-        "page { display: -lynx-text; position: relative; width: 800px; height: 600px;
+        "page { position: relative; width: 800px; height: 600px;
                 font-family: Ahem; font-size: 20px; }
          .wrap { display: contents; }",
     );
+    // The page itself is the paragraph: the definition upgrades the document
+    // element.
+    h.doc.define_lynx_text("page");
     h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
     let root = h.root();
     let wrap = h.el(root, "view.wrap");

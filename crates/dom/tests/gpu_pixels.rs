@@ -28,14 +28,15 @@ fn pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
 fn background_clip_text_clips_to_glyph_ink() {
     let mut gpu = headless("background_clip_text_clips_to_glyph_ink");
     let css = "page { display: flex; position: relative; width: 200px; height: 100px; }
-        .text { display: -lynx-text; position: absolute; left: 10px; top: 10px;
+        .text { position: absolute; left: 10px; top: 10px;
                 width: 180px; height: 50px;
                 font-family: Ahem; font-size: 20px; color: transparent;
                 background-color: rebeccapurple; background-clip: text; }";
     let mut doc = Doc::with_css(css);
+    doc.define_lynx_text("text");
     doc.dom.register_fonts(dom::FontBlob::from_static(AHEM));
     let root = doc.root;
-    let holder = doc.el(root, "text");
+    let holder = doc.el_tag(root, "text", "text");
     doc.text(holder, "HH HH");
 
     doc.dom.render();
@@ -63,14 +64,15 @@ fn background_clip_text_clips_to_glyph_ink() {
 fn plain_background_covers_the_box() {
     let mut gpu = headless("plain_background_covers_the_box");
     let css = "page { display: flex; position: relative; width: 200px; height: 100px; }
-        .text { display: -lynx-text; position: absolute; left: 10px; top: 10px;
+        .text { position: absolute; left: 10px; top: 10px;
                 width: 180px; height: 50px;
                 font-family: Ahem; font-size: 20px; color: black;
                 background-color: rebeccapurple; }";
     let mut doc = Doc::with_css(css);
+    doc.define_lynx_text("text");
     doc.dom.register_fonts(dom::FontBlob::from_static(AHEM));
     let root = doc.root;
-    let holder = doc.el(root, "text");
+    let holder = doc.el_tag(root, "text", "text");
     doc.text(holder, "HH HH");
 
     doc.dom.render();
@@ -90,15 +92,16 @@ fn plain_background_covers_the_box() {
 fn gradient_color_fills_glyph_ink_from_the_padding_box() {
     let mut gpu = headless("gradient_color_fills_glyph_ink_from_the_padding_box");
     let css = "page { display: flex; position: relative; width: 200px; height: 100px; }
-        .text { display: -lynx-text; position: absolute; left: 0px; top: 10px;
+        .text { position: absolute; left: 0px; top: 10px;
                 width: 120px; height: 50px; box-sizing: border-box;
                 border-left: 20px solid black;
                 font-family: Ahem; font-size: 20px;
                 color: linear-gradient(90deg, #ff0000, #0000ff); }";
     let mut doc = Doc::with_css(css);
+    doc.define_lynx_text("text");
     doc.dom.register_fonts(dom::FontBlob::from_static(AHEM));
     let root = doc.root;
-    let holder = doc.el(root, "text");
+    let holder = doc.el_tag(root, "text", "text");
     doc.text(holder, "HH");
 
     doc.dom.render();
@@ -546,17 +549,18 @@ fn a_composition_at_a_scroll_offset_stays_inside_the_scrollport() {
 fn a_nested_scope_paints_in_its_own_colour() {
     let mut gpu = headless("a_nested_scope_paints_in_its_own_colour");
     let css = "page { display: flex; position: relative; width: 200px; height: 100px; }
-        .text { display: -lynx-text; position: absolute; left: 0px; top: 10px;
+        .text { position: absolute; left: 0px; top: 10px;
                 width: 200px; height: 50px;
                 font-family: Ahem; font-size: 20px; color: #ff0000; }
-        .scope { display: -lynx-text; color: #0000ff; }";
+        .scope { color: #0000ff; }";
     let mut doc = Doc::with_css(css);
+    doc.define_lynx_text("text");
     doc.dom.register_fonts(dom::FontBlob::from_static(AHEM));
     let root = doc.root;
-    let holder = doc.el(root, "text");
+    let holder = doc.el_tag(root, "text", "text");
     // "AA" in the root's red, then a nested scope's "BB" in blue.
     doc.text(holder, "AA");
-    let scope = doc.el(holder, "scope");
+    let scope = doc.el_tag(holder, "text", "scope");
     doc.text(scope, "BB");
 
     doc.dom.render();

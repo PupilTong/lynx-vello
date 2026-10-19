@@ -973,7 +973,7 @@ root, tells the host's component which inner node was tapped.
 ## Text
 
 `DocumentLayoutState` lazily boxes the shared Parley `TextContext`; each
-`display: -lynx-text` element's layout-state entry lazily boxes the
+Lynx text element's (`Node::is_lynx_text`) layout-state entry lazily boxes the
 probe/commit `TextBlockStore` holding the one paragraph its subtree flattens
 into. A text node generates no box and retains nothing: it is content of the
 block above it, and its run reads inherited font/text values from its innermost
@@ -1028,14 +1028,13 @@ live. `Sync` is the bound Stylo itself needs, since the parallel traversal
 shares one `Device` across Rayon workers by reference. Fork PR #13 corrects
 `ElementData` reference documentation, fork PR #21 moves the `display`
 longhand's initial value from `inline` to `Display::initial()`, which under the
-`lynx` feature is `flex`, and fork PR #27 adds `DisplayInside::LynxText` — the
-block-level, **non**-item-container value naming one flattened Lynx paragraph.
-It is the cascade's way of saying what Lynx says structurally
+`lynx` feature is `flex`. Fork PR #27 (2026-09-03) added a fork-only
+`display: -lynx-text` value (`DisplayInside::LynxText`) naming one flattened
+Lynx paragraph, the cascade's way of saying what Lynx says structurally
 (`TextElement::OnNodeAdded` converts every added child; no author CSS can undo
-it), so a `<text>`'s subtree is inline content rather than child boxes. The
-variant carries `#[css(keyword = "-lynx-text")]` because the derived
-`DisplayInside` `ToCss` would otherwise kebab-case the variant name and
-silently drop the vendor prefix. Fork PR #30 moves `content` out of
+it); it was removed on 2026-10-17, when a Lynx text element became a paragraph
+by its kind (`CustomElement::is_lynx_text`), so a `<text>`'s subtree is inline
+content rather than child boxes without any `display` value. Fork PR #30 moves `content` out of
 `LYNX_INTERNAL_LONGHANDS` and into `lynx_properties.txt`, so the `lynx`
 feature's public grammar carries the `content` longhand the `raw-text`
 generated-text rule depends on. Read PR #21 against the paragraph above rather

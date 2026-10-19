@@ -96,6 +96,19 @@ pub(super) struct LayoutFixture {
     loose_text_holders: Vec<NodeId>,
 }
 
+/// The tag of a text leaf: defined as a Lynx text element, so each lays its
+/// text out as one Lynx paragraph.
+const TEXT_TAG: &str = "text";
+
+/// The definition `crates/bobcat-core` gives `<text>`, minus its method.
+struct TextKind;
+
+impl dom::CustomElement<()> for TextKind {
+    fn is_lynx_text(&self) -> bool {
+        true
+    }
+}
+
 impl LayoutFixture {
     pub(super) fn new(viewport: Size<f32>, root_style: &str) -> Self {
         // Each arm is the whole declaration, not a prefix of one: `grid` and
@@ -112,6 +125,7 @@ impl LayoutFixture {
             })
             .expect("every box benchmark root declares its production display mode");
         let mut document = Document::new(device(viewport), "page", ());
+        document.define(TEXT_TAG, Box::new(TextKind));
         let root = document.document_element().id();
         document.set_inline_style(root, root_style);
         Self {
@@ -166,13 +180,11 @@ impl LayoutFixture {
         match content {
             LeafContent::Synthetic => self.leaf(parent, style, intrinsic, first_baseline),
             LeafContent::Text => {
-                // The leaf is the paragraph: a text node lays out only inside
-                // a `display: -lynx-text` box.
+                // The leaf is the paragraph, a Lynx text element: a text node
+                // lays out only inside a paragraph.
                 let font_size = 12 + sample_index % 4 * 2;
-                let style = format!(
-                    "display:-lynx-text; font-family:Ahem; font-size:{font_size}px; {style}"
-                );
-                let node = self.container(parent, &style);
+                let style = format!("font-family:Ahem; font-size:{font_size}px; {style}");
+                let node = self.push_tagged(parent, TEXT_TAG, &style, None);
                 self.text(node, TEXT_SAMPLES[sample_index % TEXT_SAMPLES.len()]);
                 self.paragraphs.push(node);
                 node
@@ -210,7 +222,17 @@ impl LayoutFixture {
         style: &str,
         leaf_metrics: Option<(Size<f32>, Option<f32>)>,
     ) -> NodeId {
-        let node = self.document.create_element("view", ());
+        self.push_tagged(parent, "view", style, leaf_metrics)
+    }
+
+    fn push_tagged(
+        &mut self,
+        parent: NodeId,
+        tag: &str,
+        style: &str,
+        leaf_metrics: Option<(Size<f32>, Option<f32>)>,
+    ) -> NodeId {
+        let node = self.document.create_element(tag, ());
         self.document.set_inline_style(node, style);
         self.document.append_child(parent, node);
         if let Some((size, first_baseline)) = leaf_metrics {

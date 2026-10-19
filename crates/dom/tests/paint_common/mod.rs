@@ -55,6 +55,27 @@ pub(super) fn device(width: f32, height: f32) -> Device {
     )
 }
 
+/// A definition whose elements are Lynx text elements
+/// ([`dom::CustomElement::is_lynx_text`]) and nothing else: what
+/// `crates/bobcat-core` installs for `inline-text` and `inline-truncation`.
+pub(super) struct TextKind;
+
+impl<T> dom::CustomElement<T> for TextKind {
+    fn is_lynx_text(&self) -> bool {
+        true
+    }
+}
+
+/// Defines `tag` on `document` as a Lynx text element: each element of the
+/// tag lays out as a Lynx paragraph, or as a run of the paragraph around it,
+/// whatever its computed `display` is other than `none` and `contents`.
+///
+/// [`Document::define`]'s precondition applies: no element of the tag may
+/// exist yet, except the document element, which the definition upgrades.
+pub(super) fn define_lynx_text<T>(document: &mut Document<T>, tag: &str) {
+    document.define(tag, Box::new(TextKind));
+}
+
 #[derive(Debug)]
 pub(super) struct Doc {
     pub(super) dom: Document<()>,
@@ -73,6 +94,11 @@ impl Doc {
         let root = dom.document_element().id();
         dom.add_stylesheet(css, StylesheetOrigin::Author);
         Self { dom, root }
+    }
+
+    /// [`define_lynx_text`] on this document.
+    pub(super) fn define_lynx_text(&mut self, tag: &str) {
+        define_lynx_text(&mut self.dom, tag);
     }
 
     pub(super) fn el(&mut self, parent: NodeId, class: &str) -> NodeId {

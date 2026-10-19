@@ -59,7 +59,7 @@ consequential choice about whether to follow the spec or the quirk.
   for `flex`, `grid` and `grid-lanes` and, by ruling, for Lynx's `linear`
   and `relative`, which have no such rule of their own; each box is a
   `(block, flow)` block container laid out as a CSS inline formatting context
-  (`crates/dom/src/layout/inline_flow.rs`), never a `-lynx-text`
+  (`crates/dom/src/layout/inline_flow.rs`), never a Lynx text
   paragraph. On the Lynx side a `raw-text` renders as such text inside a tag
   that is not a Lynx tag (`div`, `span`, any other name), directly or
   through one `wrapper` (`crates/bobcat-core/src/main/tree/raw_text.rs`).
@@ -118,20 +118,25 @@ consequential choice about whether to follow the spec or the quirk.
   `LinearLayout`/`RelativeLayout`-derived) with no CSS equivalent at all;
   not a spec violation, just extensions to implement faithfully as their
   own algorithms (not flex polyfills, unlike how `web-core` does it).
-- **`display: -lynx-text`** — a fork-only display value naming one flattened
-  Lynx paragraph, added because Lynx's own inline-ness is **structural, not
+- **A Lynx text element is a Lynx paragraph by its kind, not by a `display`
+  value** — because Lynx's own inline-ness is **structural, not
   display-driven**: `TextElement::OnNodeAdded` converts every added child via
   `ConvertToInlineElement()` (`lynx/core/renderer/dom/fiber/text_element.cc`),
   a node is inline iff its parent is a text or a non-view inline element
   (`element.cc:562-571`), and there is no `display: inline` anywhere in the
-  native model. This engine cascades, so the structural rule needs a computed
-  value to ride on; `-lynx-text` is it. Block-level, and deliberately **not**
-  an item container (`is_item_container() == false`, like `LynxRelative` and
-  unlike `LynxLinear`): a text block's subtree is inline content — runs,
-  nested text scopes, atomic inline boxes — not flex or grid items. The
-  keyword is vendor-prefixed because it is neither a W3C value nor a value
-  Lynx itself spells: no bundle author writes it, and it is unreachable from
-  a plain `servo` build (pinned by `lynx_feature_off_parity`).
+  native model. This engine says it structurally too: `text`, `inline-text`
+  and `inline-truncation` are Lynx text elements by their definition
+  (`CustomElement::is_lynx_text`, read once by `Document::define` and kept on
+  each element from its creation), and `dom::layout::display_mode` lays one
+  out as one flattened Lynx paragraph, or as a nested text scope of the
+  paragraph around it, under every computed `display` but `none` and
+  `contents`. Its subtree is inline content — runs, nested text scopes,
+  atomic inline boxes — not flex or grid items. From 2026-09-03 the stylo
+  fork carried a fork-only display value for this instead,
+  `display: -lynx-text` (block-level, not an item container), which the UA
+  sheet wrote on the text tags. The value was removed on 2026-10-17 (user ruling),
+  together with its `DisplayInside` variant and the fork's style adjuster
+  that restored it on the text tags; no sheet can write it any more.
 - **Relative logical/physical precedence (temporary implementation
   deviation)** — Starlight remaps logical relative-property IDs to a physical
   slot during style application, so a logical and physical declaration that
@@ -476,8 +481,8 @@ consequential choice about whether to follow the spec or the quirk.
   browser, which applies css-text-3's `white-space-collapse: collapse` to
   every run except `raw-text`, which declares `preserve-breaks`
   (`lynx-stack/packages/web-platform/web-elements/src/elements/XText/x-text.css:261-265`).
-  A user ruling of 2026-10-16 follows native. Every `display: -lynx-text`
-  paragraph is built with `WhiteSpaceProcessing::Verbatim`
+  A user ruling of 2026-10-16 follows native. Every Lynx paragraph (a Lynx
+  text element's) is built with `WhiteSpaceProcessing::Verbatim`
   (`crates/hughie/src/text/paragraph/content.rs`, user ruling 2026-10-17:
   no switch), so:
   space runs and leading spaces stay; every `\n`, in a `raw-text` carrier or
@@ -830,9 +835,14 @@ consequential choice about whether to follow the spec or the quirk.
   the author's value take over the `x-text` host (`x-text { display: flex }`
   is author-origin, `x-text.css:7-13`), so the host is a flex box there while
   its shadow tree keeps the text. The UA sheet declares no `display` for the
-  three tags; the stylo fork's `StyleAdjuster::adjust_for_lynx_text` still
-  computes every value on them but `none` to `-lynx-text`, so the computed
-  style reports `-lynx-text`, which layout no longer reads.
+  three tags, so the computed style reports the author's value (initially
+  `flex`). `display: contents` on a text tag is **undefined behaviour (user
+  ruling, 2026-10-17)**: it acts as computed, as on every element, before the
+  element's kind is read, and that is handled only so that it does not crash
+  (`a_text_with_display_contents_is_undefined_and_only_does_not_crash` in
+  `crates/bobcat-core/src/main/tree/text.rs`). Until 2026-10-17 the stylo
+  fork's style adjuster computed every value on the three tags but `none`
+  back to `-lynx-text`; it was removed with the value.
 - **`position: relative` insets on an atomic inline box inside a `<text>` are
   ignored** — **ruled by the user on 2026-09-17**, following native Lynx
   against `web-core`. The atom is still ordinary in-flow content: it advances
@@ -1609,7 +1619,8 @@ consequential choice about whether to follow the spec or the quirk.
   losing to it). §D.15 gained one exception on 2026-09-03 —
   `display: -lynx-text` on `text`/`inline-text`, plain from 2026-10-15 so
   that `display: none` still hides a text, and gone since 2026-10-17, when a
-  text became a paragraph by its element kind — and this row is the case that exception deliberately
+  text became a paragraph by its element kind and the value was removed —
+  and this row is the case that exception deliberately
   does **not** cover: a scroller's display is a
   *default*, gated on page config by web-core itself, where the only question
   is which layout mode the box gets; a text's inline-ness is a *structural

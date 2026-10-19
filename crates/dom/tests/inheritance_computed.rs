@@ -11,6 +11,7 @@ fn inherited_and_non_inherited_properties() {
     let mut doc = Doc::with_css(
         ".parent { font-size: 20px; direction: rtl; opacity: 0.3; color: rgb(1, 2, 3); }",
     );
+    doc.define_lynx_text("text");
     let parent = doc.el(doc.root, "view.parent");
     let child = doc.el(parent, "view");
     let grandchild = doc.el(child, "text");

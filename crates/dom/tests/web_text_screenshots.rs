@@ -20,10 +20,10 @@
 //! Three adaptations run through the file, the first two shared with
 //! `crates/dom/tests/web_text_replication.rs`:
 //!
-//! * `crates/dom` holds no Lynx element vocabulary, so a `<text>` is spelled as the `display:
-//!   -lynx-text` box the Lynx UA sheet gives it — here through `support/html.rs`'s `text-block`
-//!   class — and a compiled `<raw-text>` as [`RAW_TEXT_SHEET`]'s `display: contents;
-//!   white-space-collapse: preserve-breaks`, which is what that element's UA rules amount to
+//! * `crates/dom` holds no Lynx element vocabulary, so a `<text>` is spelled as an element wearing
+//!   `support/html.rs`'s `text-block` class, which that harness creates as a Lynx text element —
+//!   and a compiled `<raw-text>` as [`RAW_TEXT_SHEET`]'s `display: contents; white-space-collapse:
+//!   preserve-breaks`, which is what that element's UA rules amount to
 //!   (`crates/bobcat-core/src/main/tree/raw_text.rs:8-11`).
 //! * `crates/dom` has no UA sheet at all, so a container that stacks its children says `display:
 //!   flex; flex-direction: column` rather than relying on a block-level default. Where a case's
@@ -175,7 +175,7 @@ fn capture_with_author_css(
 /// style would satisfy the metric test and fail here.
 ///
 /// The fixture's newline and indent between the two runs are written as the
-/// one space the browser collapses them to: a `-lynx-text` paragraph keeps
+/// one space the browser collapses them to: a Lynx paragraph keeps
 /// its white space verbatim, as a native `<text>` does, and the reference
 /// image is the browser's.
 #[test]
@@ -543,18 +543,19 @@ fn a_block_s_gradient_reaches_the_run_that_inherits_it() {
 }
 
 /// The Lynx UA sheet's truncation clauses, as much of them as a fixture here
-/// can wear (`crates/bobcat-core/src/main/tree/text.rs:121-132`): the two
-/// registered integer properties a paragraph reads its limit and its marker
-/// flag from, `inline-truncation`'s `display: none` default, and the rule that
-/// lifts it for a `text`'s **own** child — web-core's `:scope >
-/// inline-truncation` scope. `crates/dom` names no Lynx tag, so the `text` half
-/// of that child combinator is spelled as `support/html.rs`'s `text-block`
-/// class; the marker keeps its real tag name, which nothing in the engine reads.
+/// can wear (`crates/bobcat-core/src/main/tree/text.rs`): the two registered
+/// integer properties a paragraph reads its limit and its marker flag from,
+/// `inline-truncation`'s `display: none` anywhere but directly inside a
+/// `text`, and the flag on a `text`'s **own** child — web-core's `:scope >
+/// inline-truncation` scope. The `text` half of those child combinators is
+/// spelled as `support/html.rs`'s `text-block` class, the element that harness
+/// creates as a `text`; the marker keeps its real tag name, which the harness
+/// defines as a Lynx text element, as `crates/bobcat-core` does.
 const TRUNCATION_SHEET: &str = r#"
 @property --lynx-text-maxline { syntax: "<integer>"; inherits: false; initial-value: 0; }
 @property --lynx-inline-truncation { syntax: "<integer>"; inherits: false; initial-value: 0; }
-inline-truncation { display: none; }
-.text-block > inline-truncation { display: -lynx-text !important; --lynx-inline-truncation: 1; }
+:not(.text-block) > inline-truncation { display: none; }
+.text-block > inline-truncation { --lynx-inline-truncation: 1; }
 "#;
 
 /// Replicates `x-text/text-maxline-with-custom-truncation`

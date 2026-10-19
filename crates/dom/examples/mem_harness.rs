@@ -62,6 +62,17 @@ const CSS: &str = r#"
     .badge { width: 24px; height: 24px; background-color: rgb(255, 80, 80); }
 "#;
 
+/// `text` as `crates/bobcat-core` defines it, minus its method: a Lynx text
+/// element ([`dom::CustomElement::is_lynx_text`]), so each label lays out as
+/// a Lynx paragraph.
+struct TextKind;
+
+impl dom::CustomElement<()> for TextKind {
+    fn is_lynx_text(&self) -> bool {
+        true
+    }
+}
+
 const ROWS: usize = 1024;
 
 fn report(label: &str, base: usize) {
@@ -77,6 +88,7 @@ fn main() {
     let start = LIVE.load(Ordering::Relaxed);
     let device = Device::new(390.0, 844.0, 3.0);
     let mut doc = Document::new(device, "page", ());
+    doc.define("text", Box::new(TextKind));
     doc.add_stylesheet(CSS, StylesheetOrigin::Author);
     report("empty document", start);
 

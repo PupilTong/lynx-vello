@@ -9,11 +9,12 @@
 //! behavior these tests pin.
 //!
 //! Two adaptations run through the whole file. The originals are Playwright
-//! screenshot tests over Lynx elements; here there is no Lynx element
-//! vocabulary at all (`crates/dom` must not contain any), so a `<text>` is
-//! spelled as the `display: -lynx-text` box the Lynx UA sheet gives it and a
-//! `text-maxline="n"` attribute as the `--lynx-text-maxline` custom property
-//! that same sheet reflects it into. And every metric assertion shapes the
+//! screenshot tests over Lynx elements; `crates/dom` has no Lynx element
+//! vocabulary at all (it must not contain any), so a `<text>` is an element
+//! each test defines as a Lynx text element (`common::define_lynx_text`), as
+//! `crates/bobcat-core` defines the Lynx text tags, and a `text-maxline="n"`
+//! attribute is spelled as the `--lynx-text-maxline` custom property the Lynx
+//! UA sheet reflects it into. And every metric assertion shapes the
 //! vendored Ahem face, whose glyphs are solid em squares: an advance is
 //! exactly glyph-count x font-size and a glyph's ink is pixel-assertable,
 //! which a full-page golden could never be.
@@ -129,18 +130,19 @@ fn is_blue(color: [u8; 4]) -> bool {
 #[test]
 fn moving_a_clamped_paragraph_does_not_rebreak_its_lines() {
     let mut doc = Doc::with_device(device(800.0, 600.0));
+    doc.define_lynx_text("text");
     doc.add_ua_css(LIMIT_PROPERTIES);
     doc.add_css(
         "page { display: flex; align-items: flex-start; }
          .wrap { display: flex; width: 100px; }
-         .target { display: -lynx-text; width: 100%; flex-shrink: 0;
+         .target { width: 100%; flex-shrink: 0;
                    font-family: Ahem; font-size: 20px; line-height: 20px;
                    --lynx-text-maxline: 3; }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
     let wrap = doc.el(root, "view.wrap");
-    let target = doc.el(wrap, "view.target");
+    let target = doc.el(wrap, "text.target");
     // Six five-character words: each one fills the 100px line exactly, so the
     // natural paragraph is six lines and every clamp below is unambiguous.
     let run = doc
@@ -203,17 +205,18 @@ fn moving_a_clamped_paragraph_does_not_rebreak_its_lines() {
 #[test]
 fn rewriting_a_clamped_text_node_reclamps_against_the_new_string() {
     let mut doc = Doc::with_device(device(800.0, 600.0));
+    doc.define_lynx_text("text");
     doc.add_ua_css(LIMIT_PROPERTIES);
     doc.add_css(
         "page { display: flex; align-items: flex-start; }
-         .target { display: -lynx-text; width: 100px; flex-shrink: 0;
+         .target { width: 100px; flex-shrink: 0;
                    word-break: break-all;
                    font-family: Ahem; font-size: 20px; line-height: 20px;
                    --lynx-text-maxline: 2; }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
-    let target = doc.el(root, "view.target");
+    let target = doc.el(root, "text.target");
     let run = doc.dom.create_text_node("b".repeat(30), ());
     doc.dom.append_child(target, run);
     doc.flush();
@@ -264,29 +267,30 @@ fn rewriting_a_clamped_text_node_reclamps_against_the_new_string() {
 fn the_truncation_marker_wears_the_cut_run_s_colour_until_the_block_converts() {
     fn marker_and_prefix(convert: bool) -> ([u8; 4], [u8; 4], [u8; 4]) {
         let mut doc = Doc::with_device(device(200.0, 100.0));
+        doc.define_lynx_text("text");
         doc.add_ua_css(LIMIT_PROPERTIES);
         doc.add_css(
             "page { display: flex; }
-             .text { display: -lynx-text; width: 100px; color: #000000;
+             .text { width: 100px; color: #000000;
                      word-break: break-all; text-overflow: ellipsis;
                      font-family: Ahem; font-size: 20px; line-height: 20px;
                      --lynx-text-maxline: 1; }
              .convert { --lynx-tail-color-convert: 1; }
-             .run { display: -lynx-text; color: #ff0000; }",
+             .run { color: #ff0000; }",
         );
         assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
         let root = doc.root;
         let text = doc.el(
             root,
             if convert {
-                "view.text.convert"
+                "text.text.convert"
             } else {
-                "view.text"
+                "text.text"
             },
         );
         let lead = doc.dom.create_text_node("A", ());
         doc.dom.append_child(text, lead);
-        let nested = doc.el(text, "view.run");
+        let nested = doc.el(text, "text.run");
         let run = doc.dom.create_text_node("BBBBBBBBB", ());
         doc.dom.append_child(nested, run);
 
@@ -359,19 +363,21 @@ fn the_truncation_marker_wears_the_cut_run_s_colour_until_the_block_converts() {
 #[test]
 fn a_shown_truncation_subtree_is_painted_at_the_clamp() {
     let mut doc = Doc::with_device(device(200.0, 100.0));
+    doc.define_lynx_text("text");
+    doc.define_lynx_text("inline-truncation");
     doc.add_ua_css(LIMIT_PROPERTIES);
     doc.add_css(
         "page { display: flex; position: relative; width: 200px; height: 100px; }
-         .text { display: -lynx-text; position: absolute; left: 0px; top: 0px;
+         .text { position: absolute; left: 0px; top: 0px;
                  width: 100px; word-break: break-all; color: #000000;
                  font-family: Ahem; font-size: 20px; line-height: 20px;
                  --lynx-text-maxline: 2; }
-         .marker { display: -lynx-text; color: #ff0000;
+         .marker { color: #ff0000;
                    --lynx-inline-truncation: 1; }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
-    let text = doc.el(root, "view.text");
+    let text = doc.el(root, "text.text");
     let run = doc.dom.create_text_node("H".repeat(30), ());
     doc.dom.append_child(text, run);
     let marker = doc.el(text, "inline-truncation.marker");
@@ -428,25 +434,26 @@ fn a_shown_truncation_subtree_is_painted_at_the_clamp() {
 #[test]
 fn a_truncation_atom_is_placed_at_the_clamp_and_hidden_without_one() {
     let mut doc = Doc::with_device(device(400.0, 200.0));
+    doc.define_lynx_text("text");
     doc.add_ua_css(LIMIT_PROPERTIES);
     doc.add_css(
         "page { display: flex; align-items: flex-start; }
-         .text { display: -lynx-text; width: 100px; word-break: break-all;
+         .text { width: 100px; word-break: break-all;
                  font-family: Ahem; font-size: 20px; line-height: 20px;
                  --lynx-text-maxline: 2; }
-         .marker { display: -lynx-text; --lynx-inline-truncation: 1; }
+         .marker { --lynx-inline-truncation: 1; }
          .icon { display: flex; width: 40px; height: 20px; }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
 
     let mut block = |content: &str| {
-        let text = doc.el(root, "view.text");
+        let text = doc.el(root, "text.text");
         let run = doc.dom.create_text_node(content, ());
         doc.dom.append_child(text, run);
-        let marker = doc.el(text, "view.marker");
+        let marker = doc.el(text, "text.marker");
         let icon = doc.el(marker, "view.icon");
-        let spare = doc.el(text, "view.marker");
+        let spare = doc.el(text, "text.marker");
         let spare_run = doc.dom.create_text_node("HHHHH", ());
         doc.dom.append_child(spare, spare_run);
         (text, icon)
@@ -504,21 +511,22 @@ fn a_truncation_atom_is_placed_at_the_clamp_and_hidden_without_one() {
 fn a_shown_truncation_marker_paints_its_runs_and_a_background_behind_them_only() {
     fn readback_marker(content: &str) -> Vec<u8> {
         let mut doc = Doc::with_device(device(200.0, 100.0));
+        doc.define_lynx_text("text");
         doc.add_ua_css(LIMIT_PROPERTIES);
         doc.add_css(
             "page { display: flex; align-items: flex-start; }
-             .text { display: -lynx-text; width: 100px; word-break: break-all;
+             .text { width: 100px; word-break: break-all;
                      color: #000000; font-family: Ahem; font-size: 20px;
                      line-height: 20px; --lynx-text-maxline: 2; }
-             .marker { display: -lynx-text; --lynx-inline-truncation: 1;
+             .marker { --lynx-inline-truncation: 1;
                        color: #ff0000; background-color: #0000ff; }",
         );
         assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
         let root = doc.root;
-        let text = doc.el(root, "view.text");
+        let text = doc.el(root, "text.text");
         let run = doc.dom.create_text_node(content, ());
         doc.dom.append_child(text, run);
-        let marker = doc.el(text, "view.marker");
+        let marker = doc.el(text, "text.marker");
         let marker_run = doc.dom.create_text_node(" H", ());
         doc.dom.append_child(marker, marker_run);
         readback(
@@ -587,19 +595,20 @@ fn a_shown_truncation_marker_paints_its_runs_and_a_background_behind_them_only()
 #[test]
 fn a_nested_scope_s_background_paints_behind_its_own_fragments_only() {
     let mut doc = Doc::with_device(device(300.0, 60.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; align-items: flex-start; }
-         .text { display: -lynx-text; width: 300px; color: #000000;
+         .text { width: 300px; color: #000000;
                  font-family: Ahem; font-size: 20px; line-height: 40px; }
-         .tag { display: -lynx-text; color: transparent;
+         .tag { color: transparent;
                 background-color: #0000ff; }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
-    let text = doc.el(root, "view.text");
+    let text = doc.el(root, "text.text");
     let before = doc.dom.create_text_node("AAA", ());
     doc.dom.append_child(text, before);
-    let tag = doc.el(text, "view.tag");
+    let tag = doc.el(text, "text.tag");
     let nested = doc.dom.create_text_node("BBB", ());
     doc.dom.append_child(tag, nested);
     let after = doc.dom.create_text_node("AAA", ());
@@ -644,20 +653,21 @@ fn a_nested_scope_s_background_paints_behind_its_own_fragments_only() {
 #[test]
 fn a_nested_scope_that_wraps_paints_one_fragment_per_line() {
     let mut doc = Doc::with_device(device(200.0, 100.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; align-items: flex-start; }
-         .text { display: -lynx-text; width: 100px; word-break: break-all;
+         .text { width: 100px; word-break: break-all;
                  color: #000000; font-family: Ahem; font-size: 20px;
                  line-height: 20px; }
-         .tag { display: -lynx-text; color: transparent;
+         .tag { color: transparent;
                 background-color: #0000ff; }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
-    let text = doc.el(root, "view.text");
+    let text = doc.el(root, "text.text");
     let before = doc.dom.create_text_node("AAA", ());
     doc.dom.append_child(text, before);
-    let tag = doc.el(text, "view.tag");
+    let tag = doc.el(text, "text.tag");
     let nested = doc.dom.create_text_node("BBBBBB", ());
     doc.dom.append_child(tag, nested);
     let pixels = readback(
@@ -696,23 +706,24 @@ fn a_nested_scope_that_wraps_paints_one_fragment_per_line() {
 #[test]
 fn an_inner_scope_s_background_covers_its_ancestor_s() {
     let mut doc = Doc::with_device(device(300.0, 40.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; align-items: flex-start; }
-         .text { display: -lynx-text; width: 300px; color: #000000;
+         .text { width: 300px; color: #000000;
                  font-family: Ahem; font-size: 20px; line-height: 20px; }
-         .outer { display: -lynx-text; color: transparent;
+         .outer { color: transparent;
                   background-color: #0000ff; }
-         .inner { display: -lynx-text; background-color: #ff0000; }",
+         .inner { background-color: #ff0000; }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
-    let text = doc.el(root, "view.text");
+    let text = doc.el(root, "text.text");
     let before = doc.dom.create_text_node("AA", ());
     doc.dom.append_child(text, before);
-    let outer = doc.el(text, "view.outer");
+    let outer = doc.el(text, "text.outer");
     let outer_run = doc.dom.create_text_node("BB", ());
     doc.dom.append_child(outer, outer_run);
-    let inner = doc.el(outer, "view.inner");
+    let inner = doc.el(outer, "text.inner");
     let inner_run = doc.dom.create_text_node("CC", ());
     doc.dom.append_child(inner, inner_run);
     let pixels = readback(
@@ -750,25 +761,26 @@ fn an_inner_scope_s_background_covers_its_ancestor_s() {
 #[test]
 fn a_wrapper_between_scopes_paints_no_background() {
     let mut doc = Doc::with_device(device(300.0, 40.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; align-items: flex-start; }
-         .text { display: -lynx-text; width: 300px; color: transparent;
+         .text { width: 300px; color: transparent;
                  font-family: Ahem; font-size: 20px; line-height: 20px; }
          .wrapper { display: contents; background-color: #0000ff; }
-         .tag { display: -lynx-text; background-color: #ff0000; }",
+         .tag { background-color: #ff0000; }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
-    let text = doc.el(root, "view.text");
+    let text = doc.el(root, "text.text");
     let before = doc.dom.create_text_node("AA", ());
     doc.dom.append_child(text, before);
     let wrapper = doc.el(text, "view.wrapper");
-    let first = doc.el(wrapper, "view.tag");
+    let first = doc.el(wrapper, "text.tag");
     let first_run = doc.dom.create_text_node("BB", ());
     doc.dom.append_child(first, first_run);
     let between = doc.dom.create_text_node("XX", ());
     doc.dom.append_child(wrapper, between);
-    let second = doc.el(wrapper, "view.tag");
+    let second = doc.el(wrapper, "text.tag");
     let second_run = doc.dom.create_text_node("CC", ());
     doc.dom.append_child(second, second_run);
     let pixels = readback(
@@ -805,19 +817,20 @@ fn a_wrapper_between_scopes_paints_no_background() {
 #[test]
 fn an_atom_inside_a_nested_scope_is_covered_by_its_background() {
     let mut doc = Doc::with_device(device(300.0, 40.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; align-items: flex-start; }
-         .text { display: -lynx-text; width: 300px; color: transparent;
+         .text { width: 300px; color: transparent;
                  font-family: Ahem; font-size: 20px; line-height: 20px; }
-         .tag { display: -lynx-text; background-color: #0000ff; }
+         .tag { background-color: #0000ff; }
          .icon { display: flex; width: 40px; height: 10px; }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
-    let text = doc.el(root, "view.text");
+    let text = doc.el(root, "text.text");
     let before = doc.dom.create_text_node("AA", ());
     doc.dom.append_child(text, before);
-    let tag = doc.el(text, "view.tag");
+    let tag = doc.el(text, "text.tag");
     let nested = doc.dom.create_text_node("B", ());
     doc.dom.append_child(tag, nested);
     doc.el(tag, "view.icon");
@@ -850,19 +863,20 @@ fn an_atom_inside_a_nested_scope_is_covered_by_its_background() {
 #[test]
 fn a_gradient_background_image_on_a_nested_scope_fills_its_fragment() {
     let mut doc = Doc::with_device(device(300.0, 40.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; align-items: flex-start; }
-         .text { display: -lynx-text; width: 300px; color: #000000;
+         .text { width: 300px; color: #000000;
                  font-family: Ahem; font-size: 20px; line-height: 20px; }
-         .tag { display: -lynx-text; color: transparent;
+         .tag { color: transparent;
                 background-image: linear-gradient(90deg, #ff0000, #0000ff); }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
-    let text = doc.el(root, "view.text");
+    let text = doc.el(root, "text.text");
     let before = doc.dom.create_text_node("AAA", ());
     doc.dom.append_child(text, before);
-    let tag = doc.el(text, "view.tag");
+    let tag = doc.el(text, "text.tag");
     let nested = doc.dom.create_text_node("BBB", ());
     doc.dom.append_child(tag, nested);
     let pixels = readback(
@@ -907,18 +921,19 @@ fn a_gradient_background_image_on_a_nested_scope_fills_its_fragment() {
 #[test]
 fn a_percentage_width_against_an_indefinite_basis_behaves_as_auto() {
     let mut doc = Doc::with_device(device(800.0, 600.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; align-items: flex-start;
                 font-family: Ahem; font-size: 10px; line-height: 10px; }
          .middle { display: flex; flex-direction: column; flex: none;
                    height: 150px; width: fit-content; }
-         .inner { display: -lynx-text; height: 100px; width: 50%;
+         .inner { height: 100px; width: 50%;
                   overflow: hidden; overflow-wrap: normal; }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
     let middle = doc.el(root, "view.middle");
-    let inner = doc.el(middle, "view.inner");
+    let inner = doc.el(middle, "text.inner");
     let run = doc.dom.create_text_node("12345678901234567890", ());
     doc.dom.append_child(inner, run);
     doc.flush();
@@ -966,14 +981,14 @@ fn a_percentage_width_against_an_indefinite_basis_behaves_as_auto() {
 #[test]
 fn a_text_block_is_a_block_axis_scroll_target_like_a_view() {
     let mut doc = Doc::with_device(device(400.0, 600.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; align-items: flex-start; }
          .port { display: flex; flex-direction: column; flex: none;
                  width: 100px; height: 400px; overflow-y: scroll; }
          .cell { display: flex; flex: none; width: 100%; height: 50%; }
-         .textcell { display: -lynx-text; flex: none; width: 100%; height: 50%;
-                     font-family: Ahem; font-size: 20px; }
-         .scope { display: -lynx-text; }",
+         .textcell { flex: none; width: 100%; height: 50%;
+                     font-family: Ahem; font-size: 20px; }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
@@ -981,10 +996,10 @@ fn a_text_block_is_a_block_axis_scroll_target_like_a_view() {
     let cells: Vec<NodeId> = (0..8)
         .map(|index| {
             if index == 5 {
-                let text = doc.el(port, "view.textcell");
+                let text = doc.el(port, "text.textcell");
                 // `<x-text><x-text>hello lynx</x-text></x-text>`: an outer
                 // block whose only content is one nested inline run.
-                let scope = doc.el(text, "view.scope");
+                let scope = doc.el(text, "text.scope");
                 let run = doc.dom.create_text_node("hello lynx", ());
                 doc.dom.append_child(scope, run);
                 text
@@ -1049,14 +1064,14 @@ fn a_text_block_is_a_block_axis_scroll_target_like_a_view() {
 #[test]
 fn a_text_block_is_an_inline_axis_scroll_target_like_a_view() {
     let mut doc = Doc::with_device(device(600.0, 400.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; align-items: flex-start; }
          .port { display: flex; flex-direction: row; flex: none;
                  width: 400px; height: 100px; overflow-x: scroll; }
          .cell { display: flex; flex: none; width: 50%; height: 100%; }
-         .textcell { display: -lynx-text; flex: none; width: 50%; height: 100%;
-                     font-family: Ahem; font-size: 20px; }
-         .scope { display: -lynx-text; }",
+         .textcell { flex: none; width: 50%; height: 100%;
+                     font-family: Ahem; font-size: 20px; }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
@@ -1064,8 +1079,8 @@ fn a_text_block_is_an_inline_axis_scroll_target_like_a_view() {
     let cells: Vec<NodeId> = (0..8)
         .map(|index| {
             if index == 5 {
-                let text = doc.el(port, "view.textcell");
-                let scope = doc.el(text, "view.scope");
+                let text = doc.el(port, "text.textcell");
+                let scope = doc.el(text, "text.scope");
                 let run = doc.dom.create_text_node("hello lynx", ());
                 doc.dom.append_child(scope, run);
                 text
@@ -1119,16 +1134,17 @@ fn a_text_block_is_an_inline_axis_scroll_target_like_a_view() {
 #[test]
 fn gradient_valued_color_paints_glyph_ink_with_the_ramp() {
     let mut doc = Doc::with_device(device(200.0, 100.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; position: relative; width: 200px; height: 100px; }
-         .text { display: -lynx-text; position: absolute; left: 0px; top: 0px;
+         .text { position: absolute; left: 0px; top: 0px;
                  width: 200px; height: 80px;
                  font-family: Ahem; font-size: 80px; line-height: 80px;
                  color: linear-gradient(green, yellow); }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
-    let text = doc.el(root, "view.text");
+    let text = doc.el(root, "text.text");
     let run = doc.dom.create_text_node("HH", ());
     doc.dom.append_child(text, run);
 
@@ -1193,27 +1209,27 @@ fn gradient_valued_color_paints_glyph_ink_with_the_ramp() {
 #[test]
 fn a_gradient_color_fills_a_block_and_the_run_that_inherits_it() {
     let mut doc = Doc::with_device(device(240.0, 180.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; position: relative; width: 240px; height: 180px; }
-         .text { display: -lynx-text; position: absolute; left: 0px;
+         .text { position: absolute; left: 0px;
                  width: 240px; height: 40px;
                  font-family: Ahem; font-size: 40px; line-height: 40px; }
-         .grad { color: linear-gradient(green, yellow); }
-         .scope { display: -lynx-text; }",
+         .grad { color: linear-gradient(green, yellow); }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
 
     // 1. The gradient on the block itself.
-    let block = doc.el(root, "view.text.grad");
+    let block = doc.el(root, "text.text.grad");
     doc.set_inline(block, "top: 0px");
     let run = doc.dom.create_text_node("AA", ());
     doc.dom.append_child(block, run);
 
     // 3. A gradient block with an unstyled nested run, which inherits it.
-    let inheriting = doc.el(root, "view.text.grad");
+    let inheriting = doc.el(root, "text.text.grad");
     doc.set_inline(inheriting, "top: 120px");
-    let plain_scope = doc.el(inheriting, "view.scope");
+    let plain_scope = doc.el(inheriting, "text.scope");
     let plain_run = doc.dom.create_text_node("AA", ());
     doc.dom.append_child(plain_scope, plain_run);
 
@@ -1274,24 +1290,24 @@ fn a_gradient_color_fills_a_block_and_the_run_that_inherits_it() {
 #[test]
 fn a_gradient_color_on_a_nested_run_fills_only_that_run() {
     let mut doc = Doc::with_device(device(240.0, 180.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; position: relative; width: 240px; height: 180px; }
-         .text { display: -lynx-text; position: absolute; left: 0px;
+         .text { position: absolute; left: 0px;
                  width: 240px; height: 40px;
                  font-family: Ahem; font-size: 40px; line-height: 40px; }
          .grad { color: linear-gradient(green, yellow); }
-         .solid { color: #000000; }
-         .scope { display: -lynx-text; }",
+         .solid { color: #000000; }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
 
     // 2. A solid block with one gradient-colored nested run.
-    let mixed = doc.el(root, "view.text.solid");
+    let mixed = doc.el(root, "text.text.solid");
     doc.set_inline(mixed, "top: 60px");
     let solid_run = doc.dom.create_text_node("A", ());
     doc.dom.append_child(mixed, solid_run);
-    let gradient_scope = doc.el(mixed, "view.scope.grad");
+    let gradient_scope = doc.el(mixed, "text.scope.grad");
     let gradient_run = doc.dom.create_text_node("B", ());
     doc.dom.append_child(gradient_scope, gradient_run);
 
@@ -1342,19 +1358,20 @@ fn a_gradient_color_on_a_nested_run_fills_only_that_run() {
 #[test]
 fn an_extra_registered_family_is_selected_over_the_default_one() {
     let mut doc = Doc::with_device(device(800.0, 600.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; flex-direction: column; align-items: flex-start; }
-         .label { display: -lynx-text; font-size: 16px; }
+         .label { font-size: 16px; }
          .extra { font-family: Ahem; }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(ROBOTO)), 1);
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     assert!(doc.dom.set_default_font_family("Roboto"));
     let root = doc.root;
-    let default_family = doc.el(root, "view.label");
+    let default_family = doc.el(root, "text.label");
     let default_run = doc.dom.create_text_node("EXTRA", ());
     doc.dom.append_child(default_family, default_run);
-    let extra_family = doc.el(root, "view.label.extra");
+    let extra_family = doc.el(root, "text.label.extra");
     let extra_run = doc.dom.create_text_node("EXTRA", ());
     doc.dom.append_child(extra_family, extra_run);
     doc.flush();
@@ -1425,11 +1442,12 @@ fn a_font_face_declared_family_shapes_the_text_that_names_it() {
     );
 
     let mut doc = Doc::with_device(device(800.0, 600.0));
+    doc.define_lynx_text("text");
     doc.add_css(&format!(
         "@font-face {{ font-family: DeclaredAhem;
                        src: url(\"{AHEM_URL}\") format(\"truetype\"); }}
          page {{ display: flex; flex-direction: column; align-items: flex-start; }}
-         .label {{ display: -lynx-text; font-size: 16px;
+         .label {{ font-size: 16px;
                    font-family: DeclaredAhem; }}"
     ));
     // Only the default face is handed over the embedder seam; the extra one is
@@ -1464,7 +1482,7 @@ fn a_font_face_declared_family_shapes_the_text_that_names_it() {
     assert_eq!(doc.dom.register_font_face("DeclaredAhem", bytes.into()), 1);
 
     let root = doc.root;
-    let label = doc.el(root, "view.label");
+    let label = doc.el(root, "text.label");
     let run = doc.dom.create_text_node("EXTRA", ());
     doc.dom.append_child(label, run);
     doc.flush();
@@ -1531,9 +1549,10 @@ fn a_font_face_declared_family_shapes_the_text_that_names_it() {
 #[test]
 fn a_boxed_child_paints_from_a_text_block_inside_its_parents_context() {
     let mut doc = Doc::with_device(device(200.0, 100.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; position: relative; width: 200px; height: 100px; }
-         .text { display: -lynx-text; position: relative;
+         .text { position: relative;
                  width: 200px; height: 40px;
                  font-family: Ahem; font-size: 20px; line-height: 20px; }
          .child { position: absolute; left: 0px; top: 0px;
@@ -1541,7 +1560,7 @@ fn a_boxed_child_paints_from_a_text_block_inside_its_parents_context() {
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
-    let text = doc.el(root, "view.text");
+    let text = doc.el(root, "text.text");
     doc.el(text, "view.child");
     let pixels = readback(
         "a_boxed_child_paints_from_a_text_block_inside_its_parents_context",
@@ -1584,8 +1603,10 @@ fn a_boxed_child_paints_from_a_text_block_inside_its_parents_context() {
 fn a_boxed_child_paints_from_a_text_block_that_is_its_own_context() {
     // The text block is the paint root itself.
     let mut as_root = Doc::with_device(device(200.0, 100.0));
+    // The page is the paragraph: the definition upgrades the document element.
+    as_root.define_lynx_text("page");
     as_root.add_css(
-        "page { display: -lynx-text; position: relative;
+        "page { position: relative;
                 width: 200px; height: 100px;
                 font-family: Ahem; font-size: 20px; line-height: 20px; }
          .child { position: absolute; left: 0px; top: 0px;
@@ -1608,9 +1629,10 @@ fn a_boxed_child_paints_from_a_text_block_that_is_its_own_context() {
 
     // The text block is a nested, real stacking context.
     let mut as_context = Doc::with_device(device(200.0, 100.0));
+    as_context.define_lynx_text("text");
     as_context.add_css(
         "page { display: flex; position: relative; width: 200px; height: 100px; }
-         .text { display: -lynx-text; position: relative; z-index: 1;
+         .text { position: relative; z-index: 1;
                  width: 200px; height: 40px;
                  font-family: Ahem; font-size: 20px; line-height: 20px; }
          .child { position: absolute; left: 0px; top: 0px;
@@ -1621,7 +1643,7 @@ fn a_boxed_child_paints_from_a_text_block_that_is_its_own_context() {
         1
     );
     let root = as_context.root;
-    let text = as_context.el(root, "view.text");
+    let text = as_context.el(root, "text.text");
     as_context.el(text, "view.child");
     let pixels = readback(
         "a_boxed_child_paints_from_a_text_block_that_is_its_own_context.context",
@@ -1657,9 +1679,10 @@ fn a_boxed_child_paints_from_a_text_block_that_is_its_own_context() {
 #[test]
 fn an_atomic_inline_box_keeps_the_size_it_measured() {
     let mut doc = Doc::with_device(device(200.0, 100.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; position: relative; width: 200px; height: 100px; }
-         .text { display: -lynx-text; position: relative;
+         .text { position: relative;
                  width: 200px; height: 40px;
                  font-family: Ahem; font-size: 20px; line-height: 20px; }
          .atom { display: flex; width: 40px; height: 20px;
@@ -1667,7 +1690,7 @@ fn an_atomic_inline_box_keeps_the_size_it_measured() {
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
-    let text = doc.el(root, "view.text");
+    let text = doc.el(root, "text.text");
     let atom = doc.el(text, "view.atom");
     doc.flush();
 
@@ -1714,9 +1737,10 @@ fn an_atomic_inline_box_keeps_the_size_it_measured() {
 #[test]
 fn an_atomic_inline_box_sits_inside_the_blocks_border_and_padding() {
     let mut doc = Doc::with_device(device(200.0, 100.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; position: relative; width: 200px; height: 100px; }
-         .text { display: -lynx-text; position: absolute; left: 20px; top: 10px;
+         .text { position: absolute; left: 20px; top: 10px;
                  width: 160px; height: 80px; box-sizing: border-box;
                  padding: 10px;
                  font-family: Ahem; font-size: 20px; line-height: 20px; }
@@ -1727,11 +1751,11 @@ fn an_atomic_inline_box_sits_inside_the_blocks_border_and_padding() {
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
-    let text = doc.el(root, "view.text");
+    let text = doc.el(root, "text.text");
     let atom = doc.el(text, "view.atom");
-    let bordered = doc.el(root, "view.text.bordered");
+    let bordered = doc.el(root, "text.text.bordered");
     let inside_border = doc.el(bordered, "view.atom");
-    let wrapping = doc.el(root, "view.text");
+    let wrapping = doc.el(root, "text.text");
     let carrier = doc.el(wrapping, "view.carrier");
     let under_carrier = doc.el(carrier, "view.atom");
     doc.flush();
@@ -1814,9 +1838,10 @@ fn an_atomic_inline_box_sits_inside_the_blocks_border_and_padding() {
 #[test]
 fn an_atoms_margins_reach_the_line_and_step_its_border_box_in() {
     let mut doc = Doc::with_device(device(400.0, 400.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; flex-direction: column; width: 400px; height: 400px; }
-         .text { display: -lynx-text; width: 400px;
+         .text { width: 400px;
                  font-family: Ahem; font-size: 20px; line-height: 20px; }
          .atom { display: flex; width: 40px; height: 60px; }
          .left { margin-left: 10px; }
@@ -1827,7 +1852,7 @@ fn an_atoms_margins_reach_the_line_and_step_its_border_box_in() {
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
     let mut paragraph = |classes: &str| {
-        let text = doc.el(root, "view.text");
+        let text = doc.el(root, "text.text");
         let run = doc.dom.create_text_node("AB", ());
         doc.dom.append_child(text, run);
         let atom = doc.el(text, &format!("view.atom{classes}"));
@@ -1914,9 +1939,10 @@ fn an_atoms_margins_reach_the_line_and_step_its_border_box_in() {
 #[test]
 fn an_out_of_flow_child_of_a_text_resolves_against_the_blocks_padding_box() {
     let mut doc = Doc::with_device(device(200.0, 200.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; position: relative; width: 200px; height: 200px; }
-         .text { display: -lynx-text; position: relative;
+         .text { position: relative;
                  width: 160px; height: 100px; box-sizing: border-box;
                  border: 5px solid #0000ff; padding: 10px;
                  font-family: Ahem; font-size: 20px; line-height: 20px; }
@@ -1925,7 +1951,7 @@ fn an_out_of_flow_child_of_a_text_resolves_against_the_blocks_padding_box() {
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
-    let text = doc.el(root, "view.text");
+    let text = doc.el(root, "text.text");
     let out = doc.el(text, "view.out");
     let anchored = doc.el(text, "view.static-position");
     doc.flush();
@@ -1984,9 +2010,10 @@ fn an_out_of_flow_child_of_a_text_resolves_against_the_blocks_padding_box() {
 #[test]
 fn a_relative_atom_stays_in_the_line_and_only_absolute_leaves_it() {
     let mut doc = Doc::with_device(device(400.0, 400.0));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; flex-direction: column; width: 400px; height: 400px; }
-         .text { display: -lynx-text; position: relative; width: 400px;
+         .text { position: relative; width: 400px;
                  font-family: Ahem; font-size: 20px; line-height: 30px; }
          .atom { display: flex; width: 40px; height: 20px; }
          .relative { position: relative; }
@@ -1997,7 +2024,7 @@ fn a_relative_atom_stays_in_the_line_and_only_absolute_leaves_it() {
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
     let mut paragraph = |classes: &str| {
-        let text = doc.el(root, "view.text");
+        let text = doc.el(root, "text.text");
         let run = doc.dom.create_text_node("AB", ());
         doc.dom.append_child(text, run);
         let first = doc.el(text, &format!("view.atom{classes}"));

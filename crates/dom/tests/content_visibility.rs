@@ -99,6 +99,7 @@ impl Page {
         define: impl FnOnce(&mut Document<()>),
     ) -> Self {
         let mut doc = Doc::with_device(device(200.0, VIEWPORT_HEIGHT));
+        doc.define_lynx_text("text");
         doc.add_css(&format!(
             "page {{ display: flex; width: 200px; height: 100vh;
                      align-items: flex-start; font-family: Ahem; }}
@@ -107,7 +108,7 @@ impl Page {
                           align-items: flex-start; }}
              .row {{ display: flex; width: 200px; flex-shrink: 0;
                      content-visibility: auto; contain-intrinsic-size: 200px {ROW_HEIGHT}px; }}
-             .label {{ display: -lynx-text; font-size: {ROW_HEIGHT}px; }}
+             .label {{ font-size: {ROW_HEIGHT}px; }}
              {extra}"
         ));
         assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
@@ -302,12 +303,13 @@ fn a_nested_auto_box_is_determined_in_the_same_commit() {
 #[test]
 fn an_auto_box_outside_every_scroller_follows_the_viewport() {
     let mut doc = Doc::with_device(device(200.0, VIEWPORT_HEIGHT));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; width: 200px; height: 100px; font-family: Ahem; }
          .far { display: flex; position: absolute; left: 0; top: 400px;
                 width: 100px; content-visibility: auto;
                 contain-intrinsic-size: 100px 20px; }
-         .label { display: -lynx-text; font-size: 20px; }",
+         .label { font-size: 20px; }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
@@ -330,7 +332,7 @@ fn an_auto_box_outside_every_scroller_follows_the_viewport() {
         doc.dom.text_block_size(label).is_some(),
         "the style change and the reveal land in one render",
     );
-    // A `-lynx-text` flex item is as wide as its one Ahem glyph.
+    // A Lynx text flex item is as wide as its one Ahem glyph.
     assert_eq!(rect(&doc.dom, label), (0.0, 0.0, 20.0, 20.0));
     assert!(!doc.dom.needs_render());
 }
@@ -402,12 +404,13 @@ fn the_scroll_range_is_stable_across_a_reveal() {
 #[test]
 fn a_transformed_ancestor_moves_the_relevance_test_with_it() {
     let mut doc = Doc::with_device(device(200.0, VIEWPORT_HEIGHT));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; width: 200px; height: 100px; font-family: Ahem; }
          .mover { display: flex; width: 200px; height: 20px; }
          .cv { display: flex; width: 200px; content-visibility: auto;
                contain-intrinsic-size: 200px 20px; }
-         .label { display: -lynx-text; font-size: 20px; }",
+         .label { font-size: 20px; }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;
@@ -1178,6 +1181,7 @@ impl Remembered {
     /// `containment` is the target's own `contain-intrinsic-*` declarations.
     fn new(containment: &str) -> Self {
         let mut doc = Doc::with_device(device(200.0, VIEWPORT_HEIGHT));
+        doc.define_lynx_text("text");
         doc.add_css(&format!(
             "page {{ display: flex; width: 200px; height: 100vh;
                      align-items: flex-start; font-family: Ahem; }}
@@ -1187,7 +1191,7 @@ impl Remembered {
                         flex-shrink: 0; }}
              .target {{ display: flex; width: 200px; flex-shrink: 0;
                         content-visibility: auto; {containment} }}
-             .tall {{ display: -lynx-text; font-size: {TALL}px; }}"
+             .tall {{ font-size: {TALL}px; }}"
         ));
         assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
         let root = doc.root;
@@ -1302,13 +1306,14 @@ fn content_visibility_auto_makes_a_plain_length_behave_as_auto() {
 /// relevance.
 fn flat_doc() -> Doc {
     let mut doc = Doc::with_device(device(200.0, 400.0));
+    doc.define_lynx_text("text");
     doc.add_css(&format!(
         "page {{ display: flex; flex-direction: column; align-items: flex-start;
                  width: 200px; height: 400px; font-family: Ahem; }}
          .box {{ display: flex; width: 200px; flex-shrink: 0;
                  contain-intrinsic-width: 200px;
                  contain-intrinsic-height: auto {ESTIMATE}px; }}
-         .tall {{ display: -lynx-text; font-size: {TALL}px; }}"
+         .tall {{ font-size: {TALL}px; }}"
     ));
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     doc
@@ -1590,12 +1595,13 @@ fn a_box_that_loses_the_auto_keyword_while_it_skips_forgets_too() {
 #[test]
 fn a_top_layer_auto_box_is_relevant_wherever_it_is() {
     let mut doc = Doc::with_device(device(200.0, VIEWPORT_HEIGHT));
+    doc.define_lynx_text("text");
     doc.add_css(
         "page { display: flex; width: 200px; height: 100px; font-family: Ahem; }
          dialog { display: flex; position: absolute; left: 5000px; top: 0;
                   width: 100px; content-visibility: auto;
                   contain-intrinsic-size: 100px 20px; }
-         .label { display: -lynx-text; font-size: 20px; }",
+         .label { font-size: 20px; }",
     );
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = doc.root;

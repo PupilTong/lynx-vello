@@ -411,10 +411,20 @@ fn list_page_with(rows: usize, skip_offscreen: bool) -> ListPage {
     }
 }
 
+/// A Lynx text element by its definition: each `text` here lays out as one
+/// Lynx paragraph.
+struct TextKind;
+
+impl dom::CustomElement<()> for TextKind {
+    fn is_lynx_text(&self) -> bool {
+        true
+    }
+}
+
 const PARAGRAPH_CSS: &str = "page { display: flex; flex-direction: column; position: relative;
                 width: 800px; height: 600px; overflow: hidden;
                 font-family: Ahem; font-size: 16px; color: #202020; }
-         .paragraph { display: -lynx-text; flex-shrink: 0; width: 760px; height: 24px;
+         .paragraph { flex-shrink: 0; width: 760px; height: 24px;
                       background-color: #fbfbfd; }
          .banner { display: flex; flex-shrink: 0; width: 760px; height: 24px;
                    background-color: #2255aa; }";
@@ -428,6 +438,7 @@ const PARAGRAPH_CSS: &str = "page { display: flex; flex-direction: column; posit
 /// mixing them would make neither readable.
 fn paragraph_page(with_text: bool) -> (Document<()>, NodeId) {
     let mut dom = page_document(PARAGRAPH_CSS);
+    dom.define("text", Box::new(TextKind));
     assert!(
         dom.register_fonts(dom::FontBlob::from_static(AHEM)) >= 1,
         "the text cases need Ahem registered before the first layout"
@@ -439,7 +450,7 @@ fn paragraph_page(with_text: bool) -> (Document<()>, NodeId) {
     let line = "e".repeat(PARAGRAPH_CHARS);
     let mut paragraphs = Vec::with_capacity(PARAGRAPHS);
     for _ in 0..PARAGRAPHS {
-        let paragraph = dom.create_element("view", ());
+        let paragraph = dom.create_element("text", ());
         dom.add_class(paragraph, "paragraph");
         dom.append_child(root, paragraph);
         if with_text {
@@ -449,8 +460,8 @@ fn paragraph_page(with_text: bool) -> (Document<()>, NodeId) {
         paragraphs.push(paragraph);
     }
     if with_text {
-        // A text node lays out only inside a `display: -lynx-text` box: a
-        // paragraph that measured nothing would leave no glyph to encode.
+        // A text node lays out only inside a paragraph, here a Lynx text
+        // element: one that measured nothing would leave no glyph to encode.
         dom.layout();
         for paragraph in paragraphs {
             assert!(

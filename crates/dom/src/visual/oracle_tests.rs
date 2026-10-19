@@ -39,12 +39,12 @@ const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
 
 /// The Lynx UA rules the fixtures depend on: every box clips (`<text>`
 /// included, as `overflow: clip`) except `page` and `view`, which the default
-/// page config resets to `visible`.
+/// page config resets to `visible`. A `<text>` is a Lynx text element by its
+/// definition ([`Fixture::new`]), not by a rule here.
 const UA: &str = "page, view, text { display: flex; box-sizing: border-box;
                                      position: relative; overflow: clip;
                                      min-width: 0; min-height: 0; }
-                  page, view { overflow: visible; }
-                  text { display: -lynx-text; }";
+                  page, view { overflow: visible; }";
 
 const KEYFRAMES: &str = "
     @keyframes translate { from { transform: translate(0px, 0px); }
@@ -97,6 +97,7 @@ struct Fixture {
 impl Fixture {
     fn new(css: &str) -> Self {
         let mut doc = Doc::new();
+        doc.define_lynx_text("text");
         doc.add_ua_css(UA);
         doc.add_css(&format!(
             "page {{ width: 800px; height: 600px; flex-direction: column; }} {KEYFRAMES} {css}"

@@ -1038,10 +1038,11 @@ fn an_off_screen_auto_rows_contents_are_not_rendered() {
          .scroller { flex-direction: column; overflow: hidden; width: 200px; height: 100vh;
                      align-items: flex-start; }
          .row { width: 200px; content-visibility: auto; contain-intrinsic-size: 200px 20px; }
-         .label { display: -lynx-text; font-size: 20px; }",
+         .label { font-size: 20px; }",
         200.0,
         100.0,
     );
+    doc.define_lynx_text("text");
     assert_eq!(doc.dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let scroller = doc.el(doc.root, "view.scroller");
     let mut rows = Vec::new();

@@ -47,8 +47,9 @@ fn an_animated_font_size_remeasures_the_text_it_scales() {
         "@keyframes grow { from { font-size: 16px; } to { font-size: 32px; } }
          page { display: flex; width: 400px; height: 100px; align-items: flex-start;
                 font-family: Ahem; }
-         .label { display: -lynx-text; animation: grow 10s linear; }",
+         .label { animation: grow 10s linear; }",
     );
+    doc.define_lynx_text("text");
     assert_eq!(
         doc.dom.register_fonts(dom::FontBlob::from_static(AHEM)),
         1,

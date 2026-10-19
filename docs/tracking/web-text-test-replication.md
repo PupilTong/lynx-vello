@@ -443,7 +443,7 @@ reaches no second record.
 | # | Gap | Cause |
 | --- | --- | --- |
 | C1 | *Closed by the parley 0.12 upgrade:* a run's `line-height` was taken from the style of the **next** span | Parley 0.11's `shape/mod.rs:127-128` advanced `item.style_index` before flushing the pending item, so the last span's `line-height` governed every line — observed as a truncation flow's `line-height` rewriting lines *before* the cut. Parley 0.12 resolves each span's own box once per layout (`layout/style_metrics.rs`), so `a_runs_line_height_is_not_taken_from_the_span_after_it` (`crates/hughie/tests/web_text_replication.rs`) runs; its second half keeps the defect's own shape under a strut lower than both runs. |
-| C2 | *Ruled, not a gap (user, 2026-10-16):* a `<text>` keeps its leading spaces | A `<text>` does no CSS white-space processing, as on every native backend: its paragraph is built with `WhiteSpaceProcessing::Verbatim` (`crates/hughie/src/text/paragraph/content.rs`), as every `display: -lynx-text` paragraph is, so leading spaces, space runs, tabs and newlines all stay. `collapsible_whitespace_is_removed_at_the_start_of_a_line` keeps asserting web-core's 110 and is ignored as a DEVIATION; `leading_spaces_stay_in_a_text_the_way_native_lynx_keeps_them` asserts the 130 (`crates/hughie/tests/web_text_replication.rs`). The CSS inline formatting context (`hughie::text::inline`) processes with `WhiteSpaceProcessing::Css`, which removes the sequence. See [F](#f-recorded-deviations-not-gaps) and [conflict 9](#9-white-space-in-a-text). |
+| C2 | *Ruled, not a gap (user, 2026-10-16):* a `<text>` keeps its leading spaces | A `<text>` does no CSS white-space processing, as on every native backend: its paragraph is built with `WhiteSpaceProcessing::Verbatim` (`crates/hughie/src/text/paragraph/content.rs`), as every Lynx paragraph is, so leading spaces, space runs, tabs and newlines all stay. `collapsible_whitespace_is_removed_at_the_start_of_a_line` keeps asserting web-core's 110 and is ignored as a DEVIATION; `leading_spaces_stay_in_a_text_the_way_native_lynx_keeps_them` asserts the 130 (`crates/hughie/tests/web_text_replication.rs`). The CSS inline formatting context (`hughie::text::inline`) processes with `WhiteSpaceProcessing::Css`, which removes the sequence. See [F](#f-recorded-deviations-not-gaps) and [conflict 9](#9-white-space-in-a-text). |
 
 ### Parley traps, re-checked on 0.12
 
@@ -529,7 +529,8 @@ Each blocks replicas that could not be written at all.
 - *Closed 2026-10-15, reversing the 2026-09-14 ruling:* `display: none` on a
   `text`. The UA sheet used to write `text { display: -lynx-text !important }`,
   which outranked an author's `display: none` too, so no `text` element could
-  be hidden. The sheet declares no `display` for a text now: a text tag is a
+  be hidden. The sheet declares no `display` for a text now, and the
+  `-lynx-text` value itself was removed on 2026-10-17: a text tag is a
   paragraph by its element kind under every `display` but `none` and
   `contents` (`docs/style-assumptions.md` §D.15, `docs/tracking/deviations.md`).
   `display: none` hides a block text or an inline run as it does in both

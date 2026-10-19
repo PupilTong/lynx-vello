@@ -55,7 +55,7 @@ the semantics are stylo's.** Everything below refines that sentence.
 
 4. **Element text content (user-directed, 2026-09-12).**
    String `content` items and untyped, unnamespaced `attr()` (including string
-   fallback) replace the rendered children of a `display: -lynx-text` paragraph
+   fallback) replace the rendered children of a Lynx text element's paragraph
    or a nested text/contents scope. This is an explicitly supported text
    extension, not a claim of browser-compatible string `content` on ordinary
    elements. It supersedes the earlier text-only `::before` implementation;
@@ -284,8 +284,9 @@ the semantics are stylo's.** Everything below refines that sentence.
       author `display: none` still removes the text, in native and in
       web-core alike. From 2026-09-03 to 2026-10-15 this was
       `display: -lynx-text !important`, which swallowed that `none` too, and
-      until 2026-10-17 a plain `display: -lynx-text`. The paragraph is now
-      the element's kind (`CustomElement::is_lynx_text`), which
+      until 2026-10-17 a plain `display: -lynx-text`; the value was removed
+      that day. The paragraph is now the element's kind
+      (`CustomElement::is_lynx_text`), which
       `dom::layout::display_mode` reads after `none` and `contents` (user
       ruling, 2026-10-15; native ignores any other value too, the difference
       from web-core is in `docs/tracking/deviations.md`). With the
@@ -594,8 +595,8 @@ and §D.16 with what the wire format actually permits.)*
 
         Two shapes are deliberately left out, because for them the estimate is not the
         algorithm's answer: **`container-type: inline-size`**, whose block axis really does
-        answer to its contents (there is nothing to publish before them), and **`display:
-        -lynx-text`**, whose block algorithm implements no size containment at all (a recorded
+        answer to its contents (there is nothing to publish before them), and **a Lynx text
+        element**, whose block algorithm implements no size containment at all (a recorded
         deviation of the text block, not of this feature). Both fall to the loop below, as does
         a prediction that ever disagreed with its algorithm — which is a `debug_assert` and not
         a correctness question, because the record after the algorithm is what is published.

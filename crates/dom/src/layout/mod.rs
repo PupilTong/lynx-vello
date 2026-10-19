@@ -63,7 +63,7 @@ impl<T: Sync> Document<T> {
     /// [`crate::layout::committed_box`] for why the size is knowable there).
     /// What reaches this loop is what that cannot predict — an
     /// `inline-size` container, whose block axis answers to its contents, and
-    /// a `display: -lynx-text` one, whose algorithm implements no size
+    /// a Lynx text element, whose paragraph algorithm implements no size
     /// containment — plus the safety net of a prediction that disagreed with
     /// its algorithm.
     ///
@@ -748,7 +748,7 @@ impl<T> Document<T> {
     /// The source range `element` contributes to the paragraph it is inline
     /// content of, from the last committed layout.
     ///
-    /// Units are [`Self::text_range_boxes`]'s. A nested `-lynx-text` scope
+    /// Units are [`Self::text_range_boxes`]'s. A nested Lynx text scope
     /// answers its own text together with every scope and atom nested in it,
     /// which is one contiguous range because the paragraph is flattened in
     /// tree order; an atomic inline box answers its one unit. A run's units
@@ -771,12 +771,12 @@ impl<T> Document<T> {
 
     /// The element establishing the committed paragraph whose content `node`
     /// is: `node` itself when it establishes one, else the nearest
-    /// `display: -lynx-text` ancestor whose last committed layout flattened
+    /// Lynx text element ancestor whose last committed layout flattened
     /// `node` into its paragraph.
     ///
     /// The paragraph [`Self::text_index_at_point`] and
     /// [`Self::text_range_boxes`] are asked about. A node is content when
-    /// the flatten walk reaches it: a text node, a nested `-lynx-text` scope
+    /// the flatten walk reaches it: a text node, a nested Lynx text scope
     /// or `contents` wrapper, or an in-flow atomic inline box, reached only
     /// through scopes and wrappers. `None` for anything else — a node inside
     /// an atomic box's own subtree with no paragraph of its own nearer to it,
@@ -1615,16 +1615,6 @@ mod tests {
     /// one em per glyph, so a run's width is its length times its font size.
     const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
 
-    /// A paragraph whose *font size* is a container unit is the case the
-    /// interleave has to reach past style into the text pipeline for: the
-    /// shaped run is an artifact of the style, not of the geometry, and a
-    /// paragraph shaped against the viewport fallback would have to be thrown
-    /// away and shaped again.
-    ///
-    /// One run, one shaping. The restyle the run interleaves into itself goes
-    /// through the same damage harvest a flush does, so the text artifact is
-    /// evicted before the paragraph is ever built — rather than after it was
-    /// built at the wrong size.
     /// A Lynx text element is a paragraph by its kind, not by a `display`
     /// value: the author's `grid` is its computed value and still lays its
     /// text out as one paragraph; `none` hides it; `contents` acts as computed
@@ -1633,16 +1623,9 @@ mod tests {
     fn a_lynx_text_element_is_a_paragraph_whatever_its_display_computes_to() {
         use stylo::values::computed::Display;
 
-        struct Paragraph;
-        impl crate::CustomElement<()> for Paragraph {
-            fn is_lynx_text(&self) -> bool {
-                true
-            }
-        }
-
         let mut document: Document<()> =
             Document::new(crate::tree::document::tests::device(), "page", ());
-        document.define("x-para", Box::new(Paragraph));
+        crate::test_common::define_lynx_text(&mut document, "x-para");
         document.add_stylesheet(
             "page { display: flex; align-items: flex-start;
                     width: 400px; height: 300px; font-family: Ahem; font-size: 10px; }
@@ -1680,16 +1663,27 @@ mod tests {
         assert_eq!(document.bounding_client_rect(paragraph), None);
     }
 
+    /// A paragraph whose *font size* is a container unit is the case the
+    /// interleave has to reach past style into the text pipeline for: the
+    /// shaped run is an artifact of the style, not of the geometry, and a
+    /// paragraph shaped against the viewport fallback would have to be thrown
+    /// away and shaped again.
+    ///
+    /// One run, one shaping. The restyle the run interleaves into itself goes
+    /// through the same damage harvest a flush does, so the text artifact is
+    /// evicted before the paragraph is ever built — rather than after it was
+    /// built at the wrong size.
     #[test]
     fn a_text_reader_under_a_container_is_shaped_once_at_the_container_size() {
         let mut document: Document<()> =
             Document::new(crate::tree::document::tests::device(), "page", ());
+        crate::test_common::define_lynx_text(&mut document, "text");
         document.add_stylesheet(
             "page { display: flex; align-items: flex-start;
                     width: 400px; height: 300px; font-family: Ahem; }
              .query { display: flex; container-type: size;
                       width: 200px; height: 100px; }
-             .label { display: -lynx-text; font-size: 10cqw; }",
+             .label { font-size: 10cqw; }",
             StylesheetOrigin::Author,
         );
         assert_eq!(document.register_fonts(FontBlob::from_static(AHEM)), 1);
@@ -1719,8 +1713,8 @@ mod tests {
         );
     }
 
-    /// The loop is still the fallback, and a `display: -lynx-text` query
-    /// container is what still needs it: the text block algorithm implements
+    /// The loop is still the fallback, and a Lynx text element that is a
+    /// query container is what still needs it: the text block algorithm implements
     /// no size containment, so its content box is not a function of its own
     /// style and the interleave declines to predict one. The container's size
     /// is published after the run that laid it out, and the units under it
@@ -1730,11 +1724,11 @@ mod tests {
     fn a_text_query_container_is_settled_by_the_loop() {
         let mut document: Document<()> =
             Document::new(crate::tree::document::tests::device(), "page", ());
+        crate::test_common::define_lynx_text(&mut document, "text");
         document.add_stylesheet(
             "page { display: flex; align-items: flex-start;
                     width: 400px; height: 300px; font-family: Ahem; font-size: 16px; }
-             .query { display: -lynx-text; container-type: size;
-                      width: 200px; line-height: 20px; }
+             .query { container-type: size; width: 200px; line-height: 20px; }
              .item { display: flex; width: 50cqw; height: 5px; }",
             StylesheetOrigin::Author,
         );
@@ -2006,11 +2000,11 @@ mod tests {
 
         let mut document: Document<()> =
             Document::new(crate::tree::document::tests::device(), "page", ());
+        crate::test_common::define_lynx_text(&mut document, "text");
         document.add_stylesheet(
             &format!(
                 "page {{ display: flex; width: {width}px; height: 100px;
-                         align-items: flex-start; font-family: Ahem; font-size: 16px; }}
-                 .label {{ display: -lynx-text; }}"
+                         align-items: flex-start; font-family: Ahem; font-size: 16px; }}"
             ),
             StylesheetOrigin::Author,
         );

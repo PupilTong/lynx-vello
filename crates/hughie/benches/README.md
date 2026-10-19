@@ -50,8 +50,8 @@ per-node layout caches, positioned pass, and device-pixel rounding. There is
 no benchmark-only `LayoutNode`, style view, node arena, or parallel tree.
 Text-bearing scenarios additionally create real DOM text nodes, register the
 deterministic embedded Ahem font, and inherit computed font styles from their
-parent boxes. Each text leaf is a `display: -lynx-text` paragraph holding one
-text node; a text node lays out only inside such a box, so
+parent boxes. Each text leaf is a `text` element, defined as a Lynx text
+element, holding one text node; a text node lays out only inside a paragraph, so
 `LayoutFixture::prepare` asserts that every rendered text leaf measured its
 text. They run through the document's concrete Parley path: one shared
 text context per document and retained artifacts per text node. Shaping,
