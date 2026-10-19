@@ -127,20 +127,21 @@ fn editing_host_of(document: &LynxDocument, node: dom::NodeId) -> Option<dom::No
     host.filter(|&host| document.is_editing_host(host))
 }
 
-/// Whether a W3C `key` value is text a key typed rather than a named key:
-/// non-empty, free of control characters, and not one of UI Events' key
-/// names, every one of which is two or more ASCII letters and digits
-/// (`"Enter"`, `"F1"`, `"Dead"`, `"Process"`, `"Unidentified"`). A key that
-/// typed one character, or one grapheme of several code points, is text.
-fn is_typed_text(key: &str) -> bool {
-    let named = key.len() > 1 && key.bytes().all(|byte| byte.is_ascii_alphanumeric());
-    !key.is_empty() && !named && !key.chars().any(char::is_control)
+/// Whether the text a key typed is text to insert: non-empty and free of
+/// control characters. A platform reports Enter's `"\r"`, Tab's `"\t"`,
+/// Backspace's `"\u{8}"` and Escape's `"\u{1b}"` as typed text too (winit's
+/// `KeyEvent.text` does); none of them is inserted as it is.
+fn is_insertable(text: &str) -> bool {
+    !text.is_empty() && !text.chars().any(char::is_control)
 }
 
 /// The browser's editing default action for a `keydown` at a focused
 /// editing host, or `None` for a key that has none here.
 ///
-/// - Text a key typed is inserted, unless ctrl or meta is held (a shortcut, not text).
+/// - The text a key typed (`text`, which the host reports with the key: never `key`) is inserted,
+///   unless ctrl or meta is held (a shortcut, not text) or it is a control character. A host whose
+///   platform delivers typed text through its input method reports `None` here and sends the text
+///   as an input-method commit, so it is inserted once.
 /// - `"Enter"` inserts a line break; `"Backspace"` and `"Delete"` delete the character before or
 ///   after the caret, or the word with alt; with ctrl or meta held they do nothing.
 /// - `"ArrowLeft"` and `"ArrowRight"` move by a character, by a word with alt, to the line's edge
@@ -150,7 +151,7 @@ fn is_typed_text(key: &str) -> bool {
 /// - Ctrl-A or meta-A selects everything. Copy, cut and paste do nothing (clipboard access is
 ///   deferred), and so do `"Process"` (a key the input method consumed: its text arrives as an
 ///   input-method command) and `"Dead"`.
-pub(super) fn key_command(key: &str, modifiers: Modifiers) -> Option<Command> {
+pub(super) fn key_command(key: &str, text: Option<&str>, modifiers: Modifiers) -> Option<Command> {
     let shortcut = modifiers.ctrl || modifiers.meta;
     let movement = |granularity, direction| {
         Some(Command::Move {
@@ -191,8 +192,9 @@ pub(super) fn key_command(key: &str, modifiers: Modifiers) -> Option<Command> {
         "Backspace" => Some(Command::DeleteBackward),
         "Delete" if modifiers.alt => Some(Command::DeleteWordForward),
         "Delete" => Some(Command::DeleteForward),
-        _ if is_typed_text(key) => Some(Command::Insert(key.to_owned())),
-        _ => None,
+        _ => text
+            .filter(|text| is_insertable(text))
+            .map(|text| Command::Insert(text.to_owned())),
     }
 }
 
@@ -308,10 +310,18 @@ impl MainThreadRuntime {
             {
                 self.set_pressed(None);
             }
-            (EventDetail::Key { key, modifiers, .. }, "keydown") => {
+            (
+                EventDetail::Key {
+                    key,
+                    modifiers,
+                    text,
+                    ..
+                },
+                "keydown",
+            ) => {
                 let focused = self.slot.borrow().document_ref().focused();
                 if focused.is_some()
-                    && let Some(command) = key_command(key, *modifiers)
+                    && let Some(command) = key_command(key, text.as_deref(), *modifiers)
                 {
                     failures.extend(self.apply_edit(js_runtime, command, timestamp));
                 }
@@ -667,54 +677,92 @@ mod tests {
     }
 
     #[test]
-    fn typed_text_is_inserted_and_named_keys_are_not() {
-        for key in ["x", "X", " ", "1", "é", "e\u{301}", "😀", "👩‍👩‍👧", "中"] {
+    fn the_typed_text_is_inserted_and_never_the_key() {
+        for text in ["x", "X", " ", "1", "é", "e\u{301}", "😀", "👩‍👩‍👧", "中", "ab"]
+        {
             assert_eq!(
-                key_command(key, NONE),
-                Some(Command::Insert(key.to_owned())),
-                "{key:?}"
+                key_command("Unidentified", Some(text), NONE),
+                Some(Command::Insert(text.to_owned())),
+                "{text:?}"
             );
         }
+        // A key whose text the platform delivers another way (its input
+        // method) types nothing here, whatever its `key`.
         for key in [
+            "x",
+            "é",
+            "中",
             "Process",
             "Dead",
             "Unidentified",
             "Tab",
-            "Escape",
             "F1",
-            "Shift",
             "",
         ] {
-            assert_eq!(key_command(key, NONE), None, "{key:?}");
+            assert_eq!(key_command(key, None, NONE), None, "{key:?}");
         }
-        assert_eq!(key_command("\u{7f}", NONE), None, "a control character");
+        // The text a platform reports for the named keys is control
+        // characters, which are not inserted; Enter and Backspace keep their
+        // own commands.
+        assert_eq!(key_command("Tab", Some("\t"), NONE), None);
+        assert_eq!(key_command("Escape", Some("\u{1b}"), NONE), None);
+        assert_eq!(key_command("Unidentified", Some("\u{7f}"), NONE), None);
         assert_eq!(
-            key_command("å", ALT),
+            key_command("Enter", Some("\r"), NONE),
+            Some(Command::InsertLineBreak)
+        );
+        assert_eq!(
+            key_command("Backspace", Some("\u{8}"), NONE),
+            Some(Command::DeleteBackward)
+        );
+        assert_eq!(
+            key_command("å", Some("å"), ALT),
             Some(Command::Insert("å".to_owned())),
-            "alt types text on macOS"
+            "Option types text on macOS"
         );
         for shortcut in [CTRL, META] {
-            assert_eq!(key_command("x", shortcut), None);
-            assert_eq!(key_command("c", shortcut), None, "copy is deferred");
-            assert_eq!(key_command("v", shortcut), None, "paste is deferred");
-            assert_eq!(key_command("a", shortcut), Some(Command::SelectAll));
-            assert_eq!(key_command("Backspace", shortcut), None);
+            assert_eq!(key_command("x", Some("x"), shortcut), None);
+            assert_eq!(
+                key_command("c", Some("c"), shortcut),
+                None,
+                "copy is deferred"
+            );
+            assert_eq!(
+                key_command("v", Some("v"), shortcut),
+                None,
+                "paste is deferred"
+            );
+            assert_eq!(
+                key_command("a", Some("a"), shortcut),
+                Some(Command::SelectAll)
+            );
+            assert_eq!(key_command("a", None, shortcut), Some(Command::SelectAll));
+            assert_eq!(key_command("Backspace", Some("\u{8}"), shortcut), None);
         }
     }
 
     #[test]
     fn editing_keys_map_to_their_commands() {
-        assert_eq!(key_command("Enter", NONE), Some(Command::InsertLineBreak));
         assert_eq!(
-            key_command("Backspace", NONE),
+            key_command("Enter", None, NONE),
+            Some(Command::InsertLineBreak)
+        );
+        assert_eq!(
+            key_command("Backspace", None, NONE),
             Some(Command::DeleteBackward)
         );
         assert_eq!(
-            key_command("Backspace", ALT),
+            key_command("Backspace", None, ALT),
             Some(Command::DeleteWordBackward)
         );
-        assert_eq!(key_command("Delete", NONE), Some(Command::DeleteForward));
-        assert_eq!(key_command("Delete", ALT), Some(Command::DeleteWordForward));
+        assert_eq!(
+            key_command("Delete", None, NONE),
+            Some(Command::DeleteForward)
+        );
+        assert_eq!(
+            key_command("Delete", None, ALT),
+            Some(Command::DeleteWordForward)
+        );
         let moved = |granularity, direction, extend| {
             Some(Command::Move {
                 granularity,
@@ -723,35 +771,35 @@ mod tests {
             })
         };
         assert_eq!(
-            key_command("ArrowLeft", NONE),
+            key_command("ArrowLeft", None, NONE),
             moved(Granularity::Character, Direction::Backward, false)
         );
         assert_eq!(
-            key_command("ArrowRight", SHIFT),
+            key_command("ArrowRight", None, SHIFT),
             moved(Granularity::Character, Direction::Forward, true)
         );
         assert_eq!(
-            key_command("ArrowLeft", both(ALT, SHIFT)),
+            key_command("ArrowLeft", None, both(ALT, SHIFT)),
             moved(Granularity::Word, Direction::Backward, true)
         );
         assert_eq!(
-            key_command("ArrowRight", META),
+            key_command("ArrowRight", None, META),
             moved(Granularity::LineBoundary, Direction::Forward, false)
         );
         assert_eq!(
-            key_command("ArrowUp", NONE),
+            key_command("ArrowUp", None, NONE),
             moved(Granularity::Line, Direction::Backward, false)
         );
         assert_eq!(
-            key_command("ArrowDown", both(META, SHIFT)),
+            key_command("ArrowDown", None, both(META, SHIFT)),
             moved(Granularity::Document, Direction::Forward, true)
         );
         assert_eq!(
-            key_command("Home", NONE),
+            key_command("Home", None, NONE),
             moved(Granularity::LineBoundary, Direction::Backward, false)
         );
         assert_eq!(
-            key_command("End", SHIFT),
+            key_command("End", None, SHIFT),
             moved(Granularity::LineBoundary, Direction::Forward, true)
         );
     }

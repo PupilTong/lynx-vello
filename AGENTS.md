@@ -2000,9 +2000,11 @@ Editable text (`docs/editable-text-design.md`, E2) is wired here.
 prepares the command in `dom`, dispatches the events before the change at the
 host, commits, and dispatches the rest. A routed `keydown`/`keyup` is
 delivered at `Document::focused()` when there is one, and a `keydown` at a
-focused host runs the keyboard's editing command (`key_command`); a mouse's
-primary `pointerdown`, or a finger's or pen's tap (the `click`), inside an
-editing host focuses it
+focused host runs the keyboard's editing command (`key_command`), which
+inserts the text the key typed (`InputKind::Key`'s `text`, carried in
+`EventDetail::Key` and never crossing into the realm), not its `key`; a
+mouse's primary `pointerdown`, or a finger's or pen's tap (the `click`),
+inside an editing host focuses it
 (dispatching `focus`/`focusin`, and `blur`/`focusout` at the host that lost
 it — drained from `dom` right after the press) and places the caret, a second
 and third quick press select the word and the line, and a held mouse drag
@@ -2669,7 +2671,22 @@ registered, the winit window and event loop, device metrics, input translation,
 the stdin prompt, and PNG writing — and nothing of the pipeline. It builds the
 view from the group and the painter from the window on its own thread and
 attaches them. Every event handler is a relay into the painter
-(`dispatch_input`, `resize`, `set_occluded`, clock ticks in headless mode).
+(`dispatch_input`, `resize`, `set_occluded`, clock ticks in headless mode), and editing goes to the view
+(`LynxView::edit`).
+
+Text editing (`docs/editable-text-design.md`, E3): the newest
+`EngineEvent::TextInputStateChanged` of a turn turns the window's input
+method on (`set_ime_allowed`) exactly while an editing host is focused and
+places its candidate window (`set_ime_cursor_area`, the caret or the first
+composition character, as logical points). A key carries winit's
+`KeyEvent.text` as its typed text: winit 0.30.13 queues no `KeyboardInput`
+for a key its input method consumed, and no `Ime::Commit` for one it did not,
+so no text is inserted twice. `cli/ime.rs` (`ImeBridge`) turns `WindowEvent::Ime`
+into `SetComposition` (winit's byte cursor as UTF-16), `CommitText` and, on
+`Disabled` mid-composition, `FinishComposition`; it holds winit's empty
+`Preedit` back until the next event, since one comes right before every
+`Commit` and only an empty `Preedit` that no `Commit` follows (sent before the
+next other window event, or in `about_to_wait`) cancels the composition.
 
 The window it hands `Painter::new` is the draw target and nothing else: frames
 and lifecycle events wake the event loop through the injected `EventRequester`,
@@ -2718,7 +2735,11 @@ both logical viewport size and device-pixel ratio; headless mode uses a
 configurable synthetic vsync rate, skips catch-up bursts after slow frames, and
 retains its Vello renderer, render texture and staging buffer across frames.
 Both expose a GDB-like stdin command prompt (`continue`, `pause`, `frame`,
-`screenshot`, `help`, `quit`; headless also `set/show vsync`). Screenshots are
+`screenshot`, `help`, `quit`; headless also `set/show vsync`), with editing
+commands that drive a page without a keyboard: `tap X Y`, `key KEY [TEXT]`,
+`compose TEXT [START END]`, `commit TEXT` and `show text-input` (the last
+published `TextInputState` as one line);
+`tests/fixtures/editable.lynx.xml` is a page with one logging editing host. Screenshots are
 captured only through that live prompt — there is no one-shot startup flag —
 and PNG readback happens only on a screenshot.
 

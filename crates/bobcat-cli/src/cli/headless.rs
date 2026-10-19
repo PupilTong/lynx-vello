@@ -18,6 +18,8 @@ use std::collections::VecDeque;
 use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
 
+use bobcat_core::editing::{Command as EditCommand, TextInputState};
+use bobcat_core::input::{InputEvent, KeyPhase, Modifiers, Point2D, PointerKind, PointerPhase};
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, Painter, ScreenMetrics,
     StyleThreads,
@@ -27,13 +29,16 @@ use flume::RecvTimeoutError;
 
 use crate::cli::CliError;
 use crate::cli::args::Options;
-use crate::cli::command::{COMMAND_HELP, Command, Console};
+use crate::cli::command::{COMMAND_HELP, Command, Console, describe_text_input};
 use crate::cli::page::Program;
 use crate::cli::screenshot::save_screenshot;
 
 /// How long one frame waits for the view to service it before the frame is
 /// drawn from what the view has already published.
 const FRAME_DEADLINE: Duration = Duration::from_secs(10);
+
+/// The pointer id of the `tap` command's finger.
+const TAP_POINTER_ID: u32 = 1;
 
 /// This embedder's wakeup: a `Pump` on the same channel the console and the
 /// synthetic clock feed, so a wakeup from the Lynx main thread is one more
@@ -103,6 +108,7 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
         receiver: &receiver,
         held: &mut held,
         input: &program.input,
+        text_input: None,
     };
     if frame(&mut host, &mut painter, true)? {
         script.finish();
@@ -217,6 +223,42 @@ fn execute_command(
         Command::ShowVsync => {
             println!("Headless vsync is {} Hz.", clock.rate().get());
         }
+        Command::Tap(x, y) => {
+            for phase in [PointerPhase::Down, PointerPhase::Up] {
+                painter.dispatch_input(InputEvent::pointer(
+                    Point2D::new(x, y),
+                    TAP_POINTER_ID,
+                    PointerKind::Touch,
+                    phase,
+                ));
+            }
+        }
+        Command::Key { key, text } => {
+            let key = std::sync::Arc::<str>::from(key);
+            for (phase, text) in [(KeyPhase::Down, text), (KeyPhase::Up, None)] {
+                painter.dispatch_input(
+                    InputEvent::key(phase, key.clone(), "", false, Modifiers::default())
+                        .with_text(text.map(Into::into)),
+                );
+            }
+        }
+        Command::Compose { text, selection } => {
+            edit(host.view, EditCommand::SetComposition { text, selection });
+        }
+        Command::Commit(text) => edit(
+            host.view,
+            EditCommand::CommitText {
+                text,
+                relative_cursor: 0,
+            },
+        ),
+        Command::ShowTextInput => {
+            // What the view published up to now, the newest last.
+            if check_script(host)? {
+                script.finish();
+            }
+            println!("{}", describe_text_input(host.text_input.as_ref()));
+        }
         Command::Help => println!("{COMMAND_HELP}"),
         Command::Quit => return Ok(true),
         Command::Invalid(message) => eprintln!("bobcat: {message}"),
@@ -237,6 +279,15 @@ struct Host<'a> {
     receiver: &'a flume::Receiver<HostEvent>,
     held: &'a mut VecDeque<Command>,
     input: &'a str,
+    /// The last text input state the view published.
+    text_input: Option<TextInputState>,
+}
+
+/// Sends one editing command to the view, reporting a refusal.
+fn edit(view: &LynxView<ViewResources>, command: EditCommand) {
+    if let Err(error) = view.edit(command) {
+        eprintln!("bobcat: the view refused the edit: {error}");
+    }
 }
 
 /// One turn with no command to run: the view's, and then a frame if a
@@ -247,7 +298,7 @@ fn turn(
     clock: Option<&mut FrameClock>,
     script: &mut ScriptGate,
 ) -> Result<(), CliError> {
-    if check_script(host.view, host.input)? {
+    if check_script(host)? {
         script.finish();
     }
     if let Some(clock) = clock
@@ -276,7 +327,7 @@ fn frame(host: &mut Host<'_>, painter: &mut Painter, force: bool) -> Result<bool
     let deadline = Instant::now() + FRAME_DEADLINE;
     let mut finished = false;
     loop {
-        finished |= check_script(host.view, host.input)?;
+        finished |= check_script(host)?;
         if painter.frame_serviced(&posted) {
             break;
         }
@@ -291,13 +342,14 @@ fn frame(host: &mut Host<'_>, painter: &mut Painter, force: bool) -> Result<bool
     Ok(finished)
 }
 
-fn check_script(view: &mut LynxView<ViewResources>, input: &str) -> Result<bool, CliError> {
+fn check_script(host: &mut Host<'_>) -> Result<bool, CliError> {
     let mut finished = false;
-    for event in view.pump() {
+    for event in host.view.pump() {
         match event {
             // The view has ended, so the run ends with it.
-            event if event.is_fatal() => return Err(CliError::from_fatal_event(input, event)),
+            event if event.is_fatal() => return Err(CliError::from_fatal_event(host.input, event)),
             EngineEvent::ScriptFinished => finished = true,
+            EngineEvent::TextInputStateChanged(state) => host.text_input = Some(*state),
             // Not fatal: the view and its realms go on, so each of these is
             // reported the way a browser console reports one rather than by
             // stopping the run.
@@ -365,8 +417,19 @@ impl ScriptGate {
     }
 }
 
+/// Frames and captures, and the input and editing commands, which reach a
+/// view that has booted (an edit before that is refused).
 const fn requires_script(command: &Command) -> bool {
-    matches!(command, Command::Frame | Command::Screenshot(_))
+    matches!(
+        command,
+        Command::Frame
+            | Command::Screenshot(_)
+            | Command::Tap(..)
+            | Command::Key { .. }
+            | Command::Compose { .. }
+            | Command::Commit(_)
+            | Command::ShowTextInput
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
