@@ -1611,10 +1611,15 @@ registered for collection, like the page realm's. The four generic members:
 `framePage(frame)` reads the nested page of a live `frame`
 (`tree::frame::nested_page`), refusing a frame more than `MAX_FRAME_DEPTH`
 (8) frames deep over shadow-including ancestors, so a card that embeds itself
-stops; it keeps no state. `resetFrame(frame)` `drop_element`s every child of
-the nested page (inside a shadow tree, so `dom` frees each subtree whole) and
-clears the frame's shadow-root sheets (`Document::clear_shadow_stylesheets`);
-the nested page stays. `adoptStyleSheet(url, shadowRoot?)` mounts on the
+stops; it keeps no state. `resetFrame(frame)` is `tree::frame::reset_frame`:
+it `drop_element`s the nested page (inside a shadow tree, so `dom` frees the
+whole subtree, and each freed node's listener rows and intersection
+registrations leave through the free path), clears the frame's shadow-root
+sheets (`Document::clear_shadow_stylesheets`), and appends a fresh
+`page[part=page]`, built as `constructed` builds the first: the nested page
+belongs to the card, not to the frame (user ruling 2026-10-19), so the next
+card's `framePage` answers a different node and the old card's realm never
+meets the next card's tree. `adoptStyleSheet(url, shadowRoot?)` mounts on the
 named shadow root (`style::add_*_to_shadow`, no listed sheet settled) or, with
 no second argument, on the document after the listed sheets.
 `closeRealm()` sets the calling child's `retired` (the page realm's throws
@@ -1634,9 +1639,9 @@ The published listener names are the table's, over every realm: a
 child closing `tap` leaves the page's open, and a name only a closed child
 held closes when it closes.
 
-**The frame's lifecycle.** The component builds the nested page
-(`page[part=page]`, web-core's `[part="page"]`) in `constructed`, for the
-element's life, and its `connected_callback`/`disconnected_callback` queue
+**The frame's lifecycle.** The component builds the first card's nested page
+(`page[part=page]`, web-core's `[part="page"]`) in `constructed`, and
+`resetFrame` replaces it for each later card, and its `connected_callback`/`disconnected_callback` queue
 `ComponentEvent::Frame { node, connected }` on the document's
 `ComponentEvents` (a reaction queues, never acts, because it holds the
 document). `MainThreadRuntime::dispatch_component_events` hands each to the
@@ -1715,11 +1720,15 @@ every card its own frames loaded (`__BobcatCloseFrames`), then starts
 cleanup (ReactLynx's `destroyCard`, unmount effects) runs before the BTS
 acknowledges and the Worker is terminated — and calls `closeRealm()` only once
 that settles. It returns at once: the parent's `resetFrame` follows without
-waiting, a new `src` boots into the emptied nested page, and the old child is
+waiting, freeing the old card's page, a new `src` boots into the fresh one,
+and the old child is
 kept meanwhile because its worker runs; a BTS that never answers keeps it
 until the view ends. Once a realm's disposal has started it handles nothing
 its BTS says but the acknowledgement, as it already sends nothing, so a late
-patch never reaches nodes `resetFrame` freed. The page's own disposal module
+patch never reaches nodes `resetFrame` freed; its page root names a freed
+node from then on, which nothing on its way to `closeRealm` reads. Its own
+frames' cards close through `__BobcatCloseFrames` before the free, and their
+trees go with its page. The page's own disposal module
 (`MainThreadRuntime::begin_dispose`) closes the page's frames the same way
 before `__BobcatDispose`, so every frame card's BTS has its `dispose` queued
 on the shared worker thread ahead of the page BTS's; their acknowledgements
@@ -1729,9 +1738,37 @@ itself: the cycle that closes makes QuickJS leak an object when a worker's
 release.) A frame inside a
 nested card that the nested card disconnects without letting go of its
 handle keeps its card: the connection calls reach the page realm alone. No
-`load` event, no events into the frame (so a handler inside the card never
-runs) and no frame methods beyond the shared base set (native's surface; user
-ruling 2026-10-15). The card's BTS is a BTS like the page's, on the group's
+`load` event and no frame methods beyond the shared base set (native's
+surface; user ruling 2026-10-15). **Events reach the card in its own realm**
+(user rulings 2026-10-16, web-core's catch and keyboard; 2026-10-18, scheme
+D; every realm at the path's top, 2026-10-19): nothing forwards between
+realms, and a frame is a plain shadow tree to the dispatch. The kernel's walk
+calls every realm the listener table invites, each once, at the path's top,
+the page realm first (see the event paragraphs below), and each walks the
+steps it holds handles for, so the page's handlers on the frame hear a tap
+inside the card first, with the frame as the target, retargeted, and the
+card's own handlers after, at the card's node. A catch or a stop ends one
+realm's walk alone, as each web-core `lynx-view` walks its own shadow root
+(native's single propagation across both pages is not adopted), and a
+listener that throws in either realm is that dispatch's `ListenerFailed`
+after the other realm still heard the event. The card's `detail.x/y` and
+pointer, wheel and touch `x/y` are relative to the frame's border box (its
+`boundingClientRect`, read once per position dispatch, so no transforms; a
+frame with no box answers the viewport's origin), while `clientX/Y` and
+`pageX/Y` stay the viewport's. A card's `global-bind*` is reached by the
+events whose path passes through its frame's shadow root, its tree's root,
+as web-core's card listens on its own shadow root; a `keydown`/`keyup` is
+web-core's document-level exception (`DOCUMENT_LEVEL_EVENTS`), so each card's
+`global-bindkey*` hears every key, as web-core's nested bindings listen on
+`document`, holding no step of the key's path and running its global pass
+alone, aimed at each registering element. Non-composed events at a
+card's node (`scroll`, image `load`/`error`, `uiappear`) end at the frame's
+shadow root and reach only the card. The realms a dispatch calls are fixed
+before its walk, so a frame an earlier listener removed still has its card
+called in that dispatch; its `closeRealm` follows the disconnection in a
+later entry. A frame an earlier listener gave a new `src` frees the old
+card's page inside that listener, and with it every registration the card
+held, so the card is skipped (`docs/tracking/deviations.md`, `<frame>`). The card's BTS is a BTS like the page's, on the group's
 worker runtime, with the parent's `SystemInfo`; it shares the group's
 `sharedData` with every other BTS and has the view's `NativeModules` (both
 native's, where web-core gives a frame its own `sharedData` and none; user
@@ -2195,14 +2232,14 @@ typewriter, truncation and selection are deferred),
 `tree::frame` (`frame`, web-core's nested `lynx-view`: a component whose
 `constructed` attaches an open shadow root holding the nested page
 `page[part=page]`, which the UA sheet sizes 100% of the frame and which
-lives as long as the frame — no shadow sheet and no slot, so light children
-never render — whose `connected_callback`/`disconnected_callback` queue
+belongs to the card rendered under it (`reset_frame` frees it and builds the
+next card's) — no shadow sheet and no slot, so light children never render — whose `connected_callback`/`disconnected_callback` queue
 `ComponentEvent::Frame` for `bobcat:frame`'s connection exports,
 `display: flex; contain: strict` whatever `defaultDisplayLinear` says,
 relaxed to `inline-size layout paint style` by `auto-height` and to
 `layout paint style` by `auto-width` (UA attribute selectors; `preset-*`
 and `enable-multi-async-thread` are accepted and do nothing), the shared
-box block, `is_frame`, `nested_page` and `frame_depth`; `src`, `data` and
+box block, `is_frame`, `nested_page`, `reset_frame` and `frame_depth`; `src`, `data` and
 `global-props` are ordinary attributes to Rust, which observes nothing —
 `bobcat:frame` reacts to them in the realm that wrote them), and
 `tree::blur_view` (`blur-radius` reflected into a
@@ -3105,8 +3142,10 @@ of the element path in the same file.
   `api-frame-data-update` as `react-frame-data-update`, whose button's tap
   re-renders the frame's card through that card's own BTS, beside
   `react-frame-global-props-update`, the same for `global-props` (no upstream
-  case); all rendered end to end by `crates/bobcat-source/tests/frame.rs`) is
-  in that
+  case); `react-frame-tap` and its card `react-frame-tap-inner` (no upstream
+  case), a tap inside the frame that runs the card's `catchtap` and
+  `main-thread:bindtap` and the host's `bindtap` on the frame's wrapper; all
+  rendered end to end by `crates/bobcat-source/tests/frame.rs`) is in that
   package's `NOTICE.lynx-stack`. Native builds use the shared
   `scripts/lynx-bytecode.ts` hook to disable BTS manifest bytecode. MTS keeps
   the compiler's default encoding. The fixture-only source repack remains

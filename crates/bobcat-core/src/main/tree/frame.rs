@@ -17,10 +17,15 @@
 //!
 //! [`Frame`] attaches an open shadow root when the element is constructed
 //! and appends the nested page to it: a `page` element with web-core's
-//! `part="page"`, which lives as long as the frame does. A card the frame
-//! loads renders under it ([`nested_page`] is how the host's `framePage`
-//! finds it), and a card it lets go of takes its children and its sheets
-//! with it, never the page. There is no shadow sheet and no slot. With no
+//! `part="page"`. The page belongs to the card, not to the frame: a card the
+//! frame loads renders under the page the frame holds then ([`nested_page`]
+//! is how the host's `framePage` finds it), and a card it lets go of takes
+//! its page with it, everything under the page and the sheets on the shadow
+//! root included; [`reset_frame`] frees them and builds a fresh page for the next
+//! card, as web-core's nested `lynx-view` renders each card into a page of
+//! its own. A card's realm therefore never meets the next card's nodes, and
+//! a node of the old page names nothing once it is freed. There is no
+//! shadow sheet and no slot. With no
 //! slot, the frame's light children are assigned nowhere and never render,
 //! which is native's "a frame element cannot adopt any child"
 //! (`frame_element.cc`, `OnNodeAdded`) without refusing the insertion.
@@ -131,9 +136,7 @@ struct Frame {
 impl CustomElement<()> for Frame {
     fn constructed(&self, document: &mut LynxDocument, element: NodeId) {
         let shadow = document.attach_shadow(element, ShadowRootMode::Open);
-        let page = document.create_element(PAGE_TAG, ());
-        document.set_attribute(page, "part", PAGE_PART);
-        document.append_child(shadow, page);
+        append_nested_page(document, shadow);
     }
 
     fn connected_callback(&self, _document: &mut LynxDocument, element: NodeId) {
@@ -143,6 +146,34 @@ impl CustomElement<()> for Frame {
     fn disconnected_callback(&self, _document: &LynxDocument, element: NodeId) {
         self.events.queue_frame(element, false);
     }
+}
+
+/// Appends a fresh nested page to the frame's shadow root `shadow` and
+/// answers it: the one the first card renders under, built with the element,
+/// and the one each later card does, built by [`reset_frame`].
+fn append_nested_page(document: &mut LynxDocument, shadow: NodeId) -> NodeId {
+    let page = document.create_element(PAGE_TAG, ());
+    document.set_attribute(page, "part", PAGE_PART);
+    document.append_child(shadow, page);
+    page
+}
+
+/// Lets go of the card the frame `frame` shows: frees its nested page with
+/// everything under it — the page is inside a shadow tree, so
+/// [`dom::Document::drop_element`] frees the whole subtree outright, and
+/// each freed node takes its listener rows and its intersection
+/// registrations with it through the document's free path — and every sheet
+/// mounted on the frame's shadow root, so the next card is styled by its
+/// own alone; then builds a fresh nested page for that card. Answers the new
+/// page, or `None`, changing nothing, for a node that is not a live frame.
+pub(crate) fn reset_frame(document: &mut LynxDocument, frame: NodeId) -> Option<NodeId> {
+    let page = nested_page(document, frame)?;
+    let shadow = document
+        .shadow_root(frame)
+        .expect("a nested page sits in its frame's shadow root");
+    document.drop_element(page);
+    document.clear_shadow_stylesheets(shadow);
+    Some(append_nested_page(document, shadow))
 }
 
 /// Whether `node` is a live `frame` element.
@@ -193,7 +224,7 @@ mod tests {
         child, display, document, element_under, with_component_events, with_config,
     };
     use super::super::{ComponentEvent, ComponentEvents, LynxDocument, PAGE_TAG, PageConfig};
-    use super::{FRAME_TAG, frame_depth, is_frame, nested_page};
+    use super::{FRAME_TAG, frame_depth, is_frame, nested_page, reset_frame};
 
     #[test]
     fn a_frame_has_an_open_shadow_root_and_is_a_flex_box_under_either_switch() {
@@ -231,6 +262,44 @@ mod tests {
         assert_eq!(document.get(shadow).unwrap().child_ids(), [page]);
         let view = child(&mut document, "view", "");
         assert_eq!(nested_page(&document, view), None, "a view is no frame");
+    }
+
+    /// A reset frees the nested page with everything under it, empties the
+    /// shadow root's sheets, and builds the next card a page of its own: a
+    /// different node, the shadow root's one child again, with the same tag
+    /// and `part`. A node that is no frame is left alone.
+    #[test]
+    fn a_reset_frees_the_nested_page_and_builds_the_next() {
+        let mut document = document();
+        let frame = child(&mut document, FRAME_TAG, "width: 100px; height: 50px");
+        let shadow = document.shadow_root(frame).expect("a shadow root");
+        let old = nested_page(&document, frame).expect("a nested page");
+        let content = element_under(&mut document, old, "view", "width: 80px; height: 80px");
+        let deeper = element_under(&mut document, content, "view", "");
+        document.add_shadow_stylesheet(shadow, "view { color: red; }");
+        document.layout();
+
+        let page = reset_frame(&mut document, frame).expect("a frame");
+        assert_ne!(page, old, "a page of its own for the next card");
+        assert_eq!(nested_page(&document, frame), Some(page));
+        assert_eq!(document.get(shadow).unwrap().child_ids(), [page]);
+        let node = document.get(page).expect("live");
+        assert_eq!(node.tag_name(), Some(PAGE_TAG));
+        assert_eq!(node.attribute("part"), Some("page"));
+        for freed in [old, content, deeper] {
+            assert!(document.get(freed).is_none(), "{freed:?} was freed");
+        }
+        document.layout();
+        let size = document.rounded_layout(page).expect("laid out").size;
+        assert_eq!(
+            (size.width, size.height),
+            (100.0, 50.0),
+            "it fills the frame"
+        );
+
+        let view = child(&mut document, "view", "");
+        assert_eq!(reset_frame(&mut document, view), None, "a view is no frame");
+        assert!(document.get(view).is_some());
     }
 
     /// Strict containment: what renders inside sizes nothing. The page's

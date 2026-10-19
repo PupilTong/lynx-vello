@@ -6,7 +6,10 @@
 //! `data` and `global-props`, which the card boots with and takes as updates
 //! on both threads, and the frame's connection and disconnection, which the
 //! custom element queues and `bobcat:frame` turns into a load and a
-//! disposal that waits for the card's background thread.
+//! disposal that waits for the card's background thread. Then input events
+//! inside a frame, which the kernel's walk delivers to each listening realm
+//! once, at the path's top: the page realm first, then each card's realm,
+//! each walking the steps it holds handles for.
 //!
 //! The host stands in for a container installer: it answers the plain fetch
 //! of the card's URL, and serves `<url>/root.js` (the card's root as an MTS
@@ -258,13 +261,14 @@ fn pump_until(
 }
 
 /// Every diagnostic among `events`, as its message: the realms' own reports,
-/// and every worker's throw or end, so a frame's card's BTS that failed is
-/// one too.
+/// a listener's throw in any realm, and every worker's throw or end, so a
+/// frame's card's BTS that failed is one too.
 fn reported(events: &[EngineEvent]) -> Vec<&str> {
     events
         .iter()
         .filter_map(|event| match event {
             EngineEvent::ScriptReported { message, .. } => Some(message.as_str()),
+            EngineEvent::ListenerFailed(error) => Some(&*error.message),
             EngineEvent::WorkerThrew { error, .. } | EngineEvent::WorkerEnded { error, .. } => {
                 Some(&*error.message)
             }
@@ -374,25 +378,27 @@ fn a_frame_boots(src: &str) {
     assert_eq!(kept.nested_color, Some(red));
 
     write_src(&mut engine, &format!("{SECOND:?}"));
-    // The nested page is the frame's for its life; what is under it is the
-    // card's.
-    let page = nested[0];
+    // The nested page is the card's: the second card renders under a page
+    // of its own.
     let replaced = pump_until(
         &mut engine,
         &mut events,
         "the second card replaced the first",
-        |state| state.nested.len() == 2 && !nested[1..].contains(&state.nested[1]),
+        |state| state.nested.len() == 2 && !nested.contains(&state.nested[1]),
     );
-    assert_eq!(replaced.nested[0], page, "the nested page stays");
+    assert_ne!(replaced.nested[0], nested[0], "a fresh nested page");
     assert_eq!(
         replaced.nested_color,
         Some(AbsoluteColor::BLACK),
         "the second card has no page CSS, and the first card's is gone"
     );
     let freed = engine
-        .probe_document(move |tree| nested[1..].iter().all(|id| tree.get(*id).is_none()))
+        .probe_document(move |tree| nested.iter().all(|id| tree.get(*id).is_none()))
         .expect("the document answers");
-    assert!(freed, "a new src freed every node of the first card");
+    assert!(
+        freed,
+        "a new src freed every node of the first card, its page included"
+    );
     assert_eq!(reported(&events), Vec::<&str>::new());
 }
 
@@ -534,9 +540,10 @@ fn nested_of(engine: &mut TestEngine, frame: dom::NodeId) -> Vec<dom::NodeId> {
 }
 
 /// Disconnecting a frame disposes of its card, as web-core's `LynxView`
-/// does on `disconnectedCallback`: the nested page is emptied, its sheet
-/// removed and the card's realm gone, so its timers stop. Connecting it
-/// again loads the frame's `src` again, as `connectedCallback` renders it.
+/// does on `disconnectedCallback`: the card's nested page is freed and an
+/// empty one put in its place, its sheet removed and the card's realm gone,
+/// so its timers stop. Connecting it again loads the frame's `src` again,
+/// into that page, as `connectedCallback` renders it.
 #[test]
 fn a_removed_frame_disposes_of_its_card_and_reappending_renders_it_again() {
     let mut engine = serving_a_root(CARD, &ticking_root()).create(Arc::new(NoWakeup));
@@ -565,10 +572,17 @@ fn a_removed_frame_disposes_of_its_card_and_reappending_renders_it_again() {
         events.extend(pump_for(&mut engine, Duration::from_millis(5)));
         assert!(Instant::now() < deadline, "the nested page was not emptied");
     }
-    assert_eq!(
-        nested_of(&mut engine, frame),
-        first[..1],
-        "the nested page stays"
+    let emptied = nested_of(&mut engine, frame);
+    assert_ne!(
+        emptied[0], first[0],
+        "an empty page of its own for the next card"
+    );
+    let gone = first.clone();
+    assert!(
+        engine
+            .probe_document(move |tree| gone.iter().all(|id| tree.get(*id).is_none()))
+            .expect("the document answers"),
+        "the card's page went with it"
     );
     assert_no_more_ticks(&mut engine, "the disconnected frame's card is disposed of");
 
@@ -579,7 +593,10 @@ fn a_removed_frame_disposes_of_its_card_and_reappending_renders_it_again() {
         "the card rendered again",
         |state| state.nested.len() == 2 && state.nested[1] != first[1],
     );
-    assert_eq!(again.nested[0], first[0]);
+    assert_eq!(
+        again.nested[0], emptied[0],
+        "rendered into the page the reset built"
+    );
     assert_eq!(
         again.nested_color,
         Some(AbsoluteColor::srgb_legacy(255, 0, 0, 1.0)),
@@ -984,4 +1001,646 @@ fn a_frames_card_background_thread_is_disposed_before_its_realm_goes() {
     assert_eq!(logged_times(&events, &booted), 2);
     assert_eq!(logged_times(&events, &destroyed), 1);
     assert_eq!(reported(&events), Vec::<&str>::new());
+}
+
+/// A third card, which [`EVENT_CARD`] shows in a frame of its own.
+const GRAND: &str = "app:///grand.web.bundle";
+
+/// The worklet runtime, and what every events card files: `log(label)`, a
+/// worklet, and `listen(label)`, a listener, each logging
+/// `<label> <type> <target id>`, then the `detail`'s `x,y` when it has
+/// them. Both, because an element holds one worklet per event name, whatever
+/// its form.
+const LOGGING_WORKLETS: &str = "
+    globalThis.runWorklet = (value, params) => value.body(params[0]);
+    const listen = (label) => (e) => console.log(
+        label + ' ' + e.type + ' ' + e.target.id +
+        (e.detail && e.detail.x !== undefined ? ' ' + e.detail.x + ',' + e.detail.y : ''));
+    const log = (label) => ({ type: 'worklet', value: { body: listen(label) } });
+";
+
+/// The host page for the event tests: a `wrapper` padded 20px left and 30px
+/// top holds a 200×200 `frame` showing `src`, so the frame's
+/// border box starts at (20, 30). The page captures `tap`, the wrapper binds
+/// it, the page binds it globally and binds `keydown`; it captures
+/// `uiappear` too. `updatePage`'s `op` changes them: `catch` files a
+/// `capture-catch` on the wrapper in place of its bind, `src` writes
+/// [`SECOND`] to the frame's `src`, `detach` removes the frame, and
+/// `remove-on-tap` and `src-on-tap` add a capturing listener on the page
+/// that does either of those inside the next tap; each logs `page-op <op>`
+/// once done.
+fn event_host(src: &str) -> String {
+    format!(
+        r"
+        {LOGGING_WORKLETS}
+        const page = __CreatePage('0', 0);
+        __SetID(page, 'page');
+        const wrapper = __CreateView(0);
+        __SetID(wrapper, 'wrapper');
+        __SetInlineStyles(wrapper, 'padding-left:20px;padding-top:30px;width:300px;height:300px');
+        const frame = __CreateFrame(0);
+        __SetID(frame, 'frame');
+        __SetInlineStyles(frame, 'width:200px;height:200px');
+        __AppendElement(wrapper, frame);
+        __AppendElement(page, wrapper);
+        __AddEvent(page, 'capture-bind', 'tap', log('page-capture'));
+        __AddEvent(wrapper, 'bindEvent', 'tap', log('wrapper'));
+        __AddEvent(page, 'global-bindEvent', 'tap', log('page-global'));
+        __AddEvent(page, 'bindEvent', 'keydown', log('page-key'));
+        __AddEvent(page, 'capture-bind', 'uiappear', log('page-appear'));
+        __SetAttribute(frame, 'src', '{src}');
+        __FlushElementTree();
+        globalThis.updatePage = (data) => {{
+            if (data.op === 'catch') {{
+                __AddEvent(wrapper, 'capture-catch', 'tap', log('wrapper-catch'));
+            }} else if (data.op === 'src') {{
+                __SetAttribute(frame, 'src', '{SECOND}');
+            }} else if (data.op === 'detach') {{
+                __RemoveElement(wrapper, frame);
+            }} else if (data.op === 'remove-on-tap') {{
+                __AddEventListener(page, 'tap', () => __RemoveElement(wrapper, frame), {{ capture: true }});
+            }} else if (data.op === 'src-on-tap') {{
+                __AddEventListener(page, 'tap', () => __SetAttribute(frame, 'src', '{SECOND}'), {{ capture: true }});
+            }}
+            __FlushElementTree();
+            console.log('page-op ' + data.op);
+        }};
+    "
+    )
+}
+
+/// The card [`event_host`]'s frame shows: a column of three 200×60 boxes —
+/// `cv`, a view; `swiper`, an `x-swiper` with no items, so its own shadow
+/// content is what a tap there hits; `inner`, a frame showing [`GRAND`].
+/// `cv` catches `tap` with a worklet and binds it with a background-thread
+/// handler, `card-handler`; the card's page captures `tap` with a listener,
+/// binds it with a worklet and binds it globally; the swiper binds it; `cv` binds `keydown` and
+/// binds it globally, and listens for its own `uiappear`.
+fn event_card() -> String {
+    format!(
+        r"
+        {LOGGING_WORKLETS}
+        globalThis.renderPage = () => {{
+            const p = __CreatePage('0', 0);
+            __SetID(p, 'card-page');
+            __SetInlineStyles(p, 'display:flex;flex-direction:column');
+            const box = (make, id) => {{
+                const element = make();
+                __SetID(element, id);
+                __SetInlineStyles(element, 'flex-shrink:0;width:200px;height:60px');
+                __AppendElement(p, element);
+                return element;
+            }};
+            const cv = box(() => __CreateView(0), 'cv');
+            const swiper = box(() => __CreateElement('x-swiper', 0), 'swiper');
+            const inner = box(() => __CreateFrame(0), 'inner');
+            __AddEventListener(p, 'tap', listen('card-capture'), {{ capture: true }});
+            __AddEvent(p, 'bindEvent', 'tap', log('card-page'));
+            __AddEvent(p, 'global-bindEvent', 'tap', log('card-global'));
+            __AddEvent(cv, 'catchEvent', 'tap', log('card-view'));
+            __AddEvent(cv, 'bindEvent', 'tap', 'card-handler');
+            __AddEvent(swiper, 'bindEvent', 'tap', log('card-swiper'));
+            __AddEvent(cv, 'global-bindEvent', 'keydown', log('card-key-global'));
+            __AddEvent(cv, 'bindEvent', 'keydown', log('card-key-bind'));
+            __AddEventListener(cv, 'uiappear', (e) => console.log('card-appear ' + e.target.id), {{}});
+            __SetAttribute(inner, 'src', '{GRAND}');
+        }};
+    "
+    )
+}
+
+/// The card [`event_card`]'s inner frame shows: one 200×60 `gv` the page
+/// captures `tap` over and `gv` binds, and which listens for its own
+/// `uiappear`.
+fn grand_card() -> String {
+    format!(
+        r"
+        {LOGGING_WORKLETS}
+        globalThis.renderPage = () => {{
+            const p = __CreatePage('0', 0);
+            __SetID(p, 'grand-page');
+            const gv = __CreateView(0);
+            __SetID(gv, 'gv');
+            __SetInlineStyles(gv, 'width:200px;height:60px');
+            __AppendElement(p, gv);
+            __AddEvent(p, 'capture-bind', 'tap', log('grand-capture'));
+            __AddEvent(gv, 'bindEvent', 'tap', log('grand-view'));
+            __AddEventListener(gv, 'uiappear', (e) => console.log('grand-appear ' + e.target.id), {{}});
+        }};
+    "
+    )
+}
+
+/// The card [`event_host`]'s `src` op writes: one 200×60 `sv` that binds
+/// `tap`.
+fn second_event_card() -> String {
+    format!(
+        r"
+        {LOGGING_WORKLETS}
+        globalThis.renderPage = () => {{
+            const p = __CreatePage('0', 0);
+            const sv = __CreateView(0);
+            __SetID(sv, 'sv');
+            __SetInlineStyles(sv, 'width:200px;height:60px');
+            __AppendElement(p, sv);
+            __AddEvent(sv, 'bindEvent', 'tap', log('second-view'));
+        }};
+    "
+    )
+}
+
+/// The card [`event_view`]'s host shows.
+const EVENT_CARD: &str = CARD;
+
+/// A view running [`event_host`], serving [`EVENT_CARD`], [`GRAND`] and
+/// [`SECOND`], each with a BTS boot; [`EVENT_CARD`]'s logs every event
+/// published to it as `bts <card> published <handler> <target id> <x,y>`.
+fn event_view() -> TestEngine {
+    let spec = TestViewSpec::new(&event_host(EVENT_CARD))
+        .with_fetchable(EVENT_CARD)
+        .with_module(
+            &format!("{EVENT_CARD}/root.js"),
+            &super::card_entry(&event_card()),
+        )
+        .with_fetchable(GRAND)
+        .with_module(
+            &format!("{GRAND}/root.js"),
+            &super::card_entry(&grand_card()),
+        )
+        .with_fetchable(SECOND)
+        .with_module(
+            &format!("{SECOND}/root.js"),
+            &super::card_entry(&second_event_card()),
+        )
+        .with_style_sheet_probe();
+    let spec = with_bts(
+        spec,
+        EVENT_CARD,
+        "app.publishEvent = (name, event) => log('published ' + name + ' ' + \
+         event.target.id + ' ' + event.detail.x + ',' + event.detail.y);",
+    );
+    with_bts(with_bts(spec, GRAND, ""), SECOND, "").create(Arc::new(NoWakeup))
+}
+
+/// What the published frame hits at `(x, y)`: the hit node's `id`, and the
+/// `id` of the shadow host of the tree it is in. Asked briefly, as
+/// [`pump_until`] asks: the document's thread may be parked on a source the
+/// next turn of this one answers.
+fn hit_ids(engine: &mut TestEngine, x: f32, y: f32) -> Option<(Option<String>, Option<String>)> {
+    let frame = engine.published_frame()?;
+    let node = frame.hit(dom::Point2D::new(x, y), &|_| None, None)?.node;
+    engine
+        .view
+        .probe_document_within(Duration::from_millis(20), move |tree| {
+            let id = |node| {
+                tree.get(node)
+                    .and_then(|live| live.attribute("id"))
+                    .map(str::to_owned)
+            };
+            let host = tree
+                .shadow_root_of(node)
+                .and_then(|root| tree.shadow_host(root));
+            (id(node), host.and_then(id))
+        })
+}
+
+/// Pumps until the published frame hits what `wanted` accepts at `(x, y)`,
+/// collecting every event.
+fn pump_until_hit(
+    engine: &mut TestEngine,
+    events: &mut Vec<EngineEvent>,
+    (x, y): (f32, f32),
+    wanted: impl Fn(&(Option<String>, Option<String>)) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        for event in engine.pump() {
+            assert!(!event.is_fatal(), "the view ended: {event:?}");
+            events.push(event);
+        }
+        let hit = hit_ids(engine, x, y);
+        if hit.as_ref().is_some_and(&wanted) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "never hit what was wanted at ({x}, {y}), last {hit:?}: {events:?}"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// A tap at `(x, y)`: a touch down and its release in place.
+fn tap(engine: &mut TestEngine, (x, y): (f32, f32)) {
+    for phase in [dom::input::PointerPhase::Down, dom::input::PointerPhase::Up] {
+        engine.dispatch_input(dom::input::InputEvent::pointer(
+            dom::Point2D::new(x, y),
+            1,
+            dom::input::PointerKind::Touch,
+            phase,
+        ));
+    }
+}
+
+/// The console lines among `events` that a `tap` or a `keydown` handler of
+/// the event tests logged, in order: none of the `uiappear` lines, whose
+/// delivery entry may land anywhere among them, nor the BTS's.
+fn event_lines(events: &[EngineEvent]) -> Vec<&str> {
+    const LABELS: [&str; 13] = [
+        "page-capture ",
+        "page-global ",
+        "page-key ",
+        "wrapper",
+        "card-capture ",
+        "card-page ",
+        "card-global ",
+        "card-view ",
+        "card-swiper ",
+        "card-key",
+        "grand-capture ",
+        "grand-view ",
+        "second-view ",
+    ];
+    events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::ConsoleMessage { message, .. }
+                if LABELS.iter().any(|label| message.starts_with(label)) =>
+            {
+                Some(message.as_str())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Pumps until `last` is logged, then a little longer for anything that
+/// should not come, and answers the event lines logged meanwhile; nothing
+/// may be reported.
+fn lines_until(engine: &mut TestEngine, last: &str) -> Vec<String> {
+    let mut events = Vec::new();
+    pump_until_logged(engine, &mut events, last);
+    events.extend(pump_for(engine, Duration::from_millis(60)));
+    assert_eq!(reported(&events), Vec::<&str>::new());
+    event_lines(&events)
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Runs one of [`event_host`]'s ops and waits until it ran.
+fn event_op(engine: &mut TestEngine, op: &str) {
+    operate(engine, op);
+    let mut events = Vec::new();
+    pump_until_logged(engine, &mut events, &format!("page-op {op}"));
+    assert_eq!(reported(&events), Vec::<&str>::new());
+}
+
+/// Boots [`event_view`] and waits until its card and grand-card are hit
+/// where they are drawn.
+fn booted_event_view() -> TestEngine {
+    let mut engine = event_view();
+    let mut events = Vec::new();
+    pump_until_hit(&mut engine, &mut events, CV, |hit| {
+        hit.0.as_deref() == Some("cv")
+    });
+    pump_until_hit(&mut engine, &mut events, GV, |hit| {
+        hit.0.as_deref() == Some("gv")
+    });
+    assert_eq!(reported(&events), Vec::<&str>::new());
+    engine
+}
+
+/// Inside `cv`: the frame's border box starts at (20, 30), so (100, 30) in
+/// the card.
+const CV: (f32, f32) = (120.0, 60.0);
+/// Inside the swiper's own shadow content, its `#content`: (100, 90) in the
+/// card.
+const SWIPER: (f32, f32) = (120.0, 120.0);
+/// Inside the grand-card's `gv`: the inner frame starts at (20, 150) in the
+/// viewport, so (100, 30) in the grand-card and (100, 150) in the card.
+const GV: (f32, f32) = (120.0, 180.0);
+/// Inside the wrapper's padding, outside the frame.
+const PADDING: (f32, f32) = (5.0, 5.0);
+
+/// A tap inside a frame's card runs the page's handlers first, at the
+/// frame — `target` the frame, retargeted, and `detail` in the viewport —
+/// then the card's own, at its node, with `detail` relative to the frame's
+/// border box; the card's background-thread handler is published to the
+/// card's own BTS. The kernel calls the page realm and then the card's
+/// realm, each once at the path's top, and each walks the steps of the path
+/// it holds handles for. Each card's `catch` ends its own
+/// walk alone: `cv`'s `catchtap` stops the card's page's bind and leaves the
+/// host's wrapper's alone (web-core's semantics, user ruling).
+#[test]
+fn a_tap_in_a_frames_card_runs_the_pages_handlers_then_the_cards() {
+    let mut engine = booted_event_view();
+    tap(&mut engine, CV);
+    let mut events = Vec::new();
+    pump_until_logged(&mut engine, &mut events, "card-global tap cv 100,30");
+    pump_until_logged(
+        &mut engine,
+        &mut events,
+        &format!("bts {EVENT_CARD} published card-handler cv 100,30"),
+    );
+    events.extend(pump_for(&mut engine, Duration::from_millis(60)));
+    assert_eq!(
+        event_lines(&events),
+        [
+            "page-capture tap frame 120,60",
+            "wrapper tap frame 120,60",
+            "page-global tap frame 120,60",
+            "card-capture tap cv 100,30",
+            "card-view tap cv 100,30",
+            "card-global tap cv 100,30",
+        ]
+    );
+    assert_eq!(reported(&events), Vec::<&str>::new());
+}
+
+/// The other direction: the page's `capture-catch` on the wrapper ends the
+/// page's walk — its frame and the wrapper's bubble hear nothing — and the
+/// card's whole dispatch still runs, as each web-core card walks its own.
+#[test]
+fn a_pages_catch_does_not_stop_the_frames_card() {
+    let mut engine = booted_event_view();
+    event_op(&mut engine, "catch");
+    tap(&mut engine, CV);
+    let lines = lines_until(&mut engine, "card-global tap cv 100,30");
+    assert_eq!(
+        lines,
+        [
+            "page-capture tap frame 120,60",
+            "wrapper-catch tap frame 120,60",
+            "page-global tap frame 120,60",
+            "card-capture tap cv 100,30",
+            "card-view tap cv 100,30",
+            "card-global tap cv 100,30",
+        ]
+    );
+}
+
+/// A card's `global-bindtap` hears the taps inside its frame, and no
+/// other: a tap in the wrapper's padding is the page's alone. The card's
+/// registration is reached only by a path through the frame's shadow root,
+/// its tree's root, as web-core's card listens on its own shadow root.
+#[test]
+fn a_cards_global_bind_hears_only_taps_inside_its_frame() {
+    let mut engine = booted_event_view();
+    let mut events = Vec::new();
+    pump_until_hit(&mut engine, &mut events, PADDING, |hit| {
+        hit.0.as_deref() == Some("wrapper")
+    });
+    tap(&mut engine, PADDING);
+    let lines = lines_until(&mut engine, "page-global tap wrapper 5,5");
+    assert_eq!(
+        lines,
+        [
+            "page-capture tap wrapper 5,5",
+            "wrapper tap wrapper 5,5",
+            "page-global tap wrapper 5,5",
+        ]
+    );
+}
+
+/// A non-composed event at a card's node — `cv`'s own `uiappear` — stays in
+/// the card's tree: the card hears it, and the page, which captures
+/// `uiappear`, hears only its own. So does one in the grand-card, whose
+/// frame is no step of the path.
+#[test]
+fn a_non_composed_event_at_a_cards_node_reaches_only_the_card() {
+    let mut engine = event_view();
+    let mut events = Vec::new();
+    pump_until_logged(&mut engine, &mut events, "card-appear cv");
+    pump_until_logged(&mut engine, &mut events, "grand-appear gv");
+    events.extend(pump_for(&mut engine, Duration::from_millis(100)));
+    let appeared: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::ConsoleMessage { message, .. } if message.contains("appear") => {
+                Some(message.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        appeared.iter().all(|line| [
+            "card-appear cv",
+            "grand-appear gv",
+            "page-appear uiappear page"
+        ]
+        .contains(line)),
+        "{appeared:?}"
+    );
+    assert_eq!(logged_times(&events, "card-appear cv"), 1);
+    assert_eq!(logged_times(&events, "grand-appear gv"), 1);
+    assert_eq!(reported(&events), Vec::<&str>::new());
+}
+
+/// A UA component inside a card stays what it is to script: a tap on its
+/// own shadow content reaches the card at the component, retargeted, and
+/// nothing names an inner node. The page hears it at the frame.
+#[test]
+fn a_ua_component_inside_a_card_is_retargeted_to_its_host() {
+    let mut engine = booted_event_view();
+    let mut events = Vec::new();
+    pump_until_hit(&mut engine, &mut events, SWIPER, |hit| {
+        hit.1.as_deref() == Some("swiper")
+    });
+    tap(&mut engine, SWIPER);
+    let lines = lines_until(&mut engine, "card-global tap swiper 100,90");
+    assert_eq!(
+        lines,
+        [
+            "page-capture tap frame 120,120",
+            "wrapper tap frame 120,120",
+            "page-global tap frame 120,120",
+            "card-capture tap swiper 100,90",
+            "card-swiper tap swiper 100,90",
+            "card-page tap swiper 100,90",
+            "card-global tap swiper 100,90",
+        ]
+    );
+}
+
+/// A frame inside a frame's card: the page, then the card at its inner
+/// frame, then the grand-card at its own node, each `detail` relative to
+/// that realm's own frame.
+#[test]
+fn a_grand_cards_steps_follow_the_cards() {
+    let mut engine = booted_event_view();
+    tap(&mut engine, GV);
+    let lines = lines_until(&mut engine, "grand-view tap gv 100,30");
+    assert_eq!(
+        lines,
+        [
+            "page-capture tap frame 120,180",
+            "wrapper tap frame 120,180",
+            "page-global tap frame 120,180",
+            "card-capture tap inner 100,150",
+            "card-page tap inner 100,150",
+            "card-global tap inner 100,150",
+            "grand-capture tap gv 100,30",
+            "grand-view tap gv 100,30",
+        ]
+    );
+}
+
+/// A key reaches every card's `global-bindkeydown`, with no path in the
+/// card — its `bindkeydown` hears nothing, and its `target` is the element
+/// that bound it — after the page, which hears it at its page as before.
+#[test]
+fn a_key_reaches_a_cards_global_bind() {
+    let mut engine = booted_event_view();
+    engine.dispatch_input(dom::input::InputEvent::key(
+        dom::input::KeyPhase::Down,
+        "a",
+        "KeyA",
+        false,
+        dom::input::Modifiers::default(),
+    ));
+    let lines = lines_until(&mut engine, "card-key-global keydown cv");
+    assert_eq!(
+        lines,
+        ["page-key keydown page", "card-key-global keydown cv"]
+    );
+}
+
+/// A frame showing no card — here one whose `src` does not fetch, so no
+/// realm is made for it — has no realm of its own to call: a tap
+/// inside it is the page's alone, at the frame, and nothing but the one
+/// fetch diagnostic is reported.
+#[test]
+fn a_frame_showing_no_card_leaves_its_taps_to_the_page() {
+    let missing = "app:///missing.web.bundle";
+    let mut engine = TestViewSpec::new(&event_host(missing)).create(Arc::new(NoWakeup));
+    let mut events = Vec::new();
+    pump_until_hit(&mut engine, &mut events, CV, |hit| {
+        hit.0.as_deref() == Some("frame") || hit.1.as_deref() == Some("frame")
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while reported(&events).is_empty() {
+        for event in engine.pump() {
+            assert!(!event.is_fatal(), "the view ended: {event:?}");
+            events.push(event);
+        }
+        assert!(Instant::now() < deadline, "no diagnostic: {events:?}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let messages = reported(&events);
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(
+        messages[0].contains(&format!("frame {missing}")),
+        "{messages:?}"
+    );
+
+    tap(&mut engine, CV);
+    let lines = lines_until(&mut engine, "page-global tap frame 120,60");
+    assert_eq!(
+        lines,
+        [
+            "page-capture tap frame 120,60",
+            "wrapper tap frame 120,60",
+            "page-global tap frame 120,60",
+        ]
+    );
+}
+
+/// A new `src` hands the frame's events to the new card; a disconnection
+/// to nobody, the page alone hearing what lands where the frame was.
+///
+/// The tap does not wait for the first card's `closeRealm`: the new `src`'s
+/// `resetFrame` freed that card's page, and its rows went with its nodes, so
+/// only the new card is called, whether or not the first card's background
+/// thread has acknowledged its disposal yet.
+#[test]
+fn a_frames_events_follow_its_card() {
+    let mut engine = booted_event_view();
+    let mut events = Vec::new();
+    operate(&mut engine, "src");
+    pump_until_logged(&mut engine, &mut events, "page-op src");
+    pump_until_hit(&mut engine, &mut events, CV, |hit| {
+        hit.0.as_deref() == Some("sv")
+    });
+    assert_eq!(reported(&events), Vec::<&str>::new());
+    tap(&mut engine, CV);
+    let lines = lines_until(&mut engine, "second-view tap sv 100,30");
+    assert_eq!(
+        lines,
+        [
+            "page-capture tap frame 120,60",
+            "wrapper tap frame 120,60",
+            "page-global tap frame 120,60",
+            "second-view tap sv 100,30",
+        ]
+    );
+
+    event_op(&mut engine, "detach");
+    pump_until_hit(&mut engine, &mut events, CV, |hit| {
+        hit.0.as_deref() == Some("wrapper")
+    });
+    tap(&mut engine, CV);
+    let lines = lines_until(&mut engine, "page-global tap wrapper 120,60");
+    assert_eq!(
+        lines,
+        [
+            "page-capture tap wrapper 120,60",
+            "wrapper tap wrapper 120,60",
+            "page-global tap wrapper 120,60",
+        ]
+    );
+}
+
+/// A page listener that takes the frame out of the tree inside the tap: the
+/// card is still called, after the page's walk — the
+/// behavior #428 did not have, where the realm of the frame found the frame
+/// out of its page tree and handed the card nothing. Here the realms a
+/// dispatch calls are fixed before its first step, and the card's realm
+/// keeps its registrations until its `closeRealm` runs, which the
+/// frame's disconnection starts in a later entry (design
+/// `event-dispatch-root-registration-design.md` §4.5; deviations.md, the
+/// realms of a dispatch are fixed before its walk). The frame has left the
+/// layout by then, so the card's `boundingClientRect` readback answers no
+/// box and its `detail` falls back to the viewport's origin (`pageOrigin`).
+#[test]
+fn a_frame_an_earlier_listener_removed_still_has_its_card_called() {
+    let mut engine = booted_event_view();
+    event_op(&mut engine, "remove-on-tap");
+    tap(&mut engine, CV);
+    let lines = lines_until(&mut engine, "card-global tap cv 120,60");
+    assert_eq!(
+        lines,
+        [
+            "page-capture tap frame 120,60",
+            "wrapper tap frame 120,60",
+            "page-global tap frame 120,60",
+            "card-capture tap cv 120,60",
+            "card-view tap cv 120,60",
+            "card-global tap cv 120,60",
+        ]
+    );
+}
+
+/// A page listener that gives the frame a new `src` inside the tap: the
+/// page's walk goes on — the wrapper's bind and the page's global after the
+/// listener still run — the first card hears nothing, and nothing is
+/// reported, as #428 had it. The new `src` runs the first card's `teardown`
+/// inside the listener, and its `resetFrame` frees that card's page, whose
+/// nodes take the card's rows with them, so the card's call later at the
+/// same step finds it no registration for `tap` and is skipped, though its
+/// realm stays until its background thread acknowledges the disposal.
+#[test]
+fn a_frame_an_earlier_listener_gave_a_new_src_mid_dispatch() {
+    let mut engine = booted_event_view();
+    event_op(&mut engine, "src-on-tap");
+    tap(&mut engine, CV);
+    let lines = lines_until(&mut engine, "page-global tap frame 120,60");
+    assert_eq!(
+        lines,
+        [
+            "page-capture tap frame 120,60",
+            "wrapper tap frame 120,60",
+            "page-global tap frame 120,60",
+        ],
+    );
 }

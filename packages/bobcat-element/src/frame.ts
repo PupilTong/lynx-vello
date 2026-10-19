@@ -1,10 +1,11 @@
 // The `bobcat:frame` ESM: what a `frame` element does in the realm that
 // holds its handle — the parent half of a nested card.
 //
-// The `frame` custom element (`bobcat-core`'s `main/tree/frame.rs`) owns the
-// nested page, `page[part=page]` in its shadow root, for the element's whole
-// life. Which card renders under it, what that card is given, and when it is
-// let go of, is this module's, over four inputs:
+// The `frame` custom element (`bobcat-core`'s `main/tree/frame.rs`) holds the
+// nested page, `page[part=page]` in its shadow root, which belongs to the
+// card rendered under it: letting go of a card frees its page, and the next
+// card gets a fresh one. Which card renders, what that card is given, and
+// when it is let go of, is this module's, over four inputs:
 //
 // - `frameSourceChanged`, which `bobcat:element` calls after it has written
 //   `src` to a frame's node;
@@ -69,15 +70,18 @@
 //    its timers.
 //
 // Letting go (`teardown`) is two calls in order: the child's `dispose`, and
-// `resetFrame(frameId)`, which frees everything under the nested page and
-// the sheets on the frame's shadow root at once. The child's `dispose` lets
+// `resetFrame(frameId)`, which frees the nested page with everything under
+// it and the sheets on the frame's shadow root at once, and builds the next
+// card's page. The old card's listener registrations and exposure
+// registrations go with its nodes, so no dispatch calls it again for a name
+// it held on them. The child's `dispose` lets
 // go of the frames its own card loaded and starts its card's disposal: the
 // card's BTS runs its app cleanup and acknowledges, the child terminates the
 // Worker, and only then calls `closeRealm`. Until then the child stays, for
 // the host keeps a realm whose worker still runs; it is freed outside every
 // JavaScript call once it closed. The frame keeps its `src`, its `data` and
 // its `global-props`, which the next boot reads, and a new `src` boots into
-// the emptied nested page without waiting for the old card's BTS.
+// the fresh nested page without waiting for the old card's BTS.
 //
 // Every step checks that the frame still wants this load: a later `src` or a
 // teardown bumps the frame's generation, and a fetch or an import that
@@ -385,9 +389,10 @@ function startFrame(
 }
 
 /**
- * Lets go of the frame's card: starts its disposal, then frees what it built
- * under the nested page and the sheets it mounted on the frame's shadow
- * root, without waiting for the card's BTS to acknowledge. The frame keeps
+ * Lets go of the frame's card: starts its disposal, then frees its nested
+ * page with what it built there and the sheets it mounted on the frame's
+ * shadow root, and builds the next card's page, without waiting for the
+ * card's BTS to acknowledge. The frame keeps
  * its `src`, which a connection loads again, and its `data` and
  * `global-props`, which that load boots with.
  */

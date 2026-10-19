@@ -945,8 +945,9 @@ export function __CreatePage(
  * from now on: `bobcat:frame-boot` names the nested page of the frame its
  * card renders in (`framePage`) before the card runs. The handle is held by
  * this module and never registered for collection, like the page realm's,
- * so no collection of this realm's ever drops the nested page, which is the
- * frame's for its whole life. A realm whose page is already chosen refuses.
+ * so no collection of this realm's ever drops the nested page; the parent's
+ * `resetFrame` frees it with the card, after which this realm names it no
+ * more. A realm whose page is already chosen refuses.
  */
 export function __BobcatUsePageRoot(nodeId: number): undefined {
   if (pageHandle !== undefined) {

@@ -856,8 +856,9 @@ delivered to the child (`main/workers.rs`'s routes, read by
 `dispatch_worker_event`) and end when the child is freed: `createPage` and `flushElementTree` do not know which realm
 calls them, and the only difference is the child's `retired` flag, which its
 `closeRealm` sets. A `frame` is a custom-element ability: the `frame`
-component (`main/tree/frame.rs`) builds the nested page `page[part=page]` in
-its shadow root for the element's life and queues its connections as
+component (`main/tree/frame.rs`) builds a nested page `page[part=page]` in
+its shadow root for each card — the first in `constructed`, each later one
+when `resetFrame` frees the last — and queues its connections as
 `ComponentEvent::Frame`, which the page realm hears as `bobcat:frame`'s
 `__BobcatFrameConnected`/`__BobcatFrameDisconnected`. What makes a child is
 `bobcat:frame` (`packages/bobcat-element/src/frame.ts`), when a `frame`'s
@@ -873,8 +874,9 @@ carries the view's native module table; later writes `bobcat:frame` hands the
 running child as its `updateData`/`updateGlobalProps`, which post to that BTS
 too. A new `src` or a disconnection calls the child's `dispose` (its BTS's
 `dispose`, then `closeRealm` once that is acknowledged; the child is kept while
-its worker runs) and then, without waiting, `resetFrame`, which frees the nested page's children and the shadow root's
-sheets (see AGENTS.md, "The frame's lifecycle"). A worker realm's child has
+its worker runs) and then, without waiting, `resetFrame`, which frees the old
+card's nested page with everything under it and the shadow root's sheets and
+builds the next card's page (see AGENTS.md, "The frame's lifecycle"). A worker realm's child has
 the core alone.
 
 ### Realm construction and driving
