@@ -7984,7 +7984,8 @@ fn exposure_observer(
 /// `20rpx` top screen margin on this realm's 393px-wide viewport is
 /// `20 × 393 / 750` px of target margin, on the bottom, the side a positive
 /// screen margin lands on. Written through `__SetAttribute`,
-/// which reaches the registration through the host's `setAttribute`.
+/// which reaches the registration through the host's `setAttribute`; the
+/// record listener the script files is what registers the element.
 #[test]
 fn an_rpx_exposure_margin_resolves_against_the_viewport_width() {
     let (mut js, mut runtime, elements) = runtime();
@@ -7997,6 +7998,8 @@ fn an_rpx_exposure_margin_resolves_against_the_viewport_width() {
           __AppendElement(__CreatePage('card', 0), view);
           __SetAttribute(view, 'exposure-screen-margin-top', '20rpx');
           __SetAttribute(view, 'exposure-id', 'card');
+          globalThis.record = () => {};
+          __AddEventListener(view, 'bobcat:exposure', record, {});
           globalThis.view = view;
         };
         ",
@@ -8005,7 +8008,7 @@ fn an_rpx_exposure_margin_resolves_against_the_viewport_width() {
         .expect("main-thread script");
     let view = first_card_element(&elements);
     let observer =
-        exposure_observer(&elements, view).expect("an `exposure-id` registers the element");
+        exposure_observer(&elements, view).expect("the record listener registers the element");
     assert_eq!(
         elements
             .tree()
@@ -8016,7 +8019,8 @@ fn an_rpx_exposure_margin_resolves_against_the_viewport_width() {
     );
 
     // Removing the id through `__SetAttribute`'s `null` is the host's
-    // `removeAttribute`, which lets the registration go.
+    // `removeAttribute`, which re-arms the element the listener keeps
+    // registered; removing the listener lets the registration go.
     runtime
         .evaluate_module(
             &mut js,
@@ -8028,13 +8032,27 @@ fn an_rpx_exposure_margin_resolves_against_the_viewport_width() {
             "removing the exposure id",
         )
         .expect("removing the attribute");
+    let rearmed = exposure_observer(&elements, view).expect("the listener keeps it registered");
+    assert_ne!(rearmed, observer, "the attribute write re-armed it");
+    runtime
+        .evaluate_module(
+            &mut js,
+            r"
+        import { __RemoveEventListener } from 'bobcat:element';
+        __RemoveEventListener(globalThis.view, 'bobcat:exposure', globalThis.record, {});
+        ",
+            "app:///exposure-unlisten.js",
+            "removing the record listener",
+        )
+        .expect("removing the listener");
     assert_eq!(exposure_observer(&elements, view), None);
 }
 
-/// The members exposure follows, from script: `listenerOpened` for
-/// `uiappear` registers an element that has no `exposure-id` and
-/// `listenerClosed` lets it go again — the listener table is what exposure
-/// reads — `switchExposure` stops and resumes detection, and each refuses an
+/// The members exposure follows, from script: `listenerOpened` for the
+/// record event `bobcat:exposure` registers an element that has no
+/// `exposure-id` and `listenerClosed` lets it go again — the listener table
+/// is what exposure reads, and a `uiappear` row alone registers nothing —
+/// `switchExposure` stops and resumes detection, and each refuses an
 /// argument that is not its shape: a flag is `0` or `1`, as every tree
 /// member's is, and kinds are 1 to 7.
 #[test]
@@ -8073,12 +8091,23 @@ fn the_listener_members_register_exposure_and_switch_exposure_switches_detection
     assert_eq!(exposure_observer(&elements, view), None);
 
     run("listenerOpened(view, 'uiappear', 1);");
-    let first = exposure_observer(&elements, view).expect("a listener registers the element");
-    run("listenerOpened(view, 'uiappear', 5); listenerOpened(view, 'uidisappear', 2);");
+    assert_eq!(
+        exposure_observer(&elements, view),
+        None,
+        "an element event's row alone registers nothing",
+    );
+    run("listenerOpened(view, 'bobcat:exposure', 1);");
+    let first =
+        exposure_observer(&elements, view).expect("the record listener registers the element");
+    run(r"
+        listenerOpened(view, 'bobcat:exposure', 5);
+        listenerOpened(view, 'uiappear', 5);
+        listenerOpened(view, 'uidisappear', 2);
+    ");
     assert_eq!(
         exposure_observer(&elements, view),
         Some(first),
-        "new kinds and the other name are no change of whether the element listens",
+        "new kinds and the element events are no change of whether the element is registered",
     );
     run("listenerClosed(view, 'uidisappear');");
     run("switchExposure(0, 1);");
@@ -8091,6 +8120,12 @@ fn the_listener_members_register_exposure_and_switch_exposure_switches_detection
     let resumed = exposure_observer(&elements, view).expect("resuming observes it again");
     assert_ne!(resumed, first, "with an observer of its own");
     run("listenerClosed(view, 'uiappear');");
+    assert_eq!(
+        exposure_observer(&elements, view),
+        Some(resumed),
+        "the element events going leave the registration"
+    );
+    run("listenerClosed(view, 'bobcat:exposure');");
     assert_eq!(exposure_observer(&elements, view), None);
 
     run(r"
@@ -9919,8 +9954,8 @@ fn a_realm_that_throws_does_not_keep_the_next_from_hearing_the_event() {
 }
 
 /// Exposure follows the listener table, whichever realm's rows it holds: an
-/// element the page realm listens on for `uiappear` stays registered while a
-/// second realm's row for it remains, and goes with the last.
+/// element the page realm files the record listener on stays registered
+/// while a second realm's row for it remains, and goes with the last.
 #[test]
 fn exposure_follows_every_realms_rows_for_an_element() {
     let (mut js, mut runtime, elements) = runtime();
@@ -9934,10 +9969,10 @@ fn exposure_follows_every_realms_rows_for_an_element() {
         __AppendElement(page, view);
         globalThis.view = view;
         globalThis.listener = () => {{}};
-        __AddEventListener(view, 'uiappear', listener, {{}});
+        __AddEventListener(view, 'bobcat:exposure', listener, {{}});
         globalThis.realm = await frameRealm();
-        realm.evaluate(`id => H.listenerOpened(id, 'uidisappear', 4)`)(__GetElementUniqueID(view));
-        __RemoveEventListener(view, 'uiappear', listener, {{}});
+        realm.evaluate(`id => H.listenerOpened(id, 'bobcat:exposure', 4)`)(__GetElementUniqueID(view));
+        __RemoveEventListener(view, 'bobcat:exposure', listener, {{}});
     "
             ),
             "app:///exposure-two-realms.js",
@@ -9952,7 +9987,7 @@ fn exposure_follows_every_realms_rows_for_an_element() {
         .evaluate_module(
             &mut js,
             "import { __GetElementUniqueID } from 'bobcat:element';
-             globalThis.realm.evaluate(`id => H.listenerClosed(id, 'uidisappear')`)(
+             globalThis.realm.evaluate(`id => H.listenerClosed(id, 'bobcat:exposure')`)(
                  __GetElementUniqueID(globalThis.view));",
             "app:///exposure-two-realms-close.js",
             "closing the child's row",
@@ -9999,8 +10034,8 @@ fn a_freed_elements_last_registration_unpublishes_its_name_at_the_next_flush() {
 }
 
 /// A card's page goes with the card, and its exposure registration with it:
-/// with the card listening for `uiappear` on its own page root and the page
-/// realm for `uidisappear` there too, `resetFrame` frees the nested page, so
+/// with the card's record listener on its own page root and the page
+/// realm's row for the record event there too, `resetFrame` frees the nested page, so
 /// both rows and the page's exposure observer leave through the document's
 /// free path, and the fresh page the next card gets is registered for
 /// nothing. No realm needs forgetting for it.
@@ -10014,9 +10049,9 @@ fn a_reset_cards_page_takes_its_exposure_registration_with_it() {
             &format!(
                 "import {{ framePage, listenerOpened }} from 'bobcat-internal:host';
                  globalThis.realm.evaluate(
-                     `() => E.__AddEventListener(E.__CreatePage(), 'uiappear', () => {{}}, {{}})`,
+                     `() => E.__AddEventListener(E.__CreatePage(), 'bobcat:exposure', () => {{}}, {{}})`,
                  )();
-                 listenerOpened(framePage({frame}), 'uidisappear', 1);",
+                 listenerOpened(framePage({frame}), 'bobcat:exposure', 1);",
                 frame = packed_node_id(frame)
             ),
             "app:///expose-the-root.js",
@@ -10025,7 +10060,7 @@ fn a_reset_cards_page_takes_its_exposure_registration_with_it() {
         .unwrap();
     assert!(
         exposure_observer(&elements, nested).is_some(),
-        "a listener registers the page for exposure detection"
+        "the record listener registers the page for exposure detection"
     );
     runtime
         .evaluate_module(
@@ -10048,8 +10083,7 @@ fn a_reset_cards_page_takes_its_exposure_registration_with_it() {
         "and its exposure registration with it"
     );
     let fresh = frame_page_of(&elements.tree(), frame);
-    assert!(!elements.tree().has_listener(fresh, "uiappear"));
-    assert!(!elements.tree().has_listener(fresh, "uidisappear"));
+    assert!(!elements.tree().has_listener(fresh, "bobcat:exposure"));
     assert_eq!(exposure_observer(&elements, fresh), None);
 }
 

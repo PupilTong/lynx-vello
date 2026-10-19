@@ -88,6 +88,13 @@ const EXPOSURE_EXPORT: &str = "__BobcatSendExposure";
 const APPEAR_EVENT: &str = "uiappear";
 const DISAPPEAR_EVENT: &str = "uidisappear";
 
+/// The internal event an element's exposure record is: the name the realm's
+/// Lynx layer files its record listener under, on every element it registers
+/// for exposure, and so the listener-table row that registers the element
+/// here ([`Exposure::set_registered`]). The `bobcat:` prefix keeps it apart
+/// from every name an app can file.
+const EXPOSURE_RECORD_EVENT: &str = "bobcat:exposure";
+
 /// CSSOM-View's two scroll events, fired at a scroll container on this
 /// thread: `scroll` when an adopted or script-requested offset moved it,
 /// `scrollend` when the scroll finished. Non-bubbling, not composed, `{}`
@@ -1015,10 +1022,11 @@ impl DocumentSlot {
     /// at once ([`Self::publish_route_changes`]), after the last removals
     /// freed nodes left waiting, so the painter is told whether a name is
     /// routed in the order its registration count crossed zero. A change of
-    /// whether `node` has any registration for `uiappear` or `uidisappear`
-    /// is what registers it for exposure detection, or lets it go
-    /// ([`Exposure::set_listens`]); nothing else tells exposure about a
-    /// listener.
+    /// whether `node` has a [`EXPOSURE_RECORD_EVENT`] row is what registers
+    /// it for exposure detection, or lets it go, and a change of whether it
+    /// has a `uiappear` or `uidisappear` row whether it hears its element
+    /// events ([`Exposure::set_registered`]); nothing else tells exposure
+    /// about a listener.
     fn open_listener(
         &mut self,
         node: dom::NodeId,
@@ -1029,10 +1037,10 @@ impl DocumentSlot {
         self.apply_pending_last_removals();
         let exposure = is_exposure_event(name);
         let document = self.document.as_mut().expect(DOCUMENT_EXISTS);
-        let heard = exposure && hears_exposure(document, node);
+        let before = exposure.then(|| exposure_rows(document, node));
         let change = document.add_listener(node, name, kinds, key);
-        if exposure {
-            self.exposure_follows(node, heard);
+        if let Some(before) = before {
+            self.exposure_follows(node, before);
         }
         self.publish_route_changes(&[(name, change)]);
     }
@@ -1044,24 +1052,24 @@ impl DocumentSlot {
         self.apply_pending_last_removals();
         let exposure = is_exposure_event(name);
         let document = self.document.as_mut().expect(DOCUMENT_EXISTS);
-        let heard = exposure && hears_exposure(document, node);
+        let before = exposure.then(|| exposure_rows(document, node));
         let change = document.remove_listener(node, name, key);
-        if exposure {
-            self.exposure_follows(node, heard);
+        if let Some(before) = before {
+            self.exposure_follows(node, before);
         }
         self.publish_route_changes(&[(name, change)]);
     }
 
-    /// Tells exposure whether `node` has a `uiappear`/`uidisappear`
-    /// registration now, when that answer is no longer `before`.
-    fn exposure_follows(&mut self, node: dom::NodeId, before: bool) {
+    /// Tells exposure what the listener table now says of `node`
+    /// ([`exposure_rows`]), when that is no longer `before`.
+    fn exposure_follows(&mut self, node: dom::NodeId, before: (bool, bool)) {
         let Self {
             document, exposure, ..
         } = self;
         let document = document.as_mut().expect(DOCUMENT_EXISTS);
-        let now = hears_exposure(document, node);
+        let now @ (registered, hears) = exposure_rows(document, node);
         if now != before {
-            exposure.set_listens(document, node, now);
+            exposure.set_registered(document, node, registered, hears);
         }
     }
 
@@ -3970,16 +3978,27 @@ fn install_event_members(
     Ok(())
 }
 
-/// Whether `name` is one of the two an element hears its exposure by, so a
-/// change of its registrations is a change of whether the element is
-/// registered for exposure detection.
+/// Whether a change of `name`'s registrations on an element can change what
+/// exposure is told of it ([`exposure_rows`]): the record event, and the two
+/// an element hears its exposure by.
 fn is_exposure_event(name: &str) -> bool {
-    name == APPEAR_EVENT || name == DISAPPEAR_EVENT
+    name == EXPOSURE_RECORD_EVENT || name == APPEAR_EVENT || name == DISAPPEAR_EVENT
+}
+
+/// What the listener table says of `node` for exposure: whether some realm
+/// filed the record listener ([`EXPOSURE_RECORD_EVENT`]) on it, which is what
+/// registers it, and whether it hears its element events
+/// ([`hears_exposure`]).
+fn exposure_rows(document: &LynxDocument, node: dom::NodeId) -> (bool, bool) {
+    (
+        document.has_listener(node, EXPOSURE_RECORD_EVENT),
+        hears_exposure(document, node),
+    )
 }
 
 /// Whether some realm registered for `uiappear` or `uidisappear` on `node`,
-/// in any form: what registers an element for exposure whether or not it
-/// carries an `exposure-id`. Every form counts, `__AddEventListener`'s
+/// in any form: what makes a registered element hear its element events.
+/// Every form counts, `__AddEventListener`'s
 /// included — native's rule: `FiberAddEventListener` syncs the name into the
 /// element's event set for every form it files
 /// (`core/runtime/lepus/bindings/renderer_functions.cc:1077`), and native
@@ -4263,9 +4282,10 @@ fn install_attribute_members(
 /// That is the one exception to "this layer knows no attribute names". The
 /// exposure attributes (`exposure-id`, `exposure-scene`, `exposure-area`, the
 /// screen and ui margins) belong to every tag, so no tag's component can own
-/// them, and what they drive — the
-/// document's exposure registrations — sits beside the document in the slot,
-/// out of a component's reach. The slot is told after the mutation, so the
+/// them, and what they drive — the observer of a registered element, re-armed
+/// from them — sits beside the document in the slot, out of a component's
+/// reach. They register nothing by themselves: the record listener the
+/// realm's Lynx layer files does. The slot is told after the mutation, so the
 /// registration reads the attributes as they now are.
 fn install_attribute_writes(
     engine: &mut ScriptEngine,

@@ -385,7 +385,7 @@ impl Page {
     /// `uiappear`/`uidisappear`, then the `exposure` and `disexposure` record
     /// lists (`crate::main::exposure`) — and that is why this is also the
     /// entry posted for exposure changes that formed outside any update:
-    /// a teardown, a `stopExposure` that sent records, a freed element. A
+    /// a teardown or a `stopExposure` that sent records. A
     /// listener that throws, or a record list the realm did not take, is
     /// nonfatal — `ListenerFailed`, the standing every listener here has —
     /// and the rest is still delivered.
