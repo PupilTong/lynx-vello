@@ -65,10 +65,11 @@
 //! nothing and is shaped with the core's override alone.
 //!
 //! An edge next to an atomic box is no cluster: it is added to the atom's
-//! advance (the core's `NormalizedBlock::box_advance`, recorded in
-//! [`super::boxes::InlineBoxes::slot_edges`]), because the breaker already
-//! treats an atom as one unbreakable piece with an opportunity on each side,
-//! and a cluster beside it would be separable from it.
+//! advance (the core's `Additions::box_advance`, which [`EdgeAdditions`]
+//! answers from [`super::boxes::InlineBoxes::slot_edges`]), because the
+//! breaker already treats an atom as one unbreakable piece with an
+//! opportunity on each side, and a cluster beside it would be separable from
+//! it.
 //!
 //! Several edges meeting at one place — boxes closing, then boxes opening
 //! — share at most one end cluster and one start cluster, which list their
@@ -106,7 +107,10 @@ use parley::{CHROMIUM_LINE_BREAK_OVERRIDE, LineBreakContext};
 
 use super::InlineFlowItem;
 use super::boxes::{self, BoxSpec, InlineBoxes};
-use crate::text::paragraph::content::{Insertion, MarkerAt, NormalizedBlock};
+use crate::text::paragraph::Additions;
+use crate::text::paragraph::content::{
+    InsertedSegment, Insertion, MarkerAt, MarkerPlaces, NormalizedBlock,
+};
 use crate::text::paragraph::shape::BreakOverride;
 
 /// The mark that ends a start edge cluster, after the copied character:
@@ -210,12 +214,12 @@ impl Boundaries {
     /// `Close` item is one marker, in item order, then come the markers
     /// appended for the boxes the items left open
     /// ([`super::InlineFlow::new`]). A `Close` with no box open is ignored.
-    fn of(block: &NormalizedBlock, items: &[InlineFlowItem<'_>]) -> Self {
+    fn of(places: MarkerPlaces, items: &[InlineFlowItem<'_>]) -> Self {
         let mut spans: Vec<SpanRecord> = Vec::new();
         let mut markers: Vec<Marker> = Vec::new();
         let mut open: Vec<u32> = Vec::new();
         let mut item_span = Vec::with_capacity(items.len());
-        let mut found = block.markers.iter();
+        let mut found = places.markers.iter();
         // The next marker, as the boundary `opening` or closing `span`: its
         // index among the boundaries, and how many atoms came before it.
         let boundary = |found: &mut core::slice::Iter<'_, MarkerAt>,
@@ -286,7 +290,7 @@ impl Boundaries {
         Self {
             spans,
             markers,
-            pending_emitted: block.space_kept.clone(),
+            pending_emitted: places.space_kept,
             item_span,
         }
     }
@@ -577,20 +581,48 @@ fn before_forced_break(text: &str, end: u32) -> Option<u32> {
     Some(u32::try_from(start).expect("text offsets fit u32"))
 }
 
+/// What [`place`] lays into a flow: its edge clusters, as the core's
+/// inserted segments, and the edges beside atoms, as advance.
+#[derive(Debug, Default)]
+pub(super) struct EdgeAdditions {
+    /// One segment per edge cluster ([`EdgeRun`]), ascending.
+    inserted: Vec<InsertedSegment>,
+    /// The advance beside each atom, before and after it in visual order,
+    /// indexed by slot. Empty when no atom carries an edge.
+    box_advance: Vec<(f32, f32)>,
+}
+
+impl Additions for EdgeAdditions {
+    fn inserted(&self) -> &[InsertedSegment] {
+        &self.inserted
+    }
+
+    fn box_advance(&self, slot: usize) -> (f32, f32) {
+        self.box_advance.get(slot).copied().unwrap_or((0.0, 0.0))
+    }
+
+    /// [`BREAK_OVERRIDE`] once there is an edge cluster.
+    fn break_override(&self) -> Option<BreakOverride> {
+        (!self.inserted.is_empty()).then_some(BREAK_OVERRIDE)
+    }
+}
+
 /// Lays the edge clusters of the inline boxes among `items` into `block`, a
 /// flow's normalized text built from them — every `Open` and `Close` a
-/// marker — and answers every box's place; `specs` are the boxes'
-/// parameters in open order. An edge next to an atom goes into the atom's
-/// advance instead (`NormalizedBlock::box_advance`).
+/// marker, met where `marker_places` says — and answers every box's place
+/// and what was laid in; `specs` are the boxes' parameters in open order. An
+/// edge next to an atom goes into the atom's advance instead
+/// (`Additions::box_advance`).
 pub(super) fn place(
     block: &mut NormalizedBlock,
+    marker_places: MarkerPlaces,
     items: &[InlineFlowItem<'_>],
     specs: Vec<BoxSpec>,
-) -> InlineBoxes {
+) -> (InlineBoxes, EdgeAdditions) {
     if specs.is_empty() {
-        return InlineBoxes::default();
+        return (InlineBoxes::default(), EdgeAdditions::default());
     }
-    let boundaries = Boundaries::of(block, items);
+    let boundaries = Boundaries::of(marker_places, items);
     let records = &boundaries.spans;
     let events = events_in_order(&boundaries, block);
     let mut placer = Placer {
@@ -635,23 +667,24 @@ pub(super) fn place(
         slot_edges,
         ..
     } = placer;
-    block.splice(insertions);
+    let inserted = block.splice(insertions);
     debug_assert!(
-        block
-            .inserted
+        inserted
             .iter()
             .map(|segment| &segment.bytes)
             .eq(edges.iter().map(|edge| &edge.bytes)),
         "every edge cluster is one inserted segment, where the walk put it",
     );
-    if slot_edges
+    let box_advance = if slot_edges
         .iter()
         .any(|&(start, end)| start.is_some() || end.is_some())
     {
-        block.box_advance = (0..slot_edges.len())
+        (0..slot_edges.len())
             .map(|slot| boxes::slot_edge_sides(&specs, &slot_edges, slot))
-            .collect();
-    }
+            .collect()
+    } else {
+        Vec::new()
+    };
     // A box whose boundaries carried no cluster takes the places they landed
     // at; one with an edge took its cluster's.
     let spans = records
@@ -664,14 +697,21 @@ pub(super) fn place(
             slots: record.slots.clone(),
         })
         .collect();
-    InlineBoxes {
+    let boxes = InlineBoxes {
         specs,
         spans,
         edges,
         item_span: boundaries.item_span,
         slot_edges,
         areas: Vec::new(),
-    }
+    };
+    (
+        boxes,
+        EdgeAdditions {
+            inserted,
+            box_advance,
+        },
+    )
 }
 
 /// The boundaries and atoms in source order, each with the byte of the text

@@ -5,17 +5,17 @@ use core::ops::Range;
 
 use parley::{Line, PositionedLayoutItem};
 
-use super::Paragraph;
+use super::{Additions, Paragraph};
 use crate::style::TextBrush;
 
-impl<S> Paragraph<S> {
+impl<S, A: Additions> Paragraph<S, A> {
     /// Calls `visit(units, left, right)` once per cluster or atomic box of
     /// `line` that shows source content, in visual order, with the source
     /// units it covers and its inline extent.
     ///
     /// An inserted segment's cluster covers no source unit and is skipped;
     /// an atom's extent is its own margin box, without the advance laid
-    /// beside it (`content::NormalizedBlock::box_advance`).
+    /// beside it ([`Additions::box_advance`]).
     ///
     /// `line` belongs to a layout whose text starts with this paragraph's
     /// normalized content: the natural layout, or one a consumer built over a
@@ -70,7 +70,7 @@ impl<S> Paragraph<S> {
                     let slot = usize::try_from(inline_box.id).expect("slot ids are table indexes");
                     if slot < content_slots {
                         let unit = block.boxes[slot].unit;
-                        let (before, after) = block.box_advance(slot);
+                        let (before, after) = self.content.additions.box_advance(slot);
                         visit(
                             unit..unit + 1,
                             inline_box.x + before,

@@ -40,7 +40,11 @@ rather than child boxes.
   `extent.rs` (the per-cluster line walk), `query.rs` (the source-range and
   hit queries both paragraph kinds answer). It knows no inline box: a
   consumer's markers, spliced segments, line-break override and atom advance
-  are generic hooks.
+  are generic hooks. What the core reads of them after building lives in the
+  flow's `Additions` type parameter (`Flow<A = ()>`, `Paragraph<S, A = ()>`),
+  `()` for the Lynx block, never in plain `Flow`/`NormalizedBlock` fields: a
+  Lynx `<text>` retains its flow per element, and its size is on the cold
+  layout path.
 - `crates/hughie/src/text/inline/`: the CSS block container's inline
   formatting context — text runs, non-atomic inline boxes with one
   `InlineFragment` per line (`fragment.rs`), their table (`boxes.rs`) and

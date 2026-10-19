@@ -35,10 +35,12 @@
 //! - A marker ([`InlineItem::Marker`]) counts no source unit, emits no text, and leaves white space
 //!   collapsing as it would be without it. The normalizer reports where each one fell
 //!   ([`MarkerAt`]): the text length when it was met, and the collapsible white space sequence open
-//!   then, with whether that sequence kept its space ([`NormalizedBlock::space_kept`]).
+//!   then, with whether that sequence kept its space ([`MarkerPlaces::space_kept`]). The report is
+//!   returned beside the block, not kept in it.
 //! - [`NormalizedBlock::splice`] inserts consumer text into the normalized text after the fact:
-//!   bytes with no source unit, each shaped in a style of its own and listed in
-//!   [`NormalizedBlock::inserted`]. Every offset a caller reads is unchanged by them.
+//!   bytes with no source unit, each shaped in a style of its own, returned as [`InsertedSegment`]s
+//!   for the consumer to keep (`super::Additions::inserted`). Every offset a caller reads is
+//!   unchanged by them.
 
 use core::ops::Range;
 
@@ -53,7 +55,7 @@ pub enum InlineItem<'src> {
     /// A place in the content that is no content: no source unit, no
     /// text, and no break in white space collapsing — the white space around
     /// it collapses as if it were not there. Opaque to the core, which
-    /// reports where it fell ([`NormalizedBlock::markers`]); what it marks is
+    /// reports where it fell ([`MarkerPlaces::markers`]); what it marks is
     /// the consumer's.
     Marker,
 }
@@ -120,7 +122,7 @@ pub(in crate::text) enum WhiteSpaceProcessing {
 pub(in crate::text) struct NormalizedBlock {
     pub(in crate::text) text: String,
     /// Contiguous, non-overlapping, covering `0..text.len()` but for the
-    /// inserted segments in `inserted`, which `super::Flow::spans`
+    /// segments [`Self::splice`] inserted, which `super::Flow::spans`
     /// interleaves to meet the `style_run_builder` precondition. `item`
     /// indexes the input slice.
     pub(in crate::text) ranges: Vec<StyledRange>,
@@ -140,18 +142,16 @@ pub(in crate::text) struct NormalizedBlock {
     /// The box items a `first_line_only` processing dropped, in order: they
     /// have a source unit and no place in the text.
     pub(in crate::text) dropped_boxes: Vec<u32>,
-    /// Where each [`InlineItem::Marker`] fell, in item order.
+}
+
+/// Where the normalizer met the [`InlineItem::Marker`]s of one block.
+#[derive(Debug)]
+pub(in crate::text) struct MarkerPlaces {
+    /// Where each marker fell, in item order.
     pub(in crate::text) markers: Vec<MarkerAt>,
-    /// Whether each collapsible white space sequence kept a space, by the
-    /// sequence's index ([`MarkerAt::space`]).
+    /// Whether each collapsible white space sequence a marker was met in
+    /// kept a space, by the sequence's index ([`MarkerAt::space`]).
     pub(in crate::text) space_kept: Vec<bool>,
-    /// The segments [`Self::splice`] inserted into `text`, ascending.
-    /// `ranges` covers every byte but theirs.
-    pub(in crate::text) inserted: Vec<InsertedSegment>,
-    /// The advance a consumer lays beside each atomic box, indexed like
-    /// `boxes`: before it and after it in visual order. The breaker sees the
-    /// box that much wider; the box itself does not grow. Empty for none.
-    pub(in crate::text) box_advance: Vec<(f32, f32)>,
 }
 
 /// Where the normalizer met one [`InlineItem::Marker`].
@@ -163,7 +163,7 @@ pub(in crate::text) struct MarkerAt {
     pub(in crate::text) byte: u32,
     /// The collapsible white space sequence open when it was met, if any:
     /// the marker lies after that sequence's first character in source
-    /// order, and a space the sequence keeps ([`NormalizedBlock::space_kept`])
+    /// order, and a space the sequence keeps ([`MarkerPlaces::space_kept`])
     /// sits at `byte`.
     pub(in crate::text) space: Option<u32>,
     /// How many atomic boxes came before it, which orders it against a box
@@ -468,8 +468,9 @@ struct Pending {
     item: u32,
     kind: PendingKind,
     /// Which sequence this is, for the markers met while it was open
-    /// ([`MarkerAt::space`]): an index into [`Normalizer::space_kept`].
-    id: u32,
+    /// ([`MarkerAt::space`]): an index into [`Normalizer::space_kept`],
+    /// given when the first of them is met. `None` while none is.
+    id: Option<u32>,
 }
 
 struct Normalizer {
@@ -492,8 +493,8 @@ struct Normalizer {
     dropped_boxes: Vec<u32>,
     /// Every marker, in source order.
     markers: Vec<MarkerAt>,
-    /// Whether each collapsible white space sequence kept its space, by
-    /// [`Pending::id`].
+    /// Whether each collapsible white space sequence a marker was met in
+    /// kept its space, by [`Pending::id`].
     space_kept: Vec<bool>,
 }
 
@@ -501,11 +502,12 @@ struct Normalizer {
 /// is an atomic box rather than a character.
 const OBJECT_REPLACEMENT: char = '\u{FFFC}';
 
-/// Collapses whitespace across the flattened items and builds the source map.
+/// Collapses whitespace across the flattened items and builds the source map,
+/// reporting where the items' markers fell.
 pub(in crate::text) fn normalize(
     items: &[InlineItem<'_>],
     processing: WhiteSpaceProcessing,
-) -> NormalizedBlock {
+) -> (NormalizedBlock, MarkerPlaces) {
     let mut state = Normalizer {
         text: String::new(),
         ranges: Vec::new(),
@@ -569,19 +571,19 @@ impl Normalizer {
     /// A marker: no source unit, no text, and the white space around it
     /// untouched; only where it fell is recorded.
     fn mark(&mut self, item: u32) {
+        let space_kept = &mut self.space_kept;
+        let space = self.pending.as_mut().map(|pending| {
+            *pending.id.get_or_insert_with(|| {
+                space_kept.push(false);
+                u32::try_from(space_kept.len() - 1).expect("sequence count fits u32")
+            })
+        });
         self.markers.push(MarkerAt {
             item,
             byte: self.byte_len(),
-            space: self.pending.as_ref().map(|pending| pending.id),
+            space,
             atoms_before: u32::try_from(self.boxes.len()).expect("box count fits u32"),
         });
-    }
-
-    /// The id the next collapsible white space sequence takes.
-    fn next_pending_id(&mut self) -> u32 {
-        let id = u32::try_from(self.space_kept.len()).expect("sequence count fits u32");
-        self.space_kept.push(false);
-        id
     }
 
     fn consume_box(&mut self, item: u32) {
@@ -606,7 +608,6 @@ impl Normalizer {
     fn queue_space(&mut self, character: char, item: u32) {
         debug_assert_eq!(character.len_utf16(), 1);
         if self.pending.is_none() {
-            let id = self.next_pending_id();
             self.pending = Some(Pending {
                 unit_start: self.units,
                 item,
@@ -615,7 +616,7 @@ impl Normalizer {
                 } else {
                     PendingKind::Space
                 },
-                id,
+                id: None,
             });
         }
         self.units += 1;
@@ -630,7 +631,6 @@ impl Normalizer {
                 pending.item = item;
             }
         } else {
-            let id = self.next_pending_id();
             self.pending = Some(Pending {
                 unit_start: self.units,
                 item,
@@ -639,7 +639,7 @@ impl Normalizer {
                 } else {
                     PendingKind::SegmentBreak
                 },
-                id,
+                id: None,
             });
         }
         self.units += 1;
@@ -712,7 +712,9 @@ impl Normalizer {
             self.text.push(' ');
             self.record_style(start, pending.item);
             self.close_collapsed(pending.unit_start, 1);
-            self.space_kept[pending.id as usize] = true;
+            if let Some(id) = pending.id {
+                self.space_kept[id as usize] = true;
+            }
         } else {
             self.close_collapsed(pending.unit_start, 0);
         }
@@ -802,14 +804,16 @@ impl Normalizer {
         u32::try_from(self.text.len()).expect("normalized text fits u32")
     }
 
-    fn finish(mut self, item_units: Vec<Range<u32>>) -> NormalizedBlock {
+    fn finish(mut self, item_units: Vec<Range<u32>>) -> (NormalizedBlock, MarkerPlaces) {
         if let Some(pending) = self.pending.take() {
             let content_seen = !self.text.is_empty() || !self.boxes.is_empty();
             if content_seen && pending.kind != PendingKind::Suppressed {
                 let start = self.byte_len();
                 self.text.push(' ');
                 self.record_style(start, pending.item);
-                self.space_kept[pending.id as usize] = true;
+                if let Some(id) = pending.id {
+                    self.space_kept[id as usize] = true;
+                }
                 self.segments.push(Segment {
                     norm: Range2 {
                         start,
@@ -831,7 +835,7 @@ impl Normalizer {
                 .all(|entry| self.text.is_char_boundary(entry.byte as usize)),
             "box indexes are emission positions, always char boundaries",
         );
-        NormalizedBlock {
+        let block = NormalizedBlock {
             text: self.text,
             ranges: self.ranges,
             boxes: self.boxes,
@@ -848,11 +852,12 @@ impl Normalizer {
             item_units,
             tabs: self.tabs,
             dropped_boxes: self.dropped_boxes,
+        };
+        let places = MarkerPlaces {
             markers: self.markers,
             space_kept: self.space_kept,
-            inserted: Vec::new(),
-            box_advance: Vec::new(),
-        }
+        };
+        (block, places)
     }
 }
 
@@ -862,12 +867,12 @@ impl NormalizedBlock {
     /// that byte it counts in `atoms_before` and before the rest. Every byte
     /// offset after one moves past it, a styled range or segment it falls
     /// inside is cut there, and the source map counts its bytes as no source
-    /// unit, so every source offset a caller sees is unchanged. Each lands in
-    /// [`Self::inserted`], which the shaper interleaves with the styled
-    /// ranges.
-    pub(in crate::text) fn splice(&mut self, insertions: Vec<Insertion>) {
+    /// unit, so every source offset a caller sees is unchanged. Returns the
+    /// inserted segments, ascending, which the shaper interleaves with the
+    /// styled ranges (`super::Additions::inserted`).
+    pub(in crate::text) fn splice(&mut self, insertions: Vec<Insertion>) -> Vec<InsertedSegment> {
         if insertions.is_empty() {
-            return;
+            return Vec::new();
         }
         debug_assert!(
             insertions.windows(2).all(
@@ -928,6 +933,7 @@ impl NormalizedBlock {
         );
         let mut copied = 0;
         let mut moved = 0;
+        let mut inserted = Vec::with_capacity(insertions.len());
         for insertion in insertions {
             text.push_str(&self.text[copied..insertion.at as usize]);
             text.push_str(&insertion.text);
@@ -935,7 +941,7 @@ impl NormalizedBlock {
             let length = u32::try_from(insertion.text.len()).expect("fits u32");
             let start = insertion.at + moved;
             moved += length;
-            self.inserted.push(InsertedSegment {
+            inserted.push(InsertedSegment {
                 bytes: start..start + length,
                 style: insertion.style,
                 extra_spacing: insertion.extra_spacing,
@@ -944,6 +950,7 @@ impl NormalizedBlock {
         }
         text.push_str(&self.text[copied..]);
         self.text = text;
+        inserted
     }
 
     /// The source map's segments in the spliced text: cut like the styled
@@ -1056,12 +1063,6 @@ impl NormalizedBlock {
             })
             .collect()
     }
-
-    /// The advance laid beside atomic box `slot`, before it and after it in
-    /// visual order ([`Self::box_advance`]).
-    pub(in crate::text) fn box_advance(&self, slot: usize) -> (f32, f32) {
-        self.box_advance.get(slot).copied().unwrap_or((0.0, 0.0))
-    }
 }
 
 /// Where a list of insertions moves the bytes of the text before them.
@@ -1158,7 +1159,7 @@ mod tests {
     /// css-text-3 processing, which every test below that names no processing
     /// was written against. A `<text>` takes [`WhiteSpaceProcessing::Verbatim`].
     fn normalize(items: &[InlineItem<'_>]) -> NormalizedBlock {
-        super::normalize(items, WhiteSpaceProcessing::Css)
+        super::normalize(items, WhiteSpaceProcessing::Css).0
     }
 
     fn run<'src>(style: &'src RunStyle, text: &'src str) -> InlineItem<'src> {
@@ -1699,7 +1700,7 @@ mod tests {
             .iter()
             .flat_map(|case| [1, 2].map(|per_point| (case, per_point)))
         {
-            let mut block = super::normalize(items, *processing);
+            let (mut block, _) = super::normalize(items, *processing);
             assert_lookups_match_the_scan(&block);
             // The same content with text a consumer inserts: inside a long
             // verbatim segment, at an atomic box and at the text's end; then
@@ -1783,5 +1784,30 @@ mod tests {
         );
         // Only whitespace: nothing at all.
         assert!(normalize(&[run(&style, " \n\t ")]).text.is_empty());
+    }
+
+    #[test]
+    fn only_a_white_space_sequence_a_marker_falls_in_is_reported() {
+        let style = RunStyle::default();
+        let (_, plain) = super::normalize(&[run(&style, "a  b \n c ")], WhiteSpaceProcessing::Css);
+        assert!(plain.markers.is_empty());
+        assert!(plain.space_kept.is_empty());
+
+        // A removed sequence at the start, a kept one between `a` and `b`,
+        // and a marker in none.
+        let items = [
+            run(&style, "  "),
+            InlineItem::Marker,
+            run(&style, "a "),
+            InlineItem::Marker,
+            run(&style, " b"),
+            InlineItem::Marker,
+            run(&style, "c"),
+        ];
+        let (block, places) = super::normalize(&items, WhiteSpaceProcessing::Css);
+        assert_eq!(block.text, "a bc");
+        let spaces: Vec<Option<u32>> = places.markers.iter().map(|marker| marker.space).collect();
+        assert_eq!(spaces, [Some(0), Some(1), None]);
+        assert_eq!(places.space_kept, [false, true]);
     }
 }

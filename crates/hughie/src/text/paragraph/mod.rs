@@ -20,13 +20,15 @@
 //!
 //! A consumer that lays text of its own into the content uses four generic
 //! hooks, none of which the Lynx block needs: markers in the item stream,
-//! whose places the normalizer reports (`content::MarkerAt`); segments it
+//! whose places the normalizer reports (`content::MarkerPlaces`); segments it
 //! splices into the normalized text, with no source unit and a style of
 //! their own (`content::NormalizedBlock::splice`); a line-break override of
 //! its own for the pairs those segments take part in
-//! ([`shape::BreakOverride`]); and advance laid beside an atomic box
-//! (`content::NormalizedBlock::box_advance`). It builds the flow
-//! ([`Flow::build`]), uses them, then shapes ([`Paragraph::from_flow`]).
+//! ([`shape::BreakOverride`]); and advance laid beside an atomic box. It
+//! builds the flow ([`Flow::build`]), uses them, keeps what the core reads
+//! again at every shaping and break in the flow's [`Additions`], then shapes
+//! ([`Paragraph::from_flow`]). The Lynx block's flows are `Flow<()>`, which
+//! hold none of it.
 //!
 //! `Paragraph` owns one shaped natural layout over one flow of items and
 //! re-breaks it in place: a new constraint, or a resized atomic box, never
@@ -65,7 +67,7 @@ mod tab;
 use core::ops::Range;
 
 pub use content::{InlineBoxSpec, InlineItem, TextRunItem};
-use content::{NormalizedBlock, WhiteSpaceProcessing, normalize};
+use content::{InsertedSegment, MarkerPlaces, NormalizedBlock, WhiteSpaceProcessing, normalize};
 pub use memo::{BlockConstraint, BlockMetrics};
 pub use offsets::OffsetMap;
 use parley::{
@@ -139,9 +141,43 @@ pub(in crate::text) enum OwnedItem {
     Marker,
 }
 
+/// What a consumer laid into a flow after building it that the core reads
+/// at every shaping and break: the segments it spliced into the normalized
+/// text, the advance it laid beside each atomic box, and its line-break
+/// override. `()` is a flow with none of them, the Lynx block's.
+pub(in crate::text) trait Additions: Default {
+    /// The segments [`content::NormalizedBlock::splice`] inserted into the
+    /// normalized text, ascending. The flow's styled ranges cover every byte
+    /// but theirs.
+    fn inserted(&self) -> &[InsertedSegment];
+
+    /// The advance laid beside atomic box `slot`, before it and after it in
+    /// visual order. The breaker sees the box that much wider; the box
+    /// itself does not grow.
+    fn box_advance(&self, slot: usize) -> (f32, f32);
+
+    /// The line-break override for the pairs the inserted segments take
+    /// part in. `None` shapes with the paragraph's alone.
+    fn break_override(&self) -> Option<BreakOverride>;
+}
+
+impl Additions for () {
+    fn inserted(&self) -> &[InsertedSegment] {
+        &[]
+    }
+
+    fn box_advance(&self, _slot: usize) -> (f32, f32) {
+        (0.0, 0.0)
+    }
+
+    fn break_override(&self) -> Option<BreakOverride> {
+        None
+    }
+}
+
 /// One owned flattened flow: the main content, or the truncation content.
 #[derive(Debug)]
-pub(in crate::text) struct Flow {
+pub(in crate::text) struct Flow<A = ()> {
     pub(in crate::text) items: Vec<OwnedItem>,
     pub(in crate::text) block: NormalizedBlock,
     /// The extra letter-spacing each preserved tab's space is shaped with,
@@ -151,20 +187,20 @@ pub(in crate::text) struct Flow {
     /// Each preserved tab's `0.5ch`, the shortest shift it takes; indexed
     /// like `block.tabs`. Measured once, for the content flow only.
     pub(in crate::text) tab_min: Vec<f32>,
-    /// The consumer's own line-break override, for the pairs its inserted
-    /// segments take part in ([`content::NormalizedBlock::splice`]). `None`
-    /// shapes with the paragraph's alone.
-    pub(in crate::text) break_override: Option<BreakOverride>,
+    /// What the consumer laid in after building; none until it does.
+    pub(in crate::text) additions: A,
 }
 
-impl Flow {
+impl<A: Additions> Flow<A> {
+    /// Builds the flow of `items`, returning beside it where their markers
+    /// fell.
     pub(in crate::text) fn build(
         items: &[InlineItem<'_>],
         processing: WhiteSpaceProcessing,
-    ) -> Self {
-        let block = normalize(items, processing);
+    ) -> (Self, MarkerPlaces) {
+        let (block, places) = normalize(items, processing);
         let tabs = block.tabs.len();
-        Self {
+        let flow = Self {
             items: items
                 .iter()
                 .map(|item| match item {
@@ -179,8 +215,9 @@ impl Flow {
             block,
             tab_spacing: vec![0.0; tabs],
             tab_min: vec![0.0; tabs],
-            break_override: None,
-        }
+            additions: A::default(),
+        };
+        (flow, places)
     }
 
     /// The run item holding byte `byte` of the normalized text.
@@ -226,7 +263,7 @@ impl Flow {
         breaking: RunBreaking<'_>,
     ) -> Vec<ShapeSpan<'_, S>> {
         let tabs = &self.block.tabs;
-        let inserted = &self.block.inserted;
+        let inserted = self.additions.inserted();
         let mut spans =
             Vec::with_capacity(self.block.ranges.len() + 2 * tabs.len() + inserted.len());
         let shifted = |bytes: &core::ops::Range<u32>| {
@@ -316,9 +353,10 @@ fn white_space_hanging(
 /// One paragraph's content flow, shaped once into its natural layout.
 ///
 /// `S` is the consumer's paint identity for a parley style index; the
-/// natural layout records [`Self::source`] of each content item.
-pub(in crate::text) struct Paragraph<S> {
-    pub(in crate::text) content: Flow,
+/// natural layout records [`Self::source`] of each content item. `A` is
+/// what the consumer laid into the content ([`Additions`]).
+pub(in crate::text) struct Paragraph<S, A = ()> {
+    pub(in crate::text) content: Flow<A>,
     /// The content shaped as one paragraph, broken at the constraint the last
     /// [`Self::break_lines`] was given.
     pub(in crate::text) natural: Layout<TextBrush>,
@@ -354,8 +392,9 @@ impl<S: Copy> ParagraphRoot<S> {
     }
 }
 
-impl<S: Copy> Paragraph<S> {
-    /// Builds and shapes the content flow of `items`.
+impl<S: Copy, A: Additions> Paragraph<S, A> {
+    /// Builds and shapes the content flow of `items`, which lays nothing
+    /// in: its markers' places are dropped.
     ///
     /// `breaking` is the line-breaking style each item's spans are shaped
     /// with, `processing` how its white space is processed, `source` the
@@ -369,7 +408,7 @@ impl<S: Copy> Paragraph<S> {
         source: fn(u32) -> S,
         root: ParagraphRoot<S>,
     ) -> Self {
-        let flow = Flow::build(items, processing);
+        let (flow, _) = Flow::build(items, processing);
         Self::from_flow(context, breaking, processing, flow, source, root)
     }
 
@@ -382,7 +421,7 @@ impl<S: Copy> Paragraph<S> {
         context: &mut TextContext,
         breaking: RunBreaking<'_>,
         processing: WhiteSpaceProcessing,
-        mut flow: Flow,
+        mut flow: Flow<A>,
         source: fn(u32) -> S,
         root: ParagraphRoot<S>,
     ) -> Self {
@@ -407,7 +446,7 @@ impl<S: Copy> Paragraph<S> {
             boxes,
             &mut natural_sources,
             root.line_root(),
-            flow.break_override,
+            flow.additions.break_override(),
         );
         drop(spans);
         // With no strut the first run stands in for the root, as it does as
@@ -493,7 +532,7 @@ impl<S: Copy> Paragraph<S> {
         for (slot, entry) in self.natural.inline_boxes_mut().enumerate() {
             let spec = self.content.box_spec(self.content.block.boxes[slot].item);
             let sized = sized_box(spec, slot, entry.index, self.percent_basis);
-            let (before, after) = self.content.block.box_advance(slot);
+            let (before, after) = self.content.additions.box_advance(slot);
             entry.width = sized.width + before + after;
             entry.height = sized.height;
             entry.baseline = sized.baseline;
@@ -524,7 +563,7 @@ impl<S: Copy> Paragraph<S> {
             .iter()
             .enumerate()
             .map(|(slot, entry)| {
-                let (before, after) = self.content.block.box_advance(slot);
+                let (before, after) = self.content.additions.box_advance(slot);
                 self.content.box_spec(entry.item).size.width + before + after
             })
     }
@@ -565,12 +604,12 @@ impl<S: Copy> Paragraph<S> {
             boxes,
             &mut self.natural_sources,
             self.root.line_root(),
-            self.content.break_override,
+            self.content.additions.break_override(),
         );
     }
 }
 
-impl<S> Paragraph<S> {
+impl<S, A> Paragraph<S, A> {
     /// The source units content item `item` contributed: a run's whole
     /// pre-collapse text, an atomic box's one unit. Fixed when the paragraph
     /// is built.
@@ -591,10 +630,10 @@ impl<S> Paragraph<S> {
 /// One shaping per distinct run item holding a tab, at construction: `ch`
 /// never changes without a rebuild, and a paragraph without preserved tabs
 /// shapes nothing here.
-fn tab_minimums<S: Copy>(
+fn tab_minimums<S: Copy, A: Additions>(
     context: &mut TextContext,
     breaking: RunBreaking<'_>,
-    flow: &Flow,
+    flow: &Flow<A>,
     source: fn(u32) -> S,
 ) -> Vec<f32> {
     const ZERO: &str = "0";
@@ -624,8 +663,8 @@ fn tab_minimums<S: Copy>(
 }
 
 /// The parley boxes of one flow, sized and aligned from the current specs.
-pub(in crate::text) fn parley_boxes(
-    flow: &Flow,
+pub(in crate::text) fn parley_boxes<A: Additions>(
+    flow: &Flow<A>,
     byte_offset: u32,
     base_slot: usize,
     percent_basis: f32,
@@ -642,7 +681,7 @@ pub(in crate::text) fn parley_boxes(
                 (entry.byte + byte_offset) as usize,
                 percent_basis,
             );
-            let (before, after) = flow.block.box_advance(slot);
+            let (before, after) = flow.additions.box_advance(slot);
             sized.width += before + after;
             sized
         })
