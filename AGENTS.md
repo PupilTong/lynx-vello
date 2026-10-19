@@ -2306,7 +2306,11 @@ E5: a UA shadow tree of one `contenteditable="plaintext-only"` editor — for
 `x-input` an engine-sheet `display: block` `div`, its own inline formatting
 context, `white-space: pre`; for `x-textarea` a Lynx `<text>`, whose Lynx
 paragraph lays the lines out — and a `#placeholder` shown while the editor
-is `:empty`; the host is the field's box; the placeholder style attributes
+is `:empty`, whose text block is the field's `::placeholder` (it carries
+`pseudo="-webkit-input-placeholder"`, `dom::PLACEHOLDER_PSEUDO_ID`, so an
+author's `.hint::placeholder` rule reaches it under css-pseudo-4's property
+restriction, and the UA sheet's `x-input::placeholder` rules lay it out);
+the host is the field's box; the placeholder style attributes
 as UA `attr()` custom properties; `value`, `type`, `confirm-type`,
 `disabled`/`readonly` and `input-filter` mapped onto the editor in its
 attribute callback; line breaks (single-line), `maxlength`, the `number`

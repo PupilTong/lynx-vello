@@ -260,6 +260,18 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
         Node::has_part_attr(self)
     }
 
+    /// An element of a shadow tree with the `pseudo` attribute of a
+    /// placeholder is its host's `::placeholder`
+    /// ([`Node::implemented_pseudo_element`]). Stylo then collects its rules
+    /// as an element-backed pseudo-element's: the `::placeholder` rules of
+    /// every origin with the host as the originating element, the UA
+    /// sheet's and its own shadow tree's normal rules as the element it
+    /// also is, and `:host::placeholder` from its tree, and cascades them
+    /// under the pseudo-element's property restriction.
+    fn implemented_pseudo_element(&self) -> Option<PseudoElement> {
+        Node::implemented_pseudo_element(self)
+    }
+
     fn exports_any_part(&self) -> bool {
         Node::exports_any_part(self)
     }
@@ -537,7 +549,15 @@ impl<T: Sync> Element for &Node<T> {
     }
 
     fn is_pseudo_element(&self) -> bool {
-        false
+        Node::implemented_pseudo_element(self).is_some()
+    }
+
+    /// The host of the shadow tree the pseudo-element's element is in: the
+    /// originating element a `::placeholder` compound's left-hand side is
+    /// matched against ([`Node::implemented_pseudo_element`]).
+    fn pseudo_element_originating_element(&self) -> Option<Self> {
+        debug_assert!(self.is_pseudo_element());
+        Element::containing_shadow_host(self)
     }
 
     fn prev_sibling_element(&self) -> Option<Self> {
@@ -630,10 +650,10 @@ impl<T: Sync> Element for &Node<T> {
 
     fn match_pseudo_element(
         &self,
-        _pe: &PseudoElement,
+        pe: &PseudoElement,
         _context: &mut selectors::context::MatchingContext<Self::Impl>,
     ) -> bool {
-        false
+        Node::implemented_pseudo_element(self).as_ref() == Some(pe)
     }
 
     fn apply_selector_flags(&self, flags: ElementSelectorFlags) {

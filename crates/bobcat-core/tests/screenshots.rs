@@ -570,6 +570,56 @@ globalThis.renderPage = function () {
     screenshots().assert_matches(&["text-fields"], &captured(&mut painter));
 }
 
+/// web-core's `basic-element-x-input-placeholder-pseudo-element` card: an
+/// author's `.target::placeholder` rule colours, sizes and weights the
+/// placeholder's text — the field's `::placeholder` is the block holding it —
+/// where the field itself keeps its own colour and size. Ahem squares make the
+/// 20px red placeholder exact against the 10px blue value of the second
+/// field, whose rule does not apply to it.
+#[tokio::test]
+async fn a_placeholder_rule_draws_the_placeholder_in_its_style() {
+    const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
+    const SOURCE: &str = r"
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  __SetInlineStyles(page, 'display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:8px;background-color:white');
+  function field(tag, attributes) {
+    const element = __CreateElement(tag, 0);
+    __SetInlineStyles(element, 'width:180px;height:40px;padding:0 8px;font-size:10px;border:1px solid black;color:#1d4ed8');
+    __SetClasses(element, 'target');
+    for (const [name, value] of attributes) __SetAttribute(element, name, value);
+    __AppendElement(page, element);
+  }
+  field('x-input', [['placeholder', 'foo']]);
+  field('x-input', [['value', 'foo'], ['placeholder', 'unseen']]);
+  field('x-textarea', [['placeholder', 'foo bar']]);
+};
+";
+    let (_view, mut painter) = booted_with_sheet_sources(
+        SOURCE.as_bytes(),
+        PreparsedStyleSheet {
+            rules: vec![PreparsedRule::Style {
+                selectors: ".target::placeholder".to_owned(),
+                declarations: vec![
+                    declaration("color", "red"),
+                    declaration("font-weight", "bold"),
+                    declaration("font-size", "20px"),
+                ],
+            }],
+        },
+        200.0,
+        200.0,
+        ViewSources {
+            fonts: vec![FontBlob::from_static(AHEM)],
+            default_font_family: Some("Ahem".to_owned()),
+            style_sheets: vec!["app:///author.css".to_owned()],
+            ..ViewSources::new("app:///", SCRIPT_URL, SCREEN)
+        },
+    )
+    .await;
+    screenshots().assert_matches(&["text-fields-placeholder-rule"], &captured(&mut painter));
+}
+
 /// Requirement: a class change made by script must restyle against author
 /// rules that were never parsed from text. The script paints itself red, then
 /// swaps the class and flushes again; only the second commit is captured.

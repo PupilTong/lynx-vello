@@ -3121,6 +3121,16 @@ consequential choice about whether to follow the spec or the quirk.
     in view.
   - *`placeholder-font-style` and the `-x-placeholder-*` aliases* are
     native's and not web-core's, and not built.
+  - *`::placeholder` takes css-pseudo-4 §4.2's properties only* (2026-10-19,
+    bucket 1: a real pseudo-element): the `::first-line` properties,
+    `opacity`, `text-align`, `text-overflow` and the white-space properties,
+    the restriction Stylo applies. Chrome, under web-core, applies any
+    property to its placeholder element (`line-height`, `padding`,
+    `transform` included); native Lynx carries `color`, `font-size`,
+    `font-family`, `font-weight` and `font-style` to the platform
+    (`core/renderer/dom/fiber/pseudo_element.cc`). The placeholder's block
+    carries `pseudo="-webkit-input-placeholder"`, as Blink's does, which is
+    what makes it the host's `::placeholder` to `dom`.
 
   Two differ from web-core by user ruling (2026-10-19):
   - *`input` and `textarea` are not text fields.* web-core's tag map sends

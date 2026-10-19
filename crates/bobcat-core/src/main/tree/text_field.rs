@@ -35,9 +35,19 @@
 //!     is enforced against. Its `color` is inherited from the field (`text`'s UA `color: initial`
 //!     is overridden by the shadow sheet, as web-core's inner `<textarea>` inherits it).
 //! - `#placeholder`, `part="placeholder"`: an absolutely positioned box over the host's content box
-//!   holding one `display: block` container with the `placeholder` text (for both kinds: it is not
-//!   edited), shown by the shadow sheet only while the editor is `:empty` (`.editor:empty ~
-//!   #placeholder`), so no component code decides when it shows.
+//!   holding one block with the `placeholder` text (for both kinds: it is not edited), shown by the
+//!   shadow sheet only while the editor is `:empty` (`.editor:empty ~ #placeholder`), so no
+//!   component code decides when it shows. The block is the field's **`::placeholder`**: it carries
+//!   `pseudo="-webkit-input-placeholder"` ([`dom::PLACEHOLDER_PSEUDO_ID`], Blink's name for the
+//!   element behind `::placeholder` in its own UA shadow trees), which makes it the host's
+//!   `::placeholder` pseudo-element to `dom` — an author's `.hint::placeholder { color: red }`
+//!   reaches it, over the attribute-driven defaults the box carries (an outer context's normal
+//!   declaration wins, CSS Scoping §3.3). css-pseudo-4 §4.2 restricts what an author declares on
+//!   `::placeholder` to the `::first-line` properties, `opacity`, `text-align`, `text-overflow` and
+//!   the white-space properties, which Stylo enforces on every author declaration for the block,
+//!   the shadow sheet's included; so the block's layout — `display: block`, `flex: 1 1 auto`,
+//!   `min-width: 0`, `overflow: clip`, its `white-space` — is in [`UA_RULES`] as
+//!   `x-input::placeholder` rules, where the restriction does not apply.
 //!
 //! **The host is the field's box.** web-core's host is `display: contents` and its inner
 //! `<input>` inherits `width`, `height`, `border`, `padding`, `background` and the rest through
@@ -62,7 +72,7 @@
 //! |---|---|
 //! | `value` | the value, cut to `maxlength` UTF-16 units when that attribute is present (web-core's `_handleValue`); nothing when equal to the current value; the caret at the end when focused |
 //! | `placeholder` | the placeholder's text |
-//! | `placeholder-color`, `-font-size`, `-font-weight`, `-font-family` | UA `attr()` declarations on the host, read by `#placeholder` (web-core's `--placeholder-*` properties, grey and `normal` by default) |
+//! | `placeholder-color`, `-font-size`, `-font-weight`, `-font-family` | UA `attr()` declarations on the host, read by `#placeholder` (web-core's `--placeholder-*` properties, grey and `normal` by default) and inherited by its `::placeholder` block, where an author's `::placeholder` rule overrides them |
 //! | `type` | `text`, `number`, `digit`, `password`, `tel`, `email`: the editor's `type` (`password` or `text`) and `inputmode` (web-core's `_handleType`); `number` also keeps digits and the last `.` only |
 //! | `maxlength` | UTF-16 units, 140 when absent (web-core's default); see below |
 //! | `confirm-type` | the editor's `enterkeyhint`, `send` when absent |
@@ -192,6 +202,13 @@ const PLACEHOLDER_ID: &str = "placeholder";
 /// attributes as inherited custom properties. A property whose attribute is
 /// absent and has no fallback is invalid at computed-value time, so the
 /// placeholder inherits that property from the host instead.
+///
+/// The `::placeholder` rules lay the placeholder's block out: a block
+/// filling its row and clipping, on one verbatim line in an input and
+/// wrapping verbatim lines in a textarea. They are UA rules because the
+/// block implements `::placeholder` (module documentation), whose property
+/// restriction Stylo applies to every author declaration for it, the shadow
+/// sheet's included, and not to a UA one.
 pub(super) const UA_RULES: &str = r"
 x-input, x-input-ng, x-textarea, x-textarea-ng {
   display: flex; font-size: 14px;
@@ -202,13 +219,19 @@ x-input, x-input-ng, x-textarea, x-textarea-ng {
 }
 x-input, x-input-ng { flex-direction: row; align-items: center; }
 x-textarea, x-textarea-ng { flex-direction: column; align-items: stretch; }
+x-input::placeholder, x-input-ng::placeholder, x-textarea::placeholder, x-textarea-ng::placeholder {
+  display: block; min-width: 0; flex: 1 1 auto; overflow: clip;
+}
+x-input::placeholder, x-input-ng::placeholder { white-space: pre; }
+x-textarea::placeholder, x-textarea-ng::placeholder { white-space: pre-wrap; }
 ";
 
 /// The shadow sheet common to both kinds; [`INPUT_SHADOW_RULES`] and
 /// [`TEXTAREA_SHADOW_RULES`] follow it. An engine sheet
-/// ([`dom::Document::add_engine_shadow_stylesheet`]): the input's editor and
-/// the placeholder's block are `display: block`, which the `lynx` grammar
-/// keeps from author sheets.
+/// ([`dom::Document::add_engine_shadow_stylesheet`]): the input's editor is
+/// `display: block`, which the `lynx` grammar keeps from author sheets. The
+/// placeholder's block has no rule here: it is the `::placeholder`, laid
+/// out by [`UA_RULES`] (module documentation).
 const SHADOW_RULES: &str = r"
 .editor {
   min-width: 0; min-height: 1lh; overflow: clip;
@@ -222,7 +245,6 @@ const SHADOW_RULES: &str = r"
   font-family: var(--placeholder-font-family);
 }
 .editor:empty ~ #placeholder { display: flex; }
-#placeholder > div { display: block; min-width: 0; flex: 1 1 auto; overflow: clip; }
 ";
 
 /// One line, vertically centred, as a browser's `<input>` draws it, in the
@@ -230,7 +252,6 @@ const SHADOW_RULES: &str = r"
 const INPUT_SHADOW_RULES: &str = r"
 .editor { display: block; flex: 1 1 0%; white-space: pre; }
 #placeholder { align-items: center; }
-#placeholder > div { white-space: pre; }
 ";
 
 /// Lines from the top, wrapping, in the editor's Lynx paragraph. `color:
@@ -239,7 +260,6 @@ const INPUT_SHADOW_RULES: &str = r"
 const TEXTAREA_SHADOW_RULES: &str = r"
 .editor { flex: 1 1 auto; white-space: pre-wrap; color: inherit; }
 #placeholder { align-items: flex-start; }
-#placeholder > div { white-space: pre-wrap; }
 ";
 
 /// Which of the two fields an element is.
@@ -589,6 +609,7 @@ impl TextField {
         document.set_id_attribute(placeholder, Some(PLACEHOLDER_ID));
         document.set_attribute(placeholder, "part", PLACEHOLDER_ID);
         let block = document.create_element("div", ());
+        document.set_attribute(block, "pseudo", dom::PLACEHOLDER_PSEUDO_ID);
         document.append_child(placeholder, block);
         document.append_child(shadow, placeholder);
     }
@@ -1212,7 +1233,7 @@ mod tests {
     use dom::event::EventDetail;
     use dom::layout::ParagraphKind;
     use dom::stylo::properties::PropertyId;
-    use dom::{MethodCall, MethodError, MethodOutcome, NodeId, Point2D};
+    use dom::{MethodCall, MethodError, MethodOutcome, NodeId, Point2D, StylesheetOrigin};
 
     use super::super::test_support::{style_of, with_component_events};
     use super::super::{
@@ -1511,6 +1532,72 @@ mod tests {
             "10px",
             "inherited"
         );
+    }
+
+    /// The placeholder's block is the field's `::placeholder`: an author's
+    /// `::placeholder` rule styles it, over the `placeholder-*` attributes'
+    /// defaults, and follows the host's class; what css-pseudo-4 keeps off
+    /// `::placeholder` (here `padding`) is not applied; the box over the
+    /// content box keeps the defaults; the `::placeholder` rules of the UA
+    /// sheet still lay the block out.
+    #[test]
+    fn a_placeholder_rule_styles_the_placeholder_text() {
+        for tag in INPUT_TAGS.iter().chain(&TEXTAREA_TAGS) {
+            let (mut document, _, field) = make(
+                tag,
+                &[
+                    ("placeholder", "hint"),
+                    ("placeholder-color", "red"),
+                    ("class", "hinted"),
+                ],
+            );
+            document.add_stylesheet(
+                ".hinted::placeholder { color: rgb(0, 0, 255); font-weight: bold; \
+                 font-size: 20px; padding-left: 7px; }",
+                StylesheetOrigin::Author,
+            );
+            document.layout();
+            let placeholder = placeholder_box(&document, field);
+            let block = placeholder_block(&document, field).unwrap();
+            assert_eq!(
+                document.get(block).unwrap().attribute("pseudo"),
+                Some(dom::PLACEHOLDER_PSEUDO_ID),
+                "{tag}"
+            );
+            assert_eq!(
+                value_of(&document, block, "color"),
+                "rgb(0, 0, 255)",
+                "{tag}"
+            );
+            assert_eq!(value_of(&document, block, "font-weight"), "700", "{tag}");
+            assert_eq!(value_of(&document, block, "font-size"), "20px", "{tag}");
+            assert_eq!(value_of(&document, block, "padding-left"), "0px", "{tag}");
+            assert_eq!(value_of(&document, block, "display"), "block", "{tag}");
+            assert_eq!(
+                rect(&document, block).2,
+                190.0,
+                "{tag}: the block fills the row"
+            );
+            assert_eq!(
+                value_of(&document, placeholder, "color"),
+                "rgb(255, 0, 0)",
+                "{tag}"
+            );
+            assert_eq!(
+                value_of(&document, placeholder, "font-size"),
+                "10px",
+                "{tag}"
+            );
+
+            document.remove_attribute(field, "class");
+            document.layout();
+            assert_eq!(
+                value_of(&document, block, "color"),
+                "rgb(255, 0, 0)",
+                "{tag}"
+            );
+            assert_eq!(value_of(&document, block, "font-size"), "10px", "{tag}");
+        }
     }
 
     // --- attributes ----------------------------------------------------------
