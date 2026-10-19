@@ -16,14 +16,15 @@
 //! - `query` answers source-range boxes and hit points over a laid-out paragraph, for both
 //!   consumers.
 //!
-//! A consumer that lays text of its own into the content uses three generic
+//! A consumer that lays text of its own into the content uses four generic
 //! hooks, none of which the Lynx block needs: markers in the item stream,
 //! whose places the normalizer reports (`content::MarkerAt`); segments it
 //! splices into the normalized text, with no source unit and a style of
-//! their own (`content::NormalizedBlock::splice`); and a line-break override
-//! of its own for the pairs those segments take part in
-//! ([`shape::BreakOverride`]). It builds the flow ([`Flow::build`]), uses
-//! them, then shapes ([`Paragraph::from_flow`]).
+//! their own (`content::NormalizedBlock::splice`); a line-break override of
+//! its own for the pairs those segments take part in
+//! ([`shape::BreakOverride`]); and advance laid beside an atomic box
+//! (`content::NormalizedBlock::box_advance`). It builds the flow
+//! ([`Flow::build`]), uses them, then shapes ([`Paragraph::from_flow`]).
 //!
 //! `Paragraph` owns one shaped natural layout over one flow of items and
 //! re-breaks it in place: a new constraint, or a resized atomic box, never
@@ -66,6 +67,7 @@ pub use memo::{BlockConstraint, BlockMetrics};
 use parley::{
     ContentWidths, InlineBox, InlineBoxKind, Layout, WhiteSpaceCollapse as ParleyWhiteSpace,
 };
+pub use position::used_line_height;
 use shape::{BreakOverride, NaturalLine, ShapeSpan};
 pub use style::{
     BreakStyle, Direction, IndentKeywords, LineHeight, OverflowWrap, RunStyle, TextAlign,
@@ -381,8 +383,9 @@ impl<S: Copy> Paragraph<S> {
 
     /// Shapes `flow`, a flow [`Flow::build`] built with `processing`, once a
     /// consumer has used the hooks between building and shaping: its
-    /// markers' places, the segments it splices in, and its line-break
-    /// override. The rest is as [`Self::new`].
+    /// markers' places, the segments it splices in, its line-break override,
+    /// and the advance it lays beside atomic boxes. The rest is as
+    /// [`Self::new`].
     pub(in crate::text) fn from_flow(
         context: &mut TextContext,
         breaking: RunBreaking<'_>,
@@ -459,7 +462,8 @@ impl<S: Copy> Paragraph<S> {
         for (slot, entry) in self.natural.inline_boxes_mut().enumerate() {
             let spec = self.content.box_spec(self.content.block.boxes[slot].item);
             let sized = sized_box(spec, slot, entry.index, self.percent_basis);
-            entry.width = sized.width;
+            let (before, after) = self.content.block.box_advance(slot);
+            entry.width = sized.width + before + after;
             entry.height = sized.height;
             entry.baseline = sized.baseline;
             entry.vertical_align = sized.vertical_align;
@@ -606,12 +610,15 @@ pub(in crate::text) fn parley_boxes(
         .enumerate()
         .map(|(slot, entry)| {
             let spec = flow.box_spec(entry.item);
-            sized_box(
+            let mut sized = sized_box(
                 spec,
                 base_slot + slot,
                 (entry.byte + byte_offset) as usize,
                 percent_basis,
-            )
+            );
+            let (before, after) = flow.block.box_advance(slot);
+            sized.width += before + after;
+            sized
         })
         .collect()
 }

@@ -74,6 +74,27 @@ impl FontMetricsProvider for TestFontMetricsProvider {
     }
 }
 
+/// A definition whose elements are Lynx text elements
+/// ([`dom::CustomElement::is_lynx_text`]) and nothing else: what
+/// `crates/bobcat-core` installs for `inline-text` and `inline-truncation`.
+pub(crate) struct TextKind;
+
+impl<T> dom::CustomElement<T> for TextKind {
+    fn is_lynx_text(&self) -> bool {
+        true
+    }
+}
+
+/// Defines `tag` on `document` as a Lynx text element: each element of the
+/// tag lays out as a Lynx paragraph, or as a run of the paragraph around it,
+/// whatever its computed `display` is other than `none` and `contents`.
+///
+/// [`Document::define`]'s precondition applies: no element of the tag may
+/// exist yet, except the document element, which the definition upgrades.
+pub(crate) fn define_lynx_text<T>(document: &mut Document<T>, tag: &str) {
+    document.define(tag, Box::new(TextKind));
+}
+
 /// A document, root, and mutation helpers for CSS tests.
 #[derive(Debug)]
 pub(crate) struct Doc {
@@ -99,6 +120,11 @@ impl Doc {
         let dom = Document::new(device, "page", ());
         let root = dom.document_element().id();
         Self { dom, root }
+    }
+
+    /// [`define_lynx_text`] on this document.
+    pub(crate) fn define_lynx_text(&mut self, tag: &str) {
+        define_lynx_text(&mut self.dom, tag);
     }
 
     pub(crate) fn add_css(&mut self, css: &str) {

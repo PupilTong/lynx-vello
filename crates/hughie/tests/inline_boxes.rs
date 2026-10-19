@@ -1,6 +1,6 @@
 //! Inline boxes in a CSS block container's inline formatting context
 //! (`hughie::text::inline`): non-atomic inline boxes with their margin,
-//! border and padding, on Ahem geometry.
+//! border and padding, and atomic inline boxes, on Ahem geometry.
 //!
 //! Ahem's em square is exact: every glyph advances one font size, the ascent
 //! is 0.8em, the descent 0.2em and the line gap zero, so at 10px a line of
@@ -10,12 +10,13 @@
 #![allow(clippy::float_cmp)]
 
 use hughie::geometry::{Point, Rect, Size};
+use hughie::text::block::PlacedBox;
 use hughie::text::inline::{
-    FlowSource, InlineBoxOpen, InlineEdges, InlineFlow, InlineFlowItem, InlineFlowStyle,
-    InlineFragment, InlineRun,
+    FlowSource, InlineAtom, InlineBoxOpen, InlineEdges, InlineFlow, InlineFlowItem,
+    InlineFlowStyle, InlineFragment, InlineRun,
 };
 use hughie::text::paragraph::{
-    BlockConstraint, BreakStyle, Direction, LineHeight, RunStyle, WhiteSpaceCollapse,
+    BlockConstraint, BreakStyle, Direction, LineHeight, RunStyle, VerticalAlign, WhiteSpaceCollapse,
 };
 use hughie::text::{FontBlob, TextContext};
 use parley::PositionedLayoutItem;
@@ -513,6 +514,142 @@ fn a_box_ending_with_a_forced_break_ends_on_the_line_the_break_ends() {
 }
 
 #[test]
+fn an_out_of_flow_box_s_static_position_is_where_the_content_after_it_begins() {
+    let style = ahem();
+    // aa |bbb at 35px, wrapping after the space: before the second run is
+    // the start of the second line; past every item, the end of "bbb".
+    let wrapped = committed(&[run(&style, "aa "), run(&style, "bbb")], Some(35.0));
+    assert_eq!(wrapped.static_position(0), Point::new(0.0, 0.0));
+    assert_eq!(wrapped.static_position(1), Point::new(0.0, 10.0));
+    assert_eq!(wrapped.static_position(2), Point::new(30.0, 10.0));
+
+    // Around an inline box with a 10px start edge and a 5px end edge: before
+    // its start is before the edge, inside it after the edge, before its end
+    // before the end edge.
+    let boxed = committed(
+        &[
+            run(&style, "aa"),
+            open(&style, 10.0, 5.0),
+            run(&style, "bb"),
+            CLOSE,
+            run(&style, "c"),
+        ],
+        None,
+    );
+    let at = |item| boxed.static_position(item).x;
+    assert_eq!(
+        (at(1), at(2), at(3), at(4), at(5)),
+        (20.0, 30.0, 50.0, 55.0, 65.0)
+    );
+
+    // Before an atom is before it.
+    let with = with_atom(VerticalAlign::Baseline);
+    assert_eq!(with.static_position(1).x, 10.0);
+    assert_eq!(with.static_position(2).x, 30.0);
+
+    // Right-to-left content: אא fills 80..100; before it is its right edge,
+    // after it its left.
+    let rtl = committed_in(
+        Direction::Rtl,
+        &[run(&style, "\u{5d0}\u{5d0}")],
+        Some(100.0),
+    );
+    assert_eq!(rtl.static_position(0), Point::new(100.0, 0.0));
+    assert_eq!(rtl.static_position(1), Point::new(80.0, 0.0));
+
+    // No line box: the origin.
+    let empty = committed(&[], Some(100.0));
+    assert_eq!(empty.static_position(0), Point::new(0.0, 0.0));
+}
+
+/// "a", an atom, "b", the atom 20px square with no baseline of its own.
+fn with_atom(vertical_align: VerticalAlign) -> InlineFlow {
+    let style = ahem();
+    let items = [
+        run(&style, "a"),
+        InlineFlowItem::Atom(InlineAtom { vertical_align }),
+        run(&style, "b"),
+    ];
+    let mut context = text_context();
+    let mut flow = InlineFlow::new(&mut context, container(Direction::Ltr), &items);
+    flow.set_atom_size(1, Size::new(20.0, 20.0), None);
+    flow.commit(&mut context, BlockConstraint::new(None, 0.0));
+    flow
+}
+
+fn placed(flow: &InlineFlow) -> (u64, Point<f32>, Size<f32>) {
+    match flow.atoms() {
+        [
+            PlacedBox::Visible {
+                id, origin, size, ..
+            },
+        ] => (*id, *origin, *size),
+        other => panic!("one placed atom expected, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_atom_is_placed_by_its_margin_box_and_vertical_align() {
+    // `baseline` with no baseline of its own: the bottom margin edge on the
+    // line's baseline, 20px above it, the strut's 2px below.
+    let baseline = with_atom(VerticalAlign::Baseline);
+    let line = baseline.line_geometry()[0];
+    assert_eq!((line.height, line.baseline), (22.0, 20.0));
+    assert_eq!(
+        placed(&baseline),
+        (1, Point::new(10.0, 0.0), Size::new(20.0, 20.0))
+    );
+    assert_eq!(runs_of(&baseline, 2)[0].1, 30.0);
+
+    // A length raises it: 5px up moves the line's baseline 5px down.
+    let raised = with_atom(VerticalAlign::Length(5.0));
+    let line = raised.line_geometry()[0];
+    assert_eq!((line.height, line.baseline), (27.0, 25.0));
+    assert_eq!(placed(&raised).1, Point::new(10.0, 0.0));
+
+    // A percentage is one of the root inline box's 10px line height.
+    let percent = with_atom(VerticalAlign::Percent(0.5));
+    assert_eq!(percent.line_geometry()[0], raised.line_geometry()[0]);
+
+    // `top` puts it against the line box's top, which the strut shares.
+    let top = with_atom(VerticalAlign::Top);
+    let line = top.line_geometry()[0];
+    assert_eq!((line.height, line.baseline), (20.0, 8.0));
+    assert_eq!(placed(&top).1, Point::new(10.0, 0.0));
+}
+
+#[test]
+fn an_edge_beside_an_atom_is_part_of_its_advance() {
+    let style = ahem();
+    // a <span>[atom]</span> b: the start edge sits before the atom, the
+    // end edge after it, and both move nothing but the atom and "b".
+    let items = [
+        run(&style, "a"),
+        open(&style, 5.0, 7.0),
+        InlineFlowItem::Atom(InlineAtom {
+            vertical_align: VerticalAlign::Baseline,
+        }),
+        CLOSE,
+        run(&style, "b"),
+    ];
+    let mut context = text_context();
+    let mut flow = InlineFlow::new(&mut context, container(Direction::Ltr), &items);
+    flow.set_atom_size(2, Size::new(20.0, 20.0), None);
+    flow.commit(&mut context, BlockConstraint::new(None, 0.0));
+    assert_eq!(placed(&flow).1, Point::new(15.0, 0.0));
+    assert_eq!(runs_of(&flow, 4)[0].1, 42.0);
+    // The box's fragment holds the atom and its own edges, and its content
+    // area sits on the line's baseline, 20px down.
+    let [fragment] = flow.fragments() else {
+        panic!("one fragment expected")
+    };
+    assert_eq!(span(fragment), (10.0, 42.0));
+    assert_eq!(fragment.rect.origin.y, 12.0);
+    // Its min-content width keeps the atom and its edges together.
+    assert_eq!(flow.min_content_width(&mut context, 0.0), 32.0);
+}
+
+#[test]
 fn range_queries_select_content_and_never_an_edge() {
     let style = ahem();
     // aa <span>bb</span> cc, 5px edges: aa 0–20, start edge 20–25, bb 25–45,
@@ -563,13 +700,19 @@ fn styled<'src>(
 }
 
 /// Awkward combinations — edges around preserved breaks and tabs, boxes of
-/// collapsible white space only, empty boxes nested in each other, a box
-/// spanning a forced break, every one in both directions — laid out at several widths, with every
-/// range and a grid of points asked about. The answers are not checked; that the source
+/// collapsible white space only, empty boxes nested in each other, atoms
+/// carrying edges on both sides, a box spanning a forced break, every one in
+/// both directions — laid out at several widths, with every range and a
+/// grid of points asked about. The answers are not checked; that the source
 /// map and the fragments hold together everywhere is.
 #[test]
 fn awkward_boxes_lay_out_and_answer_every_query() {
     let style = ahem();
+    let atom = || {
+        InlineFlowItem::Atom(InlineAtom {
+            vertical_align: VerticalAlign::Middle,
+        })
+    };
     let pre = |text| styled(&style, text, WhiteSpaceCollapse::Preserve);
     let cases: Vec<Vec<InlineFlowItem<'_>>> = vec![
         vec![
@@ -591,6 +734,16 @@ fn awkward_boxes_lay_out_and_answer_every_query() {
             CLOSE,
             CLOSE,
             run(&style, "x"),
+        ],
+        vec![
+            open(&style, 5.0, 7.0),
+            atom(),
+            CLOSE,
+            open(&style, 1.0, 2.0),
+            atom(),
+            run(&style, "y"),
+            atom(),
+            CLOSE,
         ],
         vec![open(&style, 5.0, 5.0), pre("a\tb\tc"), CLOSE],
         vec![
@@ -627,11 +780,17 @@ fn awkward_boxes_lay_out_and_answer_every_query() {
     }
 }
 
-/// Lays `items` out at `width` and asks the flow every range of its source
-/// and a grid of points over its size.
+/// Lays `items` out at `width` with every atom 12×14 and asks the flow every
+/// range of its source and a grid of points over its size.
 fn ask_everything(direction: Direction, items: &[InlineFlowItem<'_>], width: Option<f32>) {
     let mut context = text_context();
     let mut flow = InlineFlow::new(&mut context, container(direction), items);
+    for (index, item) in items.iter().enumerate() {
+        if matches!(item, InlineFlowItem::Atom(_)) {
+            let item = u32::try_from(index).expect("fits");
+            flow.set_atom_size(item, Size::new(12.0, 14.0), Some(10.0));
+        }
+    }
     flow.commit(&mut context, BlockConstraint::new(width, 0.0));
     let units = (0..u32::try_from(items.len()).expect("fits"))
         .filter_map(|item| flow.item_source_range(item))
@@ -658,4 +817,43 @@ fn ask_everything(direction: Direction, items: &[InlineFlowItem<'_>], width: Opt
         assert!((fragment.line as usize) < flow.line_geometry().len());
     }
     let _ = flow.min_content_width(&mut context, 0.0);
+}
+
+/// An atom's size is the host's to change between a probe and a commit — a
+/// CSS inline formatting context shrinks an atom to the width it lays the
+/// line out at — so putting the committed layout back puts the committed
+/// sizes back with it.
+#[test]
+fn restoring_the_committed_layout_restores_the_committed_atom_sizes() {
+    let style = ahem();
+    let items = [
+        run(&style, "a"),
+        InlineFlowItem::Atom(InlineAtom {
+            vertical_align: VerticalAlign::Baseline,
+        }),
+        run(&style, "b"),
+    ];
+    let mut context = text_context();
+    let mut flow = InlineFlow::new(&mut context, container(Direction::Ltr), &items);
+    flow.set_atom_size(1, Size::new(40.0, 20.0), None);
+    flow.commit(&mut context, BlockConstraint::new(Some(100.0), 0.0));
+    assert_eq!(runs_of(&flow, 2)[0].1, 50.0);
+
+    // A min-content probe with the atom at its min-content size: "a", the
+    // 30px atom over the strut's 2px descent, and "b", one line each.
+    flow.set_atom_size(1, Size::new(15.0, 30.0), None);
+    let probed = flow.probe(&mut context, BlockConstraint::new(Some(0.0), 0.0));
+    assert_eq!(probed.size.height, 52.0);
+    assert!(flow.is_probe_dirty());
+
+    assert!(flow.restore_committed(&mut context));
+    assert!(!flow.is_probe_dirty());
+    assert_eq!(
+        placed(&flow),
+        (1, Point::new(10.0, 0.0), Size::new(40.0, 20.0))
+    );
+    assert_eq!(runs_of(&flow, 2)[0].1, 50.0);
+    assert_eq!(flow.size().height, 22.0);
+    // Nothing to put back the second time.
+    assert!(!flow.restore_committed(&mut context));
 }

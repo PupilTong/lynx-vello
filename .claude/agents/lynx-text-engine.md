@@ -39,13 +39,14 @@ rather than child boxes.
   (`RunStyle` and the run-level values), `memo.rs` (the probe/commit memo),
   `extent.rs` (the per-cluster line walk), `query.rs` (the source-range and
   hit queries both paragraph kinds answer). It knows no inline box: a
-  consumer's markers, spliced segments and line-break override are generic
-  hooks.
+  consumer's markers, spliced segments, line-break override and atom advance
+  are generic hooks.
 - `crates/hughie/src/text/inline/`: the CSS block container's inline
   formatting context — text runs, non-atomic inline boxes with one
   `InlineFragment` per line (`fragment.rs`), their table (`boxes.rs`) and
   their margin, border and padding as edge clusters with the line-break
-  override that keeps them glued to their content (`edge.rs`) — driven by
+  override that keeps them glued to their content (`edge.rs`), atomic inline
+  boxes — driven by
   `crates/dom/src/layout/inline_flow.rs`; its inline boxes paint in
   `crates/dom/src/paint/walker.rs` (`paint_inline_boxes`).
 - `crates/hughie/src/text/block/`: the Lynx layer on that core — `mod.rs`

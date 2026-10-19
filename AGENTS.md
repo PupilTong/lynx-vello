@@ -3113,8 +3113,9 @@ Subsystems:
   text and engine-built HTML content). Its content is text runs, non-atomic
   inline boxes (`inline_flow::is_inline_box`: a `display: inline` element
   whose box parent is a block container) with the full inline box model under
-  `box-decoration-break: slice`; every other box-generating child is hidden.
-  An inline box generates no layout box: the paragraph's fragments
+  `box-decoration-break: slice`, and atomic inline boxes — a replaced element
+  and every block-level box, block-in-inline splitting being a recorded
+  deviation. An inline box generates no layout box: the paragraph's fragments
   are its geometry, the painter draws its background and border from them
   (`paint::walker`, `paint_inline_boxes`), the paint-order build gives each a
   hit-only `PaintItemKind::InlineFragment` record so a hit on it targets the
@@ -3459,18 +3460,19 @@ with each run's `BreakStyle`), shaping, breaking and line capture
 `vertical-align` in parley's vocabulary (`position.rs`), the probe/commit break
 memo and the `Retained` trait both consumers run the protocol through
 (`memo.rs`, whose `BlockMetrics` carries the first and last line boxes'
-baselines), the per-cluster extent walk (`extent.rs`), the source-range and hit
-queries both kinds answer through (`query.rs`), `LineGeometry` — where each
-laid-out line sits, parley 0.12's own CSS 2.2 §10.8.1 line box — and
-`Paragraph`, which owns one shaped natural layout and re-breaks it in place,
-starting every line with its root inline box (`ParagraphRoot`: the strut, which
-is parley's style 0, and the base direction). The core knows nothing of inline
-boxes; a consumer that lays text of its own into the content has three
-generic hooks, which the Lynx block does not use: markers in the item stream
+baselines), the per-cluster extent walk (`extent.rs`), the source-range and hit queries
+both kinds answer through (`query.rs`), `LineGeometry` — where each laid-out
+line sits, parley 0.12's own CSS 2.2 §10.8.1 line box — and `Paragraph`, which
+owns one shaped natural layout and re-breaks it in place, starting every line
+with its root inline box (`ParagraphRoot`: the strut, which is parley's style
+0, and the base direction). The core knows nothing of inline boxes; a
+consumer that lays text of its own into the content has four generic hooks,
+which the Lynx block does not use: markers in the item stream
 (`InlineItem::Marker`) whose places after white space collapsing the
 normalizer reports, segments spliced into the normalized text with no source
-unit and a style of their own (`NormalizedBlock::splice`), and its own
-line-break override (`shape::BreakOverride`).
+unit and a style of their own (`NormalizedBlock::splice`), its own line-break
+override (`shape::BreakOverride`), and advance laid beside an atomic box
+(`NormalizedBlock::box_advance`).
 `src/text/block` is the Lynx `<text>` layer on it: `BlockStyle` with the
 `text-maxline`/`text-maxlength` limits, the truncation in `truncate.rs` (which
 lays an `<inline-truncation>` subtree in at the clamp; the painter applies
@@ -3479,19 +3481,20 @@ hidden-box outcomes, and the Lynx range and hit answers; its strut is the
 establishing element's own font (`BlockStyle::strut`) and its bidi paragraph
 level stays first-strong. `src/text/inline` is the CSS block container's inline
 formatting context (`InlineFlow`, CSS-only `InlineFlowStyle`, items
-`InlineFlowItem`): text runs, and non-atomic inline boxes with their edges and
-one `InlineFragment` per line each. `inline/edge.rs` lays an inline box's
-inline-axis margin, border and padding into the core's text as edge clusters —
-a copy of the next character and a default-ignorable mark, shaped at size 0
-with the edge as its advance, no source unit, and a line-break override that
-keeps them glued to the content beside them, because parley's own atomic boxes
-would be a soft wrap opportunity on both sides; `inline/boxes.rs` is the box
-table (`InlineEdges`, each box's place and content area). It also has
-css-text-3 §4.1 white space in full (`break-spaces` included, collapsing
-across inline box boundaries), per-run
-`text-wrap-mode`/`word-break`/`overflow-wrap`, the `text-indent` keywords
-counted in the intrinsic widths, the container's `direction` as the bidi
-paragraph level, its own font as the strut of parley's line boxes, the
+`InlineFlowItem`): text runs, non-atomic inline boxes with their edges and one
+`InlineFragment` per line each, and atomic inline boxes placed by margin box
+and `vertical-align`. `inline/edge.rs` lays an inline box's inline-axis
+margin, border and padding into the core's text as edge clusters — a copy of
+the next character and a default-ignorable mark, shaped at size 0 with the
+edge as its advance, no source unit, and a line-break override that keeps them
+glued to the content beside them, because parley's own atomic boxes would be
+a soft wrap opportunity on both sides — and adds an edge next to an atom to
+the atom's advance; `inline/boxes.rs` is the box table (`InlineEdges`, each
+box's place and content area). It also has css-text-3 §4.1 white space in
+full (`break-spaces` included, collapsing across inline box boundaries),
+per-run `text-wrap-mode`/`word-break`/`overflow-wrap`, the `text-indent`
+keywords counted in the intrinsic widths, the container's `direction` as the
+bidi paragraph level, its own font as the strut of parley's line boxes, the
 fit-content width for a definite available width, and the Lynx block's
 source-range and hit queries.
 

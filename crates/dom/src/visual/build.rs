@@ -4,11 +4,11 @@
 //! A paragraph — a Lynx text element, or a block container's inline
 //! formatting context — paints as one record after its element's box: every
 //! inline box background and border in tree order, then every glyph
-//! (`paint::walker`). A Lynx paragraph's atomic inline boxes follow as
-//! records of their own, each painted whole. That is Appendix E step 7's
-//! order for content that does not overlap; it does not interleave the steps
-//! line by line. A non-atomic inline box emits no record of its own and clips
-//! nothing (`layout::inline_flow`).
+//! (`paint::walker`). Its atomic inline boxes follow as records of their own,
+//! each painted whole. That is Appendix E step 7's order for content that
+//! does not overlap; it does not interleave the steps line by line. A
+//! non-atomic inline box emits no record of its own and clips nothing
+//! (`layout::inline_flow`).
 //!
 //! Per stacking context `E` the emitted order is:
 //! 1. `E`'s own item;
@@ -845,7 +845,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         }
         let (visible, hit_testable) = item_flags(values);
         // An inline box that is a stacking context still paints as fragments
-        // of the paragraph around it.
+        // of the paragraph around it; its group holds only its atoms.
         let visible = visible && !is_inline_box(self.node(root));
         if visible {
             self.items.push(PaintItem {
@@ -1238,7 +1238,8 @@ impl<'doc, T: Sync> Builder<'doc, T> {
     ) {
         let style = child.view.values();
         let (visible, hit_testable) = item_flags(style);
-        // An inline box paints as fragments of the paragraph around it.
+        // An inline box paints as fragments of the paragraph around it; only
+        // the atoms inside it are records of their own.
         let visible = visible && !is_inline_box(self.node(child.node));
         let descend =
             child.mode != DisplayMode::Leaf && !skips_contents(self.node(child.node), style);
@@ -1541,8 +1542,8 @@ fn member_clip_contexts(position: PositionProperty, ctx: ClipContexts) -> ClipCo
 pub(super) fn clipped_axes<T>(node: &Node<T>, style: &ComputedValues) -> ScrollAxes {
     // Neither `overflow` nor paint containment applies to a non-atomic
     // inline box (css-overflow-3, css-contain-2 §3.3), which has no box of
-    // its own to clip to, whatever the UA sheet's `overflow: clip` on every
-    // element says.
+    // its own to clip to: the UA sheet's `overflow: clip` on every element
+    // must not cut the atoms inside one away.
     if is_inline_box(node) {
         return ScrollAxes { x: false, y: false };
     }

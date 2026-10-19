@@ -9,10 +9,12 @@
 //! `sub` and `super` read the root's font, and `top` and `bottom` the line
 //! box. Parley also places the box: `PositionedInlineBox::y` is its top edge.
 
-use parley::{Layout, VerticalAlign as ParleyVerticalAlign};
+use parley::{Layout, VerticalAlign as ParleyVerticalAlign, WhiteSpaceCollapse};
 
-use super::style::{LineHeight, RunStyle, VerticalAlign};
+use super::shape::{self, ShapeSpan};
+use super::style::{BreakStyle, LineHeight, RunStyle, VerticalAlign};
 use crate::style::TextBrush;
+use crate::text::TextContext;
 
 /// The value parley aligns a box with. A percentage raises the box by that
 /// fraction of `percent_basis` (`percent_basis`).
@@ -51,6 +53,42 @@ pub(in crate::text) fn percent_basis(layout: &Layout<TextBrush>, root: Option<&R
             .root_span_metrics()
             .map_or(0.0, |metrics| metrics.ascent + metrics.descent),
         None => 0.0,
+    }
+}
+
+/// The used value of `style`'s `line-height` (CSS 2.2 §10.8.1): a length as
+/// given, a number times the font size, and `normal` the height parley gives
+/// a line box of the style's first available font alone — its ascent,
+/// descent and line gap, as Chrome takes it.
+///
+/// What a `vertical-align` percentage on an element is a fraction of, the
+/// element's own `line-height` (§10.8.1). [`VerticalAlign::Percent`] on an
+/// atom is taken of the root inline box's instead (`percent_basis`), so a
+/// host that knows the atom's style resolves the percentage into a
+/// [`VerticalAlign::Length`] with this first.
+pub fn used_line_height(context: &mut TextContext, style: &RunStyle) -> f32 {
+    match style.line_height {
+        LineHeight::Px(px) => px,
+        LineHeight::Number(factor) => factor * style.font_size,
+        LineHeight::Normal => {
+            const PROBE: &str = "0";
+            let spans = [ShapeSpan {
+                bytes: 0..PROBE.len(),
+                style,
+                breaking: BreakStyle::default(),
+                hanging: WhiteSpaceCollapse::Collapse,
+                source: (),
+                extra_spacing: 0.0,
+            }];
+            shape::with_probe(context, PROBE, &spans, Vec::new(), |layout| {
+                layout.break_all_lines(None);
+                layout
+                    .lines()
+                    .next()
+                    .map_or(0.0, |line| line.metrics().line_height)
+            })
+            .unwrap_or(0.0)
+        }
     }
 }
 

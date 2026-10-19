@@ -1092,8 +1092,12 @@ impl<T> Document<T> {
     /// through transparent/nested scopes before using normal layout invalidation.
     ///
     /// A block container establishes a paragraph too, but never nests in
-    /// one: inside a `-lynx-text` subtree it is an atomic box, and its own
-    /// runs end at it. The walk stops there. An inline box of an inline
+    /// one: inside a Lynx paragraph's subtree or an inline formatting context
+    /// it is an atomic box, and its own runs end at it. The walk stops there,
+    /// answering the Lynx paragraph it passed if there was one: a Lynx text
+    /// element that is an atom of the block container's inline formatting
+    /// context is the paragraph its own text belongs to, and the upward walk
+    /// from it reaches the block anyway. An inline box of an inline
     /// formatting context establishes none: its runs are the paragraph's
     /// around it, so the walk goes through it.
     fn paragraph_container(&self, id: crate::NodeId) -> Option<crate::NodeId> {
@@ -1121,7 +1125,7 @@ impl<T> Document<T> {
                 DisplayMode::Text => paragraph = Some(node.id()),
                 DisplayMode::Contents => {}
                 DisplayMode::BlockFlow if inline_flow::is_inline_box(node) => {}
-                DisplayMode::BlockFlow => return Some(node.id()),
+                DisplayMode::BlockFlow => return Some(paragraph.unwrap_or_else(|| node.id())),
                 _ => break,
             }
             current = node.flat_parent();
