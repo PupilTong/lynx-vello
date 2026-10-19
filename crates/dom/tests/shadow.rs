@@ -1228,3 +1228,119 @@ fn an_engine_shadow_sheet_writes_block_and_inline_and_an_author_one_does_not() {
     assert_eq!(display(block), "block");
     assert_eq!(display(inline), "inline");
 }
+
+/// An element of a shadow tree whose `pseudo` attribute is
+/// `-webkit-input-placeholder` (Blink's name for the element behind
+/// `::placeholder`) is its host's `::placeholder`: `host::placeholder` rules
+/// of the host's tree reach it with the host as the originating element,
+/// through a later class change too, and win over its own tree's normal
+/// declarations as an outer context does (CSS Scoping §3.3); its own tree
+/// still styles it as the element it is, and `:host::placeholder` reaches it
+/// from there. Without the attribute, or outside a shadow tree, nothing of
+/// this applies.
+#[test]
+fn a_placeholder_pseudo_attribute_makes_a_shadow_element_the_hosts_placeholder() {
+    let mut harness = Harness::new();
+    let frame = harness.shadow_el(harness.shadow, "frame");
+    let placeholder = harness.shadow_el(frame, "div[pseudo=-webkit-input-placeholder]");
+    let plain = harness.shadow_el(frame, "div");
+    let light = harness
+        .doc
+        .el(harness.doc.root, "div[pseudo=-webkit-input-placeholder]");
+    harness.doc.add_css(
+        "host { color: rgb(0, 0, 255); }
+         host.hinted::placeholder { color: rgb(255, 0, 0); font-weight: 700; }
+         page::placeholder, host::placeholder div, div::placeholder { font-style: italic; }",
+    );
+    harness.doc.dom.add_shadow_stylesheet(
+        harness.shadow,
+        "div { font-weight: 500; }
+         frame::placeholder { font-style: italic; }
+         :host::placeholder { letter-spacing: 2px; }",
+    );
+    harness.doc.flush();
+
+    assert_eq!(harness.doc.value(placeholder, "color"), "rgb(0, 0, 255)");
+    assert_eq!(
+        harness.doc.value(placeholder, "font-weight"),
+        "500",
+        "its own tree styles it as an element"
+    );
+    assert_eq!(
+        harness.doc.value(placeholder, "letter-spacing"),
+        "2px",
+        ":host::placeholder reaches it from its own tree"
+    );
+    assert_eq!(
+        harness.doc.value(placeholder, "font-style"),
+        "normal",
+        "its parent is not its originating element, and nothing else is"
+    );
+
+    harness.doc.add_class(harness.host, "hinted");
+    harness.doc.flush();
+    assert_eq!(
+        harness.doc.value(placeholder, "color"),
+        "rgb(255, 0, 0)",
+        "the host's ::placeholder rules reach it after the host changed"
+    );
+    assert_eq!(
+        harness.doc.value(placeholder, "font-weight"),
+        "700",
+        "the outer context's normal declaration wins over the shadow tree's"
+    );
+    assert_eq!(harness.doc.value(plain, "color"), "rgb(0, 0, 255)");
+    assert_eq!(harness.doc.value(plain, "font-weight"), "500");
+    assert_eq!(
+        harness.doc.value(light, "font-style"),
+        "normal",
+        "a light-tree element implements no pseudo-element"
+    );
+
+    harness.doc.remove_class(harness.host, "hinted");
+    harness.doc.flush();
+    assert_eq!(harness.doc.value(placeholder, "color"), "rgb(0, 0, 255)");
+    assert_eq!(harness.doc.value(placeholder, "font-weight"), "500");
+
+    harness.doc.add_class(harness.host, "hinted");
+    harness.doc.remove_attr(placeholder, "pseudo");
+    harness.doc.flush();
+    assert_eq!(
+        harness.doc.value(placeholder, "color"),
+        "rgb(0, 0, 255)",
+        "without the attribute it is a plain element of its tree"
+    );
+    harness
+        .doc
+        .set_attr(placeholder, "pseudo", "-webkit-input-placeholder");
+    harness.doc.flush();
+    assert_eq!(harness.doc.value(placeholder, "color"), "rgb(255, 0, 0)");
+}
+
+/// `::placeholder` takes the properties css-pseudo-4 §4.2 lists (those of
+/// `::first-line`, `opacity`, the text alignment, wrapping and overflow
+/// properties) from author rules — the restriction Stylo applies to the
+/// pseudo-element — including its own tree's rules, which style it as an
+/// element; a UA rule is exempt, which is how an engine lays the element
+/// out.
+#[test]
+fn a_placeholders_author_declarations_are_restricted_to_the_pseudo_elements_properties() {
+    let mut harness = Harness::new();
+    let placeholder = harness.shadow_el(harness.shadow, "div[pseudo=-webkit-input-placeholder]");
+    harness
+        .doc
+        .add_css("host::placeholder { width: 50px; text-align: center; }");
+    harness
+        .doc
+        .add_ua_css("host::placeholder { width: 30px; height: 7px; }");
+    harness
+        .doc
+        .dom
+        .add_shadow_stylesheet(harness.shadow, "div { height: 40px; opacity: 0.5; }");
+    harness.doc.flush();
+
+    assert_eq!(harness.doc.value(placeholder, "text-align"), "center");
+    assert_eq!(harness.doc.value(placeholder, "opacity"), "0.5");
+    assert_eq!(harness.doc.value(placeholder, "width"), "30px");
+    assert_eq!(harness.doc.value(placeholder, "height"), "7px");
+}

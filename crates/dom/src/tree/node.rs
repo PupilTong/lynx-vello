@@ -14,6 +14,7 @@ use smallvec::SmallVec;
 use stylo::LocalName;
 use stylo::data::{ElementData, ElementDataRef, ElementDataWrapper};
 use stylo::properties::{ComputedValues, PropertyDeclarationBlock};
+use stylo::selector_parser::PseudoElement;
 use stylo::servo_arc::Arc;
 use stylo::shared_lock::{Locked, SharedRwLock};
 use stylo::stylesheets::UrlExtraData;
@@ -113,6 +114,7 @@ impl NodeFlags {
     const CUSTOM_SUBTREE_MAY_CONTAIN: u8 = 1 << 0;
     const MAY_OVERRIDE_CHILDREN: u8 = 1 << 1;
     const LYNX_TEXT: u8 = 1 << 2;
+    const PLACEHOLDER_PSEUDO: u8 = 1 << 3;
 
     const fn get(self, bit: u8) -> bool {
         self.0 & bit != 0
@@ -803,6 +805,34 @@ impl<T> Node<T> {
     /// and `contents` ([`crate::layout::display_mode`]).
     pub(crate) fn is_lynx_text(&self) -> bool {
         self.flags.get(NodeFlags::LYNX_TEXT)
+    }
+
+    /// Records whether this element's `pseudo` attribute is
+    /// [`PLACEHOLDER_PSEUDO_ID`](crate::PLACEHOLDER_PSEUDO_ID), answering
+    /// what it was. Only `Document::set_attribute` and
+    /// `Document::remove_attribute` write it, with the attribute.
+    pub(crate) fn set_placeholder_pseudo(&mut self, on: bool) -> bool {
+        self.flags.set(NodeFlags::PLACEHOLDER_PSEUDO, on)
+    }
+
+    /// The pseudo-element this element implements for its shadow host: an
+    /// element of a shadow tree whose `pseudo` attribute is
+    /// [`PLACEHOLDER_PSEUDO_ID`](crate::PLACEHOLDER_PSEUDO_ID) is the host's `::placeholder`
+    /// (`docs/dom-architecture.md`, "Shadow DOM and custom elements"). The attribute is read
+    /// through a node bit, so an element without it answers in one load; the walk to the
+    /// containing shadow root is paid by the elements that carry it.
+    ///
+    /// A light-tree element with the attribute implements nothing: a
+    /// pseudo-element has an originating element, and here that is the
+    /// host, as it is in Blink, whose UA shadow trees name their placeholder
+    /// with this attribute.
+    pub(crate) fn implemented_pseudo_element(&self) -> Option<PseudoElement> {
+        if !self.flags.get(NodeFlags::PLACEHOLDER_PSEUDO) {
+            return None;
+        }
+        self.containing_shadow_root()
+            .is_some()
+            .then_some(PseudoElement::Placeholder)
     }
 
     pub(crate) fn is_replaced(&self) -> bool {

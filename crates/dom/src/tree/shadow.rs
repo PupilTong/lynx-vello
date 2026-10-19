@@ -52,6 +52,18 @@ pub(crate) fn is_slot_assignment_attribute(name: &str) -> bool {
     matches!(name, "slot" | "name")
 }
 
+/// The `pseudo` attribute value that makes an element of a shadow tree its
+/// host's `::placeholder` (`Node::implemented_pseudo_element`): Blink's name
+/// for the element behind `::placeholder` in its UA shadow trees, which
+/// `::placeholder` is an alias of there.
+pub const PLACEHOLDER_PSEUDO_ID: &str = "-webkit-input-placeholder";
+
+/// Whether `name` is the `pseudo` attribute.
+#[must_use]
+pub(crate) fn is_pseudo_attribute(name: &str) -> bool {
+    name == "pseudo"
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShadowRootMode {
     Open,

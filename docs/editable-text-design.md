@@ -891,7 +891,24 @@ Public surface:
   size, weight and family are custom properties the host declares from typed
   `attr()` (grey and `normal` by default; an absent size or family is
   invalid at computed-value time, so the placeholder inherits the host's).
-  The component writes only the text.
+  The component writes only the text. The block holding it is the field's
+  `::placeholder` (2026-10-19): it carries `pseudo="-webkit-input-placeholder"`
+  (`dom::PLACEHOLDER_PSEUDO_ID`, Blink's name for the element behind
+  `::placeholder` in its UA shadow trees), which `dom` reports to Stylo as
+  the element implementing the host's `::placeholder`, so an author's
+  `.hint::placeholder { color: red }` reaches it, over the attribute
+  defaults the box carries (an outer context's normal declaration wins, CSS
+  Scoping §3.3) — web-core's `.target::placeholder` card renders the same.
+  css-pseudo-4 §4.2 restricts an author's `::placeholder` declarations to
+  the `::first-line` properties, `opacity`, `text-align`, `text-overflow`
+  and the white-space properties, which Stylo enforces on every author
+  declaration for the block, the shadow sheet's included; the block's layout
+  (`display: block; flex: 1 1 auto; min-width: 0; overflow: clip`, its
+  `white-space`) is therefore in the UA sheet as `x-input::placeholder`
+  rules, which the restriction exempts. Native Lynx's `::placeholder` carries
+  only `color`, `font-size`, `font-family`, `font-weight` and `font-style`
+  (`pseudo_element.cc`'s `PlaceHolderPseudoElementStyleNames`); Chrome,
+  under web-core, restricts nothing.
 - **Events are derived from the editor's standard events, heard in Rust.**
   An editing host inside a UA shadow tree dispatches its edit and focus
   events non-composed (`is_shadow_content` in `runtime/editing.rs`): the

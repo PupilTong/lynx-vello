@@ -113,7 +113,24 @@ root owns an `AuthorStyles<DocumentStyleSheet>` whose scoped `CascadeData`
 (`Document::add_shadow_stylesheet`; `Document::replace_shadow_stylesheet`
 swaps one sheet's text in its place in their order, as rewriting a shadow
 `<style>` does) replaces the document's author rules inside that tree;
-`::slotted()` and `::part()`/`exportparts` work off the same data.
+`::slotted()` and `::part()`/`exportparts` work off the same data. An
+element of a shadow tree whose `pseudo` attribute is
+`-webkit-input-placeholder` (`dom::PLACEHOLDER_PSEUDO_ID`, Blink's name for
+the element behind `::placeholder` in its UA shadow trees) is its host's
+`::placeholder`: `Node::implemented_pseudo_element` answers
+`PseudoElement::Placeholder` for it (a node bit the two attribute setters
+keep, plus the walk to its containing shadow root, so a light-tree element
+with the attribute implements nothing), and the `TElement`/`Element` hooks
+in `style/traits.rs` hand that to Stylo, whose element-backed pseudo-element
+path collects the host's `::placeholder` rules of every origin with the host
+as the originating element (`.a::placeholder` matches it, through the host's
+own invalidation when `.a` changes), its own tree's normal rules as the
+element it also is, and `:host::placeholder` from its tree, then cascades
+them under css-pseudo-4's property restriction for `::placeholder`, which
+exempts UA declarations only. A change of the attribute restyles the element
+and its subtree from scratch. `x-input`/`x-textarea` are the one user
+(`bobcat-core`'s `tree::text_field`); nothing else implements a
+pseudo-element this way, and `::before`/`::after` boxes do not exist.
 Slot assignment is eager — every mutation that can change it (host child list,
 shadow-tree slot set, `slot`/`name` attribute) resolves the affected tree in
 the same call, gated on a live-shadow-root counter so a document with none pays
