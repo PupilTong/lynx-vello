@@ -354,31 +354,14 @@ fn a_press_focuses_the_host_and_places_the_caret_where_it_landed() {
     states.wait(&mut engine, "with the value abcde", |state| {
         state.value == "abcde"
     });
-    // The face is a load of its own: the text is Ahem's once it is five
-    // 20px squares wide.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let origin = loop {
-        engine.pump();
-        let measured = engine
-            .probe_document(|tree| {
-                let host = node_id(HOST);
-                Some((
-                    tree.text_block_size(host)?.width,
-                    tree.bounding_client_rect(host)?.origin,
-                ))
-            })
-            .flatten();
-        if let Some((width, origin)) = measured
-            && (width - 100.0).abs() < f32::EPSILON
-        {
-            break origin;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the host never measured Ahem's 100px: {measured:?}"
-        );
-        std::thread::yield_now();
-    };
+    // The face is a load of its own: the text is Ahem's once the caret
+    // after it is five 20px squares in. The host is a `view`, so its text is
+    // laid out by the anonymous block box around it, which the published
+    // state measures through.
+    let state = states.wait(&mut engine, "with Ahem's 100px", |state| {
+        (state.caret.min_x() - state.editable_bounds.min_x() - 100.0).abs() < f32::EPSILON
+    });
+    let origin = state.editable_bounds.origin;
 
     // Inside `c`'s left half: the caret goes before it.
     engine.painter.clock.pin(10.0);
