@@ -157,7 +157,9 @@ pub struct TextBlock {
     style: BlockStyle,
     /// The content flow and its natural layout.
     paragraph: Paragraph<SourceItem>,
-    truncation: Option<TruncationFlow>,
+    /// `Some` only for a block with inline-truncation content. Boxed so that
+    /// every other block does not carry a second [`Flow`] inline.
+    truncation: Option<Box<TruncationFlow>>,
     result: Option<LayoutResult>,
     /// The answered constraints, the committed one, and the counters
     /// [`Self::break_count`] and [`Self::min_content_width`] read.
@@ -221,9 +223,11 @@ impl TextBlock {
             root,
         );
         let flow = &paragraph.content;
-        let truncation = truncation.map(|items| TruncationFlow {
-            flow: Flow::build(items, block_style.processing(false)),
-            natural_width: None,
+        let truncation = truncation.map(|items| {
+            Box::new(TruncationFlow {
+                flow: Flow::build(items, block_style.processing(false)),
+                natural_width: None,
+            })
         });
         debug_assert!(
             {

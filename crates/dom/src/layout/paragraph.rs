@@ -47,10 +47,11 @@ use crate::tree::document::{DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 
 /// The retained paragraph one element's layout state holds.
-#[expect(
+#[allow(
     clippy::large_enum_variant,
     reason = "held boxed, once per paragraph-establishing element; the variants' size \
-              difference costs no other node anything"
+              difference costs no other node anything. `allow`, not `expect`: the \
+              difference crosses the lint's threshold on 64-bit targets only"
 )]
 pub(crate) enum TextStore {
     /// A Lynx text element's flattened Lynx paragraph.
