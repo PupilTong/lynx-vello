@@ -1105,9 +1105,8 @@ consequential choice about whether to follow the spec or the quirk.
   - **A `scrollend` ends a scroll that happened.** The main thread records
     every container that scrolled (an adopted offset moved it, or a
     script-facing instant scroll did) whether or not anything listens, and a
-    post naming it at rest ends that record and fires `scrollend` if a
-    registration on that container's path, or a component, would hear it at
-    that moment. An instant scroll fires its `scroll` in the task
+    post naming it at rest ends that record and fires `scrollend` if the name
+    is heard at that moment. An instant scroll fires its `scroll` in the task
     that scrolled and its `scrollend` from the painter's rest post after it
     carried the request out — or after the drag or fling that holds the
     container ends. A view with no painter attached never posts that rest.

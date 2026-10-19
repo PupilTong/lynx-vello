@@ -40,13 +40,16 @@
 //!   [`ListenerKinds::GLOBAL`], in the order they were made, so which global registrations a path
 //!   reaches, and who holds one at all, is a scan of the name's few global rows rather than of the
 //!   table.
-//! - `by_name`: name → the name's id, with per-name path and global counts in `names`. The ids keep
-//!   the rows and `global_rows`' keys a few bytes wide and make a probe from a borrowed `&str` one
-//!   string hash, done once per question. The counts are document-wide: they answer whether
-//!   anything hears a name ([`Document::hears`]) and let a path or global probe of a name with no
-//!   registration of that kind return at once. A name's id outlives its last registration: the set
-//!   of names is the page's event vocabulary, a few dozen strings for the life of the document, so
-//!   ids are not recycled.
+//! - `by_name`: name → the name's id, with per-name path, capture and global counts in `names`. The
+//!   ids keep the rows and `global_rows`' keys a few bytes wide and make a probe from a borrowed
+//!   `&str` one string hash, done once per question. The counts are document-wide: they answer
+//!   whether anything hears a name ([`Document::hears`]) and let a path or global probe of a name
+//!   with no registration of that kind return at once. The capture count is what lets
+//!   [`Document::would_reach_listener`] answer a non-bubbling, non-composed event from the target's
+//!   own rows: with no global and no capture registration of the name, only a registration on the
+//!   target itself runs on that event's path, so no path is built. A name's id outlives its last
+//!   registration: the set of names is the page's event vocabulary, a few dozen strings for the
+//!   life of the document, so ids are not recycled.
 //!
 //! Nothing is kept per registrant: which registrants a dispatch reaches is read from the rows of
 //! the path's nodes and the name's global rows, and a registrant's removal
@@ -187,23 +190,28 @@ struct Registration {
     kinds: ListenerKinds,
 }
 
-/// How many registrations hold a path kind and how many hold
-/// [`ListenerKinds::GLOBAL`]. A registration holding both counts in both;
-/// every registration counts in at least one, so both zero means none.
+/// How many registrations hold a path kind, how many of those hold
+/// [`ListenerKinds::PATH_CAPTURE`], and how many hold
+/// [`ListenerKinds::GLOBAL`]. A registration holding both a path kind and
+/// the global one counts in both; every registration counts in `path` or
+/// `global`, so both zero means none. `capture` never exceeds `path`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Counts {
     path: u32,
+    capture: u32,
     global: u32,
 }
 
 impl Counts {
     fn add(&mut self, kinds: ListenerKinds) {
         self.path += u32::from(kinds.on_path());
+        self.capture += u32::from(kinds.contains(ListenerKinds::PATH_CAPTURE));
         self.global += u32::from(kinds.global());
     }
 
     fn subtract(&mut self, kinds: ListenerKinds) {
         self.path -= u32::from(kinds.on_path());
+        self.capture -= u32::from(kinds.contains(ListenerKinds::PATH_CAPTURE));
         self.global -= u32::from(kinds.global());
     }
 
@@ -595,10 +603,20 @@ impl<T> Document<T> {
     ///
     /// No registration of the name is one lookup and `false`; a global
     /// registration anywhere is `true`, since a global registration hears
-    /// the name on any path; otherwise the path is built and probed as
-    /// [`Self::listeners_on_path`] probes it, stopping at the first hit. A
-    /// target that is not live reaches nothing. Definitions are not
-    /// consulted: a component asks this about script listeners.
+    /// the name on any path. A target that is not live reaches nothing.
+    ///
+    /// An event that neither bubbles nor is composed, of a name no capture
+    /// registration holds, is then answered from the target's own rows, one
+    /// node probe: such an event's path runs a bubble registration only on
+    /// the target, since every other node of it is an ancestor (or a slot)
+    /// with no bubble step, and a path that stays non-composed names the
+    /// target as the target at every step. The path a composed event takes
+    /// out of a shadow tree gives each host it reaches a bubble step of its
+    /// own, at target, so a composed event is not answered this way.
+    ///
+    /// Otherwise the path is built and probed as [`Self::listeners_on_path`]
+    /// probes it, stopping at the first hit. Definitions are not consulted:
+    /// a component asks this about script listeners.
     #[must_use]
     pub fn would_reach_listener(
         &self,
@@ -617,6 +635,12 @@ impl<T> Document<T> {
         }
         if counts.path == 0 || !self.contains_node(target) {
             return false;
+        }
+        if !bubbles && !composed && counts.capture == 0 {
+            return table
+                .by_target
+                .get(&target)
+                .is_some_and(|rows| rows.iter().any(|row| row.name == id));
         }
         let steps = self.event_steps(target, bubbles, composed);
         let mut reached = false;
