@@ -1336,7 +1336,7 @@ fn a_resumed_exposure_is_delivered_by_an_entry_of_its_own() {
     });
 }
 
-/// A transition that forms outside any update — here the `disexposure` a
+/// A change that forms outside any update — here the `disexposure` a
 /// `stopExposure({sendEvent: true})` owes an exposed element with an
 /// `exposure-id` — gets the delivery entry too, although no observer has an
 /// entry queued: the epilogue posts one whenever exposure is owed. What the

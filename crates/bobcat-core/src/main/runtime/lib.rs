@@ -774,7 +774,7 @@ struct DocumentSlot {
     /// ([`MainThreadRuntime::run_due_timers`]). Empty on a page with no
     /// autoplaying swiper.
     autoplays: Autoplays,
-    /// The document's exposure registrations and the transitions they owe
+    /// The document's exposure registrations and the changes they owe
     /// script.
     ///
     /// Beside the document rather than inside it because exposure is Lynx's
@@ -2890,21 +2890,21 @@ impl MainThreadRuntime {
             .is_some_and(|document| document.update_intersection_observations(time))
     }
 
-    /// Whether exposure transitions wait for a delivery entry — the page's
+    /// Whether exposure changes wait for a delivery entry — the page's
     /// cue to post one even when no observer has entries queued: a
     /// teardown, a `stopExposure` that sent records, or a freed element that
-    /// was exposed queues its transition outside any update.
+    /// was exposed queues its change outside any update.
     ///
     /// One `is_empty`, because nearly every entry's answer is no.
     pub(crate) fn has_pending_exposure(&self) -> bool {
-        self.slot.borrow().exposure.has_transitions()
+        self.slot.borrow().exposure.has_changes()
     }
 
     /// Delivers every observer's queued entries to its handler, in creation
     /// order — "notify intersection observers"
     /// ([§3.2.5](https://w3c.github.io/IntersectionObserver/#notify-intersection-observers-algo)),
     /// which `dom` runs whole, call included — and then the exposure
-    /// transitions that loop and the entries before it left, into the realm.
+    /// changes that loop and the entries before it left, into the realm.
     ///
     /// Two kinds of observer exist today. An engine component's, a
     /// `dom::CustomElement` definition's, carries a [`dom::ElementHandler`]:
@@ -2912,7 +2912,7 @@ impl MainThreadRuntime {
     /// `[CEReactions]` scope, and drops the entries if the element is not a
     /// constructed component; **no realm is entered** for one. An exposure
     /// registration's carries the exposure handler, which only records
-    /// transitions: it cannot call the realm from inside `dom`'s loop, because
+    /// changes: it cannot call the realm from inside `dom`'s loop, because
     /// the realm is not the document's to lend, so the realm half runs here,
     /// after the loop, with the document released. The MTS
     /// `IntersectionObserver` binding's handler, once it exists, is the same
@@ -2920,12 +2920,12 @@ impl MainThreadRuntime {
     /// the loop.
     ///
     /// That half is web-core's order (`ExposureServices.ts:209-275`): each
-    /// `uiappear`/`uidisappear` in the order the transitions formed — one
+    /// `uiappear`/`uidisappear` in the order the changes formed — one
     /// non-bubbling, non-composed dispatch at the element, with
     /// [`EventDetail::Exposure`] — then one `exposure` record list, then one
     /// `disexposure` list, each one call of `bobcat:runtime`'s
     /// `__BobcatSendExposure` (see [`Self::send_exposure_records`]). An
-    /// element freed since its transition formed hears nothing, as a routed
+    /// element freed since its change formed hears nothing, as a routed
     /// event at a freed target does, and its record is still sent: the id
     /// and scene were copied when it formed.
     ///
@@ -2944,14 +2944,14 @@ impl MainThreadRuntime {
             .borrow_mut()
             .document_mut()
             .notify_intersection_observers();
-        let transitions = self.slot.borrow().exposure.take_transitions();
-        if transitions.is_empty() {
+        let changes = self.slot.borrow().exposure.take_changes();
+        if changes.is_empty() {
             return Vec::new();
         }
         let timestamp = self.timeline_milliseconds;
         let mut failures = Vec::new();
-        for transition in transitions.iter().filter(|t| t.element_event) {
-            let name = if transition.appeared {
+        for change in changes.iter().filter(|t| t.element_event) {
+            let name = if change.appeared {
                 APPEAR_EVENT
             } else {
                 DISAPPEAR_EVENT
@@ -2960,7 +2960,7 @@ impl MainThreadRuntime {
             // (`ExposureServices.ts:210-218`).
             if let Err(error) = self.dispatch(
                 js,
-                transition.node,
+                change.node,
                 name,
                 false,
                 false,
@@ -2973,13 +2973,13 @@ impl MainThreadRuntime {
         }
         for (kind, appeared) in [("exposure", true), ("disexposure", false)] {
             let mut record = String::new();
-            for transition in transitions.iter().filter(|t| t.appeared == appeared) {
-                let Some(id) = &transition.exposure_id else {
+            for change in changes.iter().filter(|t| t.appeared == appeared) {
+                let Some(id) = &change.exposure_id else {
                     continue;
                 };
-                write_record_field(&mut record, &packed_node_id(transition.node).to_string());
+                write_record_field(&mut record, &packed_node_id(change.node).to_string());
                 write_record_field(&mut record, id);
-                write_record_field(&mut record, &transition.scene);
+                write_record_field(&mut record, &change.scene);
             }
             if record.is_empty() {
                 continue;

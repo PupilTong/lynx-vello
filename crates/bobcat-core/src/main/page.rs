@@ -255,7 +255,7 @@ pub(super) struct Page {
     /// already gone. One post per batch.
     content_visibility_posted: Cell<bool>,
     /// Whether an entry that will deliver the entries `dom`'s intersection
-    /// observers have queued, and the exposure transitions waiting with them,
+    /// observers have queued, and the exposure changes waiting with them,
     /// is already queued and has not run yet — the spec's per-document
     /// `IntersectionObserverTaskQueued` flag, set where it queues the task
     /// and cleared as that task's first step.
@@ -380,11 +380,11 @@ impl Page {
     ///
     /// The loop itself enters no JavaScript: an engine component's observer
     /// calls its `intersections_changed` hook through `dom::ElementHandler`,
-    /// and an exposure registration's records a transition. What enters the
+    /// and an exposure registration's records a change. What enters the
     /// realm is the exposure drain after the loop — each element's
     /// `uiappear`/`uidisappear`, then the `exposure` and `disexposure` record
     /// lists (`crate::main::exposure`) — and that is why this is also the
-    /// entry posted for exposure transitions that formed outside any update:
+    /// entry posted for exposure changes that formed outside any update:
     /// a teardown, a `stopExposure` that sent records, a freed element. A
     /// listener that throws, or a record list the realm did not take, is
     /// nonfatal — `ListenerFailed`, the standing every listener here has —
@@ -958,7 +958,7 @@ impl RealmOwner for Page {
     /// updated against that commit's layout and the live scroll offsets
     /// whether or not the commit built anything — a scroll composed inside the
     /// encode window moves an offset and commits nothing — and their entries,
-    /// which the same entry delivers with any exposure transition that formed
+    /// which the same entry delivers with any exposure change that formed
     /// outside an update, the `contentvisibilityautostatechange` deliveries
     /// that commit decided
     /// and the component events this entry produced — `<image>` `load`s and
@@ -984,7 +984,7 @@ impl RealmOwner for Page {
         // After it, so the geometry the host is handed is the frame's.
         runtime.publish_text_input_state();
         // The update first, always: it must run whether or not exposure
-        // transitions are already waiting.
+        // changes are already waiting.
         if (runtime.update_intersection_observations() || runtime.has_pending_exposure())
             && !page.intersections_posted.replace(true)
         {

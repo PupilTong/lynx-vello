@@ -7,7 +7,7 @@
 //! `dom`: each registered element is one intersection observer of `dom`'s
 //! (`dom::IntersectionEventHandler`), the W3C primitive with the target
 //! margin `dom` adds beside the root margin, and this module turns what
-//! those observers deliver into exposure transitions.
+//! those observers deliver into exposure changes.
 //!
 //! # The rulings it is built on (user, 2026-10-11; the margin fold is the
 //! architect's decision of 2026-10-12)
@@ -58,10 +58,10 @@
 //!
 //! **There is no timer.** Native polls on a display link and web-core batches
 //! its records behind a 50 ms timeout (`ExposureServices.ts:246-275`). Here
-//! the transitions are delivered by the page's intersection delivery entry,
+//! the changes are delivered by the page's intersection delivery entry,
 //! the one the epilogue posts after an update that queued entries
 //! (`docs/runtime-architecture.md`): first each `uiappear`/`uidisappear`, in
-//! the order the transitions formed, then one `exposure` list, then one
+//! the order the changes formed, then one `exposure` list, then one
 //! `disexposure` list, web-core's order. `lynx.setObserverFrameRate` has no
 //! rate to set.
 //!
@@ -122,7 +122,7 @@
 //! element's `exposure-area`, and the root and target margins its margins
 //! fold into — whose handler, [`ExposureHandler`], compares what the
 //! primitive reports with what was last recorded and queues a
-//! [`Transition`] where they differ. One
+//! [`ExposureChange`] where they differ. One
 //! threshold at the area is enough: the primitive queues an entry exactly
 //! when the pair (threshold index, intersecting) changes, which is exactly
 //! when "intersecting with a ratio of at least the area" can change.
@@ -186,14 +186,14 @@ pub(crate) fn is_exposure_attribute(name: &str) -> bool {
 /// One element's exposure moving: it became visible (`appeared`) or stopped
 /// being so, or a teardown took it out of the exposed record.
 ///
-/// The id and the scene are copied when the transition forms, because the
+/// The id and the scene are copied when the change forms, because the
 /// element may be freed, or its attributes rewritten, before the delivery
 /// entry runs: a `disexposure` names what the element was exposed under.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Transition {
+pub(crate) struct ExposureChange {
     pub(crate) node: NodeId,
     pub(crate) appeared: bool,
-    /// The `exposure-id` this transition is recorded under: `None` for an
+    /// The `exposure-id` this change is recorded under: `None` for an
     /// element registered only by its listener, which gets no record.
     pub(crate) exposure_id: Option<String>,
     pub(crate) scene: String,
@@ -217,7 +217,7 @@ struct Entry {
     scene: String,
     /// `exposure-area` as a ratio in `[0, 1]`.
     area: f64,
-    /// Recorded as exposed: the last transition this registration queued
+    /// Recorded as exposed: the last change this registration queued
     /// was an appearance.
     exposed: bool,
 }
@@ -227,22 +227,22 @@ struct Entry {
 struct Shared {
     entries: FxHashMap<NodeId, Entry>,
     /// Pending, in the order they formed.
-    transitions: Vec<Transition>,
+    changes: Vec<ExposureChange>,
 }
 
-/// Queues `transition` unless it can say nothing: one with no id and no
+/// Queues `change` unless it can say nothing: one with no id and no
 /// element event would deliver neither a record nor an event, and queued it
 /// would still cost a delivery entry.
-fn queue(transitions: &mut Vec<Transition>, transition: Transition) {
-    if transition.exposure_id.is_some() || transition.element_event {
-        transitions.push(transition);
+fn queue(changes: &mut Vec<ExposureChange>, change: ExposureChange) {
+    if change.exposure_id.is_some() || change.element_event {
+        changes.push(change);
     }
 }
 
-/// Records `entry` as visible or not, queueing the transition when that is a
+/// Records `entry` as visible or not, queueing the change when that is a
 /// change. `element_event` is whether the element hears it.
 fn record(
-    transitions: &mut Vec<Transition>,
+    changes: &mut Vec<ExposureChange>,
     node: NodeId,
     entry: &mut Entry,
     visible: bool,
@@ -253,8 +253,8 @@ fn record(
     }
     entry.exposed = visible;
     queue(
-        transitions,
-        Transition {
+        changes,
+        ExposureChange {
             node,
             appeared: visible,
             exposure_id: entry.exposure_id.clone(),
@@ -275,7 +275,7 @@ struct ExposureHandler {
 }
 
 impl IntersectionEventHandler<()> for ExposureHandler {
-    /// Compares each entry with the recorded state and queues a transition
+    /// Compares each entry with the recorded state and queues a change
     /// where they differ. Touches no `Document` method, which is what lets it
     /// hold the shared borrow for the whole call.
     fn notify(
@@ -287,7 +287,7 @@ impl IntersectionEventHandler<()> for ExposureHandler {
         let mut shared = self.shared.borrow_mut();
         let Shared {
             entries: registered,
-            transitions,
+            changes,
         } = &mut *shared;
         let Some(entry) = registered.get_mut(&self.node) else {
             return;
@@ -303,7 +303,7 @@ impl IntersectionEventHandler<()> for ExposureHandler {
             // but intersection.
             let visible = observed.is_intersecting && observed.intersection_ratio >= entry.area;
             let element_event = entry.listens;
-            record(transitions, self.node, entry, visible, element_event);
+            record(changes, self.node, entry, visible, element_event);
         }
     }
 
@@ -320,10 +320,7 @@ impl Drop for ExposureHandler {
     /// goes.
     fn drop(&mut self) {
         let mut shared = self.shared.borrow_mut();
-        let Shared {
-            entries,
-            transitions,
-        } = &mut *shared;
+        let Shared { entries, changes } = &mut *shared;
         let freed = entries
             .get(&self.node)
             .is_some_and(|entry| entry.observer.is_some());
@@ -331,7 +328,7 @@ impl Drop for ExposureHandler {
             return;
         }
         if let Some(mut entry) = entries.remove(&self.node) {
-            record(transitions, self.node, &mut entry, false, false);
+            record(changes, self.node, &mut entry, false, false);
         }
     }
 }
@@ -555,7 +552,7 @@ impl Attributes {
 }
 
 /// A document's exposure registrations, the switch `stopExposure` and
-/// `resumeExposure` turn, and the transitions waiting for a delivery entry.
+/// `resumeExposure` turn, and the changes waiting for a delivery entry.
 ///
 /// Owned by the realm's document slot beside the document.
 #[derive(Debug)]
@@ -627,10 +624,7 @@ impl Exposure {
         } = attributes;
         let previous = {
             let mut shared = self.shared.borrow_mut();
-            let Shared {
-                entries,
-                transitions,
-            } = &mut *shared;
+            let Shared { entries, changes } = &mut *shared;
             let entry = entries.entry(node).or_insert(Entry {
                 observer: None,
                 listens,
@@ -641,7 +635,7 @@ impl Exposure {
             });
             let previous = entry.observer.take();
             if entry.exposure_id != exposure_id {
-                record(transitions, node, entry, false, false);
+                record(changes, node, entry, false, false);
             }
             entry.listens = listens;
             entry.exposure_id = exposure_id;
@@ -682,14 +676,11 @@ impl Exposure {
     fn teardown(&mut self, document: &mut LynxDocument, node: NodeId) {
         let observer = {
             let mut shared = self.shared.borrow_mut();
-            let Shared {
-                entries,
-                transitions,
-            } = &mut *shared;
+            let Shared { entries, changes } = &mut *shared;
             let Some(mut entry) = entries.remove(&node) else {
                 return;
             };
-            record(transitions, node, &mut entry, false, false);
+            record(changes, node, &mut entry, false, false);
             entry.observer
         };
         if let Some(observer) = observer {
@@ -727,12 +718,9 @@ impl Exposure {
                     self.arm(document, node, attributes, listens);
                 } else {
                     let mut shared = self.shared.borrow_mut();
-                    let Shared {
-                        entries,
-                        transitions,
-                    } = &mut *shared;
+                    let Shared { entries, changes } = &mut *shared;
                     if let Some(mut entry) = entries.remove(&node) {
-                        record(transitions, node, &mut entry, false, false);
+                        record(changes, node, &mut entry, false, false);
                     }
                 }
             }
@@ -741,17 +729,14 @@ impl Exposure {
         let mut observers = Vec::new();
         {
             let mut shared = self.shared.borrow_mut();
-            let Shared {
-                entries,
-                transitions,
-            } = &mut *shared;
+            let Shared { entries, changes } = &mut *shared;
             for node in nodes {
                 let Some(entry) = entries.get_mut(&node) else {
                     continue;
                 };
                 observers.extend(entry.observer.take());
                 if send_event {
-                    record(transitions, node, entry, false, false);
+                    record(changes, node, entry, false, false);
                 }
             }
         }
@@ -767,16 +752,16 @@ impl Exposure {
         nodes
     }
 
-    /// Every pending transition, in the order they formed, leaving none.
-    pub(crate) fn take_transitions(&self) -> Vec<Transition> {
-        std::mem::take(&mut self.shared.borrow_mut().transitions)
+    /// Every pending change, in the order they formed, leaving none.
+    pub(crate) fn take_changes(&self) -> Vec<ExposureChange> {
+        std::mem::take(&mut self.shared.borrow_mut().changes)
     }
 
-    /// Whether a transition waits for a delivery entry: the epilogue's cue to
+    /// Whether a change waits for a delivery entry: the epilogue's cue to
     /// post one even when no observer has entries queued, for a teardown or
     /// a `stopExposure` that sent records, or a freed element.
-    pub(crate) fn has_transitions(&self) -> bool {
-        !self.shared.borrow().transitions.is_empty()
+    pub(crate) fn has_changes(&self) -> bool {
+        !self.shared.borrow().changes.is_empty()
     }
 
     /// The observer `node`'s registration owns, if it is registered and
