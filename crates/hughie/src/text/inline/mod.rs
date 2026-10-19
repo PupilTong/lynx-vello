@@ -67,6 +67,7 @@ use std::sync::OnceLock;
 
 pub use boxes::InlineEdges;
 use boxes::{BoxSpec, InlineBoxes};
+use edge::EdgeAdditions;
 use parley::{AlignmentOptions, BaseDirection, Layout, PositionedLayoutItem};
 
 use crate::geometry::{Point, Rect, Size};
@@ -79,9 +80,9 @@ use crate::text::paragraph::query::{Displayed, LineSpan};
 use crate::text::paragraph::shape::{self, NaturalLine};
 use crate::text::paragraph::style::resolve_alignment;
 use crate::text::paragraph::{
-    BlockConstraint, BlockMetrics, BreakStyle, Direction, Flow, IndentKeywords, InlineBoxSpec,
-    InlineItem, LineGeometry, OverflowWrap, OwnedItem, Paragraph, ParagraphRoot, RunBreaking,
-    RunStyle, TextAlign, TextRunItem, VerticalAlign, WhiteSpaceCollapse,
+    Additions, BlockConstraint, BlockMetrics, BreakStyle, Direction, Flow, IndentKeywords,
+    InlineBoxSpec, InlineItem, LineGeometry, OverflowWrap, OwnedItem, Paragraph, ParagraphRoot,
+    RunBreaking, RunStyle, TextAlign, TextRunItem, VerticalAlign, WhiteSpaceCollapse,
 };
 
 /// The block container's own parameters: CSS properties only.
@@ -238,7 +239,7 @@ pub struct InlineFlow {
     /// The content flow and its natural layout; a parley style index's paint
     /// identity is the index of the item it was shaped from — a run, or an
     /// inline box's `Open` for an edge cluster — `None` for the strut's.
-    paragraph: Paragraph<Option<u32>>,
+    paragraph: Paragraph<Option<u32>, EdgeAdditions>,
     /// Each item's line-breaking values, indexed like the items.
     breaking: Vec<BreakStyle>,
     /// The non-atomic inline boxes: their parameters, their places in the
@@ -778,7 +779,7 @@ impl InlineFlow {
             for inline_box in placed.take(count) {
                 let slot = usize::try_from(inline_box.id).expect("slot ids are table indexes");
                 let spec = content.box_spec(content.block.boxes[slot].item);
-                let (before, _) = content.block.box_advance(slot);
+                let (before, _) = content.additions.box_advance(slot);
                 atoms.push(PlacedBox::Visible {
                     id: spec.id,
                     line: u32::try_from(index).expect("line count fits u32"),
@@ -870,7 +871,7 @@ impl InlineFlow {
     ) -> (f32, f32) {
         let breaking = RunBreaking::PerItem(&self.breaking);
         let keywords = self.style.indent;
-        let mut break_at = |paragraph: &mut Paragraph<Option<u32>>, width| {
+        let mut break_at = |paragraph: &mut Paragraph<Option<u32>, EdgeAdditions>, width| {
             if counted {
                 self.memo.begin_break();
             }
@@ -903,7 +904,7 @@ impl InlineFlow {
 /// one marker more at the end of the content for each box the items leave
 /// open, which closes it there. Its places after white space collapsing
 /// decide where each edge goes (`edge::place`).
-fn lay_in(items: &[InlineFlowItem<'_>]) -> (Flow, InlineBoxes) {
+fn lay_in(items: &[InlineFlowItem<'_>]) -> (Flow<EdgeAdditions>, InlineBoxes) {
     let mut specs = Vec::new();
     let mut open = 0_usize;
     let mut core: Vec<InlineItem<'_>> = items
@@ -933,11 +934,9 @@ fn lay_in(items: &[InlineFlowItem<'_>]) -> (Flow, InlineBoxes) {
         })
         .collect();
     core.extend(core::iter::repeat_n(InlineItem::Marker, open));
-    let mut flow = Flow::build(&core, WhiteSpaceProcessing::Css);
-    let boxes = edge::place(&mut flow.block, items, specs);
-    if !boxes.edges.is_empty() {
-        flow.break_override = Some(edge::BREAK_OVERRIDE);
-    }
+    let (mut flow, places) = Flow::build(&core, WhiteSpaceProcessing::Css);
+    let (boxes, additions) = edge::place(&mut flow.block, places, items, specs);
+    flow.additions = additions;
     (flow, boxes)
 }
 
@@ -960,7 +959,11 @@ fn lay_in(items: &[InlineFlowItem<'_>]) -> (Flow, InlineBoxes) {
 ///   Parley's one pass only lets white space at the paragraph's own level hang, and documents its
 ///   widths as possibly wrong for mixed directions. Only a right-to-left paragraph was found to
 ///   differ; the rest is excluded with it.
-fn one_pass_content(flow: &Flow, breaking: &[BreakStyle], direction: Direction) -> bool {
+fn one_pass_content(
+    flow: &Flow<EdgeAdditions>,
+    breaking: &[BreakStyle],
+    direction: Direction,
+) -> bool {
     use icu_properties::CodePointMapData;
     use icu_properties::props::BidiClass;
 
@@ -975,8 +978,8 @@ fn one_pass_content(flow: &Flow, breaking: &[BreakStyle], direction: Direction) 
             OwnedItem::Box(_) | OwnedItem::Marker => true,
         })
         && flow
-            .block
-            .inserted
+            .additions
+            .inserted()
             .iter()
             .all(|segment| segment.style.letter_spacing + segment.extra_spacing >= 0.0)
         && !flow.block.text.chars().any(|character| {

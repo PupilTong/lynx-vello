@@ -21,7 +21,7 @@ use parley::PositionedLayoutItem;
 use super::edge::{EdgeRun, EdgeSide, SpanAt};
 use super::{FlowSource, InlineFlow, InlineFragment};
 use crate::geometry::{Point, Rect, Size};
-use crate::text::paragraph::Direction;
+use crate::text::paragraph::{Additions, Direction};
 
 /// Each box's inline extent on one line, if it has any.
 struct Extents<'a> {
@@ -107,6 +107,7 @@ impl InlineFlow {
         extents: &mut Extents<'_>,
     ) {
         let block = &self.paragraph.content.block;
+        let additions = &self.paragraph.content.additions;
         let boxes = &self.boxes;
         // The hanging zone sits at the line's end edge, which is the
         // paragraph direction's.
@@ -162,7 +163,7 @@ impl InlineFlow {
                 PositionedLayoutItem::InlineBox(inline_box) => {
                     let slot = usize::try_from(inline_box.id).expect("slot ids index slots");
                     let atom = block.boxes[slot].item;
-                    let (before, after) = block.box_advance(slot);
+                    let (before, after) = additions.box_advance(slot);
                     let right = inline_box.x + inline_box.width - after;
                     extents.add(boxes.item_span[atom as usize], inline_box.x + before, right);
                     self.add_atom_edges(extents, slot, inline_box.x, right, after);

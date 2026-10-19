@@ -10,7 +10,7 @@
 
 use parley::Layout;
 
-use super::{LineGeometry, Paragraph};
+use super::{Additions, LineGeometry, Paragraph};
 use crate::geometry::{Point, Rect, Size};
 use crate::style::TextBrush;
 
@@ -34,7 +34,7 @@ pub(in crate::text) struct Displayed<'a> {
     pub(in crate::text) content_slots: usize,
 }
 
-impl<S> Paragraph<S> {
+impl<S, A: Additions> Paragraph<S, A> {
     /// The boxes the source range `[start, end)` occupies in `displayed`: one
     /// per line it shows content on, from the leftmost selected cluster or
     /// atomic box to the rightmost, as tall as the line box. `start == end`

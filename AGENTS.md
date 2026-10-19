@@ -3559,10 +3559,14 @@ with its root inline box (`ParagraphRoot`: the strut, which is parley's style
 consumer that lays text of its own into the content has four generic hooks,
 which the Lynx block does not use: markers in the item stream
 (`InlineItem::Marker`) whose places after white space collapsing the
-normalizer reports, segments spliced into the normalized text with no source
-unit and a style of their own (`NormalizedBlock::splice`), its own line-break
-override (`shape::BreakOverride`), and advance laid beside an atomic box
-(`NormalizedBlock::box_advance`).
+normalizer reports beside the block (`MarkerPlaces`), segments spliced into
+the normalized text with no source unit and a style of their own
+(`NormalizedBlock::splice`), its own line-break override
+(`shape::BreakOverride`), and advance laid beside an atomic box. What the core
+reads of these at every shaping and break is the flow's `Additions` type
+parameter (`Flow<A = ()>`, `Paragraph<S, A = ()>`): the Lynx block's is `()`,
+the inline formatting context's `inline::edge::EdgeAdditions`, so the flow a
+Lynx `<text>` retains carries none of it.
 `src/text/block` is the Lynx `<text>` layer on it: `BlockStyle` with the
 `text-maxline`/`text-maxlength` limits, the truncation in `truncate.rs` (which
 lays an `<inline-truncation>` subtree in at the clamp; the painter applies

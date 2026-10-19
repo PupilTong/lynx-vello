@@ -221,7 +221,7 @@ impl TextBlock {
         );
         let flow = &paragraph.content;
         let truncation = truncation.map(|items| TruncationFlow {
-            flow: Flow::build(items, block_style.processing(false)),
+            flow: Flow::build(items, block_style.processing(false)).0,
             natural_width: None,
         });
         debug_assert!(
