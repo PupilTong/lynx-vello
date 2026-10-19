@@ -52,6 +52,17 @@
 //! it or an ancestor), focus is dropped with no event, as HTML's focus
 //! fixup rule does.
 //!
+//! A host keeps its selection while it is not focused, as a browser's text
+//! control keeps `selectionStart`/`selectionEnd` across a blur: losing focus,
+//! with or without events, retains the session's selection as value offsets,
+//! [`Document::set_host_value`] on a host that is not focused replaces it, and
+//! the next [`Document::focus`] restores it, clamped to the value as it is
+//! then. A host that was never focused nor written has none, and focusing it
+//! places a collapsed caret at the start, as HTML's `contenteditable` focus
+//! does. [`Document::host_selection`] reads either form. A host that stops
+//! being an editing host keeps its retained selection, as a read-only
+//! control keeps its own; freeing the host drops it.
+//!
 //! # Selection and composition
 //!
 //! The selection is a parley [`Selection`] over the host's committed
@@ -88,6 +99,7 @@ mod tests;
 use core::ops::Range;
 
 use parley::{Affinity, Selection};
+use rustc_hash::FxHashMap;
 
 pub use self::command::{
     Command, Direction, EditEvent, EditEventKind, EditOutcome, Granularity, PreparedEdit,
@@ -170,6 +182,17 @@ impl ByteSelection {
     pub(crate) fn range(self) -> Range<usize> {
         self.anchor.min(self.focus)..self.anchor.max(self.focus)
     }
+
+    /// Both ends moved down to a character boundary of `value` and clamped
+    /// to its length: a selection retained while the value changed under it
+    /// never ends inside a character, so never inside a surrogate pair.
+    pub(crate) fn clamped(self, value: &str) -> Self {
+        Self {
+            anchor: offsets::floor_char_boundary(value, self.anchor),
+            focus: offsets::floor_char_boundary(value, self.focus),
+            affinity: self.affinity,
+        }
+    }
 }
 
 /// The editing state of the focused host.
@@ -188,13 +211,13 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    fn new(host: NodeId) -> Self {
+    /// A session over `host` whose selection is `selection`, as value
+    /// offsets the next layout pass places in the host's paragraph.
+    fn new(host: NodeId, selection: ByteSelection) -> Self {
         Self {
             host,
             selection: Selection::default(),
-            // A host focused by script places its caret at the start, as
-            // browsers do for `element.focus()` on a `contenteditable`.
-            pending: Some(ByteSelection::collapsed(0, Affinity::Downstream)),
+            pending: Some(selection),
             composition: None,
         }
     }
@@ -238,6 +261,17 @@ pub(crate) struct EditingState {
     /// hosts ([`Document::has_editing_hosts`]). Kept by the attribute setters
     /// and by [`Document::free_node`], the two places the answer can change.
     hosts: usize,
+    /// The selection of each host that is not focused, as byte offsets into
+    /// the value it had when the selection was retained
+    /// ([`Document::host_selection`]). A host that is not focused has no
+    /// session to hold it, and a browser's text control keeps its selection
+    /// across a blur, so it is kept here, keyed by host. Only hosts that
+    /// were focused once, or written by [`Document::set_host_value`], have
+    /// an entry: losing focus and that write are the only insertions, and
+    /// [`Document::free_node`] removes the entry with the node, so a retired
+    /// id never keeps one. A focused host's entry is not read until its
+    /// session ends and replaces it.
+    retained: FxHashMap<NodeId, ByteSelection>,
 }
 
 /// Whether an attribute value makes its element an editing host: present
@@ -285,9 +319,13 @@ impl<T> Document<T> {
         }
     }
 
-    /// Records that a node being freed leaves the count if it was a host.
-    /// One comparison for a document that has none.
+    /// Records that a node being freed leaves the count if it was a host,
+    /// and drops its retained selection. One comparison each for a document
+    /// that has neither.
     pub(crate) fn note_freed_editing_host(&mut self, node: &crate::Node<T>) {
+        if !self.editing.retained.is_empty() {
+            self.editing.retained.remove(&node.id());
+        }
         if self.editing.hosts > 0
             && node.is_element()
             && makes_host(node.attribute(CONTENTEDITABLE))
@@ -311,8 +349,10 @@ impl<T> Document<T> {
     /// that answers `true`.
     ///
     /// Queues `blur` and `focusout` at the previously focused element, then
-    /// `focus` and `focusin` at `node`, and places a collapsed caret at the
-    /// start of `node`'s value.
+    /// `focus` and `focusin` at `node`. `node`'s selection is the one it
+    /// retained ([`Self::host_selection`]), clamped to its value as it is
+    /// now, or a collapsed caret at the start of its value when it has
+    /// none (HTML's `contenteditable` focus).
     pub fn focus(&mut self, node: NodeId) -> bool {
         if !self.is_editing_host(node)
             || !self.is_shadow_including_connected(node)
@@ -327,7 +367,11 @@ impl<T> Document<T> {
         if let Some(previous) = previous {
             self.unfocus(previous, Some(node));
         }
-        self.editing.session = Some(Session::new(node));
+        let selection = match self.editing.retained.get(&node) {
+            Some(retained) => retained.clamped(&self.host_value(node)),
+            None => ByteSelection::collapsed(0, Affinity::Downstream),
+        };
+        self.editing.session = Some(Session::new(node, selection));
         self.update_element_state(node, crate::ElementState::FOCUS, true);
         self.note_visual_mutation();
         self.editing.events.extend([
@@ -370,7 +414,55 @@ impl<T> Document<T> {
         std::mem::take(&mut self.editing.events)
     }
 
+    /// The selection of `host` in UTF-16 units of its value, start ≤ end:
+    /// the session's when `host` is focused (what
+    /// [`Self::text_input_state`] reports as its selection), and otherwise
+    /// the one it retained when it last lost focus or that
+    /// [`Self::set_host_value`] last gave it, clamped to the value as it is
+    /// now. `None` for a host that has none: it was never focused nor
+    /// written.
+    #[must_use]
+    pub fn host_selection(&self, host: NodeId) -> Option<Range<u32>> {
+        let value = self.host_value(host);
+        let bytes = match self
+            .editing
+            .session
+            .as_ref()
+            .filter(|session| session.host == host)
+        {
+            // As `text_input_state` reads it: a selection the paragraph
+            // cannot read back is collapsed at the value's end.
+            Some(session) => session
+                .bytes(self.editable_paragraph(host).as_ref(), &value)
+                .map_or(value.len()..value.len(), ByteSelection::range),
+            None => self.editing.retained.get(&host)?.clamped(&value).range(),
+        };
+        let to_units =
+            |byte: usize| u32::try_from(offsets::unit_of_byte(&value, byte)).unwrap_or(u32::MAX);
+        Some(to_units(bytes.start)..to_units(bytes.end))
+    }
+
+    /// Keeps the focused host's selection as value offsets before its
+    /// session ends, for [`Self::focus`] to restore. A selection held in a
+    /// paragraph that cannot read it back as value offsets
+    /// ([`Session::bytes`]) retains nothing new.
+    fn retain_selection(&mut self) {
+        let Some(session) = self.editing.session.as_ref() else {
+            return;
+        };
+        let host = session.host;
+        if self.get(host).is_none() {
+            return;
+        }
+        let value = self.host_value(host);
+        let bytes = session.bytes(self.editable_paragraph(host).as_ref(), &value);
+        if let Some(bytes) = bytes {
+            self.editing.retained.insert(host, bytes);
+        }
+    }
+
     fn unfocus(&mut self, element: NodeId, related_target: Option<NodeId>) {
+        self.retain_selection();
         self.editing.session = None;
         self.update_element_state(element, crate::ElementState::FOCUS, false);
         self.note_visual_mutation();
@@ -401,8 +493,11 @@ impl<T> Document<T> {
         self.drop_focus(host);
     }
 
-    /// Unfocuses `host` with no event: the fixup rule's ending.
+    /// Unfocuses `host` with no event: the fixup rule's ending. The host
+    /// keeps its selection, as a control that became read-only keeps its
+    /// own.
     fn drop_focus(&mut self, host: NodeId) {
+        self.retain_selection();
         self.editing.session = None;
         if self.get(host).is_some_and(crate::Node::is_element) {
             self.update_element_state(host, crate::ElementState::FOCUS, false);

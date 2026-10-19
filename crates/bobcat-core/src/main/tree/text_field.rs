@@ -70,7 +70,7 @@
 //!
 //! | Attribute | Effect |
 //! |---|---|
-//! | `value` | the value, cut to `maxlength` UTF-16 units when that attribute is present (web-core's `_handleValue`); nothing when equal to the current value; the caret at the end when focused |
+//! | `value` | the value, cut to `maxlength` UTF-16 units when that attribute is present (web-core's `_handleValue`); nothing when equal to the current value; the caret at the end, kept for the next focus when not focused |
 //! | `placeholder` | the placeholder's text |
 //! | `placeholder-color`, `-font-size`, `-font-weight`, `-font-family` | UA `attr()` declarations on the host, read by `#placeholder` (web-core's `--placeholder-*` properties, grey and `normal` by default) and inherited by its `::placeholder` block, where an author's `::placeholder` rule overrides them |
 //! | `type` | `text`, `number`, `digit`, `password`, `tel`, `email`: the editor's `type` (`password` or `text`) and `inputmode` (web-core's `_handleType`); a `password` editor shows a disc per character (`-webkit-text-security: disc` in the shadow sheet); `number` also keeps digits and the last `.` only |
@@ -81,6 +81,18 @@
 //! | `send-composing-input` | present and not `"false"`: `input` fires during a composition too |
 //! | `confirm-enter` | `x-textarea` only: Enter fires `confirm` after its line break |
 //! | `maxlines` | `x-textarea` only: a positive whole number of lines the value may lay out in; see below |
+//! | `min-height`, `max-height` | `x-textarea` only: a `<length>` (`rpx` included) clamping the host's box, from UA `attr()` declarations (below) |
+//!
+//! `min-height` and `max-height` are web-core's `bindToStyle` of the two
+//! attributes onto its inner `<textarea>`'s inline style
+//! (`XTextareaAttributes.ts`). The host is the field's box here, so the UA
+//! sheet clamps the host's own box: `x-textarea[min-height] { min-height:
+//! attr(min-height type(<length>), 0px) }` and the same for `max-height`
+//! with `none`, typed `attr()` used directly in the property (`UA_RULES`).
+//! A value that is no `<length>` takes that fallback, the value the field
+//! has without the attribute. An author's own `min-height`/`max-height` on the host
+//! outranks the attribute (author beats UA), whereas in web-core only the
+//! attribute reaches the inner box: an accepted difference.
 //!
 //! # Edits: filters and `maxlength` after the fact
 //!
@@ -150,6 +162,16 @@
 //! `XTextarea.ts`) plus the typings' `getValue` members. A method that
 //! focuses or blurs leaves its focus events queued in `dom`; the page
 //! dispatches them from an entry of its own.
+//!
+//! A field keeps its selection while it is not focused, as a browser's
+//! `<input>` keeps `selectionStart`/`selectionEnd` across a blur
+//! ([`dom::Document::host_selection`]): `focus` restores the selection the
+//! editor had when it lost focus, or the caret a script's value write
+//! (`value`, `setValue`, `addText`, `sendDelEvent`) placed since, and only
+//! a field never focused nor written gets a caret at the end of its value,
+//! where a browser's fresh `<input>` reports its selection. `getValue`,
+//! `addText` and `sendDelEvent` on a field that is not focused read that
+//! kept selection.
 
 use std::cell::RefCell;
 use std::ops::Range;
@@ -209,6 +231,15 @@ const PLACEHOLDER_ID: &str = "placeholder";
 /// block implements `::placeholder` (module documentation), whose property
 /// restriction Stylo applies to every author declaration for it, the shadow
 /// sheet's included, and not to a UA one.
+///
+/// A textarea's `min-height` and `max-height` attributes clamp the host's
+/// own box, the field's box here, through typed `attr()` used directly in
+/// the two properties (web-core binds them to its inner `<textarea>`'s
+/// inline style). A value that is no `<length>` takes the fallback, the
+/// value the field has without the attribute: `0px`, the common UA block's
+/// `min-height: 0` (`ua_sheet`), and `none`, `max-height`'s initial value.
+/// Without the fallback such a value would be invalid at computed-value
+/// time, and `min-height` would become its initial `auto`, not that `0`.
 pub(super) const UA_RULES: &str = r"
 x-input, x-input-ng, x-textarea, x-textarea-ng {
   display: flex; font-size: 14px;
@@ -224,6 +255,12 @@ x-input::placeholder, x-input-ng::placeholder, x-textarea::placeholder, x-textar
 }
 x-input::placeholder, x-input-ng::placeholder { white-space: pre; }
 x-textarea::placeholder, x-textarea-ng::placeholder { white-space: pre-wrap; }
+x-textarea[min-height], x-textarea-ng[min-height] {
+  min-height: attr(min-height type(<length>), 0px);
+}
+x-textarea[max-height], x-textarea-ng[max-height] {
+  max-height: attr(max-height type(<length>), none);
+}
 ";
 
 /// The shadow sheet common to both kinds; [`INPUT_SHADOW_RULES`] and
@@ -231,10 +268,13 @@ x-textarea::placeholder, x-textarea-ng::placeholder { white-space: pre-wrap; }
 /// ([`dom::Document::add_engine_shadow_stylesheet`]): the input's editor is
 /// `display: block`, which the `lynx` grammar keeps from author sheets. The
 /// placeholder's block has no rule here: it is the `::placeholder`, laid
-/// out by [`UA_RULES`] (module documentation).
+/// out by [`UA_RULES`] (module documentation). The editor sets no
+/// `min-height`: an empty editor is one line tall because its paragraph lays
+/// out one empty line, a layout rule, not CSS (the `lh` unit is not parsed
+/// under the fork's `lynx` feature).
 const SHADOW_RULES: &str = r"
 .editor {
-  min-width: 0; min-height: 1lh; overflow: clip;
+  min-width: 0; overflow: clip;
 }
 #placeholder {
   display: none; position: absolute; top: 0; right: 0; bottom: 0; left: 0;
@@ -631,8 +671,10 @@ impl TextField {
     }
 
     /// The value and the selection (UTF-16) of `editor`: the session's when
-    /// it is focused, a caret at the end otherwise (where a browser leaves
-    /// a field's selection after its value is set).
+    /// it is focused, otherwise the one it kept since it lost focus or a
+    /// script last wrote its value ([`dom::Document::host_selection`]), as
+    /// a browser's field keeps its selection across a blur; a caret at the
+    /// end for a field that was never focused nor written.
     fn snapshot(document: &LynxDocument, editor: NodeId) -> (String, Range<u32>, bool) {
         if document.focused() == Some(editor) {
             let state = document.text_input_state();
@@ -640,8 +682,11 @@ impl TextField {
             return (state.value, state.selection, composing);
         }
         let value = Self::value(document, editor);
-        let end = u32::try_from(units(&value)).unwrap_or(u32::MAX);
-        (value, end..end, false)
+        let selection = document.host_selection(editor).unwrap_or_else(|| {
+            let end = u32::try_from(units(&value)).unwrap_or(u32::MAX);
+            end..end
+        });
+        (value, selection, false)
     }
 
     /// Writes a value the way script does — no `input` — with the caret at
@@ -899,8 +944,11 @@ impl TextField {
         }
     }
 
-    /// `focus()`: focuses the editor with the caret at the end of the value,
-    /// where a browser's `input.focus()` restores it after a value was set.
+    /// `focus()`: focuses the editor, which restores the selection it kept
+    /// since it lost focus or a script last wrote its value, as a browser's
+    /// `input.focus()` does. A field never focused nor written has none, and
+    /// gets a caret at the end of the value, where a browser's fresh
+    /// `<input>` reports its selection.
     ///
     /// The Lynx `focus` is queued here, inside the call, as a browser fires
     /// `focus` inside `input.focus()`, so it goes ahead of a `selection` a
@@ -911,11 +959,14 @@ impl TextField {
         if document.focused() == Some(editor) {
             return MethodOutcome::Done;
         }
+        let restores = document.host_selection(editor).is_some();
         if !document.focus(editor) {
             return MethodOutcome::Failed(MethodError::Operation);
         }
-        let end = units(&Self::value(document, editor));
-        document.apply_editing(Command::SetSelection { range: end..end });
+        if !restores {
+            let end = units(&Self::value(document, editor));
+            document.apply_editing(Command::SetSelection { range: end..end });
+        }
         self.on_focus(document, field, editor);
         MethodOutcome::Done
     }
@@ -1458,8 +1509,9 @@ mod tests {
     }
 
     /// The single-line editor keeps every character and does not wrap; the
-    /// textarea's wraps. Both fill the content box and are one line tall
-    /// when empty.
+    /// textarea's wraps. Both fill the content box. An empty editor is one
+    /// line tall because its paragraph lays out one empty line, a layout
+    /// rule, not CSS.
     #[test]
     fn the_input_is_one_line_and_the_textarea_wraps() {
         let (mut document, _, input) = make("x-input", &[("value", "a  b")]);
@@ -1929,6 +1981,73 @@ mod tests {
         );
     }
 
+    /// `x-textarea`'s `min-height` and `max-height` attributes clamp the
+    /// host's box through UA `attr()` rules; removing one, or a value that
+    /// is no length, leaves the content height, and `x-input` reads neither.
+    #[test]
+    fn min_height_and_max_height_attributes_clamp_a_textarea() {
+        const UNSIZED: &str =
+            "width: 200px; padding: 5px; font-family: Ahem; font-size: 10px; line-height: 10px";
+        // The initial values, as a field with neither attribute computes
+        // them.
+        let initial = |tag: &str| {
+            let (mut document, _, field) = make(tag, &[]);
+            document.set_inline_style(field, UNSIZED);
+            document.layout();
+            (
+                value_of(&document, field, "min-height"),
+                value_of(&document, field, "max-height"),
+            )
+        };
+        for tag in TEXTAREA_TAGS {
+            let (min, max) = initial(tag);
+            let (mut document, _, field) = make(tag, &[("min-height", "60px")]);
+            document.set_inline_style(field, UNSIZED);
+            document.layout();
+            let editor = editor_of(&document, field);
+            assert_eq!(value_of(&document, field, "min-height"), "60px", "{tag}");
+            assert_eq!(rect(&document, field).3, 60.0, "{tag}");
+            assert_eq!(rect(&document, editor), (5.0, 5.0, 190.0, 50.0), "{tag}");
+
+            // One line of content: 10px and the padding.
+            document.set_attribute(field, "value", "x");
+            document.remove_attribute(field, "min-height");
+            document.layout();
+            assert_eq!(value_of(&document, field, "min-height"), min, "{tag}");
+            assert_eq!(rect(&document, field).3, 20.0, "{tag}");
+
+            // Four wrapped lines would be 50px tall.
+            document.set_attribute(field, "value", &"xx ".repeat(20));
+            document.set_attribute(field, "max-height", "30px");
+            document.layout();
+            assert_eq!(value_of(&document, field, "max-height"), "30px", "{tag}");
+            assert_eq!(rect(&document, field).3, 30.0, "{tag}");
+            document.remove_attribute(field, "max-height");
+            document.layout();
+            assert_eq!(value_of(&document, field, "max-height"), max, "{tag}");
+            assert_eq!(rect(&document, field).3, 50.0, "{tag}");
+
+            // A value that is no length takes the fallback: what the field
+            // computes without the attribute.
+            document.set_attribute(field, "min-height", "tall");
+            document.set_attribute(field, "max-height", "30");
+            document.layout();
+            assert_eq!(value_of(&document, field, "min-height"), min, "{tag}");
+            assert_eq!(value_of(&document, field, "max-height"), max, "{tag}");
+            assert_eq!(rect(&document, field).3, 50.0, "{tag}");
+        }
+
+        for tag in INPUT_TAGS {
+            let (min, max) = initial(tag);
+            let (mut document, _, field) =
+                make(tag, &[("min-height", "60px"), ("max-height", "5px")]);
+            document.set_inline_style(field, UNSIZED);
+            document.layout();
+            assert_eq!(value_of(&document, field, "min-height"), min, "{tag}");
+            assert_eq!(value_of(&document, field, "max-height"), max, "{tag}");
+        }
+    }
+
     // --- methods -------------------------------------------------------------
 
     #[test]
@@ -2001,5 +2120,101 @@ mod tests {
             invoke(&mut document, field, "scrollToPosition", "{}"),
             MethodOutcome::NotFound
         );
+    }
+
+    /// A field keeps its selection while it is not focused, as a browser's
+    /// `<input>` keeps `selectionStart`/`selectionEnd` across a blur:
+    /// `getValue` answers it, and `focus` restores it with no `selection`
+    /// event, since the `focus` report carries it. A script's write while
+    /// the field is not focused leaves its caret for the next focus.
+    #[test]
+    fn a_field_keeps_its_selection_while_it_is_not_focused() {
+        let (mut document, events, field) = make("x-input", &[("value", "hello")]);
+        let editor = editor_of(&document, field);
+        focus(&mut document, field);
+        assert_eq!(
+            invoke(
+                &mut document,
+                field,
+                "setSelectionRange",
+                r#"{"selectionStart":1,"selectionEnd":3}"#
+            ),
+            MethodOutcome::Done
+        );
+        assert_eq!(
+            invoke(&mut document, field, "blur", "{}"),
+            MethodOutcome::Done
+        );
+        deliver_focus_events(&mut document);
+        queued(&events);
+        assert_eq!(document.focused(), None);
+        assert_eq!(
+            invoke(&mut document, field, "getValue", "{}"),
+            MethodOutcome::Data("5:hello1:11:31:0".to_owned())
+        );
+
+        assert_eq!(
+            invoke(&mut document, field, "focus", "{}"),
+            MethodOutcome::Done
+        );
+        assert_eq!(document.text_input_state().selection, 1..3);
+        deliver_focus_events(&mut document);
+        assert_eq!(
+            queued(&events),
+            [("focus", text_value("hello"))],
+            "no `selection`: the focus report carries it"
+        );
+
+        // `setValue` while not focused: the caret at the end, or at `index`.
+        assert_eq!(
+            invoke(&mut document, field, "blur", "{}"),
+            MethodOutcome::Done
+        );
+        assert_eq!(
+            invoke(&mut document, field, "setValue", r#"{"value":"abcdef"}"#),
+            MethodOutcome::Done
+        );
+        assert_eq!(
+            invoke(&mut document, field, "getValue", "{}"),
+            MethodOutcome::Data("6:abcdef1:61:61:0".to_owned())
+        );
+        assert_eq!(
+            invoke(&mut document, field, "focus", "{}"),
+            MethodOutcome::Done
+        );
+        assert_eq!(document.text_input_state().selection, 6..6);
+        assert_eq!(
+            invoke(&mut document, field, "blur", "{}"),
+            MethodOutcome::Done
+        );
+        assert_eq!(
+            invoke(
+                &mut document,
+                field,
+                "setValue",
+                r#"{"value":"abcdef","index":2}"#
+            ),
+            MethodOutcome::Done
+        );
+        assert_eq!(
+            invoke(&mut document, field, "focus", "{}"),
+            MethodOutcome::Done
+        );
+        assert_eq!(document.text_input_state().selection, 2..2);
+        assert_eq!(document.focused(), Some(editor));
+
+        // A fresh field has kept nothing: `focus` puts the caret at the end.
+        let (mut document, _, field) = make("x-textarea", &[]);
+        let editor = editor_of(&document, field);
+        assert_eq!(document.host_selection(editor), None);
+        assert_eq!(
+            invoke(&mut document, field, "getValue", "{}"),
+            MethodOutcome::Data("0:1:01:01:0".to_owned())
+        );
+        assert_eq!(
+            invoke(&mut document, field, "focus", "{}"),
+            MethodOutcome::Done
+        );
+        assert_eq!(document.text_input_state().selection, 0..0);
     }
 }

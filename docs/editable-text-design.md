@@ -188,7 +188,7 @@ winit's macOS backend sends no key event for them at all (E3).
 | **E2** | bobcat-core, bobcat-element (dom: two small additions) | `ToMain::Edit`, `LynxView::edit`, `ViewNotice::TextInputState` → `EngineEvent::TextInputStateChanged`, standard events into the realm (`EventDetail::{Input, Composition, Focus}` with string data), no cancellation channel (ruled 2026-10-19), pointer → caret placement and keyboard default actions on the main thread | E1, #407 |
 | **E3** | bobcat-cli (macOS) | winit `Ime` → commands, `set_ime_allowed` / `set_ime_cursor_area` from the state, `KeyEvent.text` insertion, headless driver | E2 |
 | **E4** | bobcat-wasm (bobcat-core: the text-source flag) | hidden `<textarea>` proxy in the facade (`beforeinput`/`composition*` → `bobcat-edit` → `LynxView::edit`), keyboard focus, `TextInputState` → `bobcat-text-input`; `EditContext` recorded as the follow-up | E2 |
-| **E5** | bobcat-core (components), bobcat-element | `x-input` / `x-textarea`: UA shadow tree with a plain-text editing host, attributes (`value`, `placeholder`, `type`, `maxlength`, `confirm-type`, `disabled`, `readonly`, `input-filter`, `send-composing-input`), `lynxinput`/`confirm`/`selection`/`focus`/`blur` in web-core's shape, methods (`setValue`, `getValue`, `focus`, `blur`, `setSelectionRange`, `select`) | E2 |
+| **E5** | bobcat-core (components), bobcat-element | `x-input` / `x-textarea`: UA shadow tree with a plain-text editing host, attributes (`value`, `placeholder`, `type`, `maxlength`, `confirm-type`, `disabled`, `readonly`, `input-filter`, `send-composing-input`; `x-textarea`'s `min-height`, `max-height`), `lynxinput`/`confirm`/`selection`/`focus`/`blur` in web-core's shape, methods (`setValue`, `getValue`, `focus`, `blur`, `setSelectionRange`, `select`) | E2 |
 
 Deferred after E5, in the order the survey ranks them: clipboard (needs a host
 notice pair), caret blink, `::selection` colors, rich-text hosts, undo/redo,
@@ -204,7 +204,8 @@ on); `maxlength` 140 by default (native unlimited) and counted in UTF-16
 units without native's whole-cluster rule; `input-filter` removes what
 matches (native keeps what matches); a textarea confirms only with
 `confirm-enter` (native: whenever `confirm-type` is not the default);
-`getValue` of a field not focused answers a caret at the end (native `-1`);
+`getValue` of a field not focused answers the selection it kept, a caret at
+the end when it never had one (native `-1`);
 `selection` fires for selected ranges only (native: every change).
 
 Two follow native or a user ruling instead (2026-10-19): the HTML names
@@ -249,7 +250,9 @@ Public surface:
   (the removal path) or stops being a host (`contenteditable` removed or set
   to `"false"`) loses focus with no event, as HTML's focus fixup rule says.
   `focus()` on the focused element is a no-op that answers `true`, and puts
-  the caret at the start of the value, as browsers do for `element.focus()`.
+  the caret at the start of the value, as browsers do for `element.focus()`
+  (since 2026-10-19 only for a host never focused nor written; any other
+  restores the selection it retained, `Document::host_selection`).
   A host inside a shadow tree counts as connected through its shadow host, so
   E5's UA shadow trees can be focused.
 - **`:focus` is the focused host.** `focus`/`blur` set and clear
@@ -832,6 +835,12 @@ Public surface:
   focused host the composition ended and the selection placed (UTF-16,
   rounded down inside a pair, clamped).
 - `dom::Document::has_focus_events()`.
+- `dom::Document::host_selection(host)`: a host's selection in UTF-16
+  units, the session's while focused and otherwise the one it retained
+  (2026-10-19). A host keeps its selection while it is not focused, as a
+  browser's text control does: losing focus retains it, `set_host_value` on
+  a host that is not focused replaces it, and `focus` restores it, clamped
+  to the value; a host never focused nor written gets a caret at 0.
 - `TextInputState::input_type` is read from the host's `type` attribute with
   `<input type>`'s keywords (`password`, `search`, `email`, `number`, `tel`,
   `url`; anything else `Text`).
@@ -965,15 +974,29 @@ Public surface:
   `text-maxline`: the value stays visible and editable. iOS also caps the
   text container at `maxlines` lines, which hides overflow from a script
   write; that is not built.
+- **`min-height` and `max-height` on `x-textarea` are UA CSS**
+  (2026-10-19). web-core binds each attribute to its inner `<textarea>`'s
+  inline style (`XTextareaAttributes.ts`, `bindToStyle`); the host is the
+  field's box here, so the UA sheet clamps the host's own box with
+  `x-textarea[min-height] { min-height: attr(min-height type(<length>),
+  0px) }` and `max-height` with `none` (typed `attr()` directly in the
+  property). An absent attribute matches no rule, and one that is no
+  `<length>` takes the fallback, the value the field has without it (the
+  common UA block's `min-height: 0`; without the fallback the declaration
+  would be invalid at computed-value time and `min-height` would become
+  `auto`); `rpx` parses. An author's own `min-height`/`max-height` on the host
+  outranks the attribute (author beats UA), whereas in web-core only the
+  attribute reaches the inner box; that difference is accepted.
 - **`input-filter` on `regex-lite`.** web-core hands the pattern to
   `new RegExp`; ECMAScript's `\uXXXX` is translated to `\x{XXXX}`, and a
   pattern the small engine cannot compile (lookaround, backreferences)
   filters nothing. `setInputFilter` writes the same pattern (the editor's
   `pattern` attribute, where web-core writes it too), so the last write
   wins.
-- **Methods.** `focus()` focuses with the caret at the end and queues the
-  Lynx `focus` inside the call, so a `setSelectionRange` in the same job
-  reports after it; the standard focus events it leaves in `dom` are
+- **Methods.** `focus()` restores the selection the field kept since it
+  lost focus or a script last wrote its value (a never-focused field gets
+  the caret at the end) and queues the Lynx `focus` inside the call, so a
+  `setSelectionRange` in the same job reports after it; the standard focus events it leaves in `dom` are
   dispatched from the entry that delivers component events
   (`has_component_events` asks `has_focus_events`). `setSelectionRange`
   and `select` act only on a focused field.
@@ -989,8 +1012,7 @@ Public surface:
   width is clipped.
 - No intrinsic width: an unsized field in a row is as wide as its text.
 - `readonly` fields cannot be focused (editing is off, as for `disabled`).
-- Not built: `line-spacing`, `auto-height`/`min-height`/
-  `max-height`, `linechange`, `autocomplete`, `spell-check`,
+- Not built: `line-spacing`, `auto-height`, `linechange`, `autocomplete`, `spell-check`,
   `getTextBoundingRect` on a field, `placeholder-font-style` and the
   `-x-placeholder-*` aliases.
 - `linechange` is deferred: web-core names it only in a doc comment

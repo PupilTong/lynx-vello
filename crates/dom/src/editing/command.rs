@@ -594,8 +594,9 @@ impl<T: Sync> Document<T> {
     /// becomes `selection`, in UTF-16 units of the new value (an offset
     /// inside a surrogate pair rounds down to its character's start, one
     /// past the end clamps, as [`Command::SetSelection`] reads them). A
-    /// host that is not focused keeps no selection, so `selection` is
-    /// ignored for it.
+    /// host that is not focused retains `selection` instead
+    /// ([`Self::host_selection`]), for its next [`Self::focus`] to restore,
+    /// as a browser's text control keeps the selection a value write left.
     ///
     /// The value is written as exactly one text node, the normalization the
     /// first edit performs, and only when it differs from the current one.
@@ -615,21 +616,21 @@ impl<T: Sync> Document<T> {
         if self.host_value(host) != value {
             self.write_host_value(host, value.to_owned());
         }
+        let selection = ByteSelection {
+            anchor: byte_of_unit_floor(value, selection.start),
+            focus: byte_of_unit_floor(value, selection.end),
+            affinity: Affinity::Downstream,
+        };
         if self.focused() != Some(host) {
+            self.editing.retained.insert(host, selection);
             return;
         }
-        let anchor = byte_of_unit_floor(value, selection.start);
-        let focus = byte_of_unit_floor(value, selection.end);
         let session = self
             .editing
             .session
             .as_mut()
             .expect("the focused host has a session");
-        session.pending = Some(ByteSelection {
-            anchor,
-            focus,
-            affinity: Affinity::Downstream,
-        });
+        session.pending = Some(selection);
         session.composition = None;
         self.note_visual_mutation();
     }

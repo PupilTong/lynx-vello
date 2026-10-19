@@ -3099,8 +3099,10 @@ consequential choice about whether to follow the spec or the quirk.
     fires `confirm` on Enter whenever `confirm-type` is not the default.
     Here `confirm` follows that Enter's `input` (web-core fires it on the
     `keyup`), so an Enter the input method consumed does not confirm.
-  - *`getValue` answers a field that is not focused* with a caret at the
-    end of the value (web-core's `<input>` keeps that selection); native
+  - *`getValue` answers a field that is not focused* with the selection
+    it kept since it lost focus or a script last wrote its value, and a
+    caret at the end of the value for a field never focused nor written
+    (web-core's `<input>` keeps its selection across a blur); native
     answers `-1` for both offsets. The data carries the typings'
     `selectionStart` and web-core's `selectionBegin`, both.
   - *`selection` fires for a selected range only* (web-core's `select`):

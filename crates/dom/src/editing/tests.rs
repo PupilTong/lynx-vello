@@ -937,6 +937,91 @@ fn a_value_written_by_the_element_layer_ends_the_composition_and_places_the_sele
     }
 }
 
+/// A host keeps its selection while it is not focused, as a browser's text
+/// control keeps `selectionStart`/`selectionEnd` across a blur, and the
+/// next focus restores it.
+#[test]
+fn a_host_keeps_its_selection_while_it_is_not_focused() {
+    for kind in KINDS {
+        eprintln!("kind {kind:?}");
+        let (mut doc, host) = host_in(kind, &["hello"], 200.0);
+        select(&mut doc, 1..3);
+        doc.layout();
+        assert_eq!(doc.host_selection(host), Some(1..3), "the session's");
+        assert!(doc.blur());
+        doc.take_focus_events();
+        assert_eq!(doc.focused(), None);
+        assert_eq!(doc.host_selection(host), Some(1..3));
+
+        assert!(doc.focus(host));
+        doc.take_focus_events();
+        assert_eq!(selection(&doc), 1..3, "restored, as value offsets");
+        doc.layout();
+        assert_eq!(selection(&doc), 1..3, "placed in the paragraph");
+
+        // Moving focus to another host retains this one's selection too,
+        // and a host never focused has none, so it starts at 0.
+        let other = kind.create(&mut doc);
+        doc.set_attribute(other, "contenteditable", "");
+        doc.append_child(doc.document_element().id(), other);
+        let text = doc.create_text_node("abc", ());
+        doc.append_child(other, text);
+        doc.layout();
+        assert_eq!(doc.host_selection(other), None, "never focused");
+        assert!(doc.focus(other));
+        doc.take_focus_events();
+        assert_eq!(selection(&doc), 0..0);
+        assert_eq!(doc.host_selection(host), Some(1..3));
+
+        // A script's write while the host is not focused leaves the
+        // selection it passes (UTF-16, rounded down inside a pair, clamped).
+        doc.set_host_value(host, "h😀llo", 2..99);
+        assert_eq!(doc.host_selection(host), Some(1..6));
+        assert!(doc.focus(host));
+        doc.take_focus_events();
+        assert_eq!(selection(&doc), 1..6);
+        doc.set_host_value(host, "h😀llo", 3..6);
+        assert!(doc.blur());
+        doc.take_focus_events();
+
+        // A value shortened under a retained selection clamps it, never
+        // inside a surrogate pair: bytes 5..8 of "h😀llo" become byte 2
+        // (the pair's start in "ab😀") and the end.
+        let text = doc.get(host).unwrap().first_child().unwrap().id();
+        doc.set_text_node_data(text, "ab😀");
+        assert_eq!(doc.host_selection(host), Some(2..4));
+        assert!(doc.focus(host));
+        doc.take_focus_events();
+        assert_eq!(selection(&doc), 2..4);
+        doc.layout();
+        assert_eq!(selection(&doc), 2..4);
+    }
+}
+
+/// The fixup rule's silent unfocus retains the selection, a host that stops
+/// being an editing host keeps it, and freeing the host drops it.
+#[test]
+fn a_retained_selection_outlives_editing_but_not_the_node() {
+    let (mut doc, host) = host_in(Kind::View, &["hello"], 200.0);
+    select(&mut doc, 2..4);
+    doc.set_attribute(host, "contenteditable", "false");
+    assert_eq!(doc.focused(), None);
+    assert!(doc.take_focus_events().is_empty());
+    assert_eq!(doc.host_selection(host), Some(2..4), "read-only keeps it");
+    doc.set_attribute(host, "contenteditable", "");
+    assert!(doc.focus(host));
+    assert_eq!(selection(&doc), 2..4);
+    doc.remove_element(host);
+    assert_eq!(doc.focused(), None);
+    assert_eq!(doc.host_selection(host), Some(2..4), "removed, not freed");
+    assert_eq!(doc.editing.retained.len(), 1);
+    doc.drop_element(host);
+    assert!(
+        doc.editing.retained.is_empty(),
+        "a retired id keeps no entry"
+    );
+}
+
 #[test]
 fn composition_bounds_have_one_box_per_utf16_unit() {
     for kind in KINDS {
