@@ -508,4 +508,46 @@ verified! {
     api_frame_auto_width => "api-frame-auto-width",
     // A 300x120 `<frame>` whose `data` is `{ label }` from the outer card's state, over an `update` button. First screen: the nested card reads `data:before`. After the tap on `update` the outer card sets `label` to `after` and the nested card re-renders to `data:after`, through the background thread #426 gives a frame's card; `global:` stays empty, the frame passes no `global-props`.
     api_frame_data_update => "api-frame-data-update",
+    // An empty 314x40 `x-input`, the 10px blue `#target` and a 200x200 `#result`, pink. The tap on `#target` invokes `seekTo`, a method an `x-input` does not have; the failure carries code 3 and the box turns green (editable text E5, #417).
+    api_invoke_fail => "api-invoke-fail",
+    // An `x-input` showing `bindblur`, with an empty result line under it. The card's `focus` attribute does not focus the field: web-core's `x-input` observes no `focus` attribute (native Lynx does focus it), so a click outside the field blurs nothing and the result stays empty in both frames, as on web-core. Upstream has no spec for this card.
+    basic_element_x_input_bindblur => "basic-element-x-input-bindblur",
+    // An `x-input` showing `bindconfirm`. Once the field is clicked and Enter pressed, `bindconfirm` writes the value into the result line, `bindconfirm`, and the caret stands after the value.
+    basic_element_x_input_bindconfirm => "basic-element-x-input-bindconfirm",
+    // A 300x40 `x-input` showing `bindinput`. After Enter and `fill('foobar')` the field reads `foobar` with the caret after it, and the result line reads `foobar-6-6`, which is what upstream asserts.
+    basic_element_x_input_bindinput => "basic-element-x-input-bindinput",
+    // An `x-input` showing `bindselection`. With the field focused and `setSelectionRange(2, 5)`, `nds` is highlighted and the result line reads `2-5`, which is what upstream asserts.
+    basic_element_x_input_bindselection => "basic-element-x-input-bindselection",
+    // A 100x100 red `.blur` box over an `x-input` showing `bindblur`. The tap on the box invokes the field's `blur`; the field never had focus (web-core observes no `focus` attribute, see `basic-element-x-input-bindblur`), so no `blur` fires and the result line stays empty, as on web-core.
+    basic_element_x_input_blur => "basic-element-x-input-blur",
+    // A 100x100 red `.focus` box over a 300x40 `x-input` showing `bindfocus`. The tap on the box invokes the field's `focus`: the caret appears after the value and `bindfocus` writes it into the result line, which is what upstream asserts.
+    basic_element_x_input_focus => "basic-element-x-input-focus",
+    // An `x-input` with `input-filter='[^a-zA-Z0-9]'`. After Enter and `fill('foobar!@#)')` the filter removes the four symbols: the field and the result line both read `foobar`, which is what upstream asserts.
+    basic_element_x_input_input_filter => "basic-element-x-input-input-filter",
+    // `basic-element-x-input-bindinput` on `x-input-ng`: after Enter and `fill('foobar')` the result line reads `foobar-6-6`, which is what upstream asserts.
+    basic_element_x_input_ng_bindinput => "basic-element-x-input-ng-bindinput",
+    // An empty 300x40 `x-input` whose placeholder `foo` is red, bold and 20px from its `placeholder-color`, `placeholder-font-weight` and `placeholder-font-size` attributes.
+    basic_element_x_input_placeholder => "basic-element-x-input-placeholder",
+    // A red `.click` box, a blue `.clear` box, an `x-input` bound to the state `value` and a result line of the same state, all empty at first. A tap on the red box sets the state to `1`: the field and the line both read `1`. A tap on the blue box invokes the field's `setValue('')`: the field empties and the line, which reads the state, keeps `1`. Upstream has no spec for this card.
+    basic_element_x_input_setvalue => "basic-element-x-input-setValue",
+    // A red `.click` box over an empty `x-input` bound to the state `value`. A tap on the box sets it to `1`: the field and the result line both read `1`. Upstream has no spec for this card.
+    basic_element_x_input_value => "basic-element-x-input-value",
+    // A full-width 30px `x-textarea`, empty. Upstream's three events, each awaited in the log: a click focuses it (`focus`, value empty; the caret at its start), a click outside blurs it (`blur`, value empty), and `fill('value')` gives `input` with value `value` and selection 5 to 5; the field then reads `value` with the caret after it.
+    basic_element_x_textarea_bindinput => "basic-element-x-textarea-bindinput",
+    // An `x-textarea` showing `bindselection`. With the field focused and `setSelectionRange(2, 5)`, `nds` is highlighted and the result line reads `2-5`, which is what upstream asserts.
+    basic_element_x_textarea_bindselection => "basic-element-x-textarea-bindselection",
+    // A full-width 100px `x-textarea` with no border whose value `111` is red from the host's `color`.
+    basic_element_x_textarea_color => "basic-element-x-textarea-color",
+    // An `x-textarea` with `input-filter='[^a-zA-Z0-9]'`. Enter inserts a line break, then `fill('foobar!@#)')` replaces the value and the filter removes the four symbols: the field and the result line both read `foobar`, which is what upstream asserts.
+    basic_element_x_textarea_input_filter => "basic-element-x-textarea-input-filter",
+    // Six 5px sky-blue blocks over eleven 30px `x-textarea`s. First screen: `maxlength={1}` with value `OO` shows `O`; the six dynamic fields show nothing but the one whose value is `OO` from the start; the four fixed ones with `maxlength` 2 to 5 show `OO`. After the six blocks are clicked, every dynamic field reads `OO`: a value of two units under a limit lowered to 2 is kept whole, whichever is written first.
+    basic_element_x_textarea_maxlength => "basic-element-x-textarea-maxlength",
+    // A 50px sky-blue block over a 300px `x-textarea` with `maxlines={3}` showing the four lines `ccc`, `aa`, `bbb`, `a`; after the block is clicked, `a`, `aa`, `bbb`, `ccc`. Four lines over a limit of 3 are right in both frames: the limit cuts only what an edit inserts and never a script's write (the native rule, ruled 2026-10-19), and web-core has no `maxlines` at all.
+    basic_element_x_textarea_maxlines => "basic-element-x-textarea-maxlines",
+    // A 200px sky-blue block over two empty 30px `x-textarea`s: the first shows its grey placeholder `placeholder`, the second none. After the block is clicked the second shows `I am placeholder`.
+    basic_element_x_textarea_placeholder => "basic-element-x-textarea-placeholder",
+    // Five empty 30px `x-textarea`s, each placeholder `placeholder` in #DFA878: 20px from `placeholder-font-size`, 14px by default, 30px from the host's `font-size: 30px`, 20px again where the attribute outranks that `font-size`, and 14px.
+    basic_element_x_textarea_placeholder_font_size => "basic-element-x-textarea-placeholder-font-size",
+    // A 200px sky-blue block over two empty 30px `x-textarea`s. The first placeholder is #DFA878, 20px, normal weight in both frames; the second is #D71313, 12px, bold, and after the block is clicked #F0DE36, 16px, normal.
+    basic_element_x_textarea_placeholder_style => "basic-element-x-textarea-placeholder-style",
 }

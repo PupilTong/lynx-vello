@@ -32,10 +32,8 @@ pending! {
         "awaiting a ruling: the card reads `res.path` in the `path()` callback and expects `id: undefined` for an element with none. web-core answers `{path: […]}` with `id: undefined`; native answers the node array itself with `id: \"\"`, and this engine follows native (`__BobcatQueryNodes`, `nodeFields` in `packages/bobcat-element/src/element-papi.ts`), so `res.path` is undefined and `#result` stays pink",
     "api-global-disallowed-vars" =>
         "DEFECT: `MTS_CHUNK_PREAMBLE` (crates/bobcat-core/src/esm.rs) declares none of the disallowed globals the BTS preamble shadows, so MTS code naming `navigator`/`postMessage` raises a ReferenceError where web-core's lepus wrapper gives `undefined`. The card paints only a sizeless view, so the blank screen hides it",
-    "api-invoke-fail" =>
-        "the subject works: a tap invokes the unknown method `seekTo` and the `fail` callback's `code === 3` turns `#result` green (no kind and not the base set answers `seekTo`: `crates/bobcat-core/src/main/tree/base_methods.rs`). The frame still cannot be pinned, because the element above it is an `<x-input>`, which is not an element here (editable text is out of scope: user, 2026-09-14) and so takes no border-box default: it is drawn 42px high where its styles give 40px, and both boxes sit 2px low",
     "api-invoke-success" =>
-        "`SelectorQuery.invoke`'s success callback is the subject, but the method it calls is `<x-input>`'s `focus`, which answers code 3 (`crates/bobcat-core/src/main/tree/base_methods.rs`: `focus`/`blur` are not built, `dom` has no focus model), and `<x-input>` itself is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so `#result` stays pink after the tap; the invoke contract is covered by `api-invoke-fail`'s unknown-method path",
+        "the tap on `#target` invokes the empty `x-input`'s `focus`, which succeeds and turns the box green, but the focused field paints no caret: an empty `x-input`'s editor is 0px tall (`TextInputState::editable_bounds` 312x0), so its caret is clipped, where an empty `x-textarea` paints one (`basic-element-x-textarea-bindinput`)",
     "api-lynx-performance" =>
         "the box turns green once `lynx.performance.addTimingListener` has seen `__lynx_timing_actual_fmp` and a flagged update; `lynx.performance` is undefined on the background thread, so it stays pink. Upstream also reads the keys of the host's `timing` event, which the view does not report",
     "api-report-error" =>
@@ -47,7 +45,7 @@ pending! {
     "api-updateData-callback" =>
         "two things stand in the way: the suite never calls `update_data`, and this engine's host API has no completion callback at all — `LynxView::update_data(data, processor_name)` reports no completion, where web-core takes a third callback argument. Upstream asserts only the console line it produces",
     "basic-element-input-bindinput" =>
-        "JSX `<input>` is the same element as `<x-input>`, and editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card types into the box and asserts `bindinput`'s detail carries `value`, `textLength`, `selectionStart` and `selectionEnd` consistently",
+        "the card writes the JSX tag `<input>`, which web-core maps to `x-input`; by user ruling (2026-10-19, `docs/tracking/deviations.md`) `input` is an HTML element name here and HTML's `<input>` is not implemented, so the card gets no field and `fill` has nothing to fill",
     "basic-element-list-estimated-main-axis-size-px-waterfall" =>
         "the card exists to show that a waterfall list whose cells carry only `estimated-main-axis-size-px` still reports `scrolltolower` after `autoScroll` is invoked from `useEffect` (upstream's removed test waited for that console line). `autoScroll` is built on lists since #408, but the list threshold event `scrolltolower` is not (#407 built only `scroll` and `scrollend`), so nothing is logged",
     "basic-element-list-horizontal-estimated-main-axis-size-px" =>
@@ -76,36 +74,14 @@ pending! {
         "what a selection drag highlights is an interaction no first screen carries; selection is out of scope",
     "basic-element-x-audio-tt-play" =>
         "upstream's own test body is empty (its skip is commented out with a FIXME), so nothing is asserted. There is no `x-audio-tt` component and no audio output here, and the card's tap handler reads an undeclared `e`, so it would throw before any `invoke`",
-    "basic-element-x-input-bindblur" =>
-        "`<x-input>` paints a geometrically right box with no value, and editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts `bindblur` reports the value when focus leaves",
-    "basic-element-x-input-bindconfirm" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card starts the input focused and asserts the keyboard's confirm key fires `bindconfirm` with the current value",
     "basic-element-x-input-bindfocus" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts `bindfocus` reports the value of a `type=\"password\"` input when it gains focus",
-    "basic-element-x-input-bindinput" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card types and asserts `bindinput`'s detail keeps `value.length == textLength` with the caret positions alongside",
-    "basic-element-x-input-bindselection" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts `bindselection` reports `selectionStart`/`selectionEnd` as the selection moves",
-    "basic-element-x-input-blur" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the red square and the input's box are placed right, the value is absent, and there is no focus machinery for the tap to drive",
-    "basic-element-x-input-focus" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card taps a square to run `SelectorQuery.invoke({method:'focus'})` on the input and asserts `bindfocus` then fires",
+        "the click focuses the field and `bindfocus` writes `bindfocus` into the result line, but the field is `type='password'` and shows its value as typed: a password field is not masked (`docs/tracking/deviations.md`), where web-core shows bullets",
     "basic-element-x-input-getValue" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card invokes the input's `getValue` method, whose `{value, selectionBegin, selectionEnd}` reply only an editable input can produce",
-    "basic-element-x-input-input-filter" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: a geometrically right, empty box where `input-filter` would strip punctuation as the user types",
-    "basic-element-x-input-ng-bindinput" =>
-        "`<x-input-ng>` is the same element under its other tag name, and editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts the same `bindinput` detail contract",
-    "basic-element-x-input-placeholder" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts the `placeholder` text paints with `placeholder-color`, `-font-weight` and `-font-size` applied, none of which exists without an input",
+        "upstream focuses the field, calls `setSelectionRange(2, 5)` and clicks `#target` with a script `click()`, which leaves the field focused, and expects `getValue` to answer 2 and 5. A host has no script click: the tap on `#target` takes focus from the field first, and a field that lost focus answers its caret at the end (5 and 5), where a browser input keeps its selection after blur",
     "basic-element-x-input-placeholder-pseudo-element" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card styles the placeholder through a `::placeholder` rule instead of the attributes, which needs the same missing element",
-    "basic-element-x-input-setValue" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card taps to grow the bound value, then invokes `setValue` with an empty string and asserts the box clears",
+        "the card styles the placeholder with `.target::placeholder` (red, bold, 20px) and it shows grey and normal: web-core rewrites `::placeholder` to `::part(input)::placeholder` (`style_info_decoder.rs`), and here an author `::placeholder` rule does not reach the field's placeholder",
     "basic-element-x-input-type" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts each `type` (default, `text`, `number`, `digit`, `password`) renders its value the way that type demands",
-    "basic-element-x-input-value" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card taps to append to the bound `value` and asserts the input repaints with it",
+        "seven `x-input`s, one per `type`, each showing its value; the `password` one shows `foo` as typed, because a password field is not masked (`docs/tracking/deviations.md`), where web-core shows bullets",
     "basic-element-x-refresh-view-demo" =>
         "the first screen is right, and a 100px pull does bring the red header in. `finishRefresh` and `finishLoadMore` now exist (`crates/bobcat-core/src/main/tree/refresh_view.rs`), but the card calls them, and adds its item rows, only from its `startrefresh` and `startloadmore` handlers, and no refresh-view event is dispatched (same file: every event is not implemented), so after each release no item rows appear and the header stays snapped in where upstream shows two rows, then four, with the header and footer put back. Upstream's two mid-pull screenshots are taken with the finger still down, which the suite has no step for",
     "basic-element-x-swiper-bindchange" =>
@@ -118,32 +94,14 @@ pending! {
         "`current` 1 and 2 are right: the current item flat and centred, a turned neighbour on each side (#395). The first screen and `current` 3, where the scrollport straddles the seam, are wrong: on the first screen the red current item is drawn with the end keyframe (x 193..314, 0.514 wide, skewed) instead of flat at 79..314, the yellow neighbour's inner edge is at x 59 instead of 78, and the green neighbour is turned out of the scrollport; `current` 3 mirrors it. Two causes in `dom`. A view progress timeline's offset is clamped to `0..=max_offset` (`crates/dom/src/visual/curves.rs` `ScrollTimeline::progress`; `crates/dom/src/style/timeline.rs` `Binding::sample`), and on a circular axis the admitted offset runs to the period (943.2 here, `max_offset` 550.2), so past 550.2 every item is sampled as if the offset were 550.2. And the seam copy is drawn with the animation samples of the first copy (`crates/dom/src/paint/compose.rs` `replay_seams` moves only the scroll offset back one period), the approximation `docs/style-assumptions.md` 25 records, so an item drawn across the seam does not get the progress of the place it is drawn at. Before #395 the same defect drew the red item at the end keyframe's `scale(0.8)`",
     "basic-element-x-swiper-interval" =>
         "the first two frames are web-core's: green after one 5 s turn, and blue 1.6 s after `interval` is set to 1000 (the script takes that frame with a short stability check, because the swiper is quiet for only half a second between turns). The last is not: after `interval` 0, web-core's 4 ms timer moves the swiper to its last item, yellow, within 0.6 s, and here it stays on blue (still blue 4.8 s later). web-core keeps a logical `currentIndex` and adds one per tick; `turn` (`crates/bobcat-core/src/main/tree/swiper.rs`) takes the current item from the scroll offset, and with a turn due every 4 ms a new turn comes before the swiper has moved from blue (inferred from the code, not traced)",
-    "basic-element-x-textarea-bindinput" =>
-        "`<x-textarea>` is out of scope for the same reason, and editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts `bindinput`/`bindfocus`/`bindblur` each deliver an object detail",
-    "basic-element-x-textarea-bindselection" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts `bindselection` reports the caret range inside a textarea",
-    "basic-element-x-textarea-color" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts `color: red` reaches the textarea's own value text, which never paints",
     "basic-element-x-textarea-disabled" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts an unset, a static and a toggled `disabled` textarea each paint their disabled state",
+        "the three `x-textarea`s have no author height and each is 0px tall, its two borders only; web-core's inner `<textarea>` keeps the browser's two-row height (about 36px here). A field has no intrinsic size yet (`docs/tracking/deviations.md` names the width)",
     "basic-element-x-textarea-focus" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts an unset, a static and a toggled `focus` attribute each move focus into the right textarea",
+        "the sky-blue block is 900px tall (90% of a 1000px page), so the three `x-textarea`s the card is about lie below the viewport, and with no author height each is 0px tall (see `basic-element-x-textarea-disabled`); no capture shows them, and upstream has no spec for this card",
     "basic-element-x-textarea-getValue" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card invokes the textarea's `getValue` method, which only an editable textarea can answer",
-    "basic-element-x-textarea-input-filter" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: an empty 300x42 box where the initial value belongs",
-    "basic-element-x-textarea-maxlength" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts the five orderings of setting `value` and `maxlength` all truncate to the same result",
-    "basic-element-x-textarea-maxlines" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts `maxlines=3` clamps a four-line value, and re-clamps when the value changes",
+        "upstream focuses the field, calls `setSelectionRange(2, 5)` and clicks `#target` with a script `click()`, which leaves the field focused, and expects `getValue` to answer 2 and 5. A host has no script click: the tap on `#target` takes focus from the field first, and a field that lost focus answers its caret at the end (5 and 5), where a browser textarea keeps its selection after blur",
     "basic-element-x-textarea-min-height-max-height" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts the textarea grows with its content between `min-height: 100px` and `max-height: 200px`",
-    "basic-element-x-textarea-placeholder" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts a static and a later-set `placeholder` both paint",
-    "basic-element-x-textarea-placeholder-font-size" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts the precedence between `placeholder-font-size` and the element's own `font-size` across four textareas",
-    "basic-element-x-textarea-placeholder-style" =>
-        "editable text is ruled out of scope (user, 2026-09-14; `docs/tracking/web-text-test-replication.md`), so this will not go green: the card asserts the placeholder's colour, size and weight all repaint when their bound values change",
+        "web-core applies the `min-height` and `max-height` attributes to its inner `<textarea>`, so the field is at least 100px tall and at most 200px after the update; neither attribute is built here (`docs/editable-text-design.md`), and the field is as tall as its four lines, then its thirteen",
     "basic-element-x-viewpager-ng-allow-horizontal-gesture" =>
         "the first screen is right; `allow-horizontal-gesture={false}` only shows under the swipe it refuses",
     "basic-element-x-viewpager-ng-bindchange" =>

@@ -10,9 +10,32 @@
 // goldens: `<case>.png` for the first screen, `<case>.<label>.png` after it.
 
 use Step::{
-    Drag, Fresh, Hold, KeyDown, KeyUp, Logged, LoggedStart, MouseDown, MouseOver, MouseUp, Press,
-    QuickCapture, Release, Reload, SendGlobalEvent, Tap, UpdateData, UpdateGlobalProps, Wait, Wheel,
+    Drag, Fill, Fresh, Hold, KeyDown, KeyUp, Logged, LoggedStart, MouseDown, MouseOver, MouseUp,
+    Press, QuickCapture, Release, Reload, Select, SendGlobalEvent, Tap, UpdateData,
+    UpdateGlobalProps, Wait, Wheel,
 };
+
+/// The start of each event `basic-element-x-textarea-bindinput` logs, up to its
+/// `timestamp`.
+const TEXTAREA_FOCUS: &str = concat!(
+    r#"{"type":"focus","eventPhase":2,"#,
+    r#""target":{"dataset":{"testid":"textarea"},"id":null,"uid":4},"#,
+    r#""currentTarget":{"dataset":{"testid":"textarea"},"id":null,"uid":4},"#,
+    r#""detail":{"value":""},"#,
+);
+const TEXTAREA_BLUR: &str = concat!(
+    r#"{"type":"blur","eventPhase":2,"#,
+    r#""target":{"dataset":{"testid":"textarea"},"id":null,"uid":4},"#,
+    r#""currentTarget":{"dataset":{"testid":"textarea"},"id":null,"uid":4},"#,
+    r#""detail":{"value":""},"#,
+);
+const TEXTAREA_INPUT: &str = concat!(
+    r#"{"type":"input","eventPhase":2,"#,
+    r#""target":{"dataset":{"testid":"textarea"},"id":null,"uid":4},"#,
+    r#""currentTarget":{"dataset":{"testid":"textarea"},"id":null,"uid":4},"#,
+    r#""detail":{"value":"value","textLength":5,"cursor":5,"isComposing":false,"#,
+    r#""selectionStart":5,"selectionEnd":5},"#,
+);
 
 driven! {
     // Upstream's `api-shared-context`: `api-setSharedData` is booted first in the same
@@ -235,6 +258,59 @@ driven! {
     "basic-element-x-foldview-ng-method-setFoldExpanded-overflow" => [
         "folded-to-limit": [Tap(141.5, 450.0)],
     ],
+    // The field already has focus (`focus`); a click outside it, on nothing focusable,
+    // takes it away. Upstream has no spec for this card.
+    "basic-element-x-input-bindblur" => [
+        "blurred": [Tap(200.0, 400.0)],
+    ],
+    // `input.press('Enter')`: the field is clicked, which is how a press reaches it,
+    // then Enter.
+    "basic-element-x-input-bindconfirm" => [
+        "confirmed": [Tap(150.0, 20.0), Press("Enter", "Enter", false)],
+    ],
+    // `input.click()`.
+    "basic-element-x-input-bindfocus" => [
+        "focused": [Tap(150.0, 20.0)],
+    ],
+    // `input.press('Enter')`, then `input.fill('foobar')`.
+    "basic-element-x-input-bindinput" => [
+        "filled": [Tap(150.0, 20.0), Press("Enter", "Enter", false), Fill("foobar")],
+    ],
+    // The inner `<input>` focused, then `setSelectionRange(2, 5)`.
+    "basic-element-x-input-bindselection" => [
+        "selected": [Tap(150.0, 20.0), Select(2, 5)],
+    ],
+    // `.blur`, the red box over the focused field, clicked.
+    "basic-element-x-input-blur" => [
+        "blurred": [Tap(50.0, 50.0)],
+    ],
+    // `.focus`, the red box over the field, clicked.
+    "basic-element-x-input-focus" => [
+        "focused": [Tap(50.0, 50.0)],
+    ],
+    // The inner `<input>` focused, `setSelectionRange(2, 5)`, then `#target`, the red
+    // box over it, clicked.
+    "basic-element-x-input-getValue" => [
+        "got": [Tap(150.0, 120.0), Select(2, 5), Tap(50.0, 50.0)],
+    ],
+    // `input.press('Enter')`, then `input.fill('foobar!@#)')`.
+    "basic-element-x-input-input-filter" => [
+        "filled": [Tap(150.0, 20.0), Press("Enter", "Enter", false), Fill("foobar!@#)")],
+    ],
+    // `input.press('Enter')`, then `input.fill('foobar')`.
+    "basic-element-x-input-ng-bindinput" => [
+        "filled": [Tap(150.0, 20.0), Press("Enter", "Enter", false), Fill("foobar")],
+    ],
+    // `.click`, the red box, clicked; then `.clear`, the blue box under it, whose
+    // handler invokes the field's `setValue('')`. Upstream has no spec for this card.
+    "basic-element-x-input-setValue" => [
+        "clicked": [Tap(50.0, 50.0)],
+        "cleared": [Tap(50.0, 150.0)],
+    ],
+    // `.click`, the red box, clicked. Upstream has no spec for this card.
+    "basic-element-x-input-value" => [
+        "clicked": [Tap(50.0, 50.0)],
+    ],
     // Two upstream tests. `-could-show-all`: the four show buttons, clicked at
     // x 300, to the right of every overlay's square, with the spec's own 100 ms
     // between them; then the close-all button the same way. `-event-correct`: each
@@ -413,6 +489,59 @@ driven! {
     // to `current` 1.
     "basic-element-x-swiper-vertical" => [
         "current-1": [Tap(5.0, 5.0)],
+    ],
+    // The first `.block`, the 200px sky-blue box, clicked twice.
+    "basic-element-x-textarea-disabled" => [
+        "disabled": [Tap(100.0, 100.0)],
+        "enabled": [Tap(100.0, 100.0)],
+    ],
+    // `textarea.click()`, `textarea.blur()` (a click outside it), then
+    // `textarea.fill('value')`. Upstream listens for the three events the card logs:
+    // `focus` and `blur` with an empty value, `input` with `value` and the caret after it.
+    "basic-element-x-textarea-bindinput" => [
+        "focused": [Tap(150.0, 15.0), LoggedStart(TEXTAREA_FOCUS)],
+        "blurred": [Tap(200.0, 400.0), LoggedStart(TEXTAREA_BLUR)],
+        "filled": [Tap(150.0, 15.0), Fill("value"), LoggedStart(TEXTAREA_INPUT)],
+    ],
+    // The inner `<textarea>` focused, then `setSelectionRange(2, 5)`.
+    "basic-element-x-textarea-bindselection" => [
+        "selected": [Tap(150.0, 20.0), Select(2, 5)],
+    ],
+    // The inner `<textarea>` focused, `setSelectionRange(2, 5)`, then `#target`, the
+    // red box over it, clicked.
+    "basic-element-x-textarea-getValue" => [
+        "got": [Tap(150.0, 120.0), Select(2, 5), Tap(50.0, 50.0)],
+    ],
+    // `textarea.press('Enter')`, then `textarea.fill('foobar!@#)')`.
+    "basic-element-x-textarea-input-filter" => [
+        "filled": [Tap(150.0, 20.0), Press("Enter", "Enter", false), Fill("foobar!@#)")],
+    ],
+    // The six 5px `.block`s, `setValue` to `setValueAndLength`, each clicked once.
+    "basic-element-x-textarea-maxlength" => [
+        "dynamic": [
+            Tap(100.0, 2.5),
+            Tap(100.0, 8.5),
+            Tap(100.0, 14.5),
+            Tap(100.0, 20.5),
+            Tap(100.0, 26.5),
+            Tap(100.0, 32.5),
+        ],
+    ],
+    // `setValue`, the 50px `.block`, clicked.
+    "basic-element-x-textarea-maxlines" => [
+        "updated": [Tap(100.0, 25.0)],
+    ],
+    // `setValue`, the 50px `.block`, clicked.
+    "basic-element-x-textarea-min-height-max-height" => [
+        "updated": [Tap(100.0, 25.0)],
+    ],
+    // The `.block`, the 200px sky-blue box, clicked.
+    "basic-element-x-textarea-placeholder" => [
+        "updated": [Tap(100.0, 100.0)],
+    ],
+    // The `.block`, the 200px sky-blue box, clicked.
+    "basic-element-x-textarea-placeholder-style" => [
+        "updated": [Tap(100.0, 100.0)],
     ],
     // The control texts `last` (y 16..32), then `first` (y 0..16).
     "basic-element-x-viewpager-ng-bindchange-select-tab" => [

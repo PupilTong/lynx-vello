@@ -56,6 +56,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bobcat_core::editing::Command;
 use bobcat_core::input::{InputEvent, KeyPhase, Modifiers, PointerKind, PointerPhase};
 use bobcat_core::{
     DrawTarget, EngineError, EngineEvent, LynxGroup, LynxView, ModuleCall, NativeModule, NoWakeup,
@@ -341,6 +342,14 @@ enum Step {
     /// The primary mouse button released at this viewport point: upstream's
     /// `mouse.up()`.
     MouseUp(f32, f32),
+    /// Upstream's `locator.fill(text)` on the field that has focus: its whole
+    /// value selected, then replaced by `text` with one `insertText`, which
+    /// is what Chromium does. The host's editing commands, so a step before
+    /// this one gives the field focus.
+    Fill(&'static str),
+    /// Upstream's `setSelectionRange(start, end)` on the field that has
+    /// focus, in UTF-16 units: the host's editing command.
+    Select(usize, usize),
     /// The host's `updateData`, with the default processor: JSON text.
     UpdateData(&'static str),
     /// The host's `updateGlobalProps`: JSON text.
@@ -692,6 +701,17 @@ impl Card {
                 self.painter.dispatch_input(InputEvent::wheel(at, delta));
                 self.turn();
             }
+            Step::Fill(text) => {
+                let select_all = Command::SetSelection {
+                    range: 0..usize::MAX,
+                };
+                for command in [select_all, Command::Insert(text.to_owned())] {
+                    self.edit(command).map_err(|error| refused("edit", error))?;
+                }
+            }
+            Step::Select(start, end) => self
+                .edit(Command::SetSelection { range: start..end })
+                .map_err(|error| refused("edit", error))?,
             Step::UpdateData(data) => self
                 .view
                 .update_data(data.to_owned(), String::new())
@@ -744,6 +764,13 @@ impl Card {
         self.painter.dispatch_input(event);
         self.turn();
         tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    /// Hands the view one editing command, then turns it once.
+    fn edit(&mut self, command: Command) -> Result<(), EngineError> {
+        self.view.edit(command)?;
+        self.turn();
+        Ok(())
     }
 
     /// One key event, with Shift held or not and no other modifier.
