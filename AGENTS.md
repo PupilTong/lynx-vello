@@ -2022,8 +2022,14 @@ and `pointermove`/`pointerup`/`pointercancel` only while a mouse drag is held
 (`MainThreadRuntime::set_pressed`, inside the press's job). The kernel is not
 a registrant in the listener table, so an event routed only on that account
 invites no realm and builds no path; `deliver_input_event` runs the default
-action whenever the account routes the name. The epilogue publishes the focused host's `TextInputState`
-after its commit when it changed.
+action whenever the account routes the name. The epilogue publishes the
+focused host's `TextInputState` after its commit when it changed. An editing host inside a UA shadow tree (a
+text field's editor, E5) dispatches its edit and focus events non-composed, so
+they stay in that tree for its component; a press in a text field outside its
+editor focuses the editor (`tree::focus_delegate`); after every applied
+command `apply_edit` fires the engine-only `selectionchange` at the host
+through the Rust walk; and focus events a UI method's `focus()`/`blur()` left
+in `dom` are dispatched from the entry that delivers component events.
 
 That host side is one function, `MainThreadRuntime::dispatch`, the only place
 an event script hears is delivered. It computes the steps once and drives
@@ -2292,7 +2298,26 @@ box block, `is_frame`, `nested_page`, `reset_frame` and `frame_depth`; `src`, `d
 `backdrop-filter: blur()` presentational hint, under both the native tag
 `blur-view` and web-core's `x-blur-view`, as a CSS length rather than
 web-core's `parseFloat` — the one tag module with no UA rules of its own,
-since a blur view is a container and nothing else). `tree::ua_sheet` owns what
+since a blur view is a container and nothing else), and `tree::text_field`
+(`x-input`/`x-textarea` and their `-ng` aliases, the four Lynx tags only —
+the HTML names `input`/`textarea` are not defined, an HTML-named element
+following HTML (user ruling 2026-10-19) — `docs/editable-text-design.md`
+E5: a UA shadow tree of one `contenteditable="plaintext-only"` editor — for
+`x-input` an engine-sheet `display: block` `div`, its own inline formatting
+context, `white-space: pre`; for `x-textarea` a Lynx `<text>`, whose Lynx
+paragraph lays the lines out — and a `#placeholder` shown while the editor
+is `:empty`; the host is the field's box; the placeholder style attributes
+as UA `attr()` custom properties; `value`, `type`, `confirm-type`,
+`disabled`/`readonly` and `input-filter` mapped onto the editor in its
+attribute callback; line breaks (single-line), `maxlength`, the `number`
+filter, `input-filter` and the textarea's `maxlines` (the longest prefix of
+the insertion whose value lays out in the limit, by bisection with a layout
+pass per probe over `Document::paragraph_line_count`) corrected after each
+edit with `Document::set_host_value`; web-core's
+`input`/`confirm`/`selection`/`focus`/`blur` re-fired at the host from the
+editor's standard events, heard at its shadow root, on `ComponentEvents` with
+string extras; and web-core's methods, its `CustomElement::invoke`).
+`tree::ua_sheet` owns what
 those tags agree on, the order
 they cascade in, and `PageConfig`; `tree/lib.rs` only mints the document they
 describe. Attribute policy stays in each tag's module. Numeric text and list
@@ -3299,7 +3324,9 @@ Subsystems:
   kind, the probe/restore routing, the measure closure, the
   `PaintedParagraph` the painter reads, and `paragraph_of` /
   `inline_source_range`, which the geometry APIs (`text_range_boxes`,
-  `text_index_at_point`) answer from for either kind.
+  `text_index_at_point`) answer from for either kind; `paragraph_kind` and
+  `paragraph_line_count` say which kind a node established and how many
+  lines its last commit laid out.
 - `visual/` — stacking contexts, CSS2 Appendix E paint order, transforms,
   `RenderLayer` group effects, reverse-paint-order hit testing, and
   `content-visibility: auto` relevance determination (`relevance.rs`), which
@@ -3358,7 +3385,10 @@ Subsystems:
   and composition underline are painted by `paint/text.rs`. `bobcat-core`'s
   `main/runtime/editing.rs` dispatches the events and runs the default
   actions (E2); the events cross as `EventDetail::{Input, Composition,
-  Focus}`.
+  Focus}`. The element layer over it (E5, `tree::text_field`) writes a value
+  with `set_host_value` (no event, the composition ended, the selection
+  placed) and the host's `type` attribute picks `TextInputState::input_type`;
+  `has_focus_events` says a method's focus change is waiting.
 - `input/` and `event/` — the `InputEvent` host seam, `Document::event_steps`,
   which computes a path for a *script* dispatch above,
   `Document::dispatch_element_event_over`, which walks those same steps here

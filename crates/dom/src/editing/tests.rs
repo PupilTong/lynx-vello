@@ -874,6 +874,66 @@ fn the_input_state_reports_value_offsets_and_geometry() {
 
         doc.set_attribute(host, "inputmode", "bogus");
         assert_eq!(state(&doc).input_mode, InputMode::Default);
+
+        // The input type is the host's `type`, read with `<input type>`'s
+        // keywords; anything else is text.
+        for (value, expected) in [
+            ("password", InputType::Password),
+            ("EMAIL", InputType::Email),
+            ("number", InputType::Number),
+            ("tel", InputType::Tel),
+            ("search", InputType::Search),
+            ("url", InputType::Url),
+            ("digit", InputType::Text),
+        ] {
+            doc.set_attribute(host, "type", value);
+            assert_eq!(state(&doc).input_type, expected, "{value:?}");
+        }
+    }
+}
+
+#[test]
+fn a_value_written_by_the_element_layer_ends_the_composition_and_places_the_selection() {
+    for kind in KINDS {
+        eprintln!("kind {kind:?}");
+        let (mut doc, host) = host_in(kind, &["ab", "c"], 200.0);
+        assert!(
+            doc.apply_editing(Command::SetComposition {
+                text: "x".to_owned(),
+                selection: 1..1,
+            })
+            .applied
+        );
+        assert_eq!(state(&doc).composition, Some(0..1));
+        doc.set_host_value(host, "h😀llo", 3..3);
+        let input = state(&doc);
+        assert_eq!(input.value, "h😀llo");
+        assert_eq!(input.selection, 3..3);
+        assert_eq!(input.composition, None);
+        // One text node now, as the first edit leaves it.
+        let texts = doc.get(host).unwrap().child_ids().len();
+        assert_eq!(texts, 1);
+        // Inside the pair rounds down; past the end clamps.
+        doc.set_host_value(host, "h😀llo", 2..99);
+        assert_eq!(state(&doc).selection, 1..6);
+        // The paragraph is stale until the next pass and edits still apply.
+        assert!(doc.apply_editing(Command::Insert("!".to_owned())).applied);
+        assert_eq!(value(&doc), "h!");
+        doc.layout();
+        assert_eq!(selection(&doc), 2..2);
+
+        // A host that is not focused only takes the text, and no event is
+        // owed.
+        let other = doc.create_element("view", ());
+        doc.append_child(doc.document_element().id(), other);
+        doc.set_host_value(other, "plain", 0..0);
+        assert_eq!(doc.host_value(other), "plain");
+        assert_eq!(doc.focused(), Some(host));
+        assert!(!doc.has_focus_events());
+        assert!(doc.blur());
+        assert!(doc.has_focus_events());
+        doc.take_focus_events();
+        assert!(!doc.has_focus_events());
     }
 }
 
@@ -1278,4 +1338,42 @@ fn a_truncated_text_refuses_to_measure_past_its_cut() {
     assert!(doc.apply_editing(Command::Insert("x".to_owned())).applied);
     assert_eq!(value(&doc), "abcdexf");
     assert_eq!(selection(&doc), 6..6);
+}
+
+/// `paragraph_kind` and `paragraph_line_count` over each host's paragraph:
+/// a `<text>`'s Lynx paragraph, an inline formatting context otherwise; a
+/// soft wrap and a hard break each start a line, and only the Lynx
+/// paragraph shows the empty line after a trailing break.
+#[test]
+fn each_host_s_paragraph_reports_its_kind_and_its_lines() {
+    for kind in KINDS {
+        // 4 squares per 40px line: "aa aa" wraps at its space, "\n" breaks.
+        let (mut doc, host) = host_in(kind, &["aa aa\nb"], 40.0);
+        let paragraph = doc.paragraph_node_of(host).unwrap();
+        let expected = if kind == Kind::Text {
+            crate::layout::ParagraphKind::Lynx
+        } else {
+            crate::layout::ParagraphKind::InlineFormattingContext
+        };
+        assert_eq!(doc.paragraph_kind(paragraph), Some(expected), "{kind:?}");
+        assert_eq!(doc.paragraph_line_count(paragraph), Some(3), "{kind:?}");
+        let end = value(&doc).encode_utf16().count();
+        select(&mut doc, end..end);
+        assert!(doc.apply_editing(Command::InsertLineBreak).applied);
+        doc.layout();
+        let paragraph = doc.paragraph_node_of(host).unwrap();
+        let trailing = usize::from(kind == Kind::Text);
+        assert_eq!(
+            doc.paragraph_line_count(paragraph),
+            Some(3 + trailing),
+            "{kind:?}: a trailing break"
+        );
+    }
+    let (doc, host) = host_in(Kind::View, &["a"], 40.0);
+    assert_eq!(
+        doc.paragraph_kind(host),
+        None,
+        "the anonymous box's, not the view's"
+    );
+    assert_eq!(doc.paragraph_line_count(host), None);
 }

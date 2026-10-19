@@ -355,6 +355,15 @@ impl<T> Document<T> {
         true
     }
 
+    /// Whether focus events are queued and not taken yet: one length read,
+    /// for an embedder that dispatches them from a turn of its own when
+    /// something other than its own input handling moved the focus (an
+    /// element method's `focus()` or `blur()`).
+    #[must_use]
+    pub fn has_focus_events(&self) -> bool {
+        !self.editing.events.is_empty()
+    }
+
     /// Takes the focus events queued since the last call, in the order they
     /// formed.
     pub fn take_focus_events(&mut self) -> Vec<FocusEvent> {

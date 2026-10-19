@@ -13,8 +13,8 @@
 //! flow through `attr()`; boolean flags use attribute selectors. Only `image`,
 //! `svg`, `blur_view`, `swiper`, `refresh_view`, `viewpager`,
 //! `scroll_container`, `list`, `scroll_coordinator`, `dialog`, `overlay`,
-//! `markdown` and `frame` need components: for image resources (an `svg`'s `content` as a document
-//! handed to the host as its bytes), blur hints,
+//! `markdown`, `frame` and `text_field` need components: for image resources (an `svg`'s `content`
+//! as a document handed to the host as its bytes), blur hints,
 //! the swiper's UA shadow tree, item count and `scrollTo` UI method, the
 //! refresh view's UA shadow tree, its header and footer slot assignment and
 //! its `finishRefresh`, `finishLoadMore` and `autoStartRefresh` UI methods
@@ -32,7 +32,11 @@
 //! `getCharIndexByPoint` UI methods ([`markdown`]), and the frame's open
 //! shadow root with the nested page in it, and the
 //! `connected`/`disconnected` signals its card's lifecycle follows
-//! ([`frame`]). A component's UI methods are its
+//! ([`frame`]), and the text fields' UA shadow tree around one editing
+//! host, their attributes, their `input`, `confirm`, `selection`, `focus`
+//! and `blur` events, queued like the markdown element's as
+//! [`ComponentEvent::Detailed`], and their UI methods ([`text_field`]). A
+//! component's UI methods are its
 //! [`dom::CustomElement::invoke`], which the runtime's `callElementMethod`
 //! reaches through [`dom::Document::invoke_element_method`]. The methods
 //! every element has whatever its kind, which `callElementMethod` runs when
@@ -65,12 +69,14 @@ pub(crate) mod swiper;
 #[cfg(test)]
 pub(super) mod test_support;
 mod text;
+pub(crate) mod text_field;
 mod ua_sheet;
 mod viewpager;
 #[cfg(test)]
 mod web_text_replication;
 
 use std::cell::RefCell;
+use std::ops::Range;
 use std::rc::Rc;
 
 use dom::{Document, ImageOutcome, NodeId, StylesheetOrigin};
@@ -79,6 +85,7 @@ pub(crate) use self::base_methods::invoke_base_method;
 pub(crate) use self::frame::{MAX_FRAME_DEPTH, frame_depth, nested_page, reset_frame};
 pub(crate) use self::svg::is_svg;
 pub(crate) use self::swiper::Autoplays;
+pub(crate) use self::text_field::focus_delegate;
 pub use self::ua_sheet::PageConfig;
 pub(crate) use crate::view::Viewport;
 
@@ -124,6 +131,7 @@ pub(crate) fn new_document(
     // After `image`: every image a markdown element renders is one.
     markdown::define(&mut document, events.clone());
     dialog::define(&mut document, events.clone());
+    text_field::define(&mut document, events.clone());
     // After `dialog`: every overlay builds one in its shadow tree.
     overlay::define(&mut document, events.clone());
     frame::define(&mut document, events);
@@ -210,9 +218,11 @@ pub(crate) enum ComponentEvent {
         name: &'static str,
         delta: dom::Vector2D<f32>,
     },
-    /// An event whose detail is made of strings the component read when it
-    /// queued the event, named by that component. [`ComponentDetail`] is the
-    /// detail's shape.
+    /// An event whose detail the component read when it queued the event,
+    /// named by that component: `<x-markdown>`'s `parseEnd`, `link` and
+    /// `imageTap` ([`markdown`]), and an `x-input`'s or `x-textarea`'s
+    /// `input`, `confirm`, `selection`, `focus` and `blur`
+    /// ([`text_field`]). [`ComponentDetail`] is the detail's shape.
     ///
     /// Dispatched not bubbling and composed (ruled 2026-10-14). Not bubbling
     /// is native's: Lynx fires `<markdown>`'s `link`, `imageTap` and
@@ -220,9 +230,12 @@ pub(crate) enum ComponentEvent {
     /// (`lynx/core/renderer/events/touch_event_handler.cc:388-403`,
     /// `lynx/core/event/custom_event.h:17-23`), so only a `bindEvent` on the
     /// element itself hears one, never an ancestor's nor the
-    /// `global-bindEvent` pass. Composed is so that an event queued at a node
-    /// of a UA shadow tree retargets to the host for script, whose `target`
-    /// is then the component's element.
+    /// `global-bindEvent` pass; a text field's events do not bubble in
+    /// web-core either (`XInputEvents.ts`). Composed is so that an event
+    /// queued at a node of a UA shadow tree retargets to the host for
+    /// script, whose `target` is then the component's element; a text
+    /// field queues its events at the field element itself, outside its
+    /// shadow tree, where composed changes nothing.
     Detailed {
         node: NodeId,
         name: &'static str,
@@ -240,12 +253,12 @@ pub(crate) enum ComponentEvent {
 /// the same keys share one.
 ///
 /// Owned, because the event outlives the call that queued it: the component
-/// reads its attributes or its content at that moment, and the runtime
-/// delivers from an entry of its own. The event itself is `EventDetail::None`
-/// on the kernel's side; each string crosses as one entry of the extras
-/// channel (`"id"`, `"url"`, `"content"`, `"contentId"`), from which the
-/// realm's Lynx layer builds the `detail` object, so no JSON is written or
-/// parsed. A `None` pushes no entry, and the key is absent from the object —
+/// reads its attributes, its content or its value at that moment, and the
+/// runtime delivers from an entry of its own. The event itself is
+/// `EventDetail::None` on the kernel's side; each member crosses as one entry
+/// of the extras channel (`"id"`, `"url"`, `"value"`, `"selectionStart"`,
+/// ...), from which the realm's Lynx layer builds the `detail` object, so no
+/// JSON is written or parsed. A `None` pushes no entry, and the key is absent from the object —
 /// neither `undefined`-valued nor `""`: web-core's `{id: undefined}` loses
 /// that key when it is serialized, and the transport here would carry an
 /// `undefined`-valued key as one.
@@ -267,6 +280,23 @@ pub(crate) enum ComponentDetail {
         url: String,
         content_id: Option<String>,
     },
+    /// `{value}`: a text field's value, such as an `x-input`'s or
+    /// `x-textarea`'s `focus`, `blur` and `confirm` report.
+    Value { value: String },
+    /// `{value, textLength, cursor, isComposing, selectionStart,
+    /// selectionEnd}`: a text field's value after an edit, its selection
+    /// and whether a composition is in progress, such as an `x-input`'s or
+    /// `x-textarea`'s `input` reports. Offsets in UTF-16 units; `textLength`
+    /// (the value's UTF-16 length) and the deprecated `cursor` (the
+    /// selection's start) are computed when the runtime expands the detail.
+    Input {
+        value: String,
+        selection: Range<u32>,
+        is_composing: bool,
+    },
+    /// `{selectionStart, selectionEnd}`: a text field's selection in UTF-16
+    /// units, such as an `x-input`'s or `x-textarea`'s `selection` reports.
+    Selection { selection: Range<u32> },
 }
 
 /// The events this document's components have produced and not delivered

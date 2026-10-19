@@ -137,12 +137,13 @@ const MODIFIER_SHIFT: u8 = 8;
 
 /// One value of the extras channel: what a Lynx handler reads beside a W3C
 /// event's own payload, when it is cheap to compute here (a `load`'s size,
-/// a `scroll`'s metrics). The kernel's events stay W3C-shaped
-/// ([`EventDetail`]); the realm's Lynx layer turns a dispatch's extras into
-/// the Lynx `detail`.
+/// a `scroll`'s metrics, an `x-input`'s `value`). The kernel's events stay
+/// W3C-shaped ([`EventDetail`]); the realm's Lynx layer turns a dispatch's
+/// extras into the Lynx `detail`.
 ///
 /// `Str` borrows a component's string for the length of the dispatch: a
-/// [`ComponentDetail`]'s url, content or content id.
+/// [`ComponentDetail`]'s url, content or content id, or a text field's
+/// value.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Extra<'a> {
     Number(f64),
@@ -154,30 +155,61 @@ pub(crate) enum Extra<'a> {
 /// every event.
 type Extras<'a> = &'a [(&'static str, Extra<'a>)];
 
-/// Appends a [`ComponentDetail`]'s strings as extras, under the keys
-/// web-core's `<x-markdown>` details carry: `id`; `url`, `content` and
-/// `contentId`; `url` and `contentId`. An `id` or `contentId` the component
-/// had no value for pushes nothing, so the realm's `detail` has no such key.
-fn push_detail_strings<'a>(
+/// Appends a [`ComponentDetail`] as extras, one per key of the Lynx
+/// `detail`, under the keys and in the member order web-core's details
+/// carry: `<x-markdown>`'s `id`; `url`, `content` and `contentId`; `url`
+/// and `contentId` — an `id` or `contentId` the component had no value for
+/// pushes nothing, so the realm's `detail` has no such key — and a text
+/// field's (`XInputEvents.ts`) `value`; `value`, `textLength`, `cursor`,
+/// `isComposing`, `selectionStart` and `selectionEnd`, where `textLength`
+/// is the value's UTF-16 length and the deprecated `cursor` the selection's
+/// start; `selectionStart` and `selectionEnd`.
+fn push_detail_extras<'a>(
     detail: &'a ComponentDetail,
     extras: &mut SmallVec<[(&'static str, Extra<'a>); 7]>,
 ) {
-    let (url, content, id_key, id) = match detail {
-        ComponentDetail::Id { id } => (None, None, "id", id),
+    let unit = |offset: u32| Extra::Number(f64::from(offset));
+    let optional =
+        |key, value: &'a Option<String>| value.as_deref().map(|value| (key, Extra::Str(value)));
+    match detail {
+        ComponentDetail::Id { id } => extras.extend(optional("id", id)),
         ComponentDetail::UrlContent {
             url,
             content,
             content_id,
-        } => (Some(url), Some(content), "contentId", content_id),
-        ComponentDetail::Url { url, content_id } => (Some(url), None, "contentId", content_id),
-    };
-    for (key, value) in [("url", url), ("content", content)] {
-        if let Some(value) = value {
-            extras.push((key, Extra::Str(value)));
+        } => {
+            extras.extend([("url", Extra::Str(url)), ("content", Extra::Str(content))]);
+            extras.extend(optional("contentId", content_id));
         }
-    }
-    if let Some(id) = id {
-        extras.push((id_key, Extra::Str(id)));
+        ComponentDetail::Url { url, content_id } => {
+            extras.push(("url", Extra::Str(url)));
+            extras.extend(optional("contentId", content_id));
+        }
+        ComponentDetail::Value { value } => extras.push(("value", Extra::Str(value))),
+        ComponentDetail::Input {
+            value,
+            selection,
+            is_composing,
+        } => {
+            let length: usize = value.chars().map(char::len_utf16).sum();
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a field's length, far inside an f64's integers"
+            )]
+            let length = length as f64;
+            extras.extend([
+                ("value", Extra::Str(value)),
+                ("textLength", Extra::Number(length)),
+                ("cursor", unit(selection.start)),
+                ("isComposing", Extra::Bool(*is_composing)),
+                ("selectionStart", unit(selection.start)),
+                ("selectionEnd", unit(selection.end)),
+            ]);
+        }
+        ComponentDetail::Selection { selection } => extras.extend([
+            ("selectionStart", unit(selection.start)),
+            ("selectionEnd", unit(selection.end)),
+        ]),
     }
 }
 
@@ -2141,7 +2173,12 @@ impl MainThreadRuntime {
     /// another dialog, so a delivery entry can leave the queue non-empty for
     /// an entry of its own.
     pub(crate) fn has_component_events(&self) -> bool {
-        !self.slot.borrow().component_events.is_empty()
+        let slot = self.slot.borrow();
+        !slot.component_events.is_empty()
+            || slot
+                .document
+                .as_ref()
+                .is_some_and(LynxDocument::has_focus_events)
     }
 
     /// Dispatches everything [`Self::apply_image_events`], the `image`,
@@ -2170,9 +2207,13 @@ impl MainThreadRuntime {
         &mut self,
         js_runtime: &mut ScriptRuntime,
     ) -> Vec<MainThreadError> {
-        let events = self.slot.borrow().component_events.take();
         let timestamp = self.timeline_milliseconds;
-        let mut failures = Vec::new();
+        // Focus events a UI method's `focus()` or `blur()` left in `dom`
+        // first: they formed inside the JavaScript call, before anything
+        // queued after it, and the component events they produce (an
+        // `x-input`'s `focus`) join the queue for a turn of their own.
+        let mut failures = self.dispatch_focus_events(js_runtime, timestamp);
+        let events = self.slot.borrow().component_events.take();
         for event in &events {
             // Every one of them is W3C-shaped, with no payload of its own:
             // what a Lynx handler reads in its `detail` crosses as extras.
@@ -2193,8 +2234,9 @@ impl MainThreadRuntime {
             // by (0 for a `scrollend`), and `isDragging`, which this step
             // reports false, as web-core does.
             //
-            // A detailed event carries the strings its component read when it
-            // queued it, as extras borrowed from the queue for the call, one
+            // A detailed event carries the detail its component read when it
+            // queued it — `<x-markdown>`'s strings, a text field's value and
+            // selection — as extras borrowed from the queue for the call, one
             // per key the component had a value for.
             let mut extras: SmallVec<[(&'static str, Extra<'_>); 7]> = SmallVec::new();
             let (target, name, composed) = match *event {
@@ -2259,7 +2301,7 @@ impl MainThreadRuntime {
                     name,
                     ref detail,
                 } => {
-                    push_detail_strings(detail, &mut extras);
+                    push_detail_extras(detail, &mut extras);
                     (node, name, true)
                 }
             };

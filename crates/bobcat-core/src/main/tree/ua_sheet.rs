@@ -58,7 +58,7 @@ use super::swiper::{SWIPER_ITEM_TAG, SWIPER_TAG};
 use super::viewpager::{VIEWPAGER_ITEM_TAG, VIEWPAGER_TAG, X_VIEWPAGER_ITEM_TAG, X_VIEWPAGER_TAG};
 use super::{
     dialog, frame, image, list, markdown, overlay, popover, raw_text, refresh_view,
-    scroll_container, scroll_coordinator, svg, swiper, text, viewpager,
+    scroll_container, scroll_coordinator, svg, swiper, text, text_field, viewpager,
 };
 
 /// Page configuration for the Lynx runtime and UA cascade.
@@ -242,7 +242,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     };
     format!(
         "page, view, scroll-view, list, list-item, {component_tags}, {BLUR_VIEW_TAG}, {X_BLUR_VIEW_TAG}, \
-         {MARKDOWN_TAG}, {X_MARKDOWN_TAG}, text, image, svg, frame {{ box-sizing: border-box; border-width: 0; border-style: solid; \
+         {MARKDOWN_TAG}, {X_MARKDOWN_TAG}, {text_fields}, text, image, svg, frame {{ box-sizing: border-box; border-width: 0; border-style: solid; \
          position: relative; overflow: clip; min-width: 0; min-height: 0; }}\n\
          {display}\
          {overflow}\
@@ -260,6 +260,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          :where({DIALOG_TAG}:popover-open) {{ display: {block}; }}\n\
          {overlays}\
          {markdowns}\
+         {text_field_rules}\
          {text}\
          {EDITING_HOST_RULE}\n\
          {inheritance}\
@@ -277,6 +278,13 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
         popovers = popover::UA_RULES,
         overlays = overlay::UA_RULES,
         markdowns = markdown::UA_RULES,
+        text_field_rules = text_field::UA_RULES,
+        text_fields = text_field::INPUT_TAGS
+            .iter()
+            .chain(&text_field::TEXTAREA_TAGS)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", "),
         text = text::UA_RULES,
         carriers = raw_text::UA_RULES.as_str(),
         frames = frame::UA_RULES,

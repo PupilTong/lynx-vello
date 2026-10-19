@@ -32,8 +32,11 @@ pub(crate) const CARET_WIDTH: f32 = 1.0;
 
 /// What kind of field the focused host is, which picks the platform
 /// keyboard and its behaviors (Chromium's `TextInputType`, HTML's `<input
-/// type>`). A `contenteditable` host is [`Self::Text`]; the other values are
-/// for the element layer (`x-input`'s `type`), which sets them later.
+/// type>`). Read from the host's `type` attribute with HTML's `<input type>`
+/// keywords (ASCII case-insensitive), [`Self::Text`] for anything else and
+/// when it is absent: a plain `contenteditable` host carries none, and the
+/// element layer over this kernel (`x-input`'s `type`) writes it on the
+/// editing host in its shadow tree.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InputType {
@@ -45,6 +48,27 @@ pub enum InputType {
     Number,
     Tel,
     Url,
+}
+
+impl InputType {
+    /// HTML's `<input type>` keywords this enumeration names, ASCII
+    /// case-insensitive; every other value, and none, is [`Self::Text`].
+    fn parse(value: Option<&str>) -> Self {
+        let Some(value) = value else {
+            return Self::Text;
+        };
+        [
+            ("password", Self::Password),
+            ("search", Self::Search),
+            ("email", Self::Email),
+            ("number", Self::Number),
+            ("tel", Self::Tel),
+            ("url", Self::Url),
+        ]
+        .into_iter()
+        .find(|(keyword, _)| value.eq_ignore_ascii_case(keyword))
+        .map_or(Self::Text, |(_, kind)| kind)
+    }
 }
 
 /// HTML's `inputmode` attribute: the virtual keyboard a host asks for.
@@ -267,7 +291,7 @@ impl<T> Document<T> {
 
         TextInputState {
             host: Some(host),
-            input_type: InputType::Text,
+            input_type: InputType::parse(node.attribute("type")),
             input_mode: InputMode::parse(node.attribute("inputmode")),
             enter_key_hint: EnterKeyHint::parse(node.attribute("enterkeyhint")),
             value,

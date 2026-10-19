@@ -3071,6 +3071,77 @@ consequential choice about whether to follow the spec or the quirk.
     tag gets, with `x-markdown.css`'s column display; web-core's host is in
     no such block.
 
+- **`x-input` / `x-textarea` (2026-10-14, editable text E5)** — Lynx-only
+  (bucket 2): web-core wraps a real `<input>`/`<textarea>` in a shadow
+  tree; here the shadow tree holds one plain-text editing host over
+  `dom::editing` (`bobcat-core`'s `tree::text_field`,
+  `docs/editable-text-design.md` E5). Where native Lynx and web-core (or
+  the Lynx typings) disagree, web-core was followed:
+  - *`send-composing-input` is off by default* (web-core). Native sends
+    `input` during a composition by default; web-core suppresses it until
+    `compositionend` unless the attribute is present.
+  - *`maxlength` defaults to 140* (web-core and the typings). Native has no
+    limit by default.
+  - *`maxlength` counts UTF-16 units* (web-core, the browser's rule) and
+    takes back the excess from the end of the text just inserted, never
+    half a surrogate pair. Native counts UTF-16 units too but never splits a
+    composed character sequence, so a grapheme cluster of several code
+    points can be cut here where native drops it whole.
+  - *`input-filter` removes what the pattern matches* (web-core's
+    `value.replace(new RegExp(filter, 'g'), '')`). Native keeps only the
+    characters that match. The pattern is compiled by `regex-lite`, not an
+    ECMAScript engine: `\uXXXX` escapes are translated, and lookaround and
+    backreferences, which it lacks, make the pattern filter nothing.
+  - *`setInputFilter({pattern})` filters.* web-core's writes the inner
+    `<input>`'s `pattern` attribute, which filters nothing; here it
+    replaces `input-filter`'s pattern, the last write winning.
+  - *An `x-textarea` confirms only with `confirm-enter`* (web-core). Native
+    fires `confirm` on Enter whenever `confirm-type` is not the default.
+    Here `confirm` follows that Enter's `input` (web-core fires it on the
+    `keyup`), so an Enter the input method consumed does not confirm.
+  - *`getValue` answers a field that is not focused* with a caret at the
+    end of the value (web-core's `<input>` keeps that selection); native
+    answers `-1` for both offsets. The data carries the typings'
+    `selectionStart` and web-core's `selectionBegin`, both.
+  - *`selection` fires for a selected range only* (web-core's `select`):
+    a change of selection that changed no value and leaves text selected.
+    Native fires it on every selection change, caret moves included.
+  - *`readonly` cannot be focused.* A browser's (and native's) read-only
+    field takes focus and a caret but no edit; here `readonly`, like
+    `disabled`, turns the editor's `contenteditable` off, so a tap focuses
+    nothing and no `focus` fires.
+  - *A `password` field is not masked.* web-core's `<input type=password>`
+    shows bullets; here the text shows as typed, because masking needs a
+    paragraph built from other text than the value, over which `dom`
+    refuses edits. `TextInputState::input_type` is `Password`.
+  - *No intrinsic width.* An unsized field in a row is as wide as its text;
+    a browser's `<input>` is about 20 characters wide.
+  - *The single-line field does not follow its caret.* Text wider than the
+    field is clipped; a browser scrolls its inner editor to keep the caret
+    in view.
+  - *`placeholder-font-style` and the `-x-placeholder-*` aliases* are
+    native's and not web-core's, and not built.
+
+  Two differ from web-core by user ruling (2026-10-19):
+  - *`input` and `textarea` are not text fields.* web-core's tag map sends
+    the JSX tags `input` and `textarea` to `x-input`/`x-textarea`
+    (`web-core/ts/constants.ts:104,106`), and native Lynx registers its
+    fields under exactly those names (`LynxUIInputAutoRegistry.m:17`,
+    `LynxUITextAreaAutoRegistry.m:17`, `x-input-ng`/`x-textarea-ng` mapped
+    onto them in `LynxUIOwner.m`). Here they are HTML element names, an
+    element with an HTML name follows HTML, and HTML's `<input>` and
+    `<textarea>` are not implemented, so a card that writes `<input>` or
+    `<textarea>` gets a plain element with no field. The fields are
+    `x-input`, `x-input-ng`, `x-textarea` and `x-textarea-ng`.
+  - *`maxlines` is enforced on `x-textarea`* (native). web-core reads no
+    such attribute (its inner `<textarea>` has no line limit). Here, as
+    Android's `maxLinesFilter` does, an insertion that lays the value out
+    past the limit keeps its longest prefix that fits; iOS instead trims
+    the end of the whole value and also caps the text view's displayed
+    lines, which is not built. The lines are the editor's Lynx paragraph's
+    (the textarea's editor is a Lynx `<text>`; web-core's is a browser
+    `<textarea>`), so the empty line after a trailing break counts.
+
 ## JS runtime & APIs (see [js-runtime.md](js-runtime.md), [accessibility.md](accessibility.md))
 
 - **`ShadowRealm` children have no animation frames, and report under their

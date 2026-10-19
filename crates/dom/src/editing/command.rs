@@ -588,6 +588,52 @@ impl<T: Sync> Document<T> {
         }
     }
 
+    /// Replaces `host`'s value as a script's write to a form control's
+    /// value does (`HTMLInputElement.value`): no event is owed, and when
+    /// `host` is the focused host its composition ends and its selection
+    /// becomes `selection`, in UTF-16 units of the new value (an offset
+    /// inside a surrogate pair rounds down to its character's start, one
+    /// past the end clamps, as [`Command::SetSelection`] reads them). A
+    /// host that is not focused keeps no selection, so `selection` is
+    /// ignored for it.
+    ///
+    /// The value is written as exactly one text node, the normalization the
+    /// first edit performs, and only when it differs from the current one.
+    /// `host` need not be an editing host: an element layer that turns
+    /// editing off (a read-only field) still owns the text it shows.
+    ///
+    /// The element layer over this kernel (`x-input`, `x-textarea`) is the
+    /// caller: it writes a script's value, and the value its own filters
+    /// leave after an edit.
+    pub fn set_host_value(&mut self, host: NodeId, value: &str, selection: Range<usize>)
+    where
+        T: Default,
+    {
+        if self.get(host).is_none_or(|node| !node.is_element()) {
+            return;
+        }
+        if self.host_value(host) != value {
+            self.write_host_value(host, value.to_owned());
+        }
+        if self.focused() != Some(host) {
+            return;
+        }
+        let anchor = byte_of_unit_floor(value, selection.start);
+        let focus = byte_of_unit_floor(value, selection.end);
+        let session = self
+            .editing
+            .session
+            .as_mut()
+            .expect("the focused host has a session");
+        session.pending = Some(ByteSelection {
+            anchor,
+            focus,
+            affinity: Affinity::Downstream,
+        });
+        session.composition = None;
+        self.note_visual_mutation();
+    }
+
     /// Writes `value` into `host` as exactly one text node.
     fn write_host_value(&mut self, host: NodeId, value: String)
     where

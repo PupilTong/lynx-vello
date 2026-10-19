@@ -38,6 +38,17 @@ pub(crate) use self::style::{
 use crate::render::image::{ImageOutcome, ImageRole};
 use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeLayoutState, RelayoutKind};
 
+/// The two kinds of paragraph an element can establish
+/// ([`Document::paragraph_kind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParagraphKind {
+    /// A Lynx text element's flattened Lynx paragraph: verbatim white space,
+    /// the `text-maxline`/`text-maxlength` truncation.
+    Lynx,
+    /// A block container's CSS inline formatting context.
+    InlineFormattingContext,
+}
+
 pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new(|| {
     use stylo::properties::style_structs::Font;
     ComputedValues::initial_values_with_font_override(Font::initial_values())
@@ -666,6 +677,30 @@ impl<T> Document<T> {
     #[must_use]
     pub fn text_block_size(&self, id: crate::NodeId) -> Option<hughie::geometry::Size<f32>> {
         self.committed_paragraph(id)?.committed_size()
+    }
+
+    /// Which kind of paragraph `id` establishes, from its last commit: a
+    /// Lynx text element's Lynx paragraph or a block container's inline
+    /// formatting context. `None` when `id` establishes no paragraph or no
+    /// commit reached it, as for [`Self::text_block_size`].
+    #[must_use]
+    pub fn paragraph_kind(&self, id: crate::NodeId) -> Option<ParagraphKind> {
+        Some(match self.committed_paragraph(id)? {
+            paragraph::TextStore::Block(_) => ParagraphKind::Lynx,
+            paragraph::TextStore::Flow(_) => ParagraphKind::InlineFormattingContext,
+        })
+    }
+
+    /// How many lines the paragraph `id` establishes laid out at its last
+    /// commit: the lines it shows, wrapped lines and the lines its preserved
+    /// line breaks start included. A Lynx paragraph whose text ends in a line
+    /// break counts the empty line after it, which it shows; an inline
+    /// formatting context does not, having no line box there (CSS). Lines a
+    /// truncation cut hides are not counted. `None` as for
+    /// [`Self::paragraph_kind`]. Nothing here runs a pass.
+    #[must_use]
+    pub fn paragraph_line_count(&self, id: crate::NodeId) -> Option<usize> {
+        Some(self.committed_paragraph(id)?.painted()?.lines.len())
     }
 
     /// The boxes the source range `[start, end)` of the paragraph `id`
