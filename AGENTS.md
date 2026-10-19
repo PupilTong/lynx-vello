@@ -379,7 +379,10 @@ discards the posts queued ahead of it.
 
 A view owns its channels end to end, all `tokio::sync` and none addressed.
 Three cross that link: a `ToMain` mpsc carrying commands in; a `ViewNotice`
-mpsc carrying lifecycle events and resource asks back; and one
+mpsc carrying lifecycle events, resource asks and the focused editing host's
+`TextInputState` back (the last as `ViewNotice::TextInputState`, sent from a
+page's epilogue after its commit when it changed, which `pump` hands on as
+`EngineEvent::TextInputStateChanged`); and one
 `watch<Published>` carrying what an observer wants the *latest* of — the newest
 committed frame, the listener-name set, and the newest serviced frame post.
 Commands are a FIFO because their arrival order is what they mean; a frame is
@@ -387,7 +390,10 @@ not. `ToMain` carries a `PageUpdate` (the data, global-prop, global-event and
 reload commands a host accepted after observing MTS boot, in host FIFO order),
 a `DispatchEvent` (one event's type and target, plus the payload the router
 decided as values: the position, the wheel delta, the timestamp and — for the
-four touch events — its touch points), a `Vsync` (the display-frame reading a realm that called
+four touch events — its touch points), an `Edit` (one `dom::editing::Command`
+for the focused editing host, from `LynxView::edit`; main dispatches the
+`beforeinput`/`input`/`composition*` events it owes around the change, which
+no listener can stop), a `Vsync` (the display-frame reading a realm that called
 `requestScriptFrame` asked for), `Posted` (payload-free: the view's
 `ScrollMailbox` holds the painter's latest offset per scroll container and one
 coalesced frame post — a timeline reading, the sequence number the
@@ -1934,7 +1940,7 @@ none of, and every card; a card everything outside its nested page — and its
 shadow chrome reaches the page realm at its host (routed input events are
 composed, the components' events are not, as HTML and web-core fire them);
 a realm holding no step runs its `global-bindEvent` pass alone, aimed at each
-registering element. Then the name and primitives alone: the
+registering element. Then the name and primitives alone: `bubbles`, the
 `timestamp` (milliseconds on the view's timeline); the extras channel
 (`extraCount`, then name/value pairs: what a Lynx handler reads beside the W3C
 payload, such as a `load`'s size or a `scroll`'s metrics, which the realm makes
@@ -1942,7 +1948,10 @@ the Lynx `detail`); then the W3C payload's kind and values — for an input
 event the position, the wheel delta, a pointer's `button`, `buttons`,
 `pointerId` and `pointerType` (each `undefined` where the shape has none), and
 four numbers per touch point (`identifier`, `x`, `y`, flags); for a key event
-its `key` and `code` strings, `repeat` and a modifier bitmask. Kernel events
+its `key` and `code` strings, `repeat` and a modifier bitmask; for
+`beforeinput`/`input` the `inputType`, the `data` (or null) and `isComposing`;
+for a composition event its `data`; for a focus event the `relatedTarget`'s
+id (or null). Kernel events
 are W3C-shaped and `element-papi.ts` is the Lynx layer that reshapes them
 (user ruling 2026-10-13; `docs/tracking/dom-events.md`). The realm builds
 the `detail` object, the W3C members on the event object and the three touch
@@ -1978,6 +1987,43 @@ kinds)` (1 bubble, 2 capture, 4 global, or'ed; the host replaces the kinds on
 a repeat) and `listenerClosed(node, name)`, from `element-papi.ts`'s
 `reconcile` only; a freed node's rows leave in the document's free path, so a
 collected handle tells the host nothing.
+Nothing crosses back: no event is cancelable from script. The realm's event
+object has no `preventDefault`, `cancelable` or `defaultPrevented` (the
+2026-08-17 ruling stands, `docs/tracking/deviations.md`: a Lynx event object
+has none, and web-core's root listeners are `passive: true`), the editing
+events are dispatched not cancelable, and the editing default actions run
+whatever a listener did. The one veto on a built-in behavior is the embedder's
+`InputEvent::default_prevented`, answered by the input router.
+
+Editable text (`docs/editable-text-design.md`, E2) is wired here.
+`LynxView::edit` sends `ToMain::Edit`; `MainThreadRuntime::apply_edit`
+prepares the command in `dom`, dispatches the events before the change at the
+host, commits, and dispatches the rest. A routed `keydown`/`keyup` is
+delivered at `Document::focused()` when there is one, and a `keydown` at a
+focused host runs the keyboard's editing command (`key_command`), which
+inserts the text the key typed (`InputKind::Key`'s `text`, carried in
+`EventDetail::Key` and never crossing into the realm), not its `key` — unless
+the host set the view to `editing::TextInputSource::Commands`
+(`LynxView::set_text_input_source`, `ToMain::TextInputSource`; the browser
+host does, since its `<textarea>` proxy sends every insertion, deletion and
+line break as an edit), when a `keydown` only moves the selection and
+selects all; a mouse's primary `pointerdown`, or a finger's or pen's tap (the
+`click`), inside an editing host focuses it
+(dispatching `focus`/`focusin`, and `blur`/`focusout` at the host that lost
+it — drained from `dom` right after the press) and places the caret, a second
+and third quick press select the word and the line, and a held mouse drag
+extends. The slot routes those names on an editing account of its own, by
+state (`editing::EditingRoute`), one more term of `DocumentSlot::routes_given`
+beside the listener table and the observed names, whose changes go out through
+`DocumentSlot::change_names` after the waiting last removals: `pointerdown`
+and `click` while `Document::has_editing_hosts()`, `keydown` while an element
+is focused (both from the page's epilogue, `DocumentSlot::sync_editing_routes`),
+and `pointermove`/`pointerup`/`pointercancel` only while a mouse drag is held
+(`MainThreadRuntime::set_pressed`, inside the press's job). The kernel is not
+a registrant in the listener table, so an event routed only on that account
+invites no realm and builds no path; `deliver_input_event` runs the default
+action whenever the account routes the name. The epilogue publishes the focused host's `TextInputState`
+after its commit when it changed.
 
 That host side is one function, `MainThreadRuntime::dispatch`, the only place
 an event script hears is delivered. It computes the steps once and drives
@@ -2629,7 +2675,22 @@ registered, the winit window and event loop, device metrics, input translation,
 the stdin prompt, and PNG writing — and nothing of the pipeline. It builds the
 view from the group and the painter from the window on its own thread and
 attaches them. Every event handler is a relay into the painter
-(`dispatch_input`, `resize`, `set_occluded`, clock ticks in headless mode).
+(`dispatch_input`, `resize`, `set_occluded`, clock ticks in headless mode), and editing goes to the view
+(`LynxView::edit`).
+
+Text editing (`docs/editable-text-design.md`, E3): the newest
+`EngineEvent::TextInputStateChanged` of a turn turns the window's input
+method on (`set_ime_allowed`) exactly while an editing host is focused and
+places its candidate window (`set_ime_cursor_area`, the caret or the first
+composition character, as logical points). A key carries winit's
+`KeyEvent.text` as its typed text: winit 0.30.13 queues no `KeyboardInput`
+for a key its input method consumed, and no `Ime::Commit` for one it did not,
+so no text is inserted twice. `cli/ime.rs` (`ImeBridge`) turns `WindowEvent::Ime`
+into `SetComposition` (winit's byte cursor as UTF-16), `CommitText` and, on
+`Disabled` mid-composition, `FinishComposition`; it holds winit's empty
+`Preedit` back until the next event, since one comes right before every
+`Commit` and only an empty `Preedit` that no `Commit` follows (sent before the
+next other window event, or in `about_to_wait`) cancels the composition.
 
 The window it hands `Painter::new` is the draw target and nothing else: frames
 and lifecycle events wake the event loop through the injected `EventRequester`,
@@ -2678,7 +2739,11 @@ both logical viewport size and device-pixel ratio; headless mode uses a
 configurable synthetic vsync rate, skips catch-up bursts after slow frames, and
 retains its Vello renderer, render texture and staging buffer across frames.
 Both expose a GDB-like stdin command prompt (`continue`, `pause`, `frame`,
-`screenshot`, `help`, `quit`; headless also `set/show vsync`). Screenshots are
+`screenshot`, `help`, `quit`; headless also `set/show vsync`), with editing
+commands that drive a page without a keyboard: `tap X Y`, `key KEY [TEXT]`,
+`compose TEXT [START END]`, `commit TEXT` and `show text-input` (the last
+published `TextInputState` as one line);
+`tests/fixtures/editable.lynx.xml` is a page with one logging editing host. Screenshots are
 captured only through that live prompt — there is no one-shot startup flag —
 and PNG readback happens only on a screenshot.
 
@@ -2904,6 +2969,26 @@ reported truthfully by the facade and fed to the engine as
 `PointerKind::Mouse` by `dispatchPointer`, as the macOS host does, and a
 primary-button drag still scrolls: the engine's drag recognizer latches every
 pointer kind, a mouse included (user ruling 2026-10-13). Hover moves and secondary mouse buttons do not cross the boundary.
+
+**Text input goes through a hidden `<textarea>`** (`js/text-input.ts`,
+`docs/editable-text-design.md` E4). `BobcatRenderer::pump` hands the newest
+`EngineEvent::TextInputStateChanged` of a turn to the Render Worker's
+`postTextInputState` (the last `BobcatRenderer::create` argument) as one
+plain object, posted as `bobcat-text-input`; a load that replaces a view with
+a host focused posts one with `host: false`. The facade keeps one transparent,
+`position: fixed` `<textarea>` at the engine's caret, focused while a host is
+focused, holding its value and selection (never written during a
+composition). Every `beforeinput` outside a composition is prevented and sent
+as a `bobcat-edit` (`insertText`/`insertFromPaste` → `insert`, the line
+breaks, the deletions, `deleteByCut` → `deleteBackward`); a composition is
+`setComposition` per update, read at the `input` after it, and at its end a
+`finishComposition` (the end's text is the last update's) or a `commitText`. `BobcatRenderer::edit` reads the flat call back into
+`dom::editing::Command` (`src/text_input.rs`, natively tested) and drops it
+while the view cannot take edits. Every view is set to
+`TextInputSource::Commands`, so a key carries no text and its `keydown` only
+moves and selects all; the facade prevents the textarea's own handling of
+those keys and sends a key the input method is composing with as
+`'Process'`.
 
 **Host `NativeModules` and `globalProps` are the page's, not the Worker's.**
 `BobcatCanvas.create` takes an optional
@@ -3258,6 +3343,22 @@ Subsystems:
   container to its first one — `scrollIntoView`'s position with
   `block: start`, `inline: nearest` — as an instant scroll request and
   rebuilds the frame in the same commit.
+- `editing/` — HTML `contenteditable` plain-text editing
+  (`docs/editable-text-design.md`): editing hosts, the one focused element
+  and its queued focus events, a parley `Selection` and an IME composition
+  over the committed paragraph that lays the host's text out — a Lynx text
+  element's own, a block container's own, or the anonymous block box around
+  a flex host's loose text — with every offset converted through that
+  paragraph's source map (`hughie::text::paragraph::OffsetMap`), the
+  Chromium-shaped command set with
+  its `beforeinput`/`input`/`composition*` events reported as data
+  (`prepare_editing`/`commit_editing`), `TextInputState`, and the count of
+  editing hosts an embedder routes input by (`has_editing_hosts`, kept by the
+  `contenteditable` setters and `free_node`). The caret, selection highlight
+  and composition underline are painted by `paint/text.rs`. `bobcat-core`'s
+  `main/runtime/editing.rs` dispatches the events and runs the default
+  actions (E2); the events cross as `EventDetail::{Input, Composition,
+  Focus}`.
 - `input/` and `event/` — the `InputEvent` host seam, `Document::event_steps`,
   which computes a path for a *script* dispatch above,
   `Document::dispatch_element_event_over`, which walks those same steps here
@@ -3551,7 +3652,10 @@ with each run's `BreakStyle`), shaping, breaking and line capture
 memo and the `Retained` trait both consumers run the protocol through
 (`memo.rs`, whose `BlockMetrics` carries the first and last line boxes'
 baselines), the per-cluster extent walk (`extent.rs`), the source-range and hit queries
-both kinds answer through (`query.rs`), `LineGeometry` — where each laid-out
+both kinds answer through (`query.rs`), the read-only bridge between a
+committed paragraph's layout bytes and its source units that an editor
+addresses either kind through (`offsets.rs`, `OffsetMap`, from
+`TextBlock::offset_map` and `InlineFlow::offset_map`), `LineGeometry` — where each laid-out
 line sits, parley 0.12's own CSS 2.2 §10.8.1 line box — and `Paragraph`, which
 owns one shaped natural layout and re-breaks it in place, starting every line
 with its root inline box (`ParagraphRoot`: the strut, which is parley's style

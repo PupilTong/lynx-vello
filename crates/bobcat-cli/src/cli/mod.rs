@@ -26,6 +26,8 @@ mod args;
 mod command;
 mod headless;
 #[cfg(target_os = "macos")]
+mod ime;
+#[cfg(target_os = "macos")]
 mod keys;
 #[cfg(target_os = "macos")]
 mod macos;

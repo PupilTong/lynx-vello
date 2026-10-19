@@ -31,9 +31,9 @@
 //!   follows a second one at the same target within 500 ms with `dblclick`. `tap` keeps its own
 //!   rules and fires beside it.
 //! - **Key events.** A key phase becomes `keydown`/`keyup` (W3C UI Events), carrying the W3C
-//!   `key`/`code` strings, `repeat` and the modifiers. A key is never hit-tested: with no focus
-//!   model its target is the document element ([`NodeId::DOCUMENT_ELEMENT`]), which is the one
-//!   thing a focus model will change.
+//!   `key`/`code` strings, `repeat` and the modifiers. A key is never hit-tested: this side has no
+//!   focus, so it names the document element ([`NodeId::DOCUMENT_ELEMENT`]), and the main thread,
+//!   which holds the document's focused element, delivers the key there when there is one.
 //! - **Touch events.** A pointer that [`produces_touch_events`] also produces the W3C touch name
 //!   for its phase (`touchstart`/`touchmove`/`touchend`/`touchcancel`), carrying the three lists
 //!   ([`TouchPoint`]) the standard gives one. Every finger is tracked from its down, and the node
@@ -432,14 +432,15 @@ impl GestureRouter {
                 ref code,
                 repeat,
                 modifiers,
+                ref text,
             } => {
                 let Some(name) = key_event_name(phase) else {
                     return;
                 };
-                // No hit test and no focus model: the document element is
-                // the focus target, as it is in a browser with nothing
-                // focused. A focus model changes this target and nothing
-                // else.
+                // No hit test, and no focus on this side: the document
+                // element is the target, as it is in a browser with nothing
+                // focused, and the main thread retargets the key to the
+                // focused element when there is one.
                 out.push(emit(
                     name,
                     NodeId::DOCUMENT_ELEMENT,
@@ -448,6 +449,7 @@ impl GestureRouter {
                         code: code.clone(),
                         repeat,
                         modifiers,
+                        text: text.clone(),
                     },
                 ));
             }
@@ -1065,7 +1067,7 @@ mod tests {
         };
         // Routing hit nothing: a key event is never hit-tested.
         harness.feed_routed(
-            InputEvent::key(KeyPhase::Down, "A", "KeyA", false, shift),
+            InputEvent::key(KeyPhase::Down, "A", "KeyA", false, shift).with_text(Some("A".into())),
             None,
             0.0,
         );
@@ -1080,7 +1082,7 @@ mod tests {
                 format!("keydown@{}", NodeId::DOCUMENT_ELEMENT.to_bits()),
                 format!("keyup@{}", NodeId::DOCUMENT_ELEMENT.to_bits()),
             ],
-            "no focus model: the document element is the target, whatever routing hit"
+            "no focus here: the document element is the target, whatever routing hit"
         );
         let InputDecision::Emit(down) = &harness.out[0] else {
             panic!("an emit");
@@ -1092,6 +1094,7 @@ mod tests {
                 code: "KeyA".into(),
                 repeat: false,
                 modifiers: shift,
+                text: Some("A".into()),
             }
         );
         assert!(!harness.router.needs_frame(), "a key arms nothing");

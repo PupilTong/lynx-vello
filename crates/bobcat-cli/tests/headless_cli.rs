@@ -198,6 +198,93 @@ fn author_css_from_raw_lynx_xml_renders() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// Editing without a window: a finger's tap focuses the fixture's
+/// `contenteditable` host, two keys type `ab` through their text, an
+/// input-method composition of `x` is replaced by the commit of `y`, and the
+/// text input state the view publishes says `aby`. The realm's listeners see
+/// each key's `keydown` and the composition's events in order, with one
+/// `compositionend` after the commit's `input`.
+#[test]
+fn the_editing_commands_type_compose_and_commit_into_a_host() {
+    let gpu = flashbulb::headless("the_editing_commands_type_compose_and_commit_into_a_host");
+    drop(gpu);
+
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("editable.lynx.xml");
+    let input = url::Url::from_file_path(&fixture)
+        .expect("absolute fixture path")
+        .to_string();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_bobcat"))
+        .args(["-i", &input, "--headless", "--viewport", "320x80"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start interactive bobcat");
+    // Each `frame` waits until the view has applied everything sent before
+    // it: the tap's focus has opened the `keydown` route before a key is
+    // dispatched, and the edits have been published before they are shown.
+    write!(
+        child.stdin.take().expect("piped stdin"),
+        "frame\ntap 40 30\nframe\nshow text-input\nkey a a\nkey b b\ncompose x 1 1\nframe\n\
+         show text-input\ncommit y\nframe\nshow text-input\nquit\n"
+    )
+    .unwrap();
+    let output = child
+        .wait_with_output()
+        .expect("wait for interactive bobcat");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "interactive bobcat failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let states: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.split_once("text-input: ").map(|(_, state)| state))
+        .collect();
+    assert_eq!(states.len(), 3, "three states in:\n{stdout}");
+    assert!(
+        states[0].starts_with(r#"value="" selection=0..0 composition=none"#),
+        "the tap focused the empty host: {stdout}"
+    );
+    assert!(
+        states[1].starts_with(r#"value="abx" selection=3..3 composition=2..3"#),
+        "the keys typed ab and the composition x follows: {stdout}"
+    );
+    assert!(
+        states[2].starts_with(r#"value="aby" selection=3..3 composition=none"#),
+        "the commit replaced the composition: {stdout}"
+    );
+    let events: Vec<&str> = stderr
+        .lines()
+        .filter_map(|line| line.split_once("editing: ").map(|(_, event)| event))
+        .collect();
+    assert_eq!(
+        events,
+        [
+            "focus",
+            r#"keydown "a""#,
+            r#"beforeinput insertText "a""#,
+            r#"input insertText "a""#,
+            r#"keydown "b""#,
+            r#"beforeinput insertText "b""#,
+            r#"input insertText "b""#,
+            r#"compositionstart """#,
+            r#"beforeinput insertCompositionText "x""#,
+            r#"compositionupdate "x""#,
+            r#"input insertCompositionText "x""#,
+            r#"beforeinput insertCompositionText "y""#,
+            r#"compositionupdate "y""#,
+            r#"input insertCompositionText "y""#,
+            r#"compositionend "y""#,
+        ],
+        "stderr:\n{stderr}"
+    );
+}
+
 fn styled_lynx_xml() -> String {
     concat!(
         "\u{feff}\n",

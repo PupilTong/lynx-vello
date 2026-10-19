@@ -24,10 +24,18 @@
 //! frame either: an animation runs at the rate the display actually scans
 //! out, and a swap chain that had no image to give is asked again one refresh
 //! later rather than on a guess.
+//!
+//! Text editing: the view's [`EngineEvent::TextInputStateChanged`] turns the
+//! window's input method on while an editing host is focused and tells it
+//! where the caret is; a key the input method did not consume carries the
+//! text it typed (`KeyEvent.text`), and the input method's own events are
+//! the view's editing commands ([`super::ime`], which records what winit
+//! sends when).
 
 use std::path::Path;
 use std::sync::Arc;
 
+use bobcat_core::editing::{Command as EditCommand, TextInputState};
 use bobcat_core::input::{InputEvent, KeyPhase, Modifiers, Point2D, PointerKind, PointerPhase};
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, Painter, ScreenMetrics,
@@ -35,7 +43,7 @@ use bobcat_core::{
 };
 use bobcat_resources::ViewResources;
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{
     ElementState, KeyEvent, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent,
 };
@@ -47,7 +55,8 @@ use winit::window::{Window, WindowId};
 
 use crate::cli::CliError;
 use crate::cli::args::Options;
-use crate::cli::command::{COMMAND_HELP, Command, Console};
+use crate::cli::command::{COMMAND_HELP, Command, Console, describe_text_input};
+use crate::cli::ime::ImeBridge;
 use crate::cli::page::Program;
 use crate::cli::screenshot::save_screenshot;
 use crate::cli::vsync::DisplayLink;
@@ -60,6 +69,9 @@ enum UserEvent {
 }
 
 const MOUSE_POINTER_ID: u32 = u32::MAX;
+
+/// The pointer id of the `tap` command's finger.
+const TAP_POINTER_ID: u32 = 1;
 
 /// The native reference embedder's policy for winit's abstract line wheel
 /// unit. Core accepts wheel deltas in CSS pixels only.
@@ -126,6 +138,11 @@ struct MacApplication {
     /// The modifier keys as winit last reported them, which every key event
     /// carries.
     modifiers: ModifiersState,
+    /// The input method's composition as this side has sent it.
+    ime: ImeBridge,
+    /// The last text input state the view published: whether an editing
+    /// host is focused, and where its caret is.
+    text_input: Option<TextInputState>,
     error: Option<CliError>,
 }
 
@@ -162,6 +179,8 @@ impl MacApplication {
             pointer: None,
             pressed: false,
             modifiers: ModifiersState::empty(),
+            ime: ImeBridge::default(),
+            text_input: None,
             error: None,
         }
     }
@@ -311,6 +330,35 @@ impl MacApplication {
                 );
             }
             Command::ShowVsync => println!("Headed mode uses the display's vsync."),
+            Command::Tap(x, y) => {
+                for phase in [PointerPhase::Down, PointerPhase::Up] {
+                    self.dispatch(InputEvent::pointer(
+                        Point2D::new(x, y),
+                        TAP_POINTER_ID,
+                        PointerKind::Touch,
+                        phase,
+                    ));
+                }
+            }
+            Command::Key { key, text } => {
+                let key = Arc::<str>::from(key);
+                for (phase, text) in [(KeyPhase::Down, text), (KeyPhase::Up, None)] {
+                    self.dispatch(
+                        InputEvent::key(phase, key.clone(), "", false, Modifiers::default())
+                            .with_text(text.map(Into::into)),
+                    );
+                }
+            }
+            Command::Compose { text, selection } => {
+                self.edit(EditCommand::SetComposition { text, selection });
+            }
+            Command::Commit(text) => self.edit(EditCommand::CommitText {
+                text,
+                relative_cursor: 0,
+            }),
+            Command::ShowTextInput => {
+                println!("{}", describe_text_input(self.text_input.as_ref()));
+            }
             Command::Help => println!("{COMMAND_HELP}"),
             Command::Quit => event_loop.exit(),
             Command::Invalid(message) => eprintln!("bobcat: {message}"),
@@ -365,7 +413,17 @@ impl MacApplication {
 
     /// One key going down or up, as W3C UI Events' `keydown`/`keyup`: winit's
     /// logical key is the `key`, its physical key the `code`
-    /// ([`super::keys`]).
+    /// ([`super::keys`]), and `KeyEvent.text` the text it typed.
+    ///
+    /// The text is winit's whether or not the input method is on: a key the
+    /// input method consumed queues no `KeyboardInput` at all and its text
+    /// comes as `Ime` events, and one it did not consume delivers its text
+    /// here only ([`super::ime`]), so no key's text is inserted twice.
+    /// winit's text for Enter, Tab, Backspace and Escape is a control
+    /// character, which the engine does not insert.
+    ///
+    /// Modifiers are macOS's: Option is `alt`, Command `meta`, Control
+    /// `ctrl`.
     fn key_event(&mut self, event: &KeyEvent) {
         let phase = match event.state {
             ElementState::Pressed => KeyPhase::Down,
@@ -377,13 +435,63 @@ impl MacApplication {
             meta: self.modifiers.super_key(),
             shift: self.modifiers.shift_key(),
         };
-        self.dispatch(InputEvent::key(
-            phase,
-            super::keys::key_value(&event.logical_key),
-            super::keys::code_value(event.physical_key),
-            event.repeat,
-            modifiers,
-        ));
+        self.dispatch(
+            InputEvent::key(
+                phase,
+                super::keys::key_value(&event.logical_key),
+                super::keys::code_value(event.physical_key),
+                event.repeat,
+                modifiers,
+            )
+            .with_text(event.text.as_deref().map(Arc::from)),
+        );
+    }
+
+    /// Sends one editing command to the view, reporting a refusal.
+    fn edit(&self, command: EditCommand) {
+        if let Some(view) = &self.view
+            && let Err(error) = view.edit(command)
+        {
+            eprintln!("bobcat: the view refused the edit: {error}");
+        }
+    }
+
+    /// Sends the cancellation the input-method bridge held back, now that
+    /// an event other than a commit has followed it.
+    fn flush_ime(&mut self) {
+        if let Some(command) = self.ime.flush() {
+            self.edit(command);
+        }
+    }
+
+    /// Follows the view's text input state: the input method is on exactly
+    /// while an editing host is focused, and its candidate window sits at
+    /// the caret — or at the composition's first character while one is
+    /// active. The rectangles are viewport CSS px, which are this window's
+    /// logical points (the view's CSS px are the physical size divided by
+    /// the scale factor), so winit takes them as they are. A focus that
+    /// moved leaves the old host's composition behind.
+    ///
+    /// winit's `set_ime_purpose` is not called: its macOS backend ignores it.
+    fn text_input_changed(&mut self, state: TextInputState) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        if self.text_input.as_ref().map(|last| last.host) != Some(state.host) {
+            self.ime.reset();
+        }
+        window.set_ime_allowed(state.host.is_some());
+        if state.host.is_some() {
+            let area = state.composition_bounds.first().unwrap_or(&state.caret);
+            window.set_ime_cursor_area(
+                LogicalPosition::new(f64::from(area.origin.x), f64::from(area.origin.y)),
+                LogicalSize::new(
+                    f64::from(area.size.width.max(1.0)),
+                    f64::from(area.size.height),
+                ),
+            );
+        }
+        self.text_input = Some(state);
     }
 
     fn touch_event(&mut self, touch: Touch) {
@@ -445,6 +553,7 @@ impl MacApplication {
             }
             return;
         };
+        let mut text_input = None;
         for event in view.pump() {
             match event {
                 // The view has ended. The first failure is the one reported.
@@ -481,8 +590,13 @@ impl MacApplication {
                 } => {
                     eprintln!("[{source}] [{level}] {message}");
                 }
+                // Only the newest state matters to the window.
+                EngineEvent::TextInputStateChanged(state) => text_input = Some(*state),
                 _ => {}
             }
+        }
+        if let Some(state) = text_input {
+            self.text_input_changed(state);
         }
         if let Some(error) = fatal {
             self.fail(event_loop, error);
@@ -505,6 +619,11 @@ impl ApplicationHandler<UserEvent> for MacApplication {
     ) {
         if self.window().map(|window| window.id()) != Some(window_id) {
             return;
+        }
+        // An empty preedit held back is a cancellation unless a commit is
+        // the very next event ([`super::ime`]).
+        if !matches!(event, WindowEvent::Ime(_)) {
+            self.flush_ime();
         }
         let result = match event {
             WindowEvent::CloseRequested => {
@@ -563,6 +682,12 @@ impl ApplicationHandler<UserEvent> for MacApplication {
                 self.key_event(&event);
                 Ok(())
             }
+            WindowEvent::Ime(event) => {
+                for command in self.ime.ime(event) {
+                    self.edit(command);
+                }
+                Ok(())
+            }
             _ => Ok(()),
         };
         if let Err(error) = result {
@@ -609,6 +734,9 @@ impl ApplicationHandler<UserEvent> for MacApplication {
         if event_loop.exiting() {
             return;
         }
+        // The turn's events are all in: an empty preedit still held was not
+        // the start of a commit.
+        self.flush_ime();
         self.serve(event_loop);
         let owed = self.painter.as_ref().is_some_and(Painter::owes_frame);
         if let Some(vsync) = self.vsync.as_mut() {

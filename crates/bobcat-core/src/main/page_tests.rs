@@ -301,6 +301,7 @@ impl Harness {
                 | ViewNotice::RequestDocuments(_)
                 | ViewNotice::WorkerCreated { .. }
                 | ViewNotice::NativeModuleCall { .. }
+                | ViewNotice::TextInputState(_)
                 | ViewNotice::ScriptFrameDemand { .. } => {}
                 ViewNotice::PreloadSource(request) => self.preloads.push(request),
             }

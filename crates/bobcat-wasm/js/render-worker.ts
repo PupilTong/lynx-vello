@@ -1,10 +1,12 @@
 import initWasm, { BobcatRenderer } from '../pkg/bobcat_wasm.js'
 import { monitorFrameRate } from './frame-rate.ts'
 import type {
+  EditCommand,
   FacadeMessage,
   InitMessage,
   RenderWorkerMessage,
   RequestMessage,
+  TextInputFields,
 } from './protocol.d.ts'
 
 declare const self: DedicatedWorkerGlobalScope
@@ -125,6 +127,42 @@ function postNativeModuleCall(
   } satisfies RenderWorkerMessage)
 }
 
+// The view's newest `TextInputState`, built by the engine as the protocol's
+// `TextInputFields`, on its way to the facade's `<textarea>` proxy.
+function postTextInputState(fields: TextInputFields): void {
+  self.postMessage({
+    ...fields,
+    type: 'bobcat-text-input',
+  } satisfies RenderWorkerMessage)
+}
+
+// One `bobcat-edit` as the engine's flat call: the command's name, its text,
+// and two numbers whose meaning the name decides (`src/text_input.rs`).
+function applyEdit(command: EditCommand): void {
+  switch (command.kind) {
+    case 'setComposition':
+      renderer!.edit(
+        command.kind,
+        command.text,
+        command.selectionStart,
+        command.selectionEnd,
+      )
+      break
+    case 'commitText':
+      renderer!.edit(command.kind, command.text, command.relativeCursor, 0)
+      break
+    case 'finishComposition':
+      renderer!.edit(command.kind, undefined, command.keepSelection ? 1 : 0, 0)
+      break
+    case 'insert':
+      renderer!.edit(command.kind, command.text, 0, 0)
+      break
+    default:
+      renderer!.edit(command.kind, undefined, 0, 0)
+      break
+  }
+}
+
 async function initialize(message: InitMessage): Promise<void> {
   if (initialized) {
     throw new Error('Bobcat Render Worker was initialized more than once')
@@ -153,6 +191,7 @@ async function initialize(message: InitMessage): Promise<void> {
     nativeModuleNames,
     nativeModuleMethods,
     postNativeModuleCall,
+    postTextInputState,
   )
   running = true
   if (message.measureFrameRate) {
@@ -510,6 +549,20 @@ self.addEventListener('message', (event) => {
       }
     }
     // The same queue as pointer input, for the same reason.
+    requestQueue = requestQueue.then(dispatch)
+  } else if (message?.type === 'bobcat-edit') {
+    const dispatch = () => {
+      if (!running || renderer === undefined) {
+        return
+      }
+      try {
+        applyEdit(message.command)
+      } catch (error) {
+        reportFatal(error)
+      }
+    }
+    // The same queue as key input, so a `keydown` the facade posted first
+    // reaches the engine first, and for the same reason as pointer input.
     requestQueue = requestQueue.then(dispatch)
   } else if (message?.type === 'bobcat-native-module-callback') {
     const answer = (): void => {

@@ -206,7 +206,9 @@ impl Default for PageConfig {
 /// overlay's first child renders, which web-core itself pins and native's
 /// measurement of child 0 alone agrees with ([`super::overlay`] carries the
 /// argument). `the_ua_sheet_is_important_free_apart_from_the_recorded_exceptions`
-/// pins the set to exactly those twenty rules.
+/// pins the set to exactly those twenty rules. An editing host's
+/// [`EDITING_HOST_RULE`] is not one of them: it only defaults the host's
+/// `white-space`.
 #[must_use]
 pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     let component_tags = format!(
@@ -259,6 +261,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          {overlays}\
          {markdowns}\
          {text}\
+         {EDITING_HOST_RULE}\n\
          {inheritance}\
          {carriers}\
          {frames}\
@@ -281,6 +284,23 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
         svgs = svg::UA_RULES,
     )
 }
+
+/// HTML's `contenteditable` editing host (`docs/editable-text-design.md`,
+/// "Editing host"): its white space defaults to `pre-wrap`, so the spaces
+/// and line breaks typed into it show, as a browser's plain-text editing
+/// relies on. That is all the rule does. A host keeps the layout its element
+/// kind and `display` give it — a `<text>` its Lynx paragraph, which keeps
+/// its text verbatim whatever `white-space` says, any other element the
+/// standard inline formatting context of the anonymous block box around its
+/// text — and `dom` addresses whichever paragraph that is through its source
+/// map, so neither declaration is pinned: an author `display: none` hides
+/// the host (which then cannot be focused), and an author `white-space:
+/// normal` collapses what it shows while the value keeps every character.
+/// The rule applies to every value but an ASCII case-insensitive `"false"`,
+/// which is HTML's reading of the attribute and
+/// `dom::Document::is_editing_host`'s.
+pub(super) const EDITING_HOST_RULE: &str =
+    "[contenteditable]:not([contenteditable=\"false\" i]) { white-space: pre-wrap; }";
 
 #[cfg(test)]
 mod tests {
@@ -650,6 +670,49 @@ mod tests {
         assert!(!sheet.contains("display: linear;"));
         assert!(!sheet.contains(OVERFLOW_RULE));
         assert!(!sheet.contains(INHERITANCE_RULE));
+    }
+
+    /// A `contenteditable` element keeps its white space by default, for
+    /// every value but HTML's `"false"`, which the selector's `i` flag
+    /// matches in any case; its `display` is its own, and an author's
+    /// `white-space` and `display: none` win over the default.
+    #[test]
+    fn an_editing_host_preserves_white_space_by_default_only() {
+        use dom::stylo::computed_values::white_space_collapse::T as Collapse;
+
+        let mut document = document();
+        let hosts: Vec<(dom::NodeId, bool)> = [
+            ("", true),
+            ("true", true),
+            ("plaintext-only", true),
+            ("FALSE", false),
+            ("false", false),
+        ]
+        .into_iter()
+        .map(|(value, editable)| {
+            let view = child(&mut document, "view", "");
+            document.set_attribute(view, "contenteditable", value);
+            (view, editable)
+        })
+        .collect();
+        let normal = child(&mut document, "view", "white-space: normal;");
+        document.set_attribute(normal, "contenteditable", "");
+        let hidden = child(&mut document, "view", "display: none;");
+        document.set_attribute(hidden, "contenteditable", "");
+        document.layout();
+        let collapse = |view| {
+            *style_of(&document, view)
+                .get_inherited_text()
+                .get_white_space_collapse()
+        };
+        let display = |view| *style_of(&document, view).get_box().get_display();
+        for (view, editable) in hosts {
+            assert_ne!(display(view), Display::None);
+            assert_eq!(collapse(view) == Collapse::Preserve, editable);
+            assert_eq!(document.is_editing_host(view), editable);
+        }
+        assert_eq!(collapse(normal), Collapse::Collapse);
+        assert_eq!(display(hidden), Display::None);
     }
 
     /// `enableCSSInheritance` adds its one rule and changes nothing else:

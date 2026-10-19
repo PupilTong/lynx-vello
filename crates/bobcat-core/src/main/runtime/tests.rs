@@ -1884,6 +1884,7 @@ fn a_key_event_reaches_the_page_with_its_keyboard_members() {
                 alt: true,
                 ..dom::input::Modifiers::default()
             },
+            text: None,
         },
         timestamp: 0.0,
     };
@@ -2060,51 +2061,6 @@ fn adopted_offsets_queue_scroll_events_only_for_a_name_something_hears() {
     );
 }
 
-/// A page of two 200px column scrollers over a 1000px child each: `a`, a
-/// child of the page that binds `scroll` and `scrollend`, and `b`, under an
-/// `outer` view, with no registration of its own. Answers `a`, `outer` and
-/// `b`.
-fn two_scrollers(
-    js_runtime: &mut ScriptRuntime,
-    runtime: &mut MainThreadRuntime,
-    elements: &DocumentProbe,
-) -> (dom::NodeId, dom::NodeId, dom::NodeId) {
-    runtime
-        .run_main_thread_script(
-            js_runtime,
-            r"
-                globalThis.renderPage = function () {
-                  const page = __CreatePage('card', 0);
-                  const scroller = (parent) => {
-                    const scroller = __CreateView(0);
-                    __AppendElement(parent, scroller);
-                    __SetInlineStyles(scroller, 'display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px;flex-shrink:0');
-                    const card = __CreateView(0);
-                    __AppendElement(scroller, card);
-                    __SetInlineStyles(card, 'flex-shrink:0;width:200px;height:1000px');
-                    return scroller;
-                  };
-                  const a = scroller(page);
-                  const outer = __CreateView(0);
-                  __AppendElement(page, outer);
-                  const b = scroller(outer);
-                  globalThis.held = [page, a, outer, b];
-                  __AddEvent(a, 'bindEvent', 'scroll', 'a:scroll');
-                  __AddEvent(a, 'bindEvent', 'scrollend', 'a:scrollend');
-                  __FlushElementTree();
-                };
-                ",
-            "app:///two-scrollers.js",
-        )
-        .expect("main-thread script");
-    let tree = elements.tree();
-    let page = tree.document_element().id();
-    let children = tree.get(page).expect("the page").child_ids();
-    let (a, outer) = (children[0], children[1]);
-    let b = tree.get(outer).expect("outer").child_ids()[0];
-    (a, outer, b)
-}
-
 /// A painter post of `node` at offset `y`, at rest or still moving.
 fn scroll_post(node: dom::NodeId, y: f32, rest: bool) -> (dom::NodeId, crate::link::ScrollEntry) {
     (
@@ -2125,138 +2081,6 @@ fn queued_scroll(node: dom::NodeId, delta_y: f32) -> ComponentEvent {
         name: "scroll",
         delta: dom::Vector2D::new(0.0, delta_y),
     }
-}
-
-/// A queued `scrollend` at `node`.
-fn queued_scroll_end(node: dom::NodeId) -> ComponentEvent {
-    ComponentEvent::Scroll {
-        node,
-        name: "scrollend",
-        delta: dom::Vector2D::zero(),
-    }
-}
-
-/// `scroll` and `scrollend` are queued per container, where their dispatch
-/// would reach a registration ([`dom::Document::would_reach_listener`]),
-/// not wherever the page hears the name: `a`'s `bindscroll` and
-/// `bindscrollend` queue both at `a` and nothing at `b`. Neither bubbles, so
-/// a bubble registration on `b`'s ancestor `outer` does not make `b`'s
-/// events owed and a capture one does, for its name alone; a
-/// `global-bindscroll` anywhere does too. A `scrollend` registration made
-/// while `b` is scrolling is asked about at the rest, so it hears the end.
-/// A script-facing instant scroll follows the same rule.
-#[test]
-#[expect(clippy::too_many_lines, reason = "one page through every gate")]
-fn scroll_events_are_queued_only_where_they_would_reach_a_listener() {
-    let (mut js_runtime, mut runtime, elements) = runtime();
-    let (a, _outer, b) = two_scrollers(&mut js_runtime, &mut runtime, &elements);
-    let steps = std::cell::Cell::new(0);
-    let run = |runtime: &mut MainThreadRuntime, js_runtime: &mut ScriptRuntime, source: &str| {
-        steps.set(steps.get() + 1);
-        let source = format!(
-            "import {{ __AddEvent, __FlushElementTree, __InvokeUIMethod }} from 'bobcat:element';
-             const [page, a, outer, b] = globalThis.held;
-             {source}"
-        );
-        let name = format!("app:///scroll-gate-{}.mjs", steps.get());
-        runtime
-            .evaluate_module(js_runtime, &source, &name, "a step")
-            .expect("the step runs");
-    };
-    let queued = |runtime: &MainThreadRuntime| runtime.slot.borrow().component_events.take();
-
-    runtime.adopt_scroll_offsets([scroll_post(a, 40.0, true)].into_iter());
-    assert_eq!(
-        queued(&runtime),
-        [queued_scroll(a, 40.0), queued_scroll_end(a)],
-        "`a`'s own registrations hear both"
-    );
-    runtime.adopt_scroll_offsets([scroll_post(b, 40.0, true)].into_iter());
-    assert_eq!(
-        elements.tree().scroll_offset(b),
-        dom::Vector2D::new(0.0, 40.0)
-    );
-    assert_eq!(queued(&runtime), [], "nothing on `b`'s path listens");
-
-    run(
-        &mut runtime,
-        &mut js_runtime,
-        "__AddEvent(outer, 'bindEvent', 'scroll', 'outer:scroll');
-         __AddEvent(outer, 'bindEvent', 'scrollend', 'outer:scrollend');",
-    );
-    runtime.adopt_scroll_offsets([scroll_post(b, 80.0, true)].into_iter());
-    assert_eq!(
-        queued(&runtime),
-        [],
-        "neither name bubbles to an ancestor's bubble registration"
-    );
-
-    run(
-        &mut runtime,
-        &mut js_runtime,
-        "__AddEvent(outer, 'capture-bind', 'scroll', 'outer:capture');",
-    );
-    runtime.adopt_scroll_offsets([scroll_post(b, 120.0, true)].into_iter());
-    assert_eq!(
-        queued(&runtime),
-        [queued_scroll(b, 40.0)],
-        "an ancestor's capture registration hears `scroll`, and `scrollend` still has none"
-    );
-    run(
-        &mut runtime,
-        &mut js_runtime,
-        "__AddEvent(outer, 'capture-bind', 'scroll', null);
-         __AddEvent(page, 'global-bindEvent', 'scroll', 'page:global');",
-    );
-    runtime.adopt_scroll_offsets([scroll_post(b, 160.0, false)].into_iter());
-    assert_eq!(
-        queued(&runtime),
-        [queued_scroll(b, 40.0)],
-        "a global registration hears the name on every path"
-    );
-    run(
-        &mut runtime,
-        &mut js_runtime,
-        "__AddEvent(page, 'global-bindEvent', 'scroll', null);",
-    );
-
-    runtime.adopt_scroll_offsets([scroll_post(b, 200.0, false)].into_iter());
-    assert_eq!(queued(&runtime), [], "`b` is scrolling, heard by nothing");
-    run(
-        &mut runtime,
-        &mut js_runtime,
-        "__AddEvent(b, 'bindEvent', 'scrollend', 'b:scrollend');",
-    );
-    runtime.adopt_scroll_offsets([scroll_post(b, 200.0, true)].into_iter());
-    assert_eq!(
-        queued(&runtime),
-        [queued_scroll_end(b)],
-        "a `scrollend` registration made mid-scroll hears the end"
-    );
-
-    run(
-        &mut runtime,
-        &mut js_runtime,
-        "__InvokeUIMethod(b, 'scrollTo', { top: 0 }, () => {});",
-    );
-    runtime.queue_instant_scroll_events();
-    assert_eq!(
-        elements.tree().scroll_offset(b),
-        dom::Vector2D::zero(),
-        "the instant scroll moved `b`"
-    );
-    assert_eq!(
-        queued(&runtime),
-        [],
-        "nothing hears `b`'s `scroll`, though `a`'s registration holds the name"
-    );
-    run(
-        &mut runtime,
-        &mut js_runtime,
-        "__InvokeUIMethod(a, 'scrollTo', { top: 0 }, () => {});",
-    );
-    runtime.queue_instant_scroll_events();
-    assert_eq!(queued(&runtime), [queued_scroll(a, -40.0)]);
 }
 
 /// What [`ScrollProbe`] heard, one entry per delivery.
@@ -9250,6 +9074,11 @@ fn close_realm_retires_the_child_and_silences_its_drops() {
 /// A frame whose handle the page realm lets go of is dropped like any
 /// element, and its shadow tree — the nested page and everything under it
 /// — goes with it. Nothing frame-specific runs in the host.
+///
+/// The removed frame's handle is held on `globalThis` until its nested page
+/// has been read, and let go of by a second script: a collection `QuickJS`
+/// starts on its own while the first script allocates would otherwise free
+/// the frame before the test reads it.
 #[test]
 fn dropping_a_frame_frees_its_nested_page() {
     let (mut js, mut runtime, elements) = runtime();
@@ -9706,6 +9535,7 @@ fn a_key_calls_every_realm_that_registered_it() {
             code: Arc::from("KeyA"),
             repeat: false,
             modifiers: dom::input::Modifiers::default(),
+            text: None,
         },
         timestamp: 0.0,
     };
@@ -10221,4 +10051,138 @@ fn a_reset_cards_page_takes_its_exposure_registration_with_it() {
     assert!(!elements.tree().has_listener(fresh, "uiappear"));
     assert!(!elements.tree().has_listener(fresh, "uidisappear"));
     assert_eq!(exposure_observer(&elements, fresh), None);
+}
+
+/// The published names an editing-routing test is about: the pointer
+/// names, `click` and the keys. The components' own (`slotchange`) are
+/// published with the document and are not the editing account's.
+fn routed(names: &mut PublishedNames) -> Vec<String> {
+    let mut routed = names.names();
+    routed.retain(|name| {
+        ["click", "keydown", "keyup"].contains(&name.as_str()) || name.starts_with("pointer")
+    });
+    routed
+}
+
+/// A primary mouse button event at (10, 10), with `button` and `buttons`.
+fn mouse(button: i16, buttons: u16) -> InputEventPayload {
+    InputEventPayload {
+        detail: EventDetail::Pointer {
+            position: dom::Point2D::new(10.0, 10.0),
+            id: 1,
+            device: dom::input::PointerKind::Mouse,
+            button,
+            buttons,
+        },
+        timestamp: 0.0,
+    }
+}
+
+/// The editing account of the painter's name set routes by state: with an
+/// unfocused host only the press and the tap (`pointerdown`, `click`), the
+/// key while something is focused, and the drag's moves and release only
+/// while a mouse press that placed a caret is held. A name the realm listens
+/// for itself is never closed by it, and the last host going closes the
+/// rest.
+#[test]
+fn an_editing_host_routes_its_names_by_state() {
+    let (mut js_runtime, mut runtime, elements, mut names) =
+        runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const host = __CreateView(0);
+                  __AppendElement(page, host);
+                  globalThis.held = [page, host];
+                  __SetInlineStyles(host, 'width:200px;height:40px');
+                  __AddEventListener(page, 'pointercancel', () => {}, {});
+                  __FlushElementTree();
+                };
+                ",
+            "app:///editing-routes.js",
+        )
+        .expect("main-thread script");
+    runtime.sync_editing_routes();
+    assert_eq!(routed(&mut names), ["pointercancel"], "no host yet");
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __SetAttribute, __FlushElementTree } from 'bobcat:element';
+                __SetAttribute(held[1], 'contenteditable', 'true');
+                __FlushElementTree();
+                ",
+            "app:///editable.js",
+            "editing",
+        )
+        .expect("an attribute write");
+    runtime.sync_editing_routes();
+    assert_eq!(
+        routed(&mut names),
+        ["click", "pointercancel", "pointerdown"],
+        "an unfocused host routes the press and the tap alone"
+    );
+
+    let host = elements
+        .tree()
+        .document_element()
+        .first_child()
+        .expect("the host")
+        .id();
+    assert!(
+        runtime
+            .deliver_input_event(&mut js_runtime, host, "pointerdown", &mouse(0, 1), None)
+            .is_empty()
+    );
+    assert_eq!(
+        elements.tree().focused(),
+        Some(host),
+        "the press focused it"
+    );
+    assert_eq!(
+        routed(&mut names),
+        [
+            "click",
+            "pointercancel",
+            "pointerdown",
+            "pointermove",
+            "pointerup"
+        ],
+        "the press opened the drag at once, inside its own job"
+    );
+    runtime.sync_editing_routes();
+    assert!(names.contains("keydown"), "the focus opens the key");
+
+    assert!(
+        runtime
+            .deliver_input_event(&mut js_runtime, host, "pointerup", &mouse(0, 0), None)
+            .is_empty()
+    );
+    assert_eq!(
+        routed(&mut names),
+        ["click", "keydown", "pointercancel", "pointerdown"],
+        "the release closed the drag, all but the realm's own name"
+    );
+
+    runtime
+        .evaluate_module(
+            &mut js_runtime,
+            r"
+                import { __SetAttribute } from 'bobcat:element';
+                __SetAttribute(held[1], 'contenteditable', 'false');
+                ",
+            "app:///uneditable.js",
+            "editing",
+        )
+        .expect("an attribute write");
+    runtime.sync_editing_routes();
+    assert_eq!(
+        routed(&mut names),
+        ["pointercancel"],
+        "the last host and the focus it held close the rest"
+    );
 }

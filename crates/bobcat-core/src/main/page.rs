@@ -590,14 +590,16 @@ impl Page {
                 payload,
                 release,
             } => {
-                if let Err(failed) =
-                    runtime.dispatch_input_event(js, target, name, &payload, release)
-                {
-                    for error in failed.into_errors() {
-                        policy::report(self, Scene::Listener, error.into_script_error());
-                    }
+                for error in runtime.deliver_input_event(js, target, name, &payload, release) {
+                    policy::report(self, Scene::Listener, error.into_script_error());
                 }
             }
+            ToMain::Edit(command) => {
+                for error in runtime.apply_host_edit(js, command) {
+                    policy::report(self, Scene::Listener, error.into_script_error());
+                }
+            }
+            ToMain::TextInputSource(source) => runtime.set_text_input_source(source),
             ToMain::Vsync(milliseconds) => {
                 if let Err(error) = runtime.vsync(js, milliseconds) {
                     policy::report(self, Scene::Frame, error.into_script_error());
@@ -975,7 +977,12 @@ impl RealmOwner for Page {
         // the painter's post of the container at rest.
         runtime.queue_instant_scroll_events();
         runtime.request_documents();
+        // Before the commit, so the names an editing host needs routed are
+        // published with the frame that shows the host.
+        runtime.sync_editing_routes();
         runtime.commit_if_dirty();
+        // After it, so the geometry the host is handed is the frame's.
+        runtime.publish_text_input_state();
         // The update first, always: it must run whether or not exposure
         // transitions are already waiting.
         if (runtime.update_intersection_observations() || runtime.has_pending_exposure())
@@ -1418,3 +1425,7 @@ mod page_tests;
 #[cfg(test)]
 #[path = "font_face_tests.rs"]
 mod font_face_tests;
+
+#[cfg(test)]
+#[path = "editing_tests.rs"]
+mod editing_tests;

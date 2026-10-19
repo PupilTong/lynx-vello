@@ -15,6 +15,8 @@
 //! - `extent` walks a laid-out line cluster by cluster in source units.
 //! - `query` answers source-range boxes and hit points over a laid-out paragraph, for both
 //!   consumers.
+//! - `offsets` is the read-only bridge between a laid-out paragraph's layout bytes and its source
+//!   units ([`OffsetMap`]), for a host that addresses the layout in the offsets of its own text.
 //!
 //! A consumer that lays text of its own into the content uses four generic
 //! hooks, none of which the Lynx block needs: markers in the item stream,
@@ -55,6 +57,7 @@
 pub(in crate::text) mod content;
 mod extent;
 pub(in crate::text) mod memo;
+mod offsets;
 pub(in crate::text) mod position;
 pub(in crate::text) mod query;
 pub(in crate::text) mod shape;
@@ -66,6 +69,7 @@ use core::ops::Range;
 pub use content::{InlineBoxSpec, InlineItem, TextRunItem};
 use content::{InsertedSegment, MarkerPlaces, NormalizedBlock, WhiteSpaceProcessing, normalize};
 pub use memo::{BlockConstraint, BlockMetrics};
+pub use offsets::OffsetMap;
 use parley::{
     ContentWidths, InlineBox, InlineBoxKind, Layout, WhiteSpaceCollapse as ParleyWhiteSpace,
 };

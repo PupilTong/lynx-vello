@@ -958,6 +958,24 @@ consequential choice about whether to follow the spec or the quirk.
   compatibility" decision bought a boundary with no producer. Recognizers stay
   keyed off the gesture arbitration API, which is also what will drive the
   one surviving suppression seam, `InputEvent::default_prevented`.
+  - **`beforeinput` is not cancelable either** (user ruling 2026-10-19,
+    editable text E2). UI Events and Input Events Level 2 make `beforeinput`
+    (all but `insertCompositionText`), `keydown` and `pointerdown`
+    cancelable, and canceling them drops the edit or the editing default
+    action. Here every editing event — `beforeinput`, `input`, the
+    composition and focus events — is dispatched not cancelable, an edit
+    always applies, a `keydown` at a focused host always runs its editing
+    command and a press always places the caret, whatever a listener does.
+    Why: a Lynx event object has no `preventDefault`; web-core registers its
+    root listeners `passive: true` (`WASMJSBinding.ts:270,278`), so no Lynx
+    handler cancels anything there either; a bit with no producer is not
+    worth a boundary, so the 2026-08-17 ruling stands. E2 had briefly carried
+    a `cancelable` argument into `__BobcatDispatchEvent` and a
+    `defaultPrevented` answer back; both are gone. The only veto left on a
+    default action is the embedder's `InputEvent::default_prevented`.
+    Agreed future shape: a Rust component that needs to veto a default
+    action sets a `canceled` flag on `dom`'s `EventWalk` beside its stop
+    flag, never a script channel.
 - **`tap` suppressed by `longpress`** — Lynx hardcodes "tap doesn't fire if
   longpress was consumed earlier in the same touch sequence," a global rule
   with no DOM equivalent. **Decision: derive this from gesture-recognizer
@@ -1087,9 +1105,8 @@ consequential choice about whether to follow the spec or the quirk.
   - **A `scrollend` ends a scroll that happened.** The main thread records
     every container that scrolled (an adopted offset moved it, or a
     script-facing instant scroll did) whether or not anything listens, and a
-    post naming it at rest ends that record and fires `scrollend` if a
-    registration on that container's path, or a component, would hear it at
-    that moment. An instant scroll fires its `scroll` in the task
+    post naming it at rest ends that record and fires `scrollend` if the name
+    is heard at that moment. An instant scroll fires its `scroll` in the task
     that scrolled and its `scrollend` from the painter's rest post after it
     carried the request out — or after the drag or fling that holds the
     container ends. A view with no painter attached never posts that rest.
@@ -1116,12 +1133,20 @@ consequential choice about whether to follow the spec or the quirk.
   page with `key`, `code`, `repeat`, `altKey`, `ctrlKey`, `metaKey` and
   `shiftKey` on the event object and a `{}` detail, which is web-core's shape
   (`createCrossThreadEvent.ts`), bubbling and composed. Recorded deviations:
-  - **No focus model**, so the target is always the document element (the
-    page), as it is in a browser with nothing focused; the painter does not
-    hit-test a key. A focus model changes that one target and nothing else.
-  - **No `keypress`, `input` or composition events**, and no IME.
+  - **The target is the focused element** (2026-10-14, editable text E2):
+    the focused editing host when one is focused, and the document element
+    (the page) otherwise, as in a browser with nothing focused; the painter
+    does not hit-test a key, and the main thread retargets it. Only editing
+    hosts are focusable (`docs/editable-text-design.md`).
+  - **No `keypress`.** `beforeinput`/`input` and the composition events are
+    the editing host's (`docs/tracking/dom-events.md`); an input method's
+    text arrives through `LynxView::edit`, not as keys.
   - **No `keyCode`.** web-core forwards the deprecated numeric `keyCode` for
     parity with iOS/Android; this engine reports the W3C `key`/`code` only.
+  - **No `keydown` for a key the macOS input method consumed** (2026-10-14,
+    editable text E3). winit 0.30 sends no key event for a key that went to a
+    composition, where a browser sends `keydown` with `key = "Process"`; the
+    composition's events still fire (`docs/editable-text-design.md`).
   - **The macOS CLI maps winit's keys** through a table
     (`crates/bobcat-cli/src/cli/keys.rs`): winit's variant names are the UI
     Events values, except the Command key (`Meta`, `MetaLeft`/`MetaRight`)

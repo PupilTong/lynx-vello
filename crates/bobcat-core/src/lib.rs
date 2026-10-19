@@ -72,6 +72,46 @@ pub mod input {
     };
 }
 
+/// The editing vocabulary a host speaks to a view in: the commands
+/// [`LynxView::edit`] takes and the state
+/// [`EngineEvent::TextInputStateChanged`] reports.
+pub mod editing {
+    /// The rectangle [`TextInputState`]'s geometry is in (viewport CSS px).
+    pub use dom::Rect;
+    pub use dom::editing::{
+        Command, Direction, EnterKeyHint, Granularity, InputMode, InputType, TextInputState,
+    };
+
+    /// Where a view's typed text, deletions and line breaks come from, which
+    /// decides what a `keydown`'s editing default action does at a focused
+    /// editing host. Set per view with
+    /// [`LynxView::set_text_input_source`](crate::LynxView::set_text_input_source).
+    ///
+    /// Movement (the arrows, Home and End, by character, word, line or to an
+    /// edge) and select-all are the `keydown`'s in both: a platform text
+    /// proxy reports no input event for them.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub enum TextInputSource {
+        /// The keys: a `keydown` nobody canceled inserts the text the host
+        /// reported with the key ([`InputEvent::with_text`](crate::input::InputEvent::with_text)),
+        /// and Enter, Backspace and Delete insert a line break and delete. A
+        /// host whose input method composes sends its compositions and
+        /// commits as [`Command`]s beside them. The default, and what a
+        /// window that reads keys from the platform (the macOS host, a test
+        /// driver) is.
+        #[default]
+        Keys,
+        /// The host's edit commands: the host owns a platform text proxy
+        /// (the browser host's hidden `<textarea>`) that reports every
+        /// insertion, deletion and line break as an input event of its own,
+        /// which the host forwards as [`Command::Insert`],
+        /// [`Command::DeleteBackward`], [`Command::InsertLineBreak`] and the
+        /// rest. A `keydown` then performs only movement and select-all, so
+        /// the proxy's Backspace deletes once rather than once per path.
+        Commands,
+    }
+}
+
 pub use dom::{
     DocumentKind, FontBlob, FrameImages, ImageEvent, ImageInbox, ImageReports, ImageSizeHint,
     MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS, NoImages, VectorDocument, is_renderable, vello,
