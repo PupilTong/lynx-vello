@@ -128,7 +128,7 @@ use stylo::servo_arc::Arc;
 use stylo::values::computed::ContentItem;
 
 use crate::layout::paragraph::generated_content;
-use crate::layout::{DisplayMode, block_flow_display, display_mode};
+use crate::layout::{DisplayMode, display_mode};
 use crate::style::damage::StyleDamage;
 use crate::tree::document::{Document, NodeId, PayloadSlot, TreeArenas};
 use crate::tree::node::{Node, StyleRefresh};
@@ -576,7 +576,9 @@ impl<T> Document<T> {
         let stylist = self.style_engine().stylist();
         let mut builder =
             StyleBuilder::for_inheritance(stylist.device(), Some(stylist), Some(parent), None);
-        builder.mutate_box().set_display(block_flow_display());
+        builder
+            .mutate_box()
+            .set_display(stylo::values::computed::Display::Block);
         builder.build()
     }
 

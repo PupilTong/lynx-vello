@@ -464,10 +464,14 @@ impl StyleEngine {
     }
 
     fn parse_stylesheet(&self, css: &str, origin: Origin) -> Stylesheet {
+        self.parse_stylesheet_at(css, origin, self.url_data.clone())
+    }
+
+    fn parse_stylesheet_at(&self, css: &str, origin: Origin, url_data: UrlExtraData) -> Stylesheet {
         let media = Arc::new(self.lock.wrap(MediaList::empty()));
         Stylesheet::from_str(
             css,
-            self.url_data.clone(),
+            url_data,
             origin,
             media,
             self.lock.as_ref().clone(),
@@ -493,7 +497,27 @@ impl StyleEngine {
         styles: &mut AuthorStyles<ShadowStyleSheet>,
         css: &str,
     ) {
-        let sheet = ShadowStyleSheet(Arc::new(self.parse_stylesheet(css, Origin::Author)));
+        let sheet = self.parse_stylesheet(css, Origin::Author);
+        self.add_scoped_sheet(styles, sheet);
+    }
+
+    /// [`Self::add_scoped_stylesheet`] for a sheet the engine wrote itself:
+    /// an author sheet of the tree, parsed with chrome rules enabled.
+    pub(crate) fn add_engine_scoped_stylesheet(
+        &mut self,
+        styles: &mut AuthorStyles<ShadowStyleSheet>,
+        css: &str,
+    ) {
+        let sheet = self.parse_stylesheet_at(
+            css,
+            Origin::Author,
+            crate::tree::document::engine_url_data(),
+        );
+        self.add_scoped_sheet(styles, sheet);
+    }
+
+    fn add_scoped_sheet(&mut self, styles: &mut AuthorStyles<ShadowStyleSheet>, sheet: Stylesheet) {
+        let sheet = ShadowStyleSheet(Arc::new(sheet));
         let guard = self.lock.read();
         styles.stylesheets.append_stylesheet(sheet, &guard);
         let invalidations = styles.flush(&mut self.stylist, &guard);
@@ -862,9 +886,29 @@ impl<T> Document<T> {
         self.mark_subtree_dirty(host);
     }
 
+    /// Adds a stylesheet the engine itself wrote to one shadow tree, such as
+    /// a component's own rules for the HTML content it builds there.
+    ///
+    /// It cascades as [`Self::add_shadow_stylesheet`]'s sheets do, in the
+    /// order sheets are added, but it parses with chrome rules enabled, so it
+    /// can write the values the `lynx` grammar keeps from authors:
+    /// `display: block`, `flow` and `inline`, the flow layout of that content.
+    pub fn add_engine_shadow_stylesheet(&mut self, shadow_root: NodeId, css: &str) {
+        let host = self
+            .shadow_host(shadow_root)
+            .expect("Document::add_engine_shadow_stylesheet: not a live shadow root");
+        self.note_visual_mutation();
+        {
+            let (engine, shadow) = self.shadow_style_parts(shadow_root);
+            engine.add_engine_scoped_stylesheet(&mut shadow.styles, css);
+        }
+        self.mark_subtree_dirty(host);
+    }
+
     /// Replaces the stylesheet at `index` among those
-    /// [`Self::add_shadow_stylesheet`] added to one shadow tree, counting from
-    /// the first added, keeping its place in their order: a sheet a component
+    /// [`Self::add_shadow_stylesheet`] and [`Self::add_engine_shadow_stylesheet`]
+    /// added to one shadow tree, counting from the first added, with an author
+    /// sheet, keeping its place in their order: a sheet a component
     /// rewrites, such as the one `<x-markdown>` builds from its
     /// `markdown-style` attribute, still cascades after the sheets added
     /// before it and before the ones added after it, as replacing the text of

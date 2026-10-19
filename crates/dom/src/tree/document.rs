@@ -27,6 +27,13 @@ pub(crate) fn about_blank_url_data() -> UrlExtraData {
     UrlExtraData::from(::url::Url::parse("about:blank").expect("about:blank is a valid URL"))
 }
 
+/// The base of a sheet the engine wrote itself: a `chrome` URL, which is what
+/// enables chrome rules in stylo's parser (`UrlExtraData::chrome_rules_enabled`)
+/// for a sheet that still cascades as an author sheet.
+pub(crate) fn engine_url_data() -> UrlExtraData {
+    UrlExtraData::from(::url::Url::parse("chrome://engine/").expect("a valid URL"))
+}
+
 /// How a scheduled committed-input relayout is allowed to finish.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum RelayoutKind {
