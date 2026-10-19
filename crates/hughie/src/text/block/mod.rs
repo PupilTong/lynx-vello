@@ -49,8 +49,9 @@ use super::paragraph::memo::{BreakMemo, Retained};
 use super::paragraph::shape::{self, NaturalLine, ShapeSpan};
 use super::paragraph::style::resolve_alignment;
 pub use super::paragraph::{
-    BlockConstraint, BlockMetrics, Direction, InlineBoxSpec, InlineItem, LineHeight, RunStyle,
-    TextAlign, TextIndent, TextRunItem, TextWrap, VerticalAlign, WhiteSpaceCollapse, WordBreak,
+    BlockConstraint, BlockMetrics, Direction, InlineBoxSpec, InlineItem, LineHeight, OffsetMap,
+    RunStyle, TextAlign, TextIndent, TextRunItem, TextWrap, VerticalAlign, WhiteSpaceCollapse,
+    WordBreak,
 };
 use super::paragraph::{
     Flow, LineGeometry, OwnedItem, Paragraph, ParagraphRoot, RunBreaking, parley_boxes, sized_box,
@@ -837,16 +838,20 @@ impl TextBlock {
             .map_or(&self.paragraph.natural, |part| &part.layout)
     }
 
-    /// The paragraph's content text after white-space processing: the
-    /// string whose UTF-8 byte offsets [`Self::display`]'s clusters index,
-    /// up to a truncation cut where one was applied. Under
-    /// `white-space-collapse: preserve` on every run it is the runs' own text
-    /// concatenated, each tab and carriage return shown as a space, which is
-    /// what lets an editor address the display layout in the offsets of the
-    /// text it edits. Readable before any layout.
+    /// The offset bridge between [`Self::display`]'s bytes and the source
+    /// units the block was built from ([`OffsetMap`]): the content's
+    /// normalized text, its source map, and the truncation cut's byte, past
+    /// which the display layout shows the tail rather than source text.
+    /// Valid after [`Self::commit`].
     #[must_use]
-    pub fn text(&self) -> &str {
-        &self.content.block.text
+    pub fn offset_map(&self) -> OffsetMap<'_> {
+        let block = &self.paragraph.content.block;
+        let cut_byte = self
+            .expect_result()
+            .display
+            .as_ref()
+            .map_or(block.text.len(), |part| part.cut_byte as usize);
+        OffsetMap::new(&block.text, &block.map, cut_byte)
     }
 
     /// How many parley style indices this block's display layout has.

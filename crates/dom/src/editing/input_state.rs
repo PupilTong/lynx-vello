@@ -7,10 +7,11 @@
 //! publishes it whenever it differs from the last one it published
 //! (`PartialEq`), and answers every synchronous platform query from it.
 //!
-//! Offsets are value offsets. While the focused host's paragraph does not
-//! show its value (generated `content`, a truncation cut) and the selection
-//! is one placed in that paragraph, the selection is reported collapsed at
-//! the value's end ([`crate::editing`]).
+//! Offsets are value offsets, read back from the host's paragraph through
+//! its source map. While that paragraph is not built from the value alone
+//! (generated `content`, an element child's text) and the selection is one
+//! placed in it, or an end of it lies past a truncation cut, the selection
+//! is reported collapsed at the value's end ([`crate::editing`]).
 //!
 //! Geometry is viewport CSS px from the last committed layout, walked the way
 //! [`Document::bounding_client_rect`] walks it: sticky offsets and scroll
@@ -21,7 +22,7 @@ use core::ops::Range;
 use parley::{Cluster, Cursor, Layout};
 use stylo::properties::ComputedValues;
 
-use super::offsets::unit_of_byte;
+use super::offsets::{unit_of_byte, utf16_len};
 use crate::layout::TextBrush;
 use crate::tree::document::NodeId;
 use crate::{Document, Point2D, Rect, Size2D};
@@ -215,14 +216,13 @@ impl<T> Document<T> {
             return TextInputState::default();
         };
         let value = self.host_value(host);
-        // A parley selection over a paragraph that does not show the value
-        // has no offsets in the value: it is reported collapsed at the
-        // value's end rather than as offsets into some other text.
-        let range = if session.pending.is_some() || self.paragraph_shows_value(host, &value) {
-            session.bytes().range()
-        } else {
-            value.len()..value.len()
-        };
+        let paragraph = self.editable_paragraph(host);
+        // A parley selection the paragraph cannot read back as value offsets
+        // is reported collapsed at the value's end rather than as offsets
+        // into some other text.
+        let range = session
+            .bytes(paragraph.as_ref(), &value)
+            .map_or(value.len()..value.len(), super::ByteSelection::range);
         let to_units = |byte: usize| u32::try_from(unit_of_byte(&value, byte)).unwrap_or(u32::MAX);
         let selection = to_units(range.start)..to_units(range.end);
         let composition = session
@@ -230,28 +230,37 @@ impl<T> Document<T> {
             .as_ref()
             .map(|range| to_units(range.start)..to_units(range.end));
 
-        let editable_bounds = self.bounding_client_rect(host).unwrap_or_else(Rect::zero);
+        let host_rect = self.bounding_client_rect(host);
+        let editable_bounds = host_rect.unwrap_or_else(Rect::zero);
         let mut caret = Rect::zero();
         let mut composition_bounds = Vec::new();
-        if let Some(block) = self.text_block(host)
-            && let Some(layout) = self.rounded_layout(host)
-        {
-            let origin = editable_bounds.origin
-                + euclid::default::Vector2D::new(
-                    layout.border.left + layout.padding.left,
-                    layout.border.top + layout.padding.top,
-                );
-            let display = block.display();
-            let fallback = self.paint_style(host).map_or(0.0, empty_line_height);
-            let focus = session.selection_in(display).focus();
-            caret = caret_box(display, focus, CARET_WIDTH, fallback).translate(origin.to_vector());
-            if let Some(range) = &session.composition
-                && let Some(composed) = value.get(range.clone())
-            {
-                for (offset, character) in composed.char_indices() {
-                    let rect = cluster_box(display, range.start + offset)
-                        .map_or_else(Rect::zero, |rect| rect.translate(origin.to_vector()));
-                    composition_bounds.extend(std::iter::repeat_n(rect, character.len_utf16()));
+        let fallback = self.paint_style(host).map_or(0.0, empty_line_height);
+        if host_rect.is_some() {
+            if let Some(paragraph) = &paragraph {
+                let origin = editable_bounds.origin + paragraph.origin.to_vector();
+                let focus = session.selection_in(paragraph, &value).focus();
+                caret = caret_box(paragraph.layout, focus, CARET_WIDTH, fallback)
+                    .translate(origin.to_vector());
+                if let Some(range) = &session.composition
+                    && let Some(composed) = value.get(range.clone())
+                {
+                    for (offset, character) in composed.char_indices() {
+                        let rect = paragraph
+                            .layout_byte(&value, range.start + offset)
+                            .and_then(|byte| cluster_box(paragraph.layout, byte))
+                            .map_or_else(Rect::zero, |rect| rect.translate(origin.to_vector()));
+                        composition_bounds.extend(std::iter::repeat_n(rect, character.len_utf16()));
+                    }
+                }
+            } else {
+                // No paragraph — an empty host, or white space a flex
+                // container does not render: the caret at the content box's
+                // origin, one line tall.
+                let origin = editable_bounds.origin + self.content_inset(host);
+                caret = Rect::new(origin, Size2D::new(CARET_WIDTH, fallback));
+                if let Some(range) = &session.composition {
+                    let units = value.get(range.clone()).map_or(0, utf16_len);
+                    composition_bounds = vec![Rect::new(origin, Size2D::zero()); units];
                 }
             }
         }

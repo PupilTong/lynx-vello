@@ -245,6 +245,16 @@ fn text_nested_inline_box_across_a_wrap() {
     assert_text_golden("nested-inline-box-wrap", &actual);
 }
 
+/// Which paragraph an editing golden's host lays its text out in.
+#[derive(Clone, Copy)]
+enum EditingHost {
+    /// A Lynx `<text contenteditable>`: its own Lynx paragraph.
+    Text,
+    /// A flex `<div contenteditable>` with loose text: the standard inline
+    /// formatting context of the anonymous block box around it.
+    Flex,
+}
+
 /// One focused editing host in a `width` × `height` page, Roboto at 24px
 /// with no host font behind it, edited by `edit` before the capture.
 ///
@@ -255,14 +265,16 @@ fn text_nested_inline_box_across_a_wrap() {
 /// around the surrogate pair, not about the emoji's picture.
 fn editing_golden(
     case: &str,
+    kind: EditingHost,
     value: &str,
-    host_width: f32,
+    host_style: &str,
     edit: impl FnOnce(&mut dom::Document<()>),
 ) {
     use dom::StylesheetOrigin;
 
     let (width, height) = (360.0, 120.0);
     let mut dom = dom::Document::new(paint_common::device(width, height), "div", ());
+    paint_common::define_lynx_text(&mut dom, "text");
     dom.adopt_text_context(dom::TextContext::without_system_fonts());
     assert_eq!(
         dom.register_fonts(dom::FontBlob::from_static(screenshot::ROBOTO)),
@@ -270,8 +282,7 @@ fn editing_golden(
     );
     // The embedder's UA rule for an editing host (bobcat-core's sheet).
     dom.add_stylesheet(
-        "[contenteditable]:not([contenteditable=\"false\" i]) \
-         { display: -lynx-text !important; white-space: pre-wrap !important; }",
+        "[contenteditable]:not([contenteditable=\"false\" i]) { white-space: pre-wrap; }",
         StylesheetOrigin::UserAgent,
     );
     let root = dom.document_element().id();
@@ -281,13 +292,14 @@ fn editing_golden(
          box-sizing: border-box; background-color: white; font-family: Roboto; font-size: 24px; \
          color: #111827",
     );
-    let host = dom.create_element("div", ());
+    let host = match kind {
+        EditingHost::Text => dom.create_element("text", ()),
+        EditingHost::Flex => dom.create_element("div", ()),
+    };
     dom.set_attribute(host, "contenteditable", "");
     dom.set_inline_style(
         host,
-        &format!(
-            "width: {host_width}px; padding: 4px 6px; background-color: #f3f4f6; line-height: 32px"
-        ),
+        &format!("padding: 4px 6px; background-color: #f3f4f6; line-height: 32px; {host_style}"),
     );
     dom.append_child(root, host);
     let text = dom.create_text_node(value, ());
@@ -301,25 +313,32 @@ fn editing_golden(
 
 #[test]
 fn editing_caret_at_end() {
-    editing_golden("editing-caret-at-end", "Caret at the end", 300.0, |dom| {
-        use dom::editing::{Command, Direction, Granularity};
-        assert!(
-            dom.apply_editing(Command::Move {
-                granularity: Granularity::Document,
-                direction: Direction::Forward,
-                extend: false,
-            })
-            .applied
-        );
-    });
+    editing_golden(
+        "editing-caret-at-end",
+        EditingHost::Text,
+        "Caret at the end",
+        "width: 300px",
+        |dom| {
+            use dom::editing::{Command, Direction, Granularity};
+            assert!(
+                dom.apply_editing(Command::Move {
+                    granularity: Granularity::Document,
+                    direction: Direction::Forward,
+                    extend: false,
+                })
+                .applied
+            );
+        },
+    );
 }
 
 #[test]
 fn editing_selection_across_two_lines() {
     editing_golden(
         "editing-selection-two-lines",
+        EditingHost::Text,
         "A selection that runs over a wrapped line",
-        240.0,
+        "width: 240px",
         |dom| {
             use dom::editing::Command;
             assert!(
@@ -332,32 +351,79 @@ fn editing_selection_across_two_lines() {
 
 #[test]
 fn editing_composition_underline() {
-    editing_golden("editing-composition", "Typing ", 300.0, |dom| {
-        use dom::editing::{Command, Direction, Granularity};
-        dom.apply_editing(Command::Move {
-            granularity: Granularity::Document,
-            direction: Direction::Forward,
-            extend: false,
-        });
-        assert!(
-            dom.apply_editing(Command::SetComposition {
-                text: "here".to_owned(),
-                selection: 4..4,
-            })
-            .applied
-        );
-    });
+    editing_golden(
+        "editing-composition",
+        EditingHost::Text,
+        "Typing ",
+        "width: 300px",
+        |dom| {
+            use dom::editing::{Command, Direction, Granularity};
+            dom.apply_editing(Command::Move {
+                granularity: Granularity::Document,
+                direction: Direction::Forward,
+                extend: false,
+            });
+            assert!(
+                dom.apply_editing(Command::SetComposition {
+                    text: "here".to_owned(),
+                    selection: 4..4,
+                })
+                .applied
+            );
+        },
+    );
 }
 
 #[test]
 fn editing_emoji_boundary() {
-    editing_golden("editing-emoji-boundary", "A😀B", 300.0, |dom| {
-        use dom::editing::Command;
-        // Exactly the surrogate pair's two units: the highlight covers its
-        // one box and neither neighbour.
-        assert!(
-            dom.apply_editing(Command::SetSelection { range: 1..3 })
-                .applied
-        );
-    });
+    editing_golden(
+        "editing-emoji-boundary",
+        EditingHost::Text,
+        "A😀B",
+        "width: 300px",
+        |dom| {
+            use dom::editing::Command;
+            // Exactly the surrogate pair's two units: the highlight covers its
+            // one box and neither neighbour.
+            assert!(
+                dom.apply_editing(Command::SetSelection { range: 1..3 })
+                    .applied
+            );
+        },
+    );
+}
+
+/// A flex host's loose text, laid out by the anonymous block box's standard
+/// inline formatting context under an author `white-space: normal`: the
+/// double space after "Loose" shows as one, and a selection from inside it
+/// to the second line covers the one space it emitted and wraps with the
+/// line.
+#[test]
+fn editing_flex_host_selection() {
+    editing_golden(
+        "editing-flex-host-selection",
+        EditingHost::Flex,
+        "Loose  text in a flex view",
+        "width: 220px; white-space: normal",
+        |dom| {
+            use dom::editing::Command;
+            assert!(
+                dom.apply_editing(Command::SetSelection { range: 6..24 })
+                    .applied
+            );
+        },
+    );
+}
+
+/// An empty flex host lays out no paragraph: its caret is painted with its
+/// own box, at the content box's origin and one line tall.
+#[test]
+fn editing_empty_flex_host_caret() {
+    editing_golden(
+        "editing-empty-flex-host-caret",
+        EditingHost::Flex,
+        "",
+        "width: 220px; height: 40px",
+        |_| {},
+    );
 }

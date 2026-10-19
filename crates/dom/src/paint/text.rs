@@ -960,27 +960,75 @@ pub(crate) struct EditingPaint {
 }
 
 impl EditingPaint {
-    /// The editing state `element` paints, when it is the focused host.
+    /// The editing state the paragraph `node` paints: `node` is the focused
+    /// host's paragraph — the host itself, or the anonymous block box around
+    /// its text ([`crate::tree::anonymous`]) — and `style` its style.
+    ///
+    /// The session's offsets are the value's; they reach the layout through
+    /// the paragraph's source map, an offset the layout does not show (past
+    /// a truncation cut) painted at the end of what it shows.
     pub(crate) fn of<T>(
         document: &crate::Document<T>,
-        element: crate::NodeId,
-        layout: &Layout<crate::layout::TextBrush>,
+        node: crate::NodeId,
         style: &ComputedValues,
     ) -> Option<Self> {
         let session = document.editing.session.as_ref()?;
-        if session.host != element {
+        let host = session.host;
+        if node != host && document.arenas().anonymous_container(node) != Some(host) {
             return None;
         }
-        let selection = session.selection_in(layout);
+        let paragraph = document.editable_paragraph(host)?;
+        if paragraph.node != node {
+            return None;
+        }
+        let value = document.host_value(host);
+        let selection = session.selection_in(&paragraph, &value);
         let caret = selection.is_collapsed().then(|| caret_color(style));
+        let composition = session.composition.as_ref().map(|range| {
+            paragraph.layout_byte_clamped(&value, range.start)
+                ..paragraph.layout_byte_clamped(&value, range.end)
+        });
         Some(Self {
             selection,
-            composition: session.composition.clone(),
+            composition,
             caret,
             underline: convert::current_color(style),
             empty_line_height: crate::editing::empty_line_height(style),
         })
     }
+}
+
+/// The caret of the focused host when no paragraph holds its text — an
+/// empty host, or one whose white space a flex container does not render:
+/// [`crate::editing::CARET_WIDTH`] wide and one used line tall, at the
+/// content box's origin, in the host's border-box space. `None` for every
+/// other element, and while the selection is a range.
+pub(crate) fn empty_host_caret<T>(
+    document: &crate::Document<T>,
+    node: crate::NodeId,
+    style: &ComputedValues,
+) -> Option<(Rect, Color)> {
+    let session = document.editing.session.as_ref()?;
+    if session.host != node || document.editable_paragraph(node).is_some() {
+        return None;
+    }
+    if session
+        .pending
+        .is_some_and(|pending| pending.anchor != pending.focus)
+    {
+        return None;
+    }
+    let inset = document.content_inset(node);
+    let height = crate::editing::empty_line_height(style);
+    Some((
+        Rect::new(
+            f64::from(inset.x),
+            f64::from(inset.y),
+            f64::from(inset.x + crate::editing::CARET_WIDTH),
+            f64::from(inset.y + height),
+        ),
+        caret_color(style),
+    ))
 }
 
 /// The caret's colour: `caret-color: auto`, which is the text's own
@@ -1028,11 +1076,21 @@ pub(crate) fn paint_caret_and_composition(
                 return;
             };
             let metrics = line.metrics();
+            // The line's deepest font descent: parley 0.12's line metrics
+            // are the CSS line box, so the descent is the glyph runs'.
+            let descent = line
+                .items()
+                .filter_map(|item| match item {
+                    PositionedLayoutItem::GlyphRun(glyph_run) => {
+                        Some(glyph_run.run().font_metrics().descent)
+                    }
+                    PositionedLayoutItem::InlineBox(_) => None,
+                })
+                .fold(0.0_f32, f32::max);
             // One CSS px under the baseline by half the descent, kept inside
             // the line box.
-            let y = f64::from(
-                (metrics.baseline + metrics.descent * 0.5).min(metrics.block_max_coord - 1.0),
-            );
+            let y =
+                f64::from((metrics.baseline + descent * 0.5).min(metrics.block_max_coord - 1.0));
             scene.fill(
                 Fill::NonZero,
                 transform,

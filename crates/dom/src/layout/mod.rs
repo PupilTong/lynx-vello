@@ -797,7 +797,7 @@ impl<T> Document<T> {
     /// The committed paragraph `id` establishes, of either kind. An inline
     /// box establishes none, whatever its layout state still holds from a
     /// time it laid itself out.
-    fn committed_paragraph(&self, id: crate::NodeId) -> Option<&paragraph::TextStore> {
+    pub(crate) fn committed_paragraph(&self, id: crate::NodeId) -> Option<&paragraph::TextStore> {
         let node = self.get(id)?;
         if inline_flow::is_inline_box(node) {
             return None;

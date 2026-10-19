@@ -1572,6 +1572,13 @@ fn paint_item<T>(
             }
             border::paint(sink.scene_for(space), &mut scratch.paths, style, &fragment);
             border::paint_outline(sink.scene_for(space), &mut scratch.paths, style, &fragment);
+            // The focused editing host with no paragraph to paint its caret
+            // in — empty, or white space only — paints it here, over its own
+            // box. One `Option` test for every other element.
+            if let Some((caret, color)) = text::empty_host_caret(document, item.node, style) {
+                sink.scene_for(space)
+                    .fill(Fill::NonZero, transform, color, None, &caret);
+            }
         }
         PaintItemKind::InlineFragment { .. } => {}
         PaintItemKind::TextRun { element } => {
@@ -1613,7 +1620,7 @@ fn paint_item<T>(
             // The focused editing host's selection sits over its backgrounds
             // and under its glyphs; its caret and composition underline over
             // them. One `Option` test for every other paragraph.
-            let editing = text::EditingPaint::of(document, element, paragraph.layout, style);
+            let editing = text::EditingPaint::of(document, item.node, style);
             if let Some(editing) = &editing {
                 text::paint_selection(sink.scene_for(space), paragraph.layout, transform, editing);
             }

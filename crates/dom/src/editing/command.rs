@@ -39,7 +39,7 @@ use parley::{Affinity, Cursor, Selection};
 use super::offsets::{
     byte_of_unit, byte_of_unit_floor, floor_char_boundary, unit_of_byte, utf16_len,
 };
-use super::{ByteSelection, Session};
+use super::{ByteSelection, EditableParagraph, Session};
 use crate::Document;
 use crate::tree::document::NodeId;
 
@@ -232,9 +232,10 @@ pub struct EditOutcome {
     /// Whether the command was carried out. `false` when nothing is focused,
     /// when the command had nothing to act on, and when it was refused: a
     /// value change on a read-only host (one with an element child), any
-    /// command but `SetSelection` and `SelectAll` over a paragraph that does
-    /// not show the value, a surrogate pair split, or a commit whose value
-    /// moved after it was prepared.
+    /// command but `SetSelection` and `SelectAll` over a paragraph that is
+    /// not built from the value alone, a command that must measure past a
+    /// truncation cut, a surrogate pair split, or a commit whose value moved
+    /// after it was prepared.
     pub applied: bool,
     /// The events the embedder dispatches at the host, in order. The value
     /// changed between the last `beforeinput` and the first `input`.
@@ -345,11 +346,14 @@ struct Context {
     session: Session,
     /// Whether the value may change: no element child in the host.
     writable: bool,
+    /// The selection as value bytes, read once from wherever the session
+    /// holds it.
+    selection: ByteSelection,
 }
 
 impl Context {
     fn selection(&self) -> ByteSelection {
-        let bytes = self.session.bytes();
+        let bytes = self.selection;
         ByteSelection {
             anchor: floor_char_boundary(&self.value, bytes.anchor),
             focus: floor_char_boundary(&self.value, bytes.focus),
@@ -468,19 +472,27 @@ impl<T: Sync> Document<T> {
         let host = self.focused()?;
         let value = self.host_value(host);
         let session = self.editing.session.clone()?;
-        // Whether the selection's offsets are value offsets: the paragraph
-        // shows the value, or it is only stale behind this session's own
-        // change, whose selection is held as value offsets.
-        let trusted = session.awaiting_layout || self.paragraph_shows_value(host, &value);
+        let paragraph = self.editable_paragraph(host);
+        // A paragraph built from more than the value — generated `content`,
+        // an element child's text — has no offsets in the value: only the
+        // commands that work on value offsets alone apply over it.
+        let trusted = paragraph
+            .as_ref()
+            .is_none_or(|paragraph| paragraph.shows_value);
         if !trusted && !matches!(command, Command::SetSelection { .. } | Command::SelectAll) {
             return None;
         }
+        let selection = session
+            .bytes(paragraph.as_ref(), &value)
+            .unwrap_or_else(|| ByteSelection::collapsed(value.len(), Affinity::Downstream));
         let context = Context {
             host,
             value,
             session,
             writable: self.host_is_plain_text(host),
+            selection,
         };
+        let paragraph = paragraph.as_ref();
         match command {
             Command::SetComposition { text, selection } => {
                 set_composition(context, &text, &selection)
@@ -501,39 +513,12 @@ impl<T: Sync> Document<T> {
             Command::ExtendSelectionAndDelete { before, after } => {
                 extend_selection_and_delete(context, before, after)
             }
-            Command::SetSelection { range } => {
-                let anchor = byte_of_unit_floor(&context.value, range.start);
-                let focus = byte_of_unit_floor(&context.value, range.end);
-                let composition = context.composition();
-                Some(PreparedEdit::select(
-                    host,
-                    context.value,
-                    SelectionAfter::Bytes(ByteSelection {
-                        anchor,
-                        focus,
-                        affinity: Affinity::Downstream,
-                    }),
-                    composition,
-                ))
-            }
-            Command::SelectAll => {
-                let end = context.value.len();
-                let composition = context.composition();
-                Some(PreparedEdit::select(
-                    host,
-                    context.value,
-                    SelectionAfter::Bytes(ByteSelection {
-                        anchor: 0,
-                        focus: end,
-                        affinity: Affinity::Upstream,
-                    }),
-                    composition,
-                ))
-            }
+            Command::SetSelection { range } => Some(set_selection(context, &range)),
+            Command::SelectAll => Some(select_all(context)),
             Command::Insert(text) => insert(context, &text, INSERT_TEXT, Some(&text)),
             Command::InsertLineBreak => insert(context, "\n", INSERT_LINE_BREAK, None),
             Command::SelectFromPoint { point, extend } => {
-                self.select_at_point(context, point, |layout, selection, x, y| {
+                select_at_point(context, paragraph, point, |layout, selection, x, y| {
                     if extend {
                         selection.extend_to_point(layout, x, y)
                     } else {
@@ -542,12 +527,12 @@ impl<T: Sync> Document<T> {
                 })
             }
             Command::SelectWordAtPoint { point } => {
-                self.select_at_point(context, point, |layout, _, x, y| {
+                select_at_point(context, paragraph, point, |layout, _, x, y| {
                     Selection::word_from_point(layout, x, y)
                 })
             }
             Command::SelectLineAtPoint { point } => {
-                self.select_at_point(context, point, |layout, _, x, y| {
+                select_at_point(context, paragraph, point, |layout, _, x, y| {
                     Selection::line_from_point(layout, x, y)
                 })
             }
@@ -555,11 +540,11 @@ impl<T: Sync> Document<T> {
                 granularity,
                 direction,
                 extend,
-            } => self.move_selection(context, granularity, direction, extend),
+            } => move_selection(context, paragraph, granularity, direction, extend),
             Command::DeleteBackward
             | Command::DeleteForward
             | Command::DeleteWordBackward
-            | Command::DeleteWordForward => self.delete_by_layout(context, &command),
+            | Command::DeleteWordForward => delete_by_layout(context, paragraph, &command),
         }
     }
 
@@ -583,9 +568,6 @@ impl<T: Sync> Document<T> {
             .session
             .as_mut()
             .expect("the focused host has a session");
-        if !edit.changes.is_empty() {
-            session.awaiting_layout = true;
-        }
         match edit.selection {
             SelectionAfter::Bytes(bytes) => session.pending = Some(bytes),
             SelectionAfter::Layout(selection) => {
@@ -640,152 +622,290 @@ impl<T: Sync> Document<T> {
             self.remove_element(other);
         }
     }
+}
 
-    /// The host's committed display layout, provided it shows the value byte
-    /// for byte ([`Document::paragraph_shows_value`]).
-    fn layout_of_value(
-        &self,
-        context: &Context,
-    ) -> Option<&parley::Layout<crate::layout::TextBrush>> {
-        self.paragraph_shows_value(context.host, &context.value)
-            .then(|| {
-                self.text_block(context.host)
-                    .map(hughie::text::block::TextBlock::display)
-            })
-            .flatten()
+/// A selection the layout shows only up to a truncation cut: refused when
+/// either end lies at or past it, where the display layout shows the tail.
+fn shown(paragraph: &EditableParagraph<'_>, selection: Selection) -> Option<Selection> {
+    let cut = paragraph.map.cut_byte();
+    let past = |cursor: Cursor| paragraph.map.truncated() && cursor.index() >= cut;
+    (!past(selection.anchor()) && !past(selection.focus())).then_some(selection)
+}
+
+/// The session's selection as a parley value over `paragraph`'s layout,
+/// for a command that measures from it: `None` when its pending offsets are
+/// not shown there.
+fn current_in(context: &Context, paragraph: &EditableParagraph<'_>) -> Option<Selection> {
+    match context.session.pending {
+        None => Some(context.session.selection),
+        Some(_) => paragraph.place(&context.value, context.selection()),
     }
+}
 
-    /// The origin of the host's paragraph in its border box.
-    fn paragraph_origin(&self, host: NodeId) -> crate::Point2D<f32> {
-        self.rounded_layout(host)
-            .map_or_else(crate::Point2D::zero, |layout| {
-                crate::Point2D::new(
-                    layout.border.left + layout.padding.left,
-                    layout.border.top + layout.padding.top,
-                )
-            })
-    }
-
-    fn select_at_point(
-        &self,
-        context: Context,
-        point: crate::Point2D<f32>,
-        select: impl FnOnce(
-            &parley::Layout<crate::layout::TextBrush>,
-            &Selection,
-            f32,
-            f32,
-        ) -> Selection,
-    ) -> Option<PreparedEdit> {
-        let block = self.text_block(context.host)?;
-        let layout = block.display();
-        let origin = self.paragraph_origin(context.host);
-        let current = context.session.selection_in(layout);
-        let selection = select(layout, &current, point.x - origin.x, point.y - origin.y);
-        let composition = context.composition();
-        Some(PreparedEdit::select(
+fn select_at_point(
+    context: Context,
+    paragraph: Option<&EditableParagraph<'_>>,
+    point: crate::Point2D<f32>,
+    select: impl FnOnce(&parley::Layout<crate::layout::TextBrush>, &Selection, f32, f32) -> Selection,
+) -> Option<PreparedEdit> {
+    let composition = context.composition();
+    let Some(paragraph) = paragraph else {
+        // No paragraph: an empty host, or one whose white space renders
+        // nothing. Every point is at the end of the value.
+        let end = context.value.len();
+        return Some(PreparedEdit::select(
             context.host,
             context.value,
-            SelectionAfter::Layout(selection),
+            SelectionAfter::Bytes(ByteSelection::collapsed(end, Affinity::Downstream)),
             composition,
-        ))
-    }
+        ));
+    };
+    let layout = paragraph.layout;
+    let current = context.session.selection_in(paragraph, &context.value);
+    let origin = paragraph.origin;
+    let selection = shown(
+        paragraph,
+        select(layout, &current, point.x - origin.x, point.y - origin.y),
+    )?;
+    Some(PreparedEdit::select(
+        context.host,
+        context.value,
+        SelectionAfter::Layout(selection),
+        composition,
+    ))
+}
 
-    fn move_selection(
-        &self,
-        context: Context,
-        granularity: Granularity,
-        direction: Direction,
-        extend: bool,
-    ) -> Option<PreparedEdit> {
-        let block = self.text_block(context.host)?;
-        let layout = block.display();
-        let current = context.session.selection_in(layout);
-        let forward = direction == Direction::Forward;
-        let selection = match granularity {
-            Granularity::Character if forward => current.next_visual(layout, extend),
-            Granularity::Character => current.previous_visual(layout, extend),
-            Granularity::Word if forward => current.next_visual_word(layout, extend),
-            Granularity::Word => current.previous_visual_word(layout, extend),
-            Granularity::LineBoundary if forward => current.line_end(layout, extend),
-            Granularity::LineBoundary => current.line_start(layout, extend),
-            Granularity::Line if forward => current.next_line(layout, extend),
-            Granularity::Line => current.previous_line(layout, extend),
-            Granularity::Document => {
-                let cursor = if forward {
-                    Cursor::from_byte_index(layout, usize::MAX, Affinity::Upstream)
-                } else {
-                    Cursor::from_byte_index(layout, 0, Affinity::Downstream)
-                };
-                if extend {
-                    current.extend(cursor)
-                } else {
-                    cursor.into()
-                }
-            }
-        };
-        let composition = context.composition();
-        Some(PreparedEdit::select(
-            context.host,
-            context.value,
-            SelectionAfter::Layout(selection),
-            composition,
-        ))
-    }
-
-    /// The deletions that ask the layout where a cluster or a word ends:
-    /// parley's `PlainEditorDriver::{backdelete, delete, backdelete_word,
-    /// delete_word}`, against the host's value instead of an editor buffer.
-    fn delete_by_layout(&self, context: Context, command: &Command) -> Option<PreparedEdit> {
-        if !context.writable {
-            return None;
-        }
-        let input_type = match command {
-            Command::DeleteBackward => DELETE_CONTENT_BACKWARD,
-            Command::DeleteForward => DELETE_CONTENT_FORWARD,
-            Command::DeleteWordBackward => DELETE_WORD_BACKWARD,
-            Command::DeleteWordForward => DELETE_WORD_FORWARD,
-            _ => unreachable!("only the four deletions reach here"),
-        };
+fn move_selection(
+    context: Context,
+    paragraph: Option<&EditableParagraph<'_>>,
+    granularity: Granularity,
+    direction: Direction,
+    extend: bool,
+) -> Option<PreparedEdit> {
+    let forward = direction == Direction::Forward;
+    let composition = context.composition();
+    if granularity == Granularity::Document {
+        // The value's ends are value offsets: no layout needed, and none
+        // past a truncation cut is asked.
         let selection = context.selection();
-        if selection.anchor != selection.focus {
-            return context.delete(selection.range(), input_type);
-        }
-        let layout = self.layout_of_value(&context)?;
-        let focus = context.session.selection_in(layout).focus();
-        let caret = focus.index();
-        let range = match command {
-            Command::DeleteBackward => {
-                // Upstream cluster: the whole of it for a line break or an
-                // emoji, its last code point otherwise.
-                let cluster = focus.logical_clusters(layout)[0]?;
-                let cluster_range = cluster.text_range();
-                let start = if cluster.is_hard_line_break() || cluster.is_emoji() {
-                    cluster_range.start
-                } else {
-                    context
-                        .value
-                        .get(..cluster_range.end)?
-                        .char_indices()
-                        .next_back()?
-                        .0
-                };
-                start..cluster_range.end
-            }
-            Command::DeleteForward => focus.logical_clusters(layout)[1].as_ref()?.text_range(),
-            Command::DeleteWordBackward => focus.previous_logical_word(layout).index()..caret,
-            Command::DeleteWordForward => {
-                caret
-                    ..focus
-                        .next_logical_word(layout)
-                        .index()
-                        .min(context.value.len())
-            }
-            _ => unreachable!("only the four deletions reach here"),
+        let end = if forward { context.value.len() } else { 0 };
+        let anchor = if extend { selection.anchor } else { end };
+        let affinity = if forward {
+            Affinity::Upstream
+        } else {
+            Affinity::Downstream
         };
-        context.value.get(range.clone())?;
-        context.delete(range, input_type)
+        return Some(PreparedEdit::select(
+            context.host,
+            context.value,
+            SelectionAfter::Bytes(ByteSelection {
+                anchor,
+                focus: end,
+                affinity,
+            }),
+            composition,
+        ));
     }
+    let Some(paragraph) = paragraph else {
+        let selection = move_in_value(&context, granularity, forward, extend);
+        return Some(PreparedEdit::select(
+            context.host,
+            context.value,
+            SelectionAfter::Bytes(selection),
+            composition,
+        ));
+    };
+    let layout = paragraph.layout;
+    let current = current_in(&context, paragraph)?;
+    let step = |selection: &Selection| match granularity {
+        Granularity::Character if forward => selection.next_visual(layout, extend),
+        Granularity::Character => selection.previous_visual(layout, extend),
+        Granularity::Word if forward => selection.next_visual_word(layout, extend),
+        Granularity::Word => selection.previous_visual_word(layout, extend),
+        Granularity::LineBoundary if forward => selection.line_end(layout, extend),
+        Granularity::LineBoundary => selection.line_start(layout, extend),
+        Granularity::Line if forward => selection.next_line(layout, extend),
+        Granularity::Line => selection.previous_line(layout, extend),
+        Granularity::Document => unreachable!("answered above"),
+    };
+    let mut selection = step(&current);
+    if granularity == Granularity::Character {
+        // A cluster with no source unit — an inline box's edge — is no
+        // character of the value: a step over it alone moved the caret in
+        // the layout and not in the value, so it steps on.
+        let unit = |selection: &Selection| paragraph.map.byte_to_unit(selection.focus().index());
+        let mut from = current;
+        for _ in 0..MAX_EDGE_STEPS {
+            if unit(&selection) != unit(&from) || selection.focus().index() == from.focus().index()
+            {
+                break;
+            }
+            from = selection;
+            selection = step(&from);
+        }
+    }
+    let selection = shown(paragraph, selection)?;
+    Some(PreparedEdit::select(
+        context.host,
+        context.value,
+        SelectionAfter::Layout(selection),
+        composition,
+    ))
+}
+
+/// How many edge clusters one character step walks over at most: an inline
+/// box's start and end edges, nested a few deep, before the next character.
+const MAX_EDGE_STEPS: usize = 8;
+
+/// A move with no paragraph to measure in — an empty host, or one whose
+/// white space renders nothing: one code point for a character, the value's
+/// ends for every other granularity.
+fn move_in_value(
+    context: &Context,
+    granularity: Granularity,
+    forward: bool,
+    extend: bool,
+) -> ByteSelection {
+    let selection = context.selection();
+    let value = &context.value;
+    let range = selection.range();
+    let focus = match granularity {
+        Granularity::Character if !extend && !range.is_empty() => {
+            if forward {
+                range.end
+            } else {
+                range.start
+            }
+        }
+        Granularity::Character if forward => value[selection.focus..]
+            .chars()
+            .next()
+            .map_or(selection.focus, |character| {
+                selection.focus + character.len_utf8()
+            }),
+        Granularity::Character => value[..selection.focus]
+            .char_indices()
+            .next_back()
+            .map_or(0, |(start, _)| start),
+        _ if forward => value.len(),
+        _ => 0,
+    };
+    ByteSelection {
+        anchor: if extend { selection.anchor } else { focus },
+        focus,
+        affinity: Affinity::Downstream,
+    }
+}
+
+/// The deletions that ask the layout where a cluster or a word ends:
+/// parley's `PlainEditorDriver::{backdelete, delete, backdelete_word,
+/// delete_word}`, against the host's value instead of an editor buffer,
+/// every layout byte read back through the paragraph's source map.
+fn delete_by_layout(
+    context: Context,
+    paragraph: Option<&EditableParagraph<'_>>,
+    command: &Command,
+) -> Option<PreparedEdit> {
+    if !context.writable {
+        return None;
+    }
+    let input_type = match command {
+        Command::DeleteBackward => DELETE_CONTENT_BACKWARD,
+        Command::DeleteForward => DELETE_CONTENT_FORWARD,
+        Command::DeleteWordBackward => DELETE_WORD_BACKWARD,
+        Command::DeleteWordForward => DELETE_WORD_FORWARD,
+        _ => unreachable!("only the four deletions reach here"),
+    };
+    let selection = context.selection();
+    if selection.anchor != selection.focus {
+        return context.delete(selection.range(), input_type);
+    }
+    let caret = selection.focus;
+    let value = &context.value;
+    let Some(paragraph) = paragraph else {
+        // No paragraph: one code point, or to the value's end for a word.
+        let range = match command {
+            Command::DeleteBackward => value[..caret]
+                .char_indices()
+                .next_back()
+                .map_or(caret..caret, |(start, _)| start..caret),
+            Command::DeleteForward => value[caret..]
+                .chars()
+                .next()
+                .map_or(caret..caret, |character| {
+                    caret..caret + character.len_utf8()
+                }),
+            Command::DeleteWordBackward => 0..caret,
+            _ => caret..value.len(),
+        };
+        return context.delete(range, input_type);
+    };
+    let layout = paragraph.layout;
+    let focus = shown(paragraph, current_in(&context, paragraph)?)?.focus();
+    let range = match command {
+        Command::DeleteBackward => {
+            // Upstream cluster: the whole of it for a line break or an
+            // emoji, its last code point otherwise.
+            let cluster = focus.logical_clusters(layout)[0]?;
+            let start = if cluster.is_hard_line_break() || cluster.is_emoji() {
+                paragraph.value_byte(value, cluster.text_range().start)?
+            } else {
+                value.get(..caret)?.char_indices().next_back()?.0
+            };
+            start..caret
+        }
+        Command::DeleteForward => {
+            let [_, after] = focus.logical_clusters(layout);
+            caret..paragraph.value_end_byte(value, after?.text_range().end)?
+        }
+        Command::DeleteWordBackward => {
+            paragraph.value_byte(value, focus.previous_logical_word(layout).index())?..caret
+        }
+        Command::DeleteWordForward => {
+            caret
+                ..paragraph
+                    .value_end_byte(value, focus.next_logical_word(layout).index())?
+                    .min(value.len())
+        }
+        _ => unreachable!("only the four deletions reach here"),
+    };
+    if range.start > range.end {
+        return None;
+    }
+    value.get(range.clone())?;
+    context.delete(range, input_type)
+}
+
+/// `SetEditableSelectionOffsets`: value offsets alone.
+fn set_selection(context: Context, range: &Range<usize>) -> PreparedEdit {
+    let anchor = byte_of_unit_floor(&context.value, range.start);
+    let focus = byte_of_unit_floor(&context.value, range.end);
+    let composition = context.composition();
+    PreparedEdit::select(
+        context.host,
+        context.value,
+        SelectionAfter::Bytes(ByteSelection {
+            anchor,
+            focus,
+            affinity: Affinity::Downstream,
+        }),
+        composition,
+    )
+}
+
+fn select_all(context: Context) -> PreparedEdit {
+    let end = context.value.len();
+    let composition = context.composition();
+    PreparedEdit::select(
+        context.host,
+        context.value,
+        SelectionAfter::Bytes(ByteSelection {
+            anchor: 0,
+            focus: end,
+            affinity: Affinity::Upstream,
+        }),
+        composition,
+    )
 }
 
 fn set_composition(context: Context, text: &str, selection: &Range<usize>) -> Option<PreparedEdit> {

@@ -1095,3 +1095,25 @@ fn right_to_left_content_keeps_the_intrinsic_widths_of_two_breaks() {
     assert_eq!(one_pass, (27.0, 75.0), "parley's one pass");
     assert_eq!(breaks, 2);
 }
+
+/// The offset bridge of a collapsing flow: a unit inside a collapsed span
+/// lands on the one byte the span emitted, the byte after the span starts
+/// at the unit after it, and the end answers the text's end.
+#[test]
+fn the_offset_map_snaps_a_collapsed_span_to_its_emitted_byte() {
+    let style = ahem(10.0, LineHeight::Normal);
+    let flow = committed(container(style.clone()), &[run(&style, "a  b")], None);
+    let map = flow.offset_map();
+    assert_eq!(map.display_text(), "a b");
+    assert_eq!(map.source_len(), 4);
+    assert!(!map.truncated());
+    assert_eq!(map.unit_to_byte(0), Some(0));
+    assert_eq!(map.unit_to_byte(1), Some(1));
+    assert_eq!(map.unit_to_byte(2), Some(1), "inside the collapsed span");
+    assert_eq!(map.unit_to_byte(3), Some(2));
+    assert_eq!(map.unit_to_byte_or_end(4), Some(3));
+    assert_eq!(map.byte_to_unit(1), 1, "the span's first unit");
+    assert_eq!(map.byte_to_unit(2), 3);
+    assert_eq!(map.unit_before(2), 3, "the whole span is before `b`");
+    assert_eq!(map.byte_to_unit(3), 4);
+}

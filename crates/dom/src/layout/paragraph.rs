@@ -30,7 +30,9 @@ use hughie::style::{CoreStyle, PositionProperty};
 use hughie::text::TextContext;
 use hughie::text::block::{BlockConstraint, BlockMetrics, PlacedBox, SourceItem, TextBlock};
 use hughie::text::inline::{FlowSource, InlineEdges, InlineFlow, InlineFragment};
-use hughie::text::paragraph::{BreakStyle, Direction, LineGeometry, RunStyle, WhiteSpaceCollapse};
+use hughie::text::paragraph::{
+    BreakStyle, Direction, LineGeometry, OffsetMap, RunStyle, WhiteSpaceCollapse,
+};
 use hughie::tree::AvailableSpace;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{Content, ContentItem};
@@ -162,6 +164,30 @@ impl TextStore {
         }
     }
 
+    /// The committed paragraph as the editor reads it: its display layout,
+    /// the offset bridge between that layout's bytes and the source units
+    /// the paragraph was built from, and the node behind each item.
+    pub(crate) fn editable(&self) -> Option<EditableView<'_>> {
+        match self {
+            Self::Block(store) => {
+                let block = store.committed()?;
+                Some(EditableView {
+                    layout: block.display(),
+                    map: block.offset_map(),
+                    sources: &store.source_ids,
+                })
+            }
+            Self::Flow(store) => {
+                let flow = store.committed()?;
+                Some(EditableView {
+                    layout: flow.display(),
+                    map: flow.offset_map(),
+                    sources: &store.source_ids,
+                })
+            }
+        }
+    }
+
     /// The committed paragraph's source-range boxes
     /// ([`TextBlock::range_boxes`], [`InlineFlow::range_boxes`]).
     pub(crate) fn range_boxes(
@@ -215,6 +241,18 @@ impl TextStore {
             Self::Flow(store) => store.committed()?.item_source_range(item),
         }
     }
+}
+
+/// One committed paragraph, of either kind, as the editor reads it
+/// ([`TextStore::editable`]).
+pub(crate) struct EditableView<'a> {
+    /// The laid-out glyph runs, in the paragraph's own coordinates.
+    pub(crate) layout: &'a parley::Layout<TextBrush>,
+    /// The bridge between `layout`'s bytes and the paragraph's source units.
+    pub(crate) map: OffsetMap<'a>,
+    /// Item index → the node that contributed it: a run's is the element
+    /// whose style it carries.
+    pub(crate) sources: &'a [NodeId],
 }
 
 /// One committed paragraph, of either kind, as paint reads it.

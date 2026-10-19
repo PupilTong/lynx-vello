@@ -55,7 +55,8 @@ every synchronous OS query from it with no wait.
  │ dom::editing                             │    │ embedder IME client                       │
  │  • editing host = contenteditable elem   │    │  macOS: winit Ime + KeyEvent.text         │
  │  • Selection/Cursor over the host's      │    │  wasm:  hidden <textarea> proxy in facade │
- │    committed parley Layout               │    │  headless: test driver                    │
+ │    paragraph (its own, or its anonymous  │    │  headless: test driver                    │
+ │    box's), offsets via its source map    │    │                                           │
  │  • composition range                     │    │                                           │
  │  • commands (insert, delete, move, …)    │◀───│ LynxView::ime(ImeCommand)  (counted FIFO) │
  │  • TextInputState snapshot per change    │───▶│ ViewNotice::TextInputState(TextInputState)│
@@ -70,24 +71,44 @@ every synchronous OS query from it with no wait.
   present and not `"false"` (case-insensitive). `"true"`, `""` and
   `"plaintext-only"` are all treated as plain-text editing in this series;
   rich-text editing of nested inline elements is deferred.
-- The UA sheet lays an editing host out as one paragraph:
-  `[contenteditable]:not([contenteditable="false" i]) { display: -lynx-text !important; white-space: pre-wrap !important; }`
-  (`!important` follows the `text { display: -lynx-text !important }`
-  precedent; `white-space` is `!important` too, see E1). A `<view contenteditable>` therefore becomes a text block whose
-  text-node children are its runs, which is exactly what `<div contenteditable>`
-  holds in a browser for plain text.
+- **Editing is decoupled from the text container** (user rulings
+  2026-10-19). A host keeps the layout its element kind and its `display`
+  give it, and its text is edited in whichever paragraph that is:
+  - a Lynx `<text contenteditable>` keeps its Lynx paragraph — verbatim
+    white space, `text-maxline`/`text-maxlength` truncation — in its own
+    `TextStore::Block`;
+  - a block container (an engine sheet's `display: block`, such as E5's
+    editor) keeps its own standard inline formatting context,
+    `TextStore::Flow`;
+  - any other element — a flex, grid, linear or relative `view` or `div` —
+    lays its loose text out in the anonymous block box around it
+    (`dom::tree::anonymous`, #434), whose standard inline formatting context
+    is the paragraph. The host is that box's container.
+
+  No `display` is forced: a `display: none` host is hidden and cannot be
+  focused. The UA sheet only defaults white space, with no `!important`:
+  `[contenteditable]:not([contenteditable="false" i]) { white-space: pre-wrap; }`,
+  so typed spaces and line breaks show; a `<text>` ignores it, being
+  verbatim, and an author `white-space: normal` collapses what the host
+  shows while its value keeps every character.
 - Content model in this series: the host's text is the concatenation of its
-  direct text-node children. The first edit normalizes the host to exactly one
-  text node. Element children inside a host are not edited and make the host
-  read-only for commands that would cross them (recorded limitation).
-- Selection and caret are parley `editing::{Cursor, Selection}` values over the
-  host's committed `TextBlock::display()` layout, refreshed after every
-  relayout (`Selection::refresh`). Offsets published to the host are UTF-16
-  code units into the host's value; dom converts at the boundary.
+  direct text-node children, in content-walk order. The first edit
+  normalizes the host to exactly one text node. Element children inside a
+  host are not edited and make the host read-only for commands that would
+  cross them (recorded limitation).
+- Selection and caret are parley `editing::{Cursor, Selection}` values over
+  the host's committed paragraph layout, refreshed after every relayout
+  (`Selection::refresh`). The layout's bytes are not the value's: collapsed
+  white space, an inline box's edges and a truncation tail move them. The
+  paragraph's source units are the value's UTF-16 units, so every
+  conversion goes value byte → UTF-16 unit → layout byte and back through
+  the paragraph's own source map (`hughie::text::paragraph::OffsetMap`).
+  Offsets published to the host are UTF-16 code units into the host's
+  value.
 - `Document` gains a minimal **focus model**: one focused element, `focus(node)`
   / `blur()`, `focus`/`blur` dispatched non-bubbling (and `focusin`/`focusout`
-  bubbling) through the existing component-event path. Only editing hosts are
-  focusable in this series.
+  bubbling) through the existing component-event path. Only editing hosts that
+  are being rendered are focusable in this series.
 - Painting (`paint::text`): selection highlight behind the glyphs, the caret
   (`caret-color`, falling back to `color`), and a thin solid underline under
   the composition range. Caret blink is deferred (needs a painter-side toggle;
@@ -170,11 +191,13 @@ the hidden native responder on iOS/Android, Windows TSF.
 
 ## E1: what was built
 
-`dom::editing` (`crates/dom/src/editing/`), the UA rule in
+`dom::editing` (`crates/dom/src/editing/`; `paragraph.rs` resolves a host's
+paragraph and converts offsets), the UA rule in
 `crates/bobcat-core/src/main/tree/ua_sheet.rs` (`EDITING_HOST_RULE`), the
-caret, selection and composition painting in `crates/dom/src/paint/text.rs`,
-and `white-space-collapse: preserve` in `hughie`'s paragraph
-(`hughie::text::block::WhiteSpaceCollapse`). No host code, no realm code.
+caret, selection and composition painting in `crates/dom/src/paint/text.rs`
+and `walker.rs`, and the offset bridge in `hughie`
+(`crates/hughie/src/text/paragraph/offsets.rs`). No host code, no realm
+code.
 
 Public surface:
 
@@ -185,7 +208,10 @@ Public surface:
   EditEvent, EditEventKind}`.
 - `Document::text_input_state`; `editing::{TextInputState, InputType,
   InputMode, EnterKeyHint}`.
-- `hughie::text::block::{WhiteSpaceCollapse, TextBlock::text}`.
+- `hughie::text::paragraph::OffsetMap` (`display_text`, `source_len`,
+  `cut_byte`, `truncated`, `unit_to_byte`, `unit_to_byte_or_end`,
+  `byte_to_unit`, `unit_before`), from `TextBlock::offset_map` and
+  `InlineFlow::offset_map`.
 
 ### Choices made where the design left one
 
@@ -255,25 +281,49 @@ Public surface:
   over inline backgrounds and under shadows and glyphs; the caret only shows
   for a collapsed selection; the composition underline is 1 CSS px in the
   text colour, half the descent under the baseline.
-- **`white-space-collapse: preserve` in the paragraph.** The editing host's
-  `pre-wrap` uses the paragraph's `preserve` mode (`WhiteSpaceCollapse::Preserve`,
-  which landed with `<markdown>`): every white-space character is kept, each
-  space, tab and carriage return as one space of its own, so the paragraph's
-  text has the value's bytes at the value's offsets, with a tab or carriage
-  return shown as a space; `dom` compares a value's `\t` and `\r` as equal
-  to the paragraph's space.
-- **The UA rule's `white-space` is `!important`.** An author
-  `white-space: normal` on a host would collapse `"a  b"` to `"a b"`, after
-  which every parley offset past the collapse is one byte off the value.
-- **A paragraph that does not show the value is read-only.**
-  `prepare_editing` asks once whether the committed paragraph shows the value
-  byte for byte, untruncated (`Document::paragraph_shows_value`). When it
-  does not — generated `content`, a `text-maxline`/`text-maxlength` cut — and
-  the session is not merely waiting for the layout of its own last change,
-  every command is refused except `SetSelection` and `SelectAll`, which work
-  on value offsets alone. `text_input_state` reports a parley selection over
-  such a paragraph collapsed at the value's end rather than as offsets into
-  other text.
+- **The paragraph of a host** (`Document::paragraph_node_of`): the host
+  itself when it establishes a paragraph (a Lynx text element, a block
+  container), else the anonymous block box of its first text child, whose
+  container is the host. A host with element children can have several
+  boxes; it is read-only, so the first one serves its selection. An empty
+  host, or one holding only white space — which a flex, grid, linear or
+  relative container does not render (css-flexbox-1 §4) — has no paragraph:
+  it is edited on value offsets alone (a cluster is one code point there,
+  a word or line move goes to the value's end), its caret sits at the
+  content box's origin, one used line tall, and the walker paints that
+  caret with the host's own box.
+- **Offsets through the source map.** A value byte becomes a UTF-16 unit
+  (`offsets.rs`), then a layout byte (`OffsetMap::unit_to_byte_or_end`); a
+  layout byte becomes a unit read as a start (`byte_to_unit`) or, for a
+  range's end, as an end (`unit_before`), then a value byte. A unit inside
+  a collapsed white-space span lands on the byte the span emitted, and a
+  layout byte there reads back as the span's first unit, so a caret placed
+  between two collapsed spaces is shown on the one space and, once a layout
+  pass has placed it, reported at the span's start. An inline box's edge
+  bytes read as the unit after them, and a character move that only
+  crossed an edge cluster steps on.
+- **Trust is structural.** A paragraph's units are the value's when every
+  child of the host is a text node, no generated `content` replaces them,
+  and every run of the paragraph is the host's own
+  (`EditableParagraph::shows_value`). Otherwise — generated `content`, an
+  element child's text — every command but `SetSelection` and `SelectAll`
+  is refused, and `text_input_state` reports a parley selection over such a
+  paragraph collapsed at the value's end. A paragraph that is only stale
+  behind the session's own change needs no exception: the change leaves
+  the selection as value offsets until the next layout pass places it, and
+  the commands that measure lay out first.
+- **A truncation cut is per offset.** A `<text>`'s `text-maxline`/
+  `text-maxlength` cut leaves bytes at and past `OffsetMap::cut_byte`
+  showing the tail, no value text, and a `nowrap` `<text>` shows nothing
+  after its first line. A command that must measure there — a move, a
+  cluster or word deletion, a pointer placement landing on the tail — is
+  refused; offset-only commands still apply, and a selection the layout
+  cannot show stays held as value offsets and is painted at the end of
+  what the layout shows.
+- **Focus needs rendering.** `focus` refuses a host that is `display: none`
+  or inside an element that is; a host no flush has styled yet is
+  accepted. After every layout pass a focused host that is no longer
+  rendered loses focus with no event, as HTML's focus fixup rule says.
 - **`SetComposition` with empty text and no composition** deletes a range
   selection, as Blink's third case in `InputMethodController::SetComposition`
   does (for IMEs such as IBus-Anthy): no composition event, one
@@ -292,21 +342,28 @@ Public surface:
   value-changing command. A nested `contenteditable` inside a host is
   flattened into the outer paragraph and has no paragraph of its own.
 - **Hosts whose paragraph shows other text are read-only.** Generated
-  `content` and a `text-maxline`/`text-maxlength` cut leave only
-  `SetSelection` and `SelectAll` working (see above).
+  `content` leaves only `SetSelection` and `SelectAll` working, and past a
+  truncation cut nothing that measures works (see above).
+- **Collapsed white space snaps.** Under an author `white-space` that
+  collapses, a caret between collapsed characters is shown on the one the
+  run emitted and, after a layout pass, reported at the run's start; a
+  deletion before it takes one of the value's characters.
+- **A host's own scroll offset is not applied** to pointer points and
+  geometry of a host that is itself its paragraph.
 - **Clusters are parley's.** Cluster deletion and movement follow parley's
   shaping clusters, which depend on the font: with a face that lacks a
   combining mark, `e` and U+0301 can be separate clusters.
 - **Visual, left-to-right movement.** `Character` and `Word` moves are
   visual; `Backward` means left. Right-to-left text moves visually too, which
   is the reverse of logical order there.
-- **A trailing newline makes no line.** As in CSS, a paragraph ending in
-  `"\n"` has no empty last line box; the caret after it is placed on parley's
-  empty trailing line, below the host's box (Chromium inserts a `<br>` there;
-  a plain-text host here does not).
-- **Tabs.** A preserved tab advances to the paragraph's next tab stop, every
-  8 space advances; `tab-size` is fixed at 8 (the property is disabled under
-  `lynx`).
+- **A trailing newline makes no line in an inline formatting context.** As
+  in CSS, such a paragraph ending in `"\n"` has no empty last line box; the
+  caret after it is placed on parley's empty trailing line, below the host's
+  box (Chromium inserts a `<br>` there; a plain-text host here does not). A
+  `<text>` host shows that empty last line, as native Lynx does.
+- **Tabs.** A preserved tab advances to the paragraph's next tab stop: every
+  8 space advances in an inline formatting context (`tab-size` is fixed at 8,
+  the property being disabled under `lynx`), every 20px in a `<text>`.
 - **No transforms in geometry.** `TextInputState` geometry, like
   `bounding_client_rect`, ignores transforms.
 - **Not built yet:** caret blink, `::selection`, `selectionchange`,

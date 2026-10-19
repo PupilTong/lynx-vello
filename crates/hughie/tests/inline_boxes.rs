@@ -967,3 +967,33 @@ fn a_negative_advance_keeps_the_intrinsic_widths_of_two_breaks() {
     assert_eq!(one_pass, (15.0, 15.0), "parley's one pass");
     assert_eq!(breaks, 2);
 }
+
+/// An inline box's edges are text spliced into the flow with no source
+/// unit: an edge byte reads as the unit after it, and every unit lands on
+/// its character, past the edge.
+#[test]
+fn an_edge_byte_has_no_unit_of_its_own() {
+    let style = ahem();
+    let items = [
+        run(&style, "aa"),
+        open(&style, 4.0, 4.0),
+        run(&style, "bb"),
+        CLOSE,
+        run(&style, "cc"),
+    ];
+    let flow = committed(&items, None);
+    let map = flow.offset_map();
+    let text = map.display_text();
+    assert!(text.len() > 6, "edges are spliced in: {text:?}");
+    assert_eq!(map.source_len(), 6);
+    let b = map.unit_to_byte(2).unwrap();
+    assert!(text[b..].starts_with("bb"), "{text:?} at {b}");
+    let c = map.unit_to_byte(4).unwrap();
+    assert!(text[c..].starts_with("cc"), "{text:?} at {c}");
+    // The start edge lies between `aa` and `bb`.
+    assert!(b > 2);
+    assert_eq!(map.byte_to_unit(2), 2, "the start edge's byte");
+    assert_eq!(map.byte_to_unit(b - 1), 2);
+    assert_eq!(map.unit_before(2), 2);
+    assert_eq!(map.unit_to_byte_or_end(6), Some(text.len()));
+}
