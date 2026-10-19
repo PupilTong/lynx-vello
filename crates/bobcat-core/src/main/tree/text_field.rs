@@ -1,27 +1,43 @@
-//! `x-input` and `x-textarea` — and the JSX tags `input` and `textarea`, and
-//! the `x-input-ng`/`x-textarea-ng` aliases web-core maps to them
-//! (`web-core/ts/constants.ts:104-107`) — as Lynx elements over
+//! `x-input` and `x-textarea` — web-core's element names
+//! (`web-elements/src/elements/XInput/XInput.ts`, `XTextarea/XTextarea.ts`) —
+//! and the `x-input-ng`/`x-textarea-ng` aliases web-core maps to them
+//! (`web-core/ts/constants.ts:105,107`), as Lynx elements over
 //! `dom::editing` (`docs/editable-text-design.md`, E5).
+//!
+//! **Lynx tags only** (user ruling 2026-10-19). `input` and `textarea` are
+//! HTML element names, and an element with an HTML name follows HTML, which
+//! this component does not implement; so neither is defined here, though
+//! web-core maps both to its fields (`constants.ts:104,106`) and native Lynx
+//! registers its fields under them (`LynxUIInputAutoRegistry.m`,
+//! `LynxUITextAreaAutoRegistry.m`). An HTML `<input>`/`<textarea>` would be
+//! a separate element with HTML's semantics, not built.
 //!
 //! A Lynx-only component with no W3C equivalent, so `AGENTS.md`'s standards
 //! policy puts it in the second bucket; web-core's structure and behaviour
 //! are the ones followed (`web-elements/src/elements/XInput/*`,
-//! `XTextarea/*`), as web-core wraps a real `<input>` or `<textarea>`.
+//! `XTextarea/*`), as web-core wraps a real `<input>` or `<textarea>`, except
+//! for `maxlines`, which web-core does not read and native Lynx enforces.
 //!
 //! # The structure
 //!
 //! [`TextField::constructed`] attaches a UA shadow tree of two elements:
 //!
 //! - `#input` (`#textarea` on a textarea), `part` of the same name: the **editor**, a
-//!   `contenteditable="plaintext-only"` element — one `dom` editing host, a `display: block`
-//!   container from the engine's shadow sheet, so its own standard inline formatting context lays
-//!   out the field's value (not a Lynx `<text>`, whose verbatim white space and truncation a form
-//!   field does not have). Its `enterkeyhint`, `inputmode` and `type` carry what `confirm-type` and
-//!   `type` say into [`dom::editing::TextInputState`].
+//!   `contenteditable="plaintext-only"` element — one `dom` editing host. Its `enterkeyhint`,
+//!   `inputmode` and `type` carry what `confirm-type` and `type` say into
+//!   [`dom::editing::TextInputState`]. The two kinds lay the value out in different paragraphs:
+//!   - `x-input`'s editor is a `div` the engine's shadow sheet makes `display: block`, so its own
+//!     standard inline formatting context lays out the one line, as a browser's `<input>` does. No
+//!     Lynx text semantics reach it.
+//!   - `x-textarea`'s editor is a Lynx `<text>` (the tag [`super::text`] defines as a Lynx text
+//!     element), so its Lynx paragraph lays out the lines: verbatim white space, Lynx's `text-*`
+//!     properties, the empty last line after a trailing line break, and the line count `maxlines`
+//!     is enforced against. Its `color` is inherited from the field (`text`'s UA `color: initial`
+//!     is overridden by the shadow sheet, as web-core's inner `<textarea>` inherits it).
 //! - `#placeholder`, `part="placeholder"`: an absolutely positioned box over the host's content box
-//!   holding one block container with the `placeholder` text, shown by the shadow sheet only while
-//!   the editor is `:empty` (`#input:empty ~ #placeholder`), so no component code decides when it
-//!   shows.
+//!   holding one `display: block` container with the `placeholder` text (for both kinds: it is not
+//!   edited), shown by the shadow sheet only while the editor is `:empty` (`.editor:empty ~
+//!   #placeholder`), so no component code decides when it shows.
 //!
 //! **The host is the field's box.** web-core's host is `display: contents` and its inner
 //! `<input>` inherits `width`, `height`, `border`, `padding`, `background` and the rest through
@@ -32,8 +48,9 @@
 //! for this one component).
 //!
 //! **Single line.** An `x-input`'s editor is `white-space: pre`: every character kept and no
-//! wrapping; an `x-textarea`'s is `pre-wrap`. Both come from the shadow sheet, which outranks
-//! the UA editing-host rule's `pre-wrap` default. The value never
+//! wrapping; an `x-textarea`'s is `pre-wrap`, which a Lynx paragraph reads as "wrap" (it keeps
+//! white space verbatim whatever the value). Both come from the shadow sheet, which outranks
+//! the UA editing-host rule's `pre-wrap` default. The input's value never
 //! contains a line break: an `input` that inserted one is followed by the component removing
 //! every `\n` and `\r` from the value, as HTML's value sanitization strips them from an
 //! `<input>`, and Enter (`insertLineBreak`) becomes `confirm`. Text wider than the field is
@@ -53,6 +70,7 @@
 //! | `input-filter` | a pattern whose every match is removed from the value after each edit (web-core's `replace(new RegExp(filter, 'g'), '')`) |
 //! | `send-composing-input` | present and not `"false"`: `input` fires during a composition too |
 //! | `confirm-enter` | `x-textarea` only: Enter fires `confirm` after its line break |
+//! | `maxlines` | `x-textarea` only: a positive whole number of lines the value may lay out in; see below |
 //!
 //! # Edits: filters and `maxlength` after the fact
 //!
@@ -63,12 +81,27 @@
 //! [`dom::Document::set_host_value`] with the caret moved by what was
 //! removed before it. Outside a composition, after each `input` and at
 //! `compositionend`, in this order: line breaks (`x-input`), `maxlength`,
-//! the `number` filter, `input-filter`. `maxlength` is the browser's
-//! insertion rule applied afterwards: a value longer than the limit loses
-//! the excess from the end of what was just inserted (the units before the
-//! caret, at most the inserted text's length, never half a surrogate pair),
-//! so a value already over the limit is not cut by a deletion or a lowered
-//! limit.
+//! the `number` filter, `input-filter`, `maxlines` (`x-textarea`).
+//! `maxlength` is the browser's insertion rule applied afterwards: a value
+//! longer than the limit loses the excess from the end of what was just
+//! inserted (the units before the caret, at most the inserted text's
+//! length, never half a surrogate pair), so a value already over the limit
+//! is not cut by a deletion or a lowered limit.
+//!
+//! `maxlines` is native Lynx's textarea rule (`LynxUITextArea.kt`'s
+//! `maxLinesFilter` keeps the longest prefix of an insertion that lays out
+//! in the limit; `LynxUITextArea.m` trims to it): after the edit the value
+//! is written and laid out, and when the editor's Lynx paragraph has more
+//! lines than the limit ([`dom::Document::paragraph_line_count`]) the
+//! longest prefix of what the edit inserted that fits is kept — found by
+//! bisection over its characters, one layout pass per probe, so never half
+//! a surrogate pair — and the caret is placed after it. Lines are the
+//! paragraph's laid-out lines: wrapped lines count, and so does the empty
+//! line after a trailing line break, which the Lynx paragraph shows. Only
+//! what the edit inserted is taken back, so a value already over the limit
+//! is not cut by a deletion, and a script's write is never cut. The value
+//! stays visible and editable throughout: this is not `text-maxline`
+//! truncation, which would hide the lines past the limit.
 //!
 //! # Events
 //!
@@ -117,13 +150,16 @@ use dom::event::{ElementEvent, EventDetail, EventPhase};
 use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, ShadowRootMode};
 use serde_json::Value;
 
+use super::text::TEXT_TAG;
 use super::{ComponentEvents, InvalidParams, LynxDocument, TextFieldDetail};
 use crate::main::record::write_record_field;
 
-/// The single-line tags: the JSX tag, web-core's, and its `-ng` alias.
-pub(super) const INPUT_TAGS: [&str; 3] = ["input", "x-input", "x-input-ng"];
-/// The multi-line tags.
-pub(super) const TEXTAREA_TAGS: [&str; 3] = ["textarea", "x-textarea", "x-textarea-ng"];
+/// The single-line tags: web-core's element name and its `-ng` alias. Not
+/// the HTML name `input` (module documentation).
+pub(super) const INPUT_TAGS: [&str; 2] = ["x-input", "x-input-ng"];
+/// The multi-line tags: web-core's element name and its `-ng` alias. Not
+/// the HTML name `textarea`.
+pub(super) const TEXTAREA_TAGS: [&str; 2] = ["x-textarea", "x-textarea-ng"];
 
 /// The engine-only event the runtime fires at an editing host after every
 /// command it applied, which this component reads its `selection` from.
@@ -139,6 +175,7 @@ const READONLY: &str = "readonly";
 const INPUT_FILTER: &str = "input-filter";
 const SEND_COMPOSING_INPUT: &str = "send-composing-input";
 const CONFIRM_ENTER: &str = "confirm-enter";
+const MAXLINES: &str = "maxlines";
 /// Where the editor keeps the filter pattern: `input-filter` and
 /// `setInputFilter` both write it, so the last write wins. web-core's
 /// `setInputFilter` writes the same attribute on its inner `<input>`.
@@ -156,25 +193,25 @@ const PLACEHOLDER_ID: &str = "placeholder";
 /// absent and has no fallback is invalid at computed-value time, so the
 /// placeholder inherits that property from the host instead.
 pub(super) const UA_RULES: &str = r"
-input, x-input, x-input-ng, textarea, x-textarea, x-textarea-ng {
+x-input, x-input-ng, x-textarea, x-textarea-ng {
   display: flex; font-size: 14px;
   --placeholder-color: attr(placeholder-color type(<color>), grey);
   --placeholder-font-size: attr(placeholder-font-size type(<length>));
   --placeholder-font-weight: attr(placeholder-font-weight type(*), normal);
   --placeholder-font-family: attr(placeholder-font-family type(*));
 }
-input, x-input, x-input-ng { flex-direction: row; align-items: center; }
-textarea, x-textarea, x-textarea-ng { flex-direction: column; align-items: stretch; }
+x-input, x-input-ng { flex-direction: row; align-items: center; }
+x-textarea, x-textarea-ng { flex-direction: column; align-items: stretch; }
 ";
 
 /// The shadow sheet common to both kinds; [`INPUT_SHADOW_RULES`] and
 /// [`TEXTAREA_SHADOW_RULES`] follow it. An engine sheet
-/// ([`dom::Document::add_engine_shadow_stylesheet`]): the editor and the
-/// placeholder's text are `display: block`, which the `lynx` grammar keeps
-/// from author sheets.
+/// ([`dom::Document::add_engine_shadow_stylesheet`]): the input's editor and
+/// the placeholder's block are `display: block`, which the `lynx` grammar
+/// keeps from author sheets.
 const SHADOW_RULES: &str = r"
 .editor {
-  display: block; min-width: 0; min-height: 1lh; overflow: clip;
+  min-width: 0; min-height: 1lh; overflow: clip;
 }
 #placeholder {
   display: none; position: absolute; top: 0; right: 0; bottom: 0; left: 0;
@@ -188,16 +225,19 @@ const SHADOW_RULES: &str = r"
 #placeholder > div { display: block; min-width: 0; flex: 1 1 auto; overflow: clip; }
 ";
 
-/// One line, vertically centred, as a browser's `<input>` draws it.
+/// One line, vertically centred, as a browser's `<input>` draws it, in the
+/// editor's own inline formatting context.
 const INPUT_SHADOW_RULES: &str = r"
-.editor { flex: 1 1 0%; white-space: pre; }
+.editor { display: block; flex: 1 1 0%; white-space: pre; }
 #placeholder { align-items: center; }
 #placeholder > div { white-space: pre; }
 ";
 
-/// Lines from the top, wrapping.
+/// Lines from the top, wrapping, in the editor's Lynx paragraph. `color:
+/// inherit` undoes `text`'s UA `color: initial`: the value wears the field's
+/// colour, as web-core's inner `<textarea>` does (`x-textarea.css`).
 const TEXTAREA_SHADOW_RULES: &str = r"
-.editor { flex: 1 1 auto; white-space: pre-wrap; }
+.editor { flex: 1 1 auto; white-space: pre-wrap; color: inherit; }
 #placeholder { align-items: flex-start; }
 #placeholder > div { white-space: pre-wrap; }
 ";
@@ -217,6 +257,15 @@ impl Kind {
             Self::Textarea => "textarea",
         }
     }
+
+    /// The editor's tag: a `div` the shadow sheet makes a block container
+    /// for the single line, a Lynx `<text>` for the lines of a textarea.
+    const fn editor_tag(self) -> &'static str {
+        match self {
+            Self::Input => "div",
+            Self::Textarea => TEXT_TAG,
+        }
+    }
 }
 
 /// What the component last told script about the focused editor: the value
@@ -229,7 +278,7 @@ struct Reported {
     selection: Range<u32>,
 }
 
-/// State shared by the six definitions: the event queue and the focused
+/// State shared by the four definitions: the event queue and the focused
 /// editor's [`Reported`].
 #[derive(Default)]
 struct Shared {
@@ -237,7 +286,7 @@ struct Shared {
     reported: RefCell<Option<Reported>>,
 }
 
-/// Installs the component under its six tag names. Must run before any
+/// Installs the component under its four tag names. Must run before any
 /// element could carry them.
 pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
     let shared = Rc::new(Shared {
@@ -285,8 +334,9 @@ fn editor(document: &LynxDocument, field: NodeId) -> Option<NodeId> {
         .map(dom::Node::id)
 }
 
-/// The placeholder's text block, the only child of `#placeholder`.
-fn placeholder_text(document: &LynxDocument, field: NodeId) -> Option<NodeId> {
+/// The block holding the placeholder's text, the only child of
+/// `#placeholder`.
+fn placeholder_block(document: &LynxDocument, field: NodeId) -> Option<NodeId> {
     let root = document.shadow_root(field)?;
     let placeholder = document
         .get(root)?
@@ -368,21 +418,29 @@ fn byte_of_unit(text: &str, unit: usize) -> usize {
     text.len()
 }
 
+/// UTF-16 unit `unit` of `text` moved back by what the byte ranges
+/// `removed` (ascending, disjoint) take out before it.
+fn shift_unit(text: &str, removed: &[Range<usize>], unit: usize) -> usize {
+    let unit_byte = byte_of_unit(text, unit);
+    let mut after = unit;
+    for range in removed {
+        let before = range.start.min(unit_byte)..range.end.min(unit_byte);
+        after -= units(&text[before]);
+    }
+    after
+}
+
 /// `text` with the byte ranges `removed` (ascending, disjoint) taken out,
 /// and `caret` (UTF-16) moved back by what was removed before it.
 fn remove_ranges(text: &str, removed: &[Range<usize>], caret: usize) -> (String, usize) {
-    let caret_byte = byte_of_unit(text, caret);
     let mut kept = String::with_capacity(text.len());
     let mut at = 0;
-    let mut caret_after = caret;
     for range in removed {
         kept.push_str(&text[at..range.start]);
-        let before = range.start.min(caret_byte)..range.end.min(caret_byte);
-        caret_after -= units(&text[before]);
         at = range.end;
     }
     kept.push_str(&text[at..]);
-    (kept, caret_after)
+    (kept, shift_unit(text, removed, caret))
 }
 
 /// The byte ranges of every line break: an `x-input`'s value sanitization.
@@ -465,6 +523,49 @@ fn max_length(document: &LynxDocument, field: NodeId) -> Option<usize> {
     (limit >= 0.0).then_some(limit as usize)
 }
 
+/// The `maxlines` that applies to a textarea: the attribute as `parseFloat`
+/// reads it, whole lines; `None` (no limit) when absent, unreadable or not
+/// positive, as native Lynx's `maxLinesFilter` reads `maxLines <= 0`.
+fn max_lines(document: &LynxDocument, field: NodeId) -> Option<usize> {
+    let limit = parse_float(attribute(document, field, MAXLINES)?)?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a positive line count, truncated as native's integer attribute reads it"
+    )]
+    (limit >= 1.0).then_some(limit as usize)
+}
+
+/// The value as the editing session holds it so far, the caret, and the
+/// UTF-16 range of the value the edit inserted (it ends at the caret), as
+/// [`TextField::sanitize`] corrects them one rule at a time.
+struct Correction {
+    value: String,
+    caret: usize,
+    inserted_from: usize,
+}
+
+impl Correction {
+    /// Takes the byte ranges `removed` (ascending, disjoint) out of the
+    /// value, moving the caret and the inserted range's start with them.
+    fn remove(&mut self, removed: &[Range<usize>]) {
+        if removed.is_empty() {
+            return;
+        }
+        self.inserted_from = shift_unit(&self.value, removed, self.inserted_from);
+        (self.value, self.caret) = remove_ranges(&self.value, removed, self.caret);
+    }
+
+    /// The value with only the first `kept` UTF-16 units of the inserted
+    /// range left in it, and the caret after them.
+    fn keeping(&self, kept: usize) -> (String, usize) {
+        let start = byte_of_unit(&self.value, self.inserted_from + kept);
+        let end = byte_of_unit(&self.value, self.caret);
+        let value = format!("{}{}", &self.value[..start], &self.value[end..]);
+        (value, self.inserted_from + kept)
+    }
+}
+
 impl TextField {
     /// Builds the shadow tree; see the module documentation.
     fn build(&self, document: &mut LynxDocument, element: NodeId) {
@@ -474,7 +575,7 @@ impl TextField {
             Kind::Textarea => TEXTAREA_SHADOW_RULES,
         };
         document.add_engine_shadow_stylesheet(shadow, &format!("{SHADOW_RULES}{kind_rules}"));
-        let editor = document.create_element("div", ());
+        let editor = document.create_element(self.kind.editor_tag(), ());
         let id = self.kind.editor_id();
         document.set_id_attribute(editor, Some(id));
         document.set_attribute(editor, "part", id);
@@ -487,8 +588,8 @@ impl TextField {
         let placeholder = document.create_element("div", ());
         document.set_id_attribute(placeholder, Some(PLACEHOLDER_ID));
         document.set_attribute(placeholder, "part", PLACEHOLDER_ID);
-        let text = document.create_element("div", ());
-        document.append_child(placeholder, text);
+        let block = document.create_element("div", ());
+        document.append_child(placeholder, block);
         document.append_child(shadow, placeholder);
     }
 
@@ -571,31 +672,91 @@ impl TextField {
         inserted: usize,
     ) {
         let (original, selection, _) = Self::snapshot(document, editor);
-        let mut caret = selection.end as usize;
-        let mut value = original.clone();
+        let caret = selection.end as usize;
+        let mut fix = Correction {
+            inserted_from: caret.saturating_sub(inserted),
+            value: original.clone(),
+            caret,
+        };
         if self.kind == Kind::Input {
-            (value, caret) = remove_ranges(&value, &line_breaks(&value), caret);
+            fix.remove(&line_breaks(&fix.value));
         }
         if let Some(limit) = max_length(document, field) {
-            let length = units(&value);
+            let length = units(&fix.value);
             if length > limit {
-                let take = (length - limit).min(inserted).min(caret);
-                let end = byte_of_unit(&value, caret);
+                let take = (length - limit).min(fix.caret - fix.inserted_from);
+                let end = byte_of_unit(&fix.value, fix.caret);
                 // Never half a pair: round the start down to its character.
-                let start = byte_of_unit(&value, caret - take);
-                (value, caret) = remove_ranges(&value, std::slice::from_ref(&(start..end)), caret);
+                let start = byte_of_unit(&fix.value, fix.caret - take);
+                fix.remove(std::slice::from_ref(&(start..end)));
             }
         }
         if self.kind == Kind::Input && attribute(document, field, TYPE) == Some("number") {
-            (value, caret) = remove_ranges(&value, &number_rejects(&value), caret);
+            fix.remove(&number_rejects(&fix.value));
         }
         if let Some(pattern) = attribute(document, editor, PATTERN).filter(|p| !p.is_empty()) {
-            let rejects = filter_rejects(pattern, &value);
-            (value, caret) = remove_ranges(&value, &rejects, caret);
+            let rejects = filter_rejects(pattern, &fix.value);
+            fix.remove(&rejects);
         }
-        if value != original {
+        if fix.value != original {
+            document.set_host_value(editor, &fix.value, fix.caret..fix.caret);
+        }
+        if self.kind == Kind::Textarea
+            && let Some(limit) = max_lines(document, field)
+        {
+            Self::fit_lines(document, editor, &fix, limit);
+        }
+    }
+
+    /// `maxlines` after an edit (module documentation): with `fix` written,
+    /// keeps the longest prefix of the inserted text whose value lays out in
+    /// `limit` lines of the editor's paragraph, by bisection over the
+    /// inserted characters, one layout pass per probe. An editor with no
+    /// committed paragraph (not rendered) is left as it is.
+    fn fit_lines(document: &mut LynxDocument, editor: NodeId, fix: &Correction, limit: usize) {
+        let inserted = &fix.value
+            [byte_of_unit(&fix.value, fix.inserted_from)..byte_of_unit(&fix.value, fix.caret)];
+        if inserted.is_empty() {
+            return;
+        }
+        document.layout();
+        if document
+            .paragraph_line_count(editor)
+            .is_none_or(|count| count <= limit)
+        {
+            return;
+        }
+        let fits = |document: &mut LynxDocument, kept: usize| {
+            let (value, caret) = fix.keeping(kept);
             document.set_host_value(editor, &value, caret..caret);
+            document.layout();
+            document
+                .paragraph_line_count(editor)
+                .is_some_and(|count| count <= limit)
+        };
+        // UTF-16 lengths of the inserted text's character prefixes: kept
+        // lengths never end inside a surrogate pair.
+        let prefixes: Vec<usize> = inserted
+            .chars()
+            .scan(0, |length, character| {
+                let before = *length;
+                *length += character.len_utf16();
+                Some(before)
+            })
+            .collect();
+        // `prefixes[0]` (nothing kept) is the answer when nothing fits; the
+        // whole insertion is known not to.
+        let (mut low, mut high) = (0, prefixes.len() - 1);
+        while low < high {
+            let middle = (low + high).div_ceil(2);
+            if fits(document, prefixes[middle]) {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
         }
+        let (value, caret) = fix.keeping(prefixes[low]);
+        document.set_host_value(editor, &value, caret..caret);
     }
 
     /// Queues `input` when the value differs from the last one reported.
@@ -841,19 +1002,19 @@ impl CustomElement<()> for TextField {
         match name {
             VALUE => self.apply_value_attribute(document, element),
             PLACEHOLDER => {
-                let Some(text) = placeholder_text(document, element) else {
+                let Some(block) = placeholder_block(document, element) else {
                     return;
                 };
                 let content = new.unwrap_or_default();
                 let existing = document
-                    .get(text)
+                    .get(block)
                     .and_then(|node| node.first_child())
                     .map(dom::Node::id);
                 if let Some(node) = existing {
                     document.set_text_node_data(node, content);
                 } else {
                     let node = document.create_text_node(content, ());
-                    document.append_child(text, node);
+                    document.append_child(block, node);
                 }
             }
             TYPE => {
@@ -1049,6 +1210,7 @@ mod tests {
 
     use dom::editing::Command;
     use dom::event::EventDetail;
+    use dom::layout::ParagraphKind;
     use dom::stylo::properties::PropertyId;
     use dom::{MethodCall, MethodError, MethodOutcome, NodeId, Point2D};
 
@@ -1057,7 +1219,7 @@ mod tests {
         ComponentEvent, ComponentEvents, LynxDocument, PageConfig, TextFieldDetail,
     };
     use super::{
-        INPUT_TAGS, SELECTION_CHANGE, TEXTAREA_TAGS, editor, focus_delegate, placeholder_text,
+        INPUT_TAGS, SELECTION_CHANGE, TEXTAREA_TAGS, editor, focus_delegate, placeholder_block,
     };
 
     const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
@@ -1109,8 +1271,8 @@ mod tests {
     }
 
     fn placeholder_box(document: &LynxDocument, field: NodeId) -> NodeId {
-        let text = placeholder_text(document, field).expect("the placeholder's text block");
-        document.get(text).and_then(dom::Node::parent_id).unwrap()
+        let block = placeholder_block(document, field).expect("the placeholder's block");
+        document.get(block).and_then(dom::Node::parent_id).unwrap()
     }
 
     /// The events queued since the last call, as `(name, detail)`.
@@ -1211,6 +1373,11 @@ mod tests {
 
     #[test]
     fn every_tag_builds_an_editor_and_a_placeholder() {
+        assert_eq!(
+            INPUT_TAGS.iter().chain(&TEXTAREA_TAGS).count(),
+            4,
+            "the four Lynx tags"
+        );
         for tag in INPUT_TAGS.iter().chain(&TEXTAREA_TAGS) {
             let (document, _, field) = make(tag, &[]);
             let editor = editor_of(&document, field);
@@ -1223,6 +1390,45 @@ mod tests {
             assert_eq!(document.get(editor).unwrap().attribute("part"), Some(id));
             assert_eq!(value_of(&document, field, "font-size"), "10px", "{tag}");
         }
+    }
+
+    /// `input` and `textarea` are HTML names: no field is built under them
+    /// (user ruling 2026-10-19).
+    #[test]
+    fn the_html_names_are_not_text_fields() {
+        for tag in ["input", "textarea"] {
+            let (document, _, element) = make(tag, &[("placeholder", "p")]);
+            assert_eq!(document.shadow_root(element), None, "{tag}");
+            assert_eq!(focus_delegate(&document, element), None, "{tag}");
+        }
+    }
+
+    /// `x-input`'s editor is a `div` laid out in its own standard inline
+    /// formatting context, with no Lynx text semantics; `x-textarea`'s is a
+    /// Lynx `<text>` whose Lynx paragraph lays its lines out and which wears
+    /// the field's colour.
+    #[test]
+    fn the_input_edits_an_inline_formatting_context_and_the_textarea_a_lynx_text() {
+        let (document, _, input) = make("x-input", &[("value", "ab")]);
+        let editor = editor_of(&document, input);
+        assert_eq!(document.get(editor).unwrap().tag_name(), Some("div"));
+        assert_eq!(value_of(&document, editor, "display"), "block");
+        assert_eq!(
+            document.paragraph_kind(editor),
+            Some(ParagraphKind::InlineFormattingContext)
+        );
+
+        let (mut document, _, textarea) = make("x-textarea", &[("value", "ab")]);
+        document.set_inline_style_property(textarea, "color", "rgb(1, 2, 3)");
+        document.layout();
+        let editor = editor_of(&document, textarea);
+        assert_eq!(document.get(editor).unwrap().tag_name(), Some("text"));
+        assert_eq!(document.paragraph_kind(editor), Some(ParagraphKind::Lynx));
+        assert_eq!(value_of(&document, editor, "color"), "rgb(1, 2, 3)");
+        // The Lynx paragraph shows the empty line after a trailing break.
+        document.set_attribute(textarea, "value", "ab\n");
+        document.layout();
+        assert_eq!(document.paragraph_line_count(editor), Some(2));
     }
 
     /// The single-line editor keeps every character and does not wrap; the
@@ -1271,12 +1477,12 @@ mod tests {
             &[("placeholder", "hint"), ("placeholder-color", "red")],
         );
         let placeholder = placeholder_box(&document, field);
-        let text = placeholder_text(&document, field).unwrap();
+        let block = placeholder_block(&document, field).unwrap();
         assert_eq!(value_of(&document, placeholder, "display"), "flex");
         assert_eq!(value_of(&document, placeholder, "color"), "rgb(255, 0, 0)");
         assert_eq!(rect(&document, placeholder), (0.0, 0.0, 200.0, 40.0));
-        assert_eq!(rect(&document, text), (5.0, 15.0, 190.0, 10.0));
-        let shown = document.get(text).unwrap().first_child().unwrap().text();
+        assert_eq!(rect(&document, block), (5.0, 15.0, 190.0, 10.0));
+        let shown = document.get(block).unwrap().first_child().unwrap().text();
         assert_eq!(shown, Some("hint"));
 
         document.set_attribute(field, "value", "x");
@@ -1377,7 +1583,7 @@ mod tests {
         let (mut document, _, field) = make("x-input", &[("placeholder", "p")]);
         let editor = editor_of(&document, field);
         assert_eq!(focus_delegate(&document, field), Some(editor));
-        let placeholder = placeholder_text(&document, field).unwrap();
+        let placeholder = placeholder_block(&document, field).unwrap();
         assert_eq!(focus_delegate(&document, placeholder), Some(editor));
         let page = document.document_element().id();
         assert_eq!(focus_delegate(&document, page), None);
@@ -1461,6 +1667,67 @@ mod tests {
         focus(&mut document, field);
         edit(&mut document, Command::Insert("z".repeat(150)));
         assert_eq!(value(&document, field).len(), 140);
+    }
+
+    /// `maxlines`: an insertion that would lay the value out past the limit
+    /// keeps its longest prefix that fits, the caret after it; a value
+    /// within the limit is kept whole, and a deletion never cuts one already
+    /// over it.
+    #[test]
+    fn maxlines_takes_back_what_an_insertion_put_past_the_limit() {
+        let (mut document, events, field) =
+            make("x-textarea", &[("maxlines", "2"), ("value", "one")]);
+        focus(&mut document, field);
+        edit(&mut document, Command::SetSelection { range: 3..3 });
+        queued(&events);
+        edit(&mut document, Command::InsertLineBreak);
+        edit(&mut document, Command::Insert("two".to_owned()));
+        assert_eq!(value(&document, field), "one\ntwo", "two lines are kept");
+        assert_eq!(
+            queued(&events),
+            [
+                ("input", input("one\n", 4..4, false)),
+                ("input", input("one\ntwo", 7..7, false))
+            ]
+        );
+        // A third line, from a break: refused whole, and no `input`.
+        edit(&mut document, Command::InsertLineBreak);
+        assert_eq!(value(&document, field), "one\ntwo");
+        assert_eq!(document.text_input_state().selection, 7..7);
+        assert!(queued(&events).is_empty(), "nothing changed");
+        // A paste whose third line starts at its break keeps what is before.
+        edit(&mut document, Command::Insert("s\nthree".to_owned()));
+        assert_eq!(value(&document, field), "one\ntwos");
+        assert_eq!(
+            queued(&events),
+            [("input", input("one\ntwos", 8..8, false))]
+        );
+        // Wrapping counts: 19 squares fill the 190px line, so what follows
+        // the 15th `x` starts a third line. Never half a surrogate pair.
+        edit(
+            &mut document,
+            Command::Insert(format!("{}😀x", "x".repeat(15))),
+        );
+        let kept = value(&document, field);
+        assert_eq!(kept.lines().nth(1).unwrap().encode_utf16().count(), 19);
+        assert!(kept.ends_with('x'), "no emoji half: {kept:?}");
+        document.layout();
+        assert_eq!(
+            document.paragraph_line_count(editor_of(&document, field)),
+            Some(2)
+        );
+
+        // A value over the limit, written by script, is not cut by a
+        // deletion, and the field without `maxlines` takes every line.
+        let (mut document, _, field) =
+            make("x-textarea", &[("maxlines", "2"), ("value", "a\nb\nc")]);
+        focus(&mut document, field);
+        edit(&mut document, Command::SetSelection { range: 5..5 });
+        edit(&mut document, Command::DeleteBackward);
+        assert_eq!(value(&document, field), "a\nb\n");
+        document.remove_attribute(field, "maxlines");
+        edit(&mut document, Command::Insert("d\ne".to_owned()));
+        assert_eq!(value(&document, field), "a\nb\nd\ne");
     }
 
     #[test]

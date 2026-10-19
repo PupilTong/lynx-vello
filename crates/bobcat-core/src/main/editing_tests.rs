@@ -700,3 +700,56 @@ fn a_readonly_x_input_is_not_focused_by_a_tap() {
     assert_eq!(value.as_deref(), Some("fixed"));
     assert_eq!(log_of(&mut engine), None, "no event fired");
 }
+
+/// The `-ng` aliases are the same fields, and an `x-textarea-ng` keeps its
+/// value within `maxlines` through the runtime: Enter on the second line is
+/// taken back and fires no `input`. The HTML names `input` and `textarea`
+/// build no field, so a tap there focuses nothing.
+#[test]
+fn the_ng_aliases_are_fields_and_the_html_names_are_not() {
+    let mut engine = field_engine("x-textarea-ng", &[("maxlines", "2")], "");
+    let mut states = States::default();
+    engine.dispatch_input(touch(PointerPhase::Down, 20.0, 20.0));
+    engine.dispatch_input(touch(PointerPhase::Up, 20.0, 20.0));
+    states.wait(&mut engine, "focusing the editor", |state| {
+        state.host.is_some()
+    });
+    engine.dispatch_input(key("a"));
+    engine.dispatch_input(enter());
+    engine.dispatch_input(key("b"));
+    states.wait(&mut engine, "with two lines", |state| state.value == "a\nb");
+    engine.dispatch_input(enter());
+    engine.dispatch_input(key("c"));
+    let state = states.wait(&mut engine, "the third line taken back", |state| {
+        state.value == "a\nbc"
+    });
+    assert_eq!(state.selection, 4..4);
+    let input = |value: &str, at: u32| {
+        format!(
+            r#"input:{{"value":"{value}","textLength":{at},"cursor":{at},"isComposing":false,"selectionStart":{at},"selectionEnd":{at}}}"#
+        )
+    };
+    wait_for_log(
+        &mut engine,
+        &[
+            r#"focus:{"value":""}"#.to_owned(),
+            input("a", 1),
+            input("a\\n", 2),
+            input("a\\nb", 3),
+            input("a\\nbc", 4),
+        ]
+        .join("|"),
+    );
+
+    for tag in ["input", "textarea"] {
+        let mut engine = field_engine(tag, &[], "");
+        engine.dispatch_input(touch(PointerPhase::Down, 20.0, 20.0));
+        engine.dispatch_input(touch(PointerPhase::Up, 20.0, 20.0));
+        engine.dispatch_input(key("x"));
+        let (shadow, focused) = engine
+            .probe_document(|tree| (tree.shadow_root(node_id(HOST)), tree.focused()))
+            .expect("the view answers");
+        assert_eq!(shadow, None, "{tag}");
+        assert_eq!(focused, None, "{tag}");
+    }
+}

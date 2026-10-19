@@ -1339,3 +1339,41 @@ fn a_truncated_text_refuses_to_measure_past_its_cut() {
     assert_eq!(value(&doc), "abcdexf");
     assert_eq!(selection(&doc), 6..6);
 }
+
+/// `paragraph_kind` and `paragraph_line_count` over each host's paragraph:
+/// a `<text>`'s Lynx paragraph, an inline formatting context otherwise; a
+/// soft wrap and a hard break each start a line, and only the Lynx
+/// paragraph shows the empty line after a trailing break.
+#[test]
+fn each_host_s_paragraph_reports_its_kind_and_its_lines() {
+    for kind in KINDS {
+        // 4 squares per 40px line: "aa aa" wraps at its space, "\n" breaks.
+        let (mut doc, host) = host_in(kind, &["aa aa\nb"], 40.0);
+        let paragraph = doc.paragraph_node_of(host).unwrap();
+        let expected = if kind == Kind::Text {
+            crate::layout::ParagraphKind::Lynx
+        } else {
+            crate::layout::ParagraphKind::InlineFormattingContext
+        };
+        assert_eq!(doc.paragraph_kind(paragraph), Some(expected), "{kind:?}");
+        assert_eq!(doc.paragraph_line_count(paragraph), Some(3), "{kind:?}");
+        let end = value(&doc).encode_utf16().count();
+        select(&mut doc, end..end);
+        assert!(doc.apply_editing(Command::InsertLineBreak).applied);
+        doc.layout();
+        let paragraph = doc.paragraph_node_of(host).unwrap();
+        let trailing = usize::from(kind == Kind::Text);
+        assert_eq!(
+            doc.paragraph_line_count(paragraph),
+            Some(3 + trailing),
+            "{kind:?}: a trailing break"
+        );
+    }
+    let (doc, host) = host_in(Kind::View, &["a"], 40.0);
+    assert_eq!(
+        doc.paragraph_kind(host),
+        None,
+        "the anonymous box's, not the view's"
+    );
+    assert_eq!(doc.paragraph_line_count(host), None);
+}

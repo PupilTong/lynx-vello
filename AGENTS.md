@@ -2299,16 +2299,21 @@ box block, `is_frame`, `nested_page`, `reset_frame` and `frame_depth`; `src`, `d
 `blur-view` and web-core's `x-blur-view`, as a CSS length rather than
 web-core's `parseFloat` — the one tag module with no UA rules of its own,
 since a blur view is a container and nothing else), and `tree::text_field`
-(`x-input`/`x-textarea` under the JSX tags `input`/`textarea` and the `-ng`
-aliases, `docs/editable-text-design.md` E5: a UA shadow tree of one
-`contenteditable="plaintext-only"` editor — an engine-sheet `display: block`
-container, its own inline formatting context, `white-space: pre` for the
-single-line field — and a `#placeholder` shown while the editor is `:empty`;
-the host is the field's box; the placeholder style attributes as UA `attr()`
-custom properties; `value`, `type`, `confirm-type`, `disabled`/`readonly`
-and `input-filter` mapped onto the editor in its attribute callback; line
-breaks (single-line), `maxlength`, the `number` filter and `input-filter`
-corrected after each edit with `Document::set_host_value`; web-core's
+(`x-input`/`x-textarea` and their `-ng` aliases, the four Lynx tags only —
+the HTML names `input`/`textarea` are not defined, an HTML-named element
+following HTML (user ruling 2026-10-19) — `docs/editable-text-design.md`
+E5: a UA shadow tree of one `contenteditable="plaintext-only"` editor — for
+`x-input` an engine-sheet `display: block` `div`, its own inline formatting
+context, `white-space: pre`; for `x-textarea` a Lynx `<text>`, whose Lynx
+paragraph lays the lines out — and a `#placeholder` shown while the editor
+is `:empty`; the host is the field's box; the placeholder style attributes
+as UA `attr()` custom properties; `value`, `type`, `confirm-type`,
+`disabled`/`readonly` and `input-filter` mapped onto the editor in its
+attribute callback; line breaks (single-line), `maxlength`, the `number`
+filter, `input-filter` and the textarea's `maxlines` (the longest prefix of
+the insertion whose value lays out in the limit, by bisection with a layout
+pass per probe over `Document::paragraph_line_count`) corrected after each
+edit with `Document::set_host_value`; web-core's
 `input`/`confirm`/`selection`/`focus`/`blur` re-fired at the host from the
 editor's standard events, heard at its shadow root, on `ComponentEvents` with
 string extras; and web-core's methods, its `CustomElement::invoke`).
@@ -3319,7 +3324,9 @@ Subsystems:
   kind, the probe/restore routing, the measure closure, the
   `PaintedParagraph` the painter reads, and `paragraph_of` /
   `inline_source_range`, which the geometry APIs (`text_range_boxes`,
-  `text_index_at_point`) answer from for either kind.
+  `text_index_at_point`) answer from for either kind; `paragraph_kind` and
+  `paragraph_line_count` say which kind a node established and how many
+  lines its last commit laid out.
 - `visual/` — stacking contexts, CSS2 Appendix E paint order, transforms,
   `RenderLayer` group effects, reverse-paint-order hit testing, and
   `content-visibility: auto` relevance determination (`relevance.rs`), which

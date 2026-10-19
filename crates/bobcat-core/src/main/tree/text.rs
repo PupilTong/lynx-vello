@@ -243,7 +243,7 @@ use crate::main::record::write_record_field;
 /// The paragraph tag the component is defined on. A nested `text` is a run
 /// of its ancestor's paragraph and establishes none, so its method answers
 /// code 8.
-const TEXT_TAG: &str = "text";
+pub(super) const TEXT_TAG: &str = "text";
 
 /// Installs the `text` component, and `inline-text` and `inline-truncation`
 /// beside it as Lynx text elements with no component behaviour. Must run

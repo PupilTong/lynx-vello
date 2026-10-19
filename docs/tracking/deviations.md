@@ -3122,6 +3122,26 @@ consequential choice about whether to follow the spec or the quirk.
   - *`placeholder-font-style` and the `-x-placeholder-*` aliases* are
     native's and not web-core's, and not built.
 
+  Two differ from web-core by user ruling (2026-10-19):
+  - *`input` and `textarea` are not text fields.* web-core's tag map sends
+    the JSX tags `input` and `textarea` to `x-input`/`x-textarea`
+    (`web-core/ts/constants.ts:104,106`), and native Lynx registers its
+    fields under exactly those names (`LynxUIInputAutoRegistry.m:17`,
+    `LynxUITextAreaAutoRegistry.m:17`, `x-input-ng`/`x-textarea-ng` mapped
+    onto them in `LynxUIOwner.m`). Here they are HTML element names, an
+    element with an HTML name follows HTML, and HTML's `<input>` and
+    `<textarea>` are not implemented, so a card that writes `<input>` or
+    `<textarea>` gets a plain element with no field. The fields are
+    `x-input`, `x-input-ng`, `x-textarea` and `x-textarea-ng`.
+  - *`maxlines` is enforced on `x-textarea`* (native). web-core reads no
+    such attribute (its inner `<textarea>` has no line limit). Here, as
+    Android's `maxLinesFilter` does, an insertion that lays the value out
+    past the limit keeps its longest prefix that fits; iOS instead trims
+    the end of the whole value and also caps the text view's displayed
+    lines, which is not built. The lines are the editor's Lynx paragraph's
+    (the textarea's editor is a Lynx `<text>`; web-core's is a browser
+    `<textarea>`), so the empty line after a trailing break counts.
+
 ## JS runtime & APIs (see [js-runtime.md](js-runtime.md), [accessibility.md](accessibility.md))
 
 - **`ShadowRealm` children have no animation frames, and report under their

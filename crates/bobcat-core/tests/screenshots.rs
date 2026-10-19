@@ -546,7 +546,7 @@ globalThis.renderPage = function () {
     __AppendElement(page, element);
   }
   field('x-input', [['placeholder', 'say hi']]);
-  field('input', [['placeholder', 'red'], ['placeholder-color', 'red']]);
+  field('x-input-ng', [['placeholder', 'red'], ['placeholder-color', 'red']]);
   field('x-input', [['value', 'hello world'], ['placeholder', 'unseen']]);
   field('x-textarea', [['value', 'one two three four five six seven']]);
 };

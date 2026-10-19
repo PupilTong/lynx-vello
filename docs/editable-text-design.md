@@ -78,11 +78,12 @@ every synchronous OS query from it with no wait.
 - **Editing is decoupled from the text container** (user rulings
   2026-10-19). A host keeps the layout its element kind and its `display`
   give it, and its text is edited in whichever paragraph that is:
-  - a Lynx `<text contenteditable>` keeps its Lynx paragraph — verbatim
-    white space, `text-maxline`/`text-maxlength` truncation — in its own
+  - a Lynx `<text contenteditable>` (such as `x-textarea`'s editor, E5)
+    keeps its Lynx paragraph — verbatim white space,
+    `text-maxline`/`text-maxlength` truncation — in its own
     `TextStore::Block`;
-  - a block container (an engine sheet's `display: block`, such as E5's
-    editor) keeps its own standard inline formatting context,
+  - a block container (an engine sheet's `display: block`, such as
+    `x-input`'s editor, E5) keeps its own standard inline formatting context,
     `TextStore::Flow`;
   - any other element — a flex, grid, linear or relative `view` or `div` —
     lays its loose text out in the anonymous block box around it
@@ -205,6 +206,12 @@ matches (native keeps what matches); a textarea confirms only with
 `confirm-enter` (native: whenever `confirm-type` is not the default);
 `getValue` of a field not focused answers a caret at the end (native `-1`);
 `selection` fires for selected ranges only (native: every change).
+
+Two follow native or a user ruling instead (2026-10-19): the HTML names
+`input` and `textarea` are not text fields here (web-core maps both to its
+fields and native registers its fields under them; an HTML-named element
+follows HTML, which is not built), and `x-textarea` enforces `maxlines`,
+which web-core does not read.
 
 ## E1: what was built
 
@@ -831,9 +838,20 @@ Public surface:
 
 ### Choices made where the brief left one
 
-- **Tags.** `input`, `x-input`, `x-input-ng` and `textarea`, `x-textarea`,
-  `x-textarea-ng`: a compiled bundle writes the JSX tag verbatim here, and
-  web-core maps all six (`constants.ts:104-107`).
+- **Tags: the four Lynx names only** (user ruling 2026-10-19). `x-input`,
+  `x-input-ng`, `x-textarea` and `x-textarea-ng`: web-core's element names
+  (`XInput.ts`, `XTextarea.ts`) and the `-ng` aliases its tag map sends to
+  them (`constants.ts:105,107`). A compiled bundle writes the JSX tag
+  verbatim here. `input` and `textarea` are HTML element names, and an
+  element with an HTML name follows HTML, which this component does not
+  implement, so neither is defined — though web-core maps both to its fields
+  (`constants.ts:104,106`) and native Lynx registers its fields under exactly
+  those names (`LynxUIInputAutoRegistry.m`, `LynxUITextAreaAutoRegistry.m`,
+  with `x-input-ng`/`x-textarea-ng` mapped onto them in `LynxUIOwner.m`). An
+  HTML `<input>`/`<textarea>` would be a separate element with HTML's
+  semantics; it is not built (`docs/tracking/components.md`,
+  `docs/tracking/deviations.md`). They are not Lynx tags for the `raw-text`
+  rules either.
 - **The host is the field's box**, not web-core's `display: contents` host
   with an inner `<input>` that inherits a dozen box properties through
   `::part`. The editor fills the host's content box (a row flex box with
@@ -843,16 +861,27 @@ Public surface:
   (`tree::focus_delegate`, called by the press when the target is in no
   editing host: HTML's `delegatesFocus` for this component), and places the
   caret from that point, clamped into the paragraph.
-- **The editor is a block container, not a `<text>`.** The shadow sheet is
-  an engine sheet (`Document::add_engine_shadow_stylesheet`) that makes the
-  editor and the placeholder's text `display: block`, so each lays its text
-  out in its own standard inline formatting context; a shadow `<text>`
-  would bring Lynx's verbatim white space and truncation into a form
-  field. (Before the 2026-10-19 rework the editing-host UA rule forced
-  `display: -lynx-text` and pinned `white-space-collapse: preserve`.)
+- **Two editors** (user rulings 2026-10-19). The single line is the
+  browser's: `x-input`'s editor is a `div` the engine shadow sheet
+  (`Document::add_engine_shadow_stylesheet`) makes `display: block`, so its
+  own standard inline formatting context lays the line out, as a browser
+  lays out an `<input>`'s inner editor; no Lynx text semantics reach it
+  (it is no Lynx text element, and no `text` rule matches it). The lines of
+  a textarea are Lynx text: `x-textarea`'s editor is a Lynx `<text>`,
+  created with the tag `tree::text` defines as a Lynx text element
+  (`CustomElement::is_lynx_text`), so its Lynx paragraph lays them out —
+  verbatim white space, Lynx's `text-*` properties, the empty last line
+  after a trailing line break — and Lynx text behaviours such as `maxlines`
+  (below) are counted on it; Lynx text attributes can be carried there
+  later. The shadow sheet gives it `color: inherit` over `text`'s UA
+  `color: initial`, as web-core's inner `<textarea>` inherits the field's
+  colour (`x-textarea.css`). The placeholder's text is a `display: block`
+  `div` for both kinds: it is never edited. (Before the 2026-10-19 rework
+  the editing-host UA rule forced `display: -lynx-text` on every host.)
 - **Single line.** The single-line editor is `white-space: pre` and the
-  textarea's `pre-wrap`, from the shadow sheet, which outranks the UA
-  rule's `pre-wrap` default. The value never holds a line break: after each
+  textarea's `pre-wrap` (which its Lynx paragraph reads as "wrap", keeping
+  white space verbatim anyway), from the shadow sheet, which outranks the
+  UA rule's `pre-wrap` default. The value never holds a line break: after each
   edit the component removes `\n` and `\r` (an `<input>`'s value
   sanitization), so a paste is one line and Enter's `insertLineBreak`
   leaves the value as it was and fires `confirm`.
@@ -886,6 +915,27 @@ Public surface:
   deletion — then the `number` filter (digits and the last `.`), then
   `input-filter`, each moving the caret by what it removed before it, and
   the result written with `set_host_value`. None runs during a composition.
+- **`maxlines` follows native** (web-core reads no such attribute). On an
+  `x-textarea`, a positive whole number of lines (`parseFloat`, truncated;
+  absent, unreadable or below 1 is no limit, as Android's `maxLinesFilter`
+  reads `maxLines <= 0`). It runs last in the same after-the-edit pass:
+  the corrected value is written, `Document::layout` runs, and when the
+  editor's paragraph has more lines than the limit
+  (`Document::paragraph_line_count`, new in `dom`) the longest prefix of
+  what the edit inserted that lays out in the limit is kept, found by
+  bisection over the inserted characters with one layout pass per probe
+  (Android's `maxLinesFilter` bisects the same way; iOS trims from the end
+  of the value), and the caret goes after it. Characters, so never half a
+  surrogate pair. Wrapped lines count, and so does the empty line the Lynx
+  paragraph shows after a trailing line break, so Enter at the end of the
+  last allowed line is taken back. Only the insertion is taken back: a
+  deletion never cuts a value already over the limit, a script's write is
+  never cut, and an edit whose whole insertion goes leaves the value as the
+  rest of the edit left it (a replaced selection stays deleted). An editor
+  with no committed paragraph (not rendered) is not checked. This is not
+  `text-maxline`: the value stays visible and editable. iOS also caps the
+  text container at `maxlines` lines, which hides overflow from a script
+  write; that is not built.
 - **`input-filter` on `regex-lite`.** web-core hands the pattern to
   `new RegExp`; ECMAScript's `\uXXXX` is translated to `\x{XXXX}`, and a
   pattern the small engine cannot compile (lookaround, backreferences)
@@ -907,10 +957,19 @@ Public surface:
   width is clipped.
 - No intrinsic width: an unsized field in a row is as wide as its text.
 - `readonly` fields cannot be focused (editing is off, as for `disabled`).
-- Not built: `maxlines`, `line-spacing`, `auto-height`/`min-height`/
+- Not built: `line-spacing`, `auto-height`/`min-height`/
   `max-height`, `linechange`, `autocomplete`, `spell-check`,
   `getTextBoundingRect` on a field, `placeholder-font-style` and the
   `-x-placeholder-*` aliases.
+- `linechange` is deferred: web-core names it only in a doc comment
+  (`XTextarea/index.ts`) and never fires it, so it has no web-core detail
+  shape; native fires `line` with `{line}` (the laid-out line count, `-1`
+  when `maxlines` refused input; `LynxUITextArea.m`, `LynxUITextArea.kt`,
+  `ui_textarea.cc`), and the typings declare neither. Which name and
+  detail to follow is a native-vs-web-core question for the user. The
+  count itself is cheap (`paragraph_line_count` after the pass `maxlines`
+  already runs).
+- HTML `<input>` and `<textarea>` are not implemented (see "Tags").
 - The standard `beforeinput` and composition events of a field are not
   visible to script at the field's host (web-core lets `beforeinput` and the
   composition events through; no Lynx event names them).
