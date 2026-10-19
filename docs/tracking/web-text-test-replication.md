@@ -751,7 +751,8 @@ taller atom overflow the band.
 | lynx-vello | Verbatim — **matches native** (Android for tabs, the `nowrap` cut and the empty last line) | `WhiteSpaceProcessing::Verbatim` in `crates/hughie/src/text/paragraph/content.rs`, `TabStops::Native` in `crates/hughie/src/text/paragraph/tab.rs`, the UA rule in `crates/bobcat-core/src/main/tree/text.rs` |
 
 **Decided (user, 2026-10-16): a `text` follows native.** `<markdown>`'s
-`-lynx-text` paragraphs are not `text` and keep collapsing. Replicas whose
+paragraphs are standard inline formatting contexts, not `text`, and keep
+collapsing. Replicas whose
 claim is the browser's collapsing are DEVIATIONs with native companions (F);
 replicas whose claim is something else write the fixture's indentation the way
 a compiled card carries it, which the tree replication file's module doc
