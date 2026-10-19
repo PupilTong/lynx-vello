@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, watch};
 use crate::background::{WorkerCommand, WorkerEvent};
 use crate::esm::{MTS_CHUNK_PREAMBLE, build_runtime};
 use crate::jobs::JsThread;
-use crate::link::{DetachedView, InputEventPayload, detached_outbox};
+use crate::link::{DetachedView, InputEventPayload, ScrollEntry, detached_outbox};
 use crate::main::WorkerFactory;
 use crate::main::quickjs::ScriptRuntime;
 use crate::main::runtime::{DocumentIngredients, MainThreadRuntime, RealmStartup};
@@ -185,6 +185,49 @@ impl ScriptHarness {
             .expect("the benchmark dispatch completes")
     }
 
+    /// One frame of the painter's scroll posts, taken and delivered as the
+    /// page takes and delivers them.
+    ///
+    /// The posts go into the document as `Page::adopt_posted` hands them
+    /// over ([`MainThreadRuntime::adopt_scroll_offsets`]), which queues the
+    /// `scroll`s and `scrollend`s they owe. Then the steps of the entry's
+    /// epilogue that bear on those events run in its order: the instant
+    /// scrolls' own `scroll`s, the commit if one is due, and — when the
+    /// queue holds anything and nothing is left uncommitted — the delivery
+    /// the epilogue posts as an entry of its own
+    /// ([`MainThreadRuntime::dispatch_component_events`]), run here in place.
+    /// The epilogue's other steps (intersection and content-visibility
+    /// updates, document requests) do not read the component-event queue
+    /// and are left out. The cost of posting and entering the delivery entry
+    /// itself is not part of what this measures.
+    ///
+    /// The answer is whether a delivery ran.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an id is malformed or a listener throws.
+    pub fn scroll_frame(&mut self, posts: &[ScrollPost]) -> bool {
+        self.runtime.adopt_scroll_offsets(posts.iter().map(|post| {
+            let node = dom::NodeId::from_bits(post.node).expect("a well-formed packed handle");
+            let offset = dom::Vector2D::new(0.0, post.y);
+            let entry = ScrollEntry {
+                offset,
+                at: 0.0,
+                rest: post.rest.then_some(offset),
+                request: None,
+            };
+            (node, entry)
+        }));
+        self.runtime.queue_instant_scroll_events();
+        self.runtime.commit_if_dirty();
+        if !self.runtime.has_component_events() || self.runtime.needs_render() {
+            return false;
+        }
+        let failures = self.runtime.dispatch_component_events(&mut self.js_runtime);
+        assert!(failures.is_empty(), "no listener throws: {failures:?}");
+        true
+    }
+
     /// Whether the realm has published a listener for this event name — the
     /// question the painting side asks before it builds anything.
     ///
@@ -252,6 +295,18 @@ impl ScriptHarness {
     fn with_document<R>(&mut self, probe: impl FnOnce(&mut LynxDocument) -> R) -> R {
         self.runtime.with_document(probe)
     }
+}
+
+/// One painter post for [`ScriptHarness::scroll_frame`]: a container moved
+/// to the vertical offset `y`, and whether it came to rest there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScrollPost {
+    /// The container's packed handle.
+    pub node: u64,
+    /// The vertical offset the painter posts.
+    pub y: f32,
+    /// Whether the container is at rest at `y`, which ends a scroll.
+    pub rest: bool,
 }
 
 impl Default for ScriptHarness {
