@@ -45,6 +45,7 @@ rstest.mockRequire("bobcat-internal:host", () => {
     flushElementTree: native.flushElementTree,
     listenerOpened: native.listenerOpened,
     listenerClosed: native.listenerClosed,
+    switchExposure: native.switchExposure,
     setTimer: native.setTimer,
     clearTimer: native.clearTimer,
   };
@@ -93,6 +94,11 @@ rstest.mockRequire("bobcat:frame", () => ({
     const native =
       globalThis.__bobcatTestHost as ReturnType<typeof createMockBobcat>;
     native.calls.push(["frameDataChanged", handle, name, json]);
+  },
+  frameConnectionChanged(handle: object, frameId: number, connected: boolean) {
+    const native =
+      globalThis.__bobcatTestHost as ReturnType<typeof createMockBobcat>;
+    native.calls.push(["frameConnectionChanged", handle, frameId, connected]);
   },
 }));
 
@@ -463,8 +469,11 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
     listenerClosed: (node: unknown, eventName: unknown) => {
       calls.push(["listenerClosed", nodeId("listenerClosed", node), eventName]);
     },
-    switchExposure: (on: 0 | 1, sendEvent: 0 | 1) => {
-      calls.push(["switchExposure", on, sendEvent]);
+    // A stop with `sendEvent` answers one record per listed id, as if every
+    // listed element were exposed under an `exposure-id`.
+    switchExposure: (on: 0 | 1, sendEvent: 0 | 1, ids: string) => {
+      calls.push(["switchExposure", on, sendEvent, ids]);
+      return on === 0 && sendEvent === 1 && ids !== "" ? ids.split(",").length : 0;
     },
     // The Element PAPI reaches none of these; they are here because the
     // mock stands in for the whole native module, not part of it.
@@ -568,9 +577,13 @@ describe("installation", () => {
         // Not a PAPI member: the lifecycle export the boot module
         // constructs, which `MTS_CHUNK_PREAMBLE` does not import.
         "Document",
-        // Nor these two: `bobcat:frame-boot` chooses a frame realm's page
-        // root, and `bobcat:frame` finds a frame's handle by its id.
+        // Nor these four: `bobcat:frame-boot` chooses a frame realm's page
+        // root, stops its exposure and waits for its last exposure records
+        // with them, `bobcat:runtime`'s `lynx` switches the realm's exposure
+        // with the second, and the host's tests find a handle by its id.
         "__BobcatUsePageRoot",
+        "__BobcatSwitchExposure",
+        "__BobcatAfterExposureRecords",
         "__BobcatHandleOf",
       ].sort(),
     );
@@ -1343,6 +1356,47 @@ describe("__SetAttribute", () => {
       ["frameSourceChanged", frame, 3, null],
       ["setAttribute", 3, "title", "x"],
       ["setAttribute", 5, "src", "app:///child.web.bundle"],
+    ]);
+  });
+
+  it("files the frame connection listener on every frame, where no app can list or remove it", () => {
+    mock.calls.length = 0;
+    const frame = __CreateFrame(0);
+    const named = __CreateElement("frame", 0);
+    __CreateView(0);
+    const rows = mock.calls.filter(([name]) => String(name).startsWith("listener"));
+    expect(rows).toEqual([
+      ["listenerOpened", 3, "bobcat:frameconnected", 1],
+      ["listenerOpened", 3, "bobcat:framedisconnected", 1],
+      ["listenerOpened", 4, "bobcat:frameconnected", 1],
+      ["listenerOpened", 4, "bobcat:framedisconnected", 1],
+    ]);
+
+    mock.calls.length = 0;
+    const listener = () => {};
+    __AddEventListener(frame, "bobcat:frameconnected", listener, {});
+    __RemoveEventListener(frame, "bobcat:frameconnected", listener, {});
+    // An app removal under the internal name names no listener of the
+    // app's, and takes nothing away.
+    __RemoveEventListener(named, "bobcat:framedisconnected", listener, {});
+    expect(mock.calls.filter(([name]) => String(name).startsWith("listener"))).toEqual([]);
+    expect(__GetEvents(frame)).toEqual([]);
+  });
+
+  it("hands a frame's connection events to bobcat:frame, a detached frame's included", () => {
+    const page = __CreatePage("card", 0);
+    const frame = __CreateFrame(0);
+    __AppendElement(page, frame);
+    const id = __GetElementUniqueID(frame);
+    mock.calls.length = 0;
+
+    // As the host dispatches them: at the frame, not bubbling, no detail.
+    dispatch([frame, page], "bobcat:frameconnected", { empty: true }, undefined, false);
+    __RemoveElement(page, frame);
+    dispatch([frame], "bobcat:framedisconnected", { empty: true }, undefined, false);
+    expect(mock.named("frameConnectionChanged")).toEqual([
+      ["frameConnectionChanged", frame, id, true],
+      ["frameConnectionChanged", frame, id, false],
     ]);
   });
 
@@ -3815,6 +3869,35 @@ describe("exposure", () => {
     ]);
   });
 
+  it("runs an after-records callback once the next flush scheduled after it has sent its lists", async () => {
+    const { outer, inner } = tree();
+    __SetAttribute(inner, "exposure-id", "card-7");
+    __SetAttribute(outer, "exposure-id", "outer");
+    const order: string[] = [];
+    const sentSoFar = () => String(sent().length);
+
+    // Nothing is queued: the callback waits for a flush that has not been
+    // scheduled yet, and no time passing runs it.
+    elementModule.__BobcatAfterExposureRecords(() => order.push(`first after ${sentSoFar()}`));
+    await flush();
+    expect(order).toEqual([]);
+
+    // A flush already scheduled when a callback is filed is not the one it
+    // waits for: that is the next one.
+    record(outer, "outer", "", true);
+    elementModule.__BobcatAfterExposureRecords(() => order.push(`second after ${sentSoFar()}`));
+    await flush();
+    expect(order).toEqual(["first after 1"]);
+
+    record(inner, "card-7", "", false);
+    await flush();
+    expect(order).toEqual(["first after 1", "second after 2"]);
+    // Each ran once.
+    record(outer, "outer", "", false);
+    await flush();
+    expect(order).toHaveLength(2);
+  });
+
   it("builds a detached element's record from its live handle", async () => {
     const { outer, inner } = tree();
     const uid = __GetElementUniqueID(inner);
@@ -3833,6 +3916,61 @@ describe("exposure", () => {
       target,
       currentTarget: target,
     })]]]);
+  });
+
+  it("switches the elements this realm registered, by id, in the order it registered them", () => {
+    const { page, outer, inner } = tree();
+    __SetAttribute(inner, "exposure-id", "card-7");
+    __AddEvent(outer, "bindEvent", "uiappear", "3:0:appear");
+    // Neither an element with no exposure want nor the page is registered.
+    __AddEvent(page, "bindEvent", "tap", "3:0:tap");
+    const ids = `${__GetElementUniqueID(inner)},${__GetElementUniqueID(outer)}`;
+    mock.calls.length = 0;
+
+    // The host's answer, the records the stop queued, is the switch's.
+    expect(elementModule.__BobcatSwitchExposure(false, true)).toBe(2);
+    expect(elementModule.__BobcatSwitchExposure(false, false)).toBe(0);
+    // A resume reads no `sendEvent`.
+    expect(elementModule.__BobcatSwitchExposure(true, true)).toBe(0);
+    expect(mock.named("switchExposure")).toEqual([
+      ["switchExposure", 0, 1, ids],
+      ["switchExposure", 0, 0, ids],
+      ["switchExposure", 1, 0, ids],
+    ]);
+
+    // An element whose record listener went is no longer this realm's.
+    __SetAttribute(inner, "exposure-id", null);
+    mock.calls.length = 0;
+    elementModule.__BobcatSwitchExposure(false, true);
+    expect(mock.named("switchExposure")).toEqual([
+      ["switchExposure", 0, 1, String(__GetElementUniqueID(outer))],
+    ]);
+  });
+
+  it("stops an element registered while the realm is stopped right after filing its listener", () => {
+    const { outer, inner } = tree();
+    __SetAttribute(outer, "exposure-id", "outer");
+    elementModule.__BobcatSwitchExposure(false, true);
+    mock.calls.length = 0;
+
+    __SetAttribute(inner, "exposure-id", "card-7");
+    const id = __GetElementUniqueID(inner);
+    // Registered with the host first, then stopped, before any update can
+    // report it.
+    expect(mock.calls.filter(([name]) =>
+      name === "listenerOpened" || name === "switchExposure")).toEqual([
+      ["listenerOpened", id, "bobcat:exposure", 1],
+      ["switchExposure", 0, 0, String(id)],
+    ]);
+
+    // The resume lists it with the rest; one registered after it runs.
+    elementModule.__BobcatSwitchExposure(true, false);
+    expect(mock.named("switchExposure").at(-1)).toEqual(
+      ["switchExposure", 1, 0, `${__GetElementUniqueID(outer)},${id}`],
+    );
+    mock.calls.length = 0;
+    __AddEvent(__CreateView(0), "bindEvent", "uidisappear", "3:0:gone");
+    expect(mock.named("switchExposure")).toEqual([]);
   });
 });
 

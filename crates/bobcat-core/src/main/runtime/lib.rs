@@ -77,10 +77,15 @@ const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
 /// ([`dom::Document::global_registrants_on_path`]). See [`Invited`].
 const DOCUMENT_LEVEL_EVENTS: [&str; 2] = ["keydown", "keyup"];
 
-/// The `bobcat:frame` exports a `frame`'s connection and disconnection are
-/// handed to; see [`MainThreadRuntime::dispatch_component_events`].
-const FRAME_CONNECTED_EXPORT: &str = "__BobcatFrameConnected";
-const FRAME_DISCONNECTED_EXPORT: &str = "__BobcatFrameDisconnected";
+/// The internal events a `frame`'s connection and disconnection are: the
+/// names the realm's Lynx layer files its own listener under on every
+/// `frame` it creates, so the listener table invites the realm that holds
+/// the frame's handle, whatever its depth. Dispatched at the frame,
+/// non-bubbling and not composed, with no payload; see
+/// [`MainThreadRuntime::dispatch_component_events`]. The `bobcat:` prefix
+/// keeps them apart from every name an app can file.
+const FRAME_CONNECTED_EVENT: &str = "bobcat:frameconnected";
+const FRAME_DISCONNECTED_EVENT: &str = "bobcat:framedisconnected";
 /// What an element hears when its exposure moves. web-core's names
 /// (`ExposureServices.ts:209-220`), dispatched non-bubbling and not composed
 /// as web-core dispatches them.
@@ -1438,12 +1443,22 @@ impl DocumentSlot {
         exposure.attribute_changed(document.as_mut().expect(DOCUMENT_EXISTS), node);
     }
 
-    /// The realm's `switchExposure`; see [`Exposure::switch`].
-    fn switch_exposure(&mut self, on: bool, send_event: bool) {
+    /// The realm's `switchExposure` for the elements `nodes`; answers how
+    /// many records it queued. See [`Exposure::switch`]. An empty list asks
+    /// nothing of the document.
+    fn switch_exposure(&mut self, on: bool, send_event: bool, nodes: &[dom::NodeId]) -> usize {
+        if nodes.is_empty() {
+            return 0;
+        }
         let Self {
             document, exposure, ..
         } = self;
-        exposure.switch(document.as_mut().expect(DOCUMENT_EXISTS), on, send_event);
+        exposure.switch(
+            document.as_mut().expect(DOCUMENT_EXISTS),
+            on,
+            send_event,
+            nodes,
+        )
     }
 
     /// Adopts whatever metrics an attached painter has named, and records
@@ -2296,8 +2311,11 @@ impl MainThreadRuntime {
     /// events ([`Self::adopt_scroll_offsets`],
     /// [`Self::queue_instant_scroll_events`]) and the text layout reports
     /// ([`Self::queue_text_layout_events`]) have queued, in the order they
-    /// formed, and hands each connection and disconnection the `frame`
-    /// component queued to `bobcat:frame` ([`Self::frame_connection`]).
+    /// formed, and each connection and disconnection the `frame` component
+    /// queued, as [`FRAME_CONNECTED_EVENT`] or [`FRAME_DISCONNECTED_EVENT`]
+    /// at the frame, after which the children nothing needs any more are
+    /// freed, outside every call, so the child a disposal retired goes in
+    /// this entry.
     ///
     /// Called by the entry the page posts for the batch and by nothing else:
     /// the events are tasks, not part of the entry that produced them. Each
@@ -2386,11 +2404,17 @@ impl MainThreadRuntime {
                     (node, ERROR_EVENT, false)
                 }
                 ComponentEvent::Plain { node, name } => (node, name, false),
+                // The realm holding the frame's handle has filed the internal
+                // listener on it, so it alone is called, at any depth; a
+                // frame freed since — its page reset, its handle collected —
+                // hears nothing, as a routed event at a freed target does.
                 ComponentEvent::Frame { node, connected } => {
-                    if let Err(error) = self.frame_connection(js_runtime, node, connected) {
-                        failures.push(error);
-                    }
-                    continue;
+                    let name = if connected {
+                        FRAME_CONNECTED_EVENT
+                    } else {
+                        FRAME_DISCONNECTED_EVENT
+                    };
+                    (node, name, false)
                 }
                 ComponentEvent::Scroll { node, name, delta } => {
                     let scroll_box = self.slot.borrow_mut().document_mut().scroll_box(node);
@@ -2447,49 +2471,20 @@ impl MainThreadRuntime {
             ) {
                 failures.extend(error.into_errors());
             }
+            // A disconnection lets go of the frame's card, and may have
+            // retired a child the release frees here, outside every call,
+            // rather than waiting for the epilogue.
+            if matches!(
+                *event,
+                ComponentEvent::Frame {
+                    connected: false,
+                    ..
+                }
+            ) {
+                self.core.children.release_unneeded();
+            }
         }
         failures
-    }
-
-    /// Hands one `frame`'s connection (`connected`) or disconnection to
-    /// `bobcat:frame` in the page realm: `__BobcatFrameConnected(frameId)`,
-    /// which loads the card the frame's `src` names if none is loaded, as
-    /// web-core's `LynxView` renders on `connectedCallback`, or
-    /// `__BobcatFrameDisconnected(frameId)`, which disposes of it, as
-    /// `disconnectedCallback` does. What happens is the module's to decide:
-    /// a frame whose handle is another realm's, or that never had a `src`,
-    /// is nothing to it.
-    ///
-    /// After a disconnection, the children nothing needs any more are freed
-    /// here, outside the call, so the child the disposal retired goes in
-    /// this entry rather than waiting for its epilogue.
-    fn frame_connection(
-        &mut self,
-        js_runtime: &mut ScriptRuntime,
-        frame: dom::NodeId,
-        connected: bool,
-    ) -> Result<(), MainThreadError> {
-        let export = if connected {
-            FRAME_CONNECTED_EXPORT
-        } else {
-            FRAME_DISCONNECTED_EXPORT
-        };
-        let result = self
-            .core
-            .engine
-            .call_module_export(
-                js_runtime,
-                FRAME_MODULE_SPECIFIER,
-                export,
-                &[HostArgument::Number(packed_node_id(frame))],
-            )
-            .map(drop)
-            .map_err(|error| MainThreadError::from_engine("delivering a frame connection", error));
-        let finished = self.finish_batch(js_runtime, result.is_ok());
-        if !connected {
-            self.core.children.release_unneeded();
-        }
-        result.and(finished)
     }
 
     /// Runs `probe` against the realm's document — the observation seam for
@@ -3117,7 +3112,13 @@ impl MainThreadRuntime {
     /// included, whose path starts at itself. The realm's Lynx layer turns
     /// the records into the `exposure` and `disexposure` lists and orders
     /// them. An element freed since its change formed hears nothing, as a
-    /// routed event at a freed target does, record included.
+    /// routed event at a freed target does, record included. The changes a
+    /// `uiappear`/`uidisappear` listener queued — a `stopExposure`, an
+    /// `exposure-id` written — are records only, and join this entry's
+    /// records rather than waiting for the next delivery, so every record
+    /// queued before the record dispatches begin reaches its realm in this
+    /// entry's one checkpoint: a card let go of inside such a listener
+    /// sends its last list in the flush that follows its stop.
     ///
     /// The record dispatches share one microtask checkpoint per realm called,
     /// run after the last of them ([`Checkpoint::Deferred`]), so what a
@@ -3139,7 +3140,7 @@ impl MainThreadRuntime {
             .borrow_mut()
             .document_mut()
             .notify_intersection_observers();
-        let changes = self.slot.borrow().exposure.take_changes();
+        let mut changes = self.slot.borrow().exposure.take_changes();
         if changes.is_empty() {
             return Vec::new();
         }
@@ -3166,6 +3167,11 @@ impl MainThreadRuntime {
                 failures.extend(error.into_errors());
             }
         }
+        // What those listeners queued: records only, since only an
+        // observer's report carries an element event.
+        let late = self.slot.borrow().exposure.take_changes();
+        debug_assert!(late.iter().all(|change| !change.element_event));
+        changes.extend(late);
         // One checkpoint per realm after every record, rather than one per
         // call: what a record listener queues runs once all of the entry's
         // records are in, so the realm sends one `exposure` and one
@@ -4658,23 +4664,34 @@ fn install_attribute_writes(
 /// Installs the member the realm's exposure switch speaks to, answered by
 /// the document's [`Exposure`] beside the document in the slot.
 ///
-/// `switchExposure(on, sendEvent)` is `lynx.stopExposure` /
-/// `lynx.resumeExposure` as native runs them. Both flags are `0` or `1`, as
-/// every flag a tree member takes, and it answers nothing: what it changes
-/// is delivered by the next intersection delivery entry. Whether an element
-/// is registered for its `uiappear`/`uidisappear` is not a member's: the
-/// listener table answers it ([`DocumentSlot::open_listener`]).
+/// `switchExposure(on, sendEvent, ids)` is `lynx.stopExposure` /
+/// `lynx.resumeExposure` as native runs them for one card: for the elements
+/// `ids` names, the ones the calling realm registered, which only it knows
+/// ([`Exposure::switch`]). Both flags are `0` or `1`, as every flag a tree
+/// member takes; `ids` is comma-joined decimal node ids, as
+/// `childElementIds` carries a list, `""` for none, and an id that names no
+/// registered element is skipped. It answers the number of records it
+/// queued, which the next intersection delivery entry dispatches at their
+/// elements: one per listed element exposed under an `exposure-id` for a
+/// stop with `sendEvent`, 0 otherwise. Whether an element is registered for
+/// its `uiappear`/`uidisappear` is not a member's: the listener table answers
+/// it ([`DocumentSlot::open_listener`]).
 fn install_exposure_members(
     engine: &mut ScriptEngine,
     handle: &Rc<RefCell<DocumentSlot>>,
 ) -> Result<(), MainThreadError> {
     let tree = Rc::clone(handle);
-    install(engine, "switchExposure", 2, move |arguments| {
+    install(engine, "switchExposure", 3, move |arguments| {
         const NAME: &str = "bobcat-internal:host.switchExposure";
         let on = flag_argument(NAME, arguments, 0)?;
         let send_event = flag_argument(NAME, arguments, 1)?;
-        borrow_slot(NAME, &tree)?.switch_exposure(on, send_event);
-        Ok(HostValue::Undefined)
+        let nodes = node_ids_argument(NAME, arguments, 2)?;
+        let queued = borrow_slot(NAME, &tree)?.switch_exposure(on, send_event, &nodes);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a count of registrations is far below f64's exact-integer range"
+        )]
+        Ok(HostValue::Number(queued as f64))
     })?;
 
     Ok(())
@@ -4890,6 +4907,32 @@ fn optional_node_id_argument(
         HostValue::Undefined | HostValue::Null => Ok(None),
         _ => node_id_argument(function, arguments, index).map(Some),
     }
+}
+
+/// A list of node ids as the realm writes one: the packed ids in decimal,
+/// joined with commas — the shape `childElementIds` answers a list in — and
+/// `""` for none. Each id must have a handle's shape; whether it names a live
+/// element is the caller's to ask.
+fn node_ids_argument(
+    function: &str,
+    arguments: &[HostValue],
+    index: usize,
+) -> Result<Vec<dom::NodeId>, String> {
+    let malformed = || format!("{function} expects comma-joined node ids for argument {index}");
+    let HostValue::String(ids) = argument(arguments, index) else {
+        return Err(malformed());
+    };
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    ids.split(',')
+        .map(|id| {
+            id.parse::<u64>()
+                .ok()
+                .and_then(dom::NodeId::from_bits)
+                .ok_or_else(malformed)
+        })
+        .collect()
 }
 
 /// A flag the realm spells as `0` or `1`, which is every boolean a tree

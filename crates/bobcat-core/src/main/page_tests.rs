@@ -1164,12 +1164,13 @@ fn an_intersection_hook_that_mutates_gets_its_own_commit_and_no_second_delivery(
 ///
 /// Each listener appends `<event>:row<index>` to the page element's
 /// `data-heard`, which [`heard`] reads back. `updatePage({on, sendEvent})`
-/// is `switchExposure(on, sendEvent)`.
+/// is `switchExposure(on, sendEvent, <every row's id>)`.
 fn exposure_page(exposed: Option<usize>) -> String {
     let exposed = exposed.map_or_else(|| "-1".to_owned(), |row| row.to_string());
     format!(
         r"
 import {{ switchExposure }} from 'bobcat-internal:host';
+const rows = [];
 globalThis.renderPage = function () {{
   const page = __CreatePage('card', 0);
   __SetInlineStyles(page, 'display:flex;width:200px;height:240px;align-items:flex-start');
@@ -1182,6 +1183,7 @@ globalThis.renderPage = function () {{
   const heard = [];
   for (let index = 0; index < {WATCHED_ROWS}; index++) {{
     const row = __CreateView(0);
+    rows.push(__GetElementUniqueID(row));
     __SetInlineStyles(row, 'flex-shrink:0;width:200px;height:{WATCHED_ROW_HEIGHT}px');
     __AppendElement(scroller, row);
     if (index === {exposed}) __SetAttribute(row, 'exposure-id', 'first');
@@ -1195,7 +1197,7 @@ globalThis.renderPage = function () {{
   }}
 }};
 globalThis.updatePage = function (data) {{
-  switchExposure(data.on, data.sendEvent);
+  switchExposure(data.on, data.sendEvent, rows.join(','));
 }};
 "
     )
@@ -1233,7 +1235,8 @@ async fn first_page_child(page: &Rc<Page>) -> dom::NodeId {
         .expect("the card rendered its scroller")
 }
 
-/// `switchExposure(on, sendEvent)` through `updatePage`, as one command.
+/// `switchExposure(on, sendEvent, <every row's id>)` through `updatePage`,
+/// as one command.
 async fn switch_exposure(page: &Rc<Page>, on: u8, send_event: u8) {
     page.apply(vec![ToMain::PageUpdate(PageUpdate::Data {
         data: format!(r#"{{"on":{on},"sendEvent":{send_event}}}"#),
@@ -1367,9 +1370,9 @@ fn layout_changes_are_delivered_by_an_entry_after_the_commit() {
     });
 }
 
-/// `switchExposure` from a script: a stop drops every observer and, for rows
-/// that have no `exposure-id`, owes nothing, so its entry posts nothing; a
-/// resume observes every row again, and the update in the resume's own
+/// `switchExposure` from a script: a stop stops detecting every row and, for
+/// rows that have no `exposure-id`, owes nothing, so its entry posts nothing;
+/// a resume observes every row again, and the update in the resume's own
 /// epilogue posts the delivery entry that tells each visible row it
 /// appeared, since the stop forgot them as exposed.
 #[test]
@@ -1435,7 +1438,7 @@ fn a_stop_that_owes_records_posts_a_delivery_entry_of_its_own() {
         assert_eq!(
             owned.page.epilogue_count(),
             settled + 1,
-            "a second stop does nothing",
+            "a second stop owes nothing: the first forgot the row as exposed",
         );
     });
 }

@@ -1,7 +1,7 @@
 // `bobcat:frame`: what a frame's `src`, `data`, `global-props`, connection and
 // disconnection do in the realm that holds its handle, over stand-ins for the
-// host members it reaches (`resolveUrl`, `fetchResource`, `resetFrame` and the
-// `Future` trio), for the diagnostics pair, and for `ShadowRealm`.
+// host members it reaches (`resolveUrl`, `fetchResource`, `resetFrame` and
+// the `Future` trio), for the diagnostics pair, and for `ShadowRealm`.
 //
 // The `Future` class is the real one; its settle is driven through its own
 // `__BobcatSettleFuture`, as the host's epilogue drives it. The child half —
@@ -58,7 +58,7 @@ rstest.mockRequire("bobcat:diagnostics", () => ({
   },
 }));
 
-/** The handles `bobcat:element`'s table resolves, by node id. */
+/** The frame handles this realm holds, by node id. */
 const handles: Map<number, object> = new Map();
 
 /** A frame handle this realm holds under `frameId`. */
@@ -68,11 +68,13 @@ function frameHandle(frameId: number): object {
   return handle;
 }
 
-rstest.mockRequire("bobcat:element", () => ({
-  __BobcatHandleOf(nodeId: number): object | undefined {
-    return handles.get(nodeId);
-  },
-}));
+/**
+ * The host's connection event at the frame `frameId`, as `bobcat:element`'s
+ * listener hands it over: with the handle this realm holds.
+ */
+function connection(frameId: number, connected: boolean): void {
+  frameConnectionChanged(handles.get(frameId)!, frameId, connected);
+}
 
 /** The view's native module table, as the page realm holds it. */
 const MODULE_TABLE = "4:Echo4:ping";
@@ -85,10 +87,18 @@ rstest.mockRequire("bobcat:runtime", () => ({
 /**
  * A stand-in for the host's `ShadowRealm`: its child's `boot`, `dispose`,
  * `updateData` and `updateGlobalProps` record their calls, each but `boot`
- * with the number of its realm.
+ * with the number of its realm. Its `dispose` calls the parent's `done` at
+ * once, as a card whose exposure stop queued nothing does, unless
+ * `holdDone` is set: then `done` waits in `dones` for the test, as a card
+ * waiting for its last records' delivery.
  */
 class FakeShadowRealm {
   static created = 0;
+  /** Set to keep each child's `done` for the test to call. */
+  static holdDone = false;
+  static dones: (() => void)[] = [];
+  /** Set to make the child's `dispose` throw this, after recording. */
+  static disposeFails: string | undefined;
   /** What the next `importValue` settles with, if not a recording export. */
   static importFails: string | undefined;
   /** What the child's `boot` answers: `false` is a boot that failed. */
@@ -118,10 +128,19 @@ class FakeShadowRealm {
         calls.push(["boot", ...args]);
         return FakeShadowRealm.bootAnswers;
       }
+      : name === "dispose"
+      ? (done: () => void) => {
+        calls.push(["dispose", this.number]);
+        if (FakeShadowRealm.disposeFails !== undefined) {
+          throw new TypeError(FakeShadowRealm.disposeFails);
+        }
+        if (FakeShadowRealm.holdDone) FakeShadowRealm.dones.push(done);
+        else done();
+      }
       : (...args: unknown[]) => {
         calls.push([name, this.number, ...args]);
         const failure = FakeShadowRealm.updateFails;
-        if (failure !== undefined && name !== "dispose") throw new TypeError(failure);
+        if (failure !== undefined) throw new TypeError(failure);
       };
     if (!FakeShadowRealm.hold) return Promise.resolve(exported);
     return new Promise(resolve => {
@@ -132,8 +151,7 @@ class FakeShadowRealm {
 
 import {
   __BobcatCloseFrames,
-  __BobcatFrameConnected,
-  __BobcatFrameDisconnected,
+  frameConnectionChanged,
   frameDataChanged,
   frameSourceChanged,
 } from "../src/frame.ts";
@@ -155,7 +173,11 @@ async function drain() {
 const SYSTEM_INFO = JSON.stringify({ platform: "headless", pixelRatio: 2 });
 
 beforeEach(() => {
-  // What an earlier test left loaded is this module's, which every test shares.
+  // What an earlier test left loaded or waiting is this module's, which
+  // every test shares.
+  for (const done of FakeShadowRealm.dones.splice(0)) done();
+  FakeShadowRealm.holdDone = false;
+  FakeShadowRealm.disposeFails = undefined;
   __BobcatCloseFrames();
   calls.length = 0;
   already.clear();
@@ -297,6 +319,8 @@ describe("frameSourceChanged", () => {
     await drain();
     calls.length = 0;
     frameSourceChanged(frame, 3, "app:///second.web.bundle");
+    // The old card posted its last list at once: its page is reset before
+    // the new load starts.
     expect(calls).toEqual([
       ["dispose", 1],
       ["resetFrame", 3],
@@ -352,19 +376,20 @@ describe("connection", () => {
     frameSourceChanged(frameHandle(3), 3, "app:///child.web.bundle");
     await drain();
     // The connection that follows the first write finds the load present.
-    __BobcatFrameConnected(3);
+    connection(3, true);
     await drain();
     expect(FakeShadowRealm.created).toBe(1);
 
     calls.length = 0;
-    __BobcatFrameDisconnected(3);
-    expect(calls).toEqual([["dispose", 1], ["resetFrame", 3]]);
+    connection(3, false);
+    const reset = [["dispose", 1], ["resetFrame", 3]];
+    expect(calls).toEqual(reset);
     // A second disconnection has nothing left to let go of.
-    __BobcatFrameDisconnected(3);
-    expect(calls).toEqual([["dispose", 1], ["resetFrame", 3]]);
+    connection(3, false);
+    expect(calls).toEqual(reset);
 
     calls.length = 0;
-    __BobcatFrameConnected(3);
+    connection(3, true);
     await drain();
     expect(FakeShadowRealm.created).toBe(2);
     expect(calls.slice(0, 2)).toEqual([
@@ -376,7 +401,7 @@ describe("connection", () => {
 
   it("does not start a second load for a frame connected while its first is in flight", async () => {
     frameSourceChanged(frameHandle(3), 3, "app:///child.web.bundle");
-    __BobcatFrameConnected(3);
+    connection(3, true);
     expect(calls.filter(call => call[0] === "fetchResource")).toHaveLength(1);
     future.__BobcatSettleFuture(futures()[0]!, false, undefined);
     await drain();
@@ -385,24 +410,20 @@ describe("connection", () => {
 
   it("makes a load in flight stale on disconnect", async () => {
     frameSourceChanged(frameHandle(3), 3, "app:///child.web.bundle");
-    __BobcatFrameDisconnected(3);
+    connection(3, false);
     expect(calls.at(-1)).toEqual(["resetFrame", 3]);
     future.__BobcatSettleFuture(futures()[0]!, false, undefined);
     await drain();
     expect(FakeShadowRealm.created).toBe(0);
   });
 
-  it("ignores a frame that never had a src, or whose handle is another realm's", () => {
-    __BobcatFrameConnected(41);
-    __BobcatFrameDisconnected(41);
+  it("ignores a frame that never had a src", () => {
+    frameHandle(41);
+    connection(41, true);
+    connection(41, false);
     frameSourceChanged(frameHandle(4), 4, null);
-    __BobcatFrameConnected(4);
-    // A handle this realm does not hold, though the frame has a card.
-    frameSourceChanged({}, 5, "app:///child.web.bundle");
-    calls.length = 0;
-    __BobcatFrameConnected(5);
-    __BobcatFrameDisconnected(5);
-    __BobcatFrameDisconnected(4);
+    connection(4, true);
+    connection(4, false);
     expect(calls).toEqual([]);
   });
 
@@ -417,8 +438,128 @@ describe("connection", () => {
     expect(calls).toEqual([["dispose", 1], ["dispose", 2]]);
     // Closed is closed: a disconnection after it disposes of nothing more.
     calls.length = 0;
-    __BobcatFrameDisconnected(3);
+    connection(3, false);
     expect(calls).toEqual([]);
+  });
+});
+
+describe("the last exposure list", () => {
+  const FIRST = "app:///first.web.bundle";
+  const SECOND = "app:///second.web.bundle";
+
+  /** Boots `src` in frame 3 and answers the frame's handle. */
+  async function booted(src: string): Promise<object> {
+    already.add(src);
+    const frame = frameHandle(3);
+    frameSourceChanged(frame, 3, src);
+    await drain();
+    return frame;
+  }
+
+  it("resets the frame only once the card let go of has posted its last list", async () => {
+    await booted(FIRST);
+    FakeShadowRealm.holdDone = true;
+    calls.length = 0;
+    connection(3, false);
+    await drain();
+    expect(calls).toEqual([["dispose", 1]]);
+
+    FakeShadowRealm.dones.shift()!();
+    expect(calls).toEqual([["dispose", 1], ["resetFrame", 3]]);
+    // Once only, however often the card calls it.
+    expect(calls.filter(call => call[0] === "resetFrame")).toHaveLength(1);
+  });
+
+  it("boots a new src only after the old card's reset, into the fresh page", async () => {
+    const frame = await booted(FIRST);
+    already.add(SECOND);
+    FakeShadowRealm.holdDone = true;
+    calls.length = 0;
+    frameSourceChanged(frame, 3, SECOND);
+    await drain();
+    // Fetched already: its start came in a microtask, and waits.
+    expect(FakeShadowRealm.created).toBe(1);
+    expect(calls).toEqual([
+      ["dispose", 1],
+      ["resolveUrl", SECOND],
+      ["fetchResource", SECOND],
+    ]);
+
+    FakeShadowRealm.dones.shift()!();
+    await drain();
+    expect(FakeShadowRealm.created).toBe(2);
+    expect(calls.slice(3)).toEqual([
+      ["resetFrame", 3],
+      ["importValue", "bobcat:frame-boot", "boot"],
+      ["importValue", "bobcat:frame-boot", "dispose"],
+      ["importValue", "bobcat:frame-boot", "updateData"],
+      ["importValue", "bobcat:frame-boot", "updateGlobalProps"],
+      ["boot", 3, SECOND, "{}", "{}", SYSTEM_INFO, MODULE_TABLE],
+    ]);
+  });
+
+  it("resets once for teardowns that pile up, and boots only the last src", async () => {
+    const frame = await booted(FIRST);
+    already.add(SECOND);
+    already.add("app:///third.web.bundle");
+    FakeShadowRealm.holdDone = true;
+    calls.length = 0;
+    frameSourceChanged(frame, 3, SECOND);
+    await drain();
+    // The second card never started, so it has nothing to dispose of.
+    frameSourceChanged(frame, 3, "app:///third.web.bundle");
+    connection(3, false);
+    connection(3, true);
+    await drain();
+    expect(calls.filter(call => call[0] === "resetFrame")).toEqual([]);
+    expect(FakeShadowRealm.created).toBe(1);
+
+    FakeShadowRealm.dones.shift()!();
+    await drain();
+    expect(calls.filter(call => call[0] === "resetFrame")).toEqual([["resetFrame", 3]]);
+    expect(calls.filter(call => call[0] === "boot")).toEqual([
+      ["boot", 3, "app:///third.web.bundle", "{}", "{}", SYSTEM_INFO, MODULE_TABLE],
+    ]);
+  });
+
+  it("closes this realm's frames once every card, and every reset still waiting, is done", async () => {
+    already.add("app:///a.web.bundle");
+    already.add("app:///b.web.bundle");
+    frameSourceChanged(frameHandle(3), 3, "app:///a.web.bundle");
+    frameSourceChanged(frameHandle(4), 4, "app:///b.web.bundle");
+    await drain();
+    FakeShadowRealm.holdDone = true;
+    // Frame 3 let go of its card before the realm closes, still waiting.
+    connection(3, false);
+    let closed = 0;
+    __BobcatCloseFrames(() => {
+      closed += 1;
+    });
+    expect(closed).toBe(0);
+    // Frame 4's card, then frame 3's: its reset runs, and then the callback.
+    FakeShadowRealm.dones[1]!();
+    expect(closed).toBe(0);
+    FakeShadowRealm.dones[0]!();
+    expect(closed).toBe(1);
+    FakeShadowRealm.dones.length = 0;
+
+    // Nothing to wait for: at once.
+    __BobcatCloseFrames(() => {
+      closed += 1;
+    });
+    expect(closed).toBe(2);
+  });
+
+  it("resets all the same when the card's dispose throws, and reports it", async () => {
+    await booted(FIRST);
+    FakeShadowRealm.disposeFails = "the realm is gone";
+    calls.length = 0;
+    connection(3, false);
+    expect(calls).toEqual([
+      ["dispose", 1],
+      ["reportError", `frame ${FIRST}: the realm is gone`],
+      ["resetFrame", 3],
+    ]);
   });
 });
 
@@ -528,8 +669,8 @@ describe("data and global-props", () => {
         }
         expect(calls).toEqual([]);
         // Nor did any of them replace what the next boot reads.
-        __BobcatFrameDisconnected(3);
-        __BobcatFrameConnected(3);
+        connection(3, false);
+        connection(3, true);
         await drain();
         expect(boots()).toEqual([booted(CHILD, '{"label":"kept"}')]);
       });
@@ -558,11 +699,11 @@ describe("data and global-props", () => {
         const frame = frameHandle(3);
         frameSourceChanged(frame, 3, CHILD);
         await drain();
-        __BobcatFrameDisconnected(3);
+        connection(3, false);
         calls.length = 0;
         frameDataChanged(frame, name, '{"label":"while away"}');
         expect(calls).toEqual([]);
-        __BobcatFrameConnected(3);
+        connection(3, true);
         await drain();
         expect(boots()).toEqual([booted(CHILD, '{"label":"while away"}')]);
         expect(updates()).toEqual([]);

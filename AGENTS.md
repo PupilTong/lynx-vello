@@ -638,8 +638,10 @@ a method its module did not declare is assembled and dropped, which releases
 its functions. No built-in module ships: `bridge`, `LynxUIMethodModule` and an
 intersection module are absent. Exposure is not a module here:
 `lynx.stopExposure`/`resumeExposure` are members of both `lynx` objects over
-the `switchExposure` host member, and `lynx.setObserverFrameRate` is accepted
-and ignored (see the exposure paragraph under the intersection primitive).
+the `switchExposure` host member, for the elements the calling card's realm
+registered, and
+`lynx.setObserverFrameRate` is accepted and ignored (see the exposure
+paragraph under the intersection primitive).
 
 `ContainerSources` registers named CSS under container-relative resource
 URLs. A named
@@ -1592,7 +1594,7 @@ its own still running is, because what that worker says is the child's, a
 card's BTS acknowledging its disposal included; a retired child goes all the
 same — outside every JavaScript call, because freeing a realm collects the
 whole runtime; nothing else frees a child while its owner lives but the
-release a frame's disconnection runs right after its `bobcat:frame` call,
+release a frame's disconnection runs right after its disconnection event,
 which is the same step, and a child the hook could not furnish is kept retired for that step. A child's
 diagnostics carry the parent's `ScriptSource`. Each operation detaches the
 child from the list and puts it back after, so a `new ShadowRealm()` in the
@@ -1654,35 +1656,42 @@ held closes when it closes.
 `resetFrame` replaces it for each later card, and its `connected_callback`/`disconnected_callback` queue
 `ComponentEvent::Frame { node, connected }` on the document's
 `ComponentEvents` (a reaction queues, never acts, because it holds the
-document). `MainThreadRuntime::dispatch_component_events` hands each to the
-page realm as one call of `bobcat:frame`'s `__BobcatFrameConnected(frameId)`
-or `__BobcatFrameDisconnected(frameId)` (`call_module_export`, failures under
-`Scene::Listener`), and after a disconnection runs
+document). `MainThreadRuntime::dispatch_component_events` dispatches each
+at the frame as an internal event, `bobcat:frameconnected` or
+`bobcat:framedisconnected` — not bubbling, not composed, no payload, a
+`ListenerFailed` like any listener's — and after a disconnection runs
 `children.release_unneeded()` outside the call, so the retired child goes in
-that entry. What happens is JavaScript's
-(`packages/bobcat-element/src/frame.ts`): `__CreateFrame` and
-`__CreateElement("frame")` mark the handle, and `__SetAttribute(frame,
-"src", value)` hands the new value (`null` for a removal) to
+that entry. `__CreateFrame` and `__CreateElement("frame")` mark the handle
+and file `bobcat:element`'s own listener for both names on it, which no app
+can name, list or remove, so the listener table invites the realm that
+holds the frame's handle — a frame a card created is that card's to load
+and let go of, at any depth, a detached frame included, whose path starts
+at itself — and a frame freed since (its page reset, its handle collected)
+hears nothing. What happens is JavaScript's
+(`packages/bobcat-element/src/frame.ts`, `frameConnectionChanged`):
+`__SetAttribute(frame, "src", value)` hands the new value (`null` for a removal) to
 `frameSourceChanged` after the native write, as it hands a `data` or
 `global-props` write to `frameDataChanged` (both are `bobcat:element`'s
 `STRUCTURED_PROPERTIES` of a `frame`, so an object is written as its JSON
 text). The per-frame state — generation, `src`, whether a load is started,
 the realm, the child's `dispose`, `updateData` and `updateGlobalProps`, and
-the frame's `data` and `global-props` as JSON text — lives on the handle; the host's calls find it through
-`bobcat:element`'s `__BobcatHandleOf`, so a frame whose handle another realm
-holds is nothing to the page realm. A `null` or `""` does nothing — the frame
+the frame's `data` and `global-props` as JSON text, and how many cards it let
+go of still owe their last list — lives on the handle, which every input
+arrives with, so a frame whose handle another realm holds is nothing to this
+realm. A `null` or `""` does nothing — the frame
 keeps its card, as native's `FrameElement::OnSetSrc` ignores it and web-core's
 `LynxView` keeps its running card when `url` is removed — and neither does a
 value equal to the frame's current one, which both skip. Any other tears the
-current card down (`teardown`: the child's `dispose`, then
-`resetFrame(frameId)`) and loads the new one, connected or not: a load bumps
+current card down (`teardown`, below) and loads the new one, connected or
+not: a load bumps
 the generation, resolves `src` once with `resolveUrl` into `U` (against
 `ViewSources::base_url`, as the fetcher would) and calls `fetchResource(U)` —
 `bobcat-source`'s `BundleInstaller` registers the card through
 `ContainerSources`, its `root` at `<U>/root.js`, its StyleInfo at
 `<U>/style-info.css` and its BTS boot at `U#background-thread`, before the
 fetch settles — and when it settles (a probe hit's `true` in a microtask, a `Future` id through
-its `then`) creates a `ShadowRealm`, imports `bobcat:frame-boot`'s `boot`, `dispose`,
+its `then`), once no card the frame let go of still owes its last list,
+creates a `ShadowRealm`, imports `bobcat:frame-boot`'s `boot`, `dispose`,
 `updateData` and `updateGlobalProps`, and calls `boot(frameId, U, data,
 globalProps, JSON.stringify(SystemInfo), __BobcatNativeModuleTable())` with
 the frame's `data` and `global-props` as they stand then. The frame keeps
@@ -1724,14 +1733,37 @@ root is reported and boot still renders), `__BobcatProcessInitData`,
 data, backgroundThreadURL(U))` — the card's own BTS, which the child creates
 and owns, so its messages are delivered to the child —, `__BobcatRenderPage`,
 and a flush queued one microtask later, as the page boot queues its own. It
-answers `false` for a failure it already reported. Its `dispose()` lets go of
-every card its own frames loaded (`__BobcatCloseFrames`), then starts
-`__BobcatDispose()` — `__DestroyLifetime` and the BTS's `dispose`, whose app
-cleanup (ReactLynx's `destroyCard`, unmount effects) runs before the BTS
-acknowledges and the Worker is terminated — and calls `closeRealm()` only once
-that settles. It returns at once: the parent's `resetFrame` follows without
-waiting, freeing the old card's page, a new `src` boots into the fresh one,
-and the old child is
+answers `false` for a failure it already reported. **Letting go of a card
+sends its last `disexposure` list first** (user ruling 2026-10-20, option
+A). `teardown` calls the child's `dispose(done)` with a `done` of the
+frame's own (a wrapped function crosses the boundary), and `done` runs
+`resetFrame(frameId)`, which frees the old card's elements with their
+stopped marks, so the next card starts with nothing stopped, then whatever
+waited for the reset. The child's `dispose` stops its own exposure with
+`sendEvent` — `bobcat:element`'s `__BobcatSwitchExposure(false, true)`,
+`switchExposure(0, 1, <the ids of every element this realm registered>)`,
+which also stops each element it registers from then on — which answers
+how many records it queued, and lets go of every card its own frames
+loaded (`__BobcatCloseFrames(onClosed)`, which calls back once each of them,
+and each card a frame of this realm let go of earlier whose list is still
+owed, is done). When the stop answered 0 and no such card waits, all of it
+happens inside `dispose`, as before: `__BobcatDispose()` —
+`__DestroyLifetime` and the BTS's `dispose`, whose app cleanup (ReactLynx's
+`destroyCard`, unmount effects) runs before the BTS acknowledges and the
+Worker is terminated — then `done`, so the parent's `resetFrame` runs at
+once; `closeRealm()` follows once the BTS answered. Otherwise both wait one
+main-thread entry: the stop's records are dispatched at the card's elements,
+still live because nothing was reset, by the host's next intersection
+delivery entry, and `bobcat:element`'s `__BobcatAfterExposureRecords` runs
+the rest once the first flush scheduled after the stop has posted the
+card's `disexposure` list to its BTS — before `__BobcatDispose`, after which
+`sendToBackground` posts nothing. Until then the card holds every handle of
+its own with the record listener filed, so no collection frees an element
+whose record is owed, and `done` holds the frame's handle, so the frame and
+its nested page stay; the card goes on hearing what is dispatched to it
+meanwhile. A load of the frame waits for the reset, so a new `src` — fetched
+already, starting in a microtask — boots into the fresh page, never the old
+one; teardowns that pile up while one waits reset once. The old child is
 kept meanwhile because its worker runs; a BTS that never answers keeps it
 until the view ends. Once a realm's disposal has started it handles nothing
 its BTS says but the acknowledgement, as it already sends nothing, so a late
@@ -1739,15 +1771,15 @@ patch never reaches nodes `resetFrame` freed; its page root names a freed
 node from then on, which nothing on its way to `closeRealm` reads. Its own
 frames' cards close through `__BobcatCloseFrames` before the free, and their
 trees go with its page. The page's own disposal module
-(`MainThreadRuntime::begin_dispose`) closes the page's frames the same way
-before `__BobcatDispose`, so every frame card's BTS has its `dispose` queued
-on the shared worker thread ahead of the page BTS's; their acknowledgements
-are not awaited. (`bobcat:runtime` cannot import `bobcat:frame` to do this
-itself: the cycle that closes makes QuickJS leak an object when a worker's
-`import("bobcat:element")` fails to link, which aborts the runtime's
-release.) A frame inside a
-nested card that the nested card disconnects without letting go of its
-handle keeps its card: the connection calls reach the page realm alone. No
+(`MainThreadRuntime::begin_dispose`) closes the page's frames the same way,
+with no callback, before `__BobcatDispose`, so every frame card with nothing
+exposed has its BTS `dispose` queued on the shared worker thread ahead of
+the page BTS's; their acknowledgements are not awaited, and a card that owes
+a last list waits for a delivery entry the ending view may never run, so its
+BTS `dispose` may never be posted. (`bobcat:runtime` cannot import
+`bobcat:frame` to do this itself: the cycle that closes makes QuickJS leak
+an object when a worker's `import("bobcat:element")` fails to link, which
+aborts the runtime's release.) No
 `load` event and no frame methods beyond the shared base set (native's
 surface; user ruling 2026-10-15). **Events reach the card in its own realm**
 (user rulings 2026-10-16, web-core's catch and keyboard; 2026-10-18, scheme
@@ -1776,9 +1808,11 @@ card's node (`scroll`, image `load`/`error`, `uiappear`) end at the frame's
 shadow root and reach only the card. The realms a dispatch calls are fixed
 before its walk, so a frame an earlier listener removed still has its card
 called in that dispatch; its `closeRealm` follows the disconnection in a
-later entry. A frame an earlier listener gave a new `src` frees the old
-card's page inside that listener, and with it every registration the card
-held, so the card is skipped (`docs/tracking/deviations.md`, `<frame>`). The card's BTS is a BTS like the page's, on the group's
+later entry. A frame an earlier listener gave a new `src` whose card has
+nothing exposed frees the old card's page inside that listener, and with it
+every registration the card held, so the card is skipped; one whose card
+owes a last list keeps that page until the list is sent, so the card is
+still called (`docs/tracking/deviations.md`, `<frame>`). The card's BTS is a BTS like the page's, on the group's
 worker runtime, with the parent's `SystemInfo`; it shares the group's
 `sharedData` with every other BTS and has the view's `NativeModules` (both
 native's, where web-core gives a frame its own `sharedData` and none; user
@@ -2136,7 +2170,9 @@ intersection delivery entry (`notify_intersection_observers`) dispatches
 each `uiappear`/`uidisappear` (non-bubbling, detail from the target's own
 attributes), then, for each change that has an `exposure-id`, one
 `bobcat:exposure` event at the element: non-bubbling, not composed, with the
-extras `exposureID`, `exposureScene` and `appeared`. The record dispatches
+extras `exposureID`, `exposureScene` and `appeared`. The records a
+`uiappear`/`uidisappear` listener queued — a stop, an `exposure-id` write —
+join that entry's own. The record dispatches
 run without a checkpoint of their own (`Checkpoint::Deferred`), and the
 entry then checkpoints each realm it called once, so the record listener
 (`exposureRecordListener`) queues web-core's record for each element and one
@@ -2145,11 +2181,40 @@ promise job (`flushExposureRecords`) sends one `exposure` and then one
 `__BobcatSendExposureRecords` to that realm's BTS `GlobalEventEmitter`,
 web-core's record shape and order. The realm holding the element's handle is
 the one with the row, so a frame card's records reach the card realm and its
-own BTS, and a freed element is sent no record. Four user rulings
-(2026-10-11): the geometry is the primitive's (viewport root, clipped through
-every clipping ancestor, the ratio over the finally visible area), ui margins
-are gated by the switch as documented and as native does, `lynx.stopExposure`
-drops every observer and `resumeExposure` re-observes (native's semantics, with
+own BTS, and a freed element is sent no record. **The switch is per card,
+over the realm's own element list** (user rulings 2026-10-16, native's per
+card switch, and 2026-10-20: which elements are a card's is its realm's
+knowledge, so Rust keeps no scope): `switchExposure(on, sendEvent, ids)`
+takes the comma-joined node ids of the elements the calling realm
+registered (`childElementIds`'s list encoding, `""` for none), and
+`Exposure` keeps one stopped mark per registration. `bobcat:element` keeps
+the realm's registered set (the elements it filed the record listener on,
+in filing order, an id leaving with its listener or its collected handle)
+and whether the realm is stopped; `__BobcatSwitchExposure(on, sendEvent)`
+records that and hands the host the set, and `lynx.stopExposure({sendEvent})`
+/ `resumeExposure()` on either thread are `switchExposure(0, sendEvent, ids)`
+/ `switchExposure(1, 0, ids)` through it, so the page's stop leaves every
+card detected and a card's stop leaves the page and every other card, its
+own cards included. An element the realm registers while stopped is
+stopped right after its listener is filed (`switchExposure(0, 0, id)`), so
+it is not detected until the resume. A stop marks each listed registration
+stopped — its observer stays armed and `Exposure`'s handler ignores what it
+reports — and with `sendEvent` queues one `disexposure` record per listed
+exposed element and forgets it as exposed, whatever an earlier stop did
+(native sends its exposed set on every stop); a resume clears the mark of
+each listed stopped registration and re-arms it from its attributes, so
+what is visible then and not recorded as exposed appears again, and leaves
+a listed running one alone. An id that names no registered element — never
+registered, unregistered, freed — is skipped. The member answers the number
+of records it queued — those with an `exposure-id`, `0` without `sendEvent`,
+for a resume, or with nothing exposed — which is what a card let go of reads
+to decide whether its last list owes a delivery entry (the `frame`
+paragraphs above). An element freed while stopped is let go of at its free,
+sending nothing, as one freed while running is. Four user rulings (2026-10-11): the
+geometry is the primitive's (viewport root, clipped through every clipping
+ancestor, the ratio over the finally visible area), ui margins are gated by
+the switch as documented and as native does, `lynx.stopExposure` stops
+detection and `resumeExposure` re-observes (native's semantics, with
 `sendEvent` defaulting to true), and delivery is one batch per update with no
 timer. The defaults where the references differ are in
 `docs/tracking/deviations.md`.
@@ -2339,7 +2404,8 @@ typewriter, truncation and selection are deferred),
 `page[part=page]`, which the UA sheet sizes 100% of the frame and which
 belongs to the card rendered under it (`reset_frame` frees it and builds the
 next card's) — no shadow sheet and no slot, so light children never render — whose `connected_callback`/`disconnected_callback` queue
-`ComponentEvent::Frame` for `bobcat:frame`'s connection exports,
+`ComponentEvent::Frame`, which the runtime dispatches at the frame as the
+internal `bobcat:frameconnected`/`bobcat:framedisconnected` events,
 `display: flex; contain: strict` whatever `defaultDisplayLinear` says,
 relaxed to `inline-size layout paint style` by `auto-height` and to
 `layout paint style` by `auto-width` (UA attribute selectors; `preset-*`

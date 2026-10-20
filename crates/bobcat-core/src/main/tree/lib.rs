@@ -207,8 +207,8 @@ pub(super) fn element_children(
 
 /// One event a component owes script, at the element the component belongs
 /// to. None of them bubbles; a [`ComponentEvent::Detailed`] alone is
-/// composed. A [`ComponentEvent::Frame`] is the one that script does not
-/// hear as an event: it is a call into `bobcat:frame`.
+/// composed. A [`ComponentEvent::Frame`] is dispatched under an internal
+/// name, which only `bobcat:element`'s own listener on a `frame` hears.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ComponentEvent {
     /// An `<image>`'s or `<svg>`'s own source settled: `load`, which carries

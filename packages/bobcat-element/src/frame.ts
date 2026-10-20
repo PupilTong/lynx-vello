@@ -11,9 +11,14 @@
 //   `src` to a frame's node;
 // - `frameDataChanged`, which it calls after it has written `data` or
 //   `global-props`, with the text the attribute now holds;
-// - `__BobcatFrameConnected` and `__BobcatFrameDisconnected`, which the host
-//   calls in the page realm, one call per connection and disconnection the
-//   custom element queued, out of the mutation that caused it.
+// - `frameConnectionChanged`, which `bobcat:element`'s own listener calls
+//   for each `bobcat:frameconnected` and `bobcat:framedisconnected` event the
+//   host dispatches at the frame, one per connection and disconnection the
+//   custom element queued, out of the mutation that caused it. The listener
+//   table invites the realm that holds the frame's handle, so a frame a card
+//   created is that card's to load and let go of, at any depth, as each
+//   web-core nested `lynx-view` hears its own `connectedCallback` and
+//   `disconnectedCallback`.
 //
 // The steps:
 //
@@ -69,19 +74,29 @@
 //    module's `FinalizationRegistry`, so no orphan child is left running on
 //    its timers.
 //
-// Letting go (`teardown`) is two calls in order: the child's `dispose`, and
-// `resetFrame(frameId)`, which frees the nested page with everything under
-// it and the sheets on the frame's shadow root at once, and builds the next
-// card's page. The old card's listener registrations and exposure
-// registrations go with its nodes, so no dispatch calls it again for a name
-// it held on them. The child's `dispose` lets
-// go of the frames its own card loaded and starts its card's disposal: the
+// Letting go (`teardown`) is the child's `dispose`, handed a `done` the child
+// calls once its card's last `disexposure` list is posted to its BTS — at
+// once when its exposure stop queued nothing, or after the host's next
+// intersection delivery entry dispatched those records at the card's
+// elements, which are still live because the nested page is not reset
+// before — and then, in `done`, `resetFrame(frameId)`, which frees the
+// nested page with everything under it and the sheets on the frame's shadow
+// root, and builds the next card's page. The old card's listener
+// registrations and exposure registrations, the ones its stop left stopped
+// included, go with its nodes, so no dispatch calls it again for a name it
+// held on them, and the next card starts with nothing stopped, in a realm
+// of its own. Until `done` the
+// frame's handle is held by it, so the nested page stays, and a load of the
+// frame waits: a new `src`'s card, fetched or not, boots only into the fresh
+// page. The child's `dispose` lets go of the frames its own card loaded,
+// waiting for their last lists too, and starts its card's disposal: the
 // card's BTS runs its app cleanup and acknowledges, the child terminates the
 // Worker, and only then calls `closeRealm`. Until then the child stays, for
 // the host keeps a realm whose worker still runs; it is freed outside every
 // JavaScript call once it closed. The frame keeps its `src`, its `data` and
 // its `global-props`, which the next boot reads, and a new `src` boots into
-// the fresh nested page without waiting for the old card's BTS.
+// the fresh nested page without waiting for the old card's BTS to
+// acknowledge.
 //
 // Every step checks that the frame still wants this load: a later `src` or a
 // teardown bumps the frame's generation, and a fetch or an import that
@@ -97,16 +112,14 @@
 //
 // The per-frame state lives on the handle, under a symbol of this module,
 // for the reason every per-handle record in `bobcat:element` does: QuickJS's
-// `WeakMap` holds its values strongly. The host's calls name the frame by
-// node id, which `bobcat:element`'s handle table resolves; a frame whose
-// handle this realm does not hold is nothing to this realm. The states with a
-// load started are also in `loaded`, for `__BobcatCloseFrames`; a state holds
-// no handle, so neither keeps one alive.
+// `WeakMap` holds its values strongly. Every input arrives with the handle,
+// so a frame whose handle another realm holds is nothing to this realm. The
+// states with a load started are also in `loaded`, and those whose nested
+// page waits for a closed card's last list in `owing`, both for
+// `__BobcatCloseFrames`; a state holds no handle, so neither keeps one
+// alive.
 
 import { fetchResource, resetFrame, resolveUrl } from "bobcat-internal:host";
-// Read only when the host calls in, never as this module evaluates:
-// `bobcat:element` imports this module.
-import { __BobcatHandleOf } from "bobcat:element";
 import { reportError } from "bobcat:diagnostics";
 import { Future } from "bobcat:future";
 // Read when a load starts, never as this module evaluates: `bobcat:runtime`
@@ -123,8 +136,12 @@ type Boot = (
   nativeModuleTable: string,
 ) => boolean;
 
-/** `bobcat:frame-boot`'s `dispose`, as the child's wrapped function. */
-type Dispose = () => void;
+/**
+ * `bobcat:frame-boot`'s `dispose`, as the child's wrapped function: `done`,
+ * which crosses as a wrapped function of this realm, is called once the
+ * card's last exposure list is posted.
+ */
+type Dispose = (done: () => void) => void;
 
 /**
  * `bobcat:frame-boot`'s `updateData` or `updateGlobalProps`, as the child's
@@ -155,6 +172,13 @@ interface FrameState {
   updateData: Update | undefined;
   /** The current child's `updateGlobalProps`, once it booted. */
   updateGlobalProps: Update | undefined;
+  /**
+   * The cards this frame let go of whose last exposure list is still owed:
+   * while there is one, the nested page is not reset and no load starts.
+   */
+  owed: number;
+  /** What waits for the reset: a load's start, a realm's `__BobcatCloseFrames`. */
+  afterReset: (() => void)[];
 }
 
 const stateSymbol = Symbol("frameState");
@@ -166,18 +190,16 @@ interface FrameHandle {
 /** Every state with a load started and not torn down. */
 const loaded: Set<FrameState> = new Set();
 
-/** A collected frame handle's card goes with it. */
-const collected = new FinalizationRegistry((state: FrameState) => {
-  close(state);
-});
+/** Every state whose nested page waits for a closed card's last list. */
+const owing: Set<FrameState> = new Set();
 
 /**
- * The state of the frame `frameId`, if this realm holds its handle and it was
- * ever given a `src`, a `data` or a `global-props`.
+ * A collected frame handle's card goes with it. The frame is freed with its
+ * handle, its nested page with it, so nothing is reset.
  */
-function stateOf(frameId: number): FrameState | undefined {
-  return (__BobcatHandleOf(frameId) as FrameHandle | undefined)?.[stateSymbol];
-}
+const collected = new FinalizationRegistry((state: FrameState) => {
+  close(state, () => undefined);
+});
 
 /**
  * The state of the frame `handle`, made on the first write that needs one —
@@ -198,6 +220,8 @@ function stateFor(handle: object): FrameState {
       globalProps: "{}",
       updateData: undefined,
       updateGlobalProps: undefined,
+      owed: 0,
+      afterReset: [],
     };
     frame[stateSymbol] = state;
     collected.register(handle, state);
@@ -214,7 +238,7 @@ export function frameSourceChanged(handle: object, frameId: number, src: string 
   if (src === null || src === "") return undefined;
   const state = stateFor(handle);
   if (src === state.src) return undefined;
-  if (state.src !== null) teardown(frameId, state);
+  if (state.src !== null) teardown(handle, frameId, state);
   state.src = src;
   load(frameId, state, src);
   return undefined;
@@ -277,32 +301,50 @@ function isPlainObjectText(json: string): boolean {
 }
 
 /**
- * The host's: the frame `frameId` was connected. Loads its `src` again when
- * nothing is loaded or loading — after a disconnection let go of it.
+ * The frame `handle` (node `frameId`) was connected (`connected`) or
+ * disconnected: `bobcat:element`'s listener for the host's
+ * `bobcat:frameconnected`/`bobcat:framedisconnected` events. A connection
+ * loads its `src` again when nothing is loaded or loading — after a
+ * disconnection let go of it; a disconnection lets go of its card.
  */
-export function __BobcatFrameConnected(frameId: number): undefined {
-  const state = stateOf(frameId);
-  if (state !== undefined && state.src !== null && !state.loaded) load(frameId, state, state.src);
-  return undefined;
-}
-
-/** The host's: the frame `frameId` was disconnected. Lets go of its card. */
-export function __BobcatFrameDisconnected(frameId: number): undefined {
-  const state = stateOf(frameId);
-  if (state !== undefined && state.loaded) teardown(frameId, state);
+export function frameConnectionChanged(handle: object, frameId: number, connected: boolean): undefined {
+  const state = (handle as FrameHandle)[stateSymbol];
+  if (state === undefined) return undefined;
+  if (connected) {
+    if (state.src !== null && !state.loaded) load(frameId, state, state.src);
+  } else if (state.loaded) {
+    teardown(handle, frameId, state);
+  }
   return undefined;
 }
 
 /**
  * Lets go of every card a frame of this realm holds, without touching the
- * document. Whoever disposes of this realm calls it before
- * `__BobcatDispose` — the page's disposal module `bobcat-core` writes as the
- * view ends, and `bobcat:frame-boot`'s `dispose` before a frame's card's
- * realm closes, whose nested page the parent's `resetFrame` frees whole — so
- * each card's BTS has its `dispose` queued ahead of this realm's own BTS.
+ * document, and calls `onClosed` once every one of them, and every card
+ * this realm let go of earlier whose last list is still owed, has posted
+ * its last exposure list — at once when none waits for a delivery.
+ * Whoever disposes of this realm calls it before `__BobcatDispose` — the
+ * page's disposal module `bobcat-core` writes as the view ends, with no
+ * `onClosed`, and `bobcat:frame-boot`'s `dispose` before a frame's card's
+ * realm closes, whose nested page the parent's `resetFrame` frees whole, so
+ * it waits — and each card's BTS has its `dispose` queued ahead of this
+ * realm's own BTS.
  */
-export function __BobcatCloseFrames(): undefined {
-  for (const state of [...loaded]) close(state);
+export function __BobcatCloseFrames(onClosed?: () => void): undefined {
+  let pending = 1;
+  const arrive = () => {
+    pending -= 1;
+    if (pending === 0) onClosed?.();
+  };
+  for (const state of [...loaded]) {
+    pending += 1;
+    close(state, arrive);
+  }
+  for (const state of owing) {
+    pending += 1;
+    state.afterReset.push(arrive);
+  }
+  arrive();
   return undefined;
 }
 
@@ -327,8 +369,13 @@ function load(frameId: number, state: FrameState, src: string): void {
     report(src, error);
     return;
   }
+  // A card let go of may still owe its last list, its nested page not yet
+  // reset: the start waits for the reset, so the new card boots into the
+  // fresh page.
   const start = () => {
-    if (current()) startFrame(state, frameId, src, url, current);
+    if (!current()) return;
+    if (state.owed > 0) state.afterReset.push(start);
+    else startFrame(state, frameId, src, url, current);
   };
   if (fetched === true) {
     void Promise.resolve().then(start);
@@ -389,28 +436,43 @@ function startFrame(
 }
 
 /**
- * Lets go of the frame's card: starts its disposal, then frees its nested
- * page with what it built there and the sheets it mounted on the frame's
- * shadow root, and builds the next card's page, without waiting for the
- * card's BTS to acknowledge. The frame keeps
- * its `src`, which a connection loads again, and its `data` and
+ * Lets go of the frame's card: starts its disposal and, once the card has
+ * posted its last exposure list, frees its nested page with what it built
+ * there and the sheets it mounted on the frame's shadow root, builds the
+ * next card's page, and runs what waited for the reset — without waiting
+ * for the card's BTS to acknowledge. Until then `frame`, the handle, is
+ * held, so the frame and its nested page stay. A teardown while an earlier
+ * one still waits resets once, after both. The
+ * frame keeps its `src`, which a connection loads again, and its `data` and
  * `global-props`, which that load boots with.
  */
-function teardown(frameId: number, state: FrameState): void {
-  close(state);
-  try {
-    resetFrame(frameId);
-  } catch (error) {
-    report(state.src ?? "", error);
-  }
+function teardown(frame: object, frameId: number, state: FrameState): void {
+  state.owed += 1;
+  owing.add(state);
+  close(state, () => {
+    // Held until here: the frame, and the card's elements under it, stay
+    // while the card's last records are dispatched.
+    void frame;
+    state.owed -= 1;
+    if (state.owed > 0) return;
+    owing.delete(state);
+    try {
+      resetFrame(frameId);
+    } catch (error) {
+      report(state.src ?? "", error);
+    }
+    for (const waiting of state.afterReset.splice(0)) waiting();
+  });
 }
 
 /**
  * Makes every load of the frame stale and lets go of the realm it created:
- * the child's `dispose`, which closes the realm once the card's BTS has
- * acknowledged its disposal.
+ * the child's `dispose`, which calls `done` once its card's last exposure
+ * list is posted and closes the realm once the card's BTS has acknowledged
+ * its disposal. `done` runs once, at once when there is no child to dispose
+ * of or its `dispose` throws.
  */
-function close(state: FrameState): void {
+function close(state: FrameState, done: () => void): void {
   state.generation += 1;
   state.loaded = false;
   loaded.delete(state);
@@ -419,11 +481,21 @@ function close(state: FrameState): void {
   state.updateData = undefined;
   state.updateGlobalProps = undefined;
   state.realm = undefined;
-  if (dispose === undefined) return;
+  let called = false;
+  const once = () => {
+    if (called) return;
+    called = true;
+    done();
+  };
+  if (dispose === undefined) {
+    once();
+    return;
+  }
   try {
-    dispose();
+    dispose(once);
   } catch (error) {
     report(state.src ?? "", error);
+    once();
   }
 }
 

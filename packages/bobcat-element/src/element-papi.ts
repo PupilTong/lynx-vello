@@ -22,16 +22,17 @@ import {
   supportsStyleProperty,
   queryElementIds,
   swapElement,
+  switchExposure,
   tagName,
 } from "bobcat-internal:host";
 import type { NodeQueryRequest, QueryNode } from "bobcat:selector-query";
 import { __BobcatPublishEvent, __BobcatSendExposureRecords } from "bobcat:runtime";
 import { splitRecord } from "bobcat:record";
-// Read only when a frame's `src`, `data` or `global-props` is written, never
-// as this module evaluates: `bobcat:frame` imports `bobcat:runtime`, which
-// imports this module, so the cycle is safe exactly because nothing crosses
-// it at evaluation.
-import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
+// Read only when a frame's `src`, `data` or `global-props` is written, or its
+// connection changes, never as this module evaluates: `bobcat:frame` imports
+// `bobcat:runtime`, which imports this module, so the cycle is safe exactly
+// because nothing crosses it at evaluation.
+import { frameConnectionChanged, frameDataChanged, frameSourceChanged } from "bobcat:frame";
 
 // The Lynx Element PAPI runtime.
 //
@@ -112,7 +113,13 @@ import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 // after the native write, to `bobcat:frame`, which loads that card into a
 // `ShadowRealm` that renders under the frame's nested page; so are its
 // `data` and `global-props`, as JSON text, which that card boots with or
-// takes as an update. In that child,
+// takes as an update. The handle also gets this file's own listener for
+// the two internal events the host dispatches at a frame as it is
+// connected and disconnected, `bobcat:frameconnected` and
+// `bobcat:framedisconnected`, which hand the change to `bobcat:frame`; so
+// the listener table invites the realm that holds the frame's handle, a
+// card's own frames included, and no app can name, list or remove that
+// listener. In that child,
 // `__CreatePage` answers the nested page: `bobcat:frame-boot` names it with
 // `__BobcatUsePageRoot` before the card runs. Native's `FiberCreateFrame`
 // (`lynx/core/runtime/lepus/bindings/renderer_functions.cc`) and web-core's
@@ -298,7 +305,18 @@ import { frameDataChanged, frameSourceChanged } from "bobcat:frame";
 // one microtask checkpoint, and one promise job sends them as one
 // `exposure` list and then one `disexposure` list through `bobcat:runtime`
 // ([`queueExposureRecord`]). A freed element is sent no record: nothing is
-// left to dispatch at.
+// left to dispatch at. A frame's card let go of waits for its next flush
+// before its BTS is disposed of ([`__BobcatAfterExposureRecords`]), so the
+// last `disexposure` list its stop queued reaches that BTS first.
+//
+// The elements this file filed that listener on are this realm's
+// registered elements, and they are what its exposure switch reaches
+// ([`__BobcatSwitchExposure`]): `lynx.stopExposure` and `resumeExposure`
+// hand the host their ids, which only this realm knows, so a frame's card
+// stops its own elements and the page its own (user ruling 2026-10-20). The
+// host keeps one stopped mark per element; this file keeps whether the
+// realm is stopped, and stops an element it registers meanwhile right after
+// filing its listener, so the element waits for the resume.
 //
 // # `__AddEvent`, the other registration form
 //
@@ -638,8 +656,15 @@ interface ExposureState {
   exposed: boolean;
 }
 
+/**
+ * Marks a `frame` element's handle and files this file's listener for the
+ * frame's connection and disconnection on it ([`frameConnectionListener`]).
+ */
 function markFrame(handle: object): object {
-  (handle as Handle)[frameSymbol] = true;
+  const frame = handle as Handle;
+  frame[frameSymbol] = true;
+  addListener(frame, FRAME_CONNECTED_EVENT, frameConnectionListener, undefined);
+  addListener(frame, FRAME_DISCONNECTED_EVENT, frameConnectionListener, undefined);
   return handle;
 }
 
@@ -782,6 +807,7 @@ const handlesByNodeId: Map<number, WeakRef<Handle>> = new Map();
 const registry = new FinalizationRegistry(
   (collected: Collected) => {
     handlesByNodeId.delete(collected.nodeId);
+    exposureRegistered.delete(collected.nodeId);
     for (const name of collected.kinds?.keys() ?? []) {
       forgetGlobalNode(name, collected.nodeId);
     }
@@ -885,8 +911,9 @@ function handleOf(nodeId: number): Handle | undefined {
 }
 
 /**
- * The live handle this realm holds for `nodeId`, or undefined: how
- * `bobcat:frame` finds the frame the host's connection calls name.
+ * The live handle this realm holds for `nodeId`, or undefined: the realm's
+ * handle index, read by `bobcat-core`'s tests to name an element a script
+ * created.
  */
 export function __BobcatHandleOf(nodeId: number): object | undefined {
   return handleOf(nodeId);
@@ -3542,12 +3569,70 @@ function syncExposureListener(handle: Handle): undefined {
     if (state === undefined) {
       handle[exposureSymbol] = { exposed: false };
       addListener(handle, EXPOSURE_RECORD_EVENT, exposureRecordListener, undefined);
+      const nodeId = nodeIdOf(handle);
+      exposureRegistered.add(nodeId);
+      // Registered while this realm's exposure is stopped: the host has it
+      // registered and running now, so it is stopped at once, before any
+      // update can report it, and waits for the resume.
+      if (exposureStopped) switchExposure(0, 0, String(nodeId));
     }
   } else if (state !== undefined && !state.exposed) {
     delete handle[exposureSymbol];
     removeListener(handle, EXPOSURE_RECORD_EVENT, exposureRecordListener, undefined);
+    exposureRegistered.delete(nodeIdOf(handle));
   }
   return undefined;
+}
+
+/**
+ * The elements this realm has its exposure record listener filed on, by
+ * node id, in the order it filed it: the ones the host has registered for
+ * this realm, which its exposure switch lists ([`__BobcatSwitchExposure`]).
+ * An id leaves as its listener goes and as its handle is collected.
+ */
+const exposureRegistered: Set<number> = new Set();
+
+/**
+ * Whether this realm's exposure is stopped: between a
+ * [`__BobcatSwitchExposure`] that stopped it and one that resumes it. An
+ * element registered meanwhile is stopped as it is registered.
+ */
+let exposureStopped = false;
+
+/**
+ * The live handles of [`exposureRegistered`], in its order. An id whose
+ * handle has died is dropped on the way past: its element is about to be
+ * freed, and a record dispatched at it would reach no handle here.
+ */
+function registeredExposureHandles(): Handle[] {
+  const handles: Handle[] = [];
+  for (const nodeId of exposureRegistered) {
+    const handle = handleOf(nodeId);
+    if (handle === undefined) exposureRegistered.delete(nodeId);
+    else handles.push(handle);
+  }
+  return handles;
+}
+
+/**
+ * This realm's exposure switch: `lynx.stopExposure({sendEvent})` (`on`
+ * false) and `lynx.resumeExposure()` (`on` true), from either thread, and
+ * `bobcat:frame-boot`'s `dispose`, which stops its card with `sendEvent`.
+ *
+ * It records whether the realm is stopped and hands the host
+ * `switchExposure` with the ids of every element this realm registered,
+ * comma-joined — its own elements and no other realm's, so a frame's card
+ * stops its card alone and the page leaves every card running, as both
+ * references keep one switch per card (web-core's
+ * `createNativeModules.ts:19-30`, native's `LynxExposureModule.java:22-47`).
+ * `sendEvent` is read by a stop alone. Answers what the host answers: how
+ * many `disexposure` records the stop queued, which the host's next
+ * intersection delivery entry dispatches at their elements; 0 for a resume.
+ */
+export function __BobcatSwitchExposure(on: boolean, sendEvent: boolean): number {
+  exposureStopped = !on;
+  const ids = registeredExposureHandles().map(nodeIdOf).join(",");
+  return switchExposure(on ? 1 : 0, !on && sendEvent ? 1 : 0, ids);
 }
 
 /**
@@ -3599,6 +3684,39 @@ function exposureRecordListener(event: DispatchedEvent): undefined {
 }
 
 /**
+ * The internal events the host dispatches at a `frame` as it is connected
+ * and disconnected — its custom element's `connectedCallback` and
+ * `disconnectedCallback` — not bubbling, not composed, with no detail. Each
+ * `frame` handle has [`frameConnectionListener`] filed for both from its
+ * creation ([`markFrame`]), so the realm that holds the handle is the one
+ * the listener table invites, a frame inside a card's tree and a detached
+ * frame included. No app files these names: nothing reserves them, and no
+ * app knows them.
+ */
+const FRAME_CONNECTED_EVENT = "bobcat:frameconnected";
+const FRAME_DISCONNECTED_EVENT = "bobcat:framedisconnected";
+
+/**
+ * The one listener every `frame` files for its connection events: one
+ * function rather than a closure per frame, so it holds no frame, and
+ * identifies its frame by the event's `currentTarget`. It hands the change
+ * to `bobcat:frame`, which loads the frame's card on a connection and lets
+ * go of it on a disconnection.
+ */
+function frameConnectionListener(event: DispatchedEvent): undefined {
+  const current = event.currentTarget;
+  if (current === null) {
+    return undefined;
+  }
+  frameConnectionChanged(
+    current.elementRefptr,
+    current.uid,
+    event.type === FRAME_CONNECTED_EVENT,
+  );
+  return undefined;
+}
+
+/**
  * The records queued since the last flush, one list per global event, in
  * the order their events were dispatched.
  */
@@ -3606,6 +3724,15 @@ let exposureRecords: ExposureRecord[] = [];
 let disexposureRecords: ExposureRecord[] = [];
 /** Whether a flush of the two lists is scheduled. */
 let exposureFlushScheduled = false;
+
+/** How many flushes have been scheduled in this realm: the last one's number. */
+let exposureFlushesScheduled = 0;
+
+/**
+ * The callbacks waiting for a flush: each with the number of the first
+ * flush it waits for, and the handles it holds until then.
+ */
+let exposureFlushWaiters: { after: number; callback: () => void; held: Handle[] }[] = [];
 
 /**
  * Appends web-core's entry for one element to `list`, and schedules the one
@@ -3642,19 +3769,53 @@ function queueExposureRecord(
   });
   if (!exposureFlushScheduled) {
     exposureFlushScheduled = true;
+    exposureFlushesScheduled += 1;
     void Promise.resolve().then(flushExposureRecords);
   }
   return undefined;
 }
 
-/** Hands the queued lists to `bobcat:runtime` and starts two empty ones. */
+/**
+ * Hands the queued lists to `bobcat:runtime` and starts two empty ones; then
+ * runs every [`__BobcatAfterExposureRecords`] callback waiting for this
+ * flush, whatever the send did.
+ */
 function flushExposureRecords(): undefined {
   const exposure = exposureRecords;
   const disexposure = disexposureRecords;
   exposureRecords = [];
   disexposureRecords = [];
   exposureFlushScheduled = false;
-  __BobcatSendExposureRecords(exposure, disexposure);
+  const flush = exposureFlushesScheduled;
+  try {
+    __BobcatSendExposureRecords(exposure, disexposure);
+  } finally {
+    const due = exposureFlushWaiters.filter((waiter) => waiter.after <= flush);
+    exposureFlushWaiters = exposureFlushWaiters.filter((waiter) => waiter.after > flush);
+    for (const waiter of due) waiter.callback();
+  }
+  return undefined;
+}
+
+/**
+ * Runs `callback` once this realm's next flush of exposure records — the
+ * first one scheduled after this call — has handed its lists to
+ * `bobcat:runtime`, which posts them to the realm's BTS.
+ *
+ * `bobcat:frame-boot`'s `dispose` calls it after its card's stop queued
+ * records ([`__BobcatSwitchExposure`] answered more than 0): the host
+ * dispatches those records at their elements in its next intersection
+ * delivery entry, whose records — the ones a `uiappear` listener queued
+ * included — are all in before the first flush that entry schedules. So
+ * `callback` runs once the card's last list is posted, and it is what
+ * disposes of the card's BTS. Until then the handle of every element this
+ * realm registered — the ones the stop listed — is held here, so no
+ * collection frees an element whose record is owed, a detached one
+ * included, and the flush the callback waits for comes.
+ */
+export function __BobcatAfterExposureRecords(callback: () => void): undefined {
+  const held = registeredExposureHandles();
+  exposureFlushWaiters.push({ after: exposureFlushesScheduled + 1, callback, held });
   return undefined;
 }
 

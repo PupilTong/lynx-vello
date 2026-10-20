@@ -22,8 +22,12 @@ import * as globalEventEmitter from "../src/global-event-emitter.ts";
 rstest.mockRequire("bobcat:global-event-emitter", () => globalEventEmitter);
 rstest.mockRequire("bobcat:selector-query", () => selectorQuery);
 const queryNodes = rstest.fn();
+// The realm's exposure switch, which lists the elements `bobcat:element`
+// registered to the host; this suite pins what each thread's `lynx` hands it.
+const switchExposure = rstest.fn();
 rstest.mockRequire("bobcat:element", () => ({
   __BobcatQueryNodes: queryNodes,
+  __BobcatSwitchExposure: switchExposure,
 }));
 
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
@@ -61,7 +65,6 @@ const preloadStyleSheet = rstest.fn();
 const adoptStyleSheet = rstest.fn();
 const reportedErrors = rstest.fn();
 const consoleMessages = rstest.fn();
-const switchExposure = rstest.fn();
 // The runtime reads the view's page data and native module table as it
 // evaluates; this view has no page data and one module, `Echo`, declaring one
 // method, `ping`.
@@ -70,7 +73,6 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   reportScriptError: reportedErrors,
   logScriptMessage: consoleMessages,
   hasStyleSheet, preloadStyleSheet, adoptStyleSheet,
-  switchExposure,
   initialProcessor: () => "",
   initData: () => undefined,
   globalProps: () => undefined,
@@ -1139,8 +1141,10 @@ describe("runtime events and diagnostics", () => {
     mts.lynx.stopExposure({});
     mts.lynx.resumeExposure();
     mts.lynx.setObserverFrameRate({forPageRect: 10, forExposureCheck: 10});
-    const fromMain = switchExposure.mock.calls.splice(0);
-    expect(fromMain).toEqual([[0, 1], [0, 0], [0, 1], [1, 1]]);
+    // `on`, then `sendEvent`, which a resume does not read.
+    expect(switchExposure.mock.calls.splice(0)).toEqual([
+      [false, true], [false, false], [false, true], [true, false],
+    ]);
 
     const start = toMain.length;
     bts.stopExposure();
@@ -1156,8 +1160,10 @@ describe("runtime events and diagnostics", () => {
       {bobcat: "runtime", method: "switchExposure", on: true, sendEvent: true},
     ]);
     for (let index = 0; index < 4; index++) await deliverToMain();
-    // The host member takes its flags as `0 | 1`, never as booleans.
-    expect(switchExposure.mock.calls).toEqual(fromMain);
+    // Each post runs the realm's own switch, as its own `lynx` does.
+    expect(switchExposure.mock.calls).toEqual([
+      [false, true], [false, false], [false, true], [true, true],
+    ]);
   });
 
   it("reports both realms' diagnostics directly, with severity, values and Error stacks", async () => {

@@ -7024,7 +7024,10 @@ fn a_drop_frees_the_element_at_once_and_retires_its_id() {
                   if (tagName(goneId) !== 'view') {
                     throw new Error('the detached element is gone before its drop');
                   }
-                  // Called directly, where a finalizer would.
+                  // Called directly, where a finalizer would. The handle
+                  // is held, so its own finalizer, which would drop the id
+                  // a second time, cannot run whenever the collector does.
+                  globalThis.goneHandle = gone;
                   dropElement(goneId);
                 };
                 ",
@@ -8098,9 +8101,10 @@ fn an_rpx_exposure_margin_resolves_against_the_viewport_width() {
 /// record event `bobcat:exposure` registers an element that has no
 /// `exposure-id` and `listenerClosed` lets it go again — the listener table
 /// is what exposure reads, and a `uiappear` row alone registers nothing —
-/// `switchExposure` stops and resumes detection, and each refuses an
-/// argument that is not its shape: a flag is `0` or `1`, as every tree
-/// member's is, and kinds are 1 to 7.
+/// `switchExposure` stops and resumes detection for the elements it lists
+/// and answers the records it queued, and each refuses an argument that is
+/// not its shape: a flag is `0` or `1`, as every tree member's is, kinds are
+/// 1 to 7, and a list is comma-joined node ids.
 #[test]
 fn the_listener_members_register_exposure_and_switch_exposure_switches_detection() {
     let (mut js, mut runtime, elements) = runtime();
@@ -8156,13 +8160,20 @@ fn the_listener_members_register_exposure_and_switch_exposure_switches_detection
         "new kinds and the element events are no change of whether the element is registered",
     );
     run("listenerClosed(view, 'uidisappear');");
-    run("switchExposure(0, 1);");
+    run("if (switchExposure(0, 1, '') !== 0) throw Error('an empty list stops nothing');");
+    run("if (switchExposure(1, 0, String(view)) !== 0) throw Error('a resume queues nothing');");
     assert_eq!(
         exposure_observer(&elements, view),
-        None,
-        "stopping drops every observer"
+        Some(first),
+        "resuming an element that is running leaves it alone"
     );
-    run("switchExposure(1, 1);");
+    run("if (switchExposure(0, 1, String(view)) !== 0) throw Error('nothing was exposed');");
+    assert_eq!(
+        exposure_observer(&elements, view),
+        Some(first),
+        "stopping keeps the observer, whose reports are ignored"
+    );
+    run("switchExposure(1, 0, `${view}`);");
     let resumed = exposure_observer(&elements, view).expect("resuming observes it again");
     assert_ne!(resumed, first, "with an observer of its own");
     run("listenerClosed(view, 'uiappear');");
@@ -8178,7 +8189,11 @@ fn the_listener_members_register_exposure_and_switch_exposure_switches_detection
         for (const [call, expected] of [
           [() => listenerOpened(view, 'uiappear', 0), 'listenerOpened expects the kinds 1 to 7 for argument 2'],
           [() => listenerOpened(view, 'uiappear', 8), 'listenerOpened expects the kinds 1 to 7 for argument 2'],
-          [() => switchExposure(1, 2), 'switchExposure expects 0 or 1 for argument 1'],
+          [() => switchExposure(1, 2, ''), 'switchExposure expects 0 or 1 for argument 1'],
+          [() => switchExposure(1, 1), 'switchExposure expects comma-joined node ids for argument 2'],
+          [() => switchExposure(1, 1, view), 'switchExposure expects comma-joined node ids for argument 2'],
+          [() => switchExposure(1, 1, `${view},`), 'switchExposure expects comma-joined node ids for argument 2'],
+          [() => switchExposure(1, 1, '-1'), 'switchExposure expects comma-joined node ids for argument 2'],
           [() => listenerOpened(-1, 'uiappear', 1), 'listenerOpened'],
           [() => listenerClosed(view, 3), 'listenerClosed'],
         ]) {
@@ -8416,15 +8431,17 @@ fn notify_exposure(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) {
     );
 }
 
-/// Runs `source` in the page realm, with `bobcat:element` and the host's
-/// `switchExposure` imported.
+/// Runs `source` in the page realm, with `bobcat:element`, the realm's
+/// `lynx` and the host's `switchExposure` imported.
 fn run_exposure_script(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime, source: &str) {
     runtime
         .evaluate_module(
             js,
             &format!(
-                "import {{ __AppendElement, __FlushElementTree, __GetPageElement, __RemoveElement,
-                     __SetAttribute, __SetInlineStyles }} from 'bobcat:element';
+                "import {{ __AddEventListener, __AppendElement, __CreateView, __FlushElementTree,
+                     __GetPageElement, __RemoveElement, __SetAttribute,
+                     __SetInlineStyles }} from 'bobcat:element';
+                 import {{ lynx }} from 'bobcat:runtime';
                  import {{ switchExposure }} from 'bobcat-internal:host';
                  const views = globalThis.views;
                  {source}"
@@ -8487,15 +8504,20 @@ fn a_change_with_an_id_is_the_record_event_at_its_element() {
 }
 
 /// `stopExposure` with `sendEvent` and an id change send records only: one
-/// `appeared: false` record per exposed element, under the id it was exposed
-/// under, and no `uidisappear`.
+/// `appeared: false` record per listed exposed element, under the id it was
+/// exposed under, and no `uidisappear`.
 #[test]
 fn a_stop_and_an_id_change_send_records_and_no_element_event() {
-    let (mut js, mut runtime, _elements, [a, b, _bare]) = exposure_records();
+    let (mut js, mut runtime, _elements, [a, b, bare]) = exposure_records();
     deliver_exposure(&mut js, &mut runtime);
     frame_lines(&mut js, &mut runtime);
 
-    run_exposure_script(&mut js, &mut runtime, "switchExposure(0, 1);");
+    let ids = format!("{a},{b},{bare}");
+    run_exposure_script(
+        &mut js,
+        &mut runtime,
+        &format!("if (switchExposure(0, 1, '{ids}') !== 2) throw Error('two records are owed');"),
+    );
     notify_exposure(&mut js, &mut runtime);
     assert_eq!(
         frame_lines(&mut js, &mut runtime),
@@ -8508,7 +8530,11 @@ fn a_stop_and_an_id_change_send_records_and_no_element_event() {
             ),
         ]
     );
-    run_exposure_script(&mut js, &mut runtime, "switchExposure(1, 1);");
+    run_exposure_script(
+        &mut js,
+        &mut runtime,
+        &format!("switchExposure(1, 0, '{ids}');"),
+    );
     deliver_exposure(&mut js, &mut runtime);
     frame_lines(&mut js, &mut runtime);
 
@@ -8524,6 +8550,76 @@ fn a_stop_and_an_id_change_send_records_and_no_element_event() {
             r#"bobcat:exposure {a} {{"exposureID":"id-a","exposureScene":"","appeared":false}}"#
         )],
         "the old id leaves before any update, with no `uidisappear`"
+    );
+}
+
+/// The realm's `lynx.stopExposure()` lists the elements it registered — the
+/// ones `bobcat:element` filed its record listener on — and stops those; an
+/// element it registers while stopped is stopped right after its listener
+/// is filed, so it is not detected, `uiappear` included, until
+/// `lynx.resumeExposure()`, which exposes it with the rest.
+#[test]
+fn the_realms_stop_reaches_what_it_registered_and_what_it_registers_while_stopped() {
+    let (mut js, mut runtime, _elements, [a, b, bare]) = exposure_records();
+    deliver_exposure(&mut js, &mut runtime);
+    frame_lines(&mut js, &mut runtime);
+    run_exposure_script(&mut js, &mut runtime, "lynx.stopExposure();");
+    notify_exposure(&mut js, &mut runtime);
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            format!(
+                r#"bobcat:exposure {a} {{"exposureID":"id-a","exposureScene":"","appeared":false}}"#
+            ),
+            format!(
+                r#"bobcat:exposure {b} {{"exposureID":"id-b","exposureScene":"feed","appeared":false}}"#
+            ),
+        ]
+    );
+
+    // Registered while stopped: an `exposure-id` files the record listener.
+    run_exposure_script(
+        &mut js,
+        &mut runtime,
+        "const late = __CreateView(0);
+         __SetInlineStyles(late, 'width:100px;height:100px');
+         __AppendElement(__GetPageElement(), late);
+         __SetAttribute(late, 'exposure-id', 'id-late');
+         __AddEventListener(late, 'bobcat:exposure', (event) => {
+           seen.push(`${event.type} ${event.target.uid} ${JSON.stringify(event.detail)}`);
+         }, {});
+         __AddEventListener(late, 'uiappear', (event) => {
+           seen.push(`${event.type} ${event.target.uid}`);
+         }, {});
+         __FlushElementTree();",
+    );
+    deliver_exposure(&mut js, &mut runtime);
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        Vec::<String>::new(),
+        "nothing of this realm is detected while it is stopped"
+    );
+
+    run_exposure_script(&mut js, &mut runtime, "lynx.resumeExposure();");
+    deliver_exposure(&mut js, &mut runtime);
+    let late = runtime.with_document(|tree| packed_node_id(tree.document_element().child_ids()[3]));
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            format!("uiappear {a}"),
+            format!("uiappear {b}"),
+            format!("uiappear {bare}"),
+            format!("uiappear {late}"),
+            format!(
+                r#"bobcat:exposure {a} {{"exposureID":"id-a","exposureScene":"","appeared":true}}"#
+            ),
+            format!(
+                r#"bobcat:exposure {b} {{"exposureID":"id-b","exposureScene":"feed","appeared":true}}"#
+            ),
+            format!(
+                r#"bobcat:exposure {late} {{"exposureID":"id-late","exposureScene":"","appeared":true}}"#
+            ),
+        ]
     );
 }
 
