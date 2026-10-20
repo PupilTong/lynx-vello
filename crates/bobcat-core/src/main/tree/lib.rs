@@ -18,7 +18,7 @@
 //! the swiper's UA shadow tree, item count, `scrollTo` UI method and events, the
 //! refresh view's UA shadow tree, its header and footer slot assignment and
 //! its `finishRefresh`, `finishLoadMore` and `autoStartRefresh` UI methods
-//! ([`refresh_view`]), the viewpager's `selectTab` UI method and events, the
+//! and its events ([`refresh_view`]), the viewpager's `selectTab` UI method and events, the
 //! `scroll-view`'s `scrollTo`, `scrollBy` and `getScrollInfo` UI methods, the `list`'s
 //! `scrollToPosition`, `scrollBy`, `getScrollContainerInfo` and
 //! `getVisibleCells` UI methods ([`list`]), both scrollers'
@@ -123,7 +123,10 @@ pub(super) const SLOT_CHANGE: &str = "slotchange";
 /// `imageTap`, the `scroll-view` and `list` components their
 /// `scrolltoupper` and `scrolltolower`, the `x-swiper` component its
 /// `scrollstart`, `change`, `scrollend` and `transition`, the `viewpager`
-/// component its `offsetchange`, `change` and `willchange`, and the `frame` component its
+/// component its `offsetchange`, `change` and `willchange`, the
+/// `x-refresh-view` component its `headershow`, `headeroffset`,
+/// `footeroffset`, `headerreleased`, `footerreleased`, `startrefresh` and
+/// `startloadmore`, and the `frame` component its
 /// connections and disconnections, for the runtime to dispatch once it is out of the
 /// JavaScript call that caused them. `autoplays` is where the `x-swiper`
 /// component keeps its autoplay timers, for the runtime to wait out and run.
@@ -139,7 +142,7 @@ pub(crate) fn new_document(
     image::define(&mut document, events.clone());
     svg::define(&mut document, events.clone());
     swiper::define(&mut document, autoplays, events.clone());
-    refresh_view::define(&mut document);
+    refresh_view::define(&mut document, events.clone());
     viewpager::define(&mut document, events.clone());
     scroll_container::define(&mut document, events.clone());
     list::define(&mut document, events.clone());
@@ -245,7 +248,9 @@ pub(crate) enum ComponentEvent {
     Image(ImageOutcome),
     /// An event whose detail is `{}`, named by the component that queued
     /// it: a `<dialog>`'s `close` and `cancel` ([`dialog`]), an
-    /// `<overlay>`'s `showoverlay` and `dismissoverlay` ([`overlay`]).
+    /// `<overlay>`'s `showoverlay` and `dismissoverlay` ([`overlay`]), an
+    /// `x-refresh-view`'s `headerreleased`, `footerreleased` and
+    /// `startloadmore` ([`refresh_view`]).
     Plain { node: NodeId, name: &'static str },
     /// A scroll container's `scroll` or `scrollend`, which the runtime
     /// queues, with the change in its offset the event reports (zero for a

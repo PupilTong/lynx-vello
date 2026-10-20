@@ -2350,6 +2350,104 @@ fn a_swiper_fires_change_from_its_contents_scroll() {
     );
 }
 
+/// An `x-refresh-view`'s `startrefresh` end to end: a painter post that
+/// moves its shadow `#container` from `#content` (170) onto the header's
+/// snap position (120) and leaves it at rest queues the kernel `scroll` and
+/// `scrollend` there, with no realm listening for either name; their
+/// delivery, which ends at the shadow root, reaches the view's component,
+/// which queues `startrefresh` at the view; and that event reaches the
+/// view's listener an entry later as `{isManual: true}`, without bubbling to
+/// the page.
+#[test]
+fn a_refresh_view_fires_startrefresh_when_its_container_rests_on_the_header() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const view = __CreateElement('x-refresh-view', 0);
+                  __SetInlineStyles(view, 'width:200px;height:400px');
+                  __AppendElement(page, view);
+                  const header = __CreateElement('x-refresh-header', 0);
+                  __SetInlineStyles(header, 'height:50px');
+                  const content = __CreateView(0);
+                  __SetInlineStyles(content, 'height:100%');
+                  const footer = __CreateElement('x-refresh-footer', 0);
+                  __SetInlineStyles(footer, 'height:50px');
+                  __AppendElement(view, header);
+                  __AppendElement(view, content);
+                  __AppendElement(view, footer);
+                  globalThis.held = [page, view];
+                  const note = (label) => ({
+                    type: 'worklet',
+                    value: {
+                      body: (event) =>
+                        seen.push(label + ':' + event.type + ':' + JSON.stringify(event.detail)),
+                    },
+                  });
+                  __AddEvent(view, 'bindEvent', 'startrefresh', note('view'));
+                  __AddEvent(page, 'bindEvent', 'startrefresh', note('page'));
+                  __FlushElementTree();
+                };
+                ",
+            "app:///refresh-view-startrefresh.js",
+        )
+        .expect("main-thread script");
+    let container = {
+        let mut tree = elements.tree();
+        let page = tree.document_element().id();
+        let view = tree.get(page).expect("the page").child_ids()[0];
+        let container = crate::main::tree::refresh_view::container(&tree, view)
+            .expect("the refresh view's `#container`");
+        // The painter's first post acknowledges the initial scroll target.
+        if let Some(serial) = tree.pending_scroll_request(container) {
+            tree.acknowledge_scroll_request(container, serial);
+        }
+        assert_eq!(
+            tree.scroll_offset(container),
+            dom::Vector2D::new(0.0, 170.0),
+            "opens on `#content`"
+        );
+        container
+    };
+
+    runtime.adopt_scroll_offsets([scroll_post(container, 120.0, true)].into_iter());
+    let rest = ComponentEvent::Scroll {
+        node: container,
+        name: "scrollend",
+        delta: dom::Vector2D::zero(),
+    };
+    assert_eq!(
+        runtime.slot.borrow().component_events.take(),
+        [queued_scroll(container, -50.0), rest],
+        "`#container`'s `scroll` and `scrollend` are owed with no realm listener for either"
+    );
+    {
+        let slot = runtime.slot.borrow();
+        slot.component_events
+            .queue_scroll(container, "scroll", dom::Vector2D::new(0.0, -50.0));
+        slot.component_events
+            .queue_scroll(container, "scrollend", dom::Vector2D::zero());
+    }
+    let failures = runtime.dispatch_component_events(&mut js_runtime);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(
+        runtime.has_component_events(),
+        "the `startrefresh` waits for an entry of its own"
+    );
+    let failures = runtime.dispatch_component_events(&mut js_runtime);
+    assert!(failures.is_empty(), "{failures:?}");
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        r#"view:startrefresh:{"isManual":true}"#,
+    );
+}
+
 /// A [`ComponentDetail::Fields`] detail reaches script as one key per pair,
 /// numbers as numbers and booleans as booleans, in the component's order:
 /// the `{current, isDragged}` shape.

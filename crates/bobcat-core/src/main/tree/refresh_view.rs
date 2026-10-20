@@ -74,8 +74,9 @@
 //! - `enable-refresh="false"`: the header generates no box and `#placeholder-top` is hidden, so
 //!   nothing can be pulled down. Any other value, or none, shows them.
 //! - `enable-loadmore="false"`: the same for the footer and `#placeholder-bot`.
-//! - `enable-auto-loadmore` and `enable-footer-rebound` only change web-core's events, which are
-//!   not implemented: no visible effect.
+//! - `enable-auto-loadmore="true"` (that value alone, as web-core compares it) also starts a load
+//!   when a finger lifts with the footer showing at all (see "Events"); no visible effect.
+//! - `enable-footer-rebound` has no effect.
 //!
 //! # Which headers and footers show
 //!
@@ -136,9 +137,59 @@
 //! the user. The two finishing methods aim at `#content`, which is always a snap position, so
 //! their smooth requests are not affected.
 //!
-//! web-core's `autoStartRefresh` also sets `_nextRefreshIsManual = false`, which only its
-//! `startrefresh` event reads. Events are not implemented here, so that flag has no reader and is
-//! not kept.
+//! Each method also moves the component's latches (see "Events"): `finishRefresh` ends the
+//! refresh and `finishLoadMore` the load, so the next rest on the header (the footer) starts one
+//! again, and `autoStartRefresh` fires `startrefresh` itself.
+//!
+//! The view keeps a `manual` flag per element, the `isManual` the next `startrefresh` reports:
+//! web-core's `_nextRefreshIsManual` (`XRefreshView.ts:24`) and iOS's `manualRefresh`. It is
+//! `true` except inside an `autoStartRefresh` call, which clears it, sends its `startrefresh`
+//! `{isManual: false}` and sets it again, as iOS's `startRefresh` sets it back after sending
+//! (`lynx/platform/darwin/ios/lynx_xelement/refresh/LynxUIRefresh.m:247-262`); web-core sets it
+//! back after its next `touchend` sent the event.
+//!
+//! # Events
+//!
+//! The component decides seven events from what `#container` and the touches on the view tell it
+//! (user ruling 2026-10-20: a Rust component reacting to W3C events, nothing reported by the
+//! painter). `#container`'s `scroll` and `scrollend` neither bubble nor are composed, so their
+//! path ends at the view's shadow root, which delivers them to the view's
+//! [`CustomElement::handle_event`] in the capture pass; the component takes them when their target
+//! is `#container` and no other node. Each event is queued at the view — not bubbling —
+//! only when a listener on the view registered for its name ([`dom::Document::has_listener`]),
+//! a `{}` detail through [`ComponentEvents::queue`] and the others through
+//! [`ComponentEvents::queue_detailed`]; the latches are recorded whether or not anything listens.
+//! Geometry is the last completed layout's, read at the delivery, and never flushed: the header's
+//! and the footer's rectangles in `#container`'s scroll coordinates ([`rect_in_scroller`]; each is
+//! a box child of `#container` through its `display: contents` slot) and `#container`'s offset.
+//!
+//! How far an end shows is native's `pullingPercent`, the length of the end inside the scrollport
+//! over its height: `percent = (header.max_y - offset.y) / header.height` — 1 with the header's
+//! start on the scrollport's start, 0 with it scrolled out (the view at rest on `#content`), above
+//! 1 while the top placeholder shows — and
+//! `footer_percent = (offset.y + scrollport.height - footer.min_y) / footer.height`. An end that
+//! generates no box (none, a later one, `enable-refresh="false"` / `enable-loadmore="false"`) or
+//! has no height fires none of its events, and a view with no box decides nothing.
+//!
+//! - `headershow` then `headeroffset`, both `{isDragging, offsetPercent}`: each `scroll` with
+//!   `percent > 0`, `offsetPercent = percent` (iOS sends both from `didUpdateShowingPrecent`,
+//!   `LynxUIRefresh.m:341-364`; web-core too, from one handler).
+//! - `footeroffset` `{isDragging, offsetPercent}`: each `scroll` with `footer_percent > 0`.
+//! - `headerreleased` `{}`: the `touchend` the view's touch count takes, with `percent >= 1` (iOS:
+//!   pulled at least the header's height, `:268-284`, before `startrefresh`).
+//! - `footerreleased` `{}`: the same `touchend`, with `footer_percent >= 1`.
+//! - `startrefresh` `{isManual}`: the `scrollend` that rests `#container` on the header's snap
+//!   position — `percent >= 1` less one CSS px of the header's height ([`LANDING_TOLERANCE`]) — and
+//!   `autoStartRefresh`, at once; `isManual` is the `manual` flag above. A refresh latches: no
+//!   second `startrefresh` fires until a rest elsewhere or `finishRefresh` ends it.
+//! - `startloadmore` `{}`: the `scrollend` that rests `#container` on the footer's snap position,
+//!   by the same tolerance, latched the same way (`finishLoadMore` ends it); and under
+//!   `enable-auto-loadmore="true"`, the counted `touchend` with `footer_percent > 0` (web-core's
+//!   footer-showing rule), which latches, so the rest on the footer that may follow adds nothing.
+//!
+//! A rest on `#content`, neither end, ends both latches. `isDragging` is whether a finger is down
+//! on the view or inside it ([`super::touches::Touches`]): web-core's touch flag, standing in for
+//! native's drag state (user ruling 2026-10-20).
 //!
 //! # Deviations and what is not implemented
 //!
@@ -149,18 +200,38 @@
 //!   (`basic-element-x-refresh-view-demo/index.css`). `docs/style-assumptions.md` §D.15 records
 //!   them, with the content children's `overscroll-behavior-y`.
 //! - The UI methods are the standard scroll-into-view rather than web-core's attribute latch;
-//!   `autoStartRefresh` is instant where web-core's is smooth; no manual/automatic refresh flag is
-//!   kept, events being absent; `autoStartRefresh` without a header moves nothing
-//!   (`docs/tracking/deviations.md`).
-//! - Every event (`startrefresh`, `headeroffset`, `startloadmore`, …).
+//!   `autoStartRefresh` is instant where web-core's is smooth; `autoStartRefresh` without a header
+//!   moves nothing (`docs/tracking/deviations.md`).
+//! - The events follow native where it and web-core differ (recorded conflicts):
+//!   - `offsetPercent` is native's `pullingPercent`, not web-core's `1 - scrollTop / height`
+//!     (`XRefreshViewEventsEmitter.ts`, `#handleScroll`), whose `scrollTop` counts from the top
+//!     placeholder, and which its `footeroffset` reuses unchanged.
+//!   - `startrefresh` fires when `#container` comes to rest on the header, and at once on
+//!     `autoStartRefresh`, as native enters its refreshing state; web-core fires it at the
+//!     `touchend` that finds the header at least 90% visible, beside `headerreleased`, so its
+//!     `autoStartRefresh` waits for the next `touchend`. `startloadmore` likewise fires at the rest
+//!     on the footer, where web-core fires it at the `touchend`.
+//!   - `headerreleased` and `footerreleased` need the end pulled its full height (`>= 1`), native's
+//!     rule; web-core's need 90% (its `IntersectionObserver` threshold), and its `footerreleased`
+//!     also fires with `startloadmore` under `enable-auto-loadmore`.
+//!   - `isDragging` is the view's touch count, not native's drag state.
+//!   - Native's `refreshstatechange` is not built; web-core has none.
+
+use std::cell::RefCell;
 
 use dom::event::{ElementEvent, EventPhase};
 use dom::scroll::{
     ScrollBehavior, ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition,
 };
 use dom::{CustomElement, MethodCall, MethodOutcome, Node, NodeId, ShadowRootMode};
+use rustc_hash::FxHashMap;
+use smallvec::smallvec;
 
-use super::{LynxDocument, SLOT_CHANGE};
+use super::scroll_container::{
+    SCROLL_END_EVENT, SCROLL_EVENT, rect_in_scroller, rendered_scroll_box,
+};
+use super::touches::{TOUCH_CANCEL, TOUCH_END, TOUCH_START, Touches};
+use super::{ComponentDetail, ComponentEvents, Field, LynxDocument, SLOT_CHANGE};
 
 /// The container tag, web-core's registered spelling.
 pub(super) const REFRESH_VIEW_TAG: &str = "x-refresh-view";
@@ -221,27 +292,350 @@ slot { display: contents; }
 :host([enable-loadmore="false"]) #placeholder-bot { display: none; }
 "#;
 
-/// Installs the `x-refresh-view` component. Must run before any element
-/// could carry the tag, [`Document::define`](dom::Document::define)'s own
-/// precondition.
-pub(super) fn define(document: &mut LynxDocument) {
-    document.define(REFRESH_VIEW_TAG, Box::new(RefreshView));
+/// The event a `scroll` of `#container` fires while the header shows.
+pub(super) const HEADER_SHOW_EVENT: &str = "headershow";
+/// The event a `scroll` of `#container` fires while the header shows, the
+/// same detail as [`HEADER_SHOW_EVENT`]'s, after it.
+pub(super) const HEADER_OFFSET_EVENT: &str = "headeroffset";
+/// The event a `scroll` of `#container` fires while the footer shows.
+pub(super) const FOOTER_OFFSET_EVENT: &str = "footeroffset";
+/// The event a finger lifting fires with the header pulled fully in.
+pub(super) const HEADER_RELEASED_EVENT: &str = "headerreleased";
+/// The event a finger lifting fires with the footer pushed fully in.
+pub(super) const FOOTER_RELEASED_EVENT: &str = "footerreleased";
+/// The event a refresh starting fires: `#container` coming to rest on the
+/// header, or `autoStartRefresh`.
+pub(super) const START_REFRESH_EVENT: &str = "startrefresh";
+/// The event a load starting fires: `#container` coming to rest on the
+/// footer, or, under `enable-auto-loadmore="true"`, a finger lifting with
+/// the footer showing.
+pub(super) const START_LOAD_MORE_EVENT: &str = "startloadmore";
+
+/// How far, in CSS px, a rest offset may stand short of the header's (the
+/// footer's) snap position and still count as resting on it. The painter
+/// settles a release onto a snap position the document computed from the
+/// same rounded layout the header's rectangle is read from, so a settled
+/// rest normally equals the position exactly; the pixel is a margin for an
+/// offset rounded anywhere between the painter's post and the document.
+const LANDING_TOLERANCE: f64 = 1.0;
+
+/// Installs the `x-refresh-view` component, which queues its events on
+/// `events`. Must run before any element could carry the tag,
+/// [`Document::define`](dom::Document::define)'s own precondition.
+pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
+    document.define(
+        REFRESH_VIEW_TAG,
+        Box::new(RefreshView {
+            events,
+            touches: Touches::default(),
+            states: RefCell::default(),
+        }),
+    );
 }
 
 /// The `x-refresh-view` component: builds the shadow tree when the element
 /// is constructed, moves the header and the footer into their named slots,
-/// and answers the three UI methods.
+/// answers the three UI methods and fires the view's events from
+/// `#container`'s `scroll` and `scrollend` and the touches on the view (the
+/// module documentation's "Events").
 ///
 /// The shadow tree is built in `constructed`, as the swiper's is: the
 /// element is new and detached then, so every child arrives as a
 /// `slotchange` at the default slot.
-struct RefreshView;
+struct RefreshView {
+    events: ComponentEvents,
+    /// The fingers down on each view, which `isDragging` reports.
+    touches: Touches,
+    /// What each view's events remember, dropped when it is freed.
+    states: RefCell<FxHashMap<NodeId, RefreshState>>,
+}
+
+/// What a refresh view's events remember between two deliveries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RefreshState {
+    /// The `isManual` the next `startrefresh` reports: iOS's
+    /// `manualRefresh` and web-core's `_nextRefreshIsManual`. `true` but
+    /// for the length of an `autoStartRefresh` call, which clears it, sends
+    /// its `startrefresh` and sets it again, as iOS's `startRefresh` does
+    /// after sending (`LynxUIRefresh.m:247-262`).
+    manual: bool,
+    /// Whether a refresh started — `#container` came to rest on the header,
+    /// or `autoStartRefresh` ran — and has not ended: a rest anywhere else
+    /// and `finishRefresh` end it. No second `startrefresh` fires meanwhile.
+    refreshing: bool,
+    /// The same for a load: a rest on the footer, or a release under
+    /// `enable-auto-loadmore`, starts it; a rest anywhere else and
+    /// `finishLoadMore` end it.
+    loading: bool,
+}
+
+impl Default for RefreshState {
+    fn default() -> Self {
+        Self {
+            manual: true,
+            refreshing: false,
+            loading: false,
+        }
+    }
+}
+
+/// How far `#container`'s scrollport shows the header and the footer, from
+/// the last completed layout and the document's offset. An end that
+/// generates no box — none assigned, a later one, or the view's
+/// `enable-refresh` / `enable-loadmore` is `"false"` — or whose height is
+/// zero is `None`, and fires nothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Pull {
+    header: Option<Shown>,
+    footer: Option<Shown>,
+}
+
+/// How far one end shows: native's `pullingPercent` (`MJRefresh`), the
+/// length of the end inside the scrollport over its height, measured from
+/// the scrollport's start for the header and from its end for the footer.
+///
+/// For the header, 1 with its start on the scrollport's start, 0 with its
+/// end there (scrolled out, the view at rest on `#content`), and above 1
+/// while the top placeholder shows above it; the footer's the same from the
+/// scrollport's end.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Shown {
+    /// The `offsetPercent` reported: the CSS px lengths divided in `f64`.
+    percent: f64,
+    /// The end's height in CSS px, never zero.
+    height: f64,
+}
+
+impl Shown {
+    /// Whether any of the end shows.
+    fn showing(self) -> bool {
+        self.percent > 0.0
+    }
+
+    /// Whether all of the end shows: pulled at least its height.
+    fn fully(self) -> bool {
+        self.percent >= 1.0
+    }
+
+    /// Whether all of the end shows to within [`LANDING_TOLERANCE`]: a
+    /// `scrollend` here rests on the end's snap position.
+    fn rests_on(self) -> bool {
+        self.percent >= 1.0 - LANDING_TOLERANCE / self.height
+    }
+}
+
+impl Pull {
+    /// The pull of `view`, or `None` when `#container` has no box (the view
+    /// or an ancestor is `display: none`, or the view is detached).
+    ///
+    /// The header and the footer are each in a `display: contents` slot
+    /// that is a child of `#container`, so `#container` is the parent of
+    /// their boxes, and their layout locations are relative to its border
+    /// box, as [`rect_in_scroller`] requires.
+    fn read(document: &LynxDocument, view: NodeId) -> Option<Self> {
+        let container = container(document, view)?;
+        let scroll_box = rendered_scroll_box(document, container)?;
+        let top = f64::from(scroll_box.offset.y);
+        let bottom = top + f64::from(scroll_box.scrollport.height);
+        let rect = |end: Option<NodeId>| {
+            let end = end?;
+            document.bounding_client_rect(end)?;
+            rect_in_scroller(document, container, end).filter(|rect| rect.height() > 0.0)
+        };
+        Some(Self {
+            header: rect(header(document, view)).map(|rect| {
+                let height = f64::from(rect.height());
+                Shown {
+                    percent: (f64::from(rect.max_y()) - top) / height,
+                    height,
+                }
+            }),
+            footer: rect(footer(document, view)).map(|rect| {
+                let height = f64::from(rect.height());
+                Shown {
+                    percent: (bottom - f64::from(rect.min_y())) / height,
+                    height,
+                }
+            }),
+        })
+    }
+}
+
+/// `{isDragging, offsetPercent}`, the detail of the three offset events.
+fn offset_detail(dragging: bool, percent: f64) -> ComponentDetail {
+    ComponentDetail::Fields(smallvec![
+        ("isDragging", Field::Bool(dragging)),
+        ("offsetPercent", Field::Number(percent)),
+    ])
+}
+
+impl RefreshView {
+    /// `#container`'s `scroll`: `headershow` then `headeroffset` while the
+    /// header shows, `footeroffset` while the footer shows, each only for a
+    /// listener on the view.
+    fn scrolled(&self, document: &LynxDocument, view: NodeId) {
+        let show = document.has_listener(view, HEADER_SHOW_EVENT);
+        let header_offset = document.has_listener(view, HEADER_OFFSET_EVENT);
+        let footer_offset = document.has_listener(view, FOOTER_OFFSET_EVENT);
+        if !(show || header_offset || footer_offset) {
+            return;
+        }
+        let Some(pull) = Pull::read(document, view) else {
+            return;
+        };
+        let dragging = self.touches.is_down(view);
+        if let Some(Shown { percent, .. }) = pull.header.filter(|shown| shown.showing()) {
+            for (name, wanted) in [
+                (HEADER_SHOW_EVENT, show),
+                (HEADER_OFFSET_EVENT, header_offset),
+            ] {
+                if wanted {
+                    self.events
+                        .queue_detailed(view, name, offset_detail(dragging, percent));
+                }
+            }
+        }
+        if let Some(Shown { percent, .. }) = pull.footer.filter(|shown| shown.showing())
+            && footer_offset
+        {
+            self.events
+                .queue_detailed(view, FOOTER_OFFSET_EVENT, offset_detail(dragging, percent));
+        }
+    }
+
+    /// `#container`'s `scrollend`: a rest on the header starts a refresh,
+    /// one on the footer a load, and a rest anywhere else ends whichever
+    /// the other place started. The latches are recorded whether or not
+    /// anything listens; each event is queued only for a listener.
+    fn scroll_ended(&self, document: &LynxDocument, view: NodeId) {
+        let Some(pull) = Pull::read(document, view) else {
+            return;
+        };
+        let on_header = pull.header.is_some_and(Shown::rests_on);
+        let on_footer = pull.footer.is_some_and(Shown::rests_on);
+        let (refresh, load, manual) = {
+            let mut states = self.states.borrow_mut();
+            let state = states.entry(view).or_default();
+            let refresh = on_header && !state.refreshing;
+            let load = on_footer && !state.loading;
+            state.refreshing = on_header;
+            state.loading = on_footer;
+            (refresh, load, state.manual)
+        };
+        if refresh && document.has_listener(view, START_REFRESH_EVENT) {
+            self.events.queue_detailed(
+                view,
+                START_REFRESH_EVENT,
+                ComponentDetail::Fields(smallvec![("isManual", Field::Bool(manual))]),
+            );
+        }
+        if load && document.has_listener(view, START_LOAD_MORE_EVENT) {
+            self.events.queue(view, START_LOAD_MORE_EVENT);
+        }
+    }
+
+    /// The `touchend` the view's touch count took: `headerreleased` with the
+    /// header pulled fully in, `footerreleased` with the footer pushed fully
+    /// in, and under `enable-auto-loadmore="true"` a load with the footer
+    /// showing at all, which latches as a rest on the footer does.
+    fn released(&self, document: &LynxDocument, view: NodeId) {
+        let Some(pull) = Pull::read(document, view) else {
+            return;
+        };
+        if pull.header.is_some_and(Shown::fully)
+            && document.has_listener(view, HEADER_RELEASED_EVENT)
+        {
+            self.events.queue(view, HEADER_RELEASED_EVENT);
+        }
+        if pull.footer.is_some_and(Shown::fully)
+            && document.has_listener(view, FOOTER_RELEASED_EVENT)
+        {
+            self.events.queue(view, FOOTER_RELEASED_EVENT);
+        }
+        let auto = document
+            .get(view)
+            .is_some_and(|element| element.attribute("enable-auto-loadmore") == Some("true"));
+        if auto && pull.footer.is_some_and(Shown::showing) {
+            let load = {
+                let mut states = self.states.borrow_mut();
+                let state = states.entry(view).or_default();
+                !std::mem::replace(&mut state.loading, true)
+            };
+            if load && document.has_listener(view, START_LOAD_MORE_EVENT) {
+                self.events.queue(view, START_LOAD_MORE_EVENT);
+            }
+        }
+    }
+
+    /// `autoStartRefresh()`: the instant scroll onto the header
+    /// ([`auto_start_refresh`]), then, for a header that generates a box,
+    /// `startrefresh` `{isManual: false}` at once, as iOS's `beginRefreshing`
+    /// sends it (`LynxUIRefresh.m:380-386`), unless a refresh already
+    /// started. The refresh latches, so the `scrollend` the scroll may bring
+    /// on the header adds nothing.
+    fn auto_start_refresh(&self, document: &mut LynxDocument, view: NodeId) {
+        auto_start_refresh(document, view);
+        if Pull::read(document, view).is_none_or(|pull| pull.header.is_none()) {
+            return;
+        }
+        let refresh = {
+            let mut states = self.states.borrow_mut();
+            let state = states.entry(view).or_default();
+            state.manual = false;
+            let refresh = (!std::mem::replace(&mut state.refreshing, true)).then_some(state.manual);
+            state.manual = true;
+            refresh
+        };
+        if let Some(manual) = refresh
+            && document.has_listener(view, START_REFRESH_EVENT)
+        {
+            self.events.queue_detailed(
+                view,
+                START_REFRESH_EVENT,
+                ComponentDetail::Fields(smallvec![("isManual", Field::Bool(manual))]),
+            );
+        }
+    }
+
+    /// `finishRefresh()` (`loading == false`) or `finishLoadMore()`: the
+    /// smooth scroll back to `#content` ([`finish`]), and the refresh (the
+    /// load) ends, so the next rest on the header (the footer) starts one
+    /// again.
+    fn finish(&self, document: &mut LynxDocument, view: NodeId, loading: bool) {
+        finish(document, view);
+        if let Some(state) = self.states.borrow_mut().get_mut(&view) {
+            if loading {
+                state.loading = false;
+            } else {
+                state.refreshing = false;
+            }
+        }
+    }
+}
 
 impl CustomElement<()> for RefreshView {
     /// Its own shadow tree's `slotchange`, which is how it learns that its
-    /// assigned children changed.
+    /// assigned children changed; `#container`'s `scroll` and `scrollend`,
+    /// which its events are decided on; and the touches on it, which
+    /// `isDragging` counts and whose `touchend` releases a pull.
     fn observed_events(&self) -> &'static [&'static str] {
-        &[SLOT_CHANGE]
+        &[
+            SLOT_CHANGE,
+            SCROLL_EVENT,
+            SCROLL_END_EVENT,
+            TOUCH_START,
+            TOUCH_END,
+            TOUCH_CANCEL,
+        ]
+    }
+
+    fn disconnected_callback(&self, _document: &LynxDocument, element: NodeId) {
+        self.touches.forget(element);
+    }
+
+    fn freed(&self, element: NodeId) {
+        self.states.borrow_mut().remove(&element);
+        self.touches.forget(element);
     }
 
     fn constructed(&self, document: &mut LynxDocument, element: NodeId) {
@@ -264,28 +658,40 @@ impl CustomElement<()> for RefreshView {
     /// `slotchange` at the default slot — the one slot with no `name` —
     /// delivered at the shadow root once per pass: the capture delivery is
     /// skipped, the bubble one acts. The named slots' own are ignored.
-    fn handle_event(&self, document: &mut LynxDocument, _: NodeId, event: &mut ElementEvent<'_>) {
-        if event.type_name() != SLOT_CHANGE || event.phase() != EventPhase::Bubbling {
-            return;
-        }
-        let slot = event.target();
-        if document
-            .get(slot)
-            .is_none_or(|node| node.attribute("name").is_some())
-        {
-            return;
-        }
-        let moves: Vec<(NodeId, &str)> = document
-            .assigned_nodes(slot)
-            .iter()
-            .filter_map(|&node| match document.get(node).and_then(Node::tag_name)? {
-                REFRESH_HEADER_TAG => Some((node, "header")),
-                REFRESH_FOOTER_TAG => Some((node, "footer")),
-                _ => None,
-            })
-            .collect();
-        for (node, name) in moves {
-            document.set_attribute(node, "slot", name);
+    ///
+    /// `scroll` and `scrollend` whose target is `#container`, delivered at
+    /// the shadow root too, in the capture pass alone, since neither
+    /// bubbles; the same names aimed anywhere else — a scroller inside the
+    /// content, whose capture pass crosses the view — are not its own.
+    /// Every touch event goes to its count, and the `touchend` the count
+    /// takes releases the pull.
+    fn handle_event(
+        &self,
+        document: &mut LynxDocument,
+        element: NodeId,
+        event: &mut ElementEvent<'_>,
+    ) {
+        match event.type_name() {
+            SLOT_CHANGE => {
+                if event.phase() == EventPhase::Bubbling {
+                    slot_ends(document, event.target());
+                }
+            }
+            name @ (SCROLL_EVENT | SCROLL_END_EVENT) => {
+                if container(document, element) != Some(event.target()) {
+                    return;
+                }
+                if name == SCROLL_EVENT {
+                    self.scrolled(document, element);
+                } else {
+                    self.scroll_ended(document, element);
+                }
+            }
+            name => {
+                if self.touches.observe(element, event) && name == TOUCH_END {
+                    self.released(document, element);
+                }
+            }
         }
     }
 
@@ -299,11 +705,36 @@ impl CustomElement<()> for RefreshView {
         call: MethodCall<'_>,
     ) -> MethodOutcome {
         match call.name {
-            "finishRefresh" | "finishLoadMore" => finish(document, element),
-            "autoStartRefresh" => auto_start_refresh(document, element),
+            "finishRefresh" => self.finish(document, element, false),
+            "finishLoadMore" => self.finish(document, element, true),
+            "autoStartRefresh" => self.auto_start_refresh(document, element),
             _ => return MethodOutcome::NotFound,
         }
         MethodOutcome::Done
+    }
+}
+
+/// The default slot's `slotchange` (`slot` being the event's target): every
+/// `x-refresh-header` assigned there gets `slot="header"` and every
+/// `x-refresh-footer` `slot="footer"`. A named slot's own changes nothing.
+fn slot_ends(document: &mut LynxDocument, slot: NodeId) {
+    if document
+        .get(slot)
+        .is_none_or(|node| node.attribute("name").is_some())
+    {
+        return;
+    }
+    let moves: Vec<(NodeId, &str)> = document
+        .assigned_nodes(slot)
+        .iter()
+        .filter_map(|&node| match document.get(node).and_then(Node::tag_name)? {
+            REFRESH_HEADER_TAG => Some((node, "header")),
+            REFRESH_FOOTER_TAG => Some((node, "footer")),
+            _ => None,
+        })
+        .collect();
+    for (node, name) in moves {
+        document.set_attribute(node, "slot", name);
     }
 }
 
@@ -311,7 +742,7 @@ impl CustomElement<()> for RefreshView {
 /// `#container` that puts `#content` back at its snap position, the
 /// scrollport's center. Nothing is recorded when `#container` already rests
 /// there, or when the view has no box.
-pub(super) fn finish(document: &mut LynxDocument, view: NodeId) {
+fn finish(document: &mut LynxDocument, view: NodeId) {
     if let Some(content) = content(document, view) {
         scroll_into_view(
             document,
@@ -330,12 +761,9 @@ pub(super) fn finish(document: &mut LynxDocument, view: NodeId) {
 /// Instant rather than web-core's smooth: from rest the header is no snap
 /// position, and the painter settles a smooth request's target onto the
 /// frame's snap positions when it receives it, which would turn it back to
-/// `#content`; see the module documentation.
-///
-/// web-core also marks the next refresh as not manual
-/// (`_nextRefreshIsManual = false`); only its `startrefresh` event reads
-/// that, and events are not implemented, so nothing is kept.
-pub(super) fn auto_start_refresh(document: &mut LynxDocument, view: NodeId) {
+/// `#content`; see the module documentation. The `startrefresh` it brings
+/// is the component's ([`RefreshView::auto_start_refresh`]).
+fn auto_start_refresh(document: &mut LynxDocument, view: NodeId) {
     if let Some(header) = header(document, view) {
         scroll_into_view(
             document,
@@ -408,13 +836,23 @@ fn content(document: &LynxDocument, view: NodeId) -> Option<NodeId> {
 /// slot, which is the view's first `x-refresh-header` child once the
 /// component has set its `slot`.
 fn header(document: &LynxDocument, view: NodeId) -> Option<NodeId> {
+    slotted(document, view, "header")
+}
+
+/// The footer: the first element assigned to `#container`'s `footer`
+/// slot, which is the view's first `x-refresh-footer` child once the
+/// component has set its `slot`.
+fn footer(document: &LynxDocument, view: NodeId) -> Option<NodeId> {
+    slotted(document, view, "footer")
+}
+
+/// The first element assigned to the slot of `#container` named `name`.
+fn slotted(document: &LynxDocument, view: NodeId, name: &str) -> Option<NodeId> {
     let container = container(document, view)?;
     let slot = document
         .get(container)?
         .children()
-        .find(|child| {
-            child.tag_name() == Some("slot") && child.attribute("name") == Some("header")
-        })?
+        .find(|child| child.tag_name() == Some("slot") && child.attribute("name") == Some(name))?
         .id();
     document
         .assigned_nodes(slot)
@@ -432,8 +870,10 @@ mod tests {
     use dom::stylo::values::computed::Display;
     use dom::{MethodCall, MethodOutcome, NodeId, StylesheetOrigin, Vector2D};
 
-    use super::super::test_support::{child, document, element_under, style_of, with_config};
-    use super::super::{LynxDocument, PageConfig};
+    use super::super::test_support::{
+        child, document, element_under, style_of, with_component_events,
+    };
+    use super::super::{ComponentEvents, LynxDocument, PageConfig};
     use super::{REFRESH_FOOTER_TAG, REFRESH_HEADER_TAG, REFRESH_VIEW_TAG};
 
     /// One computed longhand, as CSSOM serializes it.
@@ -455,6 +895,8 @@ mod tests {
     /// content `view` of the view's full height, and a 50px footer.
     struct Built {
         document: LynxDocument,
+        /// What the document's components queued for script.
+        events: ComponentEvents,
         view: NodeId,
         header: NodeId,
         content: NodeId,
@@ -467,7 +909,7 @@ mod tests {
         }
 
         fn with_config(config: PageConfig, attributes: &[(&str, &str)], content_tag: &str) -> Self {
-            let mut document = with_config(config);
+            let (mut document, events) = with_component_events(config);
             let view = child(
                 &mut document,
                 REFRESH_VIEW_TAG,
@@ -481,6 +923,7 @@ mod tests {
             let footer = element_under(&mut document, view, REFRESH_FOOTER_TAG, "height: 50px");
             Self {
                 document,
+                events,
                 view,
                 header,
                 content,
@@ -1072,5 +1515,438 @@ mod tests {
                 assert_eq!(built.document.pending_scroll_request(container), None);
             }
         }
+    }
+
+    // --- the events ---------------------------------------------------------
+
+    use dom::event::EventDetail;
+
+    use super::super::scroll_container::tests::{listen, scrolled};
+    use super::super::test_support::touched;
+    use super::super::touches::{TOUCH_END, TOUCH_START};
+    use super::super::{ComponentDetail, ComponentEvent, Field};
+    use super::{
+        FOOTER_OFFSET_EVENT, FOOTER_RELEASED_EVENT, HEADER_OFFSET_EVENT, HEADER_RELEASED_EVENT,
+        HEADER_SHOW_EVENT, Pull, START_LOAD_MORE_EVENT, START_REFRESH_EVENT, Shown,
+    };
+
+    /// Every event the view fires.
+    const EVERY_EVENT: [&str; 7] = [
+        HEADER_SHOW_EVENT,
+        HEADER_OFFSET_EVENT,
+        FOOTER_OFFSET_EVENT,
+        HEADER_RELEASED_EVENT,
+        FOOTER_RELEASED_EVENT,
+        START_REFRESH_EVENT,
+        START_LOAD_MORE_EVENT,
+    ];
+
+    /// One queued event as `(name, detail pairs)`; a `{}` detail has none.
+    type Heard = (&'static str, Vec<(&'static str, Field)>);
+
+    impl Built {
+        /// The view at rest on `#content` (290), with listeners on the view
+        /// for `names`.
+        fn listening(attributes: &[(&str, &str)], names: &[&str]) -> Self {
+            let mut built = Self::new(attributes, "view");
+            built.at_rest();
+            for name in names {
+                listen(&mut built.document, built.view, name);
+            }
+            built
+        }
+
+        /// Moves `#container` to `y` and delivers its `scroll`, as the
+        /// runtime delivers the kernel's: at `#container`, which ends at the
+        /// shadow root.
+        fn pulled(&mut self, y: f32) {
+            let container = self.container();
+            scrolled(&mut self.document, container, Vector2D::new(0.0, y));
+        }
+
+        /// Moves `#container` to `y` and delivers its `scrollend` there: a
+        /// rest at `y`.
+        fn rests(&mut self, y: f32) {
+            let container = self.container();
+            self.document.scroll_to(container, Vector2D::new(0.0, y));
+            self.document.dispatch_element_event(
+                container,
+                "scrollend",
+                &EventDetail::None,
+                false,
+                false,
+                0.0,
+            );
+        }
+
+        /// A finger going down (`touchstart`) or lifting (`touchend`) on
+        /// the content child, as the runtime dispatches a routed touch.
+        fn touch(&mut self, name: &'static str) {
+            touched(&mut self.document, self.content, name);
+        }
+
+        /// What the view queued since the last call, in order.
+        fn heard(&self) -> Vec<Heard> {
+            self.events
+                .take()
+                .into_iter()
+                .map(|event| match event {
+                    ComponentEvent::Detailed {
+                        node,
+                        name,
+                        detail: ComponentDetail::Fields(fields),
+                    } => {
+                        assert_eq!(node, self.view, "{name} is queued at the view");
+                        (name, fields.into_vec())
+                    }
+                    ComponentEvent::Plain { node, name } => {
+                        assert_eq!(node, self.view, "{name} is queued at the view");
+                        (name, Vec::new())
+                    }
+                    other => panic!("the view queues fields and `{{}}` events: {other:?}"),
+                })
+                .collect()
+        }
+    }
+
+    fn offset(name: &'static str, dragging: bool, percent: f64) -> Heard {
+        (
+            name,
+            vec![
+                ("isDragging", Field::Bool(dragging)),
+                ("offsetPercent", Field::Number(percent)),
+            ],
+        )
+    }
+
+    fn start_refresh(manual: bool) -> Heard {
+        (START_REFRESH_EVENT, vec![("isManual", Field::Bool(manual))])
+    }
+
+    fn plain(name: &'static str) -> Heard {
+        (name, Vec::new())
+    }
+
+    /// The header and the footer are boxes of `#container` through their
+    /// `display: contents` slots, so their rectangles in its scroll
+    /// coordinates are their layout locations: the header after the 240px
+    /// top placeholder, the footer after the header and the 800px
+    /// `#content`. The view at rest shows neither.
+    #[test]
+    fn the_header_and_footer_are_measured_in_the_containers_coordinates() {
+        let mut built = Built::new(&[], "view");
+        built.at_rest();
+        let container = built.container();
+        let rect = |end| {
+            let rect =
+                super::super::scroll_container::rect_in_scroller(&built.document, container, end)
+                    .expect("laid out");
+            (rect.min_x(), rect.min_y(), rect.width(), rect.height())
+        };
+        assert_eq!(rect(built.header), (0.0, 240.0, 393.0, 50.0));
+        assert_eq!(rect(built.footer), (0.0, 1090.0, 393.0, 50.0));
+        let shown = |percent| {
+            Some(Shown {
+                percent,
+                height: 50.0,
+            })
+        };
+        assert_eq!(
+            Pull::read(&built.document, built.view),
+            Some(Pull {
+                header: shown(0.0),
+                footer: shown(0.0),
+            })
+        );
+    }
+
+    /// With no listener on the view, nothing is queued: not on a pull, a
+    /// release, a rest on either end, nor `autoStartRefresh`.
+    #[test]
+    fn nothing_is_queued_without_a_listener() {
+        let mut built = Built::listening(&[], &[]);
+        built.touch(TOUCH_START);
+        built.pulled(200.0);
+        built.touch(TOUCH_END);
+        built.rests(240.0);
+        built.rests(290.0);
+        built.touch(TOUCH_START);
+        built.pulled(400.0);
+        built.touch(TOUCH_END);
+        built.rests(340.0);
+        built.rests(290.0);
+        assert_eq!(built.invoke("autoStartRefresh", "{}"), MethodOutcome::Done);
+        assert_eq!(built.heard(), []);
+    }
+
+    /// `headershow` then `headeroffset` on each `scroll` that leaves the
+    /// header showing, with native's `pullingPercent`: 0.5 halfway in, 1
+    /// with its start on the scrollport's start, 5.8 with the whole 240px
+    /// top placeholder showing above it. A `scroll` leaving it out, at rest
+    /// on `#content` or past it, fires nothing.
+    #[test]
+    fn header_show_and_offset_report_how_far_the_header_is_pulled() {
+        let mut built = Built::listening(&[], &[HEADER_SHOW_EVENT, HEADER_OFFSET_EVENT]);
+        for y in [290.0, 300.0] {
+            built.pulled(y);
+            assert_eq!(built.heard(), [], "scrolled out at {y}");
+        }
+        for (y, percent) in [(265.0, 0.5), (240.0, 1.0), (0.0, 5.8)] {
+            built.pulled(y);
+            assert_eq!(
+                built.heard(),
+                [
+                    offset(HEADER_SHOW_EVENT, false, percent),
+                    offset(HEADER_OFFSET_EVENT, false, percent),
+                ],
+                "at {y}"
+            );
+        }
+    }
+
+    /// `isDragging` is whether a finger is down on the view, as each
+    /// `scroll` is delivered; each event is queued only for its own
+    /// listener.
+    #[test]
+    fn is_dragging_is_whether_a_finger_is_down() {
+        let mut built = Built::listening(&[], &[HEADER_OFFSET_EVENT]);
+        built.touch(TOUCH_START);
+        built.pulled(280.0);
+        assert_eq!(
+            built.heard(),
+            [offset(HEADER_OFFSET_EVENT, true, 0.2)],
+            "no `headershow` listener"
+        );
+        built.touch(TOUCH_END);
+        built.pulled(270.0);
+        assert_eq!(built.heard(), [offset(HEADER_OFFSET_EVENT, false, 0.4)]);
+    }
+
+    /// A `scroll` of a scroller inside the view crosses it in the capture
+    /// pass, and is not `#container`'s: nothing.
+    #[test]
+    fn an_inner_scrollers_scroll_is_not_the_containers() {
+        let mut built = Built::new(&[], "scroll-view");
+        element_under(
+            &mut built.document,
+            built.content,
+            "view",
+            "flex-shrink: 0; height: 1000px",
+        );
+        built.at_rest();
+        listen(&mut built.document, built.view, HEADER_OFFSET_EVENT);
+        let container = built.container();
+        built
+            .document
+            .scroll_to(container, Vector2D::new(0.0, 265.0));
+        scrolled(&mut built.document, built.content, Vector2D::new(0.0, 10.0));
+        assert_eq!(built.heard(), []);
+        built.pulled(265.0);
+        assert_eq!(built.heard(), [offset(HEADER_OFFSET_EVENT, false, 0.5)]);
+    }
+
+    /// `headerreleased` comes with the lift that leaves the header pulled
+    /// at least its height (native's rule; web-core's 90% is not), and
+    /// with no other lift.
+    #[test]
+    fn headerreleased_fires_at_a_lift_with_the_header_fully_pulled() {
+        let mut built = Built::listening(&[], &[HEADER_RELEASED_EVENT]);
+        built.touch(TOUCH_START);
+        built.pulled(245.0);
+        built.touch(TOUCH_END);
+        assert_eq!(built.heard(), [], "90% is not enough");
+        for y in [240.0, 100.0] {
+            built.touch(TOUCH_START);
+            built.pulled(y);
+            assert_eq!(built.heard(), [], "nothing before the lift");
+            built.touch(TOUCH_END);
+            assert_eq!(built.heard(), [plain(HEADER_RELEASED_EVENT)], "at {y}");
+        }
+    }
+
+    /// `startrefresh` `{isManual: true}` comes with the `scrollend` that
+    /// rests `#container` on the header's snap position (240, or within a
+    /// pixel of it), once: another rest there adds nothing until a rest on
+    /// `#content` ends the refresh and a new pull starts one.
+    #[test]
+    fn startrefresh_fires_once_per_rest_on_the_header() {
+        let mut built = Built::listening(&[], &[START_REFRESH_EVENT]);
+        built.rests(250.0);
+        assert_eq!(built.heard(), [], "the header is not at its snap position");
+        built.rests(240.0);
+        assert_eq!(built.heard(), [start_refresh(true)]);
+        built.rests(240.0);
+        built.rests(239.5);
+        assert_eq!(built.heard(), [], "the same refresh");
+        built.rests(290.0);
+        assert_eq!(built.heard(), [], "the rest on `#content` starts nothing");
+        built.rests(240.75);
+        assert_eq!(
+            built.heard(),
+            [start_refresh(true)],
+            "a new pull, rounded within the pixel"
+        );
+        built.rests(290.0);
+        built.rests(241.5);
+        assert_eq!(built.heard(), [], "outside the pixel");
+    }
+
+    /// `autoStartRefresh` queues `startrefresh` `{isManual: false}` at once,
+    /// and the rest on the header that follows adds nothing. A second call
+    /// while the refresh runs fires nothing, and the next manual pull,
+    /// after a rest on `#content`, is manual again.
+    #[test]
+    fn auto_start_refresh_fires_startrefresh_at_once_not_manual() {
+        let mut built = Built::listening(&[], &[START_REFRESH_EVENT]);
+        assert_eq!(built.invoke("autoStartRefresh", "{}"), MethodOutcome::Done);
+        assert_eq!(built.heard(), [start_refresh(false)]);
+        built.rests(240.0);
+        assert_eq!(built.heard(), [], "the landing repeats nothing");
+        assert_eq!(built.invoke("autoStartRefresh", "{}"), MethodOutcome::Done);
+        assert_eq!(built.heard(), [], "the refresh is running");
+        built.rests(290.0);
+        built.rests(240.0);
+        assert_eq!(built.heard(), [start_refresh(true)], "manual again");
+    }
+
+    /// `finishRefresh` ends the refresh at once: the next rest on the
+    /// header starts one, even with no rest on `#content` between, and so
+    /// does `autoStartRefresh`. `finishLoadMore` does not end it.
+    #[test]
+    fn finish_refresh_ends_the_refresh() {
+        let mut built = Built::listening(&[], &[START_REFRESH_EVENT]);
+        built.rests(240.0);
+        assert_eq!(built.heard(), [start_refresh(true)]);
+        assert_eq!(built.invoke("finishLoadMore", "{}"), MethodOutcome::Done);
+        built.rests(240.0);
+        assert_eq!(built.heard(), [], "a load's end is not the refresh's");
+        assert_eq!(built.invoke("finishRefresh", "{}"), MethodOutcome::Done);
+        built.rests(240.0);
+        assert_eq!(built.heard(), [start_refresh(true)]);
+        assert_eq!(built.invoke("finishRefresh", "{}"), MethodOutcome::Done);
+        assert_eq!(built.invoke("autoStartRefresh", "{}"), MethodOutcome::Done);
+        assert_eq!(built.heard(), [start_refresh(false)]);
+    }
+
+    /// `footeroffset` on each `scroll` that leaves the footer showing,
+    /// measured from the scrollport's end: 0.5 halfway in, 1 with its end
+    /// on the scrollport's end (340), 5.8 at the range's end with the whole
+    /// bottom placeholder showing.
+    #[test]
+    fn footeroffset_reports_how_far_the_footer_is_pushed() {
+        let mut built = Built::listening(&[], &[FOOTER_OFFSET_EVENT]);
+        built.pulled(290.0);
+        assert_eq!(built.heard(), []);
+        built.touch(TOUCH_START);
+        for (y, percent) in [(315.0, 0.5), (340.0, 1.0), (580.0, 5.8)] {
+            built.pulled(y);
+            assert_eq!(
+                built.heard(),
+                [offset(FOOTER_OFFSET_EVENT, true, percent)],
+                "at {y}"
+            );
+        }
+        built.touch(TOUCH_END);
+        built.pulled(330.0);
+        assert_eq!(built.heard(), [offset(FOOTER_OFFSET_EVENT, false, 0.8)]);
+    }
+
+    /// `footerreleased` at a lift with the footer pushed at least its
+    /// height; `startloadmore` at the rest on the footer's snap position
+    /// (340), once until a rest elsewhere or `finishLoadMore` ends the load.
+    #[test]
+    fn footerreleased_at_the_lift_and_startloadmore_at_the_rest() {
+        let mut built = Built::listening(&[], &[FOOTER_RELEASED_EVENT, START_LOAD_MORE_EVENT]);
+        built.touch(TOUCH_START);
+        built.pulled(330.0);
+        built.touch(TOUCH_END);
+        assert_eq!(built.heard(), [], "80% is not enough");
+        built.touch(TOUCH_START);
+        built.pulled(345.0);
+        built.touch(TOUCH_END);
+        assert_eq!(built.heard(), [plain(FOOTER_RELEASED_EVENT)]);
+        built.rests(340.0);
+        assert_eq!(built.heard(), [plain(START_LOAD_MORE_EVENT)]);
+        built.rests(340.0);
+        assert_eq!(built.heard(), [], "the same load");
+        built.rests(290.0);
+        built.rests(339.5);
+        assert_eq!(
+            built.heard(),
+            [plain(START_LOAD_MORE_EVENT)],
+            "a new push, within the pixel"
+        );
+        assert_eq!(built.invoke("finishLoadMore", "{}"), MethodOutcome::Done);
+        built.rests(340.0);
+        assert_eq!(built.heard(), [plain(START_LOAD_MORE_EVENT)]);
+    }
+
+    /// Under `enable-auto-loadmore="true"` a lift with any of the footer
+    /// showing starts the load, and the rest on the footer that may follow
+    /// adds nothing; the rest on `#content` a short push glides back to
+    /// ends it. Any other value waits for the rest.
+    #[test]
+    fn enable_auto_loadmore_starts_the_load_at_the_lift() {
+        let mut built = Built::listening(
+            &[("enable-auto-loadmore", "true")],
+            &[FOOTER_RELEASED_EVENT, START_LOAD_MORE_EVENT],
+        );
+        built.touch(TOUCH_START);
+        built.pulled(300.0);
+        built.touch(TOUCH_END);
+        assert_eq!(built.heard(), [plain(START_LOAD_MORE_EVENT)]);
+        built.rests(290.0);
+        assert_eq!(built.heard(), []);
+        built.touch(TOUCH_START);
+        built.pulled(340.0);
+        built.touch(TOUCH_END);
+        assert_eq!(
+            built.heard(),
+            [plain(FOOTER_RELEASED_EVENT), plain(START_LOAD_MORE_EVENT)]
+        );
+        built.rests(340.0);
+        assert_eq!(built.heard(), [], "the rest repeats nothing");
+
+        for value in ["", "false", "TRUE"] {
+            let mut built =
+                Built::listening(&[("enable-auto-loadmore", value)], &[START_LOAD_MORE_EVENT]);
+            built.touch(TOUCH_START);
+            built.pulled(340.0);
+            built.touch(TOUCH_END);
+            assert_eq!(built.heard(), [], "{value:?}");
+            built.rests(340.0);
+            assert_eq!(built.heard(), [plain(START_LOAD_MORE_EVENT)], "{value:?}");
+        }
+    }
+
+    /// `enable-refresh="false"` gives the header no box: no header event
+    /// fires, whatever moves, and `autoStartRefresh` fires nothing either,
+    /// while the footer, 10px into the scrollport, still reports.
+    /// `enable-loadmore="false"` does the same for the footer.
+    #[test]
+    fn an_end_turned_off_fires_nothing() {
+        let mut built = Built::listening(&[("enable-refresh", "false")], &EVERY_EVENT);
+        assert_eq!(built.offset(), Vector2D::zero(), "opens on `#content`");
+        built.touch(TOUCH_START);
+        built.pulled(10.0);
+        assert_eq!(built.heard(), [offset(FOOTER_OFFSET_EVENT, true, 0.2)]);
+        built.pulled(0.0);
+        built.touch(TOUCH_END);
+        built.rests(0.0);
+        assert_eq!(built.invoke("autoStartRefresh", "{}"), MethodOutcome::Done);
+        assert_eq!(built.heard(), []);
+
+        let mut built = Built::listening(&[("enable-loadmore", "false")], &EVERY_EVENT);
+        built.touch(TOUCH_START);
+        built.pulled(290.0);
+        built.touch(TOUCH_END);
+        built.rests(290.0);
+        assert_eq!(built.heard(), [], "the range ends on `#content`");
+        built.rests(240.0);
+        assert_eq!(
+            built.heard(),
+            [start_refresh(true)],
+            "the header still works"
+        );
     }
 }
