@@ -2294,8 +2294,10 @@ is written inside), `tree::text` (the paragraph attribute limits and what may
 generate a box inside a run, and a `text` component whose
 `CustomElement::invoke` answers `getTextBoundingRect` with the per-line boxes
 `Document::text_range_boxes` reads off the committed paragraph, in viewport
-px; `getSelectedText` and `setTextSelection` are not built, there being no
-selection model), `tree::image` (the `src`-to-replaced-content
+px, and, for a `text-selection` text — one the component marks selectable
+through `Document::set_selectable`, so a pointer selects it without focus —
+`getSelectedText` and `setTextSelection` over the document's selection),
+`tree::image` (the `src`-to-replaced-content
 reflection and its UA box), `tree::scroll_container` (`scroll-view` and
 `list` as scroll containers — which axis scrolls, which one clips, and which
 way the subtree stacks, from `web-elements`' own `scroll-view.css` and
@@ -4046,13 +4048,13 @@ would host it:
   standard two, the five list methods on `list` only, whose `scrollBy`
   shadows the standard one, the refresh view's three on `x-refresh-view`
   only, `setFoldExpanded` on `scroll-coordinator` and `x-foldview-ng` only,
-  `getTextBoundingRect` on `text` only, the dialog's on `dialog` only) through
+  `getTextBoundingRect`, `getSelectedText` and `setTextSelection` on `text`
+  only, the dialog's on `dialog` only) through
   `__InvokeUIMethod`; every other name — the base set's `focus`/`blur` (no
   focus model), a `scroll-view`'s `takeContentScreenshot`,
   a `list`'s `getScrollInfo`, a scroll coordinator's
   `getScrollInfo`, an `image`'s four animation methods (nothing plays image
-  frames), a `text`'s `getSelectedText` and `setTextSelection` (no
-  selection model), `requestUIInfo`,
+  frames), `requestUIInfo`,
   `takeScreenshot` (no pixel readback) and the rest of the per-component
   catalog — answers code 3, `METHOD_NOT_FOUND`. The rect itself ignores
   transforms and never flushes.

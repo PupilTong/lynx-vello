@@ -3838,8 +3838,9 @@ fn a_markdown_answers_its_ui_methods_through_invoke() {
 /// selector-query `invoke`: a 10px Ahem paragraph at (20, 30) with 5px of
 /// padding answers its range's box in viewport CSS px, from the content
 /// box's origin, with `boundingRect` the union `element-papi.ts` builds. A
-/// reversed range is code 4, a range past the text's end code 8, the
-/// selection methods code 3, and the method on a `view` code 3.
+/// reversed range is code 4, a range past the text's end code 8, and the
+/// method on a `view` code 3. The text is `text-selection`, and
+/// `setTextSelection` and `getSelectedText` answer through both paths too.
 #[test]
 fn a_text_answers_get_text_bounding_rect_through_both_invoke_paths() {
     let (mut js_runtime, mut runtime, _elements) = text_runtime();
@@ -3851,6 +3852,7 @@ fn a_text_answers_get_text_bounding_rect_through_both_invoke_paths() {
                   const page = __CreatePage('card', 0);
                   const text = __CreateText(0);
                   __SetID(text, 'label');
+                  __SetAttribute(text, 'text-selection', 'true');
                   __SetInlineStyles(text,
                     'position:absolute;left:20px;top:30px;padding:5px;' +
                     'font-family:Ahem;font-size:10px');
@@ -3908,9 +3910,21 @@ fn a_text_answers_get_text_bounding_rect_through_both_invoke_paths() {
                 expectAnswer(viaPapi(held[1], 'getTextBoundingRect', {start: 0, end: 99}), 8,
                              undefined);
                 expectAnswer(viaQuery('getTextBoundingRect', {start: 0, end: 99}), 8, undefined);
-                expectAnswer(viaPapi(held[1], 'getSelectedText', {}), 3, undefined);
+                expectAnswer(viaPapi(held[1], 'getSelectedText', {}), 0, {selectedText: ''});
+                // Border-box points: 12px into the content is b's left half,
+                // 28px c's right half, so units 1..3 again.
+                const handles = [{x: 35, y: 45, radius: 50}, {x: 55, y: 45, radius: 50}];
                 expectAnswer(viaQuery('setTextSelection',
-                                      {startX: 0, startY: 0, endX: 10, endY: 10}), 3, undefined);
+                                      {startX: 17, startY: 10, endX: 33, endY: 10}), 0,
+                             {...found, handles});
+                expectAnswer(viaPapi(held[1], 'getSelectedText', {}), 0, {selectedText: 'bc'});
+                expectAnswer(viaPapi(held[1], 'setTextSelection',
+                                     {startX: 17, startY: 10, endX: 33, endY: 10}), 0,
+                             {...found, handles});
+                expectAnswer(viaPapi(held[1], 'setTextSelection',
+                                     {startX: -1, startY: 0, endX: 0, endY: 0}), 0, undefined);
+                expectAnswer(viaQuery('getSelectedText', {}), 0, {selectedText: ''});
+                expectAnswer(viaQuery('setTextSelection', {startX: 0}), 4, undefined);
                 expectAnswer(viaPapi(held[2], 'getTextBoundingRect', {start: 0, end: 1}), 3,
                              undefined);
                 ",
@@ -11194,4 +11208,69 @@ fn an_editing_host_routes_its_names_by_state() {
         ["pointercancel"],
         "the last host and the focus it held close the rest"
     );
+}
+
+/// A selectable text routes the press and the tap while it is marked;
+/// `pointerdown` and `click`, which an editing host routes too, stay routed
+/// while either wants them.
+#[test]
+fn a_selectable_text_routes_the_press_and_the_tap() {
+    let (mut js_runtime, mut runtime, _elements, mut names) =
+        runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const text = __CreateElement('text', 0);
+                  const host = __CreateView(0);
+                  __AppendElement(page, text);
+                  __AppendElement(page, host);
+                  globalThis.held = [page, text, host];
+                  __SetAttribute(text, 'text-selection', 'true');
+                  __FlushElementTree();
+                };
+                ",
+            "app:///selectable-routes.js",
+        )
+        .expect("main-thread script");
+    runtime.sync_editing_routes();
+    assert_eq!(routed(&mut names), ["click", "pointerdown"]);
+
+    let write = |runtime: &mut MainThreadRuntime,
+                 js_runtime: &mut ScriptRuntime,
+                 index: u32,
+                 name: &str,
+                 value: &str| {
+        runtime
+            .evaluate_module(
+                js_runtime,
+                &format!(
+                    "import {{ __SetAttribute }} from 'bobcat:element';
+                     __SetAttribute(held[{index}], '{name}', '{value}');"
+                ),
+                "app:///write.js",
+                "editing",
+            )
+            .expect("an attribute write");
+        runtime.sync_editing_routes();
+    };
+    write(&mut runtime, &mut js_runtime, 2, "contenteditable", "true");
+    assert_eq!(routed(&mut names), ["click", "pointerdown"]);
+    write(&mut runtime, &mut js_runtime, 1, "text-selection", "false");
+    assert_eq!(
+        routed(&mut names),
+        ["click", "pointerdown"],
+        "the host still routes the press and the tap"
+    );
+    write(&mut runtime, &mut js_runtime, 1, "text-selection", "");
+    write(&mut runtime, &mut js_runtime, 2, "contenteditable", "false");
+    assert_eq!(
+        routed(&mut names),
+        ["click", "pointerdown"],
+        "the selectable text still routes them"
+    );
+    write(&mut runtime, &mut js_runtime, 1, "text-selection", "false");
+    assert_eq!(routed(&mut names), Vec::<String>::new());
 }

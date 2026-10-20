@@ -116,6 +116,7 @@ impl NodeFlags {
     const LYNX_TEXT: u8 = 1 << 2;
     const PLACEHOLDER_PSEUDO: u8 = 1 << 3;
     const LINE_IF_EMPTY: u8 = 1 << 4;
+    const SELECTABLE: u8 = 1 << 5;
 
     const fn get(self, bit: u8) -> bool {
         self.0 & bit != 0
@@ -352,6 +353,17 @@ impl<T> Node<T> {
     /// Records [`Self::has_line_if_empty`], answering what it was.
     pub(crate) fn set_has_line_if_empty(&mut self, on: bool) -> bool {
         self.flags.set(NodeFlags::LINE_IF_EMPTY, on)
+    }
+
+    /// Whether this element's component marked its text selectable without
+    /// focus ([`crate::Document::set_selectable`]).
+    pub(crate) fn is_selectable(&self) -> bool {
+        self.flags.get(NodeFlags::SELECTABLE)
+    }
+
+    /// Records [`Self::is_selectable`], answering what it was.
+    pub(crate) fn set_selectable(&mut self, on: bool) -> bool {
+        self.flags.set(NodeFlags::SELECTABLE, on)
     }
 
     pub(crate) fn owner_document(&self) -> &Node<T> {

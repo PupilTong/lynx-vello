@@ -1147,7 +1147,114 @@ The Selection API's `selectionchange` at the document, and Lynx's `<text>`
 
 ### Not built
 
-- Selection of read-only text: a `text-selection` `text` selected by a
-  pointer, selection handles, `::selection` painting, and the `text` methods
-  `getSelectedText`/`setTextSelection` (code 3). The document's selection
-  exists only inside an editing host today.
+- Selection handles and `::selection` painting. Selection of read-only text
+  is built: see the next section.
+
+## Read-only text selection (2026-10-20)
+
+A `<text text-selection="true">` is selected by a pointer, holds the
+document's selection without being focused or editable, and so fires the
+same two `selectionchange` events; `getSelectedText()` and
+`setTextSelection(...)` read and set that selection.
+
+### The document's selection, generalized (`dom`)
+
+- The document's one selection (`EditingState::session`) lives in a **selection host**: the focused
+  editing host, as before, or a **selectable element** selected without focus. `Session::focused`
+  says which. `Document::focused()` answers only a focused session's host; `Document::selection_host()`
+  answers either.
+- An element is selectable when its component marked it ([`Document::set_selectable`], a node bit
+  beside `has_line_if_empty`, counted by `has_selectable_elements()` the way editing hosts are
+  counted) and it establishes a committed paragraph. The stylo fork does not build `user-select`
+  (it is outside Lynx's property index, `vendor/stylo/style/properties/data.py`), so the bit is the
+  generic primitive and `tree::text` maps the attribute onto it.
+  `Document::selectable_root_of(node)` finds the nearest inclusive ancestor, through `parent_id`,
+  that is marked, rendered and has a paragraph.
+- `Document::begin_selection(root)` starts a session in a selectable `root` — collapsed at offset 0,
+  as value offsets the next layout pass places — after blurring a focused editing host (with its
+  focus events: a browser's mousedown on non-focusable content blurs the focused element). A session
+  already in `root` is kept. `Document::clear_selection()` ends a session that is not a focused
+  host's. Both set the `selectionchange` flag when they change the selection.
+- **The selection text** of a session (`Document::session_text`) is what its offsets index: a focused
+  host's value (its direct text children) as before, or, for a selectable root, the **source text of
+  its paragraph**: every run of the flattened content in order — DOM text and generated `content`
+  such as a `raw-text` carrier's — with one U+FFFC per atomic inline box (an inline `image` or
+  `view`), so its UTF-16 units are exactly the paragraph's source units, the units
+  `getTextBoundingRect` and `text_range_boxes` already use. It is rebuilt on demand by the same
+  flatten walk layout uses (`layout::text_block::source_text`), never stored, so a read-only text
+  costs nothing while unselected. For a selectable root `EditableParagraph::shows_value` is true by
+  construction, so every pointer and movement command works over nested `inline-text` runs and
+  atoms; the value-changing and composition commands are refused (`Context::writable` is false
+  for anything but a plain-text editing host).
+- `DocumentSelection { host, anchor, focus }` is unchanged in shape: for a selectable root its
+  offsets are source units.
+- `Document::selected_text(root)` answers the selected text when the selection lies in `root`
+  (atoms as U+FFFC), `None` otherwise. `Document::text_content_offset(paragraph, unit)` turns a
+  source unit into an offset of the paragraph's text content, atoms counting none
+  (`hughie::text::paragraph::OffsetMap::boxes_before`), for web-core's `range.toString()` offsets.
+- Lifetime: a selectable root's session ends, with the flag set and no event, when the root leaves
+  the document, loses the bit, stops being rendered or loses its paragraph (the focus fixup rule's
+  shape, `fix_up_selection`, run where `fix_up_focus` ran and after each layout pass), and when the
+  root is freed. A layout pass refreshes the held parley selection in the new layout. Focusing an
+  editing host replaces the root's session.
+- Painting: the highlight paints for either kind of session (`EditingPaint::of`); the caret and the
+  composition underline only for a focused one. The highlight colour stays the UA constant.
+
+### Pointer gesture (`bobcat-core`, web-core's `user-select: text`)
+
+- A press whose target is in no editing host and delegates no focus asks
+  `selectable_root_of(target)`: a root found gets `begin_selection` and then the press's command —
+  the caret at the point, the word on the second quick press, the line on the third
+  (`MainThreadRuntime::press`, the same count as an editing host's) — and a held mouse drag extends
+  the selection (`pointermove` on the drag route). No root found clears the selection, as a press on
+  the page's non-selectable area collapses a browser's selection.
+- The slot routes `pointerdown` and `click` on a new editing route (`EditingRoute::Selectable`)
+  while `has_selectable_elements()`, as the editing-host route does, so the press reaches this
+  thread with no realm listener. A finger's or pen's tap collapses the selection at the point.
+- **Touch selection is not built**: not a touch browser's long press that selects the word with
+  handles, and not native's, where a long press begins a one-character selection at the point that
+  the finger then drags out, a tap clears it, and handles adjust it (`AndroidText.java:113-140,
+  977-1060`, `LynxTextView.m:657-736`). The supported platforms have no touch screen, and routing
+  `longpress` on the selection account would make the painter synthesize it for every long hold on
+  the page and suppress that hold's `tap` (the gesture router's gate is name-level). The mouse
+  gesture follows web-core (`x-text.css:147-181` maps the attribute to `user-select`, and the
+  browser's gesture is the rest).
+
+### `text-selection`, the events and the methods (`tree::text`)
+
+- `text-selection` is observed on `text`: present and not an ASCII case-insensitive `"false"` marks
+  the element selectable. web-core's selector is `[text-selection]`, presence alone, so there
+  `text-selection="false"` (what `setElementPropertyOrAttribute` writes for `false`) selects too;
+  native parses the boolean (`UIText.java:256`, `LynxUIText.m:719`). The boolean reading is kept,
+  recorded in `deviations.md`. `custom-text-selection`, `custom-context-menu`,
+  `selection-background-color`, `selection-handle-color` and `selection-handle-size` are native-only
+  and not built.
+- The Lynx `selectionchange` record of a selectable root: offsets into its text content, every
+  text run and generated run counted, atoms counting none (web-core's `range.toString().length`;
+  native counts the placeholder character, `AndroidText.java:482-490`). An `inline-text` inside the
+  root reports when both boundary points lie within its own source range
+  (`Document::inline_source_range`), as offsets into its content; `report_selection_changes` asks
+  every listened-to `inline-text` under a selectable root as well as the root.
+- `getSelectedText()` answers `{selectedText}`, the selected text of this element's own selection
+  (atoms as U+FFFC, iOS's attachment character), `""` when the selection is elsewhere or collapsed
+  (`UIText.java:417-427`, `LynxUIText.m:809-812`).
+- `setTextSelection({startX, startY, endX, endY, showStartHandle?, showEndHandle?})`: the four
+  numbers are CSS px from the element's border-box origin (native subtracts padding and border
+  itself; `SelectFromPoint` takes border-box points). Any of them negative clears the selection and
+  answers success with no data, as both natives do. Otherwise the selection is begun in the element
+  (blurring a focused host), the anchor placed at the start point and the focus extended to the end
+  point; a selection that collapses is widened to one character, backward at the text's end and
+  forward elsewhere (native's `startIndex == endIndex` rule). The answer is `getTextBoundingRect`'s
+  `{boundingRect, boxes}` over the selected range plus `handles`, two `{x, y, radius}`: the start
+  box's bottom-left and the end box's bottom-right in viewport CSS px with native Android's
+  `RESPONSE_TOUCH_RADIUS` (50). The handle flags are read and ignored: no handle is painted.
+  Code 4 for a missing or non-numeric coordinate, code 8 when the element has no paragraph.
+- A nested `text` establishes no paragraph, so neither method applies to it (code 8 for
+  `setTextSelection`, `""` for `getSelectedText`).
+
+### Limitations
+
+- One paragraph: a selection never crosses into another element, where a browser's can.
+- A DOM change under a selected read-only text keeps the parley selection's layout positions after
+  the next pass, which may not be the same text.
+- No clipboard, no context menu, no handles, no `::selection` colours, no `selection-background-color`.

@@ -31,15 +31,25 @@
 //!   word and the line, and a drag with the button held extends the selection. A finger or a pen
 //!   does the same on the tap — the `click` — rather than the press, as touch browsers do, so a
 //!   scroll that begins on a host does not focus it; it never drags a selection.
+//! - **Pointer events over a selectable element** — a `<text text-selection>`, which
+//!   [`dom::Document::selectable_root_of`] finds — select its text without focusing it, as a
+//!   browser does over `user-select: text`: the same press, tap, count and drag start the
+//!   document's selection there ([`dom::Document::begin_selection`]) and then run the same command,
+//!   blurring a focused host first. A press or a tap that is in no editing host and no selectable
+//!   element blurs the focused host and clears the selection. A finger's or a pen's long press
+//!   selects nothing: touch selection (a touch browser's long press with handles) is not built, the
+//!   supported platforms having no touch screen, and routing `longpress` on this account would make
+//!   the painter suppress every long hold's `tap` on the page (its gate is name-level).
 //! - **The painter routes those names by state.** It forwards an event only when its name is in the
 //!   published routed set, so the slot routes names there on an editing account of its own
 //!   ([`EditingRoute`]), one more term of what the slot routes beside the listener table and the
 //!   components' observed names, published through the same path an observed name's change takes
 //!   (`DocumentSlot::change_names`): `pointerdown` and `click` while the document has an editing
-//!   host, `keydown` while an element is focused (both from the page's epilogue,
-//!   [`super::DocumentSlot::sync_editing_routes`]), and `pointermove`, `pointerup` and
-//!   `pointercancel` only while a mouse drag is held, opened by the press and closed when the drag
-//!   ends ([`MainThreadRuntime::set_pressed`]). An event routed only on that account calls no
+//!   host or a selectable element (two routes, one per state), `keydown` while an element is
+//!   focused (all three from the page's epilogue, [`super::DocumentSlot::sync_editing_routes`]),
+//!   and `pointermove`, `pointerup` and `pointercancel` only while a mouse drag is held, opened by
+//!   the press and closed when the drag ends ([`MainThreadRuntime::set_pressed`]). A name two
+//!   routes hold stays routed while either is open. An event routed only on that account calls no
 //!   listener — the kernel's dispatch builds no path for a name nothing hears — and
 //!   [`MainThreadRuntime::deliver_input_event`] runs the default action whenever the account routes
 //!   the name.
@@ -76,15 +86,20 @@ pub(super) enum EditingRoute {
     /// that placed a caret is held: the moves extend the selection and the
     /// release or cancellation ends the drag.
     Drag,
+    /// `pointerdown` and `click`, while the document has a selectable
+    /// element ([`dom::Document::has_selectable_elements`]): a mouse press
+    /// and a touch or pen tap are what select its text. The same names as
+    /// [`Self::Hosts`]'s, routed while either route is open.
+    Selectable,
 }
 
 impl EditingRoute {
-    pub(super) const ALL: [Self; 3] = [Self::Hosts, Self::Focus, Self::Drag];
+    pub(super) const ALL: [Self; 4] = [Self::Hosts, Self::Focus, Self::Drag, Self::Selectable];
 
     /// The names the route holds open.
     pub(super) const fn names(self) -> &'static [&'static str] {
         match self {
-            Self::Hosts => &["pointerdown", "click"],
+            Self::Hosts | Self::Selectable => &["pointerdown", "click"],
             Self::Focus => &["keydown"],
             Self::Drag => &["pointermove", "pointerup", "pointercancel"],
         }
@@ -96,6 +111,7 @@ impl EditingRoute {
             Self::Hosts => 1,
             Self::Focus => 2,
             Self::Drag => 4,
+            Self::Selectable => 8,
         }
     }
 }
@@ -103,10 +119,11 @@ impl EditingRoute {
 /// What the pointer's editing default actions remember between events.
 #[derive(Debug, Default)]
 pub(super) struct PointerEditing {
-    /// The mouse pointer whose press placed the caret in this host and whose
-    /// primary button is still held: its moves extend the selection.
+    /// The mouse pointer whose press placed the caret in this selection
+    /// host (an editing host or a selectable element) and whose primary
+    /// button is still held: its moves extend the selection.
     pressed: Option<(PointerId, dom::NodeId)>,
-    /// The last primary press on an editing host, its timestamp, and how
+    /// The last primary press on a selection host, its timestamp, and how
     /// many quick presses on that host it ended: two select a word, three or
     /// more a line, as a browser's click count does.
     last_press: Option<(dom::NodeId, f64, u32)>,
@@ -386,10 +403,10 @@ impl MainThreadRuntime {
                 if held != *id {
                     return;
                 }
-                // Released without a `pointerup` reaching here, or the focus
-                // moved on (a listener's doing): the drag is over.
-                let focused = self.slot.borrow().document_ref().focused();
-                if buttons & 1 == 0 || focused != Some(host) {
+                // Released without a `pointerup` reaching here, or the
+                // selection moved on (a listener's doing): the drag is over.
+                let selection_host = self.slot.borrow().document_ref().selection_host();
+                if buttons & 1 == 0 || selection_host != Some(host) {
                     self.set_pressed(None);
                     return;
                 }
@@ -411,9 +428,13 @@ impl MainThreadRuntime {
     /// A mouse's primary press, or a finger's or pen's tap:
     /// inside an editing host it focuses the host and places the caret —
     /// or, as the second or third in quick succession on that host, selects
-    /// the word or the line — and outside one it takes the focus away, as a
-    /// press on a page's unfocusable area does in a browser. A mouse press
-    /// that placed a caret starts a drag.
+    /// the word or the line. Inside no editing host but in a selectable
+    /// element ([`dom::Document::selectable_root_of`]) it starts the
+    /// document's selection there ([`dom::Document::begin_selection`], which
+    /// blurs a focused host) and runs the same command. Outside both it takes
+    /// the focus away and clears the selection, as a press on a page's
+    /// unfocusable, unselectable area does in a browser. A mouse press that
+    /// placed a caret starts a drag.
     #[allow(
         clippy::too_many_arguments,
         reason = "one press's facts, read out of its detail by the caller"
@@ -440,15 +461,17 @@ impl MainThreadRuntime {
             // above or below its line — focuses the editor.
             let host =
                 editing_host_of(document, target).or_else(|| focus_delegate(document, target));
-            match host {
-                Some(host) => {
-                    document.focus(host);
-                }
-                None => {
-                    document.blur();
-                }
+            if let Some(host) = host {
+                document.focus(host);
+                Some(host)
+            } else if let Some(root) = document.selectable_root_of(target) {
+                document.begin_selection(root);
+                Some(root)
+            } else {
+                document.blur();
+                document.clear_selection();
+                None
             }
-            host
         };
         failures.extend(self.dispatch_focus_events(js_runtime, timestamp));
         self.set_pressed(None);
@@ -465,9 +488,9 @@ impl MainThreadRuntime {
             _ => 1,
         };
         self.pointer_editing.last_press = Some((host, timestamp, count));
-        // A `focus` listener can move the focus on, and then the press
-        // places nothing in a host that is no longer the focused one.
-        if self.slot.borrow().document_ref().focused() != Some(host) {
+        // A `focus` or `blur` listener can move the selection on, and then
+        // the press places nothing in a host the selection is no longer in.
+        if self.slot.borrow().document_ref().selection_host() != Some(host) {
             return;
         }
         let Some(point) = self.host_point(host, position) else {
@@ -532,8 +555,10 @@ impl MainThreadRuntime {
         ))
     }
 
-    /// Applies one editing command to the focused editing host with the
-    /// events it owes, by the prepare/commit seam: the events before the
+    /// Applies one editing command to the selection host — the focused
+    /// editing host, or the selectable element the selection is in, which
+    /// refuses every command that would change its text — with the events
+    /// it owes, by the prepare/commit seam: the events before the
     /// change are dispatched at the host in order, then the change is
     /// committed and the events after it are dispatched. No listener can
     /// stop the change: none of the events is cancelable from script (the
@@ -687,10 +712,11 @@ impl MainThreadRuntime {
     }
 
     /// Opens or closes [`EditingRoute::Hosts`] as the document gains its
-    /// first editing host or loses its last, and [`EditingRoute::Focus`] as
-    /// an element gains or loses focus. Asked by the page's epilogue, once
-    /// per entry, before the commit that publishes the frame those hosts are
-    /// in.
+    /// first editing host or loses its last, [`EditingRoute::Selectable`] as
+    /// it gains its first selectable element or loses its last, and
+    /// [`EditingRoute::Focus`] as an element gains or loses focus. Asked by
+    /// the page's epilogue, once per entry, before the commit that publishes
+    /// the frame those hosts are in.
     pub(crate) fn sync_editing_routes(&mut self) {
         self.slot.borrow_mut().sync_editing_routes();
     }

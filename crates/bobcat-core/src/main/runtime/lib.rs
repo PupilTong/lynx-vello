@@ -1478,17 +1478,27 @@ impl DocumentSlot {
         });
     }
 
-    /// Moves the two routes the document's state decides, once per entry
+    /// Moves the three routes the document's state decides, once per entry
     /// from the page's epilogue: [`editing::EditingRoute::Hosts`] while
-    /// [`dom::Document::has_editing_hosts`], [`editing::EditingRoute::Focus`]
-    /// while an element is focused. One counter read and one field read when
-    /// nothing changed. The drag route is the press's own
-    /// ([`MainThreadRuntime::set_pressed`]).
+    /// [`dom::Document::has_editing_hosts`],
+    /// [`editing::EditingRoute::Selectable`] while
+    /// [`dom::Document::has_selectable_elements`],
+    /// [`editing::EditingRoute::Focus`] while an element is focused. Two
+    /// counter reads and one field read when nothing changed. The drag route
+    /// is the press's own ([`MainThreadRuntime::set_pressed`]).
     fn sync_editing_routes(&mut self) {
-        let (hosts, focused) = self.document.as_ref().map_or((false, false), |document| {
-            (document.has_editing_hosts(), document.focused().is_some())
-        });
+        let (hosts, selectable, focused) =
+            self.document
+                .as_ref()
+                .map_or((false, false, false), |document| {
+                    (
+                        document.has_editing_hosts(),
+                        document.has_selectable_elements(),
+                        document.focused().is_some(),
+                    )
+                });
         self.set_editing_route(editing::EditingRoute::Hosts, hosts);
+        self.set_editing_route(editing::EditingRoute::Selectable, selectable);
         self.set_editing_route(editing::EditingRoute::Focus, focused);
     }
 

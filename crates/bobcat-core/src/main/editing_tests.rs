@@ -603,6 +603,143 @@ fn selection_changes_fire_at_the_document_then_at_the_text() {
     states.wait(&mut engine, "blurred", |state| state.host.is_none());
 }
 
+// --- read-only text selection ---------------------------------------------------
+
+/// A `<text>` (node 3) 240×40 at the page's origin in 20px Ahem holding the
+/// `raw-text` run `abcdef ghij`, with `attributes`, logging the W3C
+/// `selectionchange` at the document and its own Lynx `selectionchange` as
+/// [`SELECTION_PAGE`] does. Every character is a 20px box on one 20px line,
+/// 220px in all.
+fn selectable_page(attributes: &str) -> TestEngine {
+    let source = format!(
+        r"
+        import {{ __BobcatHandleOf }} from 'bobcat:element';
+        globalThis.renderPage = function () {{
+          const page = __CreatePage('card', 0);
+          const text = __CreateElement('text', 0);
+          __AppendElement(page, text);
+          __AppendElement(text, __CreateRawText('abcdef ghij'));
+          globalThis.held = [page, text];
+          globalThis.entries = [];
+          {attributes}
+          __SetInlineStyles(text, 'width:240px;height:40px;font-family:Ahem;font-size:20px;line-height:20px');
+          const log = (entry) => {{
+            entries.push(entry);
+            __SetAttribute(text, 'log', entries.join('|'));
+          }};
+          __AddEventListener(text, 'selectionchange', (event) => log('text:' + event.detail.start
+            + ':' + event.detail.end + ':' + event.detail.direction));
+          __AddEventListener(__BobcatHandleOf(1), 'selectionchange', () => log('document'));
+          __FlushElementTree();
+        }};
+        "
+    );
+    let mut engine = TestViewSpec::new(&source)
+        .with_default_font("Ahem", AHEM)
+        .boot();
+    // The face is a load of its own: the text is Ahem's once its eleven
+    // characters measure 220px.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let width = engine
+            .probe_document(|tree| tree.text_block_size(node_id(HOST)).map(|size| size.width))
+            .flatten();
+        if width == Some(220.0) {
+            return engine;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the text never measured in Ahem; last {width:?}"
+        );
+        std::thread::yield_now();
+    }
+}
+
+/// The `text-selection` page.
+fn selectable_text() -> TestEngine {
+    selectable_page("__SetAttribute(text, 'text-selection', 'true');")
+}
+
+/// The document's selection, as host, anchor and focus.
+fn selection_of(engine: &mut TestEngine) -> Option<(dom::NodeId, u32, u32)> {
+    engine
+        .probe_document(|tree| {
+            tree.selection()
+                .map(|selection| (selection.host, selection.anchor, selection.focus))
+        })
+        .flatten()
+}
+
+/// A mouse press in a `text-selection` text selects without focusing: the
+/// press places a caret (the W3C event alone, the Lynx record of a caret
+/// being empty), a drag with the button held extends the selection, and a
+/// press outside the text clears it.
+#[test]
+fn a_mouse_press_and_drag_select_a_selectable_text() {
+    let mut engine = selectable_text();
+    let mut expected = vec!["document"];
+
+    engine.painter.clock.pin(10.0);
+    // Inside `a`: the caret before it.
+    engine.dispatch_input(mouse(PointerPhase::Down, 10.0, 10.0));
+    wait_for_log(&mut engine, &expected.join("|"));
+    // Into `d`'s left half: the selection runs to before it.
+    engine.dispatch_input(mouse(PointerPhase::Move, 65.0, 10.0));
+    expected.extend(["document", "text:0:3:forward"]);
+    wait_for_log(&mut engine, &expected.join("|"));
+    engine.dispatch_input(mouse(PointerPhase::Up, 65.0, 10.0));
+    assert_eq!(
+        engine.probe_document(|tree| tree.focused()).flatten(),
+        None,
+        "nothing is focused"
+    );
+    assert_eq!(selection_of(&mut engine), Some((node_id(HOST), 0, 3)));
+
+    engine.painter.clock.pin(20.0);
+    engine.dispatch_input(mouse(PointerPhase::Down, 300.0, 300.0));
+    engine.dispatch_input(mouse(PointerPhase::Up, 300.0, 300.0));
+    expected.extend(["document", "text:-1:-1:forward"]);
+    wait_for_log(&mut engine, &expected.join("|"));
+    assert_eq!(selection_of(&mut engine), None);
+}
+
+/// A second quick mouse press on a selectable text selects the word under
+/// it.
+#[test]
+fn two_quick_presses_select_the_word_of_a_selectable_text() {
+    let mut engine = selectable_text();
+    engine.painter.clock.pin(20.0);
+    engine.dispatch_input(mouse(PointerPhase::Down, 45.0, 10.0));
+    wait_for_log(&mut engine, "document");
+    engine.dispatch_input(mouse(PointerPhase::Up, 45.0, 10.0));
+    engine.painter.clock.pin(20.2);
+    engine.dispatch_input(mouse(PointerPhase::Down, 45.0, 10.0));
+    engine.dispatch_input(mouse(PointerPhase::Up, 45.0, 10.0));
+    wait_for_log(&mut engine, "document|document|text:0:6:forward");
+}
+
+/// A `<text>` without `text-selection` is not selected by a press or a tap,
+/// and its Lynx `selectionchange` never fires.
+#[test]
+fn a_text_without_text_selection_is_not_selected() {
+    let mut engine = selectable_page("");
+    engine.painter.clock.pin(10.0);
+    engine.dispatch_input(mouse(PointerPhase::Down, 10.0, 10.0));
+    engine.dispatch_input(mouse(PointerPhase::Move, 65.0, 10.0));
+    engine.dispatch_input(mouse(PointerPhase::Up, 65.0, 10.0));
+    engine.painter.clock.pin(11.0);
+    engine.dispatch_input(touch(PointerPhase::Down, 45.0, 10.0));
+    engine.dispatch_input(touch(PointerPhase::Up, 45.0, 10.0));
+    engine.probe_document(|_| ());
+    assert_eq!(
+        engine
+            .probe_document(|tree| tree.selection_host())
+            .flatten(),
+        None
+    );
+    assert_eq!(log_of(&mut engine), None, "no selectionchange fired");
+}
+
 // --- `x-input` and `x-textarea` (E5) -----------------------------------------
 
 /// The text field (node 3), 200×40 with 10px padding in 20px Ahem, with
