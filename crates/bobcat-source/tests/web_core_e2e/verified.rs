@@ -568,4 +568,10 @@ verified! {
     basic_element_input_bindinput => "basic-element-input-bindinput",
     // A 200px sky-blue block (vendored rewrite: 20% of the 1000px page, not 90%) over three empty `x-textarea`s with no author height, each one line tall, 16px with its borders (native, user ruling 2026-10-20). None has focus: the second's `focus` attribute is one web-core's `x-textarea` does not observe, and the engine follows web-core (native would focus it). Upstream has no spec for this card.
     basic_element_x_textarea_focus => "basic-element-x-textarea-focus",
+    // A 100x100 box that an effect turns from pink to green when `SystemInfo.platform` is a string and `SystemInfo.pixelRatio` a number (vendored rewrite: upstream asks for `'web'`; user ruling 2026-10-20). Both hold, so it is green.
+    api_systeminfo => "api-SystemInfo",
+    // A 100x100 pink box whose main-thread tap handler logs `hello world` when `SystemInfo.platform` is a string (vendored rewrite: upstream asks for `'web'`; user ruling 2026-10-20). The tap's line is awaited in the log; the box never changes colour.
+    basic_mts_systeminfo => "basic-mts-systeminfo",
+    // Three nested views around `#target`, a `<text>`, over a 400x200 `#result` (wider than the viewport, so it fills the width) that turns green when `path()`'s answer runs from `#target` up to `page` with the expected tags, ids and indexes. The card reads the answer as native gives it (vendored rewrite; user ruling 2026-10-20): the node array itself, `id: ''` for a node without one. It is green.
+    api_get_path_info => "api-get-path-info",
 }

@@ -3630,6 +3630,19 @@ consequential choice about whether to follow the spec or the quirk.
 
 ## JS runtime & APIs (see [js-runtime.md](js-runtime.md), [accessibility.md](accessibility.md))
 
+- **`NodesRef.path()` answers as native does** (user, 2026-10-20;
+  `nodeFields` and `__BobcatQueryNodes` in
+  `packages/bobcat-element/src/element-papi.ts`). The callback gets the
+  node array itself, target first, each node
+  `{tag, id, dataSet, index, class}` with `id` the empty string when the
+  node has none and `class` an array: native's `lynx-core` calls
+  `cb(res.data, res.status)` (`js_libraries/lynx-core/src/modules/selectorQuery/SelectorQuery.ts`)
+  over `FiberNodeInfo::GetNodesInfo` (`core/renderer/dom/fiber/fiber_node_info.cc`).
+  web-core wraps the array as `{path}`, leaves an absent `id` and `class`
+  undefined and `class` a string (`registerGetPathInfoHandler.ts`). The
+  API page on lynxjs.org shows the `{path}` wrapper with native's field
+  values, which matches neither implementation.
+
 - **`ShadowRealm` children have no animation frames, and report under their
   parent's source** (2026-10-13; `crates/bobcat-core/src/realm/child.rs`).
   `requestAnimationFrame` is a member of a window's or a dedicated worker's

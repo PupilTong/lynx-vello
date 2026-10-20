@@ -7,7 +7,7 @@ function App() {
   const [color, setColor] = useState('pink');
   useEffect(() => {
     if (
-      SystemInfo.platform === 'web' && typeof SystemInfo.pixelRatio === 'number'
+      typeof SystemInfo.platform === 'string' && typeof SystemInfo.pixelRatio === 'number'
     ) {
       setColor('green');
     }

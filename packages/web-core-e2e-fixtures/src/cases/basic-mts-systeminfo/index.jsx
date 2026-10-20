@@ -9,7 +9,7 @@ function App() {
       id='target'
       main-thread:bindTap={() => {
         'main thread';
-        if (SystemInfo.platform === 'web') {
+        if (typeof SystemInfo.platform === 'string') {
           console.log('hello world');
         }
       }}

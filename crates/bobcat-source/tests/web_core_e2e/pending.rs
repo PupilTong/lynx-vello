@@ -10,8 +10,6 @@
 // only then accept the picture.
 
 pending! {
-    "api-SystemInfo" =>
-        "awaiting a ruling: the box turns green only if `SystemInfo.platform === 'web'`. web-core hard-codes `'web'`, native reports its build platform, and this engine reports `\"headless\"` (`packages/bobcat-element/src/main-thread-runtime.ts`, `background-thread-runtime.ts`); `docs/tracking/js-runtime.md` leaves the string open. `pixelRatio` is already a number, so the string alone decides the card",
     "api-bindlauoutchange" =>
         "`bindLayoutChange` must deliver the box's rect and turn `#target` green; no `layoutchange` event exists here (`docs/tracking/web-text-test-replication.md` section E), so it stays pink",
     "api-bindlayoutchange-lynx-view-relative" =>
@@ -28,8 +26,6 @@ pending! {
         "an MTS-only throw: blank is consistent and the view surviving to `ScriptFinished` is #330 working; upstream asserts the report's `fileName` (`lepus.js`), which this engine does not carry",
     "api-frame-bindload" =>
         "`bindload` on a `<frame>` must deliver `statusCode: 0`, `success` and the bundle URL, printed in three texts. A frame has no `load` event (the ruling recorded with #409, unchanged by #425), so the texts keep `-1` and two empty strings",
-    "api-get-path-info" =>
-        "awaiting a ruling: the card reads `res.path` in the `path()` callback and expects `id: undefined` for an element with none. web-core answers `{path: […]}` with `id: undefined`; native answers the node array itself with `id: \"\"`, and this engine follows native (`__BobcatQueryNodes`, `nodeFields` in `packages/bobcat-element/src/element-papi.ts`), so `res.path` is undefined and `#result` stays pink",
     "api-global-disallowed-vars" =>
         "DEFECT: `MTS_CHUNK_PREAMBLE` (crates/bobcat-core/src/esm.rs) declares none of the disallowed globals the BTS preamble shadows, so MTS code naming `navigator`/`postMessage` raises a ReferenceError where web-core's lepus wrapper gives `undefined`. The card paints only a sizeless view, so the blank screen hides it",
     "api-lynx-performance" =>
@@ -96,8 +92,4 @@ pending! {
         "the text must read `hello from iframe` once the `<x-webview html=…>` document posts a message; it reads `waiting`: there is no `x-webview` component and nothing in `crates/` hosts an HTML document",
     "basic-event-trigger" =>
         "a `capture-bindtap` and a `bindtap` on one element must both run for one tap, capture first, with the first handler's `setState` visible to the second: the text must read `[capture tap][bind tap]`. It reads `[bind tap]`: the second handler's `setText(text + …)` still sees the empty `text`, so the capture handler's update is overwritten. Both handlers reach the background thread without a render between them (inferred from the picture, not traced)",
-    "basic-mts-systeminfo" =>
-        "awaiting the same ruling as `api-SystemInfo`: the main-thread tap handler logs `hello world` only if `SystemInfo.platform === 'web'`, and this engine reports `\"headless\"`, so the line never comes",
-    "basic-ppx-unit" =>
-        "the Lynx-only `ppx` unit is not in the fork's length grammar (`vendor/stylo/style/tests/lynx_lengths.rs::rejects_invalid_or_removed_units`), so both declarations are dropped and nothing paints. Admitting it needs a ruling first: native resolves `ppx` by dividing by the device pixel ratio (`lynx/core/renderer/css/css_style_utils.cc`), web-core defines `--ppx-unit: 1cqw` (`web-core/css/index.css`), and upstream's assertion — a 10x10 box after the host narrows the view to 50px — holds only under web-core's. That resize is also a step the suite does not have",
 }

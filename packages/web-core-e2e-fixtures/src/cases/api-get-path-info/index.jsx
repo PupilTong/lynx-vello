@@ -14,14 +14,14 @@ export function App() {
     { tag: 'view', id: 'inner', index: 1 },
     { tag: 'view', id: 'middle', index: 0 },
     { tag: 'view', id: 'outer', index: 0 },
-    { tag: 'view', index: 0 },
-    { tag: 'page', index: 0 },
+    { tag: 'view', id: '', index: 0 },
+    { tag: 'page', id: '', index: 0 },
   ];
 
   useEffect(() => {
     lynx.createSelectorQuery().select('#target').path((res, status) => {
       try {
-        const pathArr = res.path;
+        const pathArr = res;
         // Only check the top N nodes (from leaf to root)
         let isMatch = true;
         for (let i = 0; i < expectedPath.length; i++) {

@@ -21,10 +21,10 @@ scope decision, will not. Upstream's own `dist/` is built without an
 this engine has no intention of serving. Compiled here at `4.1.0`, the same
 sources exercise the path it does.
 
-The cards, their CSS and their assets are otherwise upstream's, with seven
+The cards, their CSS and their assets are otherwise upstream's, with nine
 rewrites applied to the vendored text by user ruling (the first two on
 2026-09-25, the third on 2026-10-08, the fourth on 2026-10-15, the fifth on
-2026-10-16, the last two on 2026-10-20):
+2026-10-16, the last four on 2026-10-20):
 
 - **`direction: lynx-rtl` becomes `direction: rtl`** (24 files). `lynx-rtl` is
   a value the fork's grammar rejects, so upstream's own spelling left every
@@ -69,7 +69,19 @@ rewrites applied to the vendored text by user ruling (the first two on
   (1 file). At 90% of the 1000px page the block was 900px tall and the
   three textareas the card is about lay below the viewport.
 
-All seven are recorded here rather than absorbed silently, because a re-sync
+- **`SystemInfo.platform` is asked to be a string, not `'web'`** (2 files:
+  `api-SystemInfo`, `basic-mts-systeminfo`). web-core hard-codes `'web'`;
+  native reports its build platform, and this engine its host's. What the
+  cards may rely on is that the member is a string.
+
+- **`api-get-path-info` reads `path()`'s answer as native gives it** (1
+  file). Native's `lynx-core` calls the callback with the node array itself
+  (`cb(res.data, res.status)`, `SelectorQuery.ts`), each node's `id` the
+  empty string when it has none (`fiber_node_info.cc`); web-core wraps the
+  array as `{path}` and leaves such an `id` undefined. The card reads `res`
+  and expects `id: ''` for the two nodes without one.
+
+All nine are recorded here rather than absorbed silently, because a re-sync
 from upstream will bring the original text back.
 
 ## Building
@@ -121,7 +133,9 @@ suite would blame the engine for it.
 
 ## What is not vendored
 
-`api-frame-element-map` (user, 2026-10-16: the test is deleted).
+`api-frame-element-map` (user, 2026-10-16: the test is deleted), and
+`basic-ppx-unit` (user, 2026-10-20: the test is deleted; the fork's grammar
+has no `ppx`).
 
 Every case that involves `enableCSSSelector: false` (user, 2026-10-13: the
 flag is no longer supported, so its cases are deleted rather than kept
@@ -138,7 +152,7 @@ Their three rspeedy config files (`config-css-selector-false.config.ts`,
 `basic-lazy-component-css-selector-false.config.ts`,
 `config-mixed-01.config.ts`) have no entry in `groups.js`. **A re-sync from
 upstream will bring the directories back; delete them again.** With them gone
-the corpus, less `api-frame-element-map` too, is 323 cards.
+the corpus, less `api-frame-element-map` and `basic-ppx-unit` too, is 322 cards.
 
 ## What is not built
 
