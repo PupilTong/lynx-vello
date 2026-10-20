@@ -1130,6 +1130,41 @@ fn an_empty_host_s_caret_is_its_paragraph_s_one_empty_line() {
     }
 }
 
+/// An element given the line by `set_has_line_if_empty` — a text control's
+/// editor whose editing is turned off — keeps one empty line of its strut
+/// when it is not an editing host; without it, an empty `contenteditable=
+/// "false"` element, like every other empty paragraph, lays out no line.
+#[test]
+fn an_element_with_a_line_if_empty_is_one_line_tall_without_being_a_host() {
+    for kind in [Kind::Text, Kind::Block] {
+        let mut doc = document();
+        let element = kind.create(&mut doc);
+        doc.set_attribute(element, "contenteditable", "false");
+        doc.set_inline_style(element, "width: 200px; padding: 3px 5px;");
+        doc.append_child(doc.document_element().id(), element);
+        doc.layout();
+        let height = |doc: &Document<()>| doc.bounding_client_rect(element).unwrap().size.height;
+        assert_eq!(height(&doc), 6.0, "{kind:?}: padding only");
+
+        doc.set_has_line_if_empty(element, true);
+        doc.layout();
+        assert!(!doc.is_editing_host(element));
+        assert_eq!(doc.paragraph_line_count(element), Some(1), "{kind:?}");
+        assert_eq!(height(&doc), 16.0, "{kind:?}: the line and the padding");
+
+        // An editing host has the line whatever the bit says.
+        doc.set_attribute(element, "contenteditable", "");
+        doc.layout();
+        assert_eq!(height(&doc), 16.0, "{kind:?}: a host");
+        doc.set_has_line_if_empty(element, false);
+        doc.layout();
+        assert_eq!(height(&doc), 16.0, "{kind:?}: a host without the bit");
+        doc.remove_attribute(element, "contenteditable");
+        doc.layout();
+        assert_eq!(height(&doc), 6.0, "{kind:?}: neither");
+    }
+}
+
 /// The empty line of an empty host's own paragraph holds no value text:
 /// every pointer and move command over it lands at offset 0, and typing
 /// into it and deleting back to empty leaves the line in place.

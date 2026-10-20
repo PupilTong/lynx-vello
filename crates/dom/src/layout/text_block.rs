@@ -332,14 +332,16 @@ fn as_items(collected: &[Collected], id_offset: usize) -> Vec<InlineItem<'_>> {
 
 /// The paragraph style, from the establishing element's CSS and attributes.
 ///
-/// An editing host's paragraph keeps one empty line of its strut when it has
-/// no content, so the host is one line tall and its caret has a line to sit
-/// on, as an HTML text control is never shorter than one line.
+/// An editing host's paragraph, or a text control editor's
+/// ([`crate::Document::set_has_line_if_empty`]), keeps one empty line of its
+/// strut when it has no content, so the element is one line tall and a caret
+/// has a line to sit on, as an HTML text control is never shorter than one
+/// line.
 fn block_style<T>(tree: &TreeArenas<T>, element: NodeSlot) -> BlockStyle {
     let node = tree.at(element);
     let view = StyleView::of(node);
     BlockStyle {
-        strut_line_when_empty: crate::editing::is_host_node(node),
+        strut_line_when_empty: crate::editing::has_line_if_empty(node),
         ..BlockStyle::from_container_style(&view, &TextRunView::from_values(view.values()))
     }
 }

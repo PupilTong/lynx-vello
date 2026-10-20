@@ -323,8 +323,19 @@ Public surface:
   HTML `<input>` or `<textarea>` is never shorter than one line;
   `Document::paragraph_line_count` answers 1. The layout host sets
   `strut_line_when_empty` on `BlockStyle`/`InlineFlowStyle` from
-  `contenteditable` (`editing::is_host_node`); it is a shaping input, so
-  toggling the attribute invalidates the element's layout and rebuilds its
+  `editing::has_line_if_empty`: the element is an editing host
+  (`contenteditable`), or carries the node bit
+  `Document::set_has_line_if_empty` sets. Blink's
+  `LayoutBlock::HasLineIfEmpty` is the same pair: an editable root, or a
+  style flag its text control inner editor's UA style sets. The bit is
+  for a text control's editor, which `disabled` and `readonly` make
+  `contenteditable="false"`: the field component sets it once on its
+  editor, so an empty field stays one line tall while it cannot be
+  edited, as native measures a field at its editor's height (user ruling
+  2026-10-20). It is no second kind of editing host: it decides
+  layout alone, and focus, commands and the UA rule still read
+  `contenteditable`. Either input is a shaping input, so a change to the
+  attribute or the bit invalidates the element's layout and rebuilds its
   paragraph. Parley shapes a substitute space for empty text in style 0,
   the strut, which gives the line its box; that space is no content — the
   line is zero wide, so `text-align` puts it and the caret at the start, the
@@ -1034,6 +1045,7 @@ Public surface:
   width is clipped.
 - No intrinsic width: an unsized field in a row is as wide as its text.
 - `readonly` fields cannot be focused (editing is off, as for `disabled`).
+  Either way an empty field stays one line tall.
 - Not built: `line-spacing`, `auto-height`, `linechange`, `autocomplete`, `spell-check`,
   `getTextBoundingRect` on a field, `placeholder-font-style` and the
   `-x-placeholder-*` aliases.

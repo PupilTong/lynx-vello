@@ -57,6 +57,13 @@
 //! vertically centred line — focuses the editor ([`focus_delegate`], HTML's `delegatesFocus`
 //! for this one component).
 //!
+//! **One line when empty.** An empty editor lays out one empty line of its strut, so an
+//! unsized field is one line tall, as native measures a field at its editor's height
+//! (`LynxUIBaseInputShadowNode.kt`). An editing host has that line in `dom`; the editor
+//! keeps it while `disabled` or `readonly` make it `contenteditable="false"`, because
+//! [`TextField::build`] gives it [`dom::Document::set_has_line_if_empty`], as Blink's
+//! text control inner editor carries the same bit in its UA style.
+//!
 //! **Single line.** An `x-input`'s editor is `white-space: pre`: every character kept and no
 //! wrapping; an `x-textarea`'s is `pre-wrap`, which a Lynx paragraph reads as "wrap" (it keeps
 //! white space verbatim whatever the value). Both come from the shadow sheet, which outranks
@@ -76,7 +83,7 @@
 //! | `type` | `text`, `number`, `digit`, `password`, `tel`, `email`: the editor's `type` (`password` or `text`) and `inputmode` (web-core's `_handleType`); a `password` editor shows a disc per character (`-webkit-text-security: disc` in the shadow sheet); `number` also keeps digits and the last `.` only |
 //! | `maxlength` | UTF-16 units, 140 when absent (web-core's default); see below |
 //! | `confirm-type` | the editor's `enterkeyhint`, `send` when absent |
-//! | `disabled`, `readonly` | present and not `"false"`: the editor is `contenteditable="false"`, so it cannot be focused or edited |
+//! | `disabled`, `readonly` | present and not `"false"`: the editor is `contenteditable="false"`, so it cannot be focused or edited; an empty field stays one line tall (below) |
 //! | `input-filter` | a pattern whose every match is removed from the value after each edit (web-core's `replace(new RegExp(filter, 'g'), '')`) |
 //! | `send-composing-input` | present and not `"false"`: `input` fires during a composition too |
 //! | `confirm-enter` | `x-textarea` only: Enter fires `confirm` after its line break |
@@ -644,6 +651,8 @@ impl TextField {
         document.set_attribute(editor, "part", id);
         document.set_classes(editor, "editor");
         document.set_attribute(editor, "contenteditable", "plaintext-only");
+        // One line tall when empty, editable or not (`disabled`, `readonly`).
+        document.set_has_line_if_empty(editor, true);
         document.set_attribute(editor, "enterkeyhint", "send");
         document.set_attribute(editor, "inputmode", "text");
         document.set_attribute(editor, TYPE, "text");
@@ -1745,6 +1754,48 @@ mod tests {
             document.set_attribute(field, attribute, "false");
             assert!(document.is_editing_host(editor), "{attribute}=false");
             assert_eq!(focus_delegate(&document, field), Some(editor));
+        }
+    }
+
+    /// An empty field with no author height is one line tall whether or not
+    /// it can be edited (native measures it at its editor's height): its
+    /// editor keeps its one empty line while `disabled` or `readonly` take
+    /// its `contenteditable` away, set before the first layout or after.
+    #[test]
+    fn an_empty_field_is_one_line_tall_when_editing_is_off() {
+        for tag in INPUT_TAGS.iter().chain(&TEXTAREA_TAGS) {
+            for attribute in ["disabled", "readonly"] {
+                let drop_height = |document: &mut LynxDocument, field| {
+                    document.set_inline_style(
+                        field,
+                        "width: 200px; padding: 5px; font-family: Ahem; font-size: 10px; \
+                         line-height: 10px",
+                    );
+                    document.layout();
+                };
+                let (mut document, _, field) = make(tag, &[(attribute, "")]);
+                drop_height(&mut document, field);
+                let editor = editor_of(&document, field);
+                assert!(!document.is_editing_host(editor), "{tag} {attribute}");
+                assert_eq!(
+                    document.paragraph_line_count(editor),
+                    Some(1),
+                    "{tag} {attribute}"
+                );
+                assert_eq!(rect(&document, editor).3, 10.0, "{tag} {attribute}");
+                assert_eq!(rect(&document, field).3, 20.0, "{tag} {attribute}");
+
+                // Turned off after a layout as a host, and on again.
+                let (mut document, _, field) = make(tag, &[]);
+                drop_height(&mut document, field);
+                assert_eq!(rect(&document, field).3, 20.0, "{tag}");
+                document.set_attribute(field, attribute, "");
+                document.layout();
+                assert_eq!(rect(&document, field).3, 20.0, "{tag} {attribute} set");
+                document.set_attribute(field, attribute, "false");
+                document.layout();
+                assert_eq!(rect(&document, field).3, 20.0, "{tag} {attribute}=false");
+            }
         }
     }
 
