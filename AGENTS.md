@@ -2295,12 +2295,19 @@ way the subtree stacks, from `web-elements`' own `scroll-view.css` and
 `x-list.css`; `enable-scroll="false"` leaves the box a scroll container only
 script can move — and a `scroll-view` component whose `CustomElement::invoke`
 answers the `scrollTo`, `scrollBy`, `autoScroll` and `getScrollInfo` UI
-methods on the axis the tag scrolls; `takeContentScreenshot` is not built),
+methods on the axis the tag scrolls; `takeContentScreenshot` is not built —
+and fires `scrolltoupper`/`scrolltolower` from the `scroll` it observes,
+native's edge rule over `upper-threshold`/`lower-threshold`, the
+`ScrollEdges` `list` shares, and `nearest_snap_position`, the nearest snap
+position the swiper and the pager report by),
 `tree::list` (`list`'s scroll axis, `list-type` layout modes and cell
 virtualization as UA rules, and a `list` component whose `CustomElement::invoke`
 answers `scrollToPosition`, `scrollBy` and `autoScroll` (`scroll-view`'s, on
 the list's axis), `getScrollContainerInfo` and `getVisibleCells`;
-`getScrollInfo` is not built, and the base set's `scrollTo` answers on a list),
+`getScrollInfo` is not built, and the base set's `scrollTo` answers on a list;
+it fires `scrolltoupper`/`scrolltolower` by `scroll-view`'s rule, its zones
+also by `upper-threshold-item-count`/`lower-threshold-item-count`;
+`scrollstatechange` is not built),
 `tree::base_methods` (the UI methods every element has, which
 `callElementMethod` runs when the element's kind has no method of the name:
 `boundingClientRect` over `Document::bounding_client_rect`,
@@ -2311,8 +2318,14 @@ are not built, `dom` having no focus model), `tree::viewpager` (`viewpager`/`x-v
 horizontal scroll container that snaps page by page, its pages' row pinned in
 the cascade, the initial page (`select-index`/`initial-select-index`) as a
 typed `attr()` and an `if()` over `sibling-index()` into
-`scroll-initial-target`, and a component whose only member is the `selectTab`
-UI method, its `CustomElement::invoke`), `tree::swiper` (`x-swiper`/`x-swiper-item`: the first
+`scroll-initial-target`, and a component that answers the `selectTab` UI
+method, its `CustomElement::invoke`, and fires `offsetchange`, `change` and
+`willchange` from the pager's own `scroll`/`scrollend` and the touches on
+it), `tree::touches` (the count of fingers down per element a component keeps
+from the `touchstart`/`touchend`/`touchcancel` its element hears, counted once
+per event outside the capture pass: the `isDragging`/`isDragged` of the
+swiper, pager and refresh-view events, web-core's approximation of native's
+drag state), `tree::swiper` (`x-swiper`/`x-swiper-item`: the first
 component with a UA shadow tree, web-core's `#content` scroll container
 snapping item by item on its main axis with the items slotted into it, and
 `#indicator`, one box drawing the dots as background layers whose active
@@ -2325,7 +2338,9 @@ compositor-exported `view()` transform animations — `carry` a scale,
 as a timer of the component's — kept in the document's `Autoplays`, which the
 page waits out beside its realm's timers (`RealmOwner::next_deadline`) and
 runs in its epilogue, each turn a `Document::scroll_to_yielding` request the
-painter declines while a pointer holds the swiper; no events; its
+painter declines while a pointer holds the swiper; `scrollstart`, `change`,
+`scrollend` and `transition` from `#content`'s `scroll`/`scrollend` and the
+touches on the host; its
 one UI method, `scrollTo({index, smooth})`, scrolls the item into view at its
 snap position through `Document::scroll_into_view`, its `CustomElement::invoke`), `tree::refresh_view` (`x-refresh-view`/`x-refresh-header`/
 `x-refresh-footer`: a component with web-core's UA shadow tree, a `#container`
@@ -2335,7 +2350,10 @@ the header and footer in named slots (the component sets their `slot` on
 resting snap target and the initial scroll target; the header's and footer's
 `scroll-snap-align` is a `view(block)` animation, `start`/`end` from 90%
 visible, in place of web-core's `x-magnet-enable`; `enable-refresh`/
-`enable-loadmore="false"` hide an end; no events; three UI methods, its
+`enable-loadmore="false"` hide an end; `headershow`, `headeroffset`,
+`footeroffset`, `headerreleased`, `footerreleased`, `startrefresh` and
+`startloadmore` from `#container`'s `scroll`/`scrollend` and the touches on
+the view, by native's `pullingPercent`; three UI methods, its
 `CustomElement::invoke`, each a `Document::scroll_into_view` in
 `#container`: `finishRefresh` and `finishLoadMore` smoothly put `#content`
 back at `block: center`, `autoStartRefresh` instantly puts the first header

@@ -1100,7 +1100,9 @@ consequential choice about whether to follow the spec or the quirk.
   `scrollLeft`, `scrollHeight`, `scrollWidth` read at delivery, `deltaX`/
   `deltaY` the change the post that queued it made (0 for `scrollend`), and
   `isDragging`, **always `false`** in this step, as web-core reports it
-  (native reports whether a finger holds the container).
+  (native reports whether a finger holds the container). It stays `false`
+  beside the component events of 2026-10-20, whose `isDragging`/`isDragged`
+  are a touch count (the Lynx scroll-state events entry below).
   Recorded choices inside the step:
   - **A `scrollend` ends a scroll that happened.** The main thread records
     every container that scrolled (an adopted offset moved it, or a
@@ -1209,6 +1211,99 @@ consequential choice about whether to follow the spec or the quirk.
   dispatches from its truncation pass
   (`web-elements/src/elements/XText/XTextTruncation.ts:369-430`), so a late
   listener there also hears the next pass and nothing before it.
+- **Lynx scroll-state events (2026-10-20, user ruling)** — Lynx-only
+  (bucket 2). `scroll-view` and `list` fire `scrolltoupper` and
+  `scrolltolower`; `x-swiper` `scrollstart`, `change`, `scrollend` and
+  `transition`; `viewpager`/`x-viewpager-ng` `offsetchange`, `change` and
+  `willchange`; `x-refresh-view` `headershow`, `headeroffset`,
+  `footeroffset`, `headerreleased`, `footerreleased`, `startrefresh` and
+  `startloadmore`. Each is decided by the tag's Rust component
+  (`crates/bobcat-core/src/main/tree/{scroll_container,list,swiper,viewpager,refresh_view}.rs`)
+  from the W3C `scroll`, `scrollend`, `touchstart`, `touchend` and
+  `touchcancel` it names in `CustomElement::observed_events`, with geometry
+  read from the last completed layout and never flushed, and queued through
+  `ComponentEvents` only when `Document::has_listener` finds a listener for
+  the name on the element. Nothing is reported by the painter, and no
+  `IntersectionObserver` is involved. Where the references disagree:
+  - *The threshold events are decided on `scroll` only*, native's rule
+    (`updateScrollPosition`, iOS `LynxUIScrollViewInternal.m:87-109`,
+    Android `LynxUIScrollViewInternal.java:90-109`): each fires when a
+    `scroll` enters its zone. web-core's intersection observers
+    (`ScrollViewEvents.ts`, `XListEvents.ts`) also fire when a layout change
+    or the first render moves a sentinel into the scrollport, which these
+    never do.
+  - *A threshold event's `detail` is the kernel `scroll`'s metrics*, read at
+    its delivery, with the change in offset since the element's previous
+    `scroll` as `deltaX`/`deltaY`. web-core's detail, at `scrollTop === 0`,
+    subtracts half the host's `scrollHeight` less its `scrollTop` (and the
+    same on x, `ScrollViewEvents.ts:110-118`); native's adds `scrollState`
+    and reports its drag state as `isDragging` (iOS
+    `LynxUIScrollViewInternal.m:118-127`, Android
+    `LynxUIScrollViewInternal.java:386-399`).
+  - *A `list`'s px thresholds default to 0*, as on a `scroll-view`. Native Android defaults `upper-threshold` and
+    `lower-threshold` to 50 px (`AbsLynxList.java:146-158`); web-core's
+    `XList` has no px form, its zones starting at the edge, and
+    `upper-threshold-item-count`/`lower-threshold-item-count` is its only
+    form (`XListEvents.ts:90-137,186-233`), which is built here too.
+    **Flagged for the user**: 0 against native's 50.
+  - *`x-swiper` `change` is decided on every `scroll`*, by the item whose
+    snap position is nearest `#content`'s offset on the main axis
+    (`scroll_container::nearest_snap_position`, the rule autoplay's turn
+    counts from). web-core decides only once the offset moved a quarter page
+    since its last decision, or near either end (`XSwiperEvents.ts`,
+    `#handleScroll`), and then by item centres; native fires when its
+    pager's page changes (Android `XSwiperUI.java:196-205`, `onPageChange`).
+  - *`x-swiper` `transition` is `{dx, dy}`, `#content`'s absolute
+    `scrollLeft` and `scrollTop`*, web-core's shape. Native sends its pager's
+    scrolling offsets beside `current` and `isDragged`, throttled by
+    `transition-throttle` (Android `XSwiperUI.java:164-183`,
+    `onPageScrolling`).
+  - *`x-swiper`'s end event is `scrollend`, fired at the swiper* with
+    `{current}`. web-core names its event `lynxscrollend`, which reaches
+    script as `scrollend` (`W3cEventNameToLynx`,
+    `web-core/ts/constants.ts:56`). The kernel's own `scrollend` targets
+    `#content` and never leaves its shadow tree.
+  - *`viewpager` `change` is the page whose snap position is nearest the
+    rest offset*, at `scrollend`. web-core takes
+    `Math.floor(scrollLeft / clientWidth)` (`XViewpagerNgEvents.ts`,
+    `#scrollEndHandler`), so a landing a fraction of a pixel short of a
+    page's position reads there as the page before it.
+  - *`viewpager` `willchange` fires on `touchend` only.* web-core's handler
+    is registered for `touchcancel` too (`XViewpagerNgEvents.ts:159`).
+  - *`x-refresh-view` follows native where the two differ*: `offsetPercent`
+    is native's `pullingPercent`, not web-core's `1 - scrollTop / height`
+    (`XRefreshViewEventsEmitter.ts`, `#handleScroll`), whose `scrollTop`
+    counts from the top placeholder; `startrefresh` fires when `#container`
+    comes to rest on the header, and at once on `autoStartRefresh`, as
+    native enters its refreshing state, where web-core fires it at the
+    `touchend` that finds the header at least 90% visible, so its
+    `autoStartRefresh` waits for the next `touchend`; `startloadmore`
+    likewise fires at the rest on the footer; `headerreleased` and
+    `footerreleased` need the end pulled its full height (`>= 1`, iOS
+    `LynxUIRefresh.m:268-284`) where web-core's need 90%. Native's
+    `refreshstatechange` is not built; web-core has none.
+  - *`isDragging` and `isDragged` are the component's own touch count*
+    (`crates/bobcat-core/src/main/tree/touches.rs`): `touchstart` adds one,
+    `touchend` and `touchcancel` take one away, never below zero, so a finger
+    down on the element or anything inside it counts whether or not it
+    drags anything. That is web-core's approximation (its components set a
+    flag on `touchstart` and clear it on `touchend`); native reports its
+    drag state.
+  - *`list` `scrollstatechange` is not built.* Native sends it (Android
+    `LynxListEvent.java:21`); web-core has none.
+  - *The kernel `scroll` detail's `isDragging` is still `false`* (the
+    `scroll`/`scrollend` entry above).
+  - *Cost.* A live `scroll-view` or `list` keeps `scroll` in the names the
+    document's components observe, and a live `x-swiper`, `viewpager` or
+    `x-refresh-view` keeps `scroll`, `scrollend`, `touchstart`, `touchend`
+    and `touchcancel` there (`DocumentSlot::listens`). On any page with one,
+    `MainThreadRuntime::adopt_scroll_offsets` therefore queues a kernel
+    `scroll` for every container an adopted post moved (one per container
+    per take), whether or not anything listens for a Lynx name, and the
+    touch names stay in the painter's routed name set, so every touch is
+    sent to the main thread. Each such event is walked through the
+    components in Rust; no realm is called unless a listener for the name
+    is registered on its path.
 - **`pointer-events: none` hit-test fall-through** — Lynx falls through to
   the *next sibling* under the point; W3C says the element (and normally its
   subtree) becomes fully transparent to hit-testing, continuing the search
@@ -1767,10 +1862,13 @@ consequential choice about whether to follow the spec or the quirk.
   `scroll-view.css` carries is absent: fading edges, scrollbar visibility
   (`enable-scrollbar`/`scroll-bar-enable`), scroll snapping
   (`item-snap`/`paging-enabled`), and the threshold-observer parts behind
-  `scrolltoupper`/`scrolltolower`. Several of those are shadow-part machinery
+  `scrolltoupper`/`scrolltolower`, which are not needed: since 2026-10-20 the
+  component decides both events from the element's own `scroll` (the Lynx
+  scroll-state events entry). Several of the rest are shadow-part machinery
   that a UA sheet cannot express alone; they belong with the component work,
-  not with the tag defaults. The tag's component answers three UI methods
-  and nothing else (the `scroll-view` UI methods entry below).
+  not with the tag defaults. The tag's component answers four UI methods
+  (the `scroll-view` UI methods entry below) and fires the two threshold
+  events.
 - **A `list` is that plus virtualized, placed cells — and nothing else yet**
   *(2026-09-21)*. `crates/bobcat-core/src/main/tree/list.rs` carries the same
   axis rules written against `scroll-orientation`, and on top of them
@@ -1788,9 +1886,11 @@ consequential choice about whether to follow the spec or the quirk.
   nonnegative numbers and their CSS fallback is the scrollport size. `sticky-top="true"` supplies sticky positioning, the
   nonnegative inherited offset and `z-index: 1`. Still absent from the sheet:
   horizontal sticky insets and `sticky-bottom`, `item-snap` /
-  `paging-enabled` scroll snapping, the scrollbar rules, the threshold
-  observers, `initial-scroll-index`, every list event and every list UI
-  method — and cell recycling, which this engine does not do at all: a
+  `paging-enabled` scroll snapping, the scrollbar rules,
+  `initial-scroll-index`, every list event and every list UI method (since
+  2026-10-20 the component decides `scrolltoupper` and `scrolltolower` from
+  the list's `scroll`, with no observer: the Lynx scroll-state events
+  entry) — and cell recycling, which this engine does not do at all: a
   virtualized cell keeps its element and skips its contents, which is
   web-core's model too (`components.md` row 23).
 - **List waterfall over `display: grid-lanes` — path assessment
@@ -2325,8 +2425,9 @@ consequential choice about whether to follow the spec or the quirk.
   scroll container and a dot strip, and its layouts are UA rules.** `crates/bobcat-core/src/main/tree/swiper.rs` translates
   `x-swiper.css` and its template (`htmlTemplates.ts:225-275`) onto web-core's
   two tags, `x-swiper` and `x-swiper-item` (web-core's tag map has no `swiper`
-  entry; native's tag is `swiper`, Android `XSwiperUI.java:52`). No events and
-  no UI methods. Where it leaves a reference:
+  entry; native's tag is `swiper`, Android `XSwiperUI.java:52`). Its
+  `scrollTo` UI method came on 2026-10-11 and its events on 2026-10-20 (the
+  Lynx scroll-state events entry). Where it leaves a reference:
   - *The shadow tree is `#content` (with one default slot) and `#indicator`
     only*: no `#bounce-padding`, no `circular-start`/`circular-end` slots, no
     per-dot elements.
@@ -2500,9 +2601,8 @@ consequential choice about whether to follow the spec or the quirk.
     - *A turn does not replace a `scrollTo` the painter has not handled
       yet*, and the document's own offset waits for the painter's post even
       for an instant turn.
-    - *Not built:* Android's `finish-reset`, and autoplay's part in the
-      swiper's events, none of which exist here.
-  - *Not implemented:* every event; every UI
+    - *Not built:* Android's `finish-reset`.
+  - *Not implemented:* every UI
     method but `scrollTo`; `contain: strict`/
     `content-visibility` from the twentieth item (`x-swiper.css:77-80`), a
     browser shortcut.
@@ -2522,9 +2622,10 @@ consequential choice about whether to follow the spec or the quirk.
   header slot, `#content` with the default slot (the one box that snaps at
   rest, centred), the footer slot and a second placeholder. The component sets
   `slot` on the header and the footer when they reach its default slot, where
-  web-core's header and footer set it themselves when they connect. No
-  events; the three UI methods since 2026-10-11 (the last item). Where it
-  leaves a reference:
+  web-core's header and footer set it themselves when they connect. The
+  three UI methods since 2026-10-11 (the last item), the events since
+  2026-10-20 (the Lynx scroll-state events entry). Where it leaves a
+  reference:
   - *The header holds at 90% visible* (web-core: the `IntersectionObserver`
     threshold of `XRefreshSubElementIntersectionObserver.ts`, the footer
     alike). Native triggers when the pull reaches the header's full height
@@ -2590,8 +2691,12 @@ consequential choice about whether to follow the spec or the quirk.
     settle at request time, left as a follow-up for the user.
     web-core's `autoStartRefresh` also marks the next refresh as not manual
     (`_nextRefreshIsManual = false`), which only its `startrefresh` event
-    reads; with no events here, no such flag is kept. `autoStartRefresh`
-    on a view with no header, or with `enable-refresh="false"`, moves
+    reads, and sets it back after its next `touchend` sent the event. Here
+    the component keeps the same `manual` flag per view: `autoStartRefresh`
+    clears it, sends its `startrefresh` `{isManual: false}` at once and sets
+    it again, as iOS's `startRefresh` sets it back after sending
+    (`LynxUIRefresh.m:247-262`; the Lynx scroll-state events entry).
+    `autoStartRefresh` on a view with no header, or with `enable-refresh="false"`, moves
     nothing, where web-core still scrolls to the top placeholder. iOS has
     no footer method (`LynxUIRefresh.m:373-388`).
 
