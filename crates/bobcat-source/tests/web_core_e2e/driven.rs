@@ -454,7 +454,10 @@ driven! {
     // is 1.6 s after the click: here 1.1 s of wait and the 0.5 s settle every frame
     // has, and a short stability check, so the capture falls inside that quiet spell.
     "basic-element-x-swiper-interval" => [
-        "second-item": [Wait(5600)],
+        // Upstream's 5.6 s count from the card's load, so the frame starts the card
+        // again: counted from the first screen, whose capture takes a varying time,
+        // the wait could span one turn or two.
+        "second-item": [Fresh, Wait(5100)],
         "third-item": [Tap(5.0, 155.0), Wait(1100), QuickCapture],
         "last-item": [Tap(5.0, 165.0), Wait(600)],
     ],

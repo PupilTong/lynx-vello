@@ -10,10 +10,6 @@
 // only then accept the picture.
 
 pending! {
-    "api-bindlauoutchange" =>
-        "`bindLayoutChange` must deliver the box's rect and turn `#target` green; no `layoutchange` event exists here (`docs/tracking/web-text-test-replication.md` section E), so it stays pink",
-    "api-bindlayoutchange-lynx-view-relative" =>
-        "the same `layoutchange` card with the host element offset upstream; no `layoutchange` event exists here (`docs/tracking/web-text-test-replication.md` section E), so `#target` stays pink",
     "api-devtool-event" =>
         "the card shows `ready` once it has a listener on `lynx.getDevtool()`, then the host's `sendDevtoolEvent` payload; it shows `waiting` because `lynx.getDevtool` does not exist (the background thread throws `TypeError: not a function`), and a view has no devtool-event call for a host to make",
     "api-dispose" =>
@@ -50,10 +46,8 @@ pending! {
         "the upper-threshold event, same reason as `basic-element-scroll-view-event-scrolltolower`: `scrolltoupper` is not built",
     "basic-element-scroll-view-scroll-to-index" =>
         "`initial-scroll-to-index={1}` must land the scrollport on the second child at boot; the attribute does not exist here, so we start at the first. Statically wrong, and a missing attribute rather than an interaction",
-    "basic-element-text-bindlayout" =>
-        "the layout event is produced but never dispatched, so the result row stays empty",
     "basic-element-text-bindselectionchange" =>
-        "selection events are not dispatched; the paragraph itself is right",
+        "upstream selects `#inline-target`'s text with `setBaseAndExtent` and expects `bindselectionchange` to report `7-10-forward` on the `<text>` and `1-4-forward` on the inline text, then the same backward. #467 built the document's `selectionchange` and the Lynx `<text>` event derived from it, but a selection exists only inside a `contenteditable` host there: selecting read-only text is its follow-up, so this plain `<text>` can hold no selection and nothing is reported",
     "basic-element-text-set-native-props-text" =>
         "the setNativeProps push is not retargeted onto the leading raw-text (recorded GAP)",
     "basic-element-text-set-native-props-text-do-not-change-inline-text" =>
@@ -74,12 +68,6 @@ pending! {
         "upstream asserts the `scrollend` events three swipers log; the card logs nothing: no swiper event exists (`crates/bobcat-core/src/main/tree/swiper.rs`; #408 built autoplay and left the swiper's events out of its scope)",
     "basic-element-x-swiper-bindscrollstart" =>
         "upstream asserts the `scrollstart` events three swipers log, with `isDragged` and `current`; the card logs nothing: no swiper event exists (`crates/bobcat-core/src/main/tree/swiper.rs`; #408 built autoplay and left the swiper's events out of its scope)",
-    "basic-element-x-swiper-circular-coverflow" =>
-        "`current` 1 and 2 are right: the current item flat and centred, a turned neighbour on each side (#395). The first screen and `current` 3, where the scrollport straddles the seam, are wrong: on the first screen the red current item is drawn with the end keyframe (x 193..314, 0.514 wide, skewed) instead of flat at 79..314, the yellow neighbour's inner edge is at x 59 instead of 78, and the green neighbour is turned out of the scrollport; `current` 3 mirrors it. Two causes in `dom`. A view progress timeline's offset is clamped to `0..=max_offset` (`crates/dom/src/visual/curves.rs` `ScrollTimeline::progress`; `crates/dom/src/style/timeline.rs` `Binding::sample`), and on a circular axis the admitted offset runs to the period (943.2 here, `max_offset` 550.2), so past 550.2 every item is sampled as if the offset were 550.2. And the seam copy is drawn with the animation samples of the first copy (`crates/dom/src/paint/compose.rs` `replay_seams` moves only the scroll offset back one period), the approximation `docs/style-assumptions.md` 25 records, so an item drawn across the seam does not get the progress of the place it is drawn at. Before #395 the same defect drew the red item at the end keyframe's `scale(0.8)`",
-    "basic-element-x-swiper-interval" =>
-        "the first two frames are web-core's: green after one 5 s turn, and blue 1.6 s after `interval` is set to 1000 (the script takes that frame with a short stability check, because the swiper is quiet for only half a second between turns). The last is not: after `interval` 0, web-core's 4 ms timer moves the swiper to its last item, yellow, within 0.6 s, and here it stays on blue (still blue 4.8 s later). web-core keeps a logical `currentIndex` and adds one per tick; `turn` (`crates/bobcat-core/src/main/tree/swiper.rs`) takes the current item from the scroll offset, and with a turn due every 4 ms a new turn comes before the swiper has moved from blue (inferred from the code, not traced)",
-    "basic-element-x-textarea-disabled" =>
-        "DEFECT: by the 2026-10-20 ruling an unsized `x-textarea` is one line tall (native), and the first and third are; the `disabled` one is 2px, its borders only. #461 gives an empty field its line only while it is an editing host (`strut_line_when_empty` from `editing::is_host_node`), and `disabled` turns the editor's `contenteditable` off, so a disabled empty field has no line; tapping the block disables the third, which collapses too",
     "basic-element-x-viewpager-ng-allow-horizontal-gesture" =>
         "the first screen is right; `allow-horizontal-gesture={false}` only shows under the swipe it refuses",
     "basic-element-x-viewpager-ng-bindchange" =>
