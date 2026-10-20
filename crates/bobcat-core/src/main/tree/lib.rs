@@ -72,7 +72,7 @@ pub(crate) mod swiper;
 pub(super) mod test_support;
 mod text;
 pub(crate) mod text_field;
-mod touches;
+mod touch_count;
 mod ua_sheet;
 mod viewpager;
 #[cfg(test)]

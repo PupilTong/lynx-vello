@@ -42,9 +42,9 @@ pub(super) const TOUCH_CANCEL: &str = "touchcancel";
 /// [`TOUCH_START`], [`TOUCH_END`] and [`TOUCH_CANCEL`] in its
 /// `observed_events`.
 #[derive(Debug, Default)]
-pub(super) struct Touches(RefCell<SmallVec<[(NodeId, u32); 2]>>);
+pub(super) struct TouchCount(RefCell<SmallVec<[(NodeId, u32); 2]>>);
 
-impl Touches {
+impl TouchCount {
     /// Counts `event` at `element`, the element whose handler is running.
     ///
     /// Answers whether this delivery is the one the event counts at — a
@@ -98,14 +98,14 @@ mod tests {
 
     use super::super::LynxDocument;
     use super::super::test_support::{child, document, element_under};
-    use super::{TOUCH_CANCEL, TOUCH_END, TOUCH_START, Touches};
+    use super::{TOUCH_CANCEL, TOUCH_END, TOUCH_START, TouchCount};
 
     const TAG: &str = "x-touch-probe";
 
-    /// A test component whose only state is a [`Touches`] table, which it
+    /// A test component whose only state is a [`TouchCount`] table, which it
     /// shares with the test, and which records each delivery it counted.
     struct Probe {
-        touches: Rc<Touches>,
+        touch_count: Rc<TouchCount>,
         counted: Rc<RefCell<Vec<&'static str>>>,
     }
 
@@ -115,11 +115,11 @@ mod tests {
         }
 
         fn disconnected_callback(&self, _document: &LynxDocument, element: NodeId) {
-            self.touches.forget(element);
+            self.touch_count.forget(element);
         }
 
         fn freed(&self, element: NodeId) {
-            self.touches.forget(element);
+            self.touch_count.forget(element);
         }
 
         fn handle_event(
@@ -128,7 +128,7 @@ mod tests {
             element: NodeId,
             event: &mut ElementEvent<'_>,
         ) {
-            if self.touches.observe(element, event) {
+            if self.touch_count.observe(element, event) {
                 self.counted.borrow_mut().push(event.type_name());
             }
         }
@@ -136,7 +136,7 @@ mod tests {
 
     struct Fixture {
         document: LynxDocument,
-        touches: Rc<Touches>,
+        touch_count: Rc<TouchCount>,
         counted: Rc<RefCell<Vec<&'static str>>>,
         host: NodeId,
         inner: NodeId,
@@ -145,12 +145,12 @@ mod tests {
     /// A probe under the page, with a `view` inside it.
     fn fixture() -> Fixture {
         let mut document = document();
-        let touches = Rc::new(Touches::default());
+        let touches = Rc::new(TouchCount::default());
         let counted = Rc::new(RefCell::new(Vec::new()));
         document.define(
             TAG,
             Box::new(Probe {
-                touches: Rc::clone(&touches),
+                touch_count: Rc::clone(&touches),
                 counted: Rc::clone(&counted),
             }),
         );
@@ -158,7 +158,7 @@ mod tests {
         let inner = element_under(&mut document, host, "view", "");
         Fixture {
             document,
-            touches,
+            touch_count: touches,
             counted,
             host,
             inner,
@@ -175,7 +175,7 @@ mod tests {
     fn a_touch_inside_the_element_counts_once_per_event() {
         let Fixture {
             mut document,
-            touches,
+            touch_count: touches,
             counted,
             host,
             inner,
@@ -197,7 +197,7 @@ mod tests {
     fn a_touch_at_the_element_itself_counts_at_its_one_delivery() {
         let Fixture {
             mut document,
-            touches,
+            touch_count: touches,
             counted,
             host,
             ..
@@ -213,7 +213,7 @@ mod tests {
     fn two_fingers_are_down_until_both_lift_and_a_stray_lift_saturates() {
         let Fixture {
             mut document,
-            touches,
+            touch_count: touches,
             host,
             inner,
             ..
@@ -237,7 +237,7 @@ mod tests {
     fn another_event_counts_nothing() {
         let Fixture {
             mut document,
-            touches,
+            touch_count: touches,
             counted,
             host,
             inner,
@@ -251,7 +251,7 @@ mod tests {
     fn leaving_the_document_or_being_freed_forgets_the_count() {
         let Fixture {
             mut document,
-            touches,
+            touch_count: touches,
             host,
             inner,
             ..

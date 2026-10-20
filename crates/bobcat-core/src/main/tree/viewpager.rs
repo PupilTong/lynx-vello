@@ -143,13 +143,13 @@
 //!   a landing a fraction of a pixel short of a page's position must not read as the page before
 //!   it.
 //! - `willchange` `{index}`: a `touchend` on the pager or inside it, counted once
-//!   ([`super::touches::Touches::observe`]), with the page the offset rounds to,
+//!   ([`super::touch_count::TouchCount::observe`]), with the page the offset rounds to,
 //!   `Math.round(scrollLeft / clientWidth)` held to `[0, children − 1]`, web-core's
 //!   (`#touchEndHandler`). web-core also sends one on `touchcancel`, which shares that handler;
 //!   here a cancelled touch sends none.
 //!
 //! `isDragged` is whether a finger is down on the pager or inside it
-//! ([`super::touches::Touches`]): web-core's touch flag, standing in for
+//! ([`super::touch_count::TouchCount`]): web-core's touch flag, standing in for
 //! native's drag state (user ruling 2026-10-20).
 //!
 //! # Where this deliberately leaves web-core
@@ -179,7 +179,7 @@ use smallvec::smallvec;
 use super::scroll_container::{
     SCROLL_END_EVENT, SCROLL_EVENT, nearest_snap_position, rendered_scroll_box,
 };
-use super::touches::{TOUCH_CANCEL, TOUCH_END, TOUCH_START, Touches};
+use super::touch_count::{TOUCH_CANCEL, TOUCH_END, TOUCH_START, TouchCount};
 use super::{
     ComponentDetail, ComponentEvents, Field, InvalidParams, LynxDocument, element_child,
     element_child_index, element_children, is_truthy,
@@ -240,7 +240,7 @@ pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
 struct Viewpager {
     events: ComponentEvents,
     /// The fingers down on each pager, which `change`'s `isDragged` reports.
-    touches: Touches,
+    touch_count: TouchCount,
     /// The page each connected pager last reported, `0` at connection;
     /// dropped when it is freed.
     pages: RefCell<FxHashMap<NodeId, usize>>,
@@ -250,7 +250,7 @@ impl Viewpager {
     fn new(events: ComponentEvents) -> Self {
         Self {
             events,
-            touches: Touches::default(),
+            touch_count: TouchCount::default(),
             pages: RefCell::default(),
         }
     }
@@ -299,7 +299,7 @@ impl Viewpager {
                 CHANGE_EVENT,
                 ComponentDetail::Fields(smallvec![
                     ("index", Field::Number(index)),
-                    ("isDragged", Field::Bool(self.touches.is_down(pager))),
+                    ("isDragged", Field::Bool(self.touch_count.is_down(pager))),
                 ]),
             );
         }
@@ -376,18 +376,18 @@ impl CustomElement<()> for Viewpager {
     }
 
     fn disconnected_callback(&self, _document: &LynxDocument, element: NodeId) {
-        self.touches.forget(element);
+        self.touch_count.forget(element);
     }
 
     fn freed(&self, element: NodeId) {
         self.pages.borrow_mut().remove(&element);
-        self.touches.forget(element);
+        self.touch_count.forget(element);
     }
 
     /// A `scroll` or `scrollend` counts only at the pager itself, its one
     /// at-target delivery: a scroller inside a page fires its own, whose
     /// capture pass crosses the pager. A touch counts at the one delivery
-    /// [`Touches::observe`] answers for, and a `touchend` there is a
+    /// [`TouchCount::observe`] answers for, and a `touchend` there is a
     /// release.
     fn handle_event(
         &self,
@@ -400,7 +400,7 @@ impl CustomElement<()> for Viewpager {
             SCROLL_END_EVENT if event.target() == element => self.scroll_ended(document, element),
             SCROLL_EVENT | SCROLL_END_EVENT => {}
             name => {
-                if self.touches.observe(element, event) && name == TOUCH_END {
+                if self.touch_count.observe(element, event) && name == TOUCH_END {
                     self.released(document, element);
                 }
             }
@@ -1403,7 +1403,7 @@ mod tests {
 
     use super::super::scroll_container::tests::{listen, scrolled};
     use super::super::test_support::{fields_heard, touched, with_component_events};
-    use super::super::touches::{TOUCH_CANCEL, TOUCH_END, TOUCH_START};
+    use super::super::touch_count::{TOUCH_CANCEL, TOUCH_END, TOUCH_START};
     use super::super::{ComponentEvents, Field};
     use super::{CHANGE_EVENT, OFFSET_CHANGE_EVENT, WILL_CHANGE_EVENT, heading_page};
 

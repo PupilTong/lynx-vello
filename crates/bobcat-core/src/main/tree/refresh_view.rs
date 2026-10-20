@@ -188,8 +188,8 @@
 //!   footer-showing rule), which latches, so the rest on the footer that may follow adds nothing.
 //!
 //! A rest on `#content`, neither end, ends both latches. `isDragging` is whether a finger is down
-//! on the view or inside it ([`super::touches::Touches`]): web-core's touch flag, standing in for
-//! native's drag state (user ruling 2026-10-20).
+//! on the view or inside it ([`super::touch_count::TouchCount`]): web-core's touch flag, standing
+//! in for native's drag state (user ruling 2026-10-20).
 //!
 //! # Deviations and what is not implemented
 //!
@@ -230,7 +230,7 @@ use smallvec::smallvec;
 use super::scroll_container::{
     SCROLL_END_EVENT, SCROLL_EVENT, rect_in_scroller, rendered_scroll_box,
 };
-use super::touches::{TOUCH_CANCEL, TOUCH_END, TOUCH_START, Touches};
+use super::touch_count::{TOUCH_CANCEL, TOUCH_END, TOUCH_START, TouchCount};
 use super::{ComponentDetail, ComponentEvents, Field, LynxDocument, SLOT_CHANGE};
 
 /// The container tag, web-core's registered spelling.
@@ -327,7 +327,7 @@ pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
         REFRESH_VIEW_TAG,
         Box::new(RefreshView {
             events,
-            touches: Touches::default(),
+            touch_count: TouchCount::default(),
             states: RefCell::default(),
         }),
     );
@@ -345,7 +345,7 @@ pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
 struct RefreshView {
     events: ComponentEvents,
     /// The fingers down on each view, which `isDragging` reports.
-    touches: Touches,
+    touch_count: TouchCount,
     /// What each view's events remember, dropped when it is freed.
     states: RefCell<FxHashMap<NodeId, RefreshState>>,
 }
@@ -483,7 +483,7 @@ impl RefreshView {
         let Some(pull) = Pull::read(document, view) else {
             return;
         };
-        let dragging = self.touches.is_down(view);
+        let dragging = self.touch_count.is_down(view);
         if let Some(Shown { percent, .. }) = pull.header.filter(|shown| shown.showing()) {
             for (name, wanted) in [
                 (HEADER_SHOW_EVENT, show),
@@ -630,12 +630,12 @@ impl CustomElement<()> for RefreshView {
     }
 
     fn disconnected_callback(&self, _document: &LynxDocument, element: NodeId) {
-        self.touches.forget(element);
+        self.touch_count.forget(element);
     }
 
     fn freed(&self, element: NodeId) {
         self.states.borrow_mut().remove(&element);
-        self.touches.forget(element);
+        self.touch_count.forget(element);
     }
 
     fn constructed(&self, document: &mut LynxDocument, element: NodeId) {
@@ -688,7 +688,7 @@ impl CustomElement<()> for RefreshView {
                 }
             }
             name => {
-                if self.touches.observe(element, event) && name == TOUCH_END {
+                if self.touch_count.observe(element, event) && name == TOUCH_END {
                     self.released(document, element);
                 }
             }
@@ -1523,7 +1523,7 @@ mod tests {
 
     use super::super::scroll_container::tests::{listen, scrolled};
     use super::super::test_support::touched;
-    use super::super::touches::{TOUCH_END, TOUCH_START};
+    use super::super::touch_count::{TOUCH_END, TOUCH_START};
     use super::super::{ComponentDetail, ComponentEvent, Field};
     use super::{
         FOOTER_OFFSET_EVENT, FOOTER_RELEASED_EVENT, HEADER_OFFSET_EVENT, HEADER_RELEASED_EVENT,

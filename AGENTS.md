@@ -2328,7 +2328,7 @@ typed `attr()` and an `if()` over `sibling-index()` into
 `scroll-initial-target`, and a component that answers the `selectTab` UI
 method, its `CustomElement::invoke`, and fires `offsetchange`, `change` and
 `willchange` from the pager's own `scroll`/`scrollend` and the touches on
-it), `tree::touches` (the count of fingers down per element a component keeps
+it), `tree::touch_count` (the count of fingers down per element a component keeps
 from the `touchstart`/`touchend`/`touchcancel` its element hears, counted once
 per event outside the capture pass: the `isDragging`/`isDragged` of the
 swiper, pager and refresh-view events, web-core's approximation of native's

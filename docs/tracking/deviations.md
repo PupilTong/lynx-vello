@@ -1283,7 +1283,7 @@ consequential choice about whether to follow the spec or the quirk.
     `LynxUIRefresh.m:268-284`) where web-core's need 90%. Native's
     `refreshstatechange` is not built; web-core has none.
   - *`isDragging` and `isDragged` are the component's own touch count*
-    (`crates/bobcat-core/src/main/tree/touches.rs`): `touchstart` adds one,
+    (`crates/bobcat-core/src/main/tree/touch_count.rs`): `touchstart` adds one,
     `touchend` and `touchcancel` take one away, never below zero, so a finger
     down on the element or anything inside it counts whether or not it
     drags anything. That is web-core's approximation (its components set a

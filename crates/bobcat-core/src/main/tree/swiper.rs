@@ -323,7 +323,7 @@
 //! scroll that puts a swiper on its initial item reports no change; a `current` written after the
 //! connection is read at the next one, as web-core reads it in `connectedCallback` alone.
 //! `isDragged` is whether a finger is down on the swiper or inside it
-//! ([`super::touches::Touches`]): web-core's touch flag, standing in for native's drag state
+//! ([`super::touch_count::TouchCount`]): web-core's touch flag, standing in for native's drag state
 //! (user ruling 2026-10-20). A swiper with no box decides nothing.
 //!
 //! # What is not implemented
@@ -361,7 +361,7 @@ use smallvec::{SmallVec, smallvec};
 use super::scroll_container::{
     SCROLL_END_EVENT, SCROLL_EVENT, nearest_snap_position, rendered_scroll_box,
 };
-use super::touches::{TOUCH_CANCEL, TOUCH_END, TOUCH_START, Touches};
+use super::touch_count::{TOUCH_CANCEL, TOUCH_END, TOUCH_START, TouchCount};
 use super::{
     ComponentDetail, ComponentEvents, Field, InvalidParams, LynxDocument, SLOT_CHANGE,
     element_child, element_child_index, is_truthy,
@@ -530,7 +530,7 @@ pub(super) fn define(document: &mut LynxDocument, autoplays: Autoplays, events: 
         Box::new(Swiper {
             autoplays,
             events,
-            touches: Touches::default(),
+            touch_count: TouchCount::default(),
             states: RefCell::default(),
         }),
     );
@@ -661,7 +661,7 @@ struct Swiper {
     autoplays: Autoplays,
     events: ComponentEvents,
     /// The fingers down on each swiper, which `isDragged` reports.
-    touches: Touches,
+    touch_count: TouchCount,
     /// What each connected swiper's events remember, dropped when it is
     /// freed.
     states: RefCell<FxHashMap<NodeId, SwiperState>>,
@@ -747,7 +747,7 @@ impl Swiper {
             }
             (before, started, changed)
         };
-        let dragged = self.touches.is_down(swiper);
+        let dragged = self.touch_count.is_down(swiper);
         if started && document.has_listener(swiper, SCROLL_START_EVENT) {
             self.events.queue_detailed(
                 swiper,
@@ -851,12 +851,12 @@ impl CustomElement<()> for Swiper {
 
     fn disconnected_callback(&self, _document: &LynxDocument, element: NodeId) {
         self.autoplays.stop(element);
-        self.touches.forget(element);
+        self.touch_count.forget(element);
     }
 
     fn freed(&self, element: NodeId) {
         self.states.borrow_mut().remove(&element);
-        self.touches.forget(element);
+        self.touch_count.forget(element);
     }
 
     /// `autoplay` or `interval` changed. A swiper that is not connected
@@ -925,7 +925,7 @@ impl CustomElement<()> for Swiper {
                 }
             }
             _ => {
-                self.touches.observe(element, event);
+                self.touch_count.observe(element, event);
             }
         }
     }
@@ -3111,7 +3111,7 @@ mod tests {
 
     use super::super::scroll_container::tests::{listen, scrolled};
     use super::super::test_support::{fields_heard, touched, with_component_events};
-    use super::super::touches::{TOUCH_END, TOUCH_START};
+    use super::super::touch_count::{TOUCH_END, TOUCH_START};
     use super::super::{ComponentEvents, Field, PageConfig};
     use super::{CHANGE_EVENT, SCROLL_START_EVENT, SWIPER_SCROLL_END_EVENT, TRANSITION_EVENT};
 
