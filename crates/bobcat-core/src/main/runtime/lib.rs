@@ -2306,6 +2306,33 @@ impl MainThreadRuntime {
                 .is_some_and(LynxDocument::has_focus_events)
     }
 
+    /// The extras of a `scroll` or `scrollend` at `node`: Lynx's scroll
+    /// metrics read now, the delta the post moved the container by, and
+    /// `isDragging`, which this step reports false.
+    fn push_scroll_extras(
+        &mut self,
+        node: dom::NodeId,
+        delta: dom::Vector2D<f32>,
+        extras: &mut SmallVec<[(&'static str, Extra<'_>); 7]>,
+    ) {
+        let scroll_box = self.slot.borrow_mut().document_mut().scroll_box(node);
+        let (offset, size) = scroll_box.map_or_else(
+            || (dom::Vector2D::zero(), dom::Size2D::zero()),
+            |scroll_box| (scroll_box.offset, scroll_box.scroll_size),
+        );
+        for (key, value) in [
+            ("scrollTop", offset.y),
+            ("scrollLeft", offset.x),
+            ("scrollHeight", size.height),
+            ("scrollWidth", size.width),
+            ("deltaX", delta.x),
+            ("deltaY", delta.y),
+        ] {
+            extras.push((key, Extra::Number(f64::from(value))));
+        }
+        extras.push(("isDragging", Extra::Bool(false)));
+    }
+
     /// Dispatches everything [`Self::apply_image_events`], the `image`,
     /// `svg` and `overlay` components, the dialog's UI methods, the scroll
     /// events ([`Self::adopt_scroll_offsets`],
@@ -2417,22 +2444,7 @@ impl MainThreadRuntime {
                     (node, name, false)
                 }
                 ComponentEvent::Scroll { node, name, delta } => {
-                    let scroll_box = self.slot.borrow_mut().document_mut().scroll_box(node);
-                    let (offset, size) = scroll_box.map_or_else(
-                        || (dom::Vector2D::zero(), dom::Size2D::zero()),
-                        |scroll_box| (scroll_box.offset, scroll_box.scroll_size),
-                    );
-                    for (key, value) in [
-                        ("scrollTop", offset.y),
-                        ("scrollLeft", offset.x),
-                        ("scrollHeight", size.height),
-                        ("scrollWidth", size.width),
-                        ("deltaX", delta.x),
-                        ("deltaY", delta.y),
-                    ] {
-                        extras.push((key, Extra::Number(f64::from(value))));
-                    }
-                    extras.push(("isDragging", Extra::Bool(false)));
+                    self.push_scroll_extras(node, delta, &mut extras);
                     // Neither `scroll` nor `scrollend` bubbles, and neither
                     // is composed.
                     (node, name, false)
