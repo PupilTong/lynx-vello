@@ -30,7 +30,7 @@ see [F](#f-recorded-deviations-not-gaps); and white space in a `text`, see
 | --- | --- | --- | --- |
 | [`crates/seldon/tests/web_text_replication.rs`](../../crates/seldon/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 19 | 2 |
 | [`crates/bobcat-core/src/main/tree/web_text_replication.rs`](../../crates/bobcat-core/src/main/tree/web_text_replication.rs) | the `<text>` element, its UA sheet and its attributes | 46 | 4 |
-| [`crates/bobcat-core/src/main/runtime/web_text_replication.rs`](../../crates/bobcat-core/src/main/runtime/web_text_replication.rs) | the Element PAPI: content, restyle, truncation, `setNativeProps`, layout events | 17 | 4 |
+| [`crates/bobcat-core/src/main/runtime/web_text_replication.rs`](../../crates/bobcat-core/src/main/runtime/web_text_replication.rs) | the Element PAPI: content, restyle, truncation, layout events | 17 | 0 |
 | [`crates/terminus/tests/web_text_replication.rs`](../../crates/terminus/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph, atom and inline-background paint | 27 | 0 |
 | [`crates/terminus/tests/web_text_screenshots.rs`](../../crates/terminus/tests/web_text_screenshots.rs) | golden screenshots — the originals' own oracle, for the cases whose claim is visual | 12 | 0 |
 | [`crates/bobcat-source/tests/web_text_css_replication.rs`](../../crates/bobcat-source/tests/web_text_css_replication.rs) | text CSS across the `.web.bundle` wire | 10 | 0 |
@@ -652,15 +652,14 @@ failure mode is easy to reintroduce.
   the replicas remain to be written against it; the two
   `a_text_block_is_a_*_axis_scroll_target_like_a_view` tests pin scroll-target
   geometry and say explicitly that they do not pin alignment.
-- **Four cases were writable but declined.** #230 implemented
-  `__SetDataset`/`__GetDataset`/`__AddDataset` and a BTS `SelectorQuery` whose
-  `setNativeProps` is serviced by `__BobcatQueryNodes`, so the four
-  `text/set-native-props-*` cases are now written against the BTS harness. They
-  are ignored on two real gaps: the push is not retargeted onto a leading
-  `raw-text` child the way `web-core` retargets it, and the attribute written
-  instead replaces the element's children where `web-core` appends. Still
-  genuinely absent: a direct MTS selector PAPI, `__AddClass`, and any rect field
-  in `nodeFields`, so the geometry half of the SelectorQuery case stays blocked.
+- **The four `text/set-native-props-*` cases are out of scope** (user,
+  2026-10-21). They test web-core retargeting a `setNativeProps({text})` push
+  onto a text's leading `raw-text` child; this engine writes the `text`
+  attribute on the element, which `text[text] { content: attr(text); }`
+  renders in place of its children, and does not support the retargeting. Their
+  replicas and their e2e cards were deleted. Still genuinely absent: a direct
+  MTS selector PAPI, `__AddClass`, and any rect field in `nodeFields`, so the
+  geometry half of the SelectorQuery case stays blocked.
 
 ## Native ↔ web conflicts
 

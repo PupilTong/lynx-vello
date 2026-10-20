@@ -135,7 +135,9 @@ suite would blame the engine for it.
 
 `api-frame-element-map` (user, 2026-10-16: the test is deleted), and
 `basic-ppx-unit` (user, 2026-10-20: the test is deleted; the fork's grammar
-has no `ppx`).
+has no `ppx`), and the four `basic-element-text-set-native-props-*` cards
+(user, 2026-10-21: they test web-core retargeting a `setNativeProps({text})`
+push onto a text's leading `raw-text`, which this engine does not support).
 
 Every case that involves `enableCSSSelector: false` (user, 2026-10-13: the
 flag is no longer supported, so its cases are deleted rather than kept
@@ -152,7 +154,7 @@ Their three rspeedy config files (`config-css-selector-false.config.ts`,
 `basic-lazy-component-css-selector-false.config.ts`,
 `config-mixed-01.config.ts`) have no entry in `groups.js`. **A re-sync from
 upstream will bring the directories back; delete them again.** With them gone
-the corpus, less `api-frame-element-map` and `basic-ppx-unit` too, is 322 cards.
+the corpus, less those six cards too, is 318 cards.
 
 ## What is not built
 

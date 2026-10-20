@@ -36,14 +36,6 @@ pending! {
         "`initial-scroll-to-index={1}` must land the scrollport on the second child at boot; the attribute does not exist here, so we start at the first. Statically wrong, and a missing attribute rather than an interaction",
     "basic-element-text-bindselectionchange" =>
         "upstream selects `#inline-target`'s text with `setBaseAndExtent` and expects `bindselectionchange` to report `7-10-forward` on the `<text>` and `1-4-forward` on the inline text, then the same backward. #467 built the document's `selectionchange` and the Lynx `<text>` event derived from it, but a selection exists only inside a `contenteditable` host there: selecting read-only text is its follow-up, so this plain `<text>` can hold no selection and nothing is reported",
-    "basic-element-text-set-native-props-text" =>
-        "the setNativeProps push is not retargeted onto the leading raw-text (recorded GAP)",
-    "basic-element-text-set-native-props-text-do-not-change-inline-text" =>
-        "same un-retargeted push (recorded GAP)",
-    "basic-element-text-set-native-props-with-maxlength" =>
-        "same un-retargeted push; the clamp itself is right but the paragraph box is two lines tall for one painted line",
-    "basic-element-text-set-native-props-with-setData" =>
-        "same un-retargeted push; the pre-tap frame is right",
     "basic-element-text-text-selection" =>
         "what a selection drag highlights is an interaction no first screen carries; selection is out of scope",
     "basic-element-x-audio-tt-play" =>

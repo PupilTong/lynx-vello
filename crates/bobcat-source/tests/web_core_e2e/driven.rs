@@ -281,13 +281,6 @@ driven! {
             Wait(100),
         ],
     ],
-    // `#target`, clicked four times.
-    "basic-element-text-set-native-props-with-setData" => [
-        "native-text": [Tap(0.5, 18.5)],
-        "value-hello": [Tap(0.5, 18.5)],
-        "native-text-2nd": [Tap(0.5, 18.5)],
-        "value-world": [Tap(0.5, 18.5)],
-    ],
     // `#tap`, clicked once.
     "basic-element-x-foldview-ng-method-setFoldExpanded" => [
         "folded-by-method": [Tap(113.2, 450.0)],
