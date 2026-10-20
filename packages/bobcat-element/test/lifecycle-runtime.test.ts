@@ -22,12 +22,8 @@ import * as globalEventEmitter from "../src/global-event-emitter.ts";
 rstest.mockRequire("bobcat:global-event-emitter", () => globalEventEmitter);
 rstest.mockRequire("bobcat:selector-query", () => selectorQuery);
 const queryNodes = rstest.fn();
-// The record list itself is element-papi.test.ts's: here it only has to reach
-// the BTS as built.
-const exposureEvents = rstest.fn((kind: string, record: string) => [{ kind, record }]);
 rstest.mockRequire("bobcat:element", () => ({
   __BobcatQueryNodes: queryNodes,
-  __BobcatExposureEvents: exposureEvents,
 }));
 
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
@@ -1101,28 +1097,36 @@ describe("runtime events and diagnostics", () => {
     emitter.removeAllListeners("host-event");
   });
 
-  it("sends an exposure record list as the global event's one argument", () => {
+  it("sends each exposure record list as the global event's one argument, exposure first", () => {
     const emitter = bts.getJSModule("GlobalEventEmitter") as globalEventEmitter.GlobalEventEmitter;
     const heard = rstest.fn();
     emitter.addListener("exposure", heard);
     emitter.addListener("disexposure", heard);
     const start = toBackground.length;
+    const before = Date.now();
+    // The records themselves are element-papi.test.ts's: here they only have
+    // to reach the BTS as built, with one timestamp per flush.
+    type Entry = Parameters<typeof mts.__BobcatSendExposureRecords>[0][number];
+    const entry = (uid: number) => ({uid} as unknown as Entry);
 
-    mts.__BobcatSendExposure("exposure", "1:42:a0:");
-    mts.__BobcatSendExposure("disexposure", "1:72:b0:");
+    mts.__BobcatSendExposureRecords([entry(42), entry(43)], [entry(72)]);
+    // An empty list is not sent.
+    mts.__BobcatSendExposureRecords([], [entry(73)]);
 
-    expect(exposureEvents.mock.calls).toEqual([["exposure", "1:42:a0:"], ["disexposure", "1:72:b0:"]]);
-    expect(toBackground.slice(start)).toEqual([
-      {bobcat: "runtime", method: "sendGlobalEvent", name: "exposure",
-        args: [[{kind: "exposure", record: "1:42:a0:"}]]},
-      {bobcat: "runtime", method: "sendGlobalEvent", name: "disexposure",
-        args: [[{kind: "disexposure", record: "1:72:b0:"}]]},
+    const posted = toBackground.slice(start) as {name: string, args: [{uid: number, timestamp: number}[]]}[];
+    expect(posted.map(({name, args}) => [name, args[0].map(({uid}) => uid)])).toEqual([
+      ["exposure", [42, 43]],
+      ["disexposure", [72]],
+      ["disexposure", [73]],
     ]);
-    deliverToBackground();
-    deliverToBackground();
-    expect(heard.mock.calls).toEqual([
-      [[{kind: "exposure", record: "1:42:a0:"}]],
-      [[{kind: "disexposure", record: "1:72:b0:"}]],
+    const stamps = posted.slice(0, 2).flatMap(({args}) => args[0].map(({timestamp}) => timestamp));
+    expect(new Set(stamps).size).toBe(1);
+    expect(stamps[0]).toBeGreaterThanOrEqual(before);
+    expect(stamps[0]).toBeLessThanOrEqual(Date.now());
+    expect(posted[0]).toMatchObject({bobcat: "runtime", method: "sendGlobalEvent"});
+    for (let index = 0; index < 3; index++) deliverToBackground();
+    expect(heard.mock.calls.map(([list]) => (list as {uid: number}[]).map(({uid}) => uid))).toEqual([
+      [42, 43], [72], [73],
     ]);
     emitter.removeAllListeners("exposure");
     emitter.removeAllListeners("disexposure");

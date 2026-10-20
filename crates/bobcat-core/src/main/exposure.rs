@@ -1,13 +1,14 @@
 //! Lynx exposure (曝光): which elements a page registered for exposure are on
-//! screen, told to script as an element's `uiappear`/`uidisappear` and as the
-//! global `exposure`/`disexposure` record lists.
+//! screen, told to script as an element's `uiappear`/`uidisappear` and as its
+//! `bobcat:exposure` record event, out of which the realm's Lynx layer builds
+//! the global `exposure`/`disexposure` record lists.
 //!
 //! Exposure is a Lynx-only extension (standards bucket 2): no W3C feature has
 //! its attributes, its events or its records. It lives here rather than in
 //! `dom`: each registered element is one intersection observer of `dom`'s
 //! (`dom::IntersectionEventHandler`), the W3C primitive with the target
 //! margin `dom` adds beside the root margin, and this module turns what
-//! those observers deliver into exposure transitions.
+//! those observers deliver into exposure changes.
 //!
 //! # The rulings it is built on (user, 2026-10-11; the margin fold is the
 //! architect's decision of 2026-10-12)
@@ -58,12 +59,13 @@
 //!
 //! **There is no timer.** Native polls on a display link and web-core batches
 //! its records behind a 50 ms timeout (`ExposureServices.ts:246-275`). Here
-//! the transitions are delivered by the page's intersection delivery entry,
+//! the changes are delivered by the page's intersection delivery entry,
 //! the one the epilogue posts after an update that queued entries
 //! (`docs/runtime-architecture.md`): first each `uiappear`/`uidisappear`, in
-//! the order the transitions formed, then one `exposure` list, then one
-//! `disexposure` list, web-core's order. `lynx.setObserverFrameRate` has no
-//! rate to set.
+//! the order the changes formed, then each record event, in the same order,
+//! all inside the one entry, so the realm's Lynx layer sends one `exposure`
+//! list and then one `disexposure` list, web-core's order.
+//! `lynx.setObserverFrameRate` has no rate to set.
 //!
 //! # Where the references differ, and what is chosen
 //!
@@ -74,15 +76,16 @@
 //!   listener.
 //! - **An element is one record, whoever else has its id**: two elements with the same id and scene
 //!   are two records (web-core keys its sets by element).
-//! - **A freed element that was exposed sends one `disexposure`**, as native's next pass does
-//!   (web-core sends nothing). An element that is unlinked but alive leaves through the primitive:
-//!   it is no longer rendered, so its update reports it not intersecting.
-//! - **Teardown sends a record and no element event.** Removing an exposed element's `exposure-id`,
-//!   its last listener, or changing its id sends a `disexposure` record carrying the id it was
-//!   exposed under and fires no `uidisappear`, as web-core's `sendAppearEvent = false` does
-//!   (`ExposureServices.ts:86-104`); so does `stopExposure` with `sendEvent`. A resume that finds
-//!   an element visible fires `uiappear` as well as the record, as native does, because resuming is
-//!   an ordinary update here.
+//! - **A freed element sends nothing**, as web-core's does: a record is an event dispatched at its
+//!   element, and a freed element is no target. Native reports one that was exposed on its next
+//!   pass. An element that is unlinked but alive leaves through the primitive: it is no longer
+//!   rendered, so its update reports it not intersecting, and its record is dispatched at it as at
+//!   any element.
+//! - **Teardown sends a record and no element event.** Unregistering an exposed element, or
+//!   changing its id, sends a `disexposure` record carrying the id it was exposed under and fires
+//!   no `uidisappear`, as web-core's `sendAppearEvent = false` does (`ExposureServices.ts:86-104`);
+//!   so does `stopExposure` with `sendEvent`. A resume that finds an element visible fires
+//!   `uiappear` as well as the record, as native does, because resuming is an ordinary update here.
 //! - **The primitive's edge cases stand**: a zero-area element that is intersecting has ratio 1, an
 //!   element that only touches an edge is intersecting, and `visibility: hidden` or `opacity: 0`
 //!   hides nothing from it — where native reports a zero-sized element hidden
@@ -113,27 +116,31 @@
 //!
 //! # How a registration is held
 //!
-//! An element is registered while it has a non-empty `exposure-id` or some
-//! realm has filed a `uiappear`/`uidisappear` handler on it, which the
-//! document's listener table answers: the host tells this module on each
-//! change of that answer, as the realm reports a registration
-//! (`listenerOpened`/`listenerClosed`). Each
-//! registration owns one observer — root the viewport, one threshold, the
+//! An element is registered while some realm has filed the exposure record
+//! listener on it — a `bobcat:exposure` row in the document's listener
+//! table, which the realm's Lynx layer files while the element has a
+//! non-empty `exposure-id` or a `uiappear`/`uidisappear` handler — and it
+//! hears its element events while the table also has a `uiappear` or
+//! `uidisappear` row on it. The host tells this module on each change of
+//! either answer, as the realm reports a registration
+//! (`listenerOpened`/`listenerClosed`); no attribute registers an element by
+//! itself. Each registration owns one observer — root the viewport, one threshold, the
 //! element's `exposure-area`, and the root and target margins its margins
 //! fold into — whose handler, [`ExposureHandler`], compares what the
 //! primitive reports with what was last recorded and queues a
-//! [`Transition`] where they differ. One
+//! [`ExposureChange`] where they differ. One
 //! threshold at the area is enough: the primitive queues an entry exactly
 //! when the pair (threshold index, intersecting) changes, which is exactly
 //! when "intersecting with a ratio of at least the area" can change.
 //!
-//! Every attribute change re-arms: the observer is dropped and created again
-//! from the attributes as they are now. The first update after an observe
+//! Every attribute change re-arms a registered element: the observer is
+//! dropped and created again from the attributes as they are now. The first update after an observe
 //! always reports the element, so an element whose visibility did not move
 //! reports what was already recorded and queues nothing.
 //!
 //! The handler is bound to its element, so the primitive drops it when the
-//! element is freed; that drop is how a freed element is noticed. Every drop
+//! element is freed; that drop is how a freed element is noticed, and it
+//! only lets the registration go. Every drop
 //! this module makes itself clears the registration's observer first, so the
 //! handler's `Drop` tells the two apart. That `Drop` borrows the shared state
 //! and runs inside `Document::drop_intersection_observer` and inside an
@@ -186,14 +193,14 @@ pub(crate) fn is_exposure_attribute(name: &str) -> bool {
 /// One element's exposure moving: it became visible (`appeared`) or stopped
 /// being so, or a teardown took it out of the exposed record.
 ///
-/// The id and the scene are copied when the transition forms, because the
+/// The id and the scene are copied when the change forms, because the
 /// element may be freed, or its attributes rewritten, before the delivery
 /// entry runs: a `disexposure` names what the element was exposed under.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Transition {
+pub(crate) struct ExposureChange {
     pub(crate) node: NodeId,
     pub(crate) appeared: bool,
-    /// The `exposure-id` this transition is recorded under: `None` for an
+    /// The `exposure-id` this change is recorded under: `None` for an
     /// element registered only by its listener, which gets no record.
     pub(crate) exposure_id: Option<String>,
     pub(crate) scene: String,
@@ -209,15 +216,16 @@ struct Entry {
     /// and before the first arm, and cleared before every drop this module
     /// makes, which is what [`ExposureHandler`]'s `Drop` reads.
     observer: Option<IntersectionObserverId>,
-    /// The realm has filed a `uiappear`/`uidisappear` handler on it.
-    listens: bool,
+    /// The element hears `uiappear`/`uidisappear`: some realm has filed a
+    /// handler for one of them on it.
+    element_event: bool,
     /// `exposure-id` when present and non-empty, copied so that a freed
     /// element still names it.
     exposure_id: Option<String>,
     scene: String,
     /// `exposure-area` as a ratio in `[0, 1]`.
     area: f64,
-    /// Recorded as exposed: the last transition this registration queued
+    /// Recorded as exposed: the last change this registration queued
     /// was an appearance.
     exposed: bool,
 }
@@ -227,22 +235,22 @@ struct Entry {
 struct Shared {
     entries: FxHashMap<NodeId, Entry>,
     /// Pending, in the order they formed.
-    transitions: Vec<Transition>,
+    changes: Vec<ExposureChange>,
 }
 
-/// Queues `transition` unless it can say nothing: one with no id and no
+/// Queues `change` unless it can say nothing: one with no id and no
 /// element event would deliver neither a record nor an event, and queued it
 /// would still cost a delivery entry.
-fn queue(transitions: &mut Vec<Transition>, transition: Transition) {
-    if transition.exposure_id.is_some() || transition.element_event {
-        transitions.push(transition);
+fn queue(changes: &mut Vec<ExposureChange>, change: ExposureChange) {
+    if change.exposure_id.is_some() || change.element_event {
+        changes.push(change);
     }
 }
 
-/// Records `entry` as visible or not, queueing the transition when that is a
+/// Records `entry` as visible or not, queueing the change when that is a
 /// change. `element_event` is whether the element hears it.
 fn record(
-    transitions: &mut Vec<Transition>,
+    changes: &mut Vec<ExposureChange>,
     node: NodeId,
     entry: &mut Entry,
     visible: bool,
@@ -253,8 +261,8 @@ fn record(
     }
     entry.exposed = visible;
     queue(
-        transitions,
-        Transition {
+        changes,
+        ExposureChange {
             node,
             appeared: visible,
             exposure_id: entry.exposure_id.clone(),
@@ -275,7 +283,7 @@ struct ExposureHandler {
 }
 
 impl IntersectionEventHandler<()> for ExposureHandler {
-    /// Compares each entry with the recorded state and queues a transition
+    /// Compares each entry with the recorded state and queues a change
     /// where they differ. Touches no `Document` method, which is what lets it
     /// hold the shared borrow for the whole call.
     fn notify(
@@ -287,7 +295,7 @@ impl IntersectionEventHandler<()> for ExposureHandler {
         let mut shared = self.shared.borrow_mut();
         let Shared {
             entries: registered,
-            transitions,
+            changes,
         } = &mut *shared;
         let Some(entry) = registered.get_mut(&self.node) else {
             return;
@@ -302,8 +310,8 @@ impl IntersectionEventHandler<()> for ExposureHandler {
             // A ratio is never negative, so an area of 0 asks for nothing
             // but intersection.
             let visible = observed.is_intersecting && observed.intersection_ratio >= entry.area;
-            let element_event = entry.listens;
-            record(transitions, self.node, entry, visible, element_event);
+            let element_event = entry.element_event;
+            record(changes, self.node, entry, visible, element_event);
         }
     }
 
@@ -314,24 +322,17 @@ impl IntersectionEventHandler<()> for ExposureHandler {
 
 impl Drop for ExposureHandler {
     /// The element was freed, when its registration still names an
-    /// observer: every drop this module makes clears that first. A freed
-    /// element that was exposed owes one `disexposure`, with no element
-    /// event — there is no element left to hear one — and the registration
-    /// goes.
+    /// observer: every drop this module makes clears that first. The
+    /// registration goes, and nothing is queued: a freed element is no
+    /// target, so there is nothing to dispatch a record at.
     fn drop(&mut self) {
         let mut shared = self.shared.borrow_mut();
-        let Shared {
-            entries,
-            transitions,
-        } = &mut *shared;
-        let freed = entries
+        let freed = shared
+            .entries
             .get(&self.node)
             .is_some_and(|entry| entry.observer.is_some());
-        if !freed {
-            return;
-        }
-        if let Some(mut entry) = entries.remove(&self.node) {
-            record(transitions, self.node, &mut entry, false, false);
+        if freed {
+            shared.entries.remove(&self.node);
         }
     }
 }
@@ -555,7 +556,7 @@ impl Attributes {
 }
 
 /// A document's exposure registrations, the switch `stopExposure` and
-/// `resumeExposure` turn, and the transitions waiting for a delivery entry.
+/// `resumeExposure` turn, and the changes waiting for a delivery entry.
 ///
 /// Owned by the realm's document slot beside the document.
 #[derive(Debug)]
@@ -576,33 +577,48 @@ impl Exposure {
     }
 
     /// An `exposure-*` attribute of the live element `node` was written or
-    /// removed: the registration follows the attributes as they are now.
+    /// removed: a registered element is re-armed from its attributes as they
+    /// are now. An element that is not registered stays so — no attribute
+    /// registers one by itself.
     pub(crate) fn attribute_changed(&mut self, document: &mut LynxDocument, node: NodeId) {
-        let listens = self
+        let element_event = self
             .shared
             .borrow()
             .entries
             .get(&node)
-            .is_some_and(|entry| entry.listens);
-        self.update(document, node, listens);
-    }
-
-    /// Whether the live element `node` has a `uiappear`/`uidisappear`
-    /// registration in the document's listener table, told on each change of
-    /// that answer.
-    pub(crate) fn set_listens(&mut self, document: &mut LynxDocument, node: NodeId, wants: bool) {
-        self.update(document, node, wants);
-    }
-
-    /// Registers, re-arms or tears down `node`: registered while it has an
-    /// `exposure-id` or a listener.
-    fn update(&mut self, document: &mut LynxDocument, node: NodeId, listens: bool) {
-        let attributes = Attributes::read(document, node);
-        if attributes.exposure_id.is_some() || listens {
-            self.arm(document, node, attributes, listens);
-        } else {
-            self.teardown(document, node);
+            .map(|entry| entry.element_event);
+        if let Some(element_event) = element_event {
+            let attributes = Attributes::read(document, node);
+            self.arm(document, node, attributes, element_event);
         }
+    }
+
+    /// What the document's listener table says of the live element `node`,
+    /// told on each change of either answer: `registered`, whether some realm
+    /// has filed the exposure record listener on it, and `element_event`,
+    /// whether some realm has filed a `uiappear`/`uidisappear` handler on it.
+    ///
+    /// The element is registered while `registered` holds: the first time,
+    /// it is armed from its attributes; after that, a change of
+    /// `element_event` alone only changes what its next changes say. When
+    /// `registered` stops holding, it is torn down.
+    pub(crate) fn set_registered(
+        &mut self,
+        document: &mut LynxDocument,
+        node: NodeId,
+        registered: bool,
+        element_event: bool,
+    ) {
+        if !registered {
+            self.teardown(document, node);
+            return;
+        }
+        if let Some(entry) = self.shared.borrow_mut().entries.get_mut(&node) {
+            entry.element_event = element_event;
+            return;
+        }
+        let attributes = Attributes::read(document, node);
+        self.arm(document, node, attributes, element_event);
     }
 
     /// Registers `node`, or re-arms it, with `attributes`.
@@ -617,7 +633,7 @@ impl Exposure {
         document: &mut LynxDocument,
         node: NodeId,
         attributes: Attributes,
-        listens: bool,
+        element_event: bool,
     ) {
         let Attributes {
             exposure_id,
@@ -627,13 +643,10 @@ impl Exposure {
         } = attributes;
         let previous = {
             let mut shared = self.shared.borrow_mut();
-            let Shared {
-                entries,
-                transitions,
-            } = &mut *shared;
+            let Shared { entries, changes } = &mut *shared;
             let entry = entries.entry(node).or_insert(Entry {
                 observer: None,
-                listens,
+                element_event,
                 exposure_id: None,
                 scene: String::new(),
                 area: 0.0,
@@ -641,9 +654,9 @@ impl Exposure {
             });
             let previous = entry.observer.take();
             if entry.exposure_id != exposure_id {
-                record(transitions, node, entry, false, false);
+                record(changes, node, entry, false, false);
             }
-            entry.listens = listens;
+            entry.element_event = element_event;
             entry.exposure_id = exposure_id;
             entry.scene = scene;
             entry.area = area;
@@ -682,14 +695,11 @@ impl Exposure {
     fn teardown(&mut self, document: &mut LynxDocument, node: NodeId) {
         let observer = {
             let mut shared = self.shared.borrow_mut();
-            let Shared {
-                entries,
-                transitions,
-            } = &mut *shared;
+            let Shared { entries, changes } = &mut *shared;
             let Some(mut entry) = entries.remove(&node) else {
                 return;
             };
-            record(transitions, node, &mut entry, false, false);
+            record(changes, node, &mut entry, false, false);
             entry.observer
         };
         if let Some(observer) = observer {
@@ -706,9 +716,9 @@ impl Exposure {
     /// recorded as not exposed, and without it nothing is sent and the
     /// record is kept, so a resume that finds the element still visible
     /// sends nothing for it. Resuming first lets go of the registrations
-    /// whose element was freed while stopped — one recorded as exposed sends
-    /// its `disexposure`, as a free while running does — and then arms every
-    /// other from its attributes as they are now.
+    /// whose element was freed while stopped, sending nothing, as a free
+    /// while running does, and then arms every other from its attributes as
+    /// they are now.
     ///
     /// Registrations are visited in `NodeId` order, so the records one call
     /// sends, and the observers a resume creates, come in an order that does
@@ -722,18 +732,12 @@ impl Exposure {
         if on {
             for node in nodes {
                 if document.get(node).is_some() {
-                    let listens = self.shared.borrow().entries[&node].listens;
+                    let element_event = self.shared.borrow().entries[&node].element_event;
                     let attributes = Attributes::read(document, node);
-                    self.arm(document, node, attributes, listens);
+                    self.arm(document, node, attributes, element_event);
                 } else {
-                    let mut shared = self.shared.borrow_mut();
-                    let Shared {
-                        entries,
-                        transitions,
-                    } = &mut *shared;
-                    if let Some(mut entry) = entries.remove(&node) {
-                        record(transitions, node, &mut entry, false, false);
-                    }
+                    // Freed while stopped: no handler was there to notice.
+                    self.shared.borrow_mut().entries.remove(&node);
                 }
             }
             return;
@@ -741,17 +745,14 @@ impl Exposure {
         let mut observers = Vec::new();
         {
             let mut shared = self.shared.borrow_mut();
-            let Shared {
-                entries,
-                transitions,
-            } = &mut *shared;
+            let Shared { entries, changes } = &mut *shared;
             for node in nodes {
                 let Some(entry) = entries.get_mut(&node) else {
                     continue;
                 };
                 observers.extend(entry.observer.take());
                 if send_event {
-                    record(transitions, node, entry, false, false);
+                    record(changes, node, entry, false, false);
                 }
             }
         }
@@ -767,16 +768,16 @@ impl Exposure {
         nodes
     }
 
-    /// Every pending transition, in the order they formed, leaving none.
-    pub(crate) fn take_transitions(&self) -> Vec<Transition> {
-        std::mem::take(&mut self.shared.borrow_mut().transitions)
+    /// Every pending change, in the order they formed, leaving none.
+    pub(crate) fn take_changes(&self) -> Vec<ExposureChange> {
+        std::mem::take(&mut self.shared.borrow_mut().changes)
     }
 
-    /// Whether a transition waits for a delivery entry: the epilogue's cue to
+    /// Whether a change waits for a delivery entry: the epilogue's cue to
     /// post one even when no observer has entries queued, for a teardown or
-    /// a `stopExposure` that sent records, or a freed element.
-    pub(crate) fn has_transitions(&self) -> bool {
-        !self.shared.borrow().transitions.is_empty()
+    /// a `stopExposure` that sent records.
+    pub(crate) fn has_changes(&self) -> bool {
+        !self.shared.borrow().changes.is_empty()
     }
 
     /// The observer `node`'s registration owns, if it is registered and

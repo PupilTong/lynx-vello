@@ -1,17 +1,20 @@
-//! Exposure over real documents: the registrations an element's attributes
-//! and listeners make, and the transitions `dom`'s intersection updates turn
-//! into.
+//! Exposure over real documents: the registrations the listener table makes,
+//! the re-arms an element's attributes make, and the changes `dom`'s
+//! intersection updates turn into.
 //!
 //! Each test plays the page's part by hand: [`deliver`] is one render, one
 //! update and one notify loop — what an entry's epilogue and the delivery
 //! entry it posts do between them — followed by the drain that entry makes.
-//! The viewport is `test_support`'s, 393 by 727.
+//! [`set`], [`remove`] and [`listen`] also play the realm's Lynx layer, which
+//! files the record listener on an element while it has a non-empty
+//! `exposure-id` or a `uiappear`/`uidisappear` handler ([`follow`]). The
+//! viewport is `test_support`'s, 393 by 727.
 
 #![allow(clippy::float_cmp)] // Authored pixel sizes and ratios are exact.
 
 use dom::{IntersectionMargin, MarginLength, NodeId, Vector2D};
 
-use super::{Exposure, Length, Margins, Transition, fold_margins, parse_area, parse_length};
+use super::{Exposure, ExposureChange, Length, Margins, fold_margins, parse_area, parse_length};
 use crate::main::tree::test_support::{
     child, document as fresh_document, element_under, with_config,
 };
@@ -31,8 +34,9 @@ fn boxed(document: &mut LynxDocument, top: f32, height: f32) -> NodeId {
     )
 }
 
-/// Writes one attribute the way `setAttribute` does: the mutation, then the
-/// registration.
+/// Writes one attribute the way `__SetAttribute` does: the mutation and the
+/// re-arm `setAttribute` makes, then the record listener the Lynx layer
+/// files or removes.
 fn set(
     exposure: &mut Exposure,
     document: &mut LynxDocument,
@@ -42,27 +46,60 @@ fn set(
 ) {
     document.set_attribute(node, name, value);
     exposure.attribute_changed(document, node);
+    follow(exposure, document, node, None);
 }
 
-/// Removes one attribute the way `removeAttribute` does.
+/// Removes one attribute the way `__SetAttribute` with a null value does.
 fn remove(exposure: &mut Exposure, document: &mut LynxDocument, node: NodeId, name: &str) {
     document.remove_attribute(node, name);
     exposure.attribute_changed(document, node);
+    follow(exposure, document, node, None);
+}
+
+/// Files (`on`) or removes the element's `uiappear`/`uidisappear` handler,
+/// with the record listener the Lynx layer files or removes beside it.
+fn listen(exposure: &mut Exposure, document: &mut LynxDocument, node: NodeId, on: bool) {
+    follow(exposure, document, node, Some(on));
+}
+
+/// What the listener table tells exposure once the Lynx layer has followed
+/// `node`: the record listener is there while the element has a non-empty
+/// `exposure-id` or a handler. `handler` is the handler's new state, `None`
+/// to keep the one the registration has.
+fn follow(
+    exposure: &mut Exposure,
+    document: &mut LynxDocument,
+    node: NodeId,
+    handler: Option<bool>,
+) {
+    let handler = handler.unwrap_or_else(|| {
+        exposure
+            .shared
+            .borrow()
+            .entries
+            .get(&node)
+            .is_some_and(|entry| entry.element_event)
+    });
+    let id = document
+        .get(node)
+        .and_then(|element| element.attribute("exposure-id"))
+        .is_some_and(|id| !id.is_empty());
+    exposure.set_registered(document, node, id || handler, handler);
 }
 
 /// One render, one update and one notify loop, then every pending
-/// transition.
-fn deliver(exposure: &Exposure, document: &mut LynxDocument) -> Vec<Transition> {
+/// change.
+fn deliver(exposure: &Exposure, document: &mut LynxDocument) -> Vec<ExposureChange> {
     document.render();
     document.update_intersection_observations(0.0);
     document.notify_intersection_observers();
-    exposure.take_transitions()
+    exposure.take_changes()
 }
 
-/// A record-only transition: an element with an `exposure-id` and no
+/// A record-only change: an element with an `exposure-id` and no
 /// listener.
-fn record(node: NodeId, appeared: bool, id: &str) -> Transition {
-    Transition {
+fn record(node: NodeId, appeared: bool, id: &str) -> ExposureChange {
+    ExposureChange {
         node,
         appeared,
         exposure_id: Some(id.to_owned()),
@@ -119,6 +156,66 @@ fn an_exposure_id_registers_and_the_first_update_reports_what_is_visible() {
     );
 }
 
+/// The record listener registers the element, whatever its attributes, and
+/// its removal unregisters it; an element registered with no id and no
+/// handler queues nothing, as it can deliver neither a record nor an event.
+#[test]
+fn the_record_listener_registers_and_its_removal_unregisters() {
+    let mut document = fresh_document();
+    let mut exposure = Exposure::new();
+    let node = boxed(&mut document, 0.0, 100.0);
+    exposure.set_registered(&mut document, node, true, false);
+    assert!(exposure.is_registered(node));
+    assert!(exposure.observer_of(node).is_some());
+    assert_eq!(deliver(&exposure, &mut document), Vec::new());
+
+    exposure.set_registered(&mut document, node, false, false);
+    assert!(!exposure.is_registered(node));
+    assert_eq!(exposure.observer_of(node), None);
+    assert!(!exposure.has_changes());
+}
+
+/// An `exposure-id` alone registers nothing: an attribute write only re-arms
+/// an element the listener table has registered, and the record listener
+/// filed later arms it from the attributes as they are then.
+#[test]
+fn an_exposure_id_alone_does_not_register() {
+    let mut document = fresh_document();
+    let mut exposure = Exposure::new();
+    let node = boxed(&mut document, 0.0, 100.0);
+    document.set_attribute(node, "exposure-id", "a");
+    exposure.attribute_changed(&mut document, node);
+    assert!(!exposure.is_registered(node));
+    assert_eq!(deliver(&exposure, &mut document), Vec::new());
+
+    exposure.set_registered(&mut document, node, true, false);
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![record(node, true, "a")]
+    );
+}
+
+/// A change of whether the element hears its events, with the record
+/// listener staying, keeps the observer and changes what the next change
+/// says.
+#[test]
+fn a_handler_change_alone_keeps_the_observer() {
+    let mut document = fresh_document();
+    let mut exposure = Exposure::new();
+    let node = boxed(&mut document, 0.0, 100.0);
+    set(&mut exposure, &mut document, node, "exposure-id", "a");
+    let observer = exposure.observer_of(node);
+    listen(&mut exposure, &mut document, node, true);
+    assert_eq!(exposure.observer_of(node), observer);
+    assert_eq!(
+        deliver(&exposure, &mut document),
+        vec![ExposureChange {
+            element_event: true,
+            ..record(node, true, "a")
+        }]
+    );
+}
+
 /// An update with nothing moved queues nothing, and a re-arm whose element
 /// is where it was recorded queues nothing either: the observer is new, its
 /// first entry is reported, and it agrees with the record.
@@ -132,7 +229,7 @@ fn nothing_is_queued_when_nothing_moved() {
 
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
     set(&mut exposure, &mut document, node, "exposure-scene", "feed");
-    assert!(!exposure.has_transitions());
+    assert!(!exposure.has_changes());
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
 }
 
@@ -593,7 +690,7 @@ fn a_changed_exposure_id_leaves_under_the_old_id_and_appears_under_the_new() {
 
     set(&mut exposure, &mut document, node, "exposure-id", "new");
     assert!(
-        exposure.has_transitions(),
+        exposure.has_changes(),
         "the disexposure is owed before any update"
     );
     assert_eq!(
@@ -616,8 +713,8 @@ fn removing_the_exposure_id_leaves_and_unregisters() {
     remove(&mut exposure, &mut document, node, "exposure-id");
     assert!(!exposure.is_registered(node));
     assert_eq!(
-        exposure.take_transitions(),
-        vec![Transition {
+        exposure.take_changes(),
+        vec![ExposureChange {
             node,
             appeared: false,
             exposure_id: Some("a".to_owned()),
@@ -636,8 +733,8 @@ fn a_listener_alone_registers_and_hears_its_element_events() {
     let mut document = fresh_document();
     let mut exposure = Exposure::new();
     let node = boxed(&mut document, 0.0, 100.0);
-    exposure.set_listens(&mut document, node, true);
-    let event = |appeared| Transition {
+    listen(&mut exposure, &mut document, node, true);
+    let event = |appeared| ExposureChange {
         node,
         appeared,
         exposure_id: None,
@@ -652,24 +749,24 @@ fn a_listener_alone_registers_and_hears_its_element_events() {
     );
     assert_eq!(deliver(&exposure, &mut document), vec![event(false)]);
 
-    exposure.set_listens(&mut document, node, false);
+    listen(&mut exposure, &mut document, node, false);
     assert!(!exposure.is_registered(node));
-    assert!(!exposure.has_transitions());
+    assert!(!exposure.has_changes());
 }
 
-/// A listener and an `exposure-id` on one element make one transition that
+/// A listener and an `exposure-id` on one element make one change that
 /// carries both: the element's event and its record.
 #[test]
-fn a_listener_and_an_id_make_one_transition() {
+fn a_listener_and_an_id_make_one_change() {
     let mut document = fresh_document();
     let mut exposure = Exposure::new();
     let node = boxed(&mut document, 0.0, 100.0);
     set(&mut exposure, &mut document, node, "exposure-scene", "feed");
     set(&mut exposure, &mut document, node, "exposure-id", "a");
-    exposure.set_listens(&mut document, node, true);
+    listen(&mut exposure, &mut document, node, true);
     assert_eq!(
         deliver(&exposure, &mut document),
-        vec![Transition {
+        vec![ExposureChange {
             node,
             appeared: true,
             exposure_id: Some("a".to_owned()),
@@ -680,7 +777,7 @@ fn a_listener_and_an_id_make_one_transition() {
 
     // The listener going leaves the element registered by its id, and
     // exposed: nothing is sent.
-    exposure.set_listens(&mut document, node, false);
+    listen(&mut exposure, &mut document, node, false);
     assert!(exposure.is_registered(node));
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
 }
@@ -707,7 +804,7 @@ fn stopping_with_send_event_leaves_everything_and_resuming_finds_it_again() {
     );
 
     exposure.switch(&mut document, false, true);
-    let ids = |nodes: Vec<NodeId>, appeared| -> Vec<Transition> {
+    let ids = |nodes: Vec<NodeId>, appeared| -> Vec<ExposureChange> {
         nodes
             .into_iter()
             .map(|node| {
@@ -725,7 +822,7 @@ fn stopping_with_send_event_leaves_everything_and_resuming_finds_it_again() {
             .collect()
     };
     assert_eq!(
-        exposure.take_transitions(),
+        exposure.take_changes(),
         ids(in_node_order(vec![a, b]), false)
     );
     assert_eq!(exposure.observer_of(a), None, "every observer is dropped");
@@ -739,7 +836,7 @@ fn stopping_with_send_event_leaves_everything_and_resuming_finds_it_again() {
     set(&mut exposure, &mut document, d, "exposure-id", "d");
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
     exposure.switch(&mut document, false, true);
-    assert!(!exposure.has_transitions(), "a second stop does nothing");
+    assert!(!exposure.has_changes(), "a second stop does nothing");
 
     exposure.switch(&mut document, true, true);
     assert_eq!(
@@ -769,7 +866,7 @@ fn stopping_without_send_event_keeps_the_exposed_record() {
     assert_eq!(deliver(&exposure, &mut document).len(), 2);
 
     exposure.switch(&mut document, false, false);
-    assert!(!exposure.has_transitions());
+    assert!(!exposure.has_changes());
     document.set_inline_style(
         gone,
         "position:absolute;left:0;top:1000px;width:100px;height:100px",
@@ -785,44 +882,37 @@ fn stopping_without_send_event_keeps_the_exposed_record() {
 
 // --- element lifetime ----------------------------------------------------
 
-/// A freed element that was exposed sends one `disexposure`, from its
-/// observer's drop inside the free, and is unregistered; the next update
-/// says nothing more of it.
+/// A freed element that was exposed sends nothing: its observer's drop
+/// inside the free only lets the registration go, as there is no target to
+/// dispatch a record at.
 #[test]
-fn a_freed_element_that_was_exposed_leaves_once() {
+fn a_freed_element_that_was_exposed_sends_nothing() {
     let mut document = fresh_document();
     let mut exposure = Exposure::new();
     let node = boxed(&mut document, 0.0, 100.0);
     set(&mut exposure, &mut document, node, "exposure-id", "a");
-    exposure.set_listens(&mut document, node, true);
+    listen(&mut exposure, &mut document, node, true);
     assert_eq!(deliver(&exposure, &mut document).len(), 1);
 
     // The collection path: a detached element whose handle was collected.
     document.remove_element(node);
     document.drop_element(node);
     assert!(!exposure.is_registered(node));
-    assert_eq!(
-        exposure.take_transitions(),
-        vec![record(node, false, "a")],
-        "a record and no element event: there is no element to hear it"
-    );
+    assert!(!exposure.has_changes());
     assert_eq!(deliver(&exposure, &mut document), Vec::new());
 
     // Freed while stopped, with the exposed record kept: the resume lets
-    // the registration go and sends what the free would have.
+    // the registration go, sending nothing either.
     let node = boxed(&mut document, 0.0, 100.0);
     set(&mut exposure, &mut document, node, "exposure-id", "b");
     assert_eq!(deliver(&exposure, &mut document).len(), 1);
     exposure.switch(&mut document, false, false);
     document.remove_element(node);
     document.drop_element(node);
-    assert!(
-        !exposure.has_transitions(),
-        "no observer to drop while stopped"
-    );
+    assert!(!exposure.has_changes(), "no observer to drop while stopped");
     exposure.switch(&mut document, true, true);
     assert!(!exposure.is_registered(node));
-    assert_eq!(exposure.take_transitions(), vec![record(node, false, "b")]);
+    assert!(!exposure.has_changes());
 }
 
 /// An element unlinked but alive stays registered and leaves through the
@@ -834,17 +924,14 @@ fn an_unlinked_element_leaves_through_the_primitive() {
     let mut exposure = Exposure::new();
     let node = boxed(&mut document, 0.0, 100.0);
     set(&mut exposure, &mut document, node, "exposure-id", "a");
-    exposure.set_listens(&mut document, node, true);
+    listen(&mut exposure, &mut document, node, true);
     assert_eq!(deliver(&exposure, &mut document).len(), 1);
 
     document.remove_element(node);
-    assert!(
-        !exposure.has_transitions(),
-        "nothing is owed before the update"
-    );
+    assert!(!exposure.has_changes(), "nothing is owed before the update");
     assert_eq!(
         deliver(&exposure, &mut document),
-        vec![Transition {
+        vec![ExposureChange {
             element_event: true,
             ..record(node, false, "a")
         }]

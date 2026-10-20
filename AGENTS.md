@@ -356,9 +356,10 @@ step. For a page the order is: the timers that came due, the commit — then the
 intersection observations that commit or an adopted scroll moved, and the
 intersection, content-visibility and component-event deliveries it posts as
 entries of their own (the intersection delivery also drains the Lynx exposure
-transitions — `uiappear`/`uidisappear`, then the `exposure` and `disexposure`
-lists — and is posted for them even when no observer crossed a threshold, as
-after `lynx.stopExposure`) — the boot report once, the frame-post acknowledgement, the module requests
+changes — each `uiappear`/`uidisappear`, then each `bobcat:exposure` record
+event, out of which the realm's Lynx layer sends the `exposure` and
+`disexposure` lists — and is posted for them even when no observer crossed a
+threshold, as after `lynx.stopExposure`) — the boot report once, the frame-post acknowledgement, the module requests
 the operation left, the future settles, what the realm's `ShadowRealm`
 children left unhandled, the `@font-face` loads, the release of every child
 nothing needs any more, the next timer deadline, and the checkpoint
@@ -2103,9 +2104,8 @@ transform-aware, clip-aware geometry; see `docs/dom-architecture.md`
 
 **Lynx exposure** (`crates/bobcat-core/src/main/exposure.rs`, user-directed
 2026-10-11) is the first consumer of that primitive, and a bucket-2 adapter
-over it: every element whose `exposure-id` attribute is non-empty, or on which
-the realm has filed a `uiappear`/`uidisappear` handler, gets one observer of
-its own — root the viewport, thresholds `[exposure-area / 100]`, and a root
+over it: every element on which a realm has filed the internal
+`bobcat:exposure` record listener gets one observer of its own — root the viewport, thresholds `[exposure-area / 100]`, and a root
 margin and a target margin folded from the element's margins by one rule:
 `exposure-ui-margin-*`, always (neither native's per-element
 `enable-exposure-ui-margin` nor its page config `enableExposureUIMargin` is
@@ -2115,17 +2115,34 @@ of the opposite side (native's `frameOfUIInWindow:` without the switch); a
 negative one on the root margin of the same side (`borderOfExposureScreen:`).
 A positive margin so grows the element's own rect, which the primitive clips,
 and reaches an element a scrollport or a clipping page cut, where a root margin
-cannot. The attribute triggers are the `setAttribute`/`removeAttribute`
-host members, which know exactly these names because the attributes belong to
-every tag and so to no component; the listener trigger is the listener table: an element
-is registered while any realm has a registration of any form for `uiappear`
-or `uidisappear` on it, and `Exposure::set_listens` is told on each change of
-that answer (`hears_exposure`). The observer's handler turns
-each entry into an exposed/not-exposed transition (intersecting with a ratio of
-at least the area), and the intersection delivery entry dispatches
-`uiappear`/`uidisappear` (non-bubbling, detail from the target's own
-attributes) and then one `exposure` and one `disexposure` list through the BTS
-`GlobalEventEmitter`, web-core's record shape and order. Four user rulings
+cannot. Registration is the listener table's answer: `bobcat:element`
+(`syncExposureListener`) files that listener while the element's
+`exposure-id` is non-empty or any registration of any form for `uiappear` or
+`uidisappear` is filed on it, and keeps it while the element is exposed, so
+the `disexposure` owed under an old id still reaches it; the host registers
+the element while `has_listener(node, "bobcat:exposure")` holds, and it hears
+its element events while it also has a `uiappear` or `uidisappear` row
+(`exposure_rows`, `hears_exposure`). `Exposure::set_registered` is told on
+each change of either answer, from `open_listener`/`close_listener`. No
+attribute registers an element by itself: the `setAttribute`/`removeAttribute`
+host members, which know the `exposure-` names because the attributes belong
+to every tag and so to no component, only re-arm an element that is
+registered. The observer's handler turns each entry into an `ExposureChange`
+(exposed or not: intersecting with a ratio of at least the area), and the
+intersection delivery entry (`notify_intersection_observers`) dispatches
+each `uiappear`/`uidisappear` (non-bubbling, detail from the target's own
+attributes), then, for each change that has an `exposure-id`, one
+`bobcat:exposure` event at the element: non-bubbling, not composed, with the
+extras `exposureID`, `exposureScene` and `appeared`. The record dispatches
+run without a checkpoint of their own (`Checkpoint::Deferred`), and the
+entry then checkpoints each realm it called once, so the record listener
+(`exposureRecordListener`) queues web-core's record for each element and one
+promise job (`flushExposureRecords`) sends one `exposure` and then one
+`disexposure` list per entry through `bobcat:runtime`'s
+`__BobcatSendExposureRecords` to that realm's BTS `GlobalEventEmitter`,
+web-core's record shape and order. The realm holding the element's handle is
+the one with the row, so a frame card's records reach the card realm and its
+own BTS, and a freed element is sent no record. Four user rulings
 (2026-10-11): the geometry is the primitive's (viewport root, clipped through
 every clipping ancestor, the ratio over the finally visible area), ui margins
 are gated by the switch as documented and as native does, `lynx.stopExposure`

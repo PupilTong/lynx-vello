@@ -2927,9 +2927,13 @@ consequential choice about whether to follow the spec or the quirk.
       by an earlier listener lets go of the old card at once: `resetFrame`
       frees its page, its registrations leave with its nodes, and its call
       is skipped, since it holds nothing for the name any more.
-    - *The card's exposure records go to the page's BTS* (deferred): a
-      card's elements' `exposure`/`disexposure` lists still go to the page
-      realm's BTS, where both references keep exposure per card.
+    - *A card's exposure records reach its own BTS* (resolved 2026-10-20):
+      each record is a `bobcat:exposure` event at its element, and the
+      listener table calls the realm holding the element's handle, so a
+      card's elements' `exposure`/`disexposure` lists are sent by the card
+      realm to the card's BTS, as both references keep exposure per card.
+      `lynx.stopExposure`/`resumeExposure` still switch the whole document's
+      exposure (above).
     - *A frame's connection calls reach the page realm alone* (deferred):
       `__BobcatFrameConnected`/`__BobcatFrameDisconnected` are not routed to
       the realm whose scope holds the frame's handle, so a frame inside a
@@ -3235,16 +3239,23 @@ consequential choice about whether to follow the spec or the quirk.
   is the element (two elements with one id+scene are two records), a
   teardown or an `exposure-id` change emits a `disexposure` record with the
   old id and no `uidisappear`, `exposure-area` is `parseFloat(value) / 100`,
-  zero-area and edge-adjacent targets count as intersecting, and
+  zero-area and edge-adjacent targets count as intersecting,
   `visibility: hidden`/`opacity: 0` do not hide (native checks alpha and
-  hidden). Defaults taken from native: global records need a non-empty
-  `exposure-id` (web-core emits records with a null id for listener-only
-  elements), a freed exposed element emits one `disexposure` (web-core
-  emits nothing for a removed node), `rpx` margins resolve (web-core:
-  0), and every registration form arms an element — an
-  `__AddEventListener` closure for `uiappear` included, since native syncs
-  every form into the element's event set (web-core marks from
-  `__AddEvent` alone). One more from web-core: `lynx.stopExposure({})`,
+  hidden), and a freed exposed element emits nothing (since 2026-10-20: a
+  record is a `bobcat:exposure` event dispatched at its element, and a
+  freed element is no target; native reports one `disexposure` for it on
+  its next poll). Defaults taken from native: global records need a
+  non-empty `exposure-id` (web-core emits records with a null id for
+  listener-only elements), `rpx` margins resolve (web-core: 0), and every
+  registration form arms an element — an `__AddEventListener` closure for
+  `uiappear` included, since native syncs every form into the element's
+  event set (web-core marks from `__AddEvent` alone). The arming itself is
+  a listener: `element-papi.ts` (`syncExposureListener`) files an internal
+  `bobcat:exposure` listener while the element's `exposure-id` is
+  non-empty or any such registration is filed, and keeps it while the
+  element is exposed; that row, not the attribute, registers the element
+  in Rust (`exposure_rows`), and an `exposure-` attribute write only
+  re-arms a registered element. One more from web-core: `lynx.stopExposure({})`,
   an object naming no `sendEvent`, sends the records (`sendEvent ?? true`;
   native sends nothing for it). Margins (2026-10-12) fold into the
   observer's root and target margins: a ui margin on the target's same

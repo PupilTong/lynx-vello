@@ -673,10 +673,13 @@ may have made due); the commit next, so the frame exists before anything
 implying it; then the intersection observations that commit — or a scroll
 adopted inside the encode window, which commits nothing — moved, updated here
 and, when a threshold was crossed — or when the Lynx exposure service holds
-transitions, as it does after `lynx.stopExposure`/`resumeExposure` — posted as
+changes, as it does after `lynx.stopExposure`/`resumeExposure` — posted as
 one fresh entry, which runs the observers' handlers and then delivers the
-exposure transitions those handlers recorded: each `uiappear`/`uidisappear`,
-then the `exposure` and `disexposure` lists to the background thread; then the two
+exposure changes those handlers recorded: each `uiappear`/`uidisappear`,
+then each `bobcat:exposure` record event at its element, under one microtask
+checkpoint per realm called (`Checkpoint::Deferred`), out of which that
+realm's Lynx layer sends one `exposure` and one `disexposure` list to its
+background thread; then the two
 batches of engine-decided events the entry may have
 left owing — the `contentvisibilityautostatechange` events that commit decided,
 and the component events the entry produced (an `<image>`'s `load`/`error`, a

@@ -78,15 +78,24 @@ const DOCUMENT_LEVEL_EVENTS: [&str; 2] = ["keydown", "keyup"];
 /// handed to; see [`MainThreadRuntime::dispatch_component_events`].
 const FRAME_CONNECTED_EXPORT: &str = "__BobcatFrameConnected";
 const FRAME_DISCONNECTED_EXPORT: &str = "__BobcatFrameDisconnected";
-/// The `bobcat:runtime` export one global exposure record list is handed to;
-/// see [`MainThreadRuntime::send_exposure_records`].
-const EXPOSURE_EXPORT: &str = "__BobcatSendExposure";
-
 /// What an element hears when its exposure moves. web-core's names
 /// (`ExposureServices.ts:209-220`), dispatched non-bubbling and not composed
 /// as web-core dispatches them.
 const APPEAR_EVENT: &str = "uiappear";
 const DISAPPEAR_EVENT: &str = "uidisappear";
+
+/// The internal event an element's exposure record is: the name the realm's
+/// Lynx layer files its record listener under, on every element it registers
+/// for exposure, and so the listener-table row that registers the element
+/// here ([`Exposure::set_registered`]). The `bobcat:` prefix keeps it apart
+/// from every name an app can file.
+///
+/// Dispatched at the element, non-bubbling and not composed, with no W3C
+/// payload and three extras the listener builds the record from:
+/// `exposureID`, `exposureScene` and `appeared` (true for an `exposure`
+/// record, false for a `disexposure`); see
+/// [`MainThreadRuntime::notify_intersection_observers`].
+const EXPOSURE_RECORD_EVENT: &str = "bobcat:exposure";
 
 /// CSSOM-View's two scroll events, fired at a scroll container on this
 /// thread: `scroll` when an adopted or script-requested offset moved it,
@@ -503,6 +512,20 @@ impl fmt::Display for MainThreadError {
     }
 }
 
+/// Where the realm calls of a dispatch checkpoint.
+enum Checkpoint<'a> {
+    /// Each call ends in its realm's microtask checkpoint, and the dispatch
+    /// in [`MainThreadRuntime::finish_batch`]: every dispatch but the
+    /// exposure records'.
+    Each,
+    /// No call checkpoints, and the dispatch does not end the batch: each
+    /// realm called is added to the list, once, for the caller to
+    /// checkpoint after its last dispatch
+    /// ([`RealmCore::checkpoint_after_calls`]). So a run of dispatches is
+    /// one checkpoint per realm, after all of them.
+    Deferred(&'a mut SmallVec<[RealmId; 2]>),
+}
+
 /// What one dispatch's listeners threw: one failure per realm call that
 /// failed, in the order the calls ran, never empty.
 ///
@@ -774,7 +797,7 @@ struct DocumentSlot {
     /// ([`MainThreadRuntime::run_due_timers`]). Empty on a page with no
     /// autoplaying swiper.
     autoplays: Autoplays,
-    /// The document's exposure registrations and the transitions they owe
+    /// The document's exposure registrations and the changes they owe
     /// script.
     ///
     /// Beside the document rather than inside it because exposure is Lynx's
@@ -1015,10 +1038,11 @@ impl DocumentSlot {
     /// at once ([`Self::publish_route_changes`]), after the last removals
     /// freed nodes left waiting, so the painter is told whether a name is
     /// routed in the order its registration count crossed zero. A change of
-    /// whether `node` has any registration for `uiappear` or `uidisappear`
-    /// is what registers it for exposure detection, or lets it go
-    /// ([`Exposure::set_listens`]); nothing else tells exposure about a
-    /// listener.
+    /// whether `node` has a [`EXPOSURE_RECORD_EVENT`] row is what registers
+    /// it for exposure detection, or lets it go, and a change of whether it
+    /// has a `uiappear` or `uidisappear` row whether it hears its element
+    /// events ([`Exposure::set_registered`]); nothing else tells exposure
+    /// about a listener.
     fn open_listener(
         &mut self,
         node: dom::NodeId,
@@ -1029,10 +1053,10 @@ impl DocumentSlot {
         self.apply_pending_last_removals();
         let exposure = is_exposure_event(name);
         let document = self.document.as_mut().expect(DOCUMENT_EXISTS);
-        let heard = exposure && hears_exposure(document, node);
+        let before = exposure.then(|| exposure_rows(document, node));
         let change = document.add_listener(node, name, kinds, key);
-        if exposure {
-            self.exposure_follows(node, heard);
+        if let Some(before) = before {
+            self.exposure_follows(node, before);
         }
         self.publish_route_changes(&[(name, change)]);
     }
@@ -1044,24 +1068,24 @@ impl DocumentSlot {
         self.apply_pending_last_removals();
         let exposure = is_exposure_event(name);
         let document = self.document.as_mut().expect(DOCUMENT_EXISTS);
-        let heard = exposure && hears_exposure(document, node);
+        let before = exposure.then(|| exposure_rows(document, node));
         let change = document.remove_listener(node, name, key);
-        if exposure {
-            self.exposure_follows(node, heard);
+        if let Some(before) = before {
+            self.exposure_follows(node, before);
         }
         self.publish_route_changes(&[(name, change)]);
     }
 
-    /// Tells exposure whether `node` has a `uiappear`/`uidisappear`
-    /// registration now, when that answer is no longer `before`.
-    fn exposure_follows(&mut self, node: dom::NodeId, before: bool) {
+    /// Tells exposure what the listener table now says of `node`
+    /// ([`exposure_rows`]), when that is no longer `before`.
+    fn exposure_follows(&mut self, node: dom::NodeId, before: (bool, bool)) {
         let Self {
             document, exposure, ..
         } = self;
         let document = document.as_mut().expect(DOCUMENT_EXISTS);
-        let now = hears_exposure(document, node);
+        let now @ (registered, hears) = exposure_rows(document, node);
         if now != before {
-            exposure.set_listens(document, node, now);
+            exposure.set_registered(document, node, registered, hears);
         }
     }
 
@@ -2591,7 +2615,9 @@ impl MainThreadRuntime {
     /// JSON is formatted here and none is parsed there.
     ///
     /// Each call is its own module-export call with its own microtask
-    /// checkpoint, as a browser checkpoints after each listener invocation.
+    /// checkpoint, as a browser checkpoints after each listener invocation —
+    /// except the exposure records', which [`Self::dispatch_checkpointed`]
+    /// runs as one checkpoint per realm after the entry's last record.
     /// A call that throws is kept and the walk goes on, so every realm still
     /// hears the event; [`Self::finish_batch`] runs once, at the end; and
     /// every failure is answered, in the order the calls ran.
@@ -2617,6 +2643,38 @@ impl MainThreadRuntime {
         timestamp: f64,
         detail: &EventDetail,
         extras: Extras<'_>,
+    ) -> Result<bool, ListenerFailures> {
+        self.dispatch_checkpointed(
+            js_runtime,
+            target,
+            name,
+            bubbles,
+            composed,
+            timestamp,
+            detail,
+            extras,
+            Checkpoint::Each,
+        )
+    }
+
+    /// [`Self::dispatch`], with its realm calls checkpointed as `checkpoint`
+    /// says: each on its own, or none, for the caller to checkpoint once per
+    /// realm after a run of dispatches.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the dispatch's own arguments, and where its calls checkpoint"
+    )]
+    fn dispatch_checkpointed(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+        target: dom::NodeId,
+        name: &str,
+        bubbles: bool,
+        composed: bool,
+        timestamp: f64,
+        detail: &EventDetail,
+        extras: Extras<'_>,
+        mut checkpoint: Checkpoint<'_>,
     ) -> Result<bool, ListenerFailures> {
         // The realm files every name lowercased — `element-papi.ts`
         // lowercases both halves of a registration, and its dispatch the
@@ -2692,18 +2750,29 @@ impl MainThreadRuntime {
                 if !invited.contains(key) {
                     continue;
                 }
+                let defer = matches!(checkpoint, Checkpoint::Deferred(_));
                 match self.call_realm(
-                    js_runtime, key, &path, name, bubbles, timestamp, detail, extras,
+                    js_runtime, key, &path, name, bubbles, timestamp, detail, extras, defer,
                 ) {
                     Ok(published) => called |= published,
                     Err(error) => failures.push(error),
+                }
+                if let Checkpoint::Deferred(realms) = &mut checkpoint {
+                    let realm = RealmId::from_listener_key(key);
+                    if !realms.contains(&realm) {
+                        realms.push(realm);
+                    }
                 }
                 live = None;
             }
         }
         // Listeners remove elements too; the count they ran up is settled
-        // here, at the end of the dispatch, as long as nothing failed.
-        if let Err(error) = self.finish_batch(js_runtime, failures.is_empty()) {
+        // here, at the end of the dispatch, as long as nothing failed — or by
+        // the caller of a deferred run, after its checkpoints, since a
+        // collection checkpoints too.
+        if matches!(checkpoint, Checkpoint::Each)
+            && let Err(error) = self.finish_batch(js_runtime, failures.is_empty())
+        {
             failures.push(error);
         }
         ListenerFailures::or_called(failures, called)
@@ -2713,7 +2782,8 @@ impl MainThreadRuntime {
     /// targets, name, bubbles, timestamp, extras…, detail…)` in the realm
     /// whose registrations are filed under `key`
     /// ([`RealmId::from_listener_key`]). A child already freed is not
-    /// called.
+    /// called. With `defer`, the call has no checkpoint of its own
+    /// ([`Checkpoint::Deferred`]).
     #[allow(
         clippy::too_many_arguments,
         reason = "the dispatch's own arguments, which every call carries"
@@ -2728,6 +2798,7 @@ impl MainThreadRuntime {
         timestamp: f64,
         detail: &EventDetail,
         extras: Extras<'_>,
+        defer: bool,
     ) -> Result<bool, MainThreadError> {
         // The detail last, because a touch event's points make it the one
         // part of variable length besides the extras before it.
@@ -2740,13 +2811,25 @@ impl MainThreadRuntime {
         encode_extras(extras, &mut arguments);
         encode_detail(detail, &mut arguments);
 
-        let Some(called) = self.core.call_module_export(
-            js_runtime,
-            RealmId::from_listener_key(key),
-            ELEMENT_MODULE_SPECIFIER,
-            EVENT_DISPATCH_EXPORT,
-            &arguments,
-        ) else {
+        let realm = RealmId::from_listener_key(key);
+        let called = if defer {
+            self.core.call_module_export_before_operation(
+                js_runtime,
+                realm,
+                ELEMENT_MODULE_SPECIFIER,
+                EVENT_DISPATCH_EXPORT,
+                &arguments,
+            )
+        } else {
+            self.core.call_module_export(
+                js_runtime,
+                realm,
+                ELEMENT_MODULE_SPECIFIER,
+                EVENT_DISPATCH_EXPORT,
+                &arguments,
+            )
+        };
+        let Some(called) = called else {
             return Ok(false);
         };
         called.map_err(|error| MainThreadError::from_engine("delivering an event", error))
@@ -2890,21 +2973,21 @@ impl MainThreadRuntime {
             .is_some_and(|document| document.update_intersection_observations(time))
     }
 
-    /// Whether exposure transitions wait for a delivery entry — the page's
+    /// Whether exposure changes wait for a delivery entry — the page's
     /// cue to post one even when no observer has entries queued: a
     /// teardown, a `stopExposure` that sent records, or a freed element that
-    /// was exposed queues its transition outside any update.
+    /// was exposed queues its change outside any update.
     ///
     /// One `is_empty`, because nearly every entry's answer is no.
     pub(crate) fn has_pending_exposure(&self) -> bool {
-        self.slot.borrow().exposure.has_transitions()
+        self.slot.borrow().exposure.has_changes()
     }
 
     /// Delivers every observer's queued entries to its handler, in creation
     /// order — "notify intersection observers"
     /// ([§3.2.5](https://w3c.github.io/IntersectionObserver/#notify-intersection-observers-algo)),
     /// which `dom` runs whole, call included — and then the exposure
-    /// transitions that loop and the entries before it left, into the realm.
+    /// changes that loop and the entries before it left, into the realm.
     ///
     /// Two kinds of observer exist today. An engine component's, a
     /// `dom::CustomElement` definition's, carries a [`dom::ElementHandler`]:
@@ -2912,7 +2995,7 @@ impl MainThreadRuntime {
     /// `[CEReactions]` scope, and drops the entries if the element is not a
     /// constructed component; **no realm is entered** for one. An exposure
     /// registration's carries the exposure handler, which only records
-    /// transitions: it cannot call the realm from inside `dom`'s loop, because
+    /// changes: it cannot call the realm from inside `dom`'s loop, because
     /// the realm is not the document's to lend, so the realm half runs here,
     /// after the loop, with the document released. The MTS
     /// `IntersectionObserver` binding's handler, once it exists, is the same
@@ -2920,22 +3003,31 @@ impl MainThreadRuntime {
     /// the loop.
     ///
     /// That half is web-core's order (`ExposureServices.ts:209-275`): each
-    /// `uiappear`/`uidisappear` in the order the transitions formed — one
+    /// `uiappear`/`uidisappear` in the order the changes formed — one
     /// non-bubbling, non-composed dispatch at the element, with
-    /// [`EventDetail::Exposure`] — then one `exposure` record list, then one
-    /// `disexposure` list, each one call of `bobcat:runtime`'s
-    /// `__BobcatSendExposure` (see [`Self::send_exposure_records`]). An
-    /// element freed since its transition formed hears nothing, as a routed
-    /// event at a freed target does, and its record is still sent: the id
-    /// and scene were copied when it formed.
+    /// [`EventDetail::Exposure`] — then, in the same order, one
+    /// [`EXPOSURE_RECORD_EVENT`] dispatch at the element of every change that
+    /// has an `exposure-id`, non-bubbling and non-composed too, its id, scene
+    /// and direction as extras. The realm holding the element's handle has
+    /// the record listener's row, so it is the one called: the listener
+    /// table answers which realm a record reaches, a detached element's
+    /// included, whose path starts at itself. The realm's Lynx layer turns
+    /// the records into the `exposure` and `disexposure` lists and orders
+    /// them. An element freed since its change formed hears nothing, as a
+    /// routed event at a freed target does, record included.
+    ///
+    /// The record dispatches share one microtask checkpoint per realm called,
+    /// run after the last of them ([`Checkpoint::Deferred`]), so what a
+    /// record listener queues runs once every record of the entry is in:
+    /// that is what lets the realm send one list of each kind per entry, as
+    /// web-core sends one per batch.
     ///
     /// A hook or a listener may mutate the tree. Whatever it wrote is
     /// committed by the delivery entry's own epilogue, whose update then runs
     /// again against the new frame.
     ///
-    /// Returns what failed: a listener that threw, or a record list the realm
-    /// did not take. Each is nonfatal and reported as `ListenerFailed`; the
-    /// rest is still delivered.
+    /// Returns what failed: a listener that threw. Each is nonfatal and
+    /// reported as `ListenerFailed`; the rest is still delivered.
     pub(crate) fn notify_intersection_observers(
         &mut self,
         js: &mut ScriptRuntime,
@@ -2944,14 +3036,14 @@ impl MainThreadRuntime {
             .borrow_mut()
             .document_mut()
             .notify_intersection_observers();
-        let transitions = self.slot.borrow().exposure.take_transitions();
-        if transitions.is_empty() {
+        let changes = self.slot.borrow().exposure.take_changes();
+        if changes.is_empty() {
             return Vec::new();
         }
         let timestamp = self.timeline_milliseconds;
         let mut failures = Vec::new();
-        for transition in transitions.iter().filter(|t| t.element_event) {
-            let name = if transition.appeared {
+        for change in changes.iter().filter(|change| change.element_event) {
+            let name = if change.appeared {
                 APPEAR_EVENT
             } else {
                 DISAPPEAR_EVENT
@@ -2960,7 +3052,7 @@ impl MainThreadRuntime {
             // (`ExposureServices.ts:210-218`).
             if let Err(error) = self.dispatch(
                 js,
-                transition.node,
+                change.node,
                 name,
                 false,
                 false,
@@ -2971,75 +3063,46 @@ impl MainThreadRuntime {
                 failures.extend(error.into_errors());
             }
         }
-        for (kind, appeared) in [("exposure", true), ("disexposure", false)] {
-            let mut record = String::new();
-            for transition in transitions.iter().filter(|t| t.appeared == appeared) {
-                let Some(id) = &transition.exposure_id else {
-                    continue;
-                };
-                write_record_field(&mut record, &packed_node_id(transition.node).to_string());
-                write_record_field(&mut record, id);
-                write_record_field(&mut record, &transition.scene);
-            }
-            if record.is_empty() {
+        // One checkpoint per realm after every record, rather than one per
+        // call: what a record listener queues runs once all of the entry's
+        // records are in, so the realm sends one `exposure` and one
+        // `disexposure` list.
+        let mut realms = SmallVec::new();
+        let mut recorded = true;
+        for change in &changes {
+            let Some(id) = &change.exposure_id else {
                 continue;
-            }
-            if let Err(error) = self.send_exposure_records(js, kind, &record) {
-                failures.push(error);
+            };
+            let extras = [
+                ("exposureID", Extra::Str(id)),
+                ("exposureScene", Extra::Str(&change.scene)),
+                ("appeared", Extra::Bool(change.appeared)),
+            ];
+            if let Err(error) = self.dispatch_checkpointed(
+                js,
+                change.node,
+                EXPOSURE_RECORD_EVENT,
+                false,
+                false,
+                timestamp,
+                &EventDetail::None,
+                &extras,
+                Checkpoint::Deferred(&mut realms),
+            ) {
+                recorded = false;
+                failures.extend(error.into_errors());
             }
         }
+        for realm in realms {
+            if let Some(Err(error)) = self.core.checkpoint_after_calls(js, realm) {
+                recorded = false;
+                failures.push(MainThreadError::from_engine("delivering an event", error));
+            }
+        }
+        if let Err(error) = self.finish_batch(js, recorded) {
+            failures.push(error);
+        }
         failures
-    }
-
-    /// Hands one global record list to the realm: `bobcat:runtime`'s
-    /// `__BobcatSendExposure(kind, record)`, `kind` being `"exposure"` or
-    /// `"disexposure"` and `record` a `bobcat:record` payload of three fields
-    /// per element — its packed node id, its `exposure-id`, its scene. The
-    /// realm builds web-core's record objects out of them and sends the list
-    /// to the BTS as the global event of that name; nothing about their shape
-    /// is decided here.
-    ///
-    /// A realm that publishes no such export is a failure rather than a
-    /// silent drop, as it is not for the exports a bundle may lack: this one
-    /// is the engine's own, and records that reach nobody are lost.
-    fn send_exposure_records(
-        &mut self,
-        js: &mut ScriptRuntime,
-        kind: &str,
-        record: &str,
-    ) -> Result<(), MainThreadError> {
-        const CONTEXT: &str = "delivering exposure records";
-        let called = self
-            .core
-            .engine
-            .call_module_export(
-                js,
-                RUNTIME_MODULE_SPECIFIER,
-                EXPOSURE_EXPORT,
-                &[HostArgument::String(kind), HostArgument::String(record)],
-            )
-            .map_err(|error| MainThreadError::from_engine(CONTEXT, error));
-        let finished = self.finish_batch(js, called.is_ok());
-        called
-            .and_then(|published| {
-                if published {
-                    Ok(())
-                } else {
-                    Err(MainThreadError::from_engine(
-                        CONTEXT,
-                        ScriptError {
-                            kind: crate::script::ScriptErrorKind::Other,
-                            phase: crate::script::ScriptErrorPhase::CallModuleExport,
-                            message: format!(
-                                "{RUNTIME_MODULE_SPECIFIER} publishes no {EXPOSURE_EXPORT}"
-                            )
-                            .into(),
-                            location: None,
-                        },
-                    ))
-                }
-            })
-            .and(finished)
     }
 
     /// When the earliest armed timer comes due, if one is armed, for a test
@@ -3970,16 +4033,27 @@ fn install_event_members(
     Ok(())
 }
 
-/// Whether `name` is one of the two an element hears its exposure by, so a
-/// change of its registrations is a change of whether the element is
-/// registered for exposure detection.
+/// Whether a change of `name`'s registrations on an element can change what
+/// exposure is told of it ([`exposure_rows`]): the record event, and the two
+/// an element hears its exposure by.
 fn is_exposure_event(name: &str) -> bool {
-    name == APPEAR_EVENT || name == DISAPPEAR_EVENT
+    name == EXPOSURE_RECORD_EVENT || name == APPEAR_EVENT || name == DISAPPEAR_EVENT
+}
+
+/// What the listener table says of `node` for exposure: whether some realm
+/// filed the record listener ([`EXPOSURE_RECORD_EVENT`]) on it, which is what
+/// registers it, and whether it hears its element events
+/// ([`hears_exposure`]).
+fn exposure_rows(document: &LynxDocument, node: dom::NodeId) -> (bool, bool) {
+    (
+        document.has_listener(node, EXPOSURE_RECORD_EVENT),
+        hears_exposure(document, node),
+    )
 }
 
 /// Whether some realm registered for `uiappear` or `uidisappear` on `node`,
-/// in any form: what registers an element for exposure whether or not it
-/// carries an `exposure-id`. Every form counts, `__AddEventListener`'s
+/// in any form: what makes a registered element hear its element events.
+/// Every form counts, `__AddEventListener`'s
 /// included — native's rule: `FiberAddEventListener` syncs the name into the
 /// element's event set for every form it files
 /// (`core/runtime/lepus/bindings/renderer_functions.cc:1077`), and native
@@ -4263,9 +4337,10 @@ fn install_attribute_members(
 /// That is the one exception to "this layer knows no attribute names". The
 /// exposure attributes (`exposure-id`, `exposure-scene`, `exposure-area`, the
 /// screen and ui margins) belong to every tag, so no tag's component can own
-/// them, and what they drive — the
-/// document's exposure registrations — sits beside the document in the slot,
-/// out of a component's reach. The slot is told after the mutation, so the
+/// them, and what they drive — the observer of a registered element, re-armed
+/// from them — sits beside the document in the slot, out of a component's
+/// reach. They register nothing by themselves: the record listener the
+/// realm's Lynx layer files does. The slot is told after the mutation, so the
 /// registration reads the attributes as they now are.
 fn install_attribute_writes(
     engine: &mut ScriptEngine,

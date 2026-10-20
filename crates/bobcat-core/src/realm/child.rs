@@ -272,6 +272,38 @@ impl ChildRealms {
         })
     }
 
+    /// [`Self::call_module_export`] without the checkpoint: the child's
+    /// [`ScriptEngine::call_module_export_before_operation`], whose queued
+    /// jobs a later [`Self::checkpoint_after_calls`] drains. `None` is a
+    /// child that is gone, which drops the call.
+    pub(crate) fn call_module_export_before_operation(
+        &self,
+        js: &mut ScriptRuntime,
+        key: ChildKey,
+        module_specifier: &str,
+        export_name: &str,
+        arguments: &[HostArgument<'_>],
+    ) -> Option<Result<bool, ScriptError>> {
+        self.with_child(key, |child| {
+            child.engine.call_module_export_before_operation(
+                js,
+                module_specifier,
+                export_name,
+                arguments,
+            )
+        })
+    }
+
+    /// The child's [`ScriptEngine::checkpoint_after_calls`]; `None` is a
+    /// child that is gone.
+    pub(crate) fn checkpoint_after_calls(
+        &self,
+        js: &mut ScriptRuntime,
+        key: ChildKey,
+    ) -> Option<Result<(), ScriptError>> {
+        self.with_child(key, |child| child.engine.checkpoint_after_calls(js))
+    }
+
     /// One rejection per child that left any unhandled, in construction
     /// order: the entry that ran the child's code checkpointed for its own
     /// realm, which leaves a child's rejections queued for the child.

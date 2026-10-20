@@ -2972,11 +2972,11 @@ fn deliver_exposure(pair: &mut Pair) -> bool {
     queued
 }
 
-/// The exposure record list the intersection delivery hands
-/// `bobcat:runtime`'s `__BobcatSendExposure` reaches a BTS
+/// The exposure record list the MTS realm's Lynx layer builds from one
+/// intersection delivery's `bobcat:exposure` record events reaches a BTS
 /// `GlobalEventEmitter` listener as the global event's one argument: an
 /// array of web-core's records, one per element, built in the MTS realm out
-/// of the host's record and the elements' own id and dataset.
+/// of each event's extras and the elements' own id and dataset.
 #[test]
 fn exposure_records_reach_the_bts_emitter_as_one_list() {
     let mut pair = Pair::with_background(EXPOSURE_MTS_ENTRY, Some(EXPOSURE_BTS_ENTRY));

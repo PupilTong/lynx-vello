@@ -67,6 +67,17 @@ rstest.mockRequire("bobcat:runtime", () => ({
       structuredClone(event),
     ]);
   },
+  // The exposure lists `bobcat:element` builds, as they would be sent:
+  // the transport's copy, without the timestamp the sender writes.
+  __BobcatSendExposureRecords(exposure: unknown[], disexposure: unknown[]) {
+    const native =
+      globalThis.__bobcatTestHost as ReturnType<typeof createMockBobcat>;
+    native.calls.push([
+      "sendExposureRecords",
+      structuredClone(exposure),
+      structuredClone(disexposure),
+    ]);
+  },
 }));
 
 // A frame's `src` load and its `data`/`global-props` are `bobcat:frame`'s,
@@ -202,7 +213,7 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
   const attributes: Map<number, Map<string, string>> = new Map();
   const tags: Map<number, string> = new Map([[2, "page"]]);
   // What `dropElement` freed. The real boundary refuses every read of a freed
-  // element, and the two reads an exposure record makes refuse here too.
+  // element, and the two attribute reads refuse here too.
   const freed: Set<number> = new Set();
   const live = (name: string, id: number): number => {
     if (freed.has(id)) {
@@ -549,9 +560,6 @@ describe("installation", () => {
         ...arities.map(([name]) => name),
         "__BobcatQueryNodes",
         "__BobcatDispatchEvent",
-        // Not a PAPI member: the global exposure records `bobcat:runtime`'s
-        // `__BobcatSendExposure` sends, built where the element state is.
-        "__BobcatExposureEvents",
         // Neither is a PAPI member: the computed-style map is the Typed OM
         // readback the realm reaches by name, and the value class is the
         // type its entries carry.
@@ -3555,14 +3563,40 @@ describe("__GetEvents and __SetEvents", () => {
 });
 
 describe("exposure", () => {
-  /** One `bobcat:record` field, as the host writes it. */
-  const field = (text: string) => `${text.length}:${text}`;
+  /** The listener table rows the realm reported since the calls were cleared. */
+  const rows = () =>
+    mock.calls.filter(([name]) => String(name).startsWith("listener"));
 
-  /** One element of a host exposure record: its id, exposure id and scene. */
-  const recorded = (uid: number, exposureId: string, scene: string) =>
-    field(String(uid)) + field(exposureId) + field(scene);
+  /**
+   * One exposure record as the host dispatches it: `bobcat:exposure` at the
+   * element, not bubbling, with the id and scene the element was exposed
+   * under and whether it appeared as extras.
+   */
+  const record = (
+    element: object,
+    exposureId: string,
+    scene: string,
+    appeared: boolean,
+  ) =>
+    dispatch([element], "bobcat:exposure", {
+      extras: [
+        ["exposureID", exposureId],
+        ["exposureScene", scene],
+        ["appeared", appeared],
+      ],
+    }, undefined, false);
 
-  it("reports an exposure handler as any other registration, and tells exposure nothing", () => {
+  /** What `bobcat:runtime`'s exposure sender received, one entry per flush. */
+  const sent = () =>
+    mock.named("sendExposureRecords").map(([, exposure, disexposure]) => [
+      exposure,
+      disexposure,
+    ]);
+
+  /** Lets the promise job the first record scheduled run. */
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it("files the record listener beside an exposure handler, and closes it with the last", () => {
     const { outer, inner } = tree();
     const id = __GetElementUniqueID(inner);
 
@@ -3577,18 +3611,20 @@ describe("exposure", () => {
     __AddEvent(inner, "bindEvent", "uiappear", undefined);
 
     // Whether the element is detected is the host's, read off its listener
-    // table: the realm reports each change of what an element has registered
-    // for a name, and nothing more.
-    expect(mock.calls.filter(([name]) => String(name).startsWith("listener"))).toEqual([
+    // table: the `bobcat:exposure` row registers it, and the `uiappear` row
+    // has it hear its element events.
+    expect(rows()).toEqual([
       ["listenerOpened", id, "uiappear", 1],
+      ["listenerOpened", id, "bobcat:exposure", 1],
       ["listenerOpened", id, "uidisappear", 1],
       ["listenerClosed", id, "uidisappear"],
       ["listenerOpened", __GetElementUniqueID(outer), "tap", 1],
       ["listenerClosed", id, "uiappear"],
+      ["listenerClosed", id, "bobcat:exposure"],
     ]);
   });
 
-  it("reports an __AddEventListener closure and a global form, in any case", () => {
+  it("files it for an __AddEventListener closure and a global form, in any case", () => {
     const { inner } = tree();
     const id = __GetElementUniqueID(inner);
     const listener = () => {};
@@ -3596,13 +3632,18 @@ describe("exposure", () => {
     __AddEventListener(inner, "UIAppear", listener, {});
     __AddEvent(inner, "global-bindEvent", "uidisappear", "3:0:global");
     __RemoveEventListener(inner, "uiappear", listener, {});
+    // An app removal under the record listener's own name names no
+    // listener of the app's, and takes nothing away.
+    __RemoveEventListener(inner, "bobcat:exposure", listener, {});
     __AddEvent(inner, "global-bindEvent", "uidisappear", null);
 
-    expect(mock.calls.filter(([name]) => String(name).startsWith("listener"))).toEqual([
+    expect(rows()).toEqual([
       ["listenerOpened", id, "uiappear", 1],
+      ["listenerOpened", id, "bobcat:exposure", 1],
       ["listenerOpened", id, "uidisappear", 4],
       ["listenerClosed", id, "uiappear"],
       ["listenerClosed", id, "uidisappear"],
+      ["listenerClosed", id, "bobcat:exposure"],
     ]);
   });
 
@@ -3621,89 +3662,177 @@ describe("exposure", () => {
     __SetEvents(inner, [{ type: "bindEvent", name: "tap", function: "3:0:tap" }]);
     expect(mock.named("listenerClosed")).toEqual([
       ["listenerClosed", id, "uiappear"],
+      ["listenerClosed", id, "bobcat:exposure"],
     ]);
     expect(mock.named("listenerOpened")).toEqual([]);
+    // Nothing an app reads lists the record listener.
+    expect(__GetEvents(inner)).toEqual([
+      { type: "bindevent", name: "tap", function: "3:0:tap" },
+    ]);
   });
 
-  it("builds web-core's global records out of the host's record", () => {
+  it("files it while the exposure-id is non-empty, and closes it when the id goes", () => {
     const { inner } = tree();
-    const uid = __GetElementUniqueID(inner);
+    const id = __GetElementUniqueID(inner);
+
+    __SetAttribute(inner, "exposure-id", "card-7");
+    // A second write and a scene file nothing more.
+    __SetAttribute(inner, "exposure-id", "card-8");
+    __SetAttribute(inner, "exposure-scene", "feed");
+    expect(rows()).toEqual([["listenerOpened", id, "bobcat:exposure", 1]]);
+
+    __SetAttribute(inner, "exposure-id", "");
+    expect(rows()).toEqual([
+      ["listenerOpened", id, "bobcat:exposure", 1],
+      ["listenerClosed", id, "bobcat:exposure"],
+    ]);
+
+    __SetAttribute(inner, "exposure-id", "card-9");
+    __SetAttribute(inner, "exposure-id", null);
+    expect(rows().slice(2)).toEqual([
+      ["listenerOpened", id, "bobcat:exposure", 1],
+      ["listenerClosed", id, "bobcat:exposure"],
+    ]);
+  });
+
+  it("keeps the row of an exposed element until its disexposure arrives", async () => {
+    const { inner } = tree();
+    const id = __GetElementUniqueID(inner);
+    __SetAttribute(inner, "exposure-id", "card-7");
+    record(inner, "card-7", "", true);
+    mock.calls.length = 0;
+
+    // The host still has the element registered, and owes the disexposure
+    // under the old id: the row stays for it.
+    __SetAttribute(inner, "exposure-id", null);
+    expect(rows()).toEqual([]);
+
+    record(inner, "card-7", "", false);
+    expect(rows()).toEqual([["listenerClosed", id, "bobcat:exposure"]]);
+    await flush();
+    expect(sent().map(([exposure, disexposure]) => [
+      (exposure as unknown[]).length,
+      (disexposure as { "exposure-id": string }[]).map((entry) => entry["exposure-id"]),
+    ])).toEqual([[1, ["card-7"]]]);
+  });
+
+  it("keeps the row of an exposed element whose last handler goes, until its disexposure", () => {
+    const { inner } = tree();
+    const id = __GetElementUniqueID(inner);
+    __AddEvent(inner, "bindEvent", "uiappear", "3:0:appear");
+    record(inner, "card-7", "", true);
+    mock.calls.length = 0;
+
+    __AddEvent(inner, "bindEvent", "uiappear", null);
+    expect(rows()).toEqual([["listenerClosed", id, "uiappear"]]);
+
+    record(inner, "card-7", "", false);
+    expect(rows()).toEqual([
+      ["listenerClosed", id, "uiappear"],
+      ["listenerClosed", id, "bobcat:exposure"],
+    ]);
+  });
+
+  it("keeps the row through a disexposure of an element that still wants it", () => {
+    const { inner } = tree();
+    __SetAttribute(inner, "exposure-id", "card-7");
+    record(inner, "card-7", "", true);
+    mock.calls.length = 0;
+
+    // `lynx.stopExposure()`: the element is no longer exposed, and still
+    // wants its records.
+    record(inner, "card-7", "", false);
+    expect(rows()).toEqual([]);
+  });
+
+  it("sends one delivery's records as one exposure list, then one disexposure list", async () => {
+    const { outer, inner } = tree();
+    const outerUid = __GetElementUniqueID(outer);
+    const innerUid = __GetElementUniqueID(inner);
     __SetID(inner, "row");
     __SetAttribute(inner, "data-row-index", "4");
     __AddDataset(inner, "typed", { nested: 1 });
-    const before = Date.now();
+    __SetAttribute(inner, "exposure-id", "card-7");
+    __SetAttribute(outer, "exposure-id", "outer");
+    record(outer, "outer", "", true);
+    await flush();
+    mock.calls.length = 0;
 
-    const events = elementModule.__BobcatExposureEvents(
-      "exposure",
-      // The id and scene are the record's, copied by the host when the
-      // transition formed, not the element's attributes now.
-      recorded(uid, "card-7", "feed"),
-    );
+    // One delivery: a disexposure first, then an exposure. The id and scene
+    // are the record's, not the element's attributes now.
+    record(outer, "outer", "", false);
+    record(inner, "card-7", "feed", true);
+    // Nothing leaves before the delivery's checkpoint.
+    expect(sent()).toEqual([]);
+    await flush();
 
     const dataset = { rowIndex: "4", typed: { nested: 1 } };
-    const target = { dataset, id: "row", uid };
-    expect(events).toEqual([
-      {
-        dataset,
-        "unique-id": uid,
-        exposureID: "card-7",
-        exposureScene: "feed",
-        "exposure-id": "card-7",
-        "exposure-scene": "feed",
-        type: "exposure",
-        target,
-        currentTarget: target,
-        detail: {
-          "unique-id": 0,
-          exposureID: "card-7",
-          exposureScene: "feed",
-          "exposure-id": "card-7",
-          "exposure-scene": "feed",
-        },
-        timestamp: expect.any(Number),
-      },
+    const target = { dataset, id: "row", uid: innerUid };
+    const outerTarget = { dataset: {}, id: null, uid: outerUid };
+    expect(sent()).toEqual([
+      [
+        [
+          {
+            dataset,
+            "unique-id": innerUid,
+            exposureID: "card-7",
+            exposureScene: "feed",
+            "exposure-id": "card-7",
+            "exposure-scene": "feed",
+            type: "exposure",
+            target,
+            currentTarget: target,
+            detail: {
+              "unique-id": 0,
+              exposureID: "card-7",
+              exposureScene: "feed",
+              "exposure-id": "card-7",
+              "exposure-scene": "feed",
+            },
+          },
+        ],
+        [
+          {
+            dataset: {},
+            "unique-id": outerUid,
+            exposureID: "outer",
+            exposureScene: "",
+            "exposure-id": "outer",
+            "exposure-scene": "",
+            type: "disexposure",
+            target: outerTarget,
+            currentTarget: outerTarget,
+            detail: {
+              "unique-id": 0,
+              exposureID: "outer",
+              exposureScene: "",
+              "exposure-id": "outer",
+              "exposure-scene": "",
+            },
+          },
+        ],
+      ],
     ]);
-    // Epoch milliseconds, web-core's `Date.now()`.
-    expect(events[0]!.timestamp).toBeGreaterThanOrEqual(before);
-    expect(events[0]!.timestamp).toBeLessThanOrEqual(Date.now());
   });
 
-  it("still builds the record of an element that is gone, with no dataset and no id", () => {
-    const { inner } = tree();
-    // No handle names 9999, and the host freed it, so its reads are refused.
-    mock.dropElement(9999);
+  it("builds a detached element's record from its live handle", async () => {
+    const { outer, inner } = tree();
+    const uid = __GetElementUniqueID(inner);
+    __SetID(inner, "gone");
+    __AddDataset(inner, "key", "k");
+    __SetAttribute(inner, "exposure-id", "card-7");
+    __RemoveElement(outer, inner);
 
-    const events = elementModule.__BobcatExposureEvents(
-      "disexposure",
-      recorded(__GetElementUniqueID(inner), "kept", "") +
-        recorded(9999, "freed", "feed"),
-    );
+    record(inner, "card-7", "", false);
+    await flush();
 
-    expect(events.map((event) => event["exposure-id"])).toEqual([
-      "kept",
-      "freed",
-    ]);
-    expect(events[1]).toMatchObject({
-      dataset: {},
-      "unique-id": 9999,
+    const target = { dataset: { key: "k" }, id: "gone", uid };
+    expect(sent()).toEqual([[[], [expect.objectContaining({
+      dataset: { key: "k" },
       type: "disexposure",
-      target: { dataset: {}, id: null, uid: 9999 },
-      currentTarget: { dataset: {}, id: null, uid: 9999 },
-      detail: { "unique-id": 0, exposureID: "freed", exposureScene: "feed" },
-    });
-  });
-
-  it("throws a read that fails while the element's handle is live", () => {
-    const view = __CreateView(0);
-    // A live handle holds its element, so a refusal here is no free.
-    mock.dropElement(__GetElementUniqueID(view));
-
-    expect(() =>
-      elementModule.__BobcatExposureEvents(
-        "exposure",
-        recorded(__GetElementUniqueID(view), "card", ""),
-      )
-    ).toThrow("stale element id");
+      target,
+      currentTarget: target,
+    })]]]);
   });
 });
 

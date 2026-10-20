@@ -1156,9 +1156,10 @@ fn an_intersection_hook_that_mutates_gets_its_own_commit_and_no_second_delivery(
 
 /// A page of [`WATCHED_ROWS`] rows, [`WATCHED_ROW_HEIGHT`] px each, in a
 /// [`WATCHED_SCROLLPORT`] px column scroller — the page element's first child
-/// — every row registered for exposure the way the realm registers an
-/// element with a `uiappear` handler: a script listener for `uiappear` and
-/// `uidisappear` on it, which the listener table reports to exposure. Row
+/// — every row registered for exposure the way the realm's Lynx layer
+/// registers an element with a `uiappear` handler: the record listener
+/// `bobcat:exposure` beside script listeners for `uiappear` and
+/// `uidisappear`, which the listener table reports to exposure. Row
 /// `exposed` (when it is a row's index) also carries `exposure-id="first"`.
 ///
 /// Each listener appends `<event>:row<index>` to the page element's
@@ -1184,6 +1185,7 @@ globalThis.renderPage = function () {{
     __SetInlineStyles(row, 'flex-shrink:0;width:200px;height:{WATCHED_ROW_HEIGHT}px');
     __AppendElement(scroller, row);
     if (index === {exposed}) __SetAttribute(row, 'exposure-id', 'first');
+    __AddEventListener(row, 'bobcat:exposure', () => {{}}, {{}});
     for (const name of ['uiappear', 'uidisappear']) {{
       __AddEventListener(row, name, () => {{
         heard.push(name + ':row' + index);
@@ -1336,7 +1338,7 @@ fn a_resumed_exposure_is_delivered_by_an_entry_of_its_own() {
     });
 }
 
-/// A transition that forms outside any update — here the `disexposure` a
+/// A change that forms outside any update — here the `disexposure` a
 /// `stopExposure({sendEvent: true})` owes an exposed element with an
 /// `exposure-id` — gets the delivery entry too, although no observer has an
 /// entry queued: the epilogue posts one whenever exposure is owed. What the
