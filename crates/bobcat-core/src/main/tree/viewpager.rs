@@ -1,6 +1,7 @@
 //! The `viewpager` and `viewpager-item` tags: a row of pages, each one
-//! scrollport wide, that the user swipes through one page at a time, and the
-//! `selectTab` UI method that turns to a page from script.
+//! scrollport wide, that the user swipes through one page at a time, the
+//! `selectTab` UI method that turns to a page from script, and the
+//! `offsetchange`, `change` and `willchange` events.
 //!
 //! Everything the user can see is a UA sheet over machinery the engine
 //! already has. The pager is a horizontal scroll container that snaps
@@ -9,10 +10,11 @@
 //! painter's snap rules do the paging: a release under half a page glides
 //! back, one past half glides on, a flick stops at the next page
 //! (`crates/bobcat-core/src/paint/inertia.rs`). The pager's component
-//! ([`Viewpager`]) has one member, the `selectTab` method ([`select_tab`]),
-//! which the runtime's `callElementMethod` reaches through
-//! [`dom::Document::invoke_element_method`]; nothing here reacts to an
-//! attribute outside the cascade, and the item tags have no component.
+//! ([`Viewpager`]) answers the `selectTab` method ([`select_tab`]), which
+//! the runtime's `callElementMethod` reaches through
+//! [`dom::Document::invoke_element_method`], and fires the pager's events
+//! (below); nothing here reacts to an attribute outside the cascade, and
+//! the item tags have no component.
 //!
 //! Translated from web-elements'
 //! `lynx-stack/packages/web-platform/web-elements/src/elements/XViewpagerNg/x-viewpager-ng.css`
@@ -114,6 +116,42 @@
 //!
 //! All of these are recorded in `docs/tracking/deviations.md`.
 //!
+//! # Events
+//!
+//! The component decides three events from the pager's own `scroll` and
+//! `scrollend` and the touches on it (user ruling 2026-10-20: a Rust
+//! component reacting to W3C events, nothing reported by the painter). The
+//! pager is its own scroll container, so its `scroll` and `scrollend` reach
+//! it at target, once; the same names aimed at a scroller inside a page,
+//! whose capture pass crosses the pager, are not its own. Each event is
+//! queued at the pager — not bubbling, composed
+//! ([`super::ComponentEvents::queue_detailed`]) — only when a listener on
+//! the pager registered for its name ([`dom::Document::has_listener`]).
+//! Geometry is the last completed layout's, read at delivery, and never
+//! flushed; the page width is the pager's scrollport width, web-core's
+//! `clientWidth`, and a pager with no box or zero pixels wide reports no
+//! offset.
+//!
+//! - `offsetchange` `{offset}`: every `scroll`, with the offset in pages, `scrollLeft` over the
+//!   page width (`XViewpagerNgEvents.ts`, `#scrollHandler`).
+//! - `change` `{index, isDragged}`: a `scrollend` after which the page whose snap position is
+//!   nearest the rest offset ([`super::scroll_container::nearest_snap_position`]) is another than
+//!   the one last reported — page 0 when the pager connects, as in web-core. `index` is the page's
+//!   index among the pager's element children. The page is recorded at every `scrollend` whether or
+//!   not anything listens. web-core takes `Math.floor(scrollLeft / clientWidth)`
+//!   (`#scrollEndHandler`); the nearest snap position is this engine's choice, a recorded conflict:
+//!   a landing a fraction of a pixel short of a page's position must not read as the page before
+//!   it.
+//! - `willchange` `{index}`: a `touchend` on the pager or inside it, counted once
+//!   ([`super::touch_count::TouchCount::observe`]), with the page the offset rounds to,
+//!   `Math.round(scrollLeft / clientWidth)` held to `[0, children − 1]`, web-core's
+//!   (`#touchEndHandler`). web-core also sends one on `touchcancel`, which shares that handler;
+//!   here a cancelled touch sends none.
+//!
+//! `isDragged` is whether a finger is down on the pager or inside it
+//! ([`super::touch_count::TouchCount`]): web-core's touch flag, standing in for
+//! native's drag state (user ruling 2026-10-20).
+//!
 //! # Where this deliberately leaves web-core
 //!
 //! - **An item outside a pager is an ordinary container**, where web-core hides every
@@ -127,13 +165,25 @@
 //!   not draw, and `scroll-snap-stop` on the pager itself (`:27`) applies to snap areas only, so
 //!   all three are left out.
 
+use std::cell::RefCell;
+
+use dom::event::ElementEvent;
 use dom::scroll::{
     ScrollBehavior, ScrollIntoViewContainer, ScrollIntoViewOptions, ScrollLogicalPosition,
 };
 use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId};
+use rustc_hash::FxHashMap;
 use serde_json::Value;
+use smallvec::smallvec;
 
-use super::{InvalidParams, LynxDocument, element_child, is_truthy};
+use super::scroll_container::{
+    SCROLL_END_EVENT, SCROLL_EVENT, nearest_snap_position, rendered_scroll_box,
+};
+use super::touch_count::{TOUCH_CANCEL, TOUCH_END, TOUCH_START, TouchCount};
+use super::{
+    ComponentDetail, ComponentEvents, Field, InvalidParams, LynxDocument, element_child,
+    element_child_index, element_children, is_truthy,
+};
 
 /// Native's pager tag, and the one `x-viewpager-ng` stands for in web-core.
 pub(super) const VIEWPAGER_TAG: &str = "viewpager";
@@ -170,18 +220,193 @@ viewpager-item, x-viewpager-item-ng {
 viewpager-item, x-viewpager-item-ng { position: relative !important; }
 "#;
 
-/// Installs the pager component under both of its tag names. Must run before
-/// any element could carry either tag, which is
-/// [`Document::define`](dom::Document::define)'s own precondition.
-pub(super) fn define(document: &mut LynxDocument) {
-    document.define(VIEWPAGER_TAG, Box::new(Viewpager));
-    document.define(X_VIEWPAGER_TAG, Box::new(Viewpager));
+/// The event a pager fires with its offset in pages at each `scroll`.
+pub(super) const OFFSET_CHANGE_EVENT: &str = "offsetchange";
+/// The event a pager fires when a `scrollend` leaves it on another page.
+pub(super) const CHANGE_EVENT: &str = "change";
+/// The event a pager fires when a finger lifts, with the page it heads for.
+pub(super) const WILL_CHANGE_EVENT: &str = "willchange";
+
+/// Installs the pager component under both of its tag names, queueing its
+/// events on `events`. Must run before any element could carry either tag,
+/// which is [`Document::define`](dom::Document::define)'s own precondition.
+pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
+    document.define(VIEWPAGER_TAG, Box::new(Viewpager::new(events.clone())));
+    document.define(X_VIEWPAGER_TAG, Box::new(Viewpager::new(events)));
 }
 
-/// The pager component: the `selectTab` method alone.
-struct Viewpager;
+/// The pager component: the `selectTab` method and the pager's events
+/// (the module documentation's "Events").
+struct Viewpager {
+    events: ComponentEvents,
+    /// The fingers down on each pager, which `change`'s `isDragged` reports.
+    touch_count: TouchCount,
+    /// The page each connected pager last reported, `0` at connection;
+    /// dropped when it is freed.
+    pages: RefCell<FxHashMap<NodeId, usize>>,
+}
+
+impl Viewpager {
+    fn new(events: ComponentEvents) -> Self {
+        Self {
+            events,
+            touch_count: TouchCount::default(),
+            pages: RefCell::default(),
+        }
+    }
+
+    /// The pager's own `scroll`: `offsetchange`, with the offset in pages.
+    fn scrolled(&self, document: &LynxDocument, pager: NodeId) {
+        if !document.has_listener(pager, OFFSET_CHANGE_EVENT) {
+            return;
+        }
+        let Some((offset, width)) = offset_and_page_width(document, pager) else {
+            return;
+        };
+        self.events.queue_detailed(
+            pager,
+            OFFSET_CHANGE_EVENT,
+            ComponentDetail::Fields(smallvec![(
+                "offset",
+                Field::Number(f64::from(offset) / f64::from(width))
+            )]),
+        );
+    }
+
+    /// The pager's own `scrollend`: `change`, when the page whose snap
+    /// position is nearest the offset it came to rest at is another than
+    /// the one last reported. The page is recorded whether or not anything
+    /// listens.
+    fn scroll_ended(&self, document: &LynxDocument, pager: NodeId) {
+        let Some(shown) = shown_page(document, pager) else {
+            return;
+        };
+        let changed = {
+            let mut table = self.pages.borrow_mut();
+            let last = table.entry(pager).or_default();
+            let changed = *last != shown;
+            *last = shown;
+            changed
+        };
+        if changed && document.has_listener(pager, CHANGE_EVENT) {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "an element child's index, far below 2^52"
+            )]
+            let index = shown as f64;
+            self.events.queue_detailed(
+                pager,
+                CHANGE_EVENT,
+                ComponentDetail::Fields(smallvec![
+                    ("index", Field::Number(index)),
+                    ("isDragged", Field::Bool(self.touch_count.is_down(pager))),
+                ]),
+            );
+        }
+    }
+
+    /// A finger lifted from the pager: `willchange`, with the page nearest
+    /// the offset it was let go at.
+    fn released(&self, document: &LynxDocument, pager: NodeId) {
+        if !document.has_listener(pager, WILL_CHANGE_EVENT) {
+            return;
+        }
+        let Some((offset, width)) = offset_and_page_width(document, pager) else {
+            return;
+        };
+        self.events.queue_detailed(
+            pager,
+            WILL_CHANGE_EVENT,
+            ComponentDetail::Fields(smallvec![(
+                "index",
+                Field::Number(heading_page(
+                    f64::from(offset) / f64::from(width),
+                    element_children(document, pager).count(),
+                ))
+            )]),
+        );
+    }
+}
+
+/// `pager`'s horizontal offset and its page width — its scrollport's width,
+/// web-core's `clientWidth` — from the last completed layout, or `None` when
+/// it has no box, is no scroll container, or is zero pixels wide.
+fn offset_and_page_width(document: &LynxDocument, pager: NodeId) -> Option<(f32, f32)> {
+    let scroll_box = rendered_scroll_box(document, pager)?;
+    let width = scroll_box.scrollport.width;
+    (width > 0.0).then_some((scroll_box.offset.x, width))
+}
+
+/// The page `willchange` names for a pager let go `pages` pages from its
+/// start with `count` element children: web-core's
+/// `max(0, min(Math.round(pages), count - 1))`, where `Math.round` takes a
+/// half up.
+fn heading_page(pages: f64, count: usize) -> f64 {
+    #[expect(clippy::cast_precision_loss, reason = "a child count, far below 2^52")]
+    let last = count as f64 - 1.0;
+    (pages + 0.5).floor().min(last).max(0.0)
+}
+
+/// The element child of `pager` whose snap position on x is nearest the
+/// pager's offset ([`nearest_snap_position`]), as its index among the
+/// pager's element children; `None` when the pager has no box or no snap
+/// position.
+fn shown_page(document: &LynxDocument, pager: NodeId) -> Option<usize> {
+    let scroll_box = rendered_scroll_box(document, pager)?;
+    let positions = document.snap_positions(pager)?;
+    let axis = positions.x()?;
+    let nearest = nearest_snap_position(&axis, scroll_box.offset.x)?;
+    element_child_index(document, pager, axis.points[nearest].area)
+}
 
 impl CustomElement<()> for Viewpager {
+    /// Its own `scroll` and `scrollend`, and the touches on it.
+    fn observed_events(&self) -> &'static [&'static str] {
+        &[
+            SCROLL_EVENT,
+            SCROLL_END_EVENT,
+            TOUCH_START,
+            TOUCH_END,
+            TOUCH_CANCEL,
+        ]
+    }
+
+    fn connected_callback(&self, _document: &mut LynxDocument, element: NodeId) {
+        self.pages.borrow_mut().insert(element, 0);
+    }
+
+    fn disconnected_callback(&self, _document: &LynxDocument, element: NodeId) {
+        self.touch_count.forget(element);
+    }
+
+    fn freed(&self, element: NodeId) {
+        self.pages.borrow_mut().remove(&element);
+        self.touch_count.forget(element);
+    }
+
+    /// A `scroll` or `scrollend` counts only at the pager itself, its one
+    /// at-target delivery: a scroller inside a page fires its own, whose
+    /// capture pass crosses the pager. A touch counts at the one delivery
+    /// [`TouchCount::observe`] answers for, and a `touchend` there is a
+    /// release.
+    fn handle_event(
+        &self,
+        document: &mut LynxDocument,
+        element: NodeId,
+        event: &mut ElementEvent<'_>,
+    ) {
+        match event.type_name() {
+            SCROLL_EVENT if event.target() == element => self.scrolled(document, element),
+            SCROLL_END_EVENT if event.target() == element => self.scroll_ended(document, element),
+            SCROLL_EVENT | SCROLL_END_EVENT => {}
+            name => {
+                if self.touch_count.observe(element, event) && name == TOUCH_END {
+                    self.released(document, element);
+                }
+            }
+        }
+    }
+
     fn invoke(
         &self,
         document: &mut LynxDocument,
@@ -1170,5 +1395,228 @@ mod tests {
         );
         assert_eq!(document.scroll_offset(outer), Vector2D::zero());
         assert_eq!(document.pending_scroll_request(outer), None);
+    }
+
+    // --- the events ---------------------------------------------------------
+
+    use dom::event::EventDetail;
+
+    use super::super::scroll_container::tests::{listen, scrolled};
+    use super::super::test_support::{fields_heard, touched, with_component_events};
+    use super::super::touch_count::{TOUCH_CANCEL, TOUCH_END, TOUCH_START};
+    use super::super::{ComponentEvents, Field};
+    use super::{CHANGE_EVENT, OFFSET_CHANGE_EVENT, WILL_CHANGE_EVENT, heading_page};
+
+    /// A laid-out pager of `spelling` with `count` pages, 200 x 100, with the
+    /// document's component events: snap positions every 200px.
+    fn evented(
+        spelling: (&str, &str),
+        style: &str,
+        count: usize,
+    ) -> (LynxDocument, ComponentEvents, NodeId, Vec<NodeId>) {
+        let (mut document, events) = with_component_events(PageConfig::default());
+        let (pager, items) = build_pager(&mut document, spelling, style, count);
+        document.layout();
+        (document, events, pager, items)
+    }
+
+    const PAGER: &str = "width: 200px; height: 100px";
+
+    /// The pager's `scrollend`, delivered as the runtime delivers the
+    /// kernel's: at the pager, not bubbling, not composed.
+    fn scroll_ended(document: &mut LynxDocument, pager: NodeId) {
+        document.dispatch_element_event(pager, "scrollend", &EventDetail::None, false, false, 0.0);
+    }
+
+    /// A `scroll` to `offset` and the `scrollend` the pager comes to rest
+    /// with there.
+    fn rested(document: &mut LynxDocument, pager: NodeId, offset: f32) {
+        scrolled(document, pager, x(offset));
+        scroll_ended(document, pager);
+    }
+
+    fn x(offset: f32) -> Vector2D<f32> {
+        Vector2D::new(offset, 0.0)
+    }
+
+    fn change(index: f64, dragged: bool) -> (&'static str, Vec<(&'static str, Field)>) {
+        (
+            CHANGE_EVENT,
+            vec![
+                ("index", Field::Number(index)),
+                ("isDragged", Field::Bool(dragged)),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_pager_with_no_listener_queues_nothing_and_still_tracks_its_page() {
+        let (mut document, events, pager, items) = evented(SPELLINGS[0], PAGER, 3);
+        touched(&mut document, items[0], TOUCH_START);
+        rested(&mut document, pager, 200.0);
+        touched(&mut document, items[0], TOUCH_END);
+        assert_eq!(fields_heard(&events, pager), [], "nobody listens");
+
+        // The page was recorded while nobody listened.
+        listen(&mut document, pager, CHANGE_EVENT);
+        rested(&mut document, pager, 210.0);
+        assert_eq!(fields_heard(&events, pager), []);
+        rested(&mut document, pager, 400.0);
+        assert_eq!(fields_heard(&events, pager), [change(2.0, false)]);
+    }
+
+    /// `offsetchange` carries the offset in pages at each `scroll`: the
+    /// offset over the pager's scrollport width, under either spelling. A
+    /// pager zero pixels wide has no page width and reports nothing.
+    #[test]
+    fn offsetchange_reports_the_offset_in_pages() {
+        for spelling in SPELLINGS {
+            let (mut document, events, pager, _) = evented(spelling, PAGER, 3);
+            listen(&mut document, pager, OFFSET_CHANGE_EVENT);
+            for (offset, in_pages) in [(100.0, 0.5), (300.0, 1.5), (400.0, 2.0)] {
+                scrolled(&mut document, pager, x(offset));
+                assert_eq!(
+                    fields_heard(&events, pager),
+                    [(
+                        OFFSET_CHANGE_EVENT,
+                        vec![("offset", Field::Number(in_pages))]
+                    )],
+                    "{} at {offset}",
+                    spelling.0
+                );
+            }
+        }
+
+        let (mut document, events, pager, _) =
+            evented(SPELLINGS[0], "width: 0px; height: 100px", 3);
+        listen(&mut document, pager, OFFSET_CHANGE_EVENT);
+        scrolled(&mut document, pager, x(0.0));
+        assert_eq!(fields_heard(&events, pager), [], "no page width");
+    }
+
+    /// `change` is decided at `scrollend` alone, on the page whose snap
+    /// position is nearest the rest offset, and only when it is another
+    /// page than the last one reported (0 at connection). 199 is the
+    /// second page, where web-core's `floor` reads the first.
+    #[test]
+    fn change_fires_at_scrollend_on_a_new_page_only() {
+        let (mut document, events, pager, _) = evented(SPELLINGS[1], PAGER, 3);
+        listen(&mut document, pager, CHANGE_EVENT);
+        scrolled(&mut document, pager, x(199.0));
+        assert_eq!(fields_heard(&events, pager), [], "no scrollend yet");
+        scroll_ended(&mut document, pager);
+        assert_eq!(fields_heard(&events, pager), [change(1.0, false)]);
+        rested(&mut document, pager, 210.0);
+        assert_eq!(fields_heard(&events, pager), [], "the same page");
+        rested(&mut document, pager, 90.0);
+        assert_eq!(fields_heard(&events, pager), [change(0.0, false)]);
+        rested(&mut document, pager, 0.0);
+        assert_eq!(fields_heard(&events, pager), []);
+    }
+
+    /// `change`'s `isDragged` is whether a finger is down on the pager as
+    /// it comes to rest.
+    #[test]
+    fn change_reports_whether_a_finger_is_down() {
+        let (mut document, events, pager, items) = evented(SPELLINGS[0], PAGER, 3);
+        listen(&mut document, pager, CHANGE_EVENT);
+        touched(&mut document, items[0], TOUCH_START);
+        rested(&mut document, pager, 200.0);
+        assert_eq!(fields_heard(&events, pager), [change(1.0, true)]);
+        touched(&mut document, items[1], TOUCH_END);
+        rested(&mut document, pager, 400.0);
+        assert_eq!(fields_heard(&events, pager), [change(2.0, false)]);
+    }
+
+    /// `willchange` comes when a finger lifts, once per `touchend` — on a
+    /// page or at the pager itself — and names the page the offset rounds
+    /// to; a `touchcancel` sends none.
+    #[test]
+    fn willchange_names_the_page_the_release_rounds_to() {
+        let (mut document, events, pager, items) = evented(SPELLINGS[0], PAGER, 3);
+        listen(&mut document, pager, WILL_CHANGE_EVENT);
+        for (offset, index) in [(290.0, 1.0), (300.0, 2.0), (99.0, 0.0)] {
+            touched(&mut document, items[0], TOUCH_START);
+            scrolled(&mut document, pager, x(offset));
+            touched(&mut document, items[0], TOUCH_END);
+            assert_eq!(
+                fields_heard(&events, pager),
+                [(WILL_CHANGE_EVENT, vec![("index", Field::Number(index))])],
+                "at {offset}"
+            );
+        }
+        touched(&mut document, pager, TOUCH_START);
+        touched(&mut document, pager, TOUCH_END);
+        assert_eq!(
+            fields_heard(&events, pager),
+            [(WILL_CHANGE_EVENT, vec![("index", Field::Number(0.0))])],
+            "a touch at the pager itself is one release"
+        );
+        touched(&mut document, items[0], TOUCH_START);
+        touched(&mut document, items[0], TOUCH_CANCEL);
+        assert_eq!(fields_heard(&events, pager), []);
+    }
+
+    /// The page is clamped to the element children: two pages an author
+    /// made 400px wide leave a range of three page widths.
+    #[test]
+    fn willchange_is_clamped_to_the_last_page() {
+        let (mut document, events) = with_component_events(PageConfig::default());
+        let pager = child(&mut document, VIEWPAGER_TAG, PAGER);
+        for _ in 0..2 {
+            element_under(&mut document, pager, VIEWPAGER_ITEM_TAG, "width: 400px");
+        }
+        document.layout();
+        listen(&mut document, pager, WILL_CHANGE_EVENT);
+        scrolled(&mut document, pager, x(600.0));
+        assert_eq!(document.scroll_offset(pager), x(600.0));
+        touched(&mut document, pager, TOUCH_END);
+        assert_eq!(
+            fields_heard(&events, pager),
+            [(WILL_CHANGE_EVENT, vec![("index", Field::Number(1.0))])]
+        );
+        for (fraction, count, expected) in [
+            (2.5, 5, 3.0),
+            (1.49, 5, 1.0),
+            (-0.6, 5, 0.0),
+            (9.0, 5, 4.0),
+            (3.0, 0, 0.0),
+        ] {
+            assert_eq!(
+                heading_page(fraction, count),
+                expected,
+                "{fraction} of {count}"
+            );
+        }
+    }
+
+    /// A scroller inside a page fires its own `scroll` and `scrollend`,
+    /// whose capture pass crosses the pager; the pager decides nothing on
+    /// them.
+    #[test]
+    fn a_scroller_inside_a_page_is_not_the_pagers() {
+        let (mut document, events, pager, items) = evented(SPELLINGS[0], PAGER, 3);
+        let inner = element_under(
+            &mut document,
+            items[0],
+            "scroll-view",
+            "width: 100px; height: 50px",
+        );
+        element_under(
+            &mut document,
+            inner,
+            "view",
+            "height: 300px; flex-shrink: 0",
+        );
+        document.layout();
+        rested(&mut document, pager, 400.0);
+        listen(&mut document, pager, CHANGE_EVENT);
+        listen(&mut document, pager, OFFSET_CHANGE_EVENT);
+        // Back on the first page with no `scrollend` of its own: a
+        // `scrollend` the pager took for its own would report it.
+        document.scroll_to(pager, x(0.0));
+        scrolled(&mut document, inner, Vector2D::new(0.0, 100.0));
+        scroll_ended(&mut document, inner);
+        assert_eq!(fields_heard(&events, pager), []);
     }
 }

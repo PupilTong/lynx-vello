@@ -10,17 +10,18 @@
 //! `callElementMethod` reaches through
 //! [`dom::Document::invoke_element_method`]: `scrollTo` ([`scroll_to`]),
 //! `scrollBy` ([`scroll_by`]), `autoScroll` ([`auto_scroll`]) and
-//! `getScrollInfo` ([`scroll_info`]). It
-//! reacts to no attribute and adds no event; the threshold events and the
-//! rest of what neither the sheet nor this module covers are recorded in
-//! `docs/tracking/deviations.md`.
+//! `getScrollInfo` ([`scroll_info`]). It also fires the two threshold
+//! events, `scrolltoupper` and `scrolltolower`, from the `scroll` it
+//! observes at the element ([`ScrollEdges`], below); what neither the sheet
+//! nor this module covers is recorded in `docs/tracking/deviations.md`.
 //!
 //! `list` is the other Lynx scroller and carries the same axis rules, written
 //! against its own attribute spellings. They live with the rest of that tag's
 //! policy in [`super::list`], one module per tag, as do its own methods,
 //! which share this module's `scrollBy` ([`scroll_by`]) and `autoScroll`
-//! ([`auto_scroll`]) whole and its offset reader ([`offset_px`]) and cell
-//! geometry ([`rect_in_scroller`]).
+//! ([`auto_scroll`]) whole, its offset reader ([`offset_px`]), its cell
+//! geometry ([`rect_in_scroller`]) and its threshold events
+//! ([`ScrollEdges`]).
 //!
 //! # The references
 //!
@@ -54,19 +55,56 @@
 //! Each method reads the last completed layout and never flushes, as every
 //! UI method does here.
 //!
+//! # The threshold events
+//!
+//! `scrolltoupper` fires when a `scroll` leaves the element within
+//! `upper-threshold` px of its start edge on the scrolling axis, having
+//! been outside that zone at the previous `scroll` (or at none);
+//! `scrolltolower` the same within `lower-threshold` px of its end edge.
+//! That is native's rule, `updateScrollPosition` in iOS
+//! `LynxUIScrollViewInternal.m:87-109` and Android
+//! `LynxUIScrollViewInternal.java:90-109`: `offset <= upper` is the upper
+//! zone, `offset >= max_offset - lower` the lower one, both edges start
+//! outside their zone, and each event fires on entering its zone only — so
+//! the first `scroll` that leaves a container still at its start fires a
+//! `scrolltoupper`. Both thresholds are read at each `scroll` as web-core's
+//! `parseInt(value)` px reads them (`ScrollViewEvents.ts:95-107`;
+//! [`threshold_px`]); a missing, unreadable or negative one is 0.
+//!
+//! The events are decided on a `scroll` the element itself fired and on
+//! nothing else, as native decides them: web-core's intersection observers
+//! also fire when a layout change or the first render moves a sentinel into
+//! the scrollport, which these never do. Geometry is the last completed
+//! layout's ([`dom::Document::scroll_box`]), read when the `scroll` is
+//! delivered. Each event is queued only when a listener on the element
+//! registered for its name ([`dom::Document::has_listener`]), at the
+//! element as the runtime queues a kernel `scroll` — not bubbling, not
+//! composed — so its `detail` is the same scroll metrics, read at its own
+//! delivery, with the change in offset since the element's previous
+//! `scroll` as `deltaX`/`deltaY`. Whether each edge's zone holds the
+//! offset is recorded at every `scroll` whether or not anything listens,
+//! so a listener added while the container stands in a zone hears nothing
+//! until the container leaves the zone and comes back. A `display: none`
+//! element, or one that is no scroll container, decides nothing
+//! ([`rendered_scroll_box`]).
+//!
 //! # Not built
 //!
 //! `takeContentScreenshot` stays unanswered (code 3): it needs a pixel
 //! readback of the scroller's whole content from the painter, which does not
 //! exist.
 
-use dom::scroll::{ScrollBehavior, ScrollBox};
+use std::cell::RefCell;
+
+use dom::event::ElementEvent;
+use dom::scroll::{ScrollBehavior, ScrollBox, SnapAxis, SnapPoint};
 use dom::{
     CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Point2D, Rect, Size2D, Vector2D,
 };
+use rustc_hash::FxHashMap;
 use serde_json::{Map, Value};
 
-use super::{InvalidParams, LynxDocument, element_child, is_truthy};
+use super::{ComponentEvents, InvalidParams, LynxDocument, element_child, is_truthy};
 use crate::main::record::write_record_field;
 
 /// The tag native registers and web-core defines (`@Component('scroll-view',
@@ -104,18 +142,78 @@ scroll-view[scroll-x][enable-scroll="false"],
 scroll-view[scroll-orientation="horizontal"][enable-scroll="false"] { overflow-x: hidden; }
 "#;
 
-/// Installs the `scroll-view` component. Must run before any element could
-/// carry the tag, which is [`Document::define`](dom::Document::define)'s own
-/// precondition.
-pub(super) fn define(document: &mut LynxDocument) {
-    document.define(SCROLL_VIEW_TAG, Box::new(ScrollView));
+/// The kernel's CSSOM-View event the threshold events are decided on, which
+/// the runtime fires at a scroll container its painter post moved.
+pub(super) const SCROLL_EVENT: &str = "scroll";
+
+/// The kernel's CSSOM-View event the runtime fires at a scroll container
+/// once a painter post leaves it at rest: what the `x-swiper` and the
+/// `viewpager` decide their end-of-scroll events on.
+pub(super) const SCROLL_END_EVENT: &str = "scrollend";
+
+/// The event a scroller fires when a `scroll` brings it within its upper
+/// threshold of its start edge.
+pub(super) const SCROLL_TO_UPPER_EVENT: &str = "scrolltoupper";
+
+/// The event a scroller fires when a `scroll` brings it within its lower
+/// threshold of its end edge.
+pub(super) const SCROLL_TO_LOWER_EVENT: &str = "scrolltolower";
+
+/// How close to its start edge, in px, a scroller counts as at its upper
+/// edge.
+pub(super) const UPPER_THRESHOLD: &str = "upper-threshold";
+
+/// How close to its end edge, in px, a scroller counts as at its lower
+/// edge.
+pub(super) const LOWER_THRESHOLD: &str = "lower-threshold";
+
+/// Installs the `scroll-view` component, which queues its threshold events
+/// on `events`. Must run before any element could carry the tag, which is
+/// [`Document::define`](dom::Document::define)'s own precondition.
+pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
+    document.define(
+        SCROLL_VIEW_TAG,
+        Box::new(ScrollView {
+            events,
+            edges: ScrollEdges::default(),
+        }),
+    );
 }
 
-/// The `scroll-view` component: `scrollTo`, `scrollBy` and
-/// `getScrollInfo`.
-struct ScrollView;
+/// The `scroll-view` component: `scrollTo`, `scrollBy`, `autoScroll` and
+/// `getScrollInfo`, and the `scrolltoupper` and `scrolltolower` events.
+struct ScrollView {
+    events: ComponentEvents,
+    edges: ScrollEdges,
+}
 
 impl CustomElement<()> for ScrollView {
+    fn observed_events(&self) -> &'static [&'static str] {
+        &[SCROLL_EVENT]
+    }
+
+    fn freed(&self, element: NodeId) {
+        self.edges.forget(element);
+    }
+
+    fn handle_event(&self, document: &mut LynxDocument, element: NodeId, event: &mut ElementEvent) {
+        if !is_own_scroll(element, event) {
+            return;
+        }
+        let Some(scroll_box) = rendered_scroll_box(document, element) else {
+            return;
+        };
+        let horizontal = is_horizontal(document, element);
+        let offset = along(scroll_box.offset, horizontal);
+        let max = along(scroll_box.max_offset(), horizontal);
+        let zones = Zones {
+            upper: offset <= threshold_px(document, element, UPPER_THRESHOLD),
+            lower: offset >= max - threshold_px(document, element, LOWER_THRESHOLD),
+        };
+        self.edges
+            .record(document, &self.events, element, scroll_box.offset, zones);
+    }
+
     fn invoke(
         &self,
         document: &mut LynxDocument,
@@ -167,6 +265,179 @@ pub(super) fn with_axis(vector: Vector2D<f32>, horizontal: bool, value: f32) -> 
         Vector2D::new(value, vector.y)
     } else {
         Vector2D::new(vector.x, value)
+    }
+}
+
+/// Whether `event` is the `scroll` of `element` itself, the one delivery a
+/// scroller's threshold events are decided on. A `scroll` does not bubble,
+/// but its capture pass still crosses every ancestor of the container that
+/// fired it, so a scroller hears a nested scroller's `scroll` too, aimed at
+/// the nested one; the walk calls the target itself once.
+pub(super) fn is_own_scroll(element: NodeId, event: &ElementEvent<'_>) -> bool {
+    event.type_name() == SCROLL_EVENT && event.target() == element
+}
+
+/// `scroller`'s scroll geometry from the last completed layout, or `None`
+/// when it has no box ([`dom::Document::bounding_client_rect`] is `None`:
+/// `display: none` itself or on an ancestor, or detached) or is no scroll
+/// container. Shared with `list` ([`super::list`]).
+pub(super) fn rendered_scroll_box(document: &LynxDocument, scroller: NodeId) -> Option<ScrollBox> {
+    document.bounding_client_rect(scroller)?;
+    document.scroll_box(scroller)
+}
+
+/// The snap position on `axis` nearest `offset`, as its index in
+/// `axis.points`: the one whose position — a range, for an area larger than
+/// the snapport — lies the least distance from `offset`, the first in
+/// `points`' order (sorted by position) on a tie; `None` when the axis has
+/// no position. Shared by the `x-swiper`'s autoplay turn and its events
+/// ([`super::swiper`]) and the `viewpager`'s `change`
+/// ([`super::viewpager`]): which item or page a container standing at
+/// `offset` shows.
+///
+/// On a circular axis (`axis.period`) the positions repeat every period:
+/// every point's position lies in `[0, period)`, the offset is read in the
+/// same period (a non-finite one as `0`), and each point is measured at its
+/// copy nearest the offset — itself, or one period either side — so an
+/// offset standing across the seam, past the last item, is nearest the
+/// first item's next copy when that is the closer one.
+pub(super) fn nearest_snap_position(axis: &SnapAxis<'_>, offset: f32) -> Option<usize> {
+    let offset = if offset.is_finite() { offset } else { 0.0 };
+    let period = axis
+        .period
+        .filter(|period| period.is_finite() && *period > 0.0);
+    let at = period.map_or(offset, |period| {
+        let at = offset.rem_euclid(period);
+        // `rem_euclid` rounds up to `period` itself for an offset just below
+        // a multiple of it, which is the start of the next period.
+        if at < period { at } else { 0.0 }
+    });
+    let distance = |point: &SnapPoint| {
+        let from = |shift: f32| {
+            (point.min + shift - at)
+                .max(at - point.max - shift)
+                .max(0.0)
+        };
+        period.map_or_else(
+            || from(0.0),
+            |period| from(0.0).min(from(-period)).min(from(period)),
+        )
+    };
+    (0..axis.points.len())
+        .min_by(|&a, &b| distance(&axis.points[a]).total_cmp(&distance(&axis.points[b])))
+}
+
+/// The px value of `scroller`'s threshold attribute `name`
+/// ([`UPPER_THRESHOLD`], [`LOWER_THRESHOLD`]): JavaScript's `parseInt` of
+/// the value, as web-core writes it into its sentinel's `flex-basis`
+/// (`ScrollViewEvents.ts:95-107`), so `"50"` and `"50px"` are 50 and
+/// `"12.9"` is 12, with any unit ignored. A missing or unreadable value is
+/// 0, as web-core's `NaNpx` is no length and leaves the sentinel at its
+/// initial size; so is a negative one, which is no `flex-basis` either.
+/// Shared with `list` ([`super::list`]).
+pub(super) fn threshold_px(document: &LynxDocument, scroller: NodeId, name: &str) -> f32 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a px threshold; one past f32 saturates to infinity, as far as any range"
+    )]
+    document
+        .get(scroller)
+        .and_then(|node| node.attribute(name))
+        .and_then(parse_int)
+        .map_or(0.0, |value| value.max(0.0) as f32)
+}
+
+/// JavaScript's `parseInt(text)` with no radix: leading whitespace, an
+/// optional sign, then the longest run of decimal digits — or hexadecimal
+/// ones after `0x`/`0X` — with anything after it ignored. `None` where
+/// `parseInt` answers `NaN`, which is no digit at all.
+pub(super) fn parse_int(text: &str) -> Option<f64> {
+    let text = text.trim_start();
+    let (negative, text) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    let (radix, digits) = match text.get(..2) {
+        Some("0x" | "0X") => (16, &text[2..]),
+        _ => (10, text),
+    };
+    let mut value: Option<f64> = None;
+    for digit in digits.chars().map_while(|digit| digit.to_digit(radix)) {
+        value = Some(value.unwrap_or(0.0) * f64::from(radix) + f64::from(digit));
+    }
+    value.map(|value| if negative { -value } else { value })
+}
+
+/// Whether the offset a `scroll` left a scroller at lies in each edge's
+/// zone: within the upper threshold of its start edge, within the lower
+/// threshold of its end edge. Each tag decides its own zones; the edge
+/// rule after that is [`ScrollEdges::record`]'s.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Zones {
+    pub(super) upper: bool,
+    pub(super) lower: bool,
+}
+
+/// What a scroller's last `scroll` left: which zones held its offset, and
+/// the offset, which the next event's delta is measured from.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct EdgeState {
+    zones: Zones,
+    offset: Vector2D<f32>,
+}
+
+/// The threshold events' memory, per element of one scroller tag
+/// (`scroll-view`'s, or `list`'s): an entry per element that has scrolled,
+/// dropped when the element is freed ([`Self::forget`]). Before an
+/// element's first `scroll` both zones read as not held and its offset as
+/// the origin, native's initial `mAtUpper = false`, `mAtLower = false`.
+#[derive(Debug, Default)]
+pub(super) struct ScrollEdges(RefCell<FxHashMap<NodeId, EdgeState>>);
+
+impl ScrollEdges {
+    /// Records the zones `scroller`'s `scroll` left it in, at `offset`, and
+    /// queues on `events` an event for each zone it entered by it — one its
+    /// previous `scroll` did not leave it in — that a listener on the
+    /// element hears: `scrolltoupper` first, then `scrolltolower`, as
+    /// native sends them. Each is queued as a kernel `scroll` is
+    /// ([`ComponentEvents::queue_scroll`]), with the change in offset since
+    /// the element's previous `scroll` as its delta.
+    ///
+    /// The zones are recorded whatever is listened to: whether a listener
+    /// hears the next edge must not depend on when it was added.
+    pub(super) fn record(
+        &self,
+        document: &LynxDocument,
+        events: &ComponentEvents,
+        scroller: NodeId,
+        offset: Vector2D<f32>,
+        zones: Zones,
+    ) {
+        let (entered, delta) = {
+            let mut table = self.0.borrow_mut();
+            let state = table.entry(scroller).or_default();
+            let entered = Zones {
+                upper: zones.upper && !state.zones.upper,
+                lower: zones.lower && !state.zones.lower,
+            };
+            let delta = offset - state.offset;
+            *state = EdgeState { zones, offset };
+            (entered, delta)
+        };
+        for (name, entered) in [
+            (SCROLL_TO_UPPER_EVENT, entered.upper),
+            (SCROLL_TO_LOWER_EVENT, entered.lower),
+        ] {
+            if entered && document.has_listener(scroller, name) {
+                events.queue_scroll(scroller, name, delta);
+            }
+        }
+    }
+
+    /// Drops what `scroller`'s last `scroll` left: it was freed.
+    pub(super) fn forget(&self, scroller: NodeId) {
+        self.0.borrow_mut().remove(&scroller);
     }
 }
 
@@ -539,19 +810,23 @@ pub(super) fn scroll_info(document: &LynxDocument, view: NodeId) -> ScrollInfo {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     #![allow(clippy::float_cmp)] // Explicit pixel sizes lay out exactly.
 
+    use dom::event::{EventDetail, ListenerKey, ListenerKinds};
     use dom::scroll::ScrollBehavior;
     use dom::stylo::computed_values::{flex_direction, linear_direction};
     use dom::stylo::values::computed::Overflow;
     use dom::{MethodCall, MethodError, MethodOutcome, NodeId, Vector2D};
 
-    use super::super::LynxDocument;
-    use super::super::test_support::{child, document, element_under, overflow, style_of};
+    use super::super::test_support::{
+        child, document, element_under, overflow, style_of, with_component_events,
+    };
+    use super::super::{ComponentEvent, ComponentEvents, LynxDocument, PageConfig};
     use super::{
-        InvalidParams, SCROLL_VIEW_TAG, ScrollInfo, ScrolledBy, auto_scroll, scroll_by,
-        scroll_info, scroll_to,
+        EdgeState, InvalidParams, LOWER_THRESHOLD, SCROLL_TO_LOWER_EVENT, SCROLL_TO_UPPER_EVENT,
+        SCROLL_VIEW_TAG, ScrollEdges, ScrollInfo, ScrolledBy, UPPER_THRESHOLD, Zones, auto_scroll,
+        parse_int, scroll_by, scroll_info, scroll_to, threshold_px,
     };
 
     #[test]
@@ -1322,5 +1597,352 @@ mod tests {
             );
         }
         assert_eq!(document.pending_scroll_request(view), None);
+    }
+
+    // --- the threshold events ----------------------------------------------
+
+    /// What a scroller's threshold events left on the queue, as
+    /// `(name, delta)`.
+    pub(in crate::main::tree) fn heard(
+        events: &ComponentEvents,
+        scroller: NodeId,
+    ) -> Vec<(&'static str, Vector2D<f32>)> {
+        events
+            .take()
+            .into_iter()
+            .map(|event| match event {
+                ComponentEvent::Scroll { node, name, delta } => {
+                    assert_eq!(node, scroller, "queued at the scroller itself");
+                    (name, delta)
+                }
+                other => panic!("only scroll-shaped events are queued: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// Moves `scroller` to `offset` and delivers its `scroll`, as the
+    /// runtime's dispatch of the queued kernel event does: at the scroller,
+    /// not bubbling, not composed.
+    pub(in crate::main::tree) fn scrolled(
+        document: &mut LynxDocument,
+        scroller: NodeId,
+        offset: Vector2D<f32>,
+    ) {
+        document.scroll_to(scroller, offset);
+        document.dispatch_element_event(scroller, "scroll", &EventDetail::None, false, false, 0.0);
+    }
+
+    /// Registers a bubble-pass listener for `name` on `node`, as a realm's
+    /// `bindscrolltoupper` files one.
+    pub(in crate::main::tree) fn listen(document: &mut LynxDocument, node: NodeId, name: &str) {
+        document.add_listener(node, name, ListenerKinds::PATH_BUBBLE, ListenerKey(0));
+    }
+
+    /// [`scroller`], with the document's component events and `attributes`
+    /// written before the layout: an 80px scrollport over five 40px
+    /// children, a range of 120 on the scrolling axis, 70 across it.
+    fn edge_scroller(attributes: &[(&str, &str)]) -> (LynxDocument, ComponentEvents, NodeId) {
+        let (mut document, events) = with_component_events(PageConfig::default());
+        let view = child(
+            &mut document,
+            SCROLL_VIEW_TAG,
+            "width: 100px; height: 100px; border: 10px solid",
+        );
+        let mut horizontal = false;
+        for (name, value) in attributes {
+            document.set_attribute(view, name, value);
+            horizontal |= *name == "scroll-x";
+        }
+        for _ in 0..5 {
+            let style = if horizontal {
+                "width: 40px; height: 150px; flex-shrink: 0"
+            } else {
+                "width: 150px; height: 40px; flex-shrink: 0"
+            };
+            element_under(&mut document, view, "view", style);
+        }
+        document.layout();
+        (document, events, view)
+    }
+
+    fn y(offset: f32) -> Vector2D<f32> {
+        Vector2D::new(0.0, offset)
+    }
+
+    #[test]
+    fn a_scroll_with_no_listener_queues_nothing_and_records_only_the_zones() {
+        let (mut document, events, view) = edge_scroller(&[]);
+        for offset in [0.0, 60.0, 120.0, 0.0] {
+            scrolled(&mut document, view, y(offset));
+        }
+        assert_eq!(heard(&events, view), [], "nobody listens on the element");
+
+        // What one scroll leaves behind: the two zones and the offset, and
+        // nothing about who listens.
+        let edges = ScrollEdges::default();
+        edges.record(
+            &document,
+            &events,
+            view,
+            y(0.0),
+            Zones {
+                upper: true,
+                lower: false,
+            },
+        );
+        assert!(events.is_empty());
+        assert_eq!(
+            edges.0.borrow().get(&view),
+            Some(&EdgeState {
+                zones: Zones {
+                    upper: true,
+                    lower: false,
+                },
+                offset: y(0.0),
+            })
+        );
+        edges.forget(view);
+        assert!(
+            edges.0.borrow().is_empty(),
+            "a freed element leaves no entry"
+        );
+    }
+
+    #[test]
+    fn entering_the_upper_zone_fires_once_and_again_after_leaving_it() {
+        let (mut document, events, view) = edge_scroller(&[(UPPER_THRESHOLD, "10")]);
+        listen(&mut document, view, SCROLL_TO_UPPER_EVENT);
+        // The first scroll inside the zone fires, native's initial state
+        // being "not at the upper edge".
+        scrolled(&mut document, view, y(5.0));
+        assert_eq!(heard(&events, view), [(SCROLL_TO_UPPER_EVENT, y(5.0))]);
+        scrolled(&mut document, view, y(3.0));
+        scrolled(&mut document, view, y(10.0));
+        assert_eq!(heard(&events, view), [], "still inside the zone");
+        scrolled(&mut document, view, y(60.0));
+        assert_eq!(heard(&events, view), [], "leaving the zone fires nothing");
+        scrolled(&mut document, view, y(8.0));
+        assert_eq!(
+            heard(&events, view),
+            [(SCROLL_TO_UPPER_EVENT, y(-52.0))],
+            "back in the zone, with the change since the previous scroll"
+        );
+    }
+
+    #[test]
+    fn entering_the_lower_zone_counts_its_threshold_from_the_end() {
+        let (mut document, events, view) = edge_scroller(&[(LOWER_THRESHOLD, "20px")]);
+        listen(&mut document, view, SCROLL_TO_LOWER_EVENT);
+        listen(&mut document, view, SCROLL_TO_UPPER_EVENT);
+        scrolled(&mut document, view, y(90.0));
+        assert_eq!(heard(&events, view), [], "short of 120 - 20");
+        scrolled(&mut document, view, y(100.0));
+        assert_eq!(heard(&events, view), [(SCROLL_TO_LOWER_EVENT, y(10.0))]);
+        scrolled(&mut document, view, y(120.0));
+        scrolled(&mut document, view, y(60.0));
+        assert_eq!(heard(&events, view), []);
+        scrolled(&mut document, view, y(110.0));
+        assert_eq!(heard(&events, view), [(SCROLL_TO_LOWER_EVENT, y(50.0))]);
+    }
+
+    #[test]
+    fn a_horizontal_scroller_decides_on_its_x_offset() {
+        let (mut document, events, view) =
+            edge_scroller(&[("scroll-x", ""), (LOWER_THRESHOLD, "0")]);
+        listen(&mut document, view, SCROLL_TO_UPPER_EVENT);
+        listen(&mut document, view, SCROLL_TO_LOWER_EVENT);
+        scrolled(&mut document, view, Vector2D::new(120.0, 0.0));
+        assert_eq!(
+            heard(&events, view),
+            [(SCROLL_TO_LOWER_EVENT, Vector2D::new(120.0, 0.0))],
+            "a y offset of 0 is no upper edge on an x scroller"
+        );
+        scrolled(&mut document, view, Vector2D::new(0.0, 70.0));
+        assert_eq!(
+            heard(&events, view),
+            [(SCROLL_TO_UPPER_EVENT, Vector2D::new(-120.0, 70.0))],
+            "a y offset at its end is no lower edge either"
+        );
+    }
+
+    #[test]
+    fn content_that_fits_is_at_both_edges_upper_first() {
+        let (mut document, events) = with_component_events(PageConfig::default());
+        let view = child(
+            &mut document,
+            SCROLL_VIEW_TAG,
+            "width: 100px; height: 100px",
+        );
+        element_under(&mut document, view, "view", "height: 40px");
+        document.layout();
+        listen(&mut document, view, SCROLL_TO_UPPER_EVENT);
+        listen(&mut document, view, SCROLL_TO_LOWER_EVENT);
+        scrolled(&mut document, view, y(0.0));
+        assert_eq!(
+            heard(&events, view),
+            [
+                (SCROLL_TO_UPPER_EVENT, y(0.0)),
+                (SCROLL_TO_LOWER_EVENT, y(0.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_listener_added_inside_a_zone_waits_for_the_next_entry() {
+        let (mut document, events, view) = edge_scroller(&[]);
+        scrolled(&mut document, view, y(0.0));
+        listen(&mut document, view, SCROLL_TO_UPPER_EVENT);
+        scrolled(&mut document, view, y(0.0));
+        assert_eq!(
+            heard(&events, view),
+            [],
+            "the zone was entered before anyone listened"
+        );
+        scrolled(&mut document, view, y(40.0));
+        scrolled(&mut document, view, y(0.0));
+        assert_eq!(heard(&events, view), [(SCROLL_TO_UPPER_EVENT, y(-40.0))]);
+    }
+
+    #[test]
+    fn a_nested_scrollers_scroll_is_not_its_ancestors() {
+        let (mut document, events, outer) = edge_scroller(&[]);
+        let inner = element_under(
+            &mut document,
+            outer,
+            SCROLL_VIEW_TAG,
+            "width: 50px; height: 50px; flex-shrink: 0",
+        );
+        element_under(
+            &mut document,
+            inner,
+            "view",
+            "height: 200px; flex-shrink: 0",
+        );
+        document.layout();
+        listen(&mut document, outer, SCROLL_TO_UPPER_EVENT);
+        listen(&mut document, inner, SCROLL_TO_LOWER_EVENT);
+        scrolled(&mut document, inner, y(150.0));
+        assert_eq!(
+            heard(&events, inner),
+            [(SCROLL_TO_LOWER_EVENT, y(150.0))],
+            "the outer scroller, at its own start, hears the inner one's scroll in the capture \
+             pass and decides nothing"
+        );
+    }
+
+    #[test]
+    fn a_scroller_with_no_box_decides_nothing() {
+        let (mut document, events, view) = edge_scroller(&[]);
+        listen(&mut document, view, SCROLL_TO_UPPER_EVENT);
+        listen(&mut document, view, SCROLL_TO_LOWER_EVENT);
+        document.set_inline_style(view, "display: none");
+        document.layout();
+        scrolled(&mut document, view, y(0.0));
+        assert_eq!(heard(&events, view), []);
+
+        // Shown again, nothing was recorded while hidden: its first scroll
+        // is its first entry.
+        document.set_inline_style(view, "width: 100px; height: 100px; border: 10px solid");
+        document.layout();
+        scrolled(&mut document, view, y(0.0));
+        assert_eq!(heard(&events, view), [(SCROLL_TO_UPPER_EVENT, y(0.0))]);
+    }
+
+    #[test]
+    fn a_threshold_is_read_as_parse_int_reads_it() {
+        for (text, expected) in [
+            ("50", Some(50.0)),
+            ("50px", Some(50.0)),
+            ("  12.9", Some(12.0)),
+            ("+7rpx", Some(7.0)),
+            ("-3", Some(-3.0)),
+            ("0x1A", Some(26.0)),
+            ("", None),
+            ("px", None),
+            ("-", None),
+            ("0x", None),
+        ] {
+            assert_eq!(parse_int(text), expected, "{text:?}");
+        }
+        let (mut document, _events, view) = edge_scroller(&[]);
+        for (value, expected) in [("30", 30.0), ("-30", 0.0), ("auto", 0.0)] {
+            document.set_attribute(view, UPPER_THRESHOLD, value);
+            assert_eq!(
+                threshold_px(&document, view, UPPER_THRESHOLD),
+                expected,
+                "{value}"
+            );
+        }
+        assert_eq!(
+            threshold_px(&document, view, LOWER_THRESHOLD),
+            0.0,
+            "missing"
+        );
+    }
+
+    // --- the nearest snap position -----------------------------------------
+
+    /// The nearest position to an offset, the first in `points`' order on a
+    /// tie, measured to a range's nearer end; on a circular axis at each
+    /// point's copy nearest the offset, read in one period.
+    #[test]
+    fn the_nearest_snap_position_wraps_on_a_circular_axis() {
+        use dom::scroll::{SnapAxis, SnapPoint, SnapStrictness};
+
+        use super::nearest_snap_position;
+
+        let area = document().document_element().id();
+        let point = |min: f32, max: f32| SnapPoint {
+            min,
+            max,
+            stop: false,
+            area,
+            order: 0,
+        };
+        let points = [point(0.0, 0.0), point(200.0, 300.0), point(500.0, 500.0)];
+        let axis = |period| SnapAxis {
+            strictness: SnapStrictness::Mandatory,
+            points: &points,
+            period,
+        };
+        let bounded = axis(None);
+        for (offset, expected) in [
+            (0.0, Some(0)),
+            (100.0, Some(0)),
+            (101.0, Some(1)),
+            (250.0, Some(1)),
+            (400.0, Some(1)),
+            (401.0, Some(2)),
+            (700.0, Some(2)),
+            (f32::NAN, Some(0)),
+        ] {
+            assert_eq!(
+                nearest_snap_position(&bounded, offset),
+                expected,
+                "{offset}"
+            );
+        }
+        let circular = axis(Some(600.0));
+        for (offset, expected) in [
+            (540.0, Some(2)),
+            (560.0, Some(0)),
+            // A tie across the seam, 50 from each: the first in `points`.
+            (550.0, Some(0)),
+            (1140.0, Some(2)),
+            (-30.0, Some(0)),
+            (f32::INFINITY, Some(0)),
+        ] {
+            assert_eq!(
+                nearest_snap_position(&circular, offset),
+                expected,
+                "{offset}"
+            );
+        }
+        let empty = SnapAxis {
+            strictness: SnapStrictness::Mandatory,
+            points: &[],
+            period: None,
+        };
+        assert_eq!(nearest_snap_position(&empty, 10.0), None);
     }
 }

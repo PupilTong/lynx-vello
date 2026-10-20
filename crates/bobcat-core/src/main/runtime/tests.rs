@@ -2095,8 +2095,8 @@ fn queued_scroll(node: dom::NodeId, delta_y: f32) -> ComponentEvent {
 /// What [`ScrollProbe`] heard, one entry per delivery.
 type ScrollLog = Rc<RefCell<Vec<String>>>;
 
-/// A test component that observes `scroll`, which no engine component does,
-/// and records each delivery as `name:target-is-self`.
+/// A test component that observes `scroll`, as the engine's `scroll-view`
+/// and `list` do, and records each delivery as `name:target-is-self`.
 struct ScrollProbe {
     log: ScrollLog,
 }
@@ -2191,13 +2191,345 @@ fn a_component_observing_scroll_keeps_its_containers_scroll_queued() {
     assert_eq!(*log.borrow(), ["scroll:true"]);
 }
 
+/// A `scroll-view`'s threshold events end to end: its component observes
+/// `scroll`, so a painter post that moves it queues the kernel `scroll` with
+/// no realm listening for that name; the delivery of that `scroll` reaches
+/// the component, which queues a `scrolltolower` for the listener on the
+/// element; and that event's delivery, an entry later, carries the scroll
+/// metrics a kernel `scroll` carries, without bubbling to the page's own
+/// `bindEvent`. A move inside the zone queues the `scroll` and nothing else.
+#[test]
+fn a_scroll_view_fires_scrolltolower_from_its_own_scroll() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const scroller = __CreateScrollView(0);
+                  __AppendElement(page, scroller);
+                  const card = __CreateView(0);
+                  __AppendElement(scroller, card);
+                  globalThis.held = [page, scroller, card];
+                  __SetAttribute(scroller, 'lower-threshold', '50');
+                  __SetInlineStyles(scroller, 'width:200px;height:200px');
+                  __SetInlineStyles(card, 'flex-shrink:0;width:200px;height:1000px');
+                  const note = (label) => ({
+                    type: 'worklet',
+                    value: {
+                      body: (event) =>
+                        seen.push(label + ':' + event.type + ':' + JSON.stringify(event.detail)),
+                    },
+                  });
+                  for (const name of ['scrolltoupper', 'scrolltolower']) {
+                    __AddEvent(scroller, 'bindEvent', name, note('scroller'));
+                    __AddEvent(page, 'bindEvent', name, note('page'));
+                  }
+                  __FlushElementTree();
+                };
+                ",
+            "app:///scroll-view-edges.js",
+        )
+        .expect("main-thread script");
+    let scroller = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        tree.get(page).expect("the page").child_ids()[0]
+    };
+
+    // The range is 800, so the lower zone starts at 750.
+    runtime.adopt_scroll_offsets([scroll_post(scroller, 760.0, false)].into_iter());
+    assert_eq!(
+        runtime.slot.borrow().component_events.take(),
+        [queued_scroll(scroller, 760.0)],
+        "the component's own `scroll` is owed with no realm listener for it"
+    );
+    runtime.slot.borrow().component_events.queue_scroll(
+        scroller,
+        "scroll",
+        dom::Vector2D::new(0.0, 760.0),
+    );
+    let failures = runtime.dispatch_component_events(&mut js_runtime);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(
+        runtime.has_component_events(),
+        "the `scrolltolower` waits for an entry of its own"
+    );
+    let failures = runtime.dispatch_component_events(&mut js_runtime);
+    assert!(failures.is_empty(), "{failures:?}");
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        "scroller:scrolltolower:{\"scrollTop\":760,\"scrollLeft\":0,\"scrollHeight\":1000,\
+         \"scrollWidth\":200,\"deltaX\":0,\"deltaY\":760,\"isDragging\":false}",
+    );
+
+    runtime.adopt_scroll_offsets([scroll_post(scroller, 800.0, true)].into_iter());
+    let failures = runtime.dispatch_component_events(&mut js_runtime);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(
+        !runtime.has_component_events(),
+        "a scroll inside the lower zone fires no second `scrolltolower`"
+    );
+    expect_seen(&mut js_runtime, &mut runtime, "");
+}
+
+/// An `x-swiper`'s `change` end to end: a painter post that moves its
+/// shadow `#content` queues the kernel `scroll` there, with no realm
+/// listening for that name; its delivery, which ends at the shadow root,
+/// reaches the swiper's component, which queues `change` at the swiper; and
+/// that event reaches the swiper's listener an entry later as
+/// `{current, isDragged}`, without bubbling to the page.
+#[test]
+fn a_swiper_fires_change_from_its_contents_scroll() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const swiper = __CreateElement('x-swiper', 0);
+                  __SetAttribute(swiper, 'vertical', '');
+                  __SetInlineStyles(swiper, 'width:100px;height:200px');
+                  __AppendElement(page, swiper);
+                  for (let i = 0; i < 3; i++) {
+                    __AppendElement(swiper, __CreateElement('x-swiper-item', 0));
+                  }
+                  globalThis.held = [page, swiper];
+                  const note = (label) => ({
+                    type: 'worklet',
+                    value: {
+                      body: (event) =>
+                        seen.push(label + ':' + event.type + ':' + JSON.stringify(event.detail)),
+                    },
+                  });
+                  __AddEvent(swiper, 'bindEvent', 'change', note('swiper'));
+                  __AddEvent(page, 'bindEvent', 'change', note('page'));
+                  __FlushElementTree();
+                };
+                ",
+            "app:///swiper-change.js",
+        )
+        .expect("main-thread script");
+    let content = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let swiper = tree.get(page).expect("the page").child_ids()[0];
+        crate::main::tree::swiper::content(&tree, swiper).expect("the swiper's `#content`")
+    };
+
+    runtime.adopt_scroll_offsets([scroll_post(content, 210.0, false)].into_iter());
+    assert_eq!(
+        runtime.slot.borrow().component_events.take(),
+        [queued_scroll(content, 210.0)],
+        "`#content`'s `scroll` is owed with no realm listener for it"
+    );
+    runtime.slot.borrow().component_events.queue_scroll(
+        content,
+        "scroll",
+        dom::Vector2D::new(0.0, 210.0),
+    );
+    let failures = runtime.dispatch_component_events(&mut js_runtime);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(
+        runtime.has_component_events(),
+        "the `change` waits for an entry of its own"
+    );
+    let failures = runtime.dispatch_component_events(&mut js_runtime);
+    assert!(failures.is_empty(), "{failures:?}");
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        r#"swiper:change:{"current":1,"isDragged":false}"#,
+    );
+}
+
+/// An `x-refresh-view`'s `startrefresh` end to end: a painter post that
+/// moves its shadow `#container` from `#content` (170) onto the header's
+/// snap position (120) and leaves it at rest queues the kernel `scroll` and
+/// `scrollend` there, with no realm listening for either name; their
+/// delivery, which ends at the shadow root, reaches the view's component,
+/// which queues `startrefresh` at the view; and that event reaches the
+/// view's listener an entry later as `{isManual: true}`, without bubbling to
+/// the page.
+#[test]
+fn a_refresh_view_fires_startrefresh_when_its_container_rests_on_the_header() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const view = __CreateElement('x-refresh-view', 0);
+                  __SetInlineStyles(view, 'width:200px;height:400px');
+                  __AppendElement(page, view);
+                  const header = __CreateElement('x-refresh-header', 0);
+                  __SetInlineStyles(header, 'height:50px');
+                  const content = __CreateView(0);
+                  __SetInlineStyles(content, 'height:100%');
+                  const footer = __CreateElement('x-refresh-footer', 0);
+                  __SetInlineStyles(footer, 'height:50px');
+                  __AppendElement(view, header);
+                  __AppendElement(view, content);
+                  __AppendElement(view, footer);
+                  globalThis.held = [page, view];
+                  const note = (label) => ({
+                    type: 'worklet',
+                    value: {
+                      body: (event) =>
+                        seen.push(label + ':' + event.type + ':' + JSON.stringify(event.detail)),
+                    },
+                  });
+                  __AddEvent(view, 'bindEvent', 'startrefresh', note('view'));
+                  __AddEvent(page, 'bindEvent', 'startrefresh', note('page'));
+                  __FlushElementTree();
+                };
+                ",
+            "app:///refresh-view-startrefresh.js",
+        )
+        .expect("main-thread script");
+    let container = {
+        let mut tree = elements.tree();
+        let page = tree.document_element().id();
+        let view = tree.get(page).expect("the page").child_ids()[0];
+        let container = crate::main::tree::refresh_view::container(&tree, view)
+            .expect("the refresh view's `#container`");
+        // The painter's first post acknowledges the initial scroll target.
+        if let Some(serial) = tree.pending_scroll_request(container) {
+            tree.acknowledge_scroll_request(container, serial);
+        }
+        assert_eq!(
+            tree.scroll_offset(container),
+            dom::Vector2D::new(0.0, 170.0),
+            "opens on `#content`"
+        );
+        container
+    };
+
+    runtime.adopt_scroll_offsets([scroll_post(container, 120.0, true)].into_iter());
+    let rest = ComponentEvent::Scroll {
+        node: container,
+        name: "scrollend",
+        delta: dom::Vector2D::zero(),
+    };
+    assert_eq!(
+        runtime.slot.borrow().component_events.take(),
+        [queued_scroll(container, -50.0), rest],
+        "`#container`'s `scroll` and `scrollend` are owed with no realm listener for either"
+    );
+    {
+        let slot = runtime.slot.borrow();
+        slot.component_events
+            .queue_scroll(container, "scroll", dom::Vector2D::new(0.0, -50.0));
+        slot.component_events
+            .queue_scroll(container, "scrollend", dom::Vector2D::zero());
+    }
+    let failures = runtime.dispatch_component_events(&mut js_runtime);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(
+        runtime.has_component_events(),
+        "the `startrefresh` waits for an entry of its own"
+    );
+    let failures = runtime.dispatch_component_events(&mut js_runtime);
+    assert!(failures.is_empty(), "{failures:?}");
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        r#"view:startrefresh:{"isManual":true}"#,
+    );
+}
+
+/// A [`ComponentDetail::Fields`] detail reaches script as one key per pair,
+/// numbers as numbers and booleans as booleans, in the component's order:
+/// the `{current, isDragged}` shape.
+#[test]
+fn a_component_event_with_a_fields_detail_reaches_script_as_numbers_and_booleans() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const swiper = __CreateView(0);
+                  __AppendElement(page, swiper);
+                  globalThis.held = [page, swiper];
+                  __AddEvent(swiper, 'bindEvent', 'change', {
+                    type: 'worklet',
+                    value: {
+                      body: (event) =>
+                        seen.push(
+                          event.type + ':' + JSON.stringify(event.detail) + ':' +
+                          typeof event.detail.current + ',' + typeof event.detail.isDragged,
+                        ),
+                    },
+                  });
+                };
+                ",
+            "app:///fields-detail.js",
+        )
+        .expect("main-thread script");
+    let swiper = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        tree.get(page).expect("the page").child_ids()[0]
+    };
+    runtime.slot.borrow().component_events.queue_detailed(
+        swiper,
+        "change",
+        ComponentDetail::Fields(smallvec::smallvec![
+            ("current", Field::Number(2.0)),
+            ("isDragged", Field::Bool(true)),
+        ]),
+    );
+    let failures = runtime.dispatch_component_events(&mut js_runtime);
+    assert!(failures.is_empty(), "{failures:?}");
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        r#"change:{"current":2,"isDragged":true}:number,boolean"#,
+    );
+}
+
+/// What the page's `x-swiper` component observes — its slot's
+/// `slotchange`, `#content`'s `scroll` and `scrollend`, and the touches its
+/// `isDragged` counts — with `names` beside them, sorted as
+/// [`PublishedNames::names`] lists them.
+fn with_swiper(names: &[&str]) -> Vec<String> {
+    let mut all: Vec<String> = [
+        "scroll",
+        "scrollend",
+        "slotchange",
+        "touchcancel",
+        "touchend",
+        "touchstart",
+    ]
+    .iter()
+    .chain(names)
+    .map(|name| (*name).to_owned())
+    .collect();
+    all.sort();
+    all
+}
+
 /// The painter's name set follows the realm's registration counts crossing
 /// zero with two adjustments: a `dblclick` registration routes `click` there
 /// too (the `dblclick` is decided from the `click`s the painter sends) and
 /// removing it stops routing `click` only when `click` is not listened for
 /// itself; and a name an element alive observes (the page's `x-swiper`'s
-/// `slotchange`) stays routed whatever the realm's registrations for it say,
-/// where an unobserved name stops being routed with its last registration.
+/// `slotchange`, `scroll`, `scrollend` and touches) stays routed whatever the realm's registrations
+/// for it say, where an unobserved name stops being routed with its last registration.
 /// `tap`, which no element here observes, is not there at all.
 #[test]
 fn the_painter_names_pair_click_with_dblclick_and_keep_observed_names() {
@@ -2229,36 +2561,36 @@ fn the_painter_names_pair_click_with_dblclick_and_keep_observed_names() {
     };
 
     step("__AddEventListener(page, 'dblclick', globalThis.listener, {});");
-    assert_eq!(names.names(), ["click", "dblclick", "slotchange"]);
+    assert_eq!(names.names(), with_swiper(&["click", "dblclick"]));
     step("__AddEventListener(page, 'click', globalThis.listener, {});");
     step("__RemoveEventListener(page, 'dblclick', globalThis.listener, {});");
     assert_eq!(
         names.names(),
-        ["click", "slotchange"],
+        with_swiper(&["click"]),
         "`click` is listened for itself"
     );
     step("__AddEventListener(page, 'dblclick', globalThis.listener, {});");
     step("__RemoveEventListener(page, 'click', globalThis.listener, {});");
     assert_eq!(
         names.names(),
-        ["click", "dblclick", "slotchange"],
+        with_swiper(&["click", "dblclick"]),
         "`dblclick` still needs the `click`s"
     );
     step("__RemoveEventListener(page, 'dblclick', globalThis.listener, {});");
-    assert_eq!(names.names(), ["slotchange"]);
+    assert_eq!(names.names(), with_swiper(&[]));
 
     step(
         "__AddEventListener(page, 'slotchange', globalThis.listener, {});
          __AddEventListener(page, 'swipe', globalThis.listener, {});",
     );
-    assert_eq!(names.names(), ["slotchange", "swipe"]);
+    assert_eq!(names.names(), with_swiper(&["swipe"]));
     step(
         "__RemoveEventListener(page, 'slotchange', globalThis.listener, {});
          __RemoveEventListener(page, 'swipe', globalThis.listener, {});",
     );
     assert_eq!(
         names.names(),
-        ["slotchange"],
+        with_swiper(&[]),
         "the last removal of an observed name keeps it routed; of another, it does not"
     );
 }

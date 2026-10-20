@@ -52,9 +52,10 @@ use crate::main::layout_change::{
 };
 use crate::main::record::write_record_field;
 use crate::main::tree::{
-    Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, LynxDocument, MAX_FRAME_DEPTH,
-    PageConfig, SELECTION_CHANGE, SelectionReports, frame_depth, invoke_base_method, is_svg,
-    is_text, nested_page, new_document, report_selection_changes, reset_frame,
+    Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, Field, LynxDocument,
+    MAX_FRAME_DEPTH, PageConfig, SELECTION_CHANGE, SelectionReports, frame_depth,
+    invoke_base_method, is_svg, is_text, nested_page, new_document, report_selection_changes,
+    reset_frame,
 };
 use crate::realm::child::{ChildHostModules, ChildHostState, ChildKey};
 use crate::realm::policy::context_of;
@@ -184,7 +185,8 @@ type Extras<'a> = &'a [(&'static str, Extra<'a>)];
 /// start; `selectionStart` and `selectionEnd`; and a Lynx text element's
 /// (`XTextSelectionEvents.ts`) `start`, `end` and `direction`, `-1`, `-1`
 /// and `"forward"` for the empty record. Seven extras at most, which the
-/// inline capacity holds.
+/// inline capacity holds. A [`ComponentDetail::Fields`] pushes its pairs as
+/// they are, in its order.
 fn push_detail_extras<'a>(
     detail: &'a ComponentDetail,
     extras: &mut SmallVec<[(&'static str, Extra<'a>); 7]>,
@@ -231,6 +233,15 @@ fn push_detail_extras<'a>(
             ("selectionStart", unit(selection.start)),
             ("selectionEnd", unit(selection.end)),
         ]),
+        ComponentDetail::Fields(fields) => {
+            extras.extend(fields.iter().map(|&(key, field)| {
+                let value = match field {
+                    Field::Number(number) => Extra::Number(number),
+                    Field::Bool(flag) => Extra::Bool(flag),
+                };
+                (key, value)
+            }));
+        }
         ComponentDetail::TextSelection { range, forward } => {
             let (start, end) = range
                 .as_ref()

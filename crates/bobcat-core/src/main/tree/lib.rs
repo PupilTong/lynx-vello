@@ -15,13 +15,15 @@
 //! `scroll_container`, `list`, `scroll_coordinator`, `dialog`, `overlay`,
 //! `markdown`, `frame` and `text_field` need components: for image resources (an `svg`'s `content`
 //! as a document handed to the host as its bytes), blur hints,
-//! the swiper's UA shadow tree, item count and `scrollTo` UI method, the
+//! the swiper's UA shadow tree, item count, `scrollTo` UI method and events, the
 //! refresh view's UA shadow tree, its header and footer slot assignment and
 //! its `finishRefresh`, `finishLoadMore` and `autoStartRefresh` UI methods
-//! ([`refresh_view`]), the viewpager's `selectTab` UI method, the
+//! and its events ([`refresh_view`]), the viewpager's `selectTab` UI method and events, the
 //! `scroll-view`'s `scrollTo`, `scrollBy` and `getScrollInfo` UI methods, the `list`'s
 //! `scrollToPosition`, `scrollBy`, `getScrollContainerInfo` and
-//! `getVisibleCells` UI methods ([`list`]), the scroll coordinator's
+//! `getVisibleCells` UI methods ([`list`]), both scrollers'
+//! `scrolltoupper` and `scrolltolower` events, decided from the `scroll`
+//! they observe ([`scroll_container`]), the scroll coordinator's
 //! `setFoldExpanded` UI method ([`scroll_coordinator`]), the dialog's
 //! `:open`/`:modal` state, top-layer membership and four UI methods
 //! ([`dialog`]), the overlay's UA shadow tree, the top-layer membership of
@@ -70,6 +72,7 @@ pub(crate) mod swiper;
 pub(super) mod test_support;
 mod text;
 pub(crate) mod text_field;
+mod touch_count;
 mod ua_sheet;
 mod viewpager;
 #[cfg(test)]
@@ -80,6 +83,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use dom::{Document, ImageOutcome, NodeId, StylesheetOrigin};
+use smallvec::SmallVec;
 
 pub(crate) use self::base_methods::invoke_base_method;
 pub(crate) use self::frame::{MAX_FRAME_DEPTH, frame_depth, nested_page, reset_frame};
@@ -130,8 +134,14 @@ pub(crate) const SELECTION_CHANGE: &str = "selectionchange";
 /// settled at its bind in, the `dialog` component the `close` and `cancel` its
 /// methods queue, the `overlay` component its `showoverlay` and
 /// `dismissoverlay`, the `markdown` component its `parseEnd`, `link` and
-/// `imageTap`, and the `frame` component its connections and
-/// disconnections, for the runtime to dispatch once it is out of the
+/// `imageTap`, the `scroll-view` and `list` components their
+/// `scrolltoupper` and `scrolltolower`, the `x-swiper` component its
+/// `scrollstart`, `change`, `scrollend` and `transition`, the `viewpager`
+/// component its `offsetchange`, `change` and `willchange`, the
+/// `x-refresh-view` component its `headershow`, `headeroffset`,
+/// `footeroffset`, `headerreleased`, `footerreleased`, `startrefresh` and
+/// `startloadmore`, and the `frame` component its
+/// connections and disconnections, for the runtime to dispatch once it is out of the
 /// JavaScript call that caused them. `autoplays` is where the `x-swiper`
 /// component keeps its autoplay timers, for the runtime to wait out and run.
 #[must_use]
@@ -145,11 +155,11 @@ pub(crate) fn new_document(
     blur_view::define(&mut document);
     image::define(&mut document, events.clone());
     svg::define(&mut document, events.clone());
-    swiper::define(&mut document, autoplays);
-    refresh_view::define(&mut document);
-    viewpager::define(&mut document);
-    scroll_container::define(&mut document);
-    list::define(&mut document);
+    swiper::define(&mut document, autoplays, events.clone());
+    refresh_view::define(&mut document, events.clone());
+    viewpager::define(&mut document, events.clone());
+    scroll_container::define(&mut document, events.clone());
+    list::define(&mut document, events.clone());
     scroll_coordinator::define(&mut document);
     text::define(&mut document);
     // After `image`: every image a markdown element renders is one.
@@ -219,6 +229,27 @@ pub(super) fn element_children(
         .filter(|child| document.get(*child).is_some_and(dom::Node::is_element))
 }
 
+/// Which of `parent`'s element children holds `node` — `node` itself or an
+/// ancestor of it — as its index among them ([`element_children`]), or
+/// `None` when `node` is not inside `parent`. Web-core's index into
+/// `children`: how the `x-swiper` and the `viewpager` name the item or page
+/// a snap position belongs to.
+pub(super) fn element_child_index(
+    document: &LynxDocument,
+    parent: NodeId,
+    node: NodeId,
+) -> Option<usize> {
+    let mut child = node;
+    loop {
+        let up = document.get(child)?.parent_id()?;
+        if up == parent {
+            break;
+        }
+        child = up;
+    }
+    element_children(document, parent).position(|element| element == child)
+}
+
 /// One event a component owes script, at the element the component belongs
 /// to. None of them bubbles; a [`ComponentEvent::Detailed`] alone is
 /// composed. A [`ComponentEvent::Frame`] is dispatched under an internal
@@ -231,12 +262,16 @@ pub(crate) enum ComponentEvent {
     Image(ImageOutcome),
     /// An event whose detail is `{}`, named by the component that queued
     /// it: a `<dialog>`'s `close` and `cancel` ([`dialog`]), an
-    /// `<overlay>`'s `showoverlay` and `dismissoverlay` ([`overlay`]).
+    /// `<overlay>`'s `showoverlay` and `dismissoverlay` ([`overlay`]), an
+    /// `x-refresh-view`'s `headerreleased`, `footerreleased` and
+    /// `startloadmore` ([`refresh_view`]).
     Plain { node: NodeId, name: &'static str },
     /// A scroll container's `scroll` or `scrollend`, which the runtime
     /// queues, with the change in its offset the event reports (zero for a
     /// `scrollend`); the rest of Lynx's scroll metrics are read at
-    /// delivery.
+    /// delivery. A `scroll-view`'s or `list`'s `scrolltoupper` and
+    /// `scrolltolower` take the same shape, queued by its component
+    /// ([`scroll_container`]) with the change since its previous `scroll`.
     Scroll {
         node: NodeId,
         name: &'static str,
@@ -303,7 +338,7 @@ pub(crate) enum ComponentEvent {
 /// neither `undefined`-valued nor `""`: web-core's `{id: undefined}` loses
 /// that key when it is serialized, and the transport here would carry an
 /// `undefined`-valued key as one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ComponentDetail {
     /// `{id}`: a content id, such as the `content-id` attribute an
     /// `<x-markdown>`'s `parseEnd` reports.
@@ -347,6 +382,20 @@ pub(crate) enum ComponentDetail {
         range: Option<Range<u32>>,
         forward: bool,
     },
+    /// Numbers and booleans under the keys the component names, in its
+    /// order: the shape of a detail with no string in it, such as a
+    /// `{current, isDragged}`. Each pair is one key of the `detail`, so two
+    /// pairs under one key are a component's mistake the realm resolves as
+    /// an object literal would, the later one kept.
+    Fields(SmallVec<[(&'static str, Field); 4]>),
+}
+
+/// One value of a [`ComponentDetail::Fields`] pair: a JavaScript number or
+/// boolean.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Field {
+    Number(f64),
+    Bool(bool),
 }
 
 /// The events this document's components have produced and not delivered
