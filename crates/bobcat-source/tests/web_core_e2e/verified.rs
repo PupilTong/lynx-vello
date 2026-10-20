@@ -586,4 +586,8 @@ verified! {
     basic_element_x_swiper_interval => "basic-element-x-swiper-interval",
     // A 200px sky-blue block over three `x-textarea`s with no author height, each one line tall, 18px with its borders (`line-height: 1.15`; native, user ruling 2026-10-20), the second `disabled` (#464 keeps a disabled empty field one line tall). Clicking the block disables the third and clicking again enables it; a disabled field looks no different, as on web-core, whose field takes its colours from the host.
     basic_element_x_textarea_disabled => "basic-element-x-textarea-disabled",
+    // A sizeless view, so nothing paints. The card logs `navigator` and `postMessage` on each thread. By the 2026-10-20 ruling the main thread follows native: neither name is declared there, so its render throws ReferenceError (`ScriptReported`), where web-core's wrapper gives `undefined`; the background thread's preamble shadows both, and its line `background thread: undefined, undefined` is awaited in the log.
+    api_global_disallowed_vars => "api-global-disallowed-vars",
+    // A 400x400 pink `#target1` with `capture-bindtap` and `bindtap`, a 50x50 green `#target2` in it, and a text under that. A tap on either, each from a fresh card, writes `[bind tap]`: by the 2026-10-20 ruling handlers follow native, one per element and event name, so the `bindtap` filed second replaced the capture handler (web-core keeps both and reads `[capture tap][bind tap]`).
+    basic_event_trigger => "basic-event-trigger",
 }

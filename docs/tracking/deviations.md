@@ -3630,6 +3630,27 @@ consequential choice about whether to follow the spec or the quirk.
 
 ## JS runtime & APIs (see [js-runtime.md](js-runtime.md), [accessibility.md](accessibility.md))
 
+- **Main-thread code that names a browser global throws, as on native**
+  (user, 2026-10-20). `MTS_CHUNK_PREAMBLE`
+  (`crates/bobcat-core/src/esm.rs`) declares none of `navigator`,
+  `postMessage` or `window`, so reading one is a ReferenceError: native
+  declares them neither in the compiler (the toolchain's
+  `RuntimeWrapperWebpackPlugin` list skips main-thread chunks) nor in the
+  runtime (the main-thread global object, `quick_context.cc`,
+  `mts_runtime.cc`), and PrimJS throws for an undeclared global. web-core
+  wraps main-thread code in `const navigator=void 0,postMessage=void 0;
+  let window=void 0` (`decode.worker.ts`), because its main thread runs in
+  an iframe that has the browser's own. The background thread's list
+  (`BTS_CHUNK_PREAMBLE`) is web-core's and shadows `postMessage` too;
+  whether native's background thread does is not established.
+- **One handler per element and event name, as on native** (user,
+  2026-10-20; `fileEvent` in `packages/bobcat-element/src/element-papi.ts`).
+  A `capture-bindtap` and a `bindtap` on one element share the name `tap`,
+  so the one filed second replaces the first, as native's
+  `AttributeHolder::SetStaticEvent` (`insert_or_assign`) does on its
+  default event path. web-core keys handlers by name and type
+  (`element_data.rs`), so both run there, capture first.
+
 - **`NodesRef.path()` answers as native does** (user, 2026-10-20;
   `nodeFields` and `__BobcatQueryNodes` in
   `packages/bobcat-element/src/element-papi.ts`). The callback gets the

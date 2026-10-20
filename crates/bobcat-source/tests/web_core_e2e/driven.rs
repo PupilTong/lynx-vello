@@ -48,6 +48,12 @@ driven! {
     "api-getSharedData" => [
         "tapped": [Tap(50.0, 50.0)],
     ],
+    // Upstream waits for the two lines the card logs, one per thread; by the 2026-10-20
+    // ruling the main thread's throws instead (native), so only the background
+    // thread's is awaited.
+    "api-global-disallowed-vars" => [
+        "logged": [Logged("background thread: undefined, undefined")],
+    ],
     // Upstream listens for the two console lines the card writes, one from each thread,
     // each naming the module-level `globalThis.foo`.
     "api-globalThis" => [
