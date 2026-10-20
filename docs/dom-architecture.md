@@ -1066,6 +1066,27 @@ paragraph or an inline formatting context) and `paragraph_line_count` (the
 lines the last commit laid out, the empty line a Lynx paragraph shows after a
 trailing break included).
 
+The `<text>` `layout` event's half in `dom` is a per-pass report list, built
+the way `content_visibility_changes` is (`docs/layout-observer-design.md`
+§3.3). `Document::set_text_layout_reporting(id, on)` adds or removes a Lynx
+text element in `DocumentLayoutState::text_layout_reporters`, a node-keyed set
+rather than a field of the `TextBlockStore`, because the store is replaced on
+every rebuild, dropped by relayout damage and absent before the first layout;
+a node that is not a Lynx text element panics. The committing branch of
+`compute_text_block_layout` (`layout/text_block.rs`), which hughie runs only
+when its layout cache for the element missed, pushes a reporting element's id
+onto `DocumentLayoutState::text_layout_reports`; an empty reporter set makes
+that one `is_empty` test. `Document::take_text_layout_reports` hands the list
+over with each node once, in first-occurrence order, since one `layout()` can
+commit a paragraph in more than one pass (the size-container loop, the anchor
+settle runs); an empty list returns an empty `Vec` without allocating.
+Freeing a node removes it from both (`DocumentLayoutState::remove`), and
+turning the report off drops its pending entries. `Document::text_lines(id)`
+answers the last commit's lines as `TextLineReport { start, end,
+ellipsis_count }` in source UTF-16 units, from hughie's `TextBlock::lines`,
+`None` for anything but a committed Lynx paragraph. The listener gate, the
+component event and the JavaScript detail are `bobcat-core`'s.
+
 ## The vendored stylo fork
 
 `dom` relies on the vendored stylo fork (`vendor/stylo`, tracking the canonical

@@ -36,6 +36,7 @@ pub use stylo;
 pub use stylo_dom::ElementState;
 pub use vello;
 
+pub use crate::layout::TextLineReport;
 pub use crate::paint::compose::FilterGroup;
 pub use crate::render::image::{
     DocumentKind, DocumentRequest, FrameImages, ImageEvent, ImageInbox, ImageOutcome, ImageReports,
