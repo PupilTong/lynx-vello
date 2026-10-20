@@ -91,7 +91,7 @@ pub use self::ua_sheet::PageConfig;
 pub(crate) use crate::view::Viewport;
 
 /// The node whose border box a `layoutchange` registration on `element`
-/// observes (`crate::main::layout_events`): web-core's `layoutChangeTarget`.
+/// observes (`crate::main::layout_change`): web-core's `layoutChangeTarget`.
 /// For an `overlay` or `x-overlay-ng` host, which generates no box, its
 /// shadow `#dialog` (`XOverlayNg.ts:21-23`); for every other element, the
 /// element itself.
@@ -257,7 +257,7 @@ pub(crate) enum ComponentEvent {
     /// disposes of it on a disconnection.
     Frame { node: NodeId, connected: bool },
     /// A reporting `text`'s paragraph was recomputed by a committing layout
-    /// run: its `layout` event (`crate::main::layout_events`), with what the
+    /// run: its `layout` event (`crate::main::layout_change`), with what the
     /// commit left — the lines it shows ([`dom::Document::text_lines`]) and
     /// its content box (the border box less padding and border, in CSS px,
     /// native's `GetContentBoxWidth`/`GetContentBoxHeight`,

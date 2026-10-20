@@ -222,14 +222,17 @@ a runtime queue the host drains into the realm inside the loop (placement
 MTS binding. web-core has no `ResizeObserver` in its MTS realm either (the
 realm is a Worker there), so this is additive and can follow the adapter.
 
-**The `layoutchange` adapter** (`crates/bobcat-core/src/main/layout_events.rs`):
+**The `layoutchange` adapter** (`crates/bobcat-core/src/main/layout_change.rs`):
 
 - Registration: `open_listener`/`close_listener` gate on
   `name == "layoutchange"` as they gate on exposure names; on each change of
-  `has_listener(node, "layoutchange")` the adapter observes or unobserves
-  the node. Every registration form counts (`__AddEventListener`,
-  `__AddEvent` `bindEvent`/`catchEvent`/capture/global-bind, string handler
-  or worklet), which is web-core's `registerEventEnableStatusChangeHandler`.
+  `has_listener(node, "layoutchange")` the runtime adds or removes the
+  node's `LayoutEventRegistration::ResizeObservation`
+  (`MainThreadRuntime::layout_registration_follows`), which is
+  `LayoutChangeObserver::observe` or `LayoutChangeObserver::unobserve`.
+  Every registration form counts (`__AddEventListener`, `__AddEvent`
+  `bindEvent`/`catchEvent`/capture/global-bind, string handler or worklet),
+  which is web-core's `registerEventEnableStatusChangeHandler`.
   No attribute and no component code is involved; `x-overlay-ng` gets the
   element itself as target (web-core observes its shadow child because
   the host element has no box there; here the overlay element has one).
@@ -387,7 +390,8 @@ delivers from a posted entry rather than inside "update the rendering".
 **Built (2026-10-20).** The primitive is `crates/dom/src/visual/resize/`
 and the text layout report list `Document::set_text_layout_reporting`,
 `take_text_layout_reports` and `text_lines` (`crates/dom/src/layout/mod.rs`);
-the host side is `crates/bobcat-core/src/main/layout_events.rs`, the resize
+the host side is `crates/bobcat-core/src/main/layout_change.rs`
+(`LayoutChangeObserver` and `LayoutEventRegistration`), the resize
 delivery entry `Page::post_resize_notifications` and
 `MainThreadRuntime::{update_resize_observations, notify_resize_observers,
 queue_text_layout_events}`, with the details built by `layoutDetailOf` in

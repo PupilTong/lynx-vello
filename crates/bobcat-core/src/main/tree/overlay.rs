@@ -173,7 +173,7 @@
 //! # `layoutchange`
 //!
 //! An overlay hears `layoutchange` through the path every element does
-//! (`crate::main::layout_events`), with one retarget, web-core's
+//! (`crate::main::layout_change`), with one retarget, web-core's
 //! `layoutChangeTarget` (`XOverlayNg.ts:21-23`): the box observed is the
 //! shadow `#dialog`'s ([`dialog_of`], which the adapter asks through
 //! [`super::layout_change_target`]), not the host's, which has none. As in

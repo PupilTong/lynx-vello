@@ -54,7 +54,7 @@
 //! replica runs the whole card, states the reference, and, while `#[ignore]`d,
 //! fails on the missing behaviour rather than on a missing identifier. The
 //! first two pass now, over the `layoutchange` resize delivery and the `text`
-//! `layout` component event (`crate::main::layout_events`). The
+//! `layout` component event (`crate::main::layout_change`). The
 //! `set-native-props` four became writable with `__SetDataset`/`__GetDataset`/
 //! `__AddDataset` (`element-papi.ts`, which files each entry as a typed value
 //! in the realm and reflects it as the node's `data-<key>` attribute) and the

@@ -3113,7 +3113,7 @@ function extrasOf(pairs: unknown[]): EventDetail {
  * The Lynx `detail` of a dispatch that carries extras: the extras
  * themselves, except for the two Lynx layout events, whose detail has a
  * shape the extras channel's one primitive per key cannot carry, so it is
- * built here from what the host sent (`crates/bobcat-core/src/main/layout_events.rs`).
+ * built here from what the host sent (`crates/bobcat-core/src/main/layout_change.rs`).
  *
  * - `layoutchange`: the host sends `left`, `top`, `width` and `height` of the
  *   element's border box. `right` and `bottom` are their sums, derived here

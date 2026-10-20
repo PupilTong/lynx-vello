@@ -430,7 +430,7 @@ impl Page {
 
     /// Queues the entry that delivers what `dom`'s resize observers queued —
     /// the document's `layoutchange` observer's entries
-    /// (`crate::main::layout_events`) — and waits for nothing.
+    /// (`crate::main::layout_change`) — and waits for nothing.
     ///
     /// Posted after the frame, as the intersection delivery is, rather than
     /// run inside the commit before paint as resize-observer-1 §3.4 and HTML's

@@ -510,7 +510,7 @@ Each blocks replicas that could not be written at all.
 
 - **The `layout` / `layoutchange` event.** *Closed 2026-10-20.* `layoutchange`
   is delivered over `dom`'s ResizeObserver primitive by the adapter in
-  `crates/bobcat-core/src/main/layout_events.rs`, and a `text`'s `layout` is a
+  `crates/bobcat-core/src/main/layout_change.rs`, and a `text`'s `layout` is a
   component event built from `dom`'s text layout report list and
   `Document::text_lines`. `widening_a_text_dispatches_a_layoutchange_carrying_its_geometry`
   and `a_wrapping_text_reports_its_line_count_and_line_ranges` are un-ignored and

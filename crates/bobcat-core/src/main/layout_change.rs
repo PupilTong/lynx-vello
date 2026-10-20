@@ -44,8 +44,8 @@
 //! web-core's `layoutChangeTarget` (`XOverlayNg.ts:21-23`), and the event is
 //! dispatched at the overlay with the dialog's rect
 //! (`CommonEventsAndMethods.ts:31-50`). [`layout_change_target`] answers
-//! which node that is; the adapter keeps the retargeted pairs (observed node
-//! to overlay) for the delivery to dispatch at the overlay.
+//! which node that is; [`LayoutChangeObserver`] keeps the retargeted pairs
+//! (observed node to overlay) for the delivery to dispatch at the overlay.
 //!
 //! # How a registration is held
 //!
@@ -54,10 +54,12 @@
 //! `__AddEventListener`, and `__AddEvent`'s `bindEvent`, `catchEvent`,
 //! `capture-bind`, `capture-catch` and `global-bindEvent`, string handler or
 //! worklet — which is web-core's
-//! `registerEventEnableStatusChangeHandler('layoutchange')`. The runtime tells
-//! this module on each change of that answer (`listenerOpened`,
-//! `listenerClosed`). The observer is created on the first registration and
-//! kept for the document's life.
+//! `registerEventEnableStatusChangeHandler('layoutchange')`. On each change
+//! of that answer (`listenerOpened`, `listenerClosed`) the runtime adds or
+//! removes the element's [`LayoutEventRegistration::ResizeObservation`]:
+//! [`LayoutChangeObserver::observe`] or [`LayoutChangeObserver::unobserve`].
+//! The observer is created on the first observation and kept for the
+//! document's life.
 //!
 //! The handler, [`LayoutChangeHandler`], is bound to no node and only
 //! records which targets resized; the realm half runs after `dom`'s loop,
@@ -75,9 +77,10 @@
 //! # `<text>` `layout`
 //!
 //! A `text` element reports while the listener table has a `layout` row on
-//! it: the runtime turns `dom`'s text layout report on or off on each change
-//! of that answer, as for `layoutchange`. A `layout` row on any other element
-//! is ignored. After every commit the epilogue takes `dom`'s report list and
+//! it: on each change of that answer the runtime adds or removes the
+//! element's [`LayoutEventRegistration::TextLayoutReport`], turning `dom`'s
+//! text layout report on or off, as for `layoutchange`. A `layout` row on any
+//! other element is ignored. After every commit the epilogue takes `dom`'s report list and
 //! queues one component event per reporting paragraph a committing layout run
 //! recomputed ([`super::tree::ComponentEvent::TextLayout`]).
 //!
@@ -98,7 +101,7 @@ use std::rc::Rc;
 use dom::{NodeId, ObservedBox, ResizeEventHandler, ResizeObserverEntry, ResizeObserverId};
 use rustc_hash::FxHashMap;
 
-use super::tree::{LynxDocument, is_text, layout_change_target};
+use super::tree::{LynxDocument, layout_change_target};
 
 /// The Lynx event every element hears when its border box changes size.
 pub(crate) const LAYOUT_CHANGE_EVENT: &str = "layoutchange";
@@ -106,32 +109,41 @@ pub(crate) const LAYOUT_CHANGE_EVENT: &str = "layoutchange";
 /// The Lynx event a `<text>` hears when its paragraph is laid out.
 pub(crate) const TEXT_LAYOUT_EVENT: &str = "layout";
 
-/// Which of the two events a listener name is, if either: the cue for the
-/// listener table's gate.
+/// What a listener for one of the two Lynx layout events registers on the
+/// host: a `layoutchange` listener a resize observation of its element
+/// ([`LayoutChangeObserver::observe`]), a `layout` listener on a `text` that
+/// element's text layout report ([`dom::Document::set_text_layout_reporting`]).
+///
+/// The runtime adds the registration when the listener table's answer to
+/// "does `node` have a row for this name" turns true, and removes it when the
+/// answer turns false (`MainThreadRuntime::layout_registration_follows`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LayoutEvent {
-    /// `layoutchange`.
-    LayoutChange,
-    /// `layout`.
-    TextLayout,
+pub(crate) enum LayoutEventRegistration {
+    /// `layoutchange`: the element's border box is a target of the
+    /// document's [`LayoutChangeObserver`].
+    ResizeObservation,
+    /// `layout`: the `text` element's paragraph is listed in `dom`'s text
+    /// layout report after each committing layout run that recomputes it.
+    TextLayoutReport,
 }
 
-impl LayoutEvent {
-    /// The event `name` is, or `None` for every other name. The realm files
-    /// every name lowercased, so the spelling compared is the lowercase one.
+impl LayoutEventRegistration {
+    /// The registration a listener for `name` makes, or `None` for every
+    /// other name. The realm files every name lowercased, so the spelling
+    /// compared is the lowercase one.
     pub(crate) fn of(name: &str) -> Option<Self> {
         match name {
-            LAYOUT_CHANGE_EVENT => Some(Self::LayoutChange),
-            TEXT_LAYOUT_EVENT => Some(Self::TextLayout),
+            LAYOUT_CHANGE_EVENT => Some(Self::ResizeObservation),
+            TEXT_LAYOUT_EVENT => Some(Self::TextLayoutReport),
             _ => None,
         }
     }
 
-    /// The listener-table name.
+    /// The listener-table name of the event this registration is for.
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::LayoutChange => LAYOUT_CHANGE_EVENT,
-            Self::TextLayout => TEXT_LAYOUT_EVENT,
+            Self::ResizeObservation => LAYOUT_CHANGE_EVENT,
+            Self::TextLayoutReport => TEXT_LAYOUT_EVENT,
         }
     }
 }
@@ -157,13 +169,14 @@ impl ResizeEventHandler<()> for LayoutChangeHandler {
     }
 }
 
-/// A document's `layoutchange` observer and what it has recorded, and the
-/// `<text>` `layout` switch.
+/// The document's one resize observer behind `layoutchange`, the
+/// observed node to element map for the overlay retargeting, and the targets
+/// the observer last delivered.
 ///
 /// Owned by the realm's document slot beside the document, as
 /// [`crate::main::exposure::Exposure`] is.
 #[derive(Debug, Default)]
-pub(crate) struct LayoutEvents {
+pub(crate) struct LayoutChangeObserver {
     /// The document's one resize observer, created on the first
     /// `layoutchange` registration.
     observer: Option<ResizeObserverId>,
@@ -174,65 +187,39 @@ pub(crate) struct LayoutEvents {
     /// observed: an overlay's shadow `#dialog` to the overlay
     /// ([`layout_change_target`]). An element observed through its own box
     /// has no entry. A pair whose node is gone is dropped at the next
-    /// registration or delivery that sees it.
+    /// observation or delivery that sees it.
     hosts: FxHashMap<NodeId, NodeId>,
 }
 
-impl LayoutEvents {
-    /// What the document's listener table now says of `node` for `event`:
-    /// `listening`, whether some realm has a row for it there. Told on each
-    /// change of that answer.
-    ///
-    /// For `layoutchange`, the element is observed (`border-box`) or
-    /// unobserved. For `layout`, a `text` element's report is turned on or
-    /// off; any other element is left alone. A node that is not a live
-    /// element is left alone either way.
-    pub(crate) fn set_listening(
-        &mut self,
-        document: &mut LynxDocument,
-        node: NodeId,
-        event: LayoutEvent,
-        listening: bool,
-    ) {
-        if !document.get(node).is_some_and(dom::Node::is_element) {
-            return;
-        }
-        match event {
-            LayoutEvent::LayoutChange => self.set_observed(document, node, listening),
-            LayoutEvent::TextLayout => {
-                if is_text(document, node) {
-                    document.set_text_layout_reporting(node, listening);
-                }
-            }
-        }
-    }
-
+impl LayoutChangeObserver {
     /// Observes the border box of the live element `node`'s
     /// [`layout_change_target`] — `node` itself, or an overlay's shadow
-    /// `#dialog` — creating the observer if this is the first registration,
-    /// or unobserves it.
-    pub(crate) fn set_observed(&mut self, document: &mut LynxDocument, node: NodeId, on: bool) {
+    /// `#dialog` — creating the observer if this is the first observation.
+    pub(crate) fn observe(&mut self, document: &mut LynxDocument, node: NodeId) {
         let target = layout_change_target(document, node);
-        if on {
-            // Freed hosts free their shadow trees, and the primitive drops
-            // those registrations by itself; their pairs go here.
-            self.hosts.retain(|target, host| {
-                document.get(*target).is_some() && document.get(*host).is_some()
-            });
-            if target != node {
-                self.hosts.insert(target, node);
-            }
-            let observer = *self.observer.get_or_insert_with(|| {
-                document.create_resize_observer(Box::new(LayoutChangeHandler {
-                    resized: Rc::clone(&self.resized),
-                }))
-            });
-            document.observe_resize(observer, target, ObservedBox::BorderBox);
-        } else {
-            self.hosts.remove(&target);
-            if let Some(observer) = self.observer {
-                document.unobserve_resize(observer, target);
-            }
+        // Freed hosts free their shadow trees, and the primitive drops those
+        // registrations by itself; their pairs go here.
+        self.hosts.retain(|target, host| {
+            document.get(*target).is_some() && document.get(*host).is_some()
+        });
+        if target != node {
+            self.hosts.insert(target, node);
+        }
+        let observer = *self.observer.get_or_insert_with(|| {
+            document.create_resize_observer(Box::new(LayoutChangeHandler {
+                resized: Rc::clone(&self.resized),
+            }))
+        });
+        document.observe_resize(observer, target, ObservedBox::BorderBox);
+    }
+
+    /// Stops observing `node`'s [`layout_change_target`], and forgets the
+    /// retargeted pair if it had one.
+    pub(crate) fn unobserve(&mut self, document: &mut LynxDocument, node: NodeId) {
+        let target = layout_change_target(document, node);
+        self.hosts.remove(&target);
+        if let Some(observer) = self.observer {
+            document.unobserve_resize(observer, target);
         }
     }
 

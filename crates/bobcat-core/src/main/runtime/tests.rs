@@ -8882,7 +8882,7 @@ fn every_registration_form_observes_layoutchange_and_the_last_one_leaving_unobse
     };
     let observed = |elements: &DocumentProbe| {
         let slot = elements.slot.borrow();
-        slot.layout_events
+        slot.layout_change
             .is_observed(slot.document.as_ref().unwrap(), box_)
     };
     assert!(observed(&elements), "the closure observes the box");
@@ -9053,7 +9053,7 @@ fn an_overlay_reports_its_shadow_dialogs_rect_at_the_host() {
     {
         let slot = elements.slot.borrow();
         let observer = slot
-            .layout_events
+            .layout_change
             .observer()
             .expect("the listener created the observer");
         let tree = slot.document.as_ref().unwrap();

@@ -47,13 +47,14 @@ use crate::esm::{
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::exposure::{Exposure, is_exposure_attribute};
-use crate::main::layout_events::{
-    LAYOUT_CHANGE_EVENT, LayoutEvent, LayoutEvents, TEXT_LAYOUT_EVENT,
+use crate::main::layout_change::{
+    LAYOUT_CHANGE_EVENT, LayoutChangeObserver, LayoutEventRegistration, TEXT_LAYOUT_EVENT,
 };
 use crate::main::record::write_record_field;
 use crate::main::tree::{
     Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, LynxDocument, MAX_FRAME_DEPTH,
-    PageConfig, frame_depth, invoke_base_method, is_svg, nested_page, new_document, reset_frame,
+    PageConfig, frame_depth, invoke_base_method, is_svg, is_text, nested_page, new_document,
+    reset_frame,
 };
 use crate::realm::child::{ChildHostModules, ChildHostState, ChildKey};
 use crate::realm::policy::context_of;
@@ -863,7 +864,7 @@ struct DocumentSlot {
     /// one of `dom`'s resize observers carries it, and what that observer
     /// delivers is dispatched into the realm by the resize delivery entry
     /// ([`MainThreadRuntime::notify_resize_observers`]).
-    layout_events: LayoutEvents,
+    layout_change: LayoutChangeObserver,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
     /// Which [`editing::EditingRoute`]s the editing account routes in the
@@ -948,7 +949,7 @@ impl DocumentSlot {
             component_events: ComponentEvents::default(),
             autoplays: Autoplays::default(),
             exposure: Exposure::new(),
-            layout_events: LayoutEvents::default(),
+            layout_change: LayoutChangeObserver::default(),
             removals: 0,
             editing_routes: 0,
             observed: FxHashSet::default(),
@@ -1101,9 +1102,10 @@ impl DocumentSlot {
     /// it for exposure detection, or lets it go, and a change of whether it
     /// has a `uiappear` or `uidisappear` row whether it hears its element
     /// events ([`Exposure::set_registered`]); nothing else tells exposure
-    /// about a listener. A change of whether `node` has a `layoutchange` row
-    /// observes or unobserves it, and of whether it has a `layout` row turns
-    /// a `text`'s layout report on or off ([`LayoutEvents::set_listening`]).
+    /// about a listener. A change of whether `node` has a `layoutchange` or a
+    /// `layout` row adds or removes its [`LayoutEventRegistration`]
+    /// ([`Self::layout_registration_follows`]): `layoutchange` observes or
+    /// unobserves it, `layout` turns a `text`'s layout report on or off.
     fn open_listener(
         &mut self,
         node: dom::NodeId,
@@ -1113,52 +1115,80 @@ impl DocumentSlot {
     ) {
         self.apply_pending_last_removals();
         let exposure = is_exposure_event(name);
-        let layout = LayoutEvent::of(name);
+        let layout = LayoutEventRegistration::of(name);
         let document = self.document.as_mut().expect(DOCUMENT_EXISTS);
         let before = exposure.then(|| exposure_rows(document, node));
-        let layout_before = layout.map(|event| (event, document.has_listener(node, name)));
+        let layout_before =
+            layout.map(|registration| (registration, document.has_listener(node, name)));
         let change = document.add_listener(node, name, kinds, key);
         if let Some(before) = before {
             self.exposure_follows(node, before);
         }
-        if let Some((event, before)) = layout_before {
-            self.layout_events_follow(node, event, before);
+        if let Some((registration, before)) = layout_before {
+            self.layout_registration_follows(node, registration, before);
         }
         self.publish_route_changes(&[(name, change)]);
     }
 
     /// A realm's `listenerClosed`: `key` no longer listens for `name` on
     /// `node`, in any pass. As [`Self::open_listener`] for the registration
-    /// change, for exposure and for the layout events.
+    /// change, for exposure and for the layout event registrations.
     fn close_listener(&mut self, node: dom::NodeId, name: &str, key: ListenerKey) {
         self.apply_pending_last_removals();
         let exposure = is_exposure_event(name);
-        let layout = LayoutEvent::of(name);
+        let layout = LayoutEventRegistration::of(name);
         let document = self.document.as_mut().expect(DOCUMENT_EXISTS);
         let before = exposure.then(|| exposure_rows(document, node));
-        let layout_before = layout.map(|event| (event, document.has_listener(node, name)));
+        let layout_before =
+            layout.map(|registration| (registration, document.has_listener(node, name)));
         let change = document.remove_listener(node, name, key);
         if let Some(before) = before {
             self.exposure_follows(node, before);
         }
-        if let Some((event, before)) = layout_before {
-            self.layout_events_follow(node, event, before);
+        if let Some((registration, before)) = layout_before {
+            self.layout_registration_follows(node, registration, before);
         }
         self.publish_route_changes(&[(name, change)]);
     }
 
-    /// Tells the layout events whether `node` now has a row for `event`,
-    /// when that is no longer `before`.
-    fn layout_events_follow(&mut self, node: dom::NodeId, event: LayoutEvent, before: bool) {
+    /// Adds `registration` for `node` when the listener table now has a row
+    /// for its event on `node` and had none (`before`), and removes it in the
+    /// opposite case. A node that is not a live element is left alone.
+    ///
+    /// [`LayoutEventRegistration::ResizeObservation`] observes or unobserves
+    /// the element ([`LayoutChangeObserver::observe`],
+    /// [`LayoutChangeObserver::unobserve`]).
+    /// [`LayoutEventRegistration::TextLayoutReport`] turns a `text` element's
+    /// layout report on or off ([`dom::Document::set_text_layout_reporting`]);
+    /// any other element is left alone.
+    fn layout_registration_follows(
+        &mut self,
+        node: dom::NodeId,
+        registration: LayoutEventRegistration,
+        before: bool,
+    ) {
         let Self {
             document,
-            layout_events,
+            layout_change,
             ..
         } = self;
         let document = document.as_mut().expect(DOCUMENT_EXISTS);
-        let now = document.has_listener(node, event.name());
-        if now != before {
-            layout_events.set_listening(document, node, event, now);
+        let now = document.has_listener(node, registration.name());
+        if now == before || !document.get(node).is_some_and(dom::Node::is_element) {
+            return;
+        }
+        match registration {
+            LayoutEventRegistration::ResizeObservation if now => {
+                layout_change.observe(document, node);
+            }
+            LayoutEventRegistration::ResizeObservation => {
+                layout_change.unobserve(document, node);
+            }
+            LayoutEventRegistration::TextLayoutReport => {
+                if is_text(document, node) {
+                    document.set_text_layout_reporting(node, now);
+                }
+            }
         }
     }
 
@@ -1183,8 +1213,9 @@ impl DocumentSlot {
     /// for nothing, when it is freed.
     ///
     /// The exposure registrations of its elements are not touched: they go
-    /// with the elements, which the frame's `resetFrame` frees. Nor are the
-    /// layout events told: an element left observed with no `layoutchange`
+    /// with the elements, which the frame's `resetFrame` frees. Nor are its
+    /// elements' [`LayoutEventRegistration`]s removed here: an element left
+    /// observed with no `layoutchange`
     /// row is unobserved by the next delivery that reaches it
     /// ([`MainThreadRuntime::notify_resize_observers`]), and a `text` left
     /// reporting with no `layout` row has its report turned off by the next
@@ -3260,7 +3291,7 @@ impl MainThreadRuntime {
     /// `dom` runs whole ([`dom::Document::notify_resize_observers`]) — and
     /// then dispatches `layoutchange` at every target the document's
     /// `layoutchange` observer delivered, in delivery order
-    /// (`crate::main::layout_events`).
+    /// (`crate::main::layout_change`).
     ///
     /// The observer's handler only records the targets: it cannot call the
     /// realm from inside `dom`'s loop, so the realm half runs here, after the
@@ -3296,12 +3327,12 @@ impl MainThreadRuntime {
             let mut slot = self.slot.borrow_mut();
             let DocumentSlot {
                 document,
-                layout_events,
+                layout_change,
                 ..
             } = &mut *slot;
             let document = document.as_mut().expect(DOCUMENT_EXISTS);
             document.notify_resize_observers();
-            layout_events.take_resized(document)
+            layout_change.take_resized(document)
         };
         let timestamp = self.timeline_milliseconds;
         let mut failures = Vec::new();
@@ -3310,7 +3341,7 @@ impl MainThreadRuntime {
                 let mut slot = self.slot.borrow_mut();
                 let DocumentSlot {
                     document,
-                    layout_events,
+                    layout_change,
                     ..
                 } = &mut *slot;
                 let document = document.as_mut().expect(DOCUMENT_EXISTS);
@@ -3319,7 +3350,7 @@ impl MainThreadRuntime {
                     continue;
                 }
                 if !document.has_listener(node, LAYOUT_CHANGE_EVENT) {
-                    layout_events.set_observed(document, node, false);
+                    layout_change.unobserve(document, node);
                     continue;
                 }
                 document.bounding_client_rect(target)
@@ -3377,7 +3408,7 @@ impl MainThreadRuntime {
             return;
         };
         for node in document.take_text_layout_reports() {
-            if !document.has_listener(node, LayoutEvent::TextLayout.name()) {
+            if !document.has_listener(node, LayoutEventRegistration::TextLayoutReport.name()) {
                 document.set_text_layout_reporting(node, false);
                 continue;
             }

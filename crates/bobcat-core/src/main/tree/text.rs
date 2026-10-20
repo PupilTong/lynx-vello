@@ -247,7 +247,7 @@ pub(super) const TEXT_TAG: &str = "text";
 
 /// Whether `node` is a live `text` element: the one tag a `layout` listener
 /// turns the paragraph's layout report on for
-/// ([`crate::main::layout_events`]). A nested `text` is one too, and reports
+/// ([`crate::main::layout_change`]). A nested `text` is one too, and reports
 /// nothing, since it establishes no paragraph.
 pub(crate) fn is_text(document: &LynxDocument, node: NodeId) -> bool {
     document

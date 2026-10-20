@@ -2219,18 +2219,21 @@ detection and `resumeExposure` re-observes (native's semantics, with
 timer. The defaults where the references differ are in
 `docs/tracking/deviations.md`.
 
-**Lynx layout events** (`crates/bobcat-core/src/main/layout_events.rs`,
+**Lynx layout events** (`crates/bobcat-core/src/main/layout_change.rs`,
 user-directed 2026-10-20, `docs/layout-observer-design.md` §5) are the
 second bucket-2 adapter, over two `dom` primitives. `layoutchange` is one
 document-wide `ResizeObserver` (created on the first registration) of which
 every element with a `layoutchange` row in the listener table, any realm and
 any form, is a `border-box` target — an `overlay`'s or `x-overlay-ng`'s
 shadow `#dialog` in place of the box-less host, web-core's
-`layoutChangeTarget` (`tree::layout_change_target`; the adapter keeps the
-dialog-to-host pairs and dispatches at the host with the dialog's rect);
-`open_listener`/`close_listener` observe or
-unobserve on each change of `has_listener(node, "layoutchange")`, as they tell
-exposure. Its handler, bound to no node, only records the targets; the
+`layoutChangeTarget` (`tree::layout_change_target`; `LayoutChangeObserver`
+keeps the dialog-to-host pairs and dispatches at the host with the dialog's
+rect). On each change of `has_listener(node, name)` for `"layoutchange"` or
+`"layout"`, `open_listener`/`close_listener` add or remove the node's
+`LayoutEventRegistration` (`layout_registration_follows`), as they tell
+exposure: `ResizeObservation` is `LayoutChangeObserver::observe`/`unobserve`
+of a live element, `TextLayoutReport` is
+`Document::set_text_layout_reporting` of a `text` element. Its handler, bound to no node, only records the targets; the
 epilogue runs `update_resize_observations` after its commit and posts the
 resize delivery entry (`Page::post_resize_notifications`, before the
 intersection one), which runs `dom`'s broadcast and then dispatches
@@ -2241,8 +2244,8 @@ for a target with no box); `bobcat:element` (`layoutDetailOf`) builds
 no transforms, no host origin subtracted, `dataset` included (rulings 1, 3, 4
 and 8). A freed target leaves through the primitive; a target whose last row
 left with a forgotten realm is unobserved by its next delivery. A `text`
-element's `layout` row turns `Document::set_text_layout_reporting` on for it
-(a `layout` row on any other element is ignored); after every commit the
+element's `layout` row turns its text layout report on (a `layout` row on
+any other element is ignored); after every commit the
 epilogue's `queue_text_layout_events` takes `take_text_layout_reports`, reads
 `text_lines` and the content box from `rounded_layout`, and queues one
 `ComponentEvent::TextLayout`, which the component-events entry dispatches at

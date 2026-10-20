@@ -1155,7 +1155,7 @@ consequential choice about whether to follow the spec or the quirk.
     focus, which takes a `tabindex` the embedding page chooses.
 - **`layoutchange` is a border-box size observation** (user-directed
   2026-10-20, ruling 1 of `docs/layout-observer-design.md` §5;
-  `crates/bobcat-core/src/main/layout_events.rs`). web-core's event is a
+  `crates/bobcat-core/src/main/layout_change.rs`). web-core's event is a
   `ResizeObserver` on the element
   (`web-elements/src/elements/common/CommonEventsAndMethods.ts:23-58`), and
   this one is the W3C primitive's (`crates/dom/src/visual/resize/`): an

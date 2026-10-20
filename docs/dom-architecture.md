@@ -866,8 +866,8 @@ registry, the spec's "gather active resize observations" (§3.4.1) with the
 entry creation of §3.4.4 folded in, and §3.4.5 "broadcast active resize
 observations". It is Rust-only, like the intersection primitive, and its
 design and rulings are `docs/layout-observer-design.md` §3.1 and §5; its
-first consumer is bobcat-core's `layoutchange` adapter
-(`crates/bobcat-core/src/main/layout_events.rs`): one document-wide observer
+first consumer is bobcat-core's `LayoutChangeObserver`
+(`crates/bobcat-core/src/main/layout_change.rs`): one document-wide observer
 whose `border-box` targets are the elements with a `layoutchange` listener.
 
 **Registry.** `Document.resizes` is a `Vec` of `ResizeObserver<T>`s in
