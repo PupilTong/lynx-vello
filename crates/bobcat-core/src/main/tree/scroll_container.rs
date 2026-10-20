@@ -97,7 +97,7 @@
 use std::cell::RefCell;
 
 use dom::event::ElementEvent;
-use dom::scroll::{ScrollBehavior, ScrollBox};
+use dom::scroll::{ScrollBehavior, ScrollBox, SnapAxis, SnapPoint};
 use dom::{
     CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Point2D, Rect, Size2D, Vector2D,
 };
@@ -145,6 +145,11 @@ scroll-view[scroll-orientation="horizontal"][enable-scroll="false"] { overflow-x
 /// The kernel's CSSOM-View event the threshold events are decided on, which
 /// the runtime fires at a scroll container its painter post moved.
 pub(super) const SCROLL_EVENT: &str = "scroll";
+
+/// The kernel's CSSOM-View event the runtime fires at a scroll container
+/// once a painter post leaves it at rest: what the `x-swiper` and the
+/// `viewpager` decide their end-of-scroll events on.
+pub(super) const SCROLL_END_EVENT: &str = "scrollend";
 
 /// The event a scroller fires when a `scroll` brings it within its upper
 /// threshold of its start edge.
@@ -279,6 +284,47 @@ pub(super) fn is_own_scroll(element: NodeId, event: &ElementEvent<'_>) -> bool {
 pub(super) fn rendered_scroll_box(document: &LynxDocument, scroller: NodeId) -> Option<ScrollBox> {
     document.bounding_client_rect(scroller)?;
     document.scroll_box(scroller)
+}
+
+/// The snap position on `axis` nearest `offset`, as its index in
+/// `axis.points`: the one whose position — a range, for an area larger than
+/// the snapport — lies the least distance from `offset`, the first in
+/// `points`' order (sorted by position) on a tie; `None` when the axis has
+/// no position. Shared by the `x-swiper`'s autoplay turn and its events
+/// ([`super::swiper`]) and the `viewpager`'s `change`
+/// ([`super::viewpager`]): which item or page a container standing at
+/// `offset` shows.
+///
+/// On a circular axis (`axis.period`) the positions repeat every period:
+/// every point's position lies in `[0, period)`, the offset is read in the
+/// same period (a non-finite one as `0`), and each point is measured at its
+/// copy nearest the offset — itself, or one period either side — so an
+/// offset standing across the seam, past the last item, is nearest the
+/// first item's next copy when that is the closer one.
+pub(super) fn nearest_snap_position(axis: &SnapAxis<'_>, offset: f32) -> Option<usize> {
+    let offset = if offset.is_finite() { offset } else { 0.0 };
+    let period = axis
+        .period
+        .filter(|period| period.is_finite() && *period > 0.0);
+    let at = period.map_or(offset, |period| {
+        let at = offset.rem_euclid(period);
+        // `rem_euclid` rounds up to `period` itself for an offset just below
+        // a multiple of it, which is the start of the next period.
+        if at < period { at } else { 0.0 }
+    });
+    let distance = |point: &SnapPoint| {
+        let from = |shift: f32| {
+            (point.min + shift - at)
+                .max(at - point.max - shift)
+                .max(0.0)
+        };
+        period.map_or_else(
+            || from(0.0),
+            |period| from(0.0).min(from(-period)).min(from(period)),
+        )
+    };
+    (0..axis.points.len())
+        .min_by(|&a, &b| distance(&axis.points[a]).total_cmp(&distance(&axis.points[b])))
 }
 
 /// The px value of `scroller`'s threshold attribute `name`
@@ -1832,5 +1878,71 @@ pub(super) mod tests {
             0.0,
             "missing"
         );
+    }
+
+    // --- the nearest snap position -----------------------------------------
+
+    /// The nearest position to an offset, the first in `points`' order on a
+    /// tie, measured to a range's nearer end; on a circular axis at each
+    /// point's copy nearest the offset, read in one period.
+    #[test]
+    fn the_nearest_snap_position_wraps_on_a_circular_axis() {
+        use dom::scroll::{SnapAxis, SnapPoint, SnapStrictness};
+
+        use super::nearest_snap_position;
+
+        let area = document().document_element().id();
+        let point = |min: f32, max: f32| SnapPoint {
+            min,
+            max,
+            stop: false,
+            area,
+            order: 0,
+        };
+        let points = [point(0.0, 0.0), point(200.0, 300.0), point(500.0, 500.0)];
+        let axis = |period| SnapAxis {
+            strictness: SnapStrictness::Mandatory,
+            points: &points,
+            period,
+        };
+        let bounded = axis(None);
+        for (offset, expected) in [
+            (0.0, Some(0)),
+            (100.0, Some(0)),
+            (101.0, Some(1)),
+            (250.0, Some(1)),
+            (400.0, Some(1)),
+            (401.0, Some(2)),
+            (700.0, Some(2)),
+            (f32::NAN, Some(0)),
+        ] {
+            assert_eq!(
+                nearest_snap_position(&bounded, offset),
+                expected,
+                "{offset}"
+            );
+        }
+        let circular = axis(Some(600.0));
+        for (offset, expected) in [
+            (540.0, Some(2)),
+            (560.0, Some(0)),
+            // A tie across the seam, 50 from each: the first in `points`.
+            (550.0, Some(0)),
+            (1140.0, Some(2)),
+            (-30.0, Some(0)),
+            (f32::INFINITY, Some(0)),
+        ] {
+            assert_eq!(
+                nearest_snap_position(&circular, offset),
+                expected,
+                "{offset}"
+            );
+        }
+        let empty = SnapAxis {
+            strictness: SnapStrictness::Mandatory,
+            points: &[],
+            period: None,
+        };
+        assert_eq!(nearest_snap_position(&empty, 10.0), None);
     }
 }

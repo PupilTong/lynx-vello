@@ -15,10 +15,10 @@
 //! `scroll_container`, `list`, `scroll_coordinator`, `dialog`, `overlay`,
 //! `markdown`, `frame` and `text_field` need components: for image resources (an `svg`'s `content`
 //! as a document handed to the host as its bytes), blur hints,
-//! the swiper's UA shadow tree, item count and `scrollTo` UI method, the
+//! the swiper's UA shadow tree, item count, `scrollTo` UI method and events, the
 //! refresh view's UA shadow tree, its header and footer slot assignment and
 //! its `finishRefresh`, `finishLoadMore` and `autoStartRefresh` UI methods
-//! ([`refresh_view`]), the viewpager's `selectTab` UI method, the
+//! ([`refresh_view`]), the viewpager's `selectTab` UI method and events, the
 //! `scroll-view`'s `scrollTo`, `scrollBy` and `getScrollInfo` UI methods, the `list`'s
 //! `scrollToPosition`, `scrollBy`, `getScrollContainerInfo` and
 //! `getVisibleCells` UI methods ([`list`]), both scrollers'
@@ -72,16 +72,6 @@ pub(crate) mod swiper;
 pub(super) mod test_support;
 mod text;
 pub(crate) mod text_field;
-/// No production caller yet: the `x-swiper`, `viewpager` and
-/// `x-refresh-view` events that read whether a finger is down are its users.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the swiper, viewpager and refresh-view events are its callers, in the slices \
-                  that follow"
-    )
-)]
 mod touches;
 mod ua_sheet;
 mod viewpager;
@@ -131,7 +121,9 @@ pub(super) const SLOT_CHANGE: &str = "slotchange";
 /// methods queue, the `overlay` component its `showoverlay` and
 /// `dismissoverlay`, the `markdown` component its `parseEnd`, `link` and
 /// `imageTap`, the `scroll-view` and `list` components their
-/// `scrolltoupper` and `scrolltolower`, and the `frame` component its
+/// `scrolltoupper` and `scrolltolower`, the `x-swiper` component its
+/// `scrollstart`, `change`, `scrollend` and `transition`, the `viewpager`
+/// component its `offsetchange`, `change` and `willchange`, and the `frame` component its
 /// connections and disconnections, for the runtime to dispatch once it is out of the
 /// JavaScript call that caused them. `autoplays` is where the `x-swiper`
 /// component keeps its autoplay timers, for the runtime to wait out and run.
@@ -146,9 +138,9 @@ pub(crate) fn new_document(
     blur_view::define(&mut document);
     image::define(&mut document, events.clone());
     svg::define(&mut document, events.clone());
-    swiper::define(&mut document, autoplays);
+    swiper::define(&mut document, autoplays, events.clone());
     refresh_view::define(&mut document);
-    viewpager::define(&mut document);
+    viewpager::define(&mut document, events.clone());
     scroll_container::define(&mut document, events.clone());
     list::define(&mut document, events.clone());
     scroll_coordinator::define(&mut document);
@@ -218,6 +210,27 @@ pub(super) fn element_children(
         .into_iter()
         .flat_map(|node| node.child_ids().iter().copied())
         .filter(|child| document.get(*child).is_some_and(dom::Node::is_element))
+}
+
+/// Which of `parent`'s element children holds `node` — `node` itself or an
+/// ancestor of it — as its index among them ([`element_children`]), or
+/// `None` when `node` is not inside `parent`. Web-core's index into
+/// `children`: how the `x-swiper` and the `viewpager` name the item or page
+/// a snap position belongs to.
+pub(super) fn element_child_index(
+    document: &LynxDocument,
+    parent: NodeId,
+    node: NodeId,
+) -> Option<usize> {
+    let mut child = node;
+    loop {
+        let up = document.get(child)?.parent_id()?;
+        if up == parent {
+            break;
+        }
+        child = up;
+    }
+    element_children(document, parent).position(|element| element == child)
 }
 
 /// One event a component owes script, at the element the component belongs
@@ -346,27 +359,12 @@ pub(crate) enum ComponentDetail {
     /// `{current, isDragged}`. Each pair is one key of the `detail`, so two
     /// pairs under one key are a component's mistake the realm resolves as
     /// an object literal would, the later one kept.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the swiper, viewpager and refresh-view events queue it, in the slices that \
-                      follow"
-        )
-    )]
     Fields(SmallVec<[(&'static str, Field); 4]>),
 }
 
 /// One value of a [`ComponentDetail::Fields`] pair: a JavaScript number or
 /// boolean.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "constructed with `ComponentDetail::Fields`, in the slices that follow"
-    )
-)]
 pub(crate) enum Field {
     Number(f64),
     Bool(bool),

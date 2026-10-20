@@ -3,11 +3,15 @@
 //! comes back out.
 
 use dom::NodeId;
+use dom::event::EventDetail;
 use dom::stylo::properties::ComputedValues;
 use dom::stylo::servo_arc::Arc;
 use dom::stylo::values::computed::{Display, Overflow};
 
-use super::{Autoplays, ComponentEvents, LynxDocument, PageConfig, Viewport, new_document};
+use super::{
+    Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, Field, LynxDocument, PageConfig,
+    Viewport, new_document,
+};
 
 /// A document on a phone-shaped viewport with the default page config.
 pub(in crate::main) fn document() -> LynxDocument {
@@ -85,4 +89,33 @@ pub(in crate::main) fn display(document: &LynxDocument, element: NodeId) -> Disp
 pub(in crate::main) fn overflow(document: &LynxDocument, element: NodeId) -> (Overflow, Overflow) {
     let style = style_of(document, element);
     (*style.get_overflow_x(), *style.get_overflow_y())
+}
+
+/// What a component queued on `events` since the last drain, each a
+/// [`ComponentDetail::Fields`] event at `node`, as `(name, pairs)`.
+pub(in crate::main) fn fields_heard(
+    events: &ComponentEvents,
+    node: NodeId,
+) -> Vec<(&'static str, Vec<(&'static str, Field)>)> {
+    events
+        .take()
+        .into_iter()
+        .map(|event| match event {
+            ComponentEvent::Detailed {
+                node: at,
+                name,
+                detail: ComponentDetail::Fields(fields),
+            } => {
+                assert_eq!(at, node, "{name} is queued at the component's element");
+                (name, fields.into_vec())
+            }
+            other => panic!("only events with a fields detail are queued: {other:?}"),
+        })
+        .collect()
+}
+
+/// Dispatches the touch event `name` at `target` as the runtime dispatches
+/// a routed one: bubbling and composed.
+pub(in crate::main) fn touched(document: &mut LynxDocument, target: NodeId, name: &'static str) {
+    document.dispatch_element_event(target, name, &EventDetail::None, true, true, 0.0);
 }

@@ -1,7 +1,8 @@
 //! The `x-swiper` and `x-swiper-item` tags: a row (or, with `vertical`, a
 //! column) of items the user swipes through one item at a time, in one of
 //! five layouts, with a strip of dots, the autoplay that turns it on a timer,
-//! and the `scrollTo` UI method that turns to an item from script.
+//! the `scrollTo` UI method that turns to an item from script, and the
+//! `scrollstart`, `change`, `scrollend` and `transition` events.
 //!
 //! Translated from web-elements'
 //! `lynx-stack/packages/web-platform/web-elements/src/elements/XSwiper/x-swiper.css`
@@ -277,6 +278,54 @@
 //! the finger; Android stops its timer for the drag and waits a whole interval after it
 //! (`XSwiperUI.java:208-220`).
 //!
+//! # Events
+//!
+//! The component decides four events from what `#content` and the touches
+//! on the swiper tell it (user ruling 2026-10-20: a Rust component reacting
+//! to W3C events, nothing reported by the painter). `#content`'s `scroll`
+//! and `scrollend` neither bubble nor are composed, so their path ends at
+//! the swiper's shadow root, which delivers them to the swiper's
+//! [`CustomElement::handle_event`](dom::CustomElement::handle_event) in the
+//! capture pass; the component takes them when their target is `#content`
+//! and no other node. Each event is queued at the swiper — not bubbling,
+//! composed ([`super::ComponentEvents::queue_detailed`]) — only when a
+//! listener on the swiper registered for its name
+//! ([`dom::Document::has_listener`]); what the component remembers is
+//! recorded whether or not anything listens. Geometry is the last completed
+//! layout's, read when the `scroll` is delivered, and never flushed.
+//!
+//! - `scrollstart` `{current, isDragged}`: the first `scroll` since the last `scrollend` (or since
+//!   the swiper was connected), with the item reported before that `scroll` — web-core sends it
+//!   ahead of the `change` the same `scroll` may bring (`XSwiperEvents.ts`, `#handleScroll`).
+//! - `change` `{current, isDragged}`: a `scroll` after which the item whose snap position is
+//!   nearest `#content`'s offset on the main axis — the first on a tie, the rule autoplay's
+//!   [`turn`] counts from, [`super::scroll_container::nearest_snap_position`] — is another than the
+//!   one last reported. `current` is that item's index among the swiper's element children,
+//!   web-core's `children` index. Under `circular` the offset may stand across the seam, past
+//!   `max_offset`, and the positions all lie in one period: each is measured at its copy nearest
+//!   the offset, so the item reported is the one shown, and the index is the item's own, not its
+//!   position's rank (in `flat-coverflow` the first item's position is the last in the period).
+//!   web-core decides only once the offset moved a quarter page since its last decision, or near
+//!   either end (`#handleScroll`), and then by item centres (`XSwiper.ts`,
+//!   `#getNeatestElementIndexAndDistanceToMid`); here every `scroll` decides, by snap position,
+//!   which for equal items is the same nearest item.
+//! - `scrollend` `{current}`: `#content`'s `scrollend`, fired at the swiper itself, with the item
+//!   last reported: the kernel's own `scrollend` targets `#content` and never leaves its shadow
+//!   tree. web-core names its event `lynxscrollend`. Its delivery at the swiper reaches this
+//!   component too, and is not `#content`'s.
+//! - `transition` `{dx, dy}`: every `scroll`, with `#content`'s `scrollLeft` and `scrollTop`,
+//!   web-core's absolute offsets. Native sends its pager's scrolling offsets beside `current` and
+//!   `isDragged`, throttled by `transition-throttle` (Android `XSwiperUI.java:164-183`,
+//!   `onPageScrolling`): a recorded conflict where this follows web-core, which has no throttle.
+//!
+//! The item a swiper starts from is the `current` attribute it is connected with, read as
+//! web-core's `parseFloat(current ?? "0")`, a value that is no finite number being 0, so the
+//! scroll that puts a swiper on its initial item reports no change; a `current` written after the
+//! connection is read at the next one, as web-core reads it in `connectedCallback` alone.
+//! `isDragged` is whether a finger is down on the swiper or inside it
+//! ([`super::touches::Touches`]): web-core's touch flag, standing in for native's drag state
+//! (user ruling 2026-10-20). A swiper with no box decides nothing.
+//!
 //! # What is not implemented
 //!
 //! - Android's `finish-reset`, which rewinds a swiper that is not `circular` from its last item
@@ -289,7 +338,6 @@
 //!   (`XSwiperUI.java:569`), `previous-margin`/`next-margin` size and offset the page in
 //!   `coverflow`, `flat-coverflow` and `carry` (`:617-638`), and `duration` is the turn's animation
 //!   length, 500 ms by default (`:91,855-863`).
-//! - Every event (`change`, `scrollstart`, `scrollend`, `transition`).
 //! - `contain: strict` and `content-visibility: auto` from the twentieth item
 //!   (`x-swiper.css:77-80`), `scrollbar-width` and the per-item `view-timeline-name` rules: a
 //!   browser shortcut, a scrollbar this engine does not draw, and web-core's per-dot timelines.
@@ -306,10 +354,18 @@ use dom::stylo::values::specified::box_::ScrollSnapAlignKeyword;
 use dom::{
     CustomElement, MethodCall, MethodError, MethodOutcome, Node, NodeId, ShadowRootMode, Vector2D,
 };
+use rustc_hash::FxHashMap;
 use serde_json::Value;
-use smallvec::SmallVec;
+use smallvec::{SmallVec, smallvec};
 
-use super::{InvalidParams, LynxDocument, SLOT_CHANGE, element_child, is_truthy};
+use super::scroll_container::{
+    SCROLL_END_EVENT, SCROLL_EVENT, nearest_snap_position, rendered_scroll_box,
+};
+use super::touches::{TOUCH_CANCEL, TOUCH_END, TOUCH_START, Touches};
+use super::{
+    ComponentDetail, ComponentEvents, Field, InvalidParams, LynxDocument, SLOT_CHANGE,
+    element_child, element_child_index, is_truthy,
+};
 use crate::clock::ClockInstant;
 
 /// The swiper tag, web-core's only spelling of it.
@@ -453,11 +509,31 @@ const INDICATOR_ID: &str = "indicator";
 /// The registered custom property the host carries its item count in.
 const COUNT_PROPERTY: &str = "--swiper-count";
 
-/// Installs the `x-swiper` component. Must run before any element could
-/// carry the tag, which is [`Document::define`](dom::Document::define)'s own
-/// precondition.
-pub(super) fn define(document: &mut LynxDocument, autoplays: Autoplays) {
-    document.define(SWIPER_TAG, Box::new(Swiper { autoplays }));
+/// The event a swiper fires when its items start moving: the first
+/// `scroll` of `#content` since its last `scrollend`.
+pub(super) const SCROLL_START_EVENT: &str = "scrollstart";
+/// The event a swiper fires when a `scroll` changes the item it shows.
+pub(super) const CHANGE_EVENT: &str = "change";
+/// The event a swiper fires at itself when `#content` comes to rest: the
+/// kernel's own `scrollend` targets `#content` and ends at the shadow root.
+pub(super) const SWIPER_SCROLL_END_EVENT: &str = "scrollend";
+/// The event a swiper fires with `#content`'s offset at each `scroll`.
+pub(super) const TRANSITION_EVENT: &str = "transition";
+
+/// Installs the `x-swiper` component, which keeps its autoplay timers in
+/// `autoplays` and queues its events on `events`. Must run before any
+/// element could carry the tag, which is
+/// [`Document::define`](dom::Document::define)'s own precondition.
+pub(super) fn define(document: &mut LynxDocument, autoplays: Autoplays, events: ComponentEvents) {
+    document.define(
+        SWIPER_TAG,
+        Box::new(Swiper {
+            autoplays,
+            events,
+            touches: Touches::default(),
+            states: RefCell::default(),
+        }),
+    );
 }
 
 /// The period of an autoplay with no usable `interval`, web-core's
@@ -573,8 +649,9 @@ fn parse_float(text: &str) -> Option<f64> {
 
 /// The `x-swiper` component: builds the shadow tree when the element is
 /// constructed, keeps `--swiper-count` equal to the number of its element
-/// children, runs the autoplay timer, and answers the `scrollTo` UI method
-/// ([`scroll_to`]).
+/// children, runs the autoplay timer, answers the `scrollTo` UI method
+/// ([`scroll_to`]) and fires the swiper's events from `#content`'s
+/// `scroll` and `scrollend` (the module documentation's "Events").
 ///
 /// The shadow tree is built in `constructed`, not on connection: the element
 /// is new and detached then, and `__CreateElement` mints a swiper before
@@ -582,6 +659,41 @@ fn parse_float(text: &str) -> Option<f64> {
 /// the slot.
 struct Swiper {
     autoplays: Autoplays,
+    events: ComponentEvents,
+    /// The fingers down on each swiper, which `isDragged` reports.
+    touches: Touches,
+    /// What each connected swiper's events remember, dropped when it is
+    /// freed.
+    states: RefCell<FxHashMap<NodeId, SwiperState>>,
+}
+
+/// What a swiper's events remember between two deliveries.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SwiperState {
+    /// The item the swiper last reported, or the `current` attribute it was
+    /// connected with: web-core's `#current`, a number that need not name
+    /// an item until the first `change` replaces it.
+    current: f64,
+    /// Whether a `scroll` came since the last `scrollend`, so the next one
+    /// starts nothing.
+    scrolling: bool,
+}
+
+impl SwiperState {
+    /// A swiper's state as it connects: web-core's
+    /// `parseFloat(getAttribute('current') ?? '0')` (`XSwiperEvents.ts`,
+    /// `connectedCallback`), with a value that is no finite number read as
+    /// `0`, and nothing moving.
+    fn connected(document: &LynxDocument, swiper: NodeId) -> Self {
+        Self {
+            current: document
+                .get(swiper)
+                .and_then(|element| element.attribute("current"))
+                .and_then(parse_float)
+                .unwrap_or(0.0),
+            scrolling: false,
+        }
+    }
 }
 
 impl Swiper {
@@ -601,6 +713,114 @@ impl Swiper {
             );
         }
     }
+
+    /// `#content`'s `scroll`: `scrollstart` on the first since the last
+    /// `scrollend`, `change` when the item shown is another than the one
+    /// last reported, and `transition` with `#content`'s offset, in that
+    /// order. The item is tracked whether or not anything listens; each
+    /// event is queued only for a listener on the swiper. A swiper with no
+    /// box decides nothing.
+    fn scrolled(&self, document: &LynxDocument, swiper: NodeId, content: NodeId) {
+        let Some(scroll_box) = rendered_scroll_box(document, content) else {
+            return;
+        };
+        let shown = shown_item(document, swiper, content, scroll_box.offset);
+        let (before, started, changed) = {
+            let mut states = self.states.borrow_mut();
+            let state = states
+                .entry(swiper)
+                .or_insert_with(|| SwiperState::connected(document, swiper));
+            let before = state.current;
+            let started = !state.scrolling;
+            state.scrolling = true;
+            #[expect(
+                clippy::cast_precision_loss,
+                clippy::float_cmp,
+                reason = "an element child's index, far below 2^52, compared as web-core's `!==` \
+                          compares it with the number last reported"
+            )]
+            let changed = shown
+                .map(|index| index as f64)
+                .filter(|&index| index != state.current);
+            if let Some(index) = changed {
+                state.current = index;
+            }
+            (before, started, changed)
+        };
+        let dragged = self.touches.is_down(swiper);
+        if started && document.has_listener(swiper, SCROLL_START_EVENT) {
+            self.events.queue_detailed(
+                swiper,
+                SCROLL_START_EVENT,
+                ComponentDetail::Fields(smallvec![
+                    ("current", Field::Number(before)),
+                    ("isDragged", Field::Bool(dragged)),
+                ]),
+            );
+        }
+        if let Some(current) = changed
+            && document.has_listener(swiper, CHANGE_EVENT)
+        {
+            self.events.queue_detailed(
+                swiper,
+                CHANGE_EVENT,
+                ComponentDetail::Fields(smallvec![
+                    ("current", Field::Number(current)),
+                    ("isDragged", Field::Bool(dragged)),
+                ]),
+            );
+        }
+        if document.has_listener(swiper, TRANSITION_EVENT) {
+            self.events.queue_detailed(
+                swiper,
+                TRANSITION_EVENT,
+                ComponentDetail::Fields(smallvec![
+                    ("dx", Field::Number(f64::from(scroll_box.offset.x))),
+                    ("dy", Field::Number(f64::from(scroll_box.offset.y))),
+                ]),
+            );
+        }
+    }
+
+    /// `#content`'s `scrollend`: the swiper's own `scrollend` with the item
+    /// last reported, and the next `scroll` starts again.
+    fn scroll_ended(&self, document: &LynxDocument, swiper: NodeId) {
+        let current = {
+            let mut states = self.states.borrow_mut();
+            let Some(state) = states.get_mut(&swiper) else {
+                return;
+            };
+            state.scrolling = false;
+            state.current
+        };
+        if document.has_listener(swiper, SWIPER_SCROLL_END_EVENT) {
+            self.events.queue_detailed(
+                swiper,
+                SWIPER_SCROLL_END_EVENT,
+                ComponentDetail::Fields(smallvec![("current", Field::Number(current))]),
+            );
+        }
+    }
+}
+
+/// The element child of `swiper` whose snap position on its main axis
+/// `#content`, standing at `offset`, is nearest ([`nearest_snap_position`]),
+/// as its index among the swiper's element children; `None` when `#content`
+/// has no snap position.
+fn shown_item(
+    document: &LynxDocument,
+    swiper: NodeId,
+    content: NodeId,
+    offset: Vector2D<f32>,
+) -> Option<usize> {
+    let positions = document.snap_positions(content)?;
+    let (axis, at) = if is_vertical(document, swiper) {
+        (positions.y()?, offset.y)
+    } else {
+        (positions.x()?, offset.x)
+    };
+    let nearest = nearest_snap_position(&axis, at)?;
+    element_child_index(document, swiper, axis.points[nearest].area)
 }
 
 impl CustomElement<()> for Swiper {
@@ -609,17 +829,34 @@ impl CustomElement<()> for Swiper {
     }
 
     /// Its own shadow tree's `slotchange`, which is how it learns that its
-    /// assigned children changed.
+    /// assigned children changed; `#content`'s `scroll` and `scrollend`,
+    /// which its events are decided on; and the touches on it, which
+    /// `isDragged` counts.
     fn observed_events(&self) -> &'static [&'static str] {
-        &[SLOT_CHANGE]
+        &[
+            SLOT_CHANGE,
+            SCROLL_EVENT,
+            SCROLL_END_EVENT,
+            TOUCH_START,
+            TOUCH_END,
+            TOUCH_CANCEL,
+        ]
     }
 
     fn connected_callback(&self, document: &mut LynxDocument, element: NodeId) {
         self.handle_autoplay(document, element);
+        let state = SwiperState::connected(document, element);
+        self.states.borrow_mut().insert(element, state);
     }
 
     fn disconnected_callback(&self, _document: &LynxDocument, element: NodeId) {
         self.autoplays.stop(element);
+        self.touches.forget(element);
+    }
+
+    fn freed(&self, element: NodeId) {
+        self.states.borrow_mut().remove(&element);
+        self.touches.forget(element);
     }
 
     /// `autoplay` or `interval` changed. A swiper that is not connected
@@ -653,17 +890,43 @@ impl CustomElement<()> for Swiper {
 
     /// `slotchange` at the swiper's own slot, delivered at its shadow root,
     /// once per pass: the capture delivery is skipped, the bubble one counts.
+    ///
+    /// `scroll` and `scrollend` whose target is `#content`, delivered at the
+    /// shadow root too, but in the capture pass alone, since neither
+    /// bubbles; the same names aimed anywhere else — a scroller inside an
+    /// item, whose capture pass crosses the swiper, or the swiper's own
+    /// `scrollend`, which it fires at itself — are not its own. Every touch
+    /// event goes to its count.
     fn handle_event(
         &self,
         document: &mut LynxDocument,
         element: NodeId,
         event: &mut ElementEvent<'_>,
     ) {
-        if event.type_name() == SLOT_CHANGE
-            && event.phase() == EventPhase::Bubbling
-            && slot(document, element) == Some(event.target())
-        {
-            count_items(document, element);
+        match event.type_name() {
+            SLOT_CHANGE => {
+                if event.phase() == EventPhase::Bubbling
+                    && slot(document, element) == Some(event.target())
+                {
+                    count_items(document, element);
+                }
+            }
+            name @ (SCROLL_EVENT | SCROLL_END_EVENT) => {
+                let Some(content) = content(document, element) else {
+                    return;
+                };
+                if event.target() != content {
+                    return;
+                }
+                if name == SCROLL_EVENT {
+                    self.scrolled(document, element, content);
+                } else {
+                    self.scroll_ended(document, element);
+                }
+            }
+            _ => {
+                self.touches.observe(element, event);
+            }
         }
     }
 
@@ -817,7 +1080,12 @@ fn flag(element: &Node<()>, name: &str) -> bool {
 ///
 /// The positions are the swiper's snap positions on its main axis
 /// ([`dom::Document::snap_positions`]), one per item, in order. The current
-/// item is the one whose position is nearest the offset, the first on a tie.
+/// item is the one whose position is nearest the offset, the first on a tie
+/// ([`nearest_snap_position`], which the swiper's events share): under
+/// `circular` an offset across the seam counts from the item whose copy
+/// beyond it is nearer, and the positions, all inside one period, are the
+/// items' in tree order turned about the seam, so the next one is still the
+/// next item.
 /// That is web-core's "item whose centre is nearest the scrollport's mid"
 /// (`XSwiper.ts:37-91`, the mid at 40% of the scrollport in `carousel`)
 /// restated: items are equal on the main axis, and each one's position is
@@ -877,15 +1145,11 @@ fn turn(document: &mut LynxDocument, swiper: NodeId) {
     } else {
         (positions.x(), offset.x)
     };
-    let Some(points) = axis.map(|axis| axis.points) else {
+    let Some(axis) = axis else {
         return;
     };
-    let distance = |index: usize| {
-        let point = points[index];
-        (point.min - at).max(at - point.max).max(0.0)
-    };
-    let Some(current) = (0..points.len()).min_by(|a, b| distance(*a).total_cmp(&distance(*b)))
-    else {
+    let points = axis.points;
+    let Some(current) = nearest_snap_position(&axis, at) else {
         return;
     };
     let next = if current + 1 < points.len() {
@@ -2839,5 +3103,344 @@ mod tests {
             Some(late + Duration::from_secs(1)),
             "one period after the run"
         );
+    }
+
+    // --- the events ---------------------------------------------------------
+
+    use dom::event::EventDetail;
+
+    use super::super::scroll_container::tests::{listen, scrolled};
+    use super::super::test_support::{fields_heard, touched, with_component_events};
+    use super::super::touches::{TOUCH_END, TOUCH_START};
+    use super::super::{ComponentEvents, Field, PageConfig};
+    use super::{CHANGE_EVENT, SCROLL_START_EVENT, SWIPER_SCROLL_END_EVENT, TRANSITION_EVENT};
+
+    /// A laid-out swiper of three items, with the document's component
+    /// events: a 200 x 100 row of 200px items (snap positions 0, 200, 400),
+    /// or under `vertical` a 100 x 200 column of 200px items, and
+    /// `attributes` set before the items arrive.
+    fn evented(
+        attributes: &[(&str, &str)],
+    ) -> (LynxDocument, ComponentEvents, NodeId, Vec<NodeId>) {
+        let (mut document, events) = with_component_events(PageConfig::default());
+        let vertical = attributes.iter().any(|(name, _)| *name == "vertical");
+        let style = if vertical {
+            "width: 100px; height: 200px"
+        } else {
+            "width: 200px; height: 100px"
+        };
+        let (swiper, items) = build(&mut document, style, attributes, 3);
+        document.layout();
+        (document, events, swiper, items)
+    }
+
+    /// `#content`'s `scrollend`, delivered as the runtime delivers the
+    /// kernel's: at `#content`, not bubbling, not composed.
+    fn content_scroll_ended(document: &mut LynxDocument, swiper: NodeId) {
+        let content = scroller(document, swiper);
+        document.dispatch_element_event(
+            content,
+            "scrollend",
+            &EventDetail::None,
+            false,
+            false,
+            0.0,
+        );
+    }
+
+    fn x(offset: f32) -> Vector2D<f32> {
+        Vector2D::new(offset, 0.0)
+    }
+
+    fn current(index: f64, dragged: bool) -> Vec<(&'static str, Field)> {
+        vec![
+            ("current", Field::Number(index)),
+            ("isDragged", Field::Bool(dragged)),
+        ]
+    }
+
+    #[test]
+    fn a_swiper_with_no_listener_queues_nothing_and_still_tracks_its_item() {
+        let (mut document, events, swiper, _) = evented(&[]);
+        let content = scroller(&document, swiper);
+        for offset in [100.0, 250.0, 400.0] {
+            scrolled(&mut document, content, x(offset));
+        }
+        content_scroll_ended(&mut document, swiper);
+        assert_eq!(fields_heard(&events, swiper), [], "nobody listens");
+
+        // The item was tracked while nobody listened: the third is no
+        // change, the second is.
+        listen(&mut document, swiper, CHANGE_EVENT);
+        scrolled(&mut document, content, x(390.0));
+        assert_eq!(fields_heard(&events, swiper), []);
+        scrolled(&mut document, content, x(200.0));
+        assert_eq!(
+            fields_heard(&events, swiper),
+            [(CHANGE_EVENT, current(1.0, false))]
+        );
+    }
+
+    /// `scrollstart` comes with the first `scroll` since the last
+    /// `scrollend`, carrying the item reported before that `scroll`, as
+    /// web-core sends it ahead of the `change` the same `scroll` may bring.
+    #[test]
+    fn scrollstart_fires_once_per_run_of_scrolls() {
+        let (mut document, events, swiper, _) = evented(&[]);
+        let content = scroller(&document, swiper);
+        listen(&mut document, swiper, SCROLL_START_EVENT);
+        scrolled(&mut document, content, x(50.0));
+        assert_eq!(
+            fields_heard(&events, swiper),
+            [(SCROLL_START_EVENT, current(0.0, false))]
+        );
+        scrolled(&mut document, content, x(150.0));
+        scrolled(&mut document, content, x(200.0));
+        assert_eq!(fields_heard(&events, swiper), [], "the same run");
+        content_scroll_ended(&mut document, swiper);
+        scrolled(&mut document, content, x(300.0));
+        assert_eq!(
+            fields_heard(&events, swiper),
+            [(SCROLL_START_EVENT, current(1.0, false))],
+            "a new run, from the item the last one changed to"
+        );
+    }
+
+    /// `change` comes on the `scroll` that makes another item's snap
+    /// position the nearest, with no quarter-page gate, and not on a move
+    /// that keeps the item; a tie keeps the first.
+    #[test]
+    fn change_fires_when_the_nearest_item_changes() {
+        let (mut document, events, swiper, _) = evented(&[]);
+        let content = scroller(&document, swiper);
+        listen(&mut document, swiper, CHANGE_EVENT);
+        for offset in [40.0, 99.0, 100.0] {
+            scrolled(&mut document, content, x(offset));
+        }
+        assert_eq!(fields_heard(&events, swiper), [], "still nearest the first");
+        scrolled(&mut document, content, x(101.0));
+        assert_eq!(
+            fields_heard(&events, swiper),
+            [(CHANGE_EVENT, current(1.0, false))]
+        );
+        scrolled(&mut document, content, x(150.0));
+        assert_eq!(fields_heard(&events, swiper), [], "a small move");
+        scrolled(&mut document, content, x(400.0));
+        scrolled(&mut document, content, x(390.0));
+        assert_eq!(
+            fields_heard(&events, swiper),
+            [(CHANGE_EVENT, current(2.0, false))]
+        );
+    }
+
+    /// The item a swiper is connected on is the one `current` names as it
+    /// connects, read as web-core's `parseFloat`: a swiper that starts on it
+    /// reports no change, and one whose `current` names no finite number
+    /// starts from 0. A `current` written after the connection is read by
+    /// the next one, as web-core reads it in `connectedCallback` alone.
+    #[test]
+    fn the_connected_item_is_the_current_attribute() {
+        for (value, first) in [("2", 2.0), ("2.5", 2.5), ("abc", 0.0), ("1e400", 0.0)] {
+            let (mut document, events) = with_component_events(PageConfig::default());
+            let swiper = document.create_element(SWIPER_TAG, ());
+            document.set_inline_style(swiper, "width: 200px; height: 100px");
+            document.set_attribute(swiper, "current", value);
+            for _ in 0..3 {
+                element_under(&mut document, swiper, SWIPER_ITEM_TAG, "");
+            }
+            let page = document.document_element().id();
+            document.append_child(page, swiper);
+            document.layout();
+            let content = scroller(&document, swiper);
+            listen(&mut document, swiper, SCROLL_START_EVENT);
+            listen(&mut document, swiper, CHANGE_EVENT);
+            scrolled(&mut document, content, x(400.0));
+            let mut expected = vec![(SCROLL_START_EVENT, current(first, false))];
+            if first != 2.0 {
+                expected.push((CHANGE_EVENT, current(2.0, false)));
+            }
+            assert_eq!(fields_heard(&events, swiper), expected, "current={value:?}");
+        }
+    }
+
+    /// `#content`'s `scrollend` is the swiper's own, at the swiper, with
+    /// the item last reported; that event, delivered at the swiper, is not
+    /// `#content`'s and changes nothing.
+    #[test]
+    fn scrollend_reports_the_current_item_at_the_swiper() {
+        let (mut document, events, swiper, _) = evented(&[]);
+        let content = scroller(&document, swiper);
+        listen(&mut document, swiper, SWIPER_SCROLL_END_EVENT);
+        scrolled(&mut document, content, x(210.0));
+        assert_eq!(fields_heard(&events, swiper), [], "no scrollend yet");
+        content_scroll_ended(&mut document, swiper);
+        assert_eq!(
+            fields_heard(&events, swiper),
+            [(
+                SWIPER_SCROLL_END_EVENT,
+                vec![("current", Field::Number(1.0))]
+            )]
+        );
+        // The queued event's delivery: at the swiper, not bubbling,
+        // composed.
+        document.dispatch_element_event(
+            swiper,
+            SWIPER_SCROLL_END_EVENT,
+            &EventDetail::None,
+            false,
+            true,
+            0.0,
+        );
+        assert_eq!(fields_heard(&events, swiper), []);
+    }
+
+    /// `transition` carries `#content`'s offset at each `scroll`, web-core's
+    /// absolute `{dx, dy}`.
+    #[test]
+    fn transition_reports_the_contents_offset_at_each_scroll() {
+        let (mut document, events, swiper, _) = evented(&[]);
+        let content = scroller(&document, swiper);
+        listen(&mut document, swiper, TRANSITION_EVENT);
+        for offset in [30.0, 230.5] {
+            scrolled(&mut document, content, x(offset));
+            assert_eq!(
+                fields_heard(&events, swiper),
+                [(
+                    TRANSITION_EVENT,
+                    vec![
+                        ("dx", Field::Number(f64::from(offset))),
+                        ("dy", Field::Number(0.0)),
+                    ]
+                )]
+            );
+        }
+    }
+
+    /// Under `vertical` the item is read from the y offset, and
+    /// `transition` reports it as `dy`.
+    #[test]
+    fn a_vertical_swiper_reads_its_y_offset() {
+        let (mut document, events, swiper, _) = evented(&[("vertical", "")]);
+        let content = scroller(&document, swiper);
+        assert_eq!(snap_points(&document, swiper, true), [0.0, 200.0, 400.0]);
+        listen(&mut document, swiper, CHANGE_EVENT);
+        listen(&mut document, swiper, TRANSITION_EVENT);
+        scrolled(&mut document, content, Vector2D::new(0.0, 210.0));
+        assert_eq!(
+            fields_heard(&events, swiper),
+            [
+                (CHANGE_EVENT, current(1.0, false)),
+                (
+                    TRANSITION_EVENT,
+                    vec![("dx", Field::Number(0.0)), ("dy", Field::Number(210.0))]
+                ),
+            ]
+        );
+    }
+
+    /// Under `circular` the offset may stand across the seam, past the last
+    /// item: it shows the first item's next copy when that is nearer, and
+    /// the item reported is the item's own index, not its position's rank —
+    /// in `flat-coverflow` the first item's position lies at the end of the
+    /// period.
+    #[test]
+    fn a_circular_swiper_reports_the_item_across_the_seam() {
+        let (mut document, events, swiper, _) = evented(&[("circular", "")]);
+        let content = scroller(&document, swiper);
+        listen(&mut document, swiper, CHANGE_EVENT);
+        scrolled(&mut document, content, x(400.0));
+        assert_eq!(
+            fields_heard(&events, swiper),
+            [(CHANGE_EVENT, current(2.0, false))]
+        );
+        // The period is 600: 550 is 50 short of the first item's next copy.
+        scrolled(&mut document, content, x(550.0));
+        assert_eq!(
+            document.scroll_offset(content),
+            x(550.0),
+            "the offset stands across the seam"
+        );
+        assert_eq!(
+            fields_heard(&events, swiper),
+            [(CHANGE_EVENT, current(0.0, false))]
+        );
+
+        let (mut document, events) = with_component_events(PageConfig::default());
+        let (swiper, _) = build(
+            &mut document,
+            "width: 200px; height: 100px",
+            &[("mode", "flat-coverflow"), ("circular", "")],
+            3,
+        );
+        document.layout();
+        let content = scroller(&document, swiper);
+        assert_eq!(
+            snap_points(&document, swiper, false),
+            [80.0, 200.0, 320.0],
+            "the first item's centre, -40, stands at 320 on the circle"
+        );
+        listen(&mut document, swiper, CHANGE_EVENT);
+        scrolled(&mut document, content, x(320.0));
+        assert_eq!(fields_heard(&events, swiper), [], "the first item");
+        scrolled(&mut document, content, x(80.0));
+        scrolled(&mut document, content, x(10.0));
+        assert_eq!(
+            fields_heard(&events, swiper),
+            [
+                (CHANGE_EVENT, current(1.0, false)),
+                (CHANGE_EVENT, current(0.0, false)),
+            ],
+            "10 is 50 past the first item's position, -40, and 70 short of the second's"
+        );
+    }
+
+    /// `isDragged` is whether a finger is down on the swiper — on an item
+    /// counts — as each event is queued.
+    #[test]
+    fn is_dragged_is_whether_a_finger_is_down() {
+        let (mut document, events, swiper, items) = evented(&[]);
+        let content = scroller(&document, swiper);
+        listen(&mut document, swiper, SCROLL_START_EVENT);
+        listen(&mut document, swiper, CHANGE_EVENT);
+        touched(&mut document, items[0], TOUCH_START);
+        scrolled(&mut document, content, x(150.0));
+        assert_eq!(
+            fields_heard(&events, swiper),
+            [
+                (SCROLL_START_EVENT, current(0.0, true)),
+                (CHANGE_EVENT, current(1.0, true)),
+            ]
+        );
+        touched(&mut document, items[0], TOUCH_END);
+        scrolled(&mut document, content, x(350.0));
+        assert_eq!(
+            fields_heard(&events, swiper),
+            [(CHANGE_EVENT, current(2.0, false))],
+            "the finger lifted and the glide went on"
+        );
+    }
+
+    /// A scroller inside an item fires its own `scroll`, whose capture pass
+    /// crosses the swiper; the swiper decides nothing on it.
+    #[test]
+    fn a_scroller_inside_an_item_is_not_the_swipers() {
+        let (mut document, events, swiper, items) = evented(&[]);
+        let inner = element_under(
+            &mut document,
+            items[1],
+            "scroll-view",
+            "width: 100px; height: 50px",
+        );
+        element_under(
+            &mut document,
+            inner,
+            "view",
+            "height: 300px; flex-shrink: 0",
+        );
+        document.layout();
+        listen(&mut document, swiper, SCROLL_START_EVENT);
+        listen(&mut document, swiper, TRANSITION_EVENT);
+        scrolled(&mut document, inner, Vector2D::new(0.0, 100.0));
+        assert_eq!(fields_heard(&events, swiper), []);
     }
 }

@@ -2277,6 +2277,79 @@ fn a_scroll_view_fires_scrolltolower_from_its_own_scroll() {
     expect_seen(&mut js_runtime, &mut runtime, "");
 }
 
+/// An `x-swiper`'s `change` end to end: a painter post that moves its
+/// shadow `#content` queues the kernel `scroll` there, with no realm
+/// listening for that name; its delivery, which ends at the shadow root,
+/// reaches the swiper's component, which queues `change` at the swiper; and
+/// that event reaches the swiper's listener an entry later as
+/// `{current, isDragged}`, without bubbling to the page.
+#[test]
+fn a_swiper_fires_change_from_its_contents_scroll() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const swiper = __CreateElement('x-swiper', 0);
+                  __SetAttribute(swiper, 'vertical', '');
+                  __SetInlineStyles(swiper, 'width:100px;height:200px');
+                  __AppendElement(page, swiper);
+                  for (let i = 0; i < 3; i++) {
+                    __AppendElement(swiper, __CreateElement('x-swiper-item', 0));
+                  }
+                  globalThis.held = [page, swiper];
+                  const note = (label) => ({
+                    type: 'worklet',
+                    value: {
+                      body: (event) =>
+                        seen.push(label + ':' + event.type + ':' + JSON.stringify(event.detail)),
+                    },
+                  });
+                  __AddEvent(swiper, 'bindEvent', 'change', note('swiper'));
+                  __AddEvent(page, 'bindEvent', 'change', note('page'));
+                  __FlushElementTree();
+                };
+                ",
+            "app:///swiper-change.js",
+        )
+        .expect("main-thread script");
+    let content = {
+        let tree = elements.tree();
+        let page = tree.document_element().id();
+        let swiper = tree.get(page).expect("the page").child_ids()[0];
+        crate::main::tree::swiper::content(&tree, swiper).expect("the swiper's `#content`")
+    };
+
+    runtime.adopt_scroll_offsets([scroll_post(content, 210.0, false)].into_iter());
+    assert_eq!(
+        runtime.slot.borrow().component_events.take(),
+        [queued_scroll(content, 210.0)],
+        "`#content`'s `scroll` is owed with no realm listener for it"
+    );
+    runtime.slot.borrow().component_events.queue_scroll(
+        content,
+        "scroll",
+        dom::Vector2D::new(0.0, 210.0),
+    );
+    let failures = runtime.dispatch_component_events(&mut js_runtime);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(
+        runtime.has_component_events(),
+        "the `change` waits for an entry of its own"
+    );
+    let failures = runtime.dispatch_component_events(&mut js_runtime);
+    assert!(failures.is_empty(), "{failures:?}");
+    expect_seen(
+        &mut js_runtime,
+        &mut runtime,
+        r#"swiper:change:{"current":1,"isDragged":false}"#,
+    );
+}
+
 /// A [`ComponentDetail::Fields`] detail reaches script as one key per pair,
 /// numbers as numbers and booleans as booleans, in the component's order:
 /// the `{current, isDragged}` shape.
@@ -2331,13 +2404,34 @@ fn a_component_event_with_a_fields_detail_reaches_script_as_numbers_and_booleans
     );
 }
 
+/// What the page's `x-swiper` component observes — its slot's
+/// `slotchange`, `#content`'s `scroll` and `scrollend`, and the touches its
+/// `isDragged` counts — with `names` beside them, sorted as
+/// [`PublishedNames::names`] lists them.
+fn with_swiper(names: &[&str]) -> Vec<String> {
+    let mut all: Vec<String> = [
+        "scroll",
+        "scrollend",
+        "slotchange",
+        "touchcancel",
+        "touchend",
+        "touchstart",
+    ]
+    .iter()
+    .chain(names)
+    .map(|name| (*name).to_owned())
+    .collect();
+    all.sort();
+    all
+}
+
 /// The painter's name set follows the realm's registration counts crossing
 /// zero with two adjustments: a `dblclick` registration routes `click` there
 /// too (the `dblclick` is decided from the `click`s the painter sends) and
 /// removing it stops routing `click` only when `click` is not listened for
 /// itself; and a name an element alive observes (the page's `x-swiper`'s
-/// `slotchange`) stays routed whatever the realm's registrations for it say,
-/// where an unobserved name stops being routed with its last registration.
+/// `slotchange`, `scroll`, `scrollend` and touches) stays routed whatever the realm's registrations
+/// for it say, where an unobserved name stops being routed with its last registration.
 /// `tap`, which no element here observes, is not there at all.
 #[test]
 fn the_painter_names_pair_click_with_dblclick_and_keep_observed_names() {
@@ -2369,36 +2463,36 @@ fn the_painter_names_pair_click_with_dblclick_and_keep_observed_names() {
     };
 
     step("__AddEventListener(page, 'dblclick', globalThis.listener, {});");
-    assert_eq!(names.names(), ["click", "dblclick", "slotchange"]);
+    assert_eq!(names.names(), with_swiper(&["click", "dblclick"]));
     step("__AddEventListener(page, 'click', globalThis.listener, {});");
     step("__RemoveEventListener(page, 'dblclick', globalThis.listener, {});");
     assert_eq!(
         names.names(),
-        ["click", "slotchange"],
+        with_swiper(&["click"]),
         "`click` is listened for itself"
     );
     step("__AddEventListener(page, 'dblclick', globalThis.listener, {});");
     step("__RemoveEventListener(page, 'click', globalThis.listener, {});");
     assert_eq!(
         names.names(),
-        ["click", "dblclick", "slotchange"],
+        with_swiper(&["click", "dblclick"]),
         "`dblclick` still needs the `click`s"
     );
     step("__RemoveEventListener(page, 'dblclick', globalThis.listener, {});");
-    assert_eq!(names.names(), ["slotchange"]);
+    assert_eq!(names.names(), with_swiper(&[]));
 
     step(
         "__AddEventListener(page, 'slotchange', globalThis.listener, {});
          __AddEventListener(page, 'swipe', globalThis.listener, {});",
     );
-    assert_eq!(names.names(), ["slotchange", "swipe"]);
+    assert_eq!(names.names(), with_swiper(&["swipe"]));
     step(
         "__RemoveEventListener(page, 'slotchange', globalThis.listener, {});
          __RemoveEventListener(page, 'swipe', globalThis.listener, {});",
     );
     assert_eq!(
         names.names(),
-        ["slotchange"],
+        with_swiper(&[]),
         "the last removal of an observed name keeps it routed; of another, it does not"
     );
 }
