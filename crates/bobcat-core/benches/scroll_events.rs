@@ -10,13 +10,19 @@
 //!
 //! Whether a container's event is queued is decided by name over the whole
 //! document, not per container: once any registration of the name exists,
-//! every container that moves queues its event, and the delivery dispatches
-//! each one — at a container with no registration on its path, that is the
-//! path built and walked without a realm call. So `scroll_nobody_listens` is
-//! the cost with nothing queued, the two `*_one_listened_elsewhere` cases the
-//! cost of a frame's events dispatched to no realm (`scroll` while moving,
-//! `scrollend` at rest), and `scroll_the_listened_container` one event that
-//! does call the realm.
+//! or a live element whose component observes it, every container that
+//! moves queues its event, and the delivery dispatches each one — at a
+//! container with no registration on its path, that is the path built and
+//! walked through the components without a realm call. The `scroll-view`
+//! component observes `scroll` (its threshold events), so a page of
+//! `scroll-view`s queues even with no listener anywhere; the floor is
+//! therefore a page of `view`s with `overflow-y: scroll`, scroll containers
+//! that no component observes. So `scroll_nobody_listens` is the
+//! cost with nothing queued, `scroll_components_observe` the cost the
+//! `scroll-view` component adds to that with no listener at all, the two
+//! `*_one_listened_elsewhere` cases the cost of a frame's events dispatched
+//! to no realm (`scroll` while moving, `scrollend` at rest), and
+//! `scroll_the_listened_container` one event that does call the realm.
 //!
 //! The realm boots once per case, outside the timed region. Every timed frame
 //! moves its containers: the posts alternate between two offsets.
@@ -41,15 +47,16 @@ const CONTAINERS: usize = 20;
 /// container's scroll range (`ROWS` rows of 40px in a 30px box).
 const OFFSETS: [f32; 2] = [20.0, 40.0];
 
-/// The page every case boots: `CONTAINERS` `scroll-view`s in a column, each
-/// 30px tall and holding three 40px rows, laid out by the boot's flush.
-/// `listener` is a module body run before the flush, with `scrollers` in
-/// scope.
+/// The page every case boots: `CONTAINERS` containers of `tag` in a column,
+/// each 30px tall and holding three 40px rows, laid out by the boot's flush.
+/// `style` is extra inline style for each container ([`VIEW_STYLE`] or
+/// nothing); `listener` is a module body run before the flush, with
+/// `scrollers` in scope.
 ///
 /// The listener is a main-thread function, which files the same path
 /// registration a `bindscroll` does and keeps the dispatch on this thread:
 /// the harness has no background thread to publish a `bindscroll` to.
-fn page_source(listener: &str) -> String {
+fn page_source(tag: &str, style: &str, listener: &str) -> String {
     format!(
         r"
         globalThis.renderPage = function () {{
@@ -57,8 +64,8 @@ fn page_source(listener: &str) -> String {
           __SetInlineStyles(page, {{ display: 'flex', flexDirection: 'column' }});
           const scrollers = [];
           for (let i = 0; i < {CONTAINERS}; i += 1) {{
-            const scroller = __CreateElement('scroll-view', 0);
-            __SetInlineStyles(scroller, {{ width: '100%', height: '30px', flexShrink: '0' }});
+            const scroller = __CreateElement('{tag}', 0);
+            __SetInlineStyles(scroller, {{ {style} width: '100%', height: '30px', flexShrink: '0' }});
             for (let j = 0; j < 3; j += 1) {{
               const row = __CreateView(0);
               __SetInlineStyles(row, {{ width: '100%', height: '40px', flexShrink: '0' }});
@@ -81,15 +88,29 @@ const LISTEN_SCROLL: &str = "__AddEventListener(scrollers[0], 'scroll', () => {}
 /// A `scrollend` listener on the first container.
 const LISTEN_SCROLL_END: &str = "__AddEventListener(scrollers[0], 'scrollend', () => {}, {});";
 
-/// Boots the page and answers the harness with the two frames' posts for the
-/// containers `moving` names, at rest when `rest` is set.
+/// The tag whose component observes `scroll`.
+const SCROLL_VIEW: &str = "scroll-view";
+
+/// The tag no component observes, made a scroll container by
+/// [`VIEW_STYLE`] (a `view` defaults to visible overflow).
+const VIEW: &str = "view";
+
+/// The inline style that makes a [`VIEW`] container scroll on y, as the UA
+/// sheet makes a `scroll-view`.
+const VIEW_STYLE: &str = "overflowY: 'scroll',";
+
+/// Boots a page of `tag` containers and answers the harness with the two
+/// frames' posts for the containers `moving` names, at rest when `rest` is
+/// set.
 fn setup(
+    tag: &str,
     listener: &str,
     moving: std::ops::Range<usize>,
     rest: bool,
 ) -> (ScriptHarness, [Vec<ScrollPost>; 2]) {
     let mut harness = ScriptHarness::new();
-    harness.boot(&page_source(listener));
+    let style = if tag == VIEW { VIEW_STYLE } else { "" };
+    harness.boot(&page_source(tag, style, listener));
     let page = harness.page();
     assert_eq!(harness.child_count(page), CONTAINERS);
     let containers: Vec<u64> = (0..CONTAINERS)
@@ -118,13 +139,27 @@ fn run(bencher: divan::Bencher, mut harness: ScriptHarness, posts: &[Vec<ScrollP
 }
 
 /// Every container moves and nothing anywhere listens for `scroll` or
-/// `scrollend`.
+/// `scrollend`: `view`s, which no component observes, so nothing is queued.
 #[divan::bench]
 fn scroll_nobody_listens(bencher: divan::Bencher) {
-    let (mut harness, posts) = setup("", 0..CONTAINERS, false);
+    let (mut harness, posts) = setup(VIEW, "", 0..CONTAINERS, false);
     assert!(
         !harness.scroll_frame(&posts[1]),
-        "nothing listens: no delivery"
+        "nothing listens and no component observes: no delivery"
+    );
+    run(bencher, harness, &posts);
+}
+
+/// Every container moves and nothing listens, but the containers are
+/// `scroll-view`s, whose component observes `scroll`: every one's `scroll`
+/// is queued and walked to the component, which finds no listener for its
+/// threshold events, and no realm is called.
+#[divan::bench]
+fn scroll_components_observe(bencher: divan::Bencher) {
+    let (mut harness, posts) = setup(SCROLL_VIEW, "", 0..CONTAINERS, false);
+    assert!(
+        harness.scroll_frame(&posts[1]),
+        "the scroll-view component observes `scroll`: a delivery to no realm"
     );
     run(bencher, harness, &posts);
 }
@@ -132,7 +167,7 @@ fn scroll_nobody_listens(bencher: divan::Bencher) {
 /// The first container listens for `scroll`; every other container moves.
 #[divan::bench]
 fn scroll_one_listened_elsewhere(bencher: divan::Bencher) {
-    let (harness, posts) = setup(LISTEN_SCROLL, 1..CONTAINERS, false);
+    let (harness, posts) = setup(SCROLL_VIEW, LISTEN_SCROLL, 1..CONTAINERS, false);
     run(bencher, harness, &posts);
 }
 
@@ -140,7 +175,7 @@ fn scroll_one_listened_elsewhere(bencher: divan::Bencher) {
 /// dispatch, which calls the realm.
 #[divan::bench]
 fn scroll_the_listened_container(bencher: divan::Bencher) {
-    let (mut harness, posts) = setup(LISTEN_SCROLL, 0..1, false);
+    let (mut harness, posts) = setup(SCROLL_VIEW, LISTEN_SCROLL, 0..1, false);
     assert!(
         harness.scroll_frame(&posts[1]),
         "the listened container's `scroll` is delivered"
@@ -153,6 +188,6 @@ fn scroll_the_listened_container(bencher: divan::Bencher) {
 /// event in question and `scroll` is heard nowhere.
 #[divan::bench]
 fn scrollend_one_listened_elsewhere(bencher: divan::Bencher) {
-    let (harness, posts) = setup(LISTEN_SCROLL_END, 1..CONTAINERS, true);
+    let (harness, posts) = setup(SCROLL_VIEW, LISTEN_SCROLL_END, 1..CONTAINERS, true);
     run(bencher, harness, &posts);
 }
