@@ -459,7 +459,7 @@ impl<T> Document<T> {
             self.note_popover_attribute_change(id, old);
         }
         if editing {
-            self.fix_up_focus();
+            self.fix_up_selection();
         }
         self.drain_reactions(base);
     }
@@ -511,7 +511,7 @@ impl<T> Document<T> {
             self.note_popover_attribute_change(id, old);
         }
         if editing {
-            self.fix_up_focus();
+            self.fix_up_selection();
         }
         self.drain_reactions(base);
     }
