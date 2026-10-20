@@ -245,6 +245,17 @@ use crate::main::record::write_record_field;
 /// code 8.
 pub(super) const TEXT_TAG: &str = "text";
 
+/// Whether `node` is a live `text` element: the one tag a `layout` listener
+/// turns the paragraph's layout report on for
+/// ([`crate::main::layout_events`]). A nested `text` is one too, and reports
+/// nothing, since it establishes no paragraph.
+pub(crate) fn is_text(document: &LynxDocument, node: NodeId) -> bool {
+    document
+        .get(node)
+        .and_then(dom::Node::tag_name)
+        .is_some_and(|tag| tag == TEXT_TAG)
+}
+
 /// Installs the `text` component, and `inline-text` and `inline-truncation`
 /// beside it as Lynx text elements with no component behaviour. Must run
 /// before any element could carry the tags, which is

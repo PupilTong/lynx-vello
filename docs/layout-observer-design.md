@@ -1,7 +1,7 @@
 # Layout events: `layoutchange`, `<text>` `layout`, and a ResizeObserver primitive
 
-Investigation and design evaluation, 2026-10-20. Nothing here is built yet.
-The open decisions are listed at the end; the rest is what the references
+Investigation and design evaluation, 2026-10-20. The decisions are listed
+at the end, with what was built from them; the rest is what the references
 do, what this engine already has, and what each implementation path costs.
 
 ## 1. Which layout events Lynx has
@@ -158,16 +158,20 @@ is the deviation.
   monotone, `Box<dyn ResizeEventHandler<T>>` per observer (the same `dyn`
   ruling as the IO primitive), a stale bit.
 - `Registration { target: NodeId, box: ObservedBox, last_reported: Size<f32> }`,
-  `last_reported` initialised to `(0, 0)` as the spec's
-  `lastReportedSizes` is.
+  `last_reported` initialised to `(-1, -1)`, the current spec's initial
+  `lastReportedSizes` (the CSSWG resolution on csswg-drafts issue 3664), so
+  the first update reports every target once, a `0 × 0` or `display: none`
+  one included.
 - `ObservedBox`: `ContentBox` (default), `BorderBox`,
   `DevicePixelContentBox`. Horizontal writing mode only, so
   `inlineSize = width`, `blockSize = height`.
 - `gather_active_resize_observations(depth)`: for each registration, read
-  `rounded_layout(target)`; a node not rendered (no box, `display: none`,
-  under a skipping `content-visibility` ancestor) is `(0, 0)`; the
-  observation is active when the box's size differs from `last_reported`
-  and the target's depth (ancestor count) is greater than `depth`.
+  `rounded_layout(target)`; a node not rendered (no box, `display: none`) is
+  `(0, 0)`; a target under a skipping `content-visibility` ancestor is left
+  alone, neither compared nor updated, as Chromium leaves a target in a
+  display-locked subtree; the observation is active when the box's size
+  differs from `last_reported` and the target's depth (ancestor count) is
+  greater than `depth`.
 - `broadcast`: per observer with active observations, build the entries
   (`contentRect` = content size at `(padding.left, padding.top)`;
   `borderBoxSize`, `contentBoxSize`, `devicePixelContentBoxSize` = content
@@ -248,9 +252,9 @@ realm is a Worker there), so this is additive and can follow the adapter.
   (`Document::layout` lays out against `device().viewport_size()`), so
   `bounding_client_rect` is already Lynx-view relative, exactly what the
   `boundingClientRect` UI method answers.
-- Semantics: fires on border-box size change only (web-core), on the
-  initial observation when the size is nonzero (spec), and with `(0, 0)`
-  when the element stops being rendered.
+- Semantics: fires on border-box size change only (web-core), once on the
+  initial observation whatever the size (spec, `0 × 0` included), and with
+  `(0, 0)` when the element stops being rendered.
 
 ### 3.2 Path B: a `LayoutObserver` of the element's own box
 
@@ -296,10 +300,11 @@ Concretely:
   hughie's layout cache missed, and its `input.goal.commits()` branch is
   the committing run that recomputed the lines. There, when the element is
   flagged as reporting, push its id onto `Document.text_layout_reports`.
-  The flag is a bit on the element's text block store, set and cleared by
-  the host from `open_listener`/`close_listener` on the name `layout`
-  (the same gate as `layoutchange`), so an unflagged paragraph pays one
-  bit test per committing run and nothing else.
+  The flag is membership in a node set on `DocumentLayoutState`
+  (`text_layout_reporters`), added and removed by the host from
+  `open_listener`/`close_listener` on the name `layout` (the same gate as
+  `layoutchange`), so an unflagged paragraph pays one `is_empty` test per
+  committing run and nothing else.
 - The epilogue takes the list after the commit (deduplicated by node; a
   paragraph can commit twice in one pass under the container loop), reads
   each paragraph's `LineInfo`s through a new `pub` query on `Document`
@@ -321,15 +326,15 @@ Concretely:
 | per commit | one `is_empty` test on the resize registry (the IO primitive pays the same) |
 | per `listenerOpened`/`listenerClosed` | one name compare, beside the exposure-name compare already there |
 | per freed node | one `is_empty` test |
-| per text paragraph layout | one listener-table lookup, only on a cache miss |
+| per text paragraph layout | one `is_empty` test on the reporting set, only on a cache miss |
 | memory | one empty `Vec` and a `bool` per document; `Node`, `LayoutSlot` and `NodeLayoutState` unchanged (the 224/336/352 assertion stands) |
 
 **Per registered `layoutchange` element**, R registrations:
 
 | Where | Cost |
 | --- | --- |
-| memory | ~16 B per registration in one `Vec` (document-wide observer); ~200 B + 2 heap blocks each if one observer per element |
-| per commit whose layout pass ran | O(R): one arena index, one 8 B compare each; R = 1000 is on the order of 10 to 30 µs |
+| memory | ~24 B per registration in one `Vec` (document-wide observer: target, box kind, last reported size); ~200 B + 2 heap blocks each if one observer per element |
+| per commit whose layout pass ran | O(R × depth): one walk up the target's box ancestors (the skip and display tests) and one 8 B compare each |
 | per scroll-only frame | nothing (not stale), where the IO update must recompute geometry |
 | per resized element | one O(depth) containing-block walk (~1 µs), one entry (~80 B), one JS `CustomEvent` dispatch, and for a BTS handler one structured clone of a ~100 B detail |
 | resize loop (placement 1) | one extra incremental layout pass per depth level a callback resizes; zero when no callback resizes anything |
@@ -378,3 +383,13 @@ without resizing them.
 With rulings 1 and 2 the primitive keeps the spec's data model (observation
 list, `lastReportedSizes`, box kinds, entry shape) and its gather step, and
 delivers from a posted entry rather than inside "update the rendering".
+
+**Built (2026-10-20).** The primitive is `crates/dom/src/visual/resize/`
+and the text layout report list `Document::set_text_layout_reporting`,
+`take_text_layout_reports` and `text_lines` (`crates/dom/src/layout/mod.rs`);
+the host side is `crates/bobcat-core/src/main/layout_events.rs`, the resize
+delivery entry `Page::post_resize_notifications` and
+`MainThreadRuntime::{update_resize_observations, notify_resize_observers,
+queue_text_layout_events}`, with the details built by `layoutDetailOf` in
+`packages/bobcat-element/src/element-papi.ts`. Rulings 1 to 5, 7 and 8 are
+built as written; the MTS `ResizeObserver` global (6) is not.

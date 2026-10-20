@@ -47,6 +47,9 @@ use crate::esm::{
 };
 use crate::link::{InputEventPayload, ViewNotice, ViewOutbox};
 use crate::main::exposure::{Exposure, is_exposure_attribute};
+use crate::main::layout_events::{
+    LAYOUT_CHANGE_EVENT, LayoutEvent, LayoutEvents, TEXT_LAYOUT_EVENT,
+};
 use crate::main::record::write_record_field;
 use crate::main::tree::{
     Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, LynxDocument, MAX_FRAME_DEPTH,
@@ -220,6 +223,50 @@ fn push_detail_extras<'a>(
             ("selectionEnd", unit(selection.end)),
         ]),
     }
+}
+
+/// A `text`'s lines as the `lines` extra of its `layout` event carries them:
+/// JSON text of one flat array, `start, end, ellipsisCount` per line, in
+/// line order — `[0,6,0,6,11,0]` for two lines. Rust owns these numbers and
+/// the realm's Lynx layer builds the objects (`AGENTS.md`, "JavaScript data
+/// ownership"); a string is how a list crosses the extras channel, which
+/// carries one primitive per key.
+fn text_lines_json(lines: &[dom::TextLineReport]) -> String {
+    let mut text = String::with_capacity(2 + lines.len() * 12);
+    text.push('[');
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            text.push(',');
+        }
+        // Writing to a `String` cannot fail.
+        let _ = write!(text, "{},{},{}", line.start, line.end, line.ellipsis_count);
+    }
+    text.push(']');
+    text
+}
+
+/// Appends a `text`'s `layout` as extras: `lineCount`, `lines` — the JSON
+/// text [`text_lines_json`] wrote, which the realm's Lynx layer parses into
+/// `{start, end, ellipsisCount}` objects — and the content box's `width` and
+/// `height`, from which the realm builds `{lineCount, lines, size}`.
+fn push_text_layout_extras<'a>(
+    line_count: usize,
+    lines: &'a str,
+    width: f32,
+    height: f32,
+    extras: &mut SmallVec<[(&'static str, Extra<'a>); 7]>,
+) {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a paragraph's line count, far inside an f64's integers"
+    )]
+    let count = line_count as f64;
+    extras.extend([
+        ("lineCount", Extra::Number(count)),
+        ("lines", Extra::Str(lines)),
+        ("width", Extra::Number(f64::from(width))),
+        ("height", Extra::Number(f64::from(height))),
+    ]);
 }
 
 /// Inline arguments for one dispatch: the six of the header, then an
@@ -806,6 +853,12 @@ struct DocumentSlot {
     /// exposure here and drained into the realm by the intersection delivery
     /// entry ([`MainThreadRuntime::notify_intersection_observers`]).
     exposure: Exposure,
+    /// The document's `layoutchange` observer and what it delivered, beside
+    /// the document for the reason `exposure` is: `layoutchange` is Lynx's,
+    /// one of `dom`'s resize observers carries it, and what that observer
+    /// delivers is dispatched into the realm by the resize delivery entry
+    /// ([`MainThreadRuntime::notify_resize_observers`]).
+    layout_events: LayoutEvents,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
     /// Which [`editing::EditingRoute`]s the editing account routes in the
@@ -890,6 +943,7 @@ impl DocumentSlot {
             component_events: ComponentEvents::default(),
             autoplays: Autoplays::default(),
             exposure: Exposure::new(),
+            layout_events: LayoutEvents::default(),
             removals: 0,
             editing_routes: 0,
             observed: FxHashSet::default(),
@@ -1042,7 +1096,9 @@ impl DocumentSlot {
     /// it for exposure detection, or lets it go, and a change of whether it
     /// has a `uiappear` or `uidisappear` row whether it hears its element
     /// events ([`Exposure::set_registered`]); nothing else tells exposure
-    /// about a listener.
+    /// about a listener. A change of whether `node` has a `layoutchange` row
+    /// observes or unobserves it, and of whether it has a `layout` row turns
+    /// a `text`'s layout report on or off ([`LayoutEvents::set_listening`]).
     fn open_listener(
         &mut self,
         node: dom::NodeId,
@@ -1052,28 +1108,53 @@ impl DocumentSlot {
     ) {
         self.apply_pending_last_removals();
         let exposure = is_exposure_event(name);
+        let layout = LayoutEvent::of(name);
         let document = self.document.as_mut().expect(DOCUMENT_EXISTS);
         let before = exposure.then(|| exposure_rows(document, node));
+        let layout_before = layout.map(|event| (event, document.has_listener(node, name)));
         let change = document.add_listener(node, name, kinds, key);
         if let Some(before) = before {
             self.exposure_follows(node, before);
+        }
+        if let Some((event, before)) = layout_before {
+            self.layout_events_follow(node, event, before);
         }
         self.publish_route_changes(&[(name, change)]);
     }
 
     /// A realm's `listenerClosed`: `key` no longer listens for `name` on
     /// `node`, in any pass. As [`Self::open_listener`] for the registration
-    /// change and for exposure.
+    /// change, for exposure and for the layout events.
     fn close_listener(&mut self, node: dom::NodeId, name: &str, key: ListenerKey) {
         self.apply_pending_last_removals();
         let exposure = is_exposure_event(name);
+        let layout = LayoutEvent::of(name);
         let document = self.document.as_mut().expect(DOCUMENT_EXISTS);
         let before = exposure.then(|| exposure_rows(document, node));
+        let layout_before = layout.map(|event| (event, document.has_listener(node, name)));
         let change = document.remove_listener(node, name, key);
         if let Some(before) = before {
             self.exposure_follows(node, before);
         }
+        if let Some((event, before)) = layout_before {
+            self.layout_events_follow(node, event, before);
+        }
         self.publish_route_changes(&[(name, change)]);
+    }
+
+    /// Tells the layout events whether `node` now has a row for `event`,
+    /// when that is no longer `before`.
+    fn layout_events_follow(&mut self, node: dom::NodeId, event: LayoutEvent, before: bool) {
+        let Self {
+            document,
+            layout_events,
+            ..
+        } = self;
+        let document = document.as_mut().expect(DOCUMENT_EXISTS);
+        let now = document.has_listener(node, event.name());
+        if now != before {
+            layout_events.set_listening(document, node, event, now);
+        }
     }
 
     /// Tells exposure what the listener table now says of `node`
@@ -1097,7 +1178,12 @@ impl DocumentSlot {
     /// for nothing, when it is freed.
     ///
     /// The exposure registrations of its elements are not touched: they go
-    /// with the elements, which the frame's `resetFrame` frees.
+    /// with the elements, which the frame's `resetFrame` frees. Nor are the
+    /// layout events told: an element left observed with no `layoutchange`
+    /// row is unobserved by the next delivery that reaches it
+    /// ([`MainThreadRuntime::notify_resize_observers`]), and a `text` left
+    /// reporting with no `layout` row has its report turned off by the next
+    /// drain that reaches it ([`MainThreadRuntime::queue_text_layout_events`]).
     fn forget_realm(&mut self, key: ListenerKey) {
         self.apply_pending_last_removals();
         let Some(document) = self.document.as_mut() else {
@@ -2206,9 +2292,10 @@ impl MainThreadRuntime {
     }
 
     /// Dispatches everything [`Self::apply_image_events`], the `image`,
-    /// `svg` and `overlay` components, the dialog's UI methods and the
-    /// scroll events ([`Self::adopt_scroll_offsets`],
-    /// [`Self::queue_instant_scroll_events`]) have queued, in the order they
+    /// `svg` and `overlay` components, the dialog's UI methods, the scroll
+    /// events ([`Self::adopt_scroll_offsets`],
+    /// [`Self::queue_instant_scroll_events`]) and the text layout reports
+    /// ([`Self::queue_text_layout_events`]) have queued, in the order they
     /// formed, and hands each connection and disconnection the `frame`
     /// component queued to `bobcat:frame` ([`Self::frame_connection`]).
     ///
@@ -2221,7 +2308,8 @@ impl MainThreadRuntime {
     /// bubble either, as native fires `<markdown>`'s `link`, `imageTap` and
     /// `parseEnd` (`lynx/core/renderer/events/touch_event_handler.cc:388-403`,
     /// ruled 2026-10-14), but is composed, so script's `target` is the
-    /// component's element. An element freed between the event forming and
+    /// component's element. A `text`'s `layout` is neither bubbling nor
+    /// composed. An element freed between the event forming and
     /// this call resolves to nothing, exactly as a routed input event at a
     /// freed target does.
     ///
@@ -2262,6 +2350,11 @@ impl MainThreadRuntime {
             // queued it — `<x-markdown>`'s strings, a text field's value and
             // selection — as extras borrowed from the queue for the call, one
             // per key the component had a value for.
+            //
+            // A `text`'s `layout` carries its lines as JSON text
+            // ([`push_text_layout_extras`]), written here, before the extras
+            // that borrow it.
+            let lines_text: String;
             let mut extras: SmallVec<[(&'static str, Extra<'_>); 7]> = SmallVec::new();
             let (target, name, composed) = match *event {
                 ComponentEvent::Image(dom::ImageOutcome::Loaded {
@@ -2327,6 +2420,16 @@ impl MainThreadRuntime {
                 } => {
                     push_detail_extras(detail, &mut extras);
                     (node, name, true)
+                }
+                ComponentEvent::TextLayout {
+                    node,
+                    ref lines,
+                    width,
+                    height,
+                } => {
+                    lines_text = text_lines_json(lines);
+                    push_text_layout_extras(lines.len(), &lines_text, width, height, &mut extras);
+                    (node, TEXT_LAYOUT_EVENT, false)
                 }
             };
             // None bubbles. Every one but a detailed event is not composed
@@ -3103,6 +3206,178 @@ impl MainThreadRuntime {
             failures.push(error);
         }
         failures
+    }
+
+    /// Runs `dom`'s resize-observation update — the spec's "gather active
+    /// observations" with the entries created
+    /// ([`dom::Document::update_resize_observations`]) — and answers whether
+    /// it queued any entry: the page's cue to post the resize delivery.
+    ///
+    /// Asked once per entry, after its commit, and nearly always answered at
+    /// once: `dom` runs nothing when there are no observers, when no layout
+    /// pass ran and nothing was observed since the last update that ran, or
+    /// before the document's first layout. It reads the last completed layout
+    /// and runs no pass.
+    pub(crate) fn update_resize_observations(&mut self) -> bool {
+        self.slot
+            .borrow_mut()
+            .document
+            .as_mut()
+            .is_some_and(LynxDocument::update_resize_observations)
+    }
+
+    /// Whether any resize observer has entries queued — the page's cue to post
+    /// the resize delivery when the update itself queued nothing new, for
+    /// entries an earlier update left that no delivery has taken yet.
+    pub(crate) fn has_pending_resize_notifications(&self) -> bool {
+        self.slot
+            .borrow()
+            .document
+            .as_ref()
+            .is_some_and(LynxDocument::has_pending_resize_notifications)
+    }
+
+    /// Delivers every resize observer's queued entries to its handler, in
+    /// creation order — the broadcast of resize-observer-1 §3.4.5, which
+    /// `dom` runs whole ([`dom::Document::notify_resize_observers`]) — and
+    /// then dispatches `layoutchange` at every target the document's
+    /// `layoutchange` observer delivered, in delivery order
+    /// (`crate::main::layout_events`).
+    ///
+    /// The observer's handler only records the targets: it cannot call the
+    /// realm from inside `dom`'s loop, so the realm half runs here, after the
+    /// loop, with the document released, as
+    /// [`Self::notify_intersection_observers`] runs exposure.
+    ///
+    /// An overlay's observed box is its shadow `#dialog`'s (web-core's
+    /// `layoutChangeTarget`, [`crate::main::tree::layout_change_target`]):
+    /// its `layoutchange` is dispatched at the overlay with the dialog's rect.
+    ///
+    /// Each target is one dispatch, not bubbling and not composed, web-core's
+    /// `commonComponentEventSetting` (`CommonEventsAndMethods.ts:23-58`),
+    /// with four extras the realm's Lynx layer builds the detail
+    /// `{id, dataset, width, height, left, top, right, bottom}` from: `left`,
+    /// `top`, `width` and `height` of [`dom::Document::bounding_client_rect`]
+    /// read here, in the Lynx view's CSS px with nothing subtracted (user
+    /// rulings 3 and 8 of 2026-10-20), or all four `0` when the target has no
+    /// box any more. A target freed since its entry formed hears nothing, as
+    /// a routed event at a freed target does; one whose last `layoutchange`
+    /// row left without the listener table telling this side — its realm was
+    /// forgotten — is unobserved here and hears nothing either.
+    ///
+    /// A listener may mutate the tree. Whatever it wrote is committed by the
+    /// delivery entry's own epilogue, whose update runs again against it.
+    ///
+    /// Returns what failed: a listener that threw. Each is nonfatal and
+    /// reported as `ListenerFailed`; the rest is still delivered.
+    pub(crate) fn notify_resize_observers(
+        &mut self,
+        js: &mut ScriptRuntime,
+    ) -> Vec<MainThreadError> {
+        let resized = {
+            let mut slot = self.slot.borrow_mut();
+            let DocumentSlot {
+                document,
+                layout_events,
+                ..
+            } = &mut *slot;
+            let document = document.as_mut().expect(DOCUMENT_EXISTS);
+            document.notify_resize_observers();
+            layout_events.take_resized(document)
+        };
+        let timestamp = self.timeline_milliseconds;
+        let mut failures = Vec::new();
+        for (target, node) in resized {
+            let rect = {
+                let mut slot = self.slot.borrow_mut();
+                let DocumentSlot {
+                    document,
+                    layout_events,
+                    ..
+                } = &mut *slot;
+                let document = document.as_mut().expect(DOCUMENT_EXISTS);
+                // A listener earlier in this loop may have freed it.
+                if document.get(node).is_none() || document.get(target).is_none() {
+                    continue;
+                }
+                if !document.has_listener(node, LAYOUT_CHANGE_EVENT) {
+                    layout_events.set_observed(document, node, false);
+                    continue;
+                }
+                document.bounding_client_rect(target)
+            };
+            let (left, top, width, height) = rect.map_or((0.0, 0.0, 0.0, 0.0), |rect| {
+                (
+                    f64::from(rect.origin.x),
+                    f64::from(rect.origin.y),
+                    f64::from(rect.size.width),
+                    f64::from(rect.size.height),
+                )
+            });
+            let extras = [
+                ("left", Extra::Number(left)),
+                ("top", Extra::Number(top)),
+                ("width", Extra::Number(width)),
+                ("height", Extra::Number(height)),
+            ];
+            if let Err(error) = self.dispatch(
+                js,
+                node,
+                LAYOUT_CHANGE_EVENT,
+                false,
+                false,
+                timestamp,
+                &EventDetail::None,
+                &extras,
+            ) {
+                failures.extend(error.into_errors());
+            }
+        }
+        failures
+    }
+
+    /// Queues the `layout` event of every reporting `text` whose paragraph a
+    /// committing layout run recomputed since the last call
+    /// ([`dom::Document::take_text_layout_reports`]), with the lines and the
+    /// content box that commit left ([`ComponentEvent::TextLayout`]), in the
+    /// order the runs first reached them. Asked by the page's epilogue after
+    /// its commit, so the events join the component events the same entry
+    /// posts; one `is_empty` when nothing reported.
+    ///
+    /// A node whose `layout` row left without the listener table telling
+    /// this side — its realm was forgotten — has its report turned off here
+    /// and queues nothing. A node whose paragraph has no committed lines (it
+    /// stopped establishing one) queues nothing either.
+    pub(crate) fn queue_text_layout_events(&mut self) {
+        let mut slot = self.slot.borrow_mut();
+        let DocumentSlot {
+            document,
+            component_events,
+            ..
+        } = &mut *slot;
+        let Some(document) = document.as_mut() else {
+            return;
+        };
+        for node in document.take_text_layout_reports() {
+            if !document.has_listener(node, LayoutEvent::TextLayout.name()) {
+                document.set_text_layout_reporting(node, false);
+                continue;
+            }
+            let (Some(lines), Some(layout)) =
+                (document.text_lines(node), document.rounded_layout(node))
+            else {
+                continue;
+            };
+            let dom::layout::Layout {
+                size,
+                padding,
+                border,
+                ..
+            } = layout;
+            let width = size.width - padding.left - padding.right - border.left - border.right;
+            let height = size.height - padding.top - padding.bottom - border.top - border.bottom;
+            component_events.queue_text_layout(node, lines, width, height);
+        }
     }
 
     /// When the earliest armed timer comes due, if one is armed, for a test

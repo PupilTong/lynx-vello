@@ -1302,6 +1302,71 @@ fn exposure_events_are_delivered_by_an_entry_after_the_update() {
     });
 }
 
+/// A 100×50 view with a `layoutchange` closure that appends its detail's
+/// `<width>x<height>` to the page element's `data-heard` ([`heard`]);
+/// `updatePage({width})` writes the view's width.
+const LAYOUT_CHANGE_ENTRY: &str = r"
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  const box = __CreateView(0);
+  __SetInlineStyles(box, 'width:100px;height:50px');
+  __AppendElement(page, box);
+  const heard = [];
+  __AddEventListener(box, 'layoutchange', (event) => {
+    heard.push(event.detail.width + 'x' + event.detail.height);
+    __SetAttribute(page, 'data-heard', heard.join(','));
+  }, {});
+  globalThis.box = box;
+};
+globalThis.updatePage = function (data) {
+  __SetInlineStyles(globalThis.box, 'width:' + data.width + 'px;height:50px');
+};
+";
+
+/// `width` through `updatePage`, as one command.
+async fn resize_box(page: &Rc<Page>, width: u32) {
+    page.apply(vec![ToMain::PageUpdate(PageUpdate::Data {
+        data: format!(r#"{{"width":{width}}}"#),
+        processor_name: String::new(),
+        reset: false,
+    })])
+    .await;
+}
+
+/// `layoutchange` is delivered by the resize delivery entry the epilogue
+/// posts after its commit (`Page::post_resize_notifications`): boot's own
+/// update reports the box once, the entry that resizes it is followed by one
+/// delivery entry, and an entry that writes the same size again commits a
+/// layout pass and posts no delivery.
+#[test]
+fn layout_changes_are_delivered_by_an_entry_after_the_commit() {
+    on_a_js_thread(|thread| async move {
+        let (context, _workers) = group(&thread);
+        let mut owned = OwnedPage::new(context);
+        owned.boot(LAYOUT_CHANGE_ENTRY).await;
+        assert_eq!(heard(&owned.page).await, ["100x50"]);
+
+        let settled = owned.page.epilogue_count();
+        resize_box(&owned.page, 140).await;
+        assert_eq!(
+            heard(&owned.page).await,
+            ["100x50", "140x50"],
+            "the resize was reported once, by an entry of its own",
+        );
+        // The update, the delivery its update queued, and the probe.
+        assert_eq!(owned.page.epilogue_count(), settled + 3);
+
+        let settled = owned.page.epilogue_count();
+        resize_box(&owned.page, 140).await;
+        assert_eq!(heard(&owned.page).await.len(), 2);
+        assert_eq!(
+            owned.page.epilogue_count(),
+            settled + 2,
+            "the update and the probe: an unchanged size posts no delivery",
+        );
+    });
+}
+
 /// `switchExposure` from a script: a stop drops every observer and, for rows
 /// that have no `exposure-id`, owes nothing, so its entry posts nothing; a
 /// resume observes every row again, and the update in the resume's own

@@ -26,6 +26,7 @@
 //! synchronous stylesheet.
 
 mod exposure;
+mod layout_events;
 mod page;
 pub(crate) mod quickjs;
 pub(crate) mod record;

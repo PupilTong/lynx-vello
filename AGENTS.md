@@ -353,9 +353,12 @@ under the borrows of the shared runtime and the realm, and then that
 operation's epilogue. The epilogue is one function;
 what only one role has is a hook of that owner's `RealmOwner` impl at a fixed
 step. For a page the order is: the timers that came due, the commit — then the
-intersection observations that commit or an adopted scroll moved, and the
-intersection, content-visibility and component-event deliveries it posts as
-entries of their own (the intersection delivery also drains the Lynx exposure
+`<text>` `layout` reports that commit left (queued as component events), the
+resize observations that commit moved, the intersection observations that
+commit or an adopted scroll moved, and the resize, intersection,
+content-visibility and component-event deliveries it posts as entries of
+their own (the resize delivery dispatches each resized element's
+`layoutchange`; the intersection delivery also drains the Lynx exposure
 changes — each `uiappear`/`uidisappear`, then each `bobcat:exposure` record
 event, out of which the realm's Lynx layer sends the `exposure` and
 `disexposure` lists — and is posted for them even when no observer crossed a
@@ -2150,6 +2153,39 @@ drops every observer and `resumeExposure` re-observes (native's semantics, with
 `sendEvent` defaulting to true), and delivery is one batch per update with no
 timer. The defaults where the references differ are in
 `docs/tracking/deviations.md`.
+
+**Lynx layout events** (`crates/bobcat-core/src/main/layout_events.rs`,
+user-directed 2026-10-20, `docs/layout-observer-design.md` §5) are the
+second bucket-2 adapter, over two `dom` primitives. `layoutchange` is one
+document-wide `ResizeObserver` (created on the first registration) of which
+every element with a `layoutchange` row in the listener table, any realm and
+any form, is a `border-box` target — an `overlay`'s or `x-overlay-ng`'s
+shadow `#dialog` in place of the box-less host, web-core's
+`layoutChangeTarget` (`tree::layout_change_target`; the adapter keeps the
+dialog-to-host pairs and dispatches at the host with the dialog's rect);
+`open_listener`/`close_listener` observe or
+unobserve on each change of `has_listener(node, "layoutchange")`, as they tell
+exposure. Its handler, bound to no node, only records the targets; the
+epilogue runs `update_resize_observations` after its commit and posts the
+resize delivery entry (`Page::post_resize_notifications`, before the
+intersection one), which runs `dom`'s broadcast and then dispatches
+`layoutchange` at each recorded target, not bubbling, not composed, with the
+extras `left`, `top`, `width`, `height` of `bounding_client_rect` (all `0`
+for a target with no box); `bobcat:element` (`layoutDetailOf`) builds
+`{id, dataset, width, height, left, top, right, bottom}`. Size changes only,
+no transforms, no host origin subtracted, `dataset` included (rulings 1, 3, 4
+and 8). A freed target leaves through the primitive; a target whose last row
+left with a forgotten realm is unobserved by its next delivery. A `text`
+element's `layout` row turns `Document::set_text_layout_reporting` on for it
+(a `layout` row on any other element is ignored); after every commit the
+epilogue's `queue_text_layout_events` takes `take_text_layout_reports`, reads
+`text_lines` and the content box from `rounded_layout`, and queues one
+`ComponentEvent::TextLayout`, which the component-events entry dispatches at
+the `text`, not bubbling, not composed, with `lineCount`, `lines` (JSON text of
+a flat `start, end, ellipsisCount` array) and `width`/`height`; the realm
+builds `{lineCount, lines, size}`. A listener filed after the paragraph laid
+out hears nothing until the paragraph's next committing re-layout (iOS's
+per-renderer latch).
 
 `__SetCSSId` writes web-core's `l-css-id` attribute on each element (a
 non-zero id sets it, 0 or a nullish id removes it), and `bobcat-source`'s

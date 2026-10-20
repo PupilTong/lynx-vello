@@ -8594,6 +8594,547 @@ fn one_entrys_records_run_under_one_checkpoint() {
     assert_eq!(frame_lines(&mut js, &mut runtime), ["flush row0,row1,row2"]);
 }
 
+/// The `api-bindlauoutchange` card (`lynx-stack`'s
+/// `web-core-e2e/tests/reactlynx/api-bindlauoutchange/index.jsx`,
+/// `reactlynx.spec.ts:2327`) with a few additions: a column `view` holding a
+/// 10px-tall `before` row, then the 100×100 `box` with `margin: 50px`, which
+/// carries an id and a typed dataset and whose `layoutchange` closure reports
+/// `<type> <detail as JSON>` into `seen` ([`frame_lines`]). The card files its
+/// handler with `bindLayoutChange`; this one files a closure, which needs no
+/// background thread, and `a_bts_layoutchange_handler_hears_the_detail` in
+/// `worker_tests.rs` covers the string handler. The fixture has no `before`
+/// row: with it, the box sits 10px lower.
+const LAYOUT_CHANGE_PAGE: &str = r"
+globalThis.seen = [];
+globalThis.record = (event) => {
+  seen.push(`${event.type} ${JSON.stringify(event.detail)}`);
+};
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  const column = __CreateView(0);
+  __SetInlineStyles(column, 'display:flex;flex-direction:column');
+  const before = __CreateView(0);
+  __SetInlineStyles(before, 'width:100px;height:10px');
+  const box = __CreateView(0);
+  __SetID(box, 'box');
+  __AddDataset(box, 'row', 7);
+  __SetInlineStyles(box, 'width:100px;height:100px;margin:50px');
+  __AppendElement(page, column);
+  __AppendElement(column, before);
+  __AppendElement(column, box);
+  __AddEventListener(box, 'layoutchange', record, {});
+  globalThis.views = { column, before, box };
+};
+";
+
+/// Runs `source` in the page realm with `bobcat:element` imported and the
+/// card's `views` in scope, then commits what it wrote, as the epilogue of
+/// its entry would.
+fn run_layout_script(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime, source: &str) {
+    runtime
+        .evaluate_module(
+            js,
+            &format!(
+                "import {{ __AddEvent, __AddEventListener, __AppendElement, __FlushElementTree,
+                     __RemoveElement, __RemoveEventListener, __SetAttribute, __SetInlineStyles }}
+                     from 'bobcat:element';
+                 const views = globalThis.views;
+                 {source}"
+            ),
+            "app:///layout-step.js",
+            "running a layout step",
+        )
+        .expect("the layout step");
+    runtime.commit_if_dirty();
+}
+
+/// The resize delivery as the page's epilogue and its posted entry run it:
+/// the update, and when it queued anything, the notification, which reports
+/// no failure. Answers whether the update queued anything.
+fn deliver_layout_changes(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) -> bool {
+    let queued = runtime.update_resize_observations() || runtime.has_pending_resize_notifications();
+    if queued {
+        let failures = runtime.notify_resize_observers(js);
+        assert!(
+            failures.is_empty(),
+            "{:?}",
+            failures
+                .into_iter()
+                .map(|failure| failure.into_script_error().message)
+                .collect::<Vec<_>>()
+        );
+    }
+    queued
+}
+
+/// The `layoutchange` detail of the box at `top`, `width` wide and 100 tall:
+/// the order and keys `element-papi.ts`'s `layoutDetailOf` writes.
+fn box_layout_change(top: u32, width: u32) -> String {
+    format!(
+        r#"layoutchange {{"id":"box","dataset":{{"row":7}},"width":{width},"height":100,"left":50,"top":{top},"right":{right},"bottom":{bottom}}}"#,
+        right = 50 + width,
+        bottom = top + 100,
+    )
+}
+
+/// `layoutchange` is a size observation (the user's ruling 1 of
+/// 2026-10-20): the first delivery after the registration reports the box
+/// once with its geometry — `left`/`top` its margin offset in the column,
+/// `right`/`bottom` the sums — a width change reports it once more with the
+/// new geometry, and a move that resizes nothing, the `before` row growing
+/// by 20px, reports nothing, though the box's `top` changed. A delivery with
+/// nothing new dispatches nothing.
+#[test]
+fn a_layoutchange_listener_hears_each_size_change_of_its_border_box_and_no_move() {
+    let (mut js, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(&mut js, LAYOUT_CHANGE_PAGE, "app:///layoutchange.js")
+        .expect("main-thread script");
+    assert!(deliver_layout_changes(&mut js, &mut runtime));
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [box_layout_change(60, 100)]
+    );
+    assert!(
+        !deliver_layout_changes(&mut js, &mut runtime),
+        "nothing moved since"
+    );
+
+    run_layout_script(
+        &mut js,
+        &mut runtime,
+        "__SetInlineStyles(views.box, 'width:140px;height:100px;margin:50px');",
+    );
+    assert!(deliver_layout_changes(&mut js, &mut runtime));
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [box_layout_change(60, 140)]
+    );
+
+    run_layout_script(
+        &mut js,
+        &mut runtime,
+        "__SetInlineStyles(views.before, 'width:100px;height:30px');",
+    );
+    assert!(
+        !deliver_layout_changes(&mut js, &mut runtime),
+        "the box moved 20px down and kept its size"
+    );
+    assert_eq!(frame_lines(&mut js, &mut runtime), Vec::<String>::new());
+}
+
+/// The `api-bindlauoutchange` card itself: a 100×100 view with
+/// `margin: 50px` first in a flex column reports `top 50, bottom 150, left
+/// 50, right 150, width 100, height 100`, which is what the card's handler
+/// checks before it turns its target green.
+#[test]
+fn the_api_bindlauoutchange_card_reports_its_view_at_its_margin_offset() {
+    let (mut js, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        globalThis.seen = [];
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const column = __CreateView(0);
+          __SetInlineStyles(column, 'display:flex;flex-direction:column');
+          const view = __CreateView(0);
+          __SetInlineStyles(view, 'width:100px;height:100px;background-color:green;margin:50px');
+          const target = __CreateView(0);
+          __SetID(target, 'target');
+          __SetInlineStyles(target, 'width:100px;height:100px;background-color:pink');
+          __AppendElement(page, column);
+          __AppendElement(column, view);
+          __AppendElement(column, target);
+          __AddEventListener(view, 'layoutchange', (event) => {
+            const { top, bottom, left, right, width, height } = event.detail;
+            seen.push([top, bottom, left, right, width, height].join(','));
+          }, {});
+        };
+        ",
+            "app:///api-bindlauoutchange.js",
+        )
+        .expect("main-thread script");
+    assert!(deliver_layout_changes(&mut js, &mut runtime));
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        ["50,150,50,150,100,100"]
+    );
+}
+
+/// Every registration form observes the element — `__AddEvent`'s string
+/// handler, its worklet, each of its kinds, and `__AddEventListener` — which
+/// is web-core's `registerEventEnableStatusChangeHandler('layoutchange')`;
+/// a second form changes nothing, and the last one leaving unobserves it, so
+/// the next resize dispatches nothing. A `layoutchange` row on another name
+/// or element is no registration of this one.
+#[test]
+fn every_registration_form_observes_layoutchange_and_the_last_one_leaving_unobserves() {
+    let (mut js, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(&mut js, LAYOUT_CHANGE_PAGE, "app:///layoutchange-forms.js")
+        .expect("main-thread script");
+    let box_ = {
+        let tree = elements.tree();
+        let column = tree
+            .document_element()
+            .first_child()
+            .expect("the column")
+            .id();
+        tree.get(column).unwrap().child_ids()[1]
+    };
+    let observed = |elements: &DocumentProbe| {
+        let slot = elements.slot.borrow();
+        slot.layout_events
+            .is_observed(slot.document.as_ref().unwrap(), box_)
+    };
+    assert!(observed(&elements), "the closure observes the box");
+    deliver_layout_changes(&mut js, &mut runtime);
+    frame_lines(&mut js, &mut runtime);
+
+    run_layout_script(
+        &mut js,
+        &mut runtime,
+        "__RemoveEventListener(views.box, 'layoutchange', record, {});",
+    );
+    assert!(
+        !observed(&elements),
+        "the closure was the only registration"
+    );
+
+    for form in [
+        "__AddEvent(views.box, 'bindEvent', 'layoutchange', 'handleLayoutChange');",
+        "__AddEvent(views.box, 'catchEvent', 'layoutchange', { type: 'worklet', value: {} });",
+        "__AddEvent(views.box, 'capture-bind', 'layoutchange', 'capture');",
+        "__AddEvent(views.box, 'capture-catch', 'layoutchange', 'capture');",
+        "__AddEvent(views.box, 'global-bindEvent', 'layoutchange', 'global');",
+    ] {
+        run_layout_script(&mut js, &mut runtime, form);
+        assert!(observed(&elements), "{form} observes the box");
+        let undo = form
+            .replace("'handleLayoutChange'", "null")
+            .replace("{ type: 'worklet', value: {} }", "null")
+            .replace("'capture'", "null")
+            .replace("'global'", "null");
+        run_layout_script(&mut js, &mut runtime, &undo);
+        assert!(!observed(&elements), "{undo} unobserves it");
+    }
+
+    // Two forms, one leaving: still observed.
+    run_layout_script(
+        &mut js,
+        &mut runtime,
+        "__AddEvent(views.box, 'bindEvent', 'layoutchange', 'handleLayoutChange');
+         __AddEventListener(views.box, 'layoutchange', record, {});
+         __AddEvent(views.box, 'bindEvent', 'layoutchange', null);
+         __AddEventListener(views.column, 'layout', record, {});",
+    );
+    assert!(observed(&elements), "the closure still listens");
+    run_layout_script(
+        &mut js,
+        &mut runtime,
+        "__RemoveEventListener(views.box, 'layoutchange', record, {});
+         __SetInlineStyles(views.box, 'width:180px;height:100px;margin:50px');",
+    );
+    assert!(!observed(&elements));
+    assert!(
+        !deliver_layout_changes(&mut js, &mut runtime),
+        "an unobserved box's resize queues nothing"
+    );
+    assert_eq!(frame_lines(&mut js, &mut runtime), Vec::<String>::new());
+}
+
+/// A box that stops being rendered, `display: none`, is reported once as the
+/// primitive reports it, `0 × 0`, and its detail is all zeros, since
+/// `boundingClientRect` has no box to answer for it. Shown again, it reports
+/// its size again.
+#[test]
+fn a_box_that_stops_being_rendered_reports_a_zero_rect() {
+    let (mut js, mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(&mut js, LAYOUT_CHANGE_PAGE, "app:///layoutchange-none.js")
+        .expect("main-thread script");
+    deliver_layout_changes(&mut js, &mut runtime);
+    frame_lines(&mut js, &mut runtime);
+
+    run_layout_script(
+        &mut js,
+        &mut runtime,
+        "__SetInlineStyles(views.box, 'display:none;width:100px;height:100px;margin:50px');",
+    );
+    assert!(deliver_layout_changes(&mut js, &mut runtime));
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            r#"layoutchange {"id":"box","dataset":{"row":7},"width":0,"height":0,"left":0,"top":0,"right":0,"bottom":0}"#
+        ]
+    );
+
+    run_layout_script(
+        &mut js,
+        &mut runtime,
+        "__SetInlineStyles(views.box, 'width:100px;height:100px;margin:50px');",
+    );
+    assert!(deliver_layout_changes(&mut js, &mut runtime));
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [box_layout_change(60, 100)]
+    );
+}
+
+/// An element freed between its resize being queued and the delivery hears
+/// nothing: the primitive drops its registration and its queued entry with
+/// the node, so the delivery has nothing for it.
+#[test]
+fn a_freed_element_hears_no_layoutchange() {
+    let (mut js, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(&mut js, LAYOUT_CHANGE_PAGE, "app:///layoutchange-freed.js")
+        .expect("main-thread script");
+    assert!(
+        runtime.update_resize_observations(),
+        "the first observation is queued"
+    );
+    let box_ = {
+        let tree = elements.tree();
+        let column = tree.document_element().first_child().unwrap().id();
+        tree.get(column).unwrap().child_ids()[1]
+    };
+    run_layout_script(
+        &mut js,
+        &mut runtime,
+        "__RemoveElement(views.column, views.box);
+         views.box = undefined;",
+    );
+    runtime.collect_garbage(&mut js).expect("collection");
+    assert!(elements.tree().get(box_).is_none(), "the box is freed");
+    assert!(
+        !runtime.has_pending_resize_notifications(),
+        "its queued entry went with it"
+    );
+    assert!(runtime.notify_resize_observers(&mut js).is_empty());
+    assert!(!deliver_layout_changes(&mut js, &mut runtime));
+    assert_eq!(frame_lines(&mut js, &mut runtime), Vec::<String>::new());
+}
+
+/// An `x-overlay-ng`'s `layoutchange` observes its shadow `#dialog`, web-core's
+/// `layoutChangeTarget` (`XOverlayNg.ts:21-23`), since the host is
+/// `display: contents` and has no box: shown, it reports the dialog's rect,
+/// the whole 393×727 viewport, at the host — the event's target and current
+/// target are the overlay. Hidden, the dialog is `display: none`, and the
+/// host hears an all-zero rect.
+#[test]
+fn an_overlay_reports_its_shadow_dialogs_rect_at_the_host() {
+    let (mut js, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        globalThis.seen = [];
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const overlay = __CreateElement('x-overlay-ng', 0);
+          const panel = __CreateView(0);
+          __SetInlineStyles(panel, 'width:100px;height:50px');
+          __AppendElement(page, overlay);
+          __AppendElement(overlay, panel);
+          __SetAttribute(overlay, 'visible', true);
+          __AddEventListener(overlay, 'layoutchange', (event) => {
+            seen.push(`${event.target.uid} ${event.currentTarget.uid} ${JSON.stringify(event.detail)}`);
+          }, {});
+          globalThis.views = { overlay };
+        };
+        ",
+            "app:///overlay-layoutchange.js",
+        )
+        .expect("main-thread script");
+    let (overlay, dialog) = {
+        let tree = elements.tree();
+        let overlay = tree.document_element().first_child().unwrap().id();
+        (overlay, overlay_dialog(&tree, overlay))
+    };
+    {
+        let slot = elements.slot.borrow();
+        let observer = slot
+            .layout_events
+            .observer()
+            .expect("the listener created the observer");
+        let tree = slot.document.as_ref().unwrap();
+        let observer = tree.resize_observer(observer).unwrap();
+        assert!(
+            observer.observed_box(dialog).is_some(),
+            "the dialog is observed"
+        );
+        assert!(observer.observed_box(overlay).is_none(), "the host is not");
+    }
+    let uid = packed_node_id(overlay);
+    assert!(deliver_layout_changes(&mut js, &mut runtime));
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [format!(
+            r#"{uid} {uid} {{"id":"","dataset":{{}},"width":393,"height":727,"left":0,"top":0,"right":393,"bottom":727}}"#
+        )]
+    );
+
+    run_layout_script(
+        &mut js,
+        &mut runtime,
+        "__SetAttribute(views.overlay, 'visible', false);",
+    );
+    assert!(deliver_layout_changes(&mut js, &mut runtime));
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [format!(
+            r#"{uid} {uid} {{"id":"","dataset":{{}},"width":0,"height":0,"left":0,"top":0,"right":0,"bottom":0}}"#
+        )]
+    );
+}
+
+/// A 20px Ahem `text` holding `abcde fghij`, styled by `style`, with a
+/// `layout` closure that reports `<type> <detail as JSON>` into `seen` when
+/// `listen` is set, and an empty `view` beside it that carries a `layout`
+/// closure too, which is no registration: only a `text` reports.
+fn text_layout_page(style: &str, maxline: Option<&str>, listen: bool) -> String {
+    let maxline = maxline.map_or_else(String::new, |lines| {
+        format!("__SetAttribute(text, 'text-maxline', '{lines}');")
+    });
+    let listen = if listen {
+        "__AddEventListener(text, 'layout', record, {});"
+    } else {
+        ""
+    };
+    format!(
+        r"
+        globalThis.seen = [];
+        globalThis.record = (event) => {{
+          seen.push(`${{event.type}} ${{JSON.stringify(event.detail)}}`);
+        }};
+        globalThis.renderPage = function () {{
+          const page = __CreatePage('card', 0);
+          const text = __CreateText(0);
+          __SetInlineStyles(text, 'font-family:Ahem;font-size:20px;line-height:21px;{style}');
+          {maxline}
+          __AppendElement(text, __CreateRawText('abcde fghij'));
+          __AppendElement(page, text);
+          const view = __CreateView(0);
+          __AppendElement(page, view);
+          __AddEventListener(view, 'layout', record, {{}});
+          {listen}
+          globalThis.views = {{ page, text, view }};
+        }};
+        "
+    )
+}
+
+/// The `layout` component events of the epilogue's drain, delivered as the
+/// component-events entry delivers them, with no failure.
+fn deliver_text_layouts(js: &mut ScriptRuntime, runtime: &mut MainThreadRuntime) {
+    runtime.queue_text_layout_events();
+    let failures = runtime.dispatch_component_events(js);
+    assert!(
+        failures.is_empty(),
+        "{:?}",
+        failures
+            .into_iter()
+            .map(|failure| failure.into_script_error().message)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A one-line `text-maxline` cut states itself in its first line's
+/// `ellipsisCount` — `ab` and the three dots fill the five em squares, so
+/// three of the line's five units are cut — and `size` is the content box:
+/// the border box less its padding and border.
+#[test]
+fn a_maxline_text_reports_its_cut_and_its_content_box() {
+    let (mut js, mut runtime, elements) = text_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            &text_layout_page(
+                "width:110px;padding:2px 3px;border:1px solid black;text-overflow:ellipsis",
+                Some("1"),
+                true,
+            ),
+            "app:///text-layout-maxline.js",
+        )
+        .expect("main-thread script");
+    let (width, height) = {
+        let tree = elements.tree();
+        let text = tree.document_element().first_child().unwrap().id();
+        let layout = tree.rounded_layout(text).expect("a committed box");
+        (
+            layout.size.width
+                - layout.padding.left
+                - layout.padding.right
+                - layout.border.left
+                - layout.border.right,
+            layout.size.height
+                - layout.padding.top
+                - layout.padding.bottom
+                - layout.border.top
+                - layout.border.bottom,
+        )
+    };
+    assert!(
+        (width - 102.0).abs() < f32::EPSILON && (height - 21.0).abs() < f32::EPSILON,
+        "the content box of a border-box 110px text with 3px and 1px sides, one 21px line: \
+         {width}×{height}"
+    );
+    deliver_text_layouts(&mut js, &mut runtime);
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            r#"layout {"lineCount":1,"lines":[{"start":0,"end":5,"ellipsisCount":3}],"size":{"width":102,"height":21}}"#
+        ]
+    );
+}
+
+/// A `layout` listener filed after the paragraph laid out hears nothing
+/// until a committing layout recomputes the paragraph — native iOS's
+/// per-renderer latch (`LynxUIText.m:359-365`) — and then hears that layout:
+/// widened to 300px, the eleven units fit one line.
+#[test]
+fn a_layout_listener_filed_after_the_first_layout_hears_the_next_relayout_only() {
+    let (mut js, mut runtime, _elements) = text_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            &text_layout_page("width:100px", None, false),
+            "app:///text-layout-late.js",
+        )
+        .expect("main-thread script");
+    deliver_text_layouts(&mut js, &mut runtime);
+    assert_eq!(frame_lines(&mut js, &mut runtime), Vec::<String>::new());
+
+    run_layout_script(
+        &mut js,
+        &mut runtime,
+        "__AddEventListener(views.text, 'layout', record, {});
+         __FlushElementTree();",
+    );
+    deliver_text_layouts(&mut js, &mut runtime);
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        Vec::<String>::new(),
+        "registering lays nothing out"
+    );
+
+    run_layout_script(
+        &mut js,
+        &mut runtime,
+        "__SetInlineStyles(views.text, 'font-family:Ahem;font-size:20px;line-height:21px;width:300px');",
+    );
+    deliver_text_layouts(&mut js, &mut runtime);
+    assert_eq!(
+        frame_lines(&mut js, &mut runtime),
+        [
+            r#"layout {"lineCount":1,"lines":[{"start":0,"end":11,"ellipsisCount":0}],"size":{"width":300,"height":21}}"#
+        ]
+    );
+}
+
 fn requested_stylesheet(
     notices: &mut mpsc::UnboundedReceiver<ViewNotice>,
 ) -> (String, crate::resource::SourceCompletion) {

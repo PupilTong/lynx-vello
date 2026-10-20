@@ -30,11 +30,11 @@ see [F](#f-recorded-deviations-not-gaps); and white space in a `text`, see
 | --- | --- | --- | --- |
 | [`crates/hughie/tests/web_text_replication.rs`](../../crates/hughie/tests/web_text_replication.rs) | paragraph algorithm: clamping, cut points, tail fitting, word-break | 19 | 2 |
 | [`crates/bobcat-core/src/main/tree/web_text_replication.rs`](../../crates/bobcat-core/src/main/tree/web_text_replication.rs) | the `<text>` element, its UA sheet and its attributes | 46 | 4 |
-| [`crates/bobcat-core/src/main/runtime/web_text_replication.rs`](../../crates/bobcat-core/src/main/runtime/web_text_replication.rs) | the Element PAPI: content, restyle, truncation, `setNativeProps`, layout events | 15 | 6 |
+| [`crates/bobcat-core/src/main/runtime/web_text_replication.rs`](../../crates/bobcat-core/src/main/runtime/web_text_replication.rs) | the Element PAPI: content, restyle, truncation, `setNativeProps`, layout events | 17 | 4 |
 | [`crates/dom/tests/web_text_replication.rs`](../../crates/dom/tests/web_text_replication.rs) | relayout, percentage sizing, scroll targets, glyph, atom and inline-background paint | 27 | 0 |
 | [`crates/dom/tests/web_text_screenshots.rs`](../../crates/dom/tests/web_text_screenshots.rs) | golden screenshots — the originals' own oracle, for the cases whose claim is visual | 12 | 0 |
 | [`crates/bobcat-source/tests/web_text_css_replication.rs`](../../crates/bobcat-source/tests/web_text_css_replication.rs) | text CSS across the `.web.bundle` wire | 10 | 0 |
-| **Total** | | **129** | **12** |
+| **Total** | | **131** | **10** |
 
 A gap-ignored test asserts the `web-core` behavior and is marked
 `#[ignore = "GAP: …"]` naming the cause with a `file:line`. It is a real
@@ -508,13 +508,14 @@ cut, past the paragraph, or on the line above it.
 
 Each blocks replicas that could not be written at all.
 
-- **The `layout` / `layoutchange` event.** A listener registers cleanly and never
-  fires; the only engine-synthesized names are the pointer set plus `tap` and
-  `longpress` (`crates/bobcat-core/src/paint/gesture.rs:81,84`). The payload
-  already exists as `hughie`'s `LineInfo`
-  (`crates/hughie/src/text/block/mod.rs:68-85`); what is missing is delivery and
-  a host-visible query, since `Document::text_block` is `pub(crate)`
-  (`crates/dom/src/layout/mod.rs:303`).
+- **The `layout` / `layoutchange` event.** *Closed 2026-10-20.* `layoutchange`
+  is delivered over `dom`'s ResizeObserver primitive by the adapter in
+  `crates/bobcat-core/src/main/layout_events.rs`, and a `text`'s `layout` is a
+  component event built from `dom`'s text layout report list and
+  `Document::text_lines`. `widening_a_text_dispatches_a_layoutchange_carrying_its_geometry`
+  and `a_wrapping_text_reports_its_line_count_and_line_ranges` are un-ignored and
+  pass; the first now also asserts the `dataset` the detail carries
+  (`docs/tracking/deviations.md`).
 - **`__AddClass`** and the `enableCSSSelector=false` cascade.
 - **Text selection.** No selection model anywhere; `text-selection` is inert.
 - **Editable text controls.** No `<input>` or `<textarea>`; 54 catalogued cases
