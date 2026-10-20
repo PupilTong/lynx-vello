@@ -21,10 +21,10 @@ scope decision, will not. Upstream's own `dist/` is built without an
 this engine has no intention of serving. Compiled here at `4.1.0`, the same
 sources exercise the path it does.
 
-The cards, their CSS and their assets are otherwise upstream's, with five
+The cards, their CSS and their assets are otherwise upstream's, with seven
 rewrites applied to the vendored text by user ruling (the first two on
 2026-09-25, the third on 2026-10-08, the fourth on 2026-10-15, the fifth on
-2026-10-16):
+2026-10-16, the last two on 2026-10-20):
 
 - **`direction: lynx-rtl` becomes `direction: rtl`** (24 files). `lynx-rtl` is
   a value the fork's grammar rejects, so upstream's own spelling left every
@@ -59,7 +59,17 @@ rewrites applied to the vendored text by user ruling (the first two on
   with `align-items: flex-start`, so the yellow box is as wide as the nested
   card's widest line.
 
-All five are recorded here rather than absorbed silently, because a re-sync
+- **`<input>` becomes `<x-input>` in `basic-element-input-bindinput`** (1
+  file). web-core maps the JSX tag `input` to `x-input`; here `input` is an
+  HTML element name, and HTML's `<input>` is not a text field
+  (`docs/tracking/deviations.md`), so upstream's spelling gave the card no
+  field to fill.
+
+- **`basic-element-x-textarea-focus`'s block is 20% of the page, not 90%**
+  (1 file). At 90% of the 1000px page the block was 900px tall and the
+  three textareas the card is about lay below the viewport.
+
+All seven are recorded here rather than absorbed silently, because a re-sync
 from upstream will bring the original text back.
 
 ## Building

@@ -3602,7 +3602,7 @@ consequential choice about whether to follow the spec or the quirk.
     carries `pseudo="-webkit-input-placeholder"`, as Blink's does, which is
     what makes it the host's `::placeholder` to `terminus`.
 
-  Two differ from web-core by user ruling (2026-10-19):
+  Three differ from web-core by user ruling (2026-10-19, 2026-10-20):
   - *`input` and `textarea` are not text fields.* web-core's tag map sends
     the JSX tags `input` and `textarea` to `x-input`/`x-textarea`
     (`web-core/ts/constants.ts:104,106`), and native Lynx registers its
@@ -3621,6 +3621,12 @@ consequential choice about whether to follow the spec or the quirk.
     lines, which is not built. The lines are the editor's Lynx paragraph's
     (the textarea's editor is a Lynx `<text>`; web-core's is a browser
     `<textarea>`), so the empty line after a trailing break counts.
+  - *An `x-textarea` with no author height is as tall as its lines*
+    (native; user, 2026-10-20). Native measures an unsized field at the
+    height its editor reports (`LynxUIBaseInputShadowNode.kt:22-29`,
+    `mUIHeight`), so an empty one is one line tall, which is what the empty
+    editing host's strut line gives here. web-core's inner `<textarea>`
+    keeps the browser's default two rows (`rows=2`), about 36px at 14px.
 
 ## JS runtime & APIs (see [js-runtime.md](js-runtime.md), [accessibility.md](accessibility.md))
 

@@ -42,8 +42,6 @@ pending! {
         "DEFECT: the BTS `app` behind `lynxCoreInject.tt` has no `setSourceMapRelease`, so the card hits a TypeError before its own error",
     "api-updateData-callback" =>
         "two things stand in the way: the suite never calls `update_data`, and this engine's host API has no completion callback at all — `LynxView::update_data(data, processor_name)` reports no completion, where web-core takes a third callback argument. Upstream asserts only the console line it produces",
-    "basic-element-input-bindinput" =>
-        "the card writes the JSX tag `<input>`, which web-core maps to `x-input`; by user ruling (2026-10-19, `docs/tracking/deviations.md`) `input` is an HTML element name here and HTML's `<input>` is not implemented, so the card gets no field and `fill` has nothing to fill",
     "basic-element-list-estimated-main-axis-size-px-waterfall" =>
         "the card exists to show that a waterfall list whose cells carry only `estimated-main-axis-size-px` still reports `scrolltolower` after `autoScroll` is invoked from `useEffect` (upstream's removed test waited for that console line). `autoScroll` is built on lists since #408, but the list threshold event `scrolltolower` is not (#407 built only `scroll` and `scrollend`), so nothing is logged",
     "basic-element-list-horizontal-estimated-main-axis-size-px" =>
@@ -85,9 +83,7 @@ pending! {
     "basic-element-x-swiper-interval" =>
         "the first two frames are web-core's: green after one 5 s turn, and blue 1.6 s after `interval` is set to 1000 (the script takes that frame with a short stability check, because the swiper is quiet for only half a second between turns). The last is not: after `interval` 0, web-core's 4 ms timer moves the swiper to its last item, yellow, within 0.6 s, and here it stays on blue (still blue 4.8 s later). web-core keeps a logical `currentIndex` and adds one per tick; `turn` (`crates/bobcat-core/src/main/tree/swiper.rs`) takes the current item from the scroll offset, and with a turn due every 4 ms a new turn comes before the swiper has moved from blue (inferred from the code, not traced)",
     "basic-element-x-textarea-disabled" =>
-        "native-vs-web-core conflict for the user: the three `x-textarea`s have no author height and each is one line tall (#461), as native's text view, which wraps its content, would be; web-core's inner `<textarea>` keeps the browser's two rows (about 36px here), which upstream's screenshots show",
-    "basic-element-x-textarea-focus" =>
-        "the sky-blue block is 900px tall (90% of a 1000px page), so the three `x-textarea`s the card is about lie below the viewport; no capture shows them, and upstream has no spec for this card",
+        "DEFECT: by the 2026-10-20 ruling an unsized `x-textarea` is one line tall (native), and the first and third are; the `disabled` one is 2px, its borders only. #461 gives an empty field its line only while it is an editing host (`strut_line_when_empty` from `editing::is_host_node`), and `disabled` turns the editor's `contenteditable` off, so a disabled empty field has no line; tapping the block disables the third, which collapses too",
     "basic-element-x-viewpager-ng-allow-horizontal-gesture" =>
         "the first screen is right; `allow-horizontal-gesture={false}` only shows under the swipe it refuses",
     "basic-element-x-viewpager-ng-bindchange" =>

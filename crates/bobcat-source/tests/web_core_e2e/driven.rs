@@ -263,6 +263,11 @@ driven! {
     "basic-element-x-foldview-ng-method-setFoldExpanded-overflow" => [
         "folded-to-limit": [Tap(141.5, 450.0)],
     ],
+    // `input.press('Enter')`, then `input.fill('foobar')`. The card's `<input>` is
+    // `<x-input>` here (vendored rewrite, see the fixtures README).
+    "basic-element-input-bindinput" => [
+        "filled": [Tap(150.0, 20.0), Press("Enter", "Enter", false), Fill("foobar")],
+    ],
     // The field already has focus (`focus`); a click outside it, on nothing focusable,
     // takes it away. Upstream has no spec for this card.
     "basic-element-x-input-bindblur" => [

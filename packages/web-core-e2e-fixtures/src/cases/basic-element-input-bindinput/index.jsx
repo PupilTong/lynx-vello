@@ -27,7 +27,7 @@ function App() {
 
   return (
     <view>
-      <input
+      <x-input
         bindinput={onInput}
         value={value}
         style='border: 1px solid;width: 300px;height:40px'

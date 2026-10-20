@@ -564,4 +564,8 @@ verified! {
     basic_element_x_textarea_getvalue => "basic-element-x-textarea-getValue",
     // A 50px sky-blue block over an `x-textarea` with `min-height='100px'` and `max-height='200px'` (#461). First screen: four lines, and the field is 100px tall from its minimum. After the block is clicked the value has thirteen lines, 182px at this font's `normal` line height (its own metrics, 1.0em, as for every Lynx paragraph), so the field is 184px tall and under its 200px maximum.
     basic_element_x_textarea_min_height_max_height => "basic-element-x-textarea-min-height-max-height",
+    // `basic-element-x-input-bindinput` with the card's `<input>` rewritten to `<x-input>` (vendored rewrite, see the fixtures README): after Enter and `fill('foobar')` the field reads `foobar` with the caret after it and the result line reads `foobar-6-6`, which is what upstream asserts.
+    basic_element_input_bindinput => "basic-element-input-bindinput",
+    // A 200px sky-blue block (vendored rewrite: 20% of the 1000px page, not 90%) over three empty `x-textarea`s with no author height, each one line tall, 16px with its borders (native, user ruling 2026-10-20). None has focus: the second's `focus` attribute is one web-core's `x-textarea` does not observe, and the engine follows web-core (native would focus it). Upstream has no spec for this card.
+    basic_element_x_textarea_focus => "basic-element-x-textarea-focus",
 }
