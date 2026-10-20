@@ -21,7 +21,9 @@
 //! ([`refresh_view`]), the viewpager's `selectTab` UI method, the
 //! `scroll-view`'s `scrollTo`, `scrollBy` and `getScrollInfo` UI methods, the `list`'s
 //! `scrollToPosition`, `scrollBy`, `getScrollContainerInfo` and
-//! `getVisibleCells` UI methods ([`list`]), the scroll coordinator's
+//! `getVisibleCells` UI methods ([`list`]), both scrollers'
+//! `scrolltoupper` and `scrolltolower` events, decided from the `scroll`
+//! they observe ([`scroll_container`]), the scroll coordinator's
 //! `setFoldExpanded` UI method ([`scroll_coordinator`]), the dialog's
 //! `:open`/`:modal` state, top-layer membership and four UI methods
 //! ([`dialog`]), the overlay's UA shadow tree, the top-layer membership of
@@ -70,6 +72,17 @@ pub(crate) mod swiper;
 pub(super) mod test_support;
 mod text;
 pub(crate) mod text_field;
+/// No production caller yet: the `x-swiper`, `viewpager` and
+/// `x-refresh-view` events that read whether a finger is down are its users.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the swiper, viewpager and refresh-view events are its callers, in the slices \
+                  that follow"
+    )
+)]
+mod touches;
 mod ua_sheet;
 mod viewpager;
 #[cfg(test)]
@@ -80,6 +93,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use dom::{Document, ImageOutcome, NodeId, StylesheetOrigin};
+use smallvec::SmallVec;
 
 pub(crate) use self::base_methods::invoke_base_method;
 pub(crate) use self::frame::{MAX_FRAME_DEPTH, frame_depth, nested_page, reset_frame};
@@ -116,8 +130,9 @@ pub(super) const SLOT_CHANGE: &str = "slotchange";
 /// settled at its bind in, the `dialog` component the `close` and `cancel` its
 /// methods queue, the `overlay` component its `showoverlay` and
 /// `dismissoverlay`, the `markdown` component its `parseEnd`, `link` and
-/// `imageTap`, and the `frame` component its connections and
-/// disconnections, for the runtime to dispatch once it is out of the
+/// `imageTap`, the `scroll-view` and `list` components their
+/// `scrolltoupper` and `scrolltolower`, and the `frame` component its
+/// connections and disconnections, for the runtime to dispatch once it is out of the
 /// JavaScript call that caused them. `autoplays` is where the `x-swiper`
 /// component keeps its autoplay timers, for the runtime to wait out and run.
 #[must_use]
@@ -134,8 +149,8 @@ pub(crate) fn new_document(
     swiper::define(&mut document, autoplays);
     refresh_view::define(&mut document);
     viewpager::define(&mut document);
-    scroll_container::define(&mut document);
-    list::define(&mut document);
+    scroll_container::define(&mut document, events.clone());
+    list::define(&mut document, events.clone());
     scroll_coordinator::define(&mut document);
     text::define(&mut document);
     // After `image`: every image a markdown element renders is one.
@@ -222,7 +237,9 @@ pub(crate) enum ComponentEvent {
     /// A scroll container's `scroll` or `scrollend`, which the runtime
     /// queues, with the change in its offset the event reports (zero for a
     /// `scrollend`); the rest of Lynx's scroll metrics are read at
-    /// delivery.
+    /// delivery. A `scroll-view`'s or `list`'s `scrolltoupper` and
+    /// `scrolltolower` take the same shape, queued by its component
+    /// ([`scroll_container`]) with the change since its previous `scroll`.
     Scroll {
         node: NodeId,
         name: &'static str,
@@ -289,7 +306,7 @@ pub(crate) enum ComponentEvent {
 /// neither `undefined`-valued nor `""`: web-core's `{id: undefined}` loses
 /// that key when it is serialized, and the transport here would carry an
 /// `undefined`-valued key as one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ComponentDetail {
     /// `{id}`: a content id, such as the `content-id` attribute an
     /// `<x-markdown>`'s `parseEnd` reports.
@@ -324,6 +341,35 @@ pub(crate) enum ComponentDetail {
     /// `{selectionStart, selectionEnd}`: a text field's selection in UTF-16
     /// units, such as an `x-input`'s or `x-textarea`'s `selection` reports.
     Selection { selection: Range<u32> },
+    /// Numbers and booleans under the keys the component names, in its
+    /// order: the shape of a detail with no string in it, such as a
+    /// `{current, isDragged}`. Each pair is one key of the `detail`, so two
+    /// pairs under one key are a component's mistake the realm resolves as
+    /// an object literal would, the later one kept.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the swiper, viewpager and refresh-view events queue it, in the slices that \
+                      follow"
+        )
+    )]
+    Fields(SmallVec<[(&'static str, Field); 4]>),
+}
+
+/// One value of a [`ComponentDetail::Fields`] pair: a JavaScript number or
+/// boolean.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "constructed with `ComponentDetail::Fields`, in the slices that follow"
+    )
+)]
+pub(crate) enum Field {
+    Number(f64),
+    Bool(bool),
 }
 
 /// The events this document's components have produced and not delivered

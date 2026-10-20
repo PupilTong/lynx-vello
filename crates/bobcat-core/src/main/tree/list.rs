@@ -8,7 +8,7 @@
 //! written against it; its cells **skip their contents** until the frame
 //! reaches them; and its `list-type` picks the layout mode the cells are
 //! placed by. All three are the UA sheet's whole contribution. No cell
-//! recycling, no threshold events, no `update-list-info` consumer —
+//! recycling, no `scrollstatechange`, no `update-list-info` consumer —
 //! `docs/tracking/components.md` rows 23-24 carry what is still missing.
 //!
 //! The component ([`List`]) adds five of the methods Lynx documents for the
@@ -22,6 +22,25 @@
 //! `getVisibleCells` ([`visible_cells`]). The list has no `scrollTo` of its
 //! own, as web-core's `XList` has none, so the base set's CSSOM-View
 //! `scrollTo` answers one ([`super::base_methods`]).
+//!
+//! It fires `scroll-view`'s threshold events, `scrolltoupper` and
+//! `scrolltolower`, by `scroll-view`'s rule
+//! ([`super::scroll_container::ScrollEdges`]): decided on the list's own
+//! `scroll` only, each on entering its zone, each queued only for a listener
+//! on the list, with the scroll metrics as its `detail`. A zone is
+//! `upper-threshold`/`lower-threshold` px from the edge, read and defaulted
+//! to 0 as on a `scroll-view` — the native lists read both forms, Android's
+//! `AbsLynxList.java:146-158` defaulting each px threshold to 50, and
+//! web-core's `XList` has no px form, its zones starting at the edge —
+//! unless `upper-threshold-item-count`/`lower-threshold-item-count` names a
+//! positive count `k`, web-core's only form (`XListEvents.ts:90-137,186-233`): then
+//! the upper zone holds while element child number `k` (from 1) overlaps
+//! the scrollport on the scrolling axis, and the lower one while element
+//! child number `k` from the end does — web-core's `children[k - 1]` and
+//! `children[children.length - k]`, which its intersection observers watch.
+//! The children are read at each `scroll`, so an insertion moves the
+//! watched child with no bookkeeping; a count past the children, or one
+//! naming a child with no box, holds no zone ([`zones`]).
 //!
 //! The methods' references:
 //!
@@ -100,9 +119,10 @@
 //! offset (default `0px`), and `z-index: 1` to paint above ordinary cells.
 //! Horizontal sticky insets and `sticky-bottom` (`x-list.css:104-135`)
 //! are still missing, along with `item-snap` /
-//! `paging-enabled` scroll snapping (`:137-151`), the scrollbar rules
-//! (`:8,45-61`), and every `::part()` threshold observer behind
-//! `scrolltoupper`/`scrolltolower` (`:153-193`).
+//! `paging-enabled` scroll snapping (`:137-151`) and the scrollbar rules
+//! (`:8,45-61`). The `::part()` threshold observers behind
+//! `scrolltoupper`/`scrolltolower` (`:153-193`) are not needed: the
+//! component decides both events from the list's `scroll`.
 //!
 //! Gaps are the author's own `row-gap`/`column-gap`. web-core's
 //! `--list-main-axis-gap`/`--list-cross-axis-gap` indirection exists because
@@ -112,15 +132,20 @@
 //! (`crates/dom/tests/grammar_layout.rs:342-351`), so there is nothing to
 //! rename and the real gap properties are what an author writes.
 
+use dom::event::ElementEvent;
 use dom::scroll::{ScrollBehavior, ScrollBox};
 use dom::stylo::values::computed::Display;
 use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId, Rect, Size2D, Vector2D};
 use serde_json::{Map, Value};
 
 use super::scroll_container::{
-    along, auto_scroll, clamp_to_range, object, offset_px, rect_in_scroller, scroll_by, with_axis,
+    LOWER_THRESHOLD, SCROLL_EVENT, ScrollEdges, UPPER_THRESHOLD, Zones, along, auto_scroll,
+    clamp_to_range, is_own_scroll, object, offset_px, parse_int, rect_in_scroller,
+    rendered_scroll_box, scroll_by, threshold_px, with_axis,
 };
-use super::{InvalidParams, LynxDocument, element_child, element_children, is_truthy};
+use super::{
+    ComponentEvents, InvalidParams, LynxDocument, element_child, element_children, is_truthy,
+};
 use crate::main::record::write_record_field;
 
 /// The `list` and `list-item` policy, in `x-list.css`'s own order.
@@ -219,18 +244,55 @@ pub(super) const LIST_TAG: &str = "list";
 /// `getVisibleCells` reports and indexes.
 const CELL_TAG: &str = "list-item";
 
-/// Installs the `list` component. Must run before any element could carry
-/// the tag, which is [`Document::define`](dom::Document::define)'s own
-/// precondition.
-pub(super) fn define(document: &mut LynxDocument) {
-    document.define(LIST_TAG, Box::new(List));
+/// How many element children from the start the upper zone reaches: while
+/// the last of them overlaps the scrollport the list is at its upper edge.
+const UPPER_THRESHOLD_ITEM_COUNT: &str = "upper-threshold-item-count";
+
+/// How many element children from the end the lower zone reaches.
+const LOWER_THRESHOLD_ITEM_COUNT: &str = "lower-threshold-item-count";
+
+/// Installs the `list` component, which queues its threshold events on
+/// `events`. Must run before any element could carry the tag, which is
+/// [`Document::define`](dom::Document::define)'s own precondition.
+pub(super) fn define(document: &mut LynxDocument, events: ComponentEvents) {
+    document.define(
+        LIST_TAG,
+        Box::new(List {
+            events,
+            edges: ScrollEdges::default(),
+        }),
+    );
 }
 
-/// The `list` component: `scrollToPosition`, `scrollBy`,
-/// `getScrollContainerInfo` and `getVisibleCells`.
-struct List;
+/// The `list` component: `scrollToPosition`, `scrollBy`, `autoScroll`,
+/// `getScrollContainerInfo` and `getVisibleCells`, and the `scrolltoupper`
+/// and `scrolltolower` events.
+struct List {
+    events: ComponentEvents,
+    edges: ScrollEdges,
+}
 
 impl CustomElement<()> for List {
+    fn observed_events(&self) -> &'static [&'static str] {
+        &[SCROLL_EVENT]
+    }
+
+    fn freed(&self, element: NodeId) {
+        self.edges.forget(element);
+    }
+
+    fn handle_event(&self, document: &mut LynxDocument, element: NodeId, event: &mut ElementEvent) {
+        if !is_own_scroll(element, event) {
+            return;
+        }
+        let Some(scroll_box) = rendered_scroll_box(document, element) else {
+            return;
+        };
+        let zones = zones(document, element, &scroll_box);
+        self.edges
+            .record(document, &self.events, element, scroll_box.offset, zones);
+    }
+
     fn invoke(
         &self,
         document: &mut LynxDocument,
@@ -268,12 +330,78 @@ fn is_horizontal(document: &LynxDocument, list: NodeId) -> bool {
         .is_some_and(|node| node.attribute("scroll-orientation") == Some("horizontal"))
 }
 
-/// `list`'s scroll geometry, or `None` when it has no box
-/// ([`dom::Document::bounding_client_rect`] is `None`: `display: none`
-/// itself or on an ancestor, or detached) or is no scroll container.
-fn list_scroll_box(document: &LynxDocument, list: NodeId) -> Option<ScrollBox> {
-    document.bounding_client_rect(list)?;
-    document.scroll_box(list)
+/// The zones the offset `scroll_box` holds lies in, on `list`'s scrolling
+/// axis: per edge, the item-count rule when its count attribute names a
+/// positive count ([`item_count`]), else `scroll-view`'s px rule with the
+/// list's own `upper-threshold`/`lower-threshold`.
+fn zones(document: &LynxDocument, list: NodeId, scroll_box: &ScrollBox) -> Zones {
+    let horizontal = is_horizontal(document, list);
+    let offset = along(scroll_box.offset, horizontal);
+    let upper = match item_count(document, list, UPPER_THRESHOLD_ITEM_COUNT) {
+        0 => offset <= threshold_px(document, list, UPPER_THRESHOLD),
+        count => element_children(document, list)
+            .nth(count - 1)
+            .is_some_and(|child| {
+                overlaps_scrollport(document, list, child, scroll_box, horizontal)
+            }),
+    };
+    let lower = match item_count(document, list, LOWER_THRESHOLD_ITEM_COUNT) {
+        0 => {
+            let max = along(scroll_box.max_offset(), horizontal);
+            offset >= max - threshold_px(document, list, LOWER_THRESHOLD)
+        }
+        count => element_children(document, list)
+            .count()
+            .checked_sub(count)
+            .and_then(|index| element_children(document, list).nth(index))
+            .is_some_and(|child| {
+                overlaps_scrollport(document, list, child, scroll_box, horizontal)
+            }),
+    };
+    Zones { upper, lower }
+}
+
+/// `list`'s item-count attribute `name` as a whole number of children:
+/// JavaScript's `parseInt` of it ([`parse_int`]), and 0 — the px rule —
+/// when it is missing, unreadable or not positive. web-core `parseFloat`s
+/// it and indexes `children` with the result, so a fractional count names
+/// no child there and fires nothing, where here it is truncated.
+fn item_count(document: &LynxDocument, list: NodeId, name: &str) -> usize {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a positive whole number; one past any child count saturates and names none"
+    )]
+    document
+        .get(list)
+        .and_then(|node| node.attribute(name))
+        .and_then(parse_int)
+        .filter(|count| *count > 0.0)
+        .map_or(0, |count| count as usize)
+}
+
+/// Whether `child`, an element child of `list`, overlaps the scrollport on
+/// the scrolling axis at the offset `scroll_box` holds: its border box
+/// starts before the scrollport's end and ends after its start. A child
+/// that generates no box ([`generates_box`]) overlaps nothing.
+fn overlaps_scrollport(
+    document: &LynxDocument,
+    list: NodeId,
+    child: NodeId,
+    scroll_box: &ScrollBox,
+    horizontal: bool,
+) -> bool {
+    if !generates_box(document, child) {
+        return false;
+    }
+    let Some(rect) = rect_in_scroller(document, list, child) else {
+        return false;
+    };
+    let start = along(rect.origin.to_vector(), horizontal);
+    let end = start + along(rect.size.to_vector(), horizontal);
+    let offset = along(scroll_box.offset, horizontal);
+    let scrollport = along(scroll_box.scrollport.to_vector(), horizontal);
+    start < offset + scrollport && end > offset
 }
 
 /// Whether `cell`, an element child of a list that has a box, generates one
@@ -361,7 +489,7 @@ pub(super) fn scroll_to_position(
         ScrollBehavior::Instant
     };
     let horizontal = is_horizontal(document, list);
-    let Some(scroll_box) = list_scroll_box(document, list) else {
+    let Some(scroll_box) = rendered_scroll_box(document, list) else {
         return Ok(());
     };
     if !generates_box(document, cell) {
@@ -449,7 +577,7 @@ impl ScrollContainerInfo {
 /// method. `params` is unread. A list with no box, or that is no scroll
 /// container, answers zeros.
 pub(super) fn scroll_container_info(document: &LynxDocument, list: NodeId) -> ScrollContainerInfo {
-    list_scroll_box(document, list).map_or(
+    rendered_scroll_box(document, list).map_or(
         ScrollContainerInfo {
             offset: Vector2D::zero(),
             scroll_size: Size2D::zero(),
@@ -497,7 +625,7 @@ pub(super) struct VisibleCell {
 /// A list with no box, or that is no scroll container, answers no cells.
 /// `params` is unread.
 pub(super) fn visible_cells(document: &LynxDocument, list: NodeId) -> Vec<VisibleCell> {
-    let Some(scroll_box) = list_scroll_box(document, list) else {
+    let Some(scroll_box) = rendered_scroll_box(document, list) else {
         return Vec::new();
     };
     let scrollport = Rect::from_size(scroll_box.scrollport);
@@ -552,8 +680,12 @@ mod tests {
     use dom::stylo::values::computed::{Display, Overflow};
     use dom::{MethodCall, MethodError, MethodOutcome, NodeId, Rect, Size2D, Vector2D};
 
-    use super::super::LynxDocument;
-    use super::super::test_support::{child, display, document, element_under, overflow, style_of};
+    use super::super::scroll_container::tests::{heard, listen, scrolled};
+    use super::super::scroll_container::{SCROLL_TO_LOWER_EVENT, SCROLL_TO_UPPER_EVENT};
+    use super::super::test_support::{
+        child, display, document, element_under, overflow, style_of, with_component_events,
+    };
+    use super::super::{ComponentEvents, LynxDocument, PageConfig};
     use super::{
         LIST_TAG, ScrollContainerInfo, VisibleCell, scroll_container_info, scroll_to_position,
         visible_cells,
@@ -1897,5 +2029,169 @@ mod tests {
             );
         }
         assert_eq!(document.pending_scroll_request(list), None);
+    }
+
+    // --- the threshold events ----------------------------------------------
+
+    /// [`methods_list`]'s list, with the document's component events and
+    /// `attributes` written before the layout: a 180px scrollport over six
+    /// cells at 0, 100, 180, 220, 300 and 370, ending at 470, so a range of
+    /// 290.
+    fn edge_list(attributes: &[(&str, &str)]) -> (LynxDocument, ComponentEvents, NodeId) {
+        let (mut document, events) = with_component_events(PageConfig::default());
+        let list = child(
+            &mut document,
+            LIST_TAG,
+            "width: 200px; height: 200px; border: 10px solid",
+        );
+        let mut horizontal = false;
+        for (name, value) in attributes {
+            document.set_attribute(list, name, value);
+            horizontal |= (*name, *value) == ("scroll-orientation", "horizontal");
+        }
+        for size in SIZES {
+            let style = if horizontal {
+                format!("width: {size}px")
+            } else {
+                format!("height: {size}px")
+            };
+            cell(&mut document, list, &style);
+        }
+        document.layout();
+        (document, events, list)
+    }
+
+    fn y(offset: f32) -> Vector2D<f32> {
+        Vector2D::new(0.0, offset)
+    }
+
+    #[test]
+    fn a_list_fires_by_the_px_thresholds_as_a_scroll_view_does() {
+        let (mut document, events, list) =
+            edge_list(&[("upper-threshold", "30"), ("lower-threshold", "10px")]);
+        listen(&mut document, list, SCROLL_TO_UPPER_EVENT);
+        listen(&mut document, list, SCROLL_TO_LOWER_EVENT);
+        scrolled(&mut document, list, y(40.0));
+        assert_eq!(heard(&events, list), [], "past 30 and short of 280");
+        scrolled(&mut document, list, y(30.0));
+        assert_eq!(heard(&events, list), [(SCROLL_TO_UPPER_EVENT, y(-10.0))]);
+        scrolled(&mut document, list, y(280.0));
+        assert_eq!(heard(&events, list), [(SCROLL_TO_LOWER_EVENT, y(250.0))]);
+        scrolled(&mut document, list, y(290.0));
+        assert_eq!(heard(&events, list), [], "still inside the lower zone");
+    }
+
+    #[test]
+    fn an_upper_item_count_watches_that_child_from_the_start() {
+        let (mut document, events, list) = edge_list(&[("upper-threshold-item-count", "2")]);
+        listen(&mut document, list, SCROLL_TO_UPPER_EVENT);
+        // The second cell spans 100..180.
+        scrolled(&mut document, list, y(0.0));
+        assert_eq!(heard(&events, list), [(SCROLL_TO_UPPER_EVENT, y(0.0))]);
+        scrolled(&mut document, list, y(150.0));
+        assert_eq!(heard(&events, list), [], "the cell still overlaps 150..330");
+        scrolled(&mut document, list, y(180.0));
+        assert_eq!(
+            heard(&events, list),
+            [],
+            "a cell ending at the start overlaps nothing"
+        );
+        scrolled(&mut document, list, y(179.0));
+        assert_eq!(heard(&events, list), [(SCROLL_TO_UPPER_EVENT, y(-1.0))]);
+    }
+
+    #[test]
+    fn a_lower_item_count_watches_that_child_from_the_end() {
+        let (mut document, events, list) = edge_list(&[("lower-threshold-item-count", "2")]);
+        listen(&mut document, list, SCROLL_TO_LOWER_EVENT);
+        // The second cell from the end spans 300..370.
+        scrolled(&mut document, list, y(120.0));
+        assert_eq!(
+            heard(&events, list),
+            [],
+            "a cell starting at the end overlaps nothing"
+        );
+        scrolled(&mut document, list, y(121.0));
+        assert_eq!(heard(&events, list), [(SCROLL_TO_LOWER_EVENT, y(1.0))]);
+        scrolled(&mut document, list, y(290.0));
+        scrolled(&mut document, list, y(110.0));
+        assert_eq!(heard(&events, list), []);
+        scrolled(&mut document, list, y(200.0));
+        assert_eq!(heard(&events, list), [(SCROLL_TO_LOWER_EVENT, y(90.0))]);
+    }
+
+    #[test]
+    fn an_item_count_reads_the_children_at_each_scroll() {
+        let (mut document, events, list) = edge_list(&[("lower-threshold-item-count", "1")]);
+        listen(&mut document, list, SCROLL_TO_LOWER_EVENT);
+        scrolled(&mut document, list, y(290.0));
+        assert_eq!(heard(&events, list), [(SCROLL_TO_LOWER_EVENT, y(290.0))]);
+        // A new last cell, 470..570: at 280 the old last one (370..470)
+        // still overlaps the scrollport, the new one does not.
+        cell(&mut document, list, "height: 100px");
+        document.layout();
+        scrolled(&mut document, list, y(280.0));
+        scrolled(&mut document, list, y(390.0));
+        assert_eq!(
+            heard(&events, list),
+            [(SCROLL_TO_LOWER_EVENT, y(110.0))],
+            "the zone followed the new last child"
+        );
+    }
+
+    #[test]
+    fn an_item_count_naming_no_child_with_a_box_holds_no_zone() {
+        let (mut document, events, list) = edge_list(&[
+            ("upper-threshold-item-count", "7"),
+            ("lower-threshold-item-count", "1"),
+        ]);
+        // A `view` written directly in a list generates no box.
+        element_under(&mut document, list, "view", "height: 50px");
+        document.layout();
+        listen(&mut document, list, SCROLL_TO_UPPER_EVENT);
+        listen(&mut document, list, SCROLL_TO_LOWER_EVENT);
+        for offset in [0.0, 290.0, 0.0] {
+            scrolled(&mut document, list, y(offset));
+        }
+        assert_eq!(
+            heard(&events, list),
+            [],
+            "the seventh child is the hidden `view`, and so is the last"
+        );
+        document.set_attribute(list, "upper-threshold-item-count", "8");
+        scrolled(&mut document, list, y(10.0));
+        assert_eq!(heard(&events, list), [], "a count past the children");
+    }
+
+    #[test]
+    fn a_horizontal_list_watches_its_children_along_x() {
+        let (mut document, events, list) = edge_list(&[
+            ("scroll-orientation", "horizontal"),
+            ("upper-threshold-item-count", "3"),
+        ]);
+        listen(&mut document, list, SCROLL_TO_UPPER_EVENT);
+        // The third cell spans 180..220 along x.
+        scrolled(&mut document, list, Vector2D::zero());
+        assert_eq!(
+            heard(&events, list),
+            [],
+            "a cell starting at the end overlaps nothing"
+        );
+        scrolled(&mut document, list, Vector2D::new(10.0, 0.0));
+        assert_eq!(
+            heard(&events, list),
+            [(SCROLL_TO_UPPER_EVENT, Vector2D::new(10.0, 0.0))]
+        );
+    }
+
+    #[test]
+    fn a_list_with_no_box_decides_nothing() {
+        let (mut document, events, list) = edge_list(&[]);
+        listen(&mut document, list, SCROLL_TO_UPPER_EVENT);
+        listen(&mut document, list, SCROLL_TO_LOWER_EVENT);
+        document.set_inline_style(list, "display: none");
+        document.layout();
+        scrolled(&mut document, list, y(0.0));
+        assert_eq!(heard(&events, list), []);
     }
 }

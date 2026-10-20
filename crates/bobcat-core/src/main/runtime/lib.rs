@@ -52,9 +52,9 @@ use crate::main::layout_change::{
 };
 use crate::main::record::write_record_field;
 use crate::main::tree::{
-    Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, LynxDocument, MAX_FRAME_DEPTH,
-    PageConfig, frame_depth, invoke_base_method, is_svg, is_text, nested_page, new_document,
-    reset_frame,
+    Autoplays, ComponentDetail, ComponentEvent, ComponentEvents, Field, LynxDocument,
+    MAX_FRAME_DEPTH, PageConfig, frame_depth, invoke_base_method, is_svg, is_text, nested_page,
+    new_document, reset_frame,
 };
 use crate::realm::child::{ChildHostModules, ChildHostState, ChildKey};
 use crate::realm::policy::context_of;
@@ -181,7 +181,8 @@ type Extras<'a> = &'a [(&'static str, Extra<'a>)];
 /// field's (`XInputEvents.ts`) `value`; `value`, `textLength`, `cursor`,
 /// `isComposing`, `selectionStart` and `selectionEnd`, where `textLength`
 /// is the value's UTF-16 length and the deprecated `cursor` the selection's
-/// start; `selectionStart` and `selectionEnd`.
+/// start; `selectionStart` and `selectionEnd`. A
+/// [`ComponentDetail::Fields`] pushes its pairs as they are, in its order.
 fn push_detail_extras<'a>(
     detail: &'a ComponentDetail,
     extras: &mut SmallVec<[(&'static str, Extra<'a>); 7]>,
@@ -228,6 +229,15 @@ fn push_detail_extras<'a>(
             ("selectionStart", unit(selection.start)),
             ("selectionEnd", unit(selection.end)),
         ]),
+        ComponentDetail::Fields(fields) => {
+            extras.extend(fields.iter().map(|&(key, field)| {
+                let value = match field {
+                    Field::Number(number) => Extra::Number(number),
+                    Field::Bool(flag) => Extra::Bool(flag),
+                };
+                (key, value)
+            }));
+        }
     }
 }
 
