@@ -550,4 +550,18 @@ verified! {
     basic_element_x_textarea_placeholder_font_size => "basic-element-x-textarea-placeholder-font-size",
     // A 200px sky-blue block over two empty 30px `x-textarea`s. The first placeholder is #DFA878, 20px, normal weight in both frames; the second is #D71313, 12px, bold, and after the block is clicked #F0DE36, 16px, normal.
     basic_element_x_textarea_placeholder_style => "basic-element-x-textarea-placeholder-style",
+    // An empty 314x40 `x-input`, the 10px blue `#target` and a 200x200 `#result`, pink. The tap on `#target` invokes the field's `focus`, which succeeds: the box turns green, and the empty field shows its caret on one line of its own height (#461).
+    api_invoke_success => "api-invoke-success",
+    // A 300x40 `x-input type='password'` whose value `bindfocus` shows as nine discs (#460). The click focuses it: the caret stands after the discs and `bindfocus` writes the value into the result line, which is what upstream asserts.
+    basic_element_x_input_bindfocus => "basic-element-x-input-bindfocus",
+    // Seven 300x40 `x-input`s, one per `type`: `foo`, `foo`, `123`, `456`, three discs for the `password` value `foo` (#460), `12344545643` and `foo@example.com`.
+    basic_element_x_input_type => "basic-element-x-input-type",
+    // An empty 300x40 `x-input` whose placeholder `foo` is red, bold and 20px from the card's `.target::placeholder` rule, which reaches the field's placeholder as web-core's `::part(input)::placeholder` does (#459).
+    basic_element_x_input_placeholder_pseudo_element => "basic-element-x-input-placeholder-pseudo-element",
+    // A red `#target` box over a 300x40 `x-input` showing `hello`. The field is focused and given the selection 2 to 5, then `#target` is tapped and its handler logs `getValue`'s answer, awaited in the log: `hello`, selection 2 to 5. The tap took the field's focus, so the frame shows it unfocused with no highlight; it kept its selection, as a browser's text control does (#461), which is what upstream asserts.
+    basic_element_x_input_getvalue => "basic-element-x-input-getValue",
+    // `basic-element-x-input-getValue` on a 300x40 `x-textarea`, its value `hello` at the top: the logged answer, awaited, is `hello` with selection 2 to 5, kept across the loss of focus (#461).
+    basic_element_x_textarea_getvalue => "basic-element-x-textarea-getValue",
+    // A 50px sky-blue block over an `x-textarea` with `min-height='100px'` and `max-height='200px'` (#461). First screen: four lines, and the field is 100px tall from its minimum. After the block is clicked the value has thirteen lines, 182px at this font's `normal` line height (its own metrics, 1.0em, as for every Lynx paragraph), so the field is 184px tall and under its 200px maximum.
+    basic_element_x_textarea_min_height_max_height => "basic-element-x-textarea-min-height-max-height",
 }

@@ -32,8 +32,6 @@ pending! {
         "awaiting a ruling: the card reads `res.path` in the `path()` callback and expects `id: undefined` for an element with none. web-core answers `{path: […]}` with `id: undefined`; native answers the node array itself with `id: \"\"`, and this engine follows native (`__BobcatQueryNodes`, `nodeFields` in `packages/bobcat-element/src/element-papi.ts`), so `res.path` is undefined and `#result` stays pink",
     "api-global-disallowed-vars" =>
         "DEFECT: `MTS_CHUNK_PREAMBLE` (crates/bobcat-core/src/esm.rs) declares none of the disallowed globals the BTS preamble shadows, so MTS code naming `navigator`/`postMessage` raises a ReferenceError where web-core's lepus wrapper gives `undefined`. The card paints only a sizeless view, so the blank screen hides it",
-    "api-invoke-success" =>
-        "the tap on `#target` invokes the empty `x-input`'s `focus`, which succeeds and turns the box green, but the focused field paints no caret: an empty `x-input`'s editor is 0px tall (`TextInputState::editable_bounds` 312x0), so its caret is clipped, where an empty `x-textarea` paints one (`basic-element-x-textarea-bindinput`)",
     "api-lynx-performance" =>
         "the box turns green once `lynx.performance.addTimingListener` has seen `__lynx_timing_actual_fmp` and a flagged update; `lynx.performance` is undefined on the background thread, so it stays pink. Upstream also reads the keys of the host's `timing` event, which the view does not report",
     "api-report-error" =>
@@ -74,14 +72,6 @@ pending! {
         "what a selection drag highlights is an interaction no first screen carries; selection is out of scope",
     "basic-element-x-audio-tt-play" =>
         "upstream's own test body is empty (its skip is commented out with a FIXME), so nothing is asserted. There is no `x-audio-tt` component and no audio output here, and the card's tap handler reads an undeclared `e`, so it would throw before any `invoke`",
-    "basic-element-x-input-bindfocus" =>
-        "the click focuses the field and `bindfocus` writes `bindfocus` into the result line, but the field is `type='password'` and shows its value as typed: a password field is not masked (`docs/tracking/deviations.md`), where web-core shows bullets",
-    "basic-element-x-input-getValue" =>
-        "upstream focuses the field, calls `setSelectionRange(2, 5)` and clicks `#target` with a script `click()`, which leaves the field focused, and expects `getValue` to answer 2 and 5. A host has no script click: the tap on `#target` takes focus from the field first, and a field that lost focus answers its caret at the end (5 and 5), where a browser input keeps its selection after blur",
-    "basic-element-x-input-placeholder-pseudo-element" =>
-        "the card styles the placeholder with `.target::placeholder` (red, bold, 20px) and it shows grey and normal: web-core rewrites `::placeholder` to `::part(input)::placeholder` (`style_info_decoder.rs`), and here an author `::placeholder` rule does not reach the field's placeholder",
-    "basic-element-x-input-type" =>
-        "seven `x-input`s, one per `type`, each showing its value; the `password` one shows `foo` as typed, because a password field is not masked (`docs/tracking/deviations.md`), where web-core shows bullets",
     "basic-element-x-refresh-view-demo" =>
         "the first screen is right, and a 100px pull does bring the red header in. `finishRefresh` and `finishLoadMore` now exist (`crates/bobcat-core/src/main/tree/refresh_view.rs`), but the card calls them, and adds its item rows, only from its `startrefresh` and `startloadmore` handlers, and no refresh-view event is dispatched (same file: every event is not implemented), so after each release no item rows appear and the header stays snapped in where upstream shows two rows, then four, with the header and footer put back. Upstream's two mid-pull screenshots are taken with the finger still down, which the suite has no step for",
     "basic-element-x-swiper-bindchange" =>
@@ -95,13 +85,9 @@ pending! {
     "basic-element-x-swiper-interval" =>
         "the first two frames are web-core's: green after one 5 s turn, and blue 1.6 s after `interval` is set to 1000 (the script takes that frame with a short stability check, because the swiper is quiet for only half a second between turns). The last is not: after `interval` 0, web-core's 4 ms timer moves the swiper to its last item, yellow, within 0.6 s, and here it stays on blue (still blue 4.8 s later). web-core keeps a logical `currentIndex` and adds one per tick; `turn` (`crates/bobcat-core/src/main/tree/swiper.rs`) takes the current item from the scroll offset, and with a turn due every 4 ms a new turn comes before the swiper has moved from blue (inferred from the code, not traced)",
     "basic-element-x-textarea-disabled" =>
-        "the three `x-textarea`s have no author height and each is 0px tall, its two borders only; web-core's inner `<textarea>` keeps the browser's two-row height (about 36px here). A field has no intrinsic size yet (`docs/tracking/deviations.md` names the width)",
+        "native-vs-web-core conflict for the user: the three `x-textarea`s have no author height and each is one line tall (#461), as native's text view, which wraps its content, would be; web-core's inner `<textarea>` keeps the browser's two rows (about 36px here), which upstream's screenshots show",
     "basic-element-x-textarea-focus" =>
-        "the sky-blue block is 900px tall (90% of a 1000px page), so the three `x-textarea`s the card is about lie below the viewport, and with no author height each is 0px tall (see `basic-element-x-textarea-disabled`); no capture shows them, and upstream has no spec for this card",
-    "basic-element-x-textarea-getValue" =>
-        "upstream focuses the field, calls `setSelectionRange(2, 5)` and clicks `#target` with a script `click()`, which leaves the field focused, and expects `getValue` to answer 2 and 5. A host has no script click: the tap on `#target` takes focus from the field first, and a field that lost focus answers its caret at the end (5 and 5), where a browser textarea keeps its selection after blur",
-    "basic-element-x-textarea-min-height-max-height" =>
-        "web-core applies the `min-height` and `max-height` attributes to its inner `<textarea>`, so the field is at least 100px tall and at most 200px after the update; neither attribute is built here (`docs/editable-text-design.md`), and the field is as tall as its four lines, then its thirteen",
+        "the sky-blue block is 900px tall (90% of a 1000px page), so the three `x-textarea`s the card is about lie below the viewport; no capture shows them, and upstream has no spec for this card",
     "basic-element-x-viewpager-ng-allow-horizontal-gesture" =>
         "the first screen is right; `allow-horizontal-gesture={false}` only shows under the swipe it refuses",
     "basic-element-x-viewpager-ng-bindchange" =>

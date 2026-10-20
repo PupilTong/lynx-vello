@@ -15,6 +15,11 @@ use Step::{
     UpdateGlobalProps, Wait, Wheel,
 };
 
+/// What the two `getValue` cards log: the value, and the selection the field kept
+/// when the tap on `#target` took its focus.
+const GOT_VALUE: &str =
+    r#"{"value":"hello","selectionStart":2,"selectionEnd":5,"isComposing":false,"selectionBegin":2}"#;
+
 /// The start of each event `basic-element-x-textarea-bindinput` logs, up to its
 /// `timestamp`.
 const TEXTAREA_FOCUS: &str = concat!(
@@ -289,9 +294,10 @@ driven! {
         "focused": [Tap(50.0, 50.0)],
     ],
     // The inner `<input>` focused, `setSelectionRange(2, 5)`, then `#target`, the red
-    // box over it, clicked.
+    // box over it, clicked. Upstream clicks with a script `click()`, which keeps the
+    // field focused; a tap takes focus, and the field answers the selection it kept.
     "basic-element-x-input-getValue" => [
-        "got": [Tap(150.0, 120.0), Select(2, 5), Tap(50.0, 50.0)],
+        "got": [Tap(150.0, 120.0), Select(2, 5), Tap(50.0, 50.0), Logged(GOT_VALUE)],
     ],
     // `input.press('Enter')`, then `input.fill('foobar!@#)')`.
     "basic-element-x-input-input-filter" => [
@@ -508,9 +514,9 @@ driven! {
         "selected": [Tap(150.0, 20.0), Select(2, 5)],
     ],
     // The inner `<textarea>` focused, `setSelectionRange(2, 5)`, then `#target`, the
-    // red box over it, clicked.
+    // red box over it, clicked, as for `basic-element-x-input-getValue`.
     "basic-element-x-textarea-getValue" => [
-        "got": [Tap(150.0, 120.0), Select(2, 5), Tap(50.0, 50.0)],
+        "got": [Tap(150.0, 120.0), Select(2, 5), Tap(50.0, 50.0), Logged(GOT_VALUE)],
     ],
     // `textarea.press('Enter')`, then `textarea.fill('foobar!@#)')`.
     "basic-element-x-textarea-input-filter" => [
