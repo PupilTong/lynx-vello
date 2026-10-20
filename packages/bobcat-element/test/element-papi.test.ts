@@ -5234,3 +5234,122 @@ describe("the page realm", () => {
     expect(mock.named("parentNode")).toEqual([]);
   });
 });
+
+describe("layout events", () => {
+  /** The detail every dispatch handed a closure on `element`, in order. */
+  const details = (element: object, name: string) => {
+    const seen: unknown[] = [];
+    __AddEventListener(element, name, (event: { detail: unknown }) => {
+      seen.push(event.detail);
+    }, {});
+    return seen;
+  };
+
+  it("builds layoutchange's detail from the four numbers and the target", () => {
+    const { inner } = tree();
+    __SetID(inner, "box");
+    __AddDataset(inner, "row", 7);
+    const seen = details(inner, "layoutchange");
+
+    dispatch([inner], "layoutchange", {
+      extras: [["left", 50], ["top", 60], ["width", 100], ["height", 40]],
+    }, undefined, false);
+
+    expect(seen).toEqual([{
+      id: "box",
+      dataset: { row: 7 },
+      width: 100,
+      height: 40,
+      left: 50,
+      top: 60,
+      right: 150,
+      bottom: 100,
+    }]);
+    expect(Object.keys(seen[0] as object)).toEqual([
+      "id",
+      "dataset",
+      "width",
+      "height",
+      "left",
+      "top",
+      "right",
+      "bottom",
+    ]);
+  });
+
+  it("answers an empty id for an element that carries none", () => {
+    const { inner } = tree();
+    const seen = details(inner, "layoutchange");
+
+    dispatch([inner], "layoutchange", {
+      extras: [["left", 0], ["top", 0], ["width", 0], ["height", 0]],
+    }, undefined, false);
+
+    expect(seen).toEqual([{
+      id: "",
+      dataset: {},
+      width: 0,
+      height: 0,
+      left: 0,
+      top: 0,
+      right: 0,
+      bottom: 0,
+    }]);
+  });
+
+  it("publishes the layoutchange detail to a background handler as values", () => {
+    const { inner } = tree();
+    __AddDataset(inner, "row", 7);
+    __AddEvent(inner, "bindEvent", "layoutchange", "3:0:bindlayoutchange");
+
+    dispatch([inner], "layoutchange", {
+      extras: [["left", 1], ["top", 2], ["width", 3], ["height", 4]],
+    }, undefined, false);
+
+    const published = mock.named("publishEvent");
+    expect(published).toHaveLength(1);
+    expect(published[0]![2]).toBe("3:0:bindlayoutchange");
+    expect((published[0]![3] as { detail: unknown }).detail).toEqual({
+      id: "",
+      dataset: { row: 7 },
+      width: 3,
+      height: 4,
+      left: 1,
+      top: 2,
+      right: 4,
+      bottom: 6,
+    });
+  });
+
+  it("builds a text's layout detail from the lines' JSON text", () => {
+    const { inner } = tree();
+    const seen = details(inner, "layout");
+
+    dispatch([inner], "layout", {
+      extras: [
+        ["lineCount", 2],
+        ["lines", "[0,5,0,6,11,3]"],
+        ["width", 100],
+        ["height", 42],
+      ],
+    }, undefined, false);
+
+    expect(seen).toEqual([{
+      lineCount: 2,
+      lines: [
+        { start: 0, end: 5, ellipsisCount: 0 },
+        { start: 6, end: 11, ellipsisCount: 3 },
+      ],
+      size: { width: 100, height: 42 },
+    }]);
+  });
+
+  it("leaves another event's extras as the detail", () => {
+    const { inner } = tree();
+    const seen = details(inner, "load");
+
+    dispatch([inner], "load", { width: 40, height: 20 }, undefined, false);
+
+    expect(seen).toEqual([{ width: 40, height: 20 }]);
+  });
+});

@@ -3015,6 +3015,74 @@ fn a_bts_stop_exposure_sends_the_disexposure_list_back_to_the_bts() {
     );
 }
 
+/// A background-thread string handler filed through
+/// `__AddEvent(el, 'bindEvent', 'layoutchange', name)` — what `ReactLynx`'s
+/// `bindLayoutChange` compiles to — is reached through the existing publish
+/// path with the `layoutchange` detail: the `api-bindlauoutchange` card's
+/// 100×100 view at its 50px margin offset, with its id and typed dataset.
+/// The detail crosses as values, `dataset` a copy.
+#[test]
+fn a_bts_layoutchange_handler_hears_the_detail() {
+    let mut pair = Pair::with_background(
+        r"
+        globalThis.results = [];
+        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const column = __CreateView(0);
+          __SetInlineStyles(column, 'display:flex;flex-direction:column');
+          const view = __CreateView(0);
+          __SetID(view, 'box');
+          __AddDataset(view, 'row', 7);
+          __SetInlineStyles(view, 'width:100px;height:100px;margin:50px');
+          __AppendElement(page, column);
+          __AppendElement(column, view);
+          __AddEvent(view, 'bindEvent', 'layoutchange', 'handleLayoutChange');
+          globalThis.held = [view];
+        };
+        ",
+        Some(
+            r"
+        import { lynx } from 'bobcat:bts-runtime';
+        lynx.getApp().publishEvent = (name, event) => {
+            lynx.getCoreContext().dispatchEvent({
+                type: 'reply',
+                data: [name, event.type, event.target.id, event.detail],
+            });
+        };
+        ",
+        ),
+    );
+    let runtime = pair.runtime.as_mut().unwrap();
+    assert!(
+        runtime.update_resize_observations(),
+        "the first observation is queued"
+    );
+    let failures = runtime.notify_resize_observers(&mut pair.js);
+    assert!(failures.is_empty());
+    pair.deliver();
+    pair.check(
+        r"
+        const expected = JSON.stringify([[
+          'handleLayoutChange',
+          'layoutchange',
+          'box',
+          {
+            id: 'box',
+            dataset: { row: 7 },
+            width: 100,
+            height: 100,
+            left: 50,
+            top: 50,
+            right: 150,
+            bottom: 150,
+          },
+        ]]);
+        if (JSON.stringify(results) !== expected) throw Error(JSON.stringify(results));
+        ",
+    );
+}
+
 #[test]
 fn mts_boot_finishes_without_waiting_for_bts() {
     // Boot is the MTS entry's own fact. A BTS entry whose top-level await

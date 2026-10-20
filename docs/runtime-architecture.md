@@ -670,7 +670,14 @@ due timers first, because whatever just ran may have armed or
 cleared one and its mutation should ride the same frame (the page's hook also
 ends the batch those callbacks ran, which runs the collection their removals
 may have made due); the commit next, so the frame exists before anything
-implying it; then the intersection observations that commit — or a scroll
+implying it; then the `<text>` `layout` reports that commit left, drained
+into the component events (`queue_text_layout_events`); then the resize
+observations that commit moved, updated here and, when an entry was queued,
+posted as one fresh entry (`Page::post_resize_notifications`), which runs the
+observers' handlers and then dispatches `layoutchange` at each element the
+document's `layoutchange` observer recorded (`notify_resize_observers`;
+posted before the intersection delivery, as HTML gathers resize observations
+before it updates intersection observations); then the intersection observations that commit — or a scroll
 adopted inside the encode window, which commits nothing — moved, updated here
 and, when a threshold was crossed — or when the Lynx exposure service holds
 changes, as it does after `lynx.stopExposure`/`resumeExposure` — posted as
@@ -684,14 +691,16 @@ background thread; then the two
 batches of engine-decided events the entry may have
 left owing — the `contentvisibilityautostatechange` events that commit decided,
 and the component events the entry produced (an `<image>`'s `load`/`error`, a
-`<dialog>`'s `cancel`/`close`, an overlay's `showoverlay`/`dismissoverlay`),
+`<dialog>`'s `cancel`/`close`, an overlay's `showoverlay`/`dismissoverlay`,
+a `<text>`'s `layout`),
 each posted as one fresh entry rather than run here, so a handler's own
 mutation gets a commit of its own — the boot report, the
 frame-post acknowledgement, the module requests the operation left other than
 the MTS entry's own, the futures it asked to settle, the `@font-face` loads its
 sheets declared, the next timer deadline republished only when it moved, and
-finally the checkpoint generation as of this entry. The commit, the observation update and the three
-posts are the page's `after_timers` hook, `ScriptFinished` its `on_booted`, the
+finally the checkpoint generation as of this entry. The commit, the text
+layout drain, the two observation updates and the four posts are the page's
+`after_timers` hook, `ScriptFinished` its `on_booted`, the
 acknowledgement its `after_boot` and the font loads its `after_settles`.
 `Settles::settle` is the epilogue alone, for a wake that carries no operation
 of its own; `Settles` is one blanket impl over every `RealmOwner`.

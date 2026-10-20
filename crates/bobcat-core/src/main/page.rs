@@ -267,6 +267,14 @@ pub(super) struct Page {
     /// between the two would post one more and find the queues already
     /// taken. One post per batch.
     intersections_posted: Cell<bool>,
+    /// Whether an entry that will deliver the entries `dom`'s resize
+    /// observers have queued — the document's `layoutchange` observer's —
+    /// is already queued and has not run yet.
+    ///
+    /// The same latch as [`Self::intersections_posted`], for the same
+    /// reason: the queues outlive the epilogue whose update filled them, and
+    /// the drain is the delivery entry's.
+    resizes_posted: Cell<bool>,
     /// Whether an entry that will deliver the component events the runtime
     /// has queued — `<image>` `load`s and `error`s, `<dialog>` `cancel`s and
     /// `close`s — is already queued and has not run yet.
@@ -309,6 +317,7 @@ impl Page {
             boot_reported: Cell::new(false),
             content_visibility_posted: Cell::new(false),
             intersections_posted: Cell::new(false),
+            resizes_posted: Cell::new(false),
             component_events_posted: Cell::new(false),
             lifetime,
         })
@@ -419,9 +428,43 @@ impl Page {
         }));
     }
 
+    /// Queues the entry that delivers what `dom`'s resize observers queued —
+    /// the document's `layoutchange` observer's entries
+    /// (`crate::main::layout_change`) — and waits for nothing.
+    ///
+    /// Posted after the frame, as the intersection delivery is, rather than
+    /// run inside the commit before paint as resize-observer-1 §3.4 and HTML's
+    /// "update the rendering" place it (the user's ruling 2 of 2026-10-20):
+    /// a listener's writes land in the next commit, and the spec's depth loop
+    /// and its loop error do not exist, since every observation is delivered
+    /// by the next entry and none is held back. The epilogue posts it before
+    /// the intersection delivery, so of two entries one epilogue posts, the
+    /// resize one runs first, as HTML gathers resize observations before it
+    /// updates intersection observations.
+    ///
+    /// The loop itself enters no JavaScript: the `layoutchange` observer's
+    /// handler records its targets. What enters the realm is the dispatch of
+    /// `layoutchange` at each of them, after the loop. A listener that throws
+    /// is nonfatal — `ListenerFailed` — and the rest is still delivered.
+    ///
+    /// The latch is cleared at the start, before the loop: a listener that
+    /// resizes an observed element makes a batch of this entry's own
+    /// epilogue, which owes an entry of its own. The chain ends where the
+    /// sizes stop moving, since the update queues an entry only for a target
+    /// whose border-box size differs from the one it last reported.
+    fn post_resize_notifications(self: &Rc<Self>) {
+        let page = Rc::clone(self);
+        drop(owner::enter(self, move |runtime, js| {
+            page.resizes_posted.set(false);
+            for failure in runtime.notify_resize_observers(js) {
+                policy::report(&page, Scene::Listener, failure.into_script_error());
+            }
+        }));
+    }
+
     /// Queues the entry that delivers one batch of component events —
     /// `<image>` `load` and `error`, `<svg>` `load`, `<dialog>` `cancel` and
-    /// `close` — and waits for nothing.
+    /// `close`, `<text>` `layout` — and waits for nothing.
     ///
     /// The same post as [`Self::post_content_visibility_changes`], because
     /// these events have the same standing: a browser fires an `<img>`'s
@@ -436,10 +479,11 @@ impl Page {
     /// re-enter the realm in the middle of a host call.
     ///
     /// The epilogue asks after its commit, beside the content-visibility
-    /// check, rather than before it. Nothing a commit does produces a
-    /// component event — the queue is filled by a bind, a UI method or the
-    /// painting side's report, all of which happen in the entry's body — so
-    /// the position cannot change what is posted.
+    /// check, rather than before it. A commit produces one kind of component
+    /// event, a reporting `<text>`'s `layout`, which the epilogue drains into
+    /// the queue right after the commit and before this check; the rest is
+    /// filled by a bind, a UI method or the painting side's report, all of
+    /// which happen in the entry's body.
     ///
     /// It posts only when that commit left nothing uncommitted
     /// ([`MainThreadRuntime::needs_render`] is `false`). An `<svg>`'s `load`
@@ -953,7 +997,11 @@ impl RealmOwner for Page {
     /// frame and the image sources the walk discovered — skipped while any
     /// listed author sheet is outstanding, because the first
     /// `__FlushElementTree` is what waits for them and a commit without them
-    /// would publish an unstyled frame. Then the intersection observations,
+    /// would publish an unstyled frame. Then the `layout` events of the
+    /// `text` paragraphs that commit recomputed, queued with the component
+    /// events. Then the resize observations, updated against that commit's
+    /// layout, and their entries — the `layoutchange` deliveries. Then the
+    /// intersection observations,
     /// updated against that commit's layout and the live scroll offsets
     /// whether or not the commit built anything — a scroll composed inside the
     /// encode window moves an offset and commits nothing — and their entries,
@@ -963,10 +1011,11 @@ impl RealmOwner for Page {
     /// and the component events this entry produced — `<image>` `load`s and
     /// `error`s, `<svg>` `load`s, `<dialog>` `cancel`s and `close`s, the
     /// `scroll`s of the instant scrolls it performed (queued first, before
-    /// the commit), and the `scroll`s and `scrollend`s of the offsets it
-    /// adopted — each
+    /// the commit), the `scroll`s and `scrollend`s of the offsets it
+    /// adopted, and the `text` `layout`s — each
     /// posted as an entry of its own and never run here, the component events
     /// only once the commit has run: see
+    /// [`Page::post_resize_notifications`],
     /// [`Page::post_intersection_notifications`],
     /// [`Page::post_content_visibility_changes`] and
     /// [`Page::post_component_events`].
@@ -982,6 +1031,17 @@ impl RealmOwner for Page {
         runtime.commit_if_dirty();
         // After it, so the geometry the host is handed is the frame's.
         runtime.publish_text_input_state();
+        // After it too: the `text` paragraphs it recomputed join this entry's
+        // component events as their `layout` events.
+        runtime.queue_text_layout_events();
+        // The resize update first, always, as the intersection one below:
+        // HTML gathers resize observations before it updates intersection
+        // observations, so its delivery is posted first.
+        if (runtime.update_resize_observations() || runtime.has_pending_resize_notifications())
+            && !page.resizes_posted.replace(true)
+        {
+            page.post_resize_notifications();
+        }
         // The update first, always: it must run whether or not exposure
         // changes are already waiting.
         if (runtime.update_intersection_observations() || runtime.has_pending_exposure())

@@ -586,6 +586,12 @@ pub(crate) fn compute_text_block_layout<T>(
             },
             &block,
         );
+        // The `<text>` `layout` event's report list
+        // (`docs/layout-observer-design.md` §3.3): this run recomputed the
+        // committed lines. Native Lynx dispatches the event from the text
+        // fragment's laid-out result
+        // (`core/renderer/dom/fragment/text_fragment_behavior.cc:65-124`).
+        state.note_text_layout(element);
     } else {
         state.note_probed_text(element);
     }
@@ -1233,5 +1239,210 @@ mod empty_host_tests {
             assert_eq!(doc.text_block_size(element), Some(Size::new(0.0, 0.0)));
             assert_eq!(height(&doc, element), 0.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod layout_report_tests {
+    use crate::{Document, FontBlob, NodeId, StylesheetOrigin, TextLineReport};
+
+    /// A 300px column of a 20px Ahem `text` holding `content`, styled by
+    /// `inline`, and a sibling `view` after it.
+    fn paragraph(inline: &str, content: &str) -> (Document<()>, NodeId, NodeId) {
+        let mut doc = Document::new(crate::tree::document::tests::device(), "page", ());
+        crate::test_common::define_lynx_text(&mut doc, "text");
+        doc.register_fonts(FontBlob::from_static(include_bytes!(
+            "../../../hughie/tests/fixtures/Ahem.ttf"
+        )));
+        doc.add_stylesheet(
+            "page { display: flex; flex-direction: column; align-items: flex-start; \
+                    width: 300px; } \
+             text { font-family: Ahem; font-size: 20px; line-height: 21px; } \
+             view { display: flex; }",
+            StylesheetOrigin::Author,
+        );
+        let text = doc.create_element("text", ());
+        doc.set_inline_style(text, inline);
+        doc.append_child(doc.document_element().id(), text);
+        let run = doc.create_text_node(content, ());
+        doc.append_child(text, run);
+        let sibling = doc.create_element("view", ());
+        doc.set_inline_style(sibling, "width: 10px; height: 10px;");
+        doc.append_child(doc.document_element().id(), sibling);
+        (doc, text, sibling)
+    }
+
+    fn line(start: u32, end: u32, ellipsis_count: u32) -> TextLineReport {
+        TextLineReport {
+            start,
+            end,
+            ellipsis_count,
+        }
+    }
+
+    #[test]
+    fn a_reporting_text_reports_each_committing_layout_and_no_cache_hit() {
+        let (mut doc, text, sibling) = paragraph("width: 100px;", "abcde fghij");
+        doc.set_text_layout_reporting(text, true);
+        doc.layout();
+        assert_eq!(doc.take_text_layout_reports(), [text]);
+        assert_eq!(
+            doc.take_text_layout_reports(),
+            [],
+            "the take empties the list"
+        );
+
+        // Nothing changed, so nothing is laid out again.
+        doc.layout();
+        assert_eq!(doc.take_text_layout_reports(), []);
+
+        // A pass runs for the sibling, and the text's layout input is the
+        // same: the sibling's new width changes neither the column's width,
+        // which is 300px, nor its height, which is the content's.
+        // So hughie answers the text from its cache.
+        doc.set_inline_style(sibling, "width: 30px; height: 10px;");
+        doc.layout();
+        assert_eq!(
+            doc.rounded_layout(sibling).expect("laid out").size,
+            hughie::geometry::Size::new(30.0, 10.0),
+            "the pass ran"
+        );
+        assert_eq!(doc.take_text_layout_reports(), []);
+
+        // A width that re-wraps the paragraph recomputes it.
+        assert_eq!(doc.text_lines(text).map(|lines| lines.len()), Some(2));
+        doc.set_inline_style(text, "width: 60px;");
+        doc.layout();
+        assert_eq!(doc.take_text_layout_reports(), [text]);
+        assert_eq!(doc.text_lines(text).map(|lines| lines.len()), Some(4));
+    }
+
+    #[test]
+    fn a_text_without_reporting_never_reports() {
+        let (mut doc, text, _) = paragraph("width: 100px;", "abcde fghij");
+        doc.layout();
+        doc.set_inline_style(text, "width: 60px;");
+        doc.layout();
+        assert_eq!(doc.take_text_layout_reports(), []);
+
+        // Turning the report off drops what it had listed.
+        doc.set_text_layout_reporting(text, true);
+        doc.set_inline_style(text, "width: 100px;");
+        doc.layout();
+        doc.set_text_layout_reporting(text, false);
+        assert_eq!(doc.take_text_layout_reports(), []);
+        doc.set_inline_style(text, "width: 60px;");
+        doc.layout();
+        assert_eq!(doc.take_text_layout_reports(), []);
+    }
+
+    #[test]
+    fn the_take_lists_a_paragraph_reported_by_two_layouts_once() {
+        let (mut doc, text, _) = paragraph("width: 100px;", "abcde fghij");
+        let other = doc.create_element("text", ());
+        doc.append_child(doc.document_element().id(), other);
+        let run = doc.create_text_node("abc", ());
+        doc.append_child(other, run);
+        doc.set_text_layout_reporting(text, true);
+        doc.set_text_layout_reporting(other, true);
+        doc.layout();
+        // Still two lines, and the column is 300px wide, so the column's
+        // size and with it `other`'s layout input stay.
+        doc.set_inline_style(text, "width: 120px;");
+        doc.layout();
+        assert_eq!(
+            doc.layout_state().text_layout_reports,
+            [text, other, text],
+            "two committing runs of `text` before a take"
+        );
+        assert_eq!(
+            doc.take_text_layout_reports(),
+            [text, other],
+            "first occurrence order"
+        );
+    }
+
+    #[test]
+    fn a_paragraph_committed_twice_in_one_layout_is_taken_once() {
+        // A `container-type: inline-size` box ahead of the text in the column,
+        // holding a child whose height is in `cqw`. The first pass resolves
+        // `50cqw` before the container's width is published and lays the
+        // text out below that height; `Document::layout`'s container loop
+        // then restyles the child, the container's block size moves, and the
+        // second pass lays the column out again, committing the text a second
+        // time. With `height: 50px` in place of `50cqw` the list holds one
+        // entry.
+        let (mut doc, text, _) = paragraph("width: 100px;", "abcde fghij");
+        let container = doc.create_element("view", ());
+        doc.set_inline_style(
+            container,
+            "container-type: inline-size; width: 100px; flex-direction: column;",
+        );
+        let page = doc.document_element().id();
+        doc.insert_before(page, container, Some(text));
+        let inner = doc.create_element("view", ());
+        doc.set_inline_style(inner, "width: 10px; height: 50cqw;");
+        doc.append_child(container, inner);
+        doc.set_text_layout_reporting(text, true);
+        doc.layout();
+        assert_eq!(
+            doc.rounded_layout(container).expect("laid out").size,
+            hughie::geometry::Size::new(100.0, 50.0)
+        );
+        assert_eq!(
+            doc.layout_state().text_layout_reports,
+            [text, text],
+            "both passes of the one layout committed the paragraph"
+        );
+        assert_eq!(doc.take_text_layout_reports(), [text]);
+    }
+
+    #[test]
+    fn freeing_a_reporting_text_drops_its_pending_report() {
+        let (mut doc, text, _) = paragraph("width: 100px;", "abcde fghij");
+        doc.set_text_layout_reporting(text, true);
+        doc.layout();
+        let _ = doc.drop_subtree(text);
+        assert_eq!(doc.take_text_layout_reports(), []);
+        assert!(doc.layout_state().text_layout_reporters.is_empty());
+    }
+
+    #[test]
+    fn text_lines_answers_each_line_source_range() {
+        // The fixture of `a_wrapping_text_reports_its_line_count_and_line_ranges`
+        // (crates/bobcat-core/src/main/runtime/web_text_replication.rs): five
+        // em squares of room, eleven units, the break at the space.
+        let (mut doc, text, sibling) = paragraph("width: 100px;", "abcde fghij");
+        assert_eq!(doc.text_lines(text), None, "no pass has run");
+        doc.layout();
+        let lines = doc.text_lines(text).expect("a committed paragraph");
+        // The wrap consumed the space at unit 5, which belongs to no line.
+        assert_eq!(lines, [line(0, 5, 0), line(6, 11, 0)]);
+        assert_eq!(doc.text_lines(sibling), None, "not a Lynx text element");
+        assert_eq!(doc.text_lines(doc.document_element().id()), None);
+    }
+
+    #[test]
+    fn text_lines_states_a_maxline_cut_in_its_ellipsis_count() {
+        let (mut doc, text, _) = paragraph(
+            "width: 100px; text-overflow: ellipsis; --lynx-text-maxline: 1;",
+            "abcde fghij",
+        );
+        doc.add_stylesheet(
+            r#"@property --lynx-text-maxline { syntax: "<integer>"; inherits: false; initial-value: 0; }"#,
+            StylesheetOrigin::UserAgent,
+        );
+        doc.layout();
+        let lines = doc.text_lines(text).expect("a committed paragraph");
+        // "ab" and the three dots fill the five em squares: the cut is at
+        // unit 2 of the natural first line `0..5`, three units before its end.
+        assert_eq!(lines, [line(0, 5, 3)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-Lynx-text NodeId passed to Document::set_text_layout_reporting")]
+    fn reporting_on_an_element_that_is_not_lynx_text_panics() {
+        let (mut doc, _, sibling) = paragraph("width: 100px;", "abcde fghij");
+        doc.set_text_layout_reporting(sibling, true);
     }
 }

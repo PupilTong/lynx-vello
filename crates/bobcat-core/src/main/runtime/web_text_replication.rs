@@ -50,9 +50,11 @@
 //! That is what separates it from `x-text/event-layoutchange`,
 //! `text/bindlayout` and the four `text/set-native-props-*` cases, which the
 //! assignment files under the same `blocked-by-engine-gap` verdict but which
-//! *are* written as `#[ignore]`d replicas below: every member those call
-//! exists, so the replica runs the whole card, states the reference, and fails
-//! on the missing behaviour rather than on a missing identifier. The
+//! *are* written as replicas below: every member those call exists, so the
+//! replica runs the whole card, states the reference, and, while `#[ignore]`d,
+//! fails on the missing behaviour rather than on a missing identifier. The
+//! first two pass now, over the `layoutchange` resize delivery and the `text`
+//! `layout` component event (`crate::main::layout_change`). The
 //! `set-native-props` four became writable with `__SetDataset`/`__GetDataset`/
 //! `__AddDataset` (`element-papi.ts`, which files each entry as a typed value
 //! in the realm and reflects it as the node's `data-<key>` attribute) and the
@@ -1160,14 +1162,13 @@ fn a_maxlength_clamp_re_applies_when_the_content_arrives_after_a_flush() {
 /// assertion, so a `text` has to take part in the same layout-observation
 /// path as every other Lynx box.
 ///
-/// The trailing geometry assertion documents rather than pins: the JS
-/// verification throws first while the event is missing, so it is only
-/// reached once the gap closes, and it is there to state which box the
-/// detail should have described.
+/// Boot's own flush commits the widened box, so the first observation after
+/// the registration is already the 200px one: the resize delivery
+/// (`MainThreadRuntime::notify_resize_observers`), run here as the page's
+/// posted entry runs it, dispatches one `layoutchange` carrying it. The
+/// detail also carries `dataset`, which web-core's does not
+/// (`docs/tracking/deviations.md`); the element has none, so it is `{}`.
 #[test]
-#[ignore = "GAP: no layout/layoutchange event exists — the only engine-synthesized \
-            event names are the pointer set plus `tap` and `longpress`, \
-            crates/bobcat-core/src/paint/gesture.rs:81,84"]
 fn widening_a_text_dispatches_a_layoutchange_carrying_its_geometry() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
     runtime
@@ -1199,6 +1200,12 @@ fn widening_a_text_dispatches_a_layoutchange_carrying_its_geometry() {
         )
         .expect("main-thread script");
 
+    assert!(
+        runtime.update_resize_observations(),
+        "the registration's first observation is queued"
+    );
+    let failures = runtime.notify_resize_observers(&mut js_runtime);
+    assert!(failures.is_empty(), "no listener threw");
     runtime
         .evaluate_module(
             &mut js_runtime,
@@ -1211,14 +1218,22 @@ fn widening_a_text_dispatches_a_layoutchange_carrying_its_geometry() {
                   }
                 }
                 if (detail.id !== 'target') throw new Error('id is ' + detail.id);
+                if (JSON.stringify(detail.dataset) !== '{}') {
+                  throw new Error('dataset is ' + JSON.stringify(detail.dataset));
+                }
+                if (detail.width !== 200 || detail.height !== 400) {
+                  throw new Error('size ' + JSON.stringify(detail));
+                }
+                if (detail.right !== detail.left + 200 || detail.bottom !== detail.top + 400) {
+                  throw new Error('edges ' + JSON.stringify(detail));
+                }
                 ",
             "app:///verify.js",
             "verifying",
         )
         .expect("verification");
 
-    // The geometry the detail should have carried is the box's own, and the
-    // host already has it: what is missing is the observation, not the data.
+    // The detail described the box's own geometry.
     let tree = elements.tree();
     let target = element_with_id(&tree, "target");
     let box_ = tree.rounded_layout(target).expect("a committed box");
@@ -1242,11 +1257,11 @@ fn widening_a_text_dispatches_a_layoutchange_carrying_its_geometry() {
 /// `detail.lineCount` and `detail.lines[i].{start, end, ellipsisCount}`. The
 /// card registers through `__AddEvent(el, 'bindEvent', 'layout', ...)`; the
 /// replica registers the same name through `__AddEventListener`, which needs
-/// no worklet runtime to deliver to.
+/// no worklet runtime to deliver to. The listener is filed before boot's
+/// flush lays the paragraph out, so that first committing run reports it;
+/// the epilogue's drain (`MainThreadRuntime::queue_text_layout_events`) and
+/// the component-event delivery are run here as the page runs them.
 #[test]
-#[ignore = "GAP: no layout event delivery, and the payload has no host-visible \
-            query — LineInfo is computed at crates/hughie/src/text/block/mod.rs:66-83 \
-            but Document::text_block is pub(crate), crates/dom/src/layout/mod.rs:303"]
 fn a_wrapping_text_reports_its_line_count_and_line_ranges() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
     runtime
@@ -1278,6 +1293,9 @@ fn a_wrapping_text_reports_its_line_count_and_line_ranges() {
         )
         .expect("main-thread script");
 
+    runtime.queue_text_layout_events();
+    let failures = runtime.dispatch_component_events(&mut js_runtime);
+    assert!(failures.is_empty(), "no listener threw");
     runtime
         .evaluate_module(
             &mut js_runtime,
@@ -1288,6 +1306,13 @@ fn a_wrapping_text_reports_its_line_count_and_line_ranges() {
                 const second = detail.lines[1];
                 if (second.start !== 6 || second.end !== 11 || second.ellipsisCount !== 0) {
                   throw new Error('lines[1] ' + JSON.stringify(second));
+                }
+                const first = detail.lines[0];
+                if (first.start !== 0 || first.ellipsisCount !== 0) {
+                  throw new Error('lines[0] ' + JSON.stringify(first));
+                }
+                if (detail.size.width !== 100 || detail.size.height !== 42) {
+                  throw new Error('size ' + JSON.stringify(detail.size));
                 }
                 ",
             "app:///verify.js",

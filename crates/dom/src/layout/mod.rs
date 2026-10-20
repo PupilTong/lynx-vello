@@ -49,6 +49,26 @@ pub enum ParagraphKind {
     InlineFormattingContext,
 }
 
+/// One line of a Lynx paragraph as the `<text>` `layout` event reports it
+/// ([`Document::text_lines`]): `lines[i].{start, end, ellipsisCount}` of the
+/// event's detail (`TextLayoutEventDetail`,
+/// `lynx/js_libraries/types/types/common/events.d.ts:391`).
+///
+/// Offsets are the paragraph's source UTF-16 units, an inline image or view
+/// counting one, the units [`Document::text_range_boxes`] takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextLineReport {
+    /// The first source unit the line shows.
+    pub start: u32,
+    /// One past the last source unit the line shows. The collapsible white
+    /// space a soft wrap consumed belongs to no line, so `end` of one line
+    /// and `start` of the next can differ.
+    pub end: u32,
+    /// How many of the line's source units the truncation cut removed:
+    /// `end` minus the cut when the cut falls in this line, else zero.
+    pub ellipsis_count: u32,
+}
+
 pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new(|| {
     use stylo::properties::style_structs::Font;
     ComputedValues::initial_values_with_font_override(Font::initial_values())
@@ -147,6 +167,11 @@ impl<T: Sync> Document<T> {
         self.arenas_mut().publish_committed_boxes(resized);
         self.clear_relayout_roots();
         self.mark_layout_complete(viewport, scale);
+        // A pass that ran may have resized any box, so the next resize
+        // observation update reads every registration again
+        // (`crate::visual::resize`, "The stale bit"). One store, observers
+        // or not; a `layout()` that ran no pass never reaches here.
+        self.resizes.note_layout();
     }
 
     /// The settle loop after a run that laid out anchor-positioned boxes: a
@@ -702,6 +727,90 @@ impl<T> Document<T> {
     #[must_use]
     pub fn paragraph_line_count(&self, id: crate::NodeId) -> Option<usize> {
         Some(self.committed_paragraph(id)?.painted()?.lines.len())
+    }
+
+    /// The lines the Lynx paragraph `id` establishes laid out at its last
+    /// commit, as the `<text>` `layout` event reports them: one entry per
+    /// line the paragraph shows, in order (`hughie::text::block::LineInfo`,
+    /// [`hughie::text::block::TextBlock::lines`]). The source ranges are the
+    /// lines of the layout before truncation, so a line the truncation cut
+    /// keeps its full range and states the cut in its `ellipsis_count`.
+    ///
+    /// `None` when `id` is not a Lynx text element that establishes a
+    /// paragraph (a block container's inline formatting context, a nested
+    /// Lynx text scope, any other element) or when no commit has reached it.
+    /// Nothing here runs a pass, so the answer is the last one's.
+    #[must_use]
+    pub fn text_lines(&self, id: crate::NodeId) -> Option<Vec<TextLineReport>> {
+        let block = self.committed_paragraph(id)?.as_block()?.committed()?;
+        Some(
+            block
+                .lines()
+                .iter()
+                .map(|line| TextLineReport {
+                    start: line.source_start,
+                    end: line.source_end,
+                    ellipsis_count: line.ellipsis_count,
+                })
+                .collect(),
+        )
+    }
+
+    /// Turns the `<text>` `layout` report on or off for the Lynx text element
+    /// `id` (`docs/layout-observer-design.md` §3.3).
+    ///
+    /// While it is on, every committing layout run that recomputes `id`'s
+    /// paragraph lists `id` for [`Self::take_text_layout_reports`]. A run
+    /// that hughie answers from its layout cache recomputes nothing and lists
+    /// nothing. Turning it off also drops `id`'s entries not yet taken.
+    /// Turning it on lists nothing by itself: the next committing run of the
+    /// paragraph does.
+    ///
+    /// # Panics
+    ///
+    /// On a stale `id`, and on an `id` that is not a Lynx text element
+    /// ([`crate::CustomElement::is_lynx_text`]).
+    pub fn set_text_layout_reporting(&mut self, id: crate::NodeId, on: bool) {
+        let node = self
+            .get(id)
+            .expect("stale NodeId passed to Document::set_text_layout_reporting");
+        assert!(
+            node.is_lynx_text(),
+            "non-Lynx-text NodeId passed to Document::set_text_layout_reporting"
+        );
+        let state = self.layout_state_mut();
+        if on {
+            state.text_layout_reporters.insert(id);
+        } else if state.text_layout_reporters.remove(&id) && !state.text_layout_reports.is_empty() {
+            state.text_layout_reports.retain(|node| *node != id);
+        }
+    }
+
+    /// Takes the reporting Lynx text elements whose paragraph a committing
+    /// layout run recomputed since the last call, each once, in the order
+    /// the runs first reached them, and leaves the list empty.
+    ///
+    /// One `layout()` can commit a paragraph more than once (the
+    /// size-container passes and the anchor settle runs in
+    /// [`Self::layout`]), and two layouts without a take between them can
+    /// each commit it: every repeat after the first is dropped here.
+    ///
+    /// An empty list hands back an empty `Vec` without allocating, and leaves
+    /// the list's own storage in place, as
+    /// [`Self::take_content_visibility_changes`] does.
+    #[must_use]
+    pub fn take_text_layout_reports(&mut self) -> Vec<crate::NodeId> {
+        let pending = &mut self.layout_state_mut().text_layout_reports;
+        if pending.is_empty() {
+            return Vec::new();
+        }
+        let mut reports = std::mem::take(pending);
+        if reports.len() > 1 {
+            let mut seen =
+                FxHashSet::with_capacity_and_hasher(reports.len(), rustc_hash::FxBuildHasher);
+            reports.retain(|id| seen.insert(*id));
+        }
+        reports
     }
 
     /// The boxes the source range `[start, end)` of the paragraph `id`

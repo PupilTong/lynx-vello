@@ -48,11 +48,12 @@
 //! happens afterwards, in the rounding tail, and is a property of the frame
 //! rather than of the element.
 //!
-//! **This engine has no `ResizeObserver`, so the recording moment is the
-//! commit's own layout run** — [`record`], called from the layout host after
-//! an algorithm's committing run, on a cache miss. That is the same box and
-//! the same numbers a `ResizeObserver` would have been handed, one step
-//! earlier than a browser delivers them: a browser observes after the layout
+//! **The recording moment is the commit's own layout run** — [`record`],
+//! called from the layout host after an algorithm's committing run, on a
+//! cache miss. That is the same box and the same numbers a resize
+//! observation reads ([`crate::visual::resize`] gathers after that layout and
+//! delivers from a posted entry after the frame), one step earlier than a
+//! browser delivers them: a browser observes after the layout
 //! that produced the size, so a same-frame change that starts the box skipping
 //! still uses the previous frame's value, while here the commit that laid the
 //! box out is the one that remembers it. Gecko likewise re-resolves container

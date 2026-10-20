@@ -87,6 +87,10 @@ pub struct Document<T> {
     /// [`TreeArenas`] table: nothing in style, layout or paint reads it, and
     /// its one reader, the update, holds the document mutably.
     pub(crate) intersections: crate::visual::intersection::IntersectionObservers<T>,
+    /// The resize observers and their queues ([`crate::visual::resize`]). A
+    /// field rather than a [`TreeArenas`] table for the reason
+    /// `intersections` is one; the layout pass writes only its stale bit.
+    pub(crate) resizes: crate::visual::resize::ResizeObservers<T>,
     /// The event listener table ([`crate::event`]'s `listeners` module, which
     /// says why it is a side table). A field rather than a [`TreeArenas`]
     /// table for the reason `intersections` is one: style, layout and paint
@@ -150,6 +154,7 @@ impl<T> Document<T> {
             images: crate::render::image::ImageRegistry::default(),
             content_visibility_changes: Vec::new(),
             intersections: crate::visual::intersection::IntersectionObservers::default(),
+            resizes: crate::visual::resize::ResizeObservers::default(),
             listeners: crate::event::listeners::Listeners::default(),
             editing: crate::editing::EditingState::default(),
             pending_snapshots: SnapshotMap::new(),
@@ -259,6 +264,11 @@ impl<T> Document<T> {
     /// rounding survives them — including for boxes no layout write touched.
     pub(crate) fn layout_inputs_changed(&self, viewport: Size<f32>, scale: f32) -> bool {
         self.last_layout_inputs != Some((viewport, scale))
+    }
+
+    /// Whether any layout pass has completed in this document.
+    pub(crate) const fn has_laid_out(&self) -> bool {
+        self.last_layout_inputs.is_some()
     }
 
     pub(crate) fn mark_layout_complete(&mut self, viewport: Size<f32>, scale: f32) {
@@ -901,6 +911,13 @@ impl<T> Document<T> {
         // when nothing observes.
         if !self.intersections.is_empty() {
             self.intersections.forget_node(id);
+        }
+        // A resize observer names nodes two ways — as the node its handler is
+        // bound to, as a target — and an entry names its target; the same
+        // retired-id rule makes this its one cleanup. One test when nothing
+        // observes.
+        if !self.resizes.is_empty() {
+            self.resizes.forget_node(id);
         }
         // The listener table names nodes as registration targets, and the
         // same retired-id rule makes this its one cleanup: a freed node's

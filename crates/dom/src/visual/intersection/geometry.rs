@@ -406,18 +406,18 @@ impl<T> Document<T> {
             })
     }
 
-    /// Carries `id`'s border box, dilated by `margin` in its own border-box
-    /// space, to the viewport, clipping against `clip`'s root when there is
-    /// one: `None` when `id` is not rendered.
-    ///
-    /// With no `clip`, the walk only maps — what an element root's bounds
-    /// need, with the zero margin.
-    fn carry_to_viewport(
+    /// The first half of the "Not rendered" test, the half about `id`
+    /// itself: it is a live node with a style, a display that generates a
+    /// box, and a layout slot hughie has not hidden (every box under a
+    /// `display: none` ancestor or a box that skips its contents is hidden at
+    /// the pass that hid it). Answers the node, its style and its rounded
+    /// layout. The second half is the walk up the containing-block chain,
+    /// which has to reach the document element. The resize observations
+    /// ([`crate::visual::resize`]) use this half too.
+    pub(crate) fn own_box(
         &self,
         id: NodeId,
-        clip: Option<&RootGeometry>,
-        margin: &IntersectionMargin,
-    ) -> Option<Carry> {
+    ) -> Option<(&crate::Node<T>, StyleView<'_, T>, &Layout)> {
         let node = self.get(id)?;
         let style = StyleView::try_of(node)?;
         if matches!(
@@ -430,7 +430,22 @@ impl<T> Document<T> {
         if state.slot.is_hidden() {
             return None;
         }
-        let layout = &state.slot.rounded;
+        Some((node, style, &state.slot.rounded))
+    }
+
+    /// Carries `id`'s border box, dilated by `margin` in its own border-box
+    /// space, to the viewport, clipping against `clip`'s root when there is
+    /// one: `None` when `id` is not rendered.
+    ///
+    /// With no `clip`, the walk only maps — what an element root's bounds
+    /// need, with the zero margin.
+    fn carry_to_viewport(
+        &self,
+        id: NodeId,
+        clip: Option<&RootGeometry>,
+        margin: &IntersectionMargin,
+    ) -> Option<Carry> {
+        let (node, style, layout) = self.own_box(id)?;
         let mut offsets = Offsets {
             document: self,
             anchored: !self.layout_state().anchored.is_empty(),

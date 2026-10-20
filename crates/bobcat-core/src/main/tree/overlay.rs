@@ -170,10 +170,22 @@
 //! (native Android fires `dismissoverlay`); `docs/tracking/deviations.md`
 //! lists the conflicts.
 //!
+//! # `layoutchange`
+//!
+//! An overlay hears `layoutchange` through the path every element does
+//! (`crate::main::layout_change`), with one retarget, web-core's
+//! `layoutChangeTarget` (`XOverlayNg.ts:21-23`): the box observed is the
+//! shadow `#dialog`'s ([`dialog_of`], which the adapter asks through
+//! [`super::layout_change_target`]), not the host's, which has none. As in
+//! web-core, which observes that target (`CommonEventsAndMethods.ts:50`) and
+//! dispatches at the host with the target's rect (`:31-46`), the event is
+//! dispatched at the host and carries the dialog's rect: the viewport's while
+//! the overlay is shown, and a zero one while it is hidden.
+//!
 //! # What is not implemented
 //!
 //! - `requestclose`: there is no keyboard or back input to send it (native Android and Harmony send
-//!   it, web-core never does). No `overlaytouch`, `overlaymoved`, `error` or `layoutchange`.
+//!   it, web-core never does). No `overlaytouch`, `overlaymoved` or `error`.
 //! - `level`: native has four tiers (level 1 frontmost, last in first out within one); web-core's
 //!   `z-index` ladder (`x-overlay-ng.css:42-53`) has no effect under its `display: contents` host,
 //!   and its overlays stack in `showModal()` order. Overlays here stack in show order, as in
@@ -375,12 +387,22 @@ impl CustomElement<()> for Overlay {
 /// The overlay's shadow `#dialog`, the first element of its shadow tree,
 /// which [`Overlay::constructed`] builds for every overlay.
 fn shadow_dialog(document: &LynxDocument, overlay: NodeId) -> NodeId {
+    dialog_of(document, overlay).expect("every overlay has its shadow dialog")
+}
+
+/// The shadow `#dialog` of `element` when it is a constructed `overlay` or
+/// `x-overlay-ng`, and `None` for every other element: what
+/// [`super::layout_change_target`] observes for an overlay.
+pub(super) fn dialog_of(document: &LynxDocument, element: NodeId) -> Option<NodeId> {
+    let tag = document.get(element)?.tag_name()?;
+    if tag != OVERLAY_TAG && tag != X_OVERLAY_TAG {
+        return None;
+    }
     document
-        .shadow_root(overlay)
+        .shadow_root(element)
         .and_then(|root| document.get(root))
         .and_then(|root| root.children().find(|child| child.is_element()))
         .map(Node::id)
-        .expect("every overlay has its shadow dialog")
 }
 
 /// Whether a `visible` value shows the overlay: present and not `"false"`.

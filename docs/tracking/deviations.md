@@ -1153,6 +1153,62 @@ consequential choice about whether to follow the spec or the quirk.
     and the space bar's `key` (`" "`). The browser embedder passes the
     browser's own strings through, and its canvas hears keys only while it has
     focus, which takes a `tabindex` the embedding page chooses.
+- **`layoutchange` is a border-box size observation** (user-directed
+  2026-10-20, ruling 1 of `docs/layout-observer-design.md` §5;
+  `crates/bobcat-core/src/main/layout_change.rs`). web-core's event is a
+  `ResizeObserver` on the element
+  (`web-elements/src/elements/common/CommonEventsAndMethods.ts:23-58`), and
+  this one is the W3C primitive's (`crates/dom/src/visual/resize/`): an
+  element whose border box changes size hears one event, and so does every
+  element once on its first observation, a `0 × 0` one included. Native also
+  fires when the element only moves within its parent or changes a padding,
+  border, margin or sticky position, and when a text was re-measured to the
+  same frame: starlight's `LayoutObject::SetNewLayoutResult` compares all of
+  them (`lynx/core/renderer/starlight/layout/layout_object.cc:300-322`).
+  Here a preceding sibling that grows moves the element and fires nothing.
+- **`layoutchange`'s rect excludes transforms** (user-directed 2026-10-20,
+  ruling 3). The detail's `left`/`top`/`width`/`height` are
+  `Document::bounding_client_rect`, the transform-free walk the
+  `boundingClientRect` UI method answers from (its 2026-09-16 ruling), in the
+  Lynx view's CSS px with no host origin subtracted (ruling 8). iOS converts
+  the view's bounds into the root view's space, transforms included
+  (`lynx/platform/darwin/ios/lynx/ui/LynxUI.m:1391-1400`), and web-core
+  reads `getBoundingClientRect()`, transforms included
+  (`CommonEventsAndMethods.ts:31-32`), then subtracts the `<lynx-view>`'s own
+  client origin (`web-core/ts/client/mainthread/elementAPIs/createCrossThreadEvent.ts:111-127`).
+  Android's default excludes them: `getBoundingClientRect` offsets the
+  untransformed view (`lynx/platform/android/lynx_android/src/main/java/com/lynx/tasm/behavior/ui/LynxBaseUI.java:1151-1173`)
+  unless `enableTransformForPositionCalculation` is on, which it is not by
+  default (`lynx/platform/android/lynx_android/src/main/java/com/lynx/tasm/LynxEnv.java:1390-1392`).
+- **`layoutchange`'s detail carries `dataset`** (user-directed 2026-10-20,
+  ruling 4): `{id, dataset, width, height, left, top, right, bottom}`, as
+  native's does and as the engine's `boundingClientRect` answer does; `id`
+  is `""` for an element with none. web-core's detail is
+  `{width, height, left, right, top, bottom, id}` with no `dataset`
+  (`createCrossThreadEvent.ts:111-127`).
+- **`layoutchange` reaches every element** (user-directed 2026-10-20).
+  Every element with a `layoutchange` listener is observed, as every native
+  `LynxUI` sends the event (`LynxUI.m:429`, `LynxBaseUI.java:2584`).
+  web-core observes only the elements that name a `layoutChangeTarget` —
+  `x-view`, `x-text` and `x-overlay-ng`
+  (`web-elements/src/elements/{XView,XText,XOverlayNg}`) — so an `<image>` or
+  a `<scroll-view>` there never hears it. An overlay follows web-core
+  (user-directed 2026-10-20): its observed box is its shadow `#dialog`'s, as
+  web-core's `layoutChangeTarget` is (`XOverlayNg.ts:21-23`), and the event
+  is dispatched at the host with that rect
+  (`crates/bobcat-core/src/main/tree/overlay.rs`), so no deviation remains
+  there.
+- **A `<text>` `layout` listener filed after the paragraph laid out hears
+  nothing until the paragraph is laid out again.** The event is a report of
+  a committing layout run that recomputed the paragraph
+  (`Document::set_text_layout_reporting`), and filing the listener runs no
+  layout. That is native iOS's per-renderer latch: `LynxUIText` dispatches
+  once per text renderer it receives, only when the element has a `layout`
+  entry at that moment
+  (`lynx/platform/darwin/ios/lynx/ui/text/LynxUIText.m:359-365`). web-core
+  dispatches from its truncation pass
+  (`web-elements/src/elements/XText/XTextTruncation.ts:369-430`), so a late
+  listener there also hears the next pass and nothing before it.
 - **`pointer-events: none` hit-test fall-through** — Lynx falls through to
   the *next sibling* under the point; W3C says the element (and normally its
   subtree) becomes fully transparent to hit-testing, continuing the search
