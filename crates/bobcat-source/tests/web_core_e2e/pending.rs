@@ -23,7 +23,7 @@ pending! {
     "api-frame-bindload" =>
         "`bindload` on a `<frame>` must deliver `statusCode: 0`, `success` and the bundle URL, printed in three texts. A frame has no `load` event (the ruling recorded with #409, unchanged by #425), so the texts keep `-1` and two empty strings",
     "api-global-disallowed-vars" =>
-        "DEFECT: `MTS_CHUNK_PREAMBLE` (crates/bobcat-core/src/esm.rs) declares none of the disallowed globals the BTS preamble shadows, so MTS code naming `navigator`/`postMessage` raises a ReferenceError where web-core's lepus wrapper gives `undefined`. The card paints only a sizeless view, so the blank screen hides it",
+        "native-vs-web-core conflict for the user: main-thread code reading `navigator` and `postMessage` throws ReferenceError here (`MTS_CHUNK_PREAMBLE`, crates/bobcat-core/src/esm.rs, shadows none of them), as on native, where nothing declares them on the main thread and PrimJS throws for an undeclared global. web-core wraps main-thread code with `const navigator=void 0,postMessage=void 0; let window=void 0` (`decode.worker.ts`), because its main thread runs in an iframe that has the browser's own, and upstream expects `main thread: undefined, undefined`. The card paints only a sizeless view, so the screen settles nothing",
     "api-lynx-performance" =>
         "the box turns green once `lynx.performance.addTimingListener` has seen `__lynx_timing_actual_fmp` and a flagged update; `lynx.performance` is undefined on the background thread, so it stays pink. Upstream also reads the keys of the host's `timing` event, which the view does not report",
     "api-report-error" =>
@@ -79,5 +79,5 @@ pending! {
     "basic-element-x-webview-bindmessage" =>
         "the text must read `hello from iframe` once the `<x-webview html=…>` document posts a message; it reads `waiting`: there is no `x-webview` component and nothing in `crates/` hosts an HTML document",
     "basic-event-trigger" =>
-        "a `capture-bindtap` and a `bindtap` on one element must both run for one tap, capture first, with the first handler's `setState` visible to the second: the text must read `[capture tap][bind tap]`. It reads `[bind tap]`: the second handler's `setText(text + …)` still sees the empty `text`, so the capture handler's update is overwritten. Both handlers reach the background thread without a render between them (inferred from the picture, not traced)",
+        "native-vs-web-core conflict for the user: the card files `capture-bindtap` and `bindtap` on one element, and expects both to run, capture first: `[capture tap][bind tap]`. Here handlers are keyed by event name alone (`fileEvent` in packages/bobcat-element/src/element-papi.ts, native's `insert_or_assign` in `AttributeHolder::SetStaticEvent`), so the `bindtap` filed second replaces the capture handler and the text reads `[bind tap]`, as native's default event path does. web-core keys them by name and type (`element_data.rs`), so both survive and run, each in its own background task with a re-render between them",
 }
