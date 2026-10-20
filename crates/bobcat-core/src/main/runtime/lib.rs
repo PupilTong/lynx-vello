@@ -1490,16 +1490,15 @@ impl DocumentSlot {
     }
 
     /// Moves the two routes the document's state decides, once per entry
-    /// from the page's epilogue: [`editing::EditingRoute::Hosts`] while
-    /// [`dom::Document::has_editing_hosts`], [`editing::EditingRoute::Focus`]
-    /// while an element is focused. One counter read and one field read when
-    /// nothing changed. The drag route is the press's own
-    /// ([`MainThreadRuntime::set_pressed`]).
+    /// from the page's epilogue: [`editing::EditingRoute::Pointer`] while
+    /// the document exists, [`editing::EditingRoute::Focus`] while an
+    /// element is focused. One field read when nothing changed. The drag
+    /// route is the press's own ([`MainThreadRuntime::set_pressed`]).
     fn sync_editing_routes(&mut self) {
-        let (hosts, focused) = self.document.as_ref().map_or((false, false), |document| {
-            (document.has_editing_hosts(), document.focused().is_some())
+        let (pointer, focused) = self.document.as_ref().map_or((false, false), |document| {
+            (true, document.focused().is_some())
         });
-        self.set_editing_route(editing::EditingRoute::Hosts, hosts);
+        self.set_editing_route(editing::EditingRoute::Pointer, pointer);
         self.set_editing_route(editing::EditingRoute::Focus, focused);
     }
 

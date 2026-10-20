@@ -4792,6 +4792,70 @@ describe("__InvokeUIMethod", () => {
     expect(answers[2]).toStrictEqual({ code: 8, data: undefined });
   });
 
+  it("builds a text's setTextSelection data with its boxes and two handles", () => {
+    const text = __CreateText(0);
+    const answers: unknown[] = [];
+    mock.answerElementMethod = () =>
+      "1:0" + "1:2"
+      + "2:47" + "2:37" + "2:40" + "2:21"
+      + "2:27" + "2:58" + "2:40" + "2:21"
+      + "2:47" + "2:58" + "2:50"
+      + "2:67" + "2:79" + "2:50";
+    __InvokeUIMethod(
+      text,
+      "setTextSelection",
+      { startX: 32, startY: 17, endX: 52, endY: 38, showStartHandle: true },
+      (result: unknown) => answers.push(result),
+    );
+    mock.answerElementMethod = () => 0;
+    __InvokeUIMethod(
+      text,
+      "setTextSelection",
+      { startX: -1, startY: 0, endX: 0, endY: 0 },
+      (result: unknown) => answers.push(result),
+    );
+    mock.answerElementMethod = () => 8;
+    __InvokeUIMethod(
+      text,
+      "setTextSelection",
+      { startX: 0, startY: 0, endX: 0, endY: 0 },
+      (result: unknown) => answers.push(result),
+    );
+
+    expect(mock.named("callElementMethod").slice(-3)[0]?.[3]).toBe(
+      '{"startX":32,"startY":17,"endX":52,"endY":38,"showStartHandle":true}',
+    );
+    expect(answers[0]).toStrictEqual({
+      code: 0,
+      data: {
+        boundingRect: { left: 27, top: 37, right: 87, bottom: 79, width: 60, height: 42 },
+        boxes: [
+          { left: 47, top: 37, right: 87, bottom: 58, width: 40, height: 21 },
+          { left: 27, top: 58, right: 67, bottom: 79, width: 40, height: 21 },
+        ],
+        handles: [
+          { x: 47, y: 58, radius: 50 },
+          { x: 67, y: 79, radius: 50 },
+        ],
+      },
+    });
+    // A negative coordinate clears the selection and answers no data.
+    expect(answers[1]).toStrictEqual({ code: 0, data: undefined });
+    expect(answers[2]).toStrictEqual({ code: 8, data: undefined });
+  });
+
+  it("builds a text's getSelectedText data from its one field", () => {
+    const text = __CreateText(0);
+    const answers: unknown[] = [];
+    mock.answerElementMethod = () => "1:0" + "4:b:c\uFFFC";
+    __InvokeUIMethod(text, "getSelectedText", {}, (result: unknown) => answers.push(result));
+    mock.answerElementMethod = () => "1:0" + "0:";
+    __InvokeUIMethod(text, "getSelectedText", {}, (result: unknown) => answers.push(result));
+
+    expect(answers[0]).toStrictEqual({ code: 0, data: { selectedText: "b:c\uFFFC" } });
+    expect(answers[1]).toStrictEqual({ code: 0, data: { selectedText: "" } });
+  });
+
   it("sends missing params as an empty object and uncarriable ones as null", () => {
     const view = __CreateView(0);
     const cyclic: Record<string, unknown> = {};

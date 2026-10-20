@@ -390,6 +390,23 @@ pub(crate) enum OwnedItem {
     Close,
 }
 
+/// The source text of a flattened flow: every run's text in order and one
+/// U+FFFC (OBJECT REPLACEMENT CHARACTER) per atomic box, an inline box's
+/// boundaries contributing nothing. Its UTF-16 units are exactly the source
+/// units the paragraph built from `collected` counts: a run's units before
+/// white-space processing, an atom one unit.
+pub(crate) fn source_text_of(collected: &[Collected]) -> String {
+    let mut text = String::new();
+    for entry in collected {
+        match &entry.item {
+            OwnedItem::Run { text: run, .. } => text.push_str(run),
+            OwnedItem::Atom { .. } => text.push('\u{FFFC}'),
+            OwnedItem::Open { .. } | OwnedItem::Close => {}
+        }
+    }
+    text
+}
+
 /// Hashes one flow's structure: its length, and per item the node behind it
 /// and a run's text, `white-space-collapse` and `-webkit-text-security`.
 pub(crate) fn hash_flow(collected: &[Collected], hasher: &mut impl Hasher) {

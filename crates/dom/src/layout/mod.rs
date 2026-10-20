@@ -955,6 +955,35 @@ impl<T> Document<T> {
             .filter(|store| store.has_committed())
     }
 
+    /// The source text of the committed paragraph `paragraph` establishes:
+    /// its flattened content's runs in order — DOM text and generated
+    /// `content` — with one U+FFFC per atomic inline box, so its UTF-16
+    /// units are the paragraph's source units, the units
+    /// [`Self::text_range_boxes`] takes. Rebuilt by the flatten walk of the
+    /// paragraph's kind from the tree as it is now, never stored. `None`
+    /// when `paragraph` establishes no committed paragraph.
+    pub(crate) fn paragraph_source_text(&self, paragraph: crate::NodeId) -> Option<String> {
+        let store = self.committed_paragraph(paragraph)?;
+        let slot = self.slot(paragraph)?;
+        Some(match store {
+            paragraph::TextStore::Block(_) => text_block::source_text(self.arenas(), slot),
+            paragraph::TextStore::Flow(_) => inline_flow::source_text(self.arenas(), slot),
+        })
+    }
+
+    /// The offset of the source unit `unit` of the committed paragraph
+    /// `paragraph` establishes, counted in its text content alone: `unit`
+    /// less the atomic inline boxes (an inline `image` or `view`, one source
+    /// unit each) before it ([`hughie::text::paragraph::OffsetMap::boxes_before`]).
+    /// What a browser's `Range.toString()` length counts, where an atom is
+    /// no text. `None` when `paragraph` establishes no committed paragraph
+    /// or `unit` is past its source length. Nothing here runs a pass.
+    #[must_use]
+    pub fn text_content_offset(&self, paragraph: crate::NodeId, unit: u32) -> Option<u32> {
+        let view = self.committed_paragraph(paragraph)?.editable()?;
+        (unit <= view.map.source_len()).then(|| unit - view.map.boxes_before(unit))
+    }
+
     /// The Lynx paragraph `id` established, if a commit has produced one:
     /// what this crate's tests inspect beyond [`Self::text_block_size`].
     #[cfg(test)]

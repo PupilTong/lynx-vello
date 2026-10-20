@@ -305,34 +305,6 @@ fn a_detached_host_cannot_be_focused_and_a_removed_one_loses_focus_silently() {
     assert_eq!(doc.focused(), None);
 }
 
-/// The host count an embedder routes editing input by: set and removed with
-/// the attribute, kept while a host is detached, dropped when it is freed.
-#[test]
-fn the_editing_host_count_follows_the_attribute_and_the_free() {
-    let mut doc = document();
-    let page = doc.document_element().id();
-    assert!(!doc.has_editing_hosts());
-    let host = doc.create_element("view", ());
-    doc.set_attribute(host, "contenteditable", "false");
-    assert!(!doc.has_editing_hosts(), "\"false\" makes no host");
-    doc.set_attribute(host, "contenteditable", "");
-    assert!(doc.has_editing_hosts(), "a detached host counts");
-    doc.set_attribute(host, "contenteditable", "true");
-    let other = doc.create_element("view", ());
-    doc.set_attribute(other, "contenteditable", "plaintext-only");
-    doc.append_child(page, host);
-    doc.append_child(host, other);
-    doc.remove_attribute(host, "contenteditable");
-    assert!(doc.has_editing_hosts(), "one host is left");
-    doc.remove_element(other);
-    assert!(doc.has_editing_hosts(), "a removed host is still allocated");
-    doc.drop_element(other);
-    assert!(!doc.has_editing_hosts(), "the last host was freed");
-    doc.set_attribute(host, "contenteditable", "");
-    doc.set_attribute(host, "contenteditable", "FALSE");
-    assert!(!doc.has_editing_hosts());
-}
-
 // --- Commands --------------------------------------------------------------
 
 #[test]
@@ -1896,4 +1868,471 @@ fn a_blur_or_the_fixup_rule_ends_the_document_selection() {
         assert!(took_selectionchange(&mut doc), "the fixup rule's ending");
         assert_eq!(doc.selection(), None);
     }
+}
+
+// --- Read-only selection of a selectable element ---------------------------
+
+/// The embedder's rule for a `raw-text` carrier inside a Lynx text, as
+/// `bobcat-core` writes it: its `text` attribute is generated content, and
+/// the element itself generates no box.
+const RAW_TEXT_RULE: &str = "raw-text { display: contents; content: attr(text); }";
+
+/// U+FFFC, an atomic inline box in a selection text.
+const ATOM: char = '\u{FFFC}';
+
+/// [`document`] with `inline-text` defined as a Lynx text element and the
+/// `raw-text` rule.
+fn selectable_document() -> Document<()> {
+    let mut doc = document();
+    crate::test_common::define_lynx_text(&mut doc, "inline-text");
+    doc.add_stylesheet(RAW_TEXT_RULE, StylesheetOrigin::UserAgent);
+    doc
+}
+
+/// A selectable Lynx text — `user-select: text`, as the embedder's UA sheet
+/// gives a `text-selection` text — 200px wide with no padding, holding
+/// `"ab"`, a `raw-text` carrier generating `"cd"`, an `inline-text` holding
+/// `"ef"`, an inline `view` 10px square and `"gh"`: the selection text
+/// `"abcdef\u{FFFC}gh"`, nine source units, each 10px wide on one line.
+/// Laid out, not selected. Answers the document, the root and the nested
+/// `inline-text`.
+fn selectable_root() -> (Document<()>, NodeId, NodeId) {
+    let mut doc = selectable_document();
+    let root = doc.create_element("text", ());
+    doc.set_inline_style(root, "width: 200px; user-select: text;");
+    doc.append_child(doc.document_element().id(), root);
+    let ab = doc.create_text_node("ab", ());
+    doc.append_child(root, ab);
+    let raw = doc.create_element("raw-text", ());
+    doc.set_attribute(raw, "text", "cd");
+    doc.append_child(root, raw);
+    let nested = doc.create_element("inline-text", ());
+    doc.append_child(root, nested);
+    let ef = doc.create_text_node("ef", ());
+    doc.append_child(nested, ef);
+    let atom = doc.create_element("view", ());
+    doc.set_inline_style(atom, "display: flex; width: 10px; height: 10px;");
+    doc.append_child(root, atom);
+    let gh = doc.create_text_node("gh", ());
+    doc.append_child(root, gh);
+    doc.layout();
+    (doc, root, nested)
+}
+
+/// A point on the root's one line, `x` CSS px from its border-box origin.
+fn on_line(x: f32) -> Point2D<f32> {
+    Point2D::new(x, 5.0)
+}
+
+fn select_from(doc: &mut Document<()>, x: f32, extend: bool) {
+    assert!(
+        doc.apply_editing(Command::SelectFromPoint {
+            point: on_line(x),
+            extend,
+        })
+        .applied
+    );
+}
+
+/// Only a selectable element that is in the document, rendered and has a
+/// paragraph of its own takes a session; a nested scope is passed over for
+/// the paragraph around it.
+#[test]
+fn begin_selection_needs_a_rendered_selectable_paragraph() {
+    let (mut doc, root, nested) = selectable_root();
+    assert!(doc.is_user_selectable(root));
+    let ab = doc.get(root).unwrap().child_ids()[0];
+
+    assert_eq!(doc.selectable_root_of(ab), Some(root), "from a text node");
+    assert_eq!(doc.selectable_root_of(root), Some(root));
+    let ef = doc.get(nested).unwrap().child_ids()[0];
+    assert_eq!(
+        doc.selectable_root_of(ef),
+        Some(root),
+        "a nested scope has no paragraph of its own"
+    );
+    assert!(!doc.begin_selection(nested));
+    assert_eq!(doc.selection_host(), None);
+
+    let page = doc.document_element().id();
+    assert_eq!(doc.selectable_root_of(page), None, "no paragraph");
+    let plain = doc.create_element("text", ());
+    doc.set_inline_style(plain, "user-select: none;");
+    doc.append_child(page, plain);
+    let text = doc.create_text_node("plain", ());
+    doc.append_child(plain, text);
+    doc.layout();
+    assert_eq!(doc.selectable_root_of(text), None, "user-select: none");
+    assert!(!doc.begin_selection(plain));
+
+    let detached = doc.create_element("text", ());
+    doc.set_inline_style(detached, "user-select: text;");
+    assert!(!doc.begin_selection(detached), "not in the document");
+
+    doc.set_inline_style_property(root, "display", "none");
+    doc.layout();
+    assert_eq!(doc.selectable_root_of(ab), None, "not rendered");
+    assert!(!doc.begin_selection(root));
+    assert!(!doc.has_pending_selectionchange(), "nothing was selected");
+    doc.set_inline_style_property(root, "display", "");
+    doc.layout();
+    assert!(doc.begin_selection(root));
+    assert_eq!(doc.selection_host(), Some(root));
+    assert_eq!(doc.focused(), None, "selected, not focused");
+    assert_eq!(
+        doc.selection(),
+        Some(DocumentSelection {
+            host: root,
+            anchor: 0,
+            focus: 0
+        })
+    );
+}
+
+/// Beginning a selection blurs a focused editing host, with its events and
+/// its selection retained, and the document's selection moves to the root.
+#[test]
+fn begin_selection_blurs_a_focused_host() {
+    let (mut doc, root, _) = selectable_root();
+    let host = doc.create_element("view", ());
+    doc.set_attribute(host, "contenteditable", "");
+    doc.append_child(doc.document_element().id(), host);
+    let text = doc.create_text_node("field", ());
+    doc.append_child(host, text);
+    doc.layout();
+    assert!(doc.focus(host));
+    select(&mut doc, 1..3);
+    doc.take_focus_events();
+    took_selectionchange(&mut doc);
+
+    assert!(doc.begin_selection(root));
+    assert_eq!(doc.focused(), None);
+    assert_eq!(doc.selection_host(), Some(root));
+    let events: Vec<_> = doc
+        .take_focus_events()
+        .into_iter()
+        .map(|event| (event.kind, event.target, event.related_target))
+        .collect();
+    assert_eq!(
+        events,
+        [
+            (FocusEventKind::Blur, host, None),
+            (FocusEventKind::FocusOut, host, None)
+        ]
+    );
+    assert!(took_selectionchange(&mut doc));
+    assert_eq!(doc.host_selection(host), Some(1..3), "retained");
+    assert_eq!(
+        doc.text_input_state(),
+        TextInputState::default(),
+        "nothing an input method edits"
+    );
+    assert!(
+        !doc.get(host)
+            .unwrap()
+            .element_state()
+            .contains(crate::ElementState::FOCUS)
+    );
+}
+
+/// A press and a drag select over the root's source units: generated text
+/// counts its own units, the nested scope's text its own, and the atom one
+/// unit, U+FFFC in the selected text and none in a text content offset.
+#[test]
+fn pointer_selection_reads_source_units_and_the_selected_text() {
+    let (mut doc, root, _) = selectable_root();
+    assert!(doc.begin_selection(root));
+    doc.layout();
+    took_selectionchange(&mut doc);
+
+    // Between `a` and `b`, then extended to just after the atom.
+    select_from(&mut doc, 12.0, false);
+    assert!(took_selectionchange(&mut doc));
+    assert_eq!(anchor_focus(&doc), (1, 1));
+    assert_eq!(doc.selected_text(root).as_deref(), Some(""), "collapsed");
+    select_from(&mut doc, 72.0, true);
+    assert!(took_selectionchange(&mut doc));
+    assert_eq!(anchor_focus(&doc), (1, 7));
+    assert_eq!(
+        doc.selected_text(root),
+        Some(format!("bcdef{ATOM}")),
+        "the generated `cd`, the nested `ef` and the atom"
+    );
+    // Back over the generated text: a backward selection.
+    select_from(&mut doc, 8.0, false);
+    select_from(&mut doc, 32.0, true);
+    select_from(&mut doc, 88.0, false);
+    select_from(&mut doc, 28.0, true);
+    assert_eq!(anchor_focus(&doc), (9, 3));
+    assert_eq!(doc.selected_text(root), Some(format!("def{ATOM}gh")));
+
+    assert_eq!(doc.text_content_offset(root, 3), Some(3));
+    assert_eq!(doc.text_content_offset(root, 6), Some(6), "before the atom");
+    assert_eq!(doc.text_content_offset(root, 7), Some(6), "after it");
+    assert_eq!(doc.text_content_offset(root, 9), Some(8), "the end");
+    assert_eq!(doc.text_content_offset(root, 10), None, "past the end");
+    let page = doc.document_element().id();
+    assert_eq!(doc.text_content_offset(page, 0), None, "no paragraph");
+    assert_eq!(doc.selected_text(page), None, "not the selection host");
+}
+
+/// A double press's word selection works over a root's paragraph.
+#[test]
+fn a_word_selects_in_a_selectable_root() {
+    let mut doc = selectable_document();
+    let root = doc.create_element("text", ());
+    doc.set_inline_style(root, "width: 200px; user-select: text;");
+    doc.append_child(doc.document_element().id(), root);
+    let text = doc.create_text_node("hello world", ());
+    doc.append_child(root, text);
+    doc.layout();
+    assert!(doc.begin_selection(root));
+
+    assert!(
+        doc.apply_editing(Command::SelectWordAtPoint {
+            point: on_line(75.0)
+        })
+        .applied
+    );
+    assert_eq!(anchor_focus(&doc), (6, 11));
+    assert_eq!(doc.selected_text(root).as_deref(), Some("world"));
+    assert!(doc.apply_editing(Command::SelectAll).applied);
+    assert_eq!(doc.selected_text(root).as_deref(), Some("hello world"));
+}
+
+/// A selectable root is read only: every command that would change a value
+/// or compose text is refused, the text is unchanged and the selection
+/// with it.
+#[test]
+fn a_selectable_root_refuses_edits_and_compositions() {
+    let (mut doc, root, _) = selectable_root();
+    assert!(doc.begin_selection(root));
+    select_from(&mut doc, 12.0, false);
+    select_from(&mut doc, 32.0, true);
+    took_selectionchange(&mut doc);
+    for command in [
+        Command::Insert("x".to_owned()),
+        Command::InsertLineBreak,
+        Command::DeleteBackward,
+        Command::DeleteForward,
+        Command::DeleteWordBackward,
+        Command::DeleteWordForward,
+        Command::DeleteSurrounding {
+            before: 1,
+            after: 1,
+        },
+        Command::ExtendSelectionAndDelete {
+            before: 1,
+            after: 0,
+        },
+        Command::SetComposition {
+            text: "x".to_owned(),
+            selection: 1..1,
+        },
+        Command::CommitText {
+            text: "x".to_owned(),
+            relative_cursor: 0,
+        },
+        Command::SetCompositionFromExistingText { range: 0..2 },
+        Command::FinishComposition {
+            keep_selection: true,
+        },
+    ] {
+        assert!(
+            !doc.apply_editing(command.clone()).applied,
+            "{command:?} is refused"
+        );
+    }
+    assert!(!took_selectionchange(&mut doc));
+    assert_eq!(anchor_focus(&doc), (1, 3));
+    assert_eq!(doc.selected_text(root).as_deref(), Some("bc"));
+    let ab = doc.get(root).unwrap().child_ids()[0];
+    assert_eq!(doc.get(ab).and_then(crate::Node::text), Some("ab"));
+
+    // A move and an offset selection still apply.
+    assert!(
+        doc.apply_editing(Command::Move {
+            granularity: Granularity::Character,
+            direction: Direction::Forward,
+            extend: true,
+        })
+        .applied
+    );
+    assert_eq!(anchor_focus(&doc), (1, 4));
+    select(&mut doc, 7..9);
+    assert_eq!(doc.selected_text(root).as_deref(), Some("gh"));
+}
+
+/// The held selection follows a relayout, the flag untouched, and a layout
+/// pass places offsets the session holds as such.
+#[test]
+fn a_layout_pass_keeps_a_root_s_selection() {
+    let (mut doc, root, _) = selectable_root();
+    assert!(doc.begin_selection(root));
+    select(&mut doc, 2..5);
+    took_selectionchange(&mut doc);
+    doc.layout();
+    assert!(!took_selectionchange(&mut doc), "placing changes nothing");
+    assert_eq!(anchor_focus(&doc), (2, 5));
+    assert!(
+        doc.editing.session.as_ref().unwrap().pending.is_none(),
+        "placed in the paragraph"
+    );
+
+    // Rebroken over two lines: the same units.
+    doc.set_inline_style_property(root, "width", "40px");
+    doc.layout();
+    assert_eq!(anchor_focus(&doc), (2, 5));
+    assert_eq!(doc.selected_text(root).as_deref(), Some("cde"));
+    assert!(!took_selectionchange(&mut doc));
+    assert_eq!(doc.selection_host(), Some(root));
+}
+
+/// `clear_selection` ends a root's session and nothing else; beginning a
+/// selection in the root that holds it changes nothing.
+#[test]
+fn clear_and_repeated_begin_selection_set_the_flag_only_on_change() {
+    let (mut doc, root, _) = selectable_root();
+    assert!(!doc.clear_selection(), "nothing selected");
+    assert!(!took_selectionchange(&mut doc));
+
+    assert!(doc.begin_selection(root));
+    assert!(took_selectionchange(&mut doc));
+    select(&mut doc, 1..2);
+    assert!(took_selectionchange(&mut doc));
+    assert!(doc.begin_selection(root), "already in the root");
+    assert!(!took_selectionchange(&mut doc));
+    assert_eq!(anchor_focus(&doc), (1, 2), "kept");
+
+    assert!(doc.clear_selection());
+    assert!(took_selectionchange(&mut doc));
+    assert_eq!(doc.selection(), None);
+    assert_eq!(doc.selected_text(root), None);
+    assert!(doc.take_focus_events().is_empty(), "no focus event");
+    assert!(!doc.clear_selection());
+
+    let host = doc.create_element("view", ());
+    doc.set_attribute(host, "contenteditable", "");
+    doc.append_child(doc.document_element().id(), host);
+    doc.layout();
+    assert!(doc.focus(host));
+    took_selectionchange(&mut doc);
+    assert!(!doc.clear_selection(), "a focused host's session stays");
+    assert_eq!(doc.focused(), Some(host));
+    assert!(!took_selectionchange(&mut doc));
+}
+
+/// A root's session ends with the flag and no event when the root leaves
+/// the document, computes `user-select: none` or stops being rendered;
+/// focusing an editing host replaces it.
+#[test]
+fn a_root_s_session_ends_with_its_root() {
+    let (mut doc, root, _) = selectable_root();
+    assert!(doc.begin_selection(root));
+    took_selectionchange(&mut doc);
+    doc.remove_element(root);
+    assert_eq!(doc.selection_host(), None, "left the document");
+    assert!(took_selectionchange(&mut doc));
+    assert!(doc.take_focus_events().is_empty());
+
+    doc.append_child(doc.document_element().id(), root);
+    doc.layout();
+    assert!(doc.begin_selection(root));
+    took_selectionchange(&mut doc);
+    doc.set_inline_style_property(root, "user-select", "none");
+    assert_eq!(
+        doc.selection_host(),
+        Some(root),
+        "a style change shows after the next pass"
+    );
+    doc.layout();
+    assert_eq!(doc.selection_host(), None, "user-select: none");
+    assert!(took_selectionchange(&mut doc));
+
+    doc.set_inline_style_property(root, "user-select", "text");
+    doc.layout();
+    assert!(doc.begin_selection(root));
+    took_selectionchange(&mut doc);
+    doc.set_inline_style_property(root, "display", "none");
+    doc.layout();
+    assert_eq!(doc.selection_host(), None, "not rendered");
+    assert!(took_selectionchange(&mut doc));
+
+    doc.set_inline_style_property(root, "display", "");
+    doc.layout();
+    assert!(doc.begin_selection(root));
+    took_selectionchange(&mut doc);
+    let host = doc.create_element("view", ());
+    doc.set_attribute(host, "contenteditable", "");
+    doc.append_child(doc.document_element().id(), host);
+    doc.layout();
+    assert!(doc.focus(host));
+    assert_eq!(doc.selection_host(), Some(host), "focus replaces it");
+    assert_eq!(doc.focused(), Some(host));
+    assert!(took_selectionchange(&mut doc));
+    let events: Vec<_> = doc
+        .take_focus_events()
+        .into_iter()
+        .map(|event| (event.kind, event.target, event.related_target))
+        .collect();
+    assert_eq!(
+        events,
+        [
+            (FocusEventKind::Focus, host, None),
+            (FocusEventKind::FocusIn, host, None)
+        ],
+        "no blur at the root, which was never focused"
+    );
+}
+
+/// css-ui-4's used value: the nearest ancestor-or-self whose computed
+/// `user-select` is not `auto` decides, `none` under `none`, and the
+/// root's `auto` is `text`, a browser's default. `contain` and `all` select
+/// as `text` does, within the one paragraph. A freed root ends its session
+/// with the flag.
+#[test]
+fn the_used_user_select_decides_and_a_freed_root_ends_its_session() {
+    let mut doc = selectable_document();
+    let page = doc.document_element().id();
+    let outer = doc.create_element("view", ());
+    doc.set_inline_style(outer, "user-select: none;");
+    doc.append_child(page, outer);
+    let text_under = |doc: &mut Document<()>, parent: NodeId, style: &str| {
+        let text = doc.create_element("text", ());
+        doc.set_inline_style(text, style);
+        doc.append_child(parent, text);
+        let run = doc.create_text_node("abc", ());
+        doc.append_child(text, run);
+        (text, run)
+    };
+    let (inherited, inherited_run) = text_under(&mut doc, outer, "");
+    let (opted_in, opted_in_run) = text_under(&mut doc, outer, "user-select: text;");
+    let (contained, contained_run) = text_under(&mut doc, outer, "user-select: contain;");
+    let (whole, whole_run) = text_under(&mut doc, outer, "user-select: all;");
+    let (default, default_run) = text_under(&mut doc, page, "");
+    doc.layout();
+
+    assert!(!doc.is_user_selectable(inherited_run), "auto under none");
+    assert_eq!(doc.selectable_root_of(inherited_run), None);
+    assert!(!doc.begin_selection(inherited));
+    assert_eq!(doc.selectable_root_of(opted_in_run), Some(opted_in));
+    assert_eq!(doc.selectable_root_of(contained_run), Some(contained));
+    assert_eq!(doc.selectable_root_of(whole_run), Some(whole));
+    assert!(
+        doc.is_user_selectable(default_run),
+        "the root's auto is text"
+    );
+    assert_eq!(doc.selectable_root_of(default_run), Some(default));
+
+    let unstyled = doc.create_element("text", ());
+    assert!(doc.is_user_selectable(unstyled), "no flush yet: auto");
+    doc.append_child(outer, unstyled);
+    assert!(!doc.is_user_selectable(unstyled), "the parent's none");
+
+    assert!(doc.begin_selection(opted_in));
+    took_selectionchange(&mut doc);
+    doc.remove_element(opted_in);
+    doc.drop_element(opted_in);
+    assert_eq!(doc.selection_host(), None, "freed");
+    assert!(took_selectionchange(&mut doc));
 }

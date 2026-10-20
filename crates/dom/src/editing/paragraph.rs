@@ -1,6 +1,6 @@
-//! The paragraph an editing host's text is laid out in, and the one
-//! conversion between that paragraph's layout bytes and the value's
-//! offsets.
+//! The paragraph a selection host's text is laid out in, and the one
+//! conversion between that paragraph's layout bytes and the offsets of the
+//! selection text.
 //!
 //! Editing is not tied to the kind of text container. A host's text is laid
 //! out by whichever paragraph its element kind and display give it:
@@ -19,6 +19,13 @@
 //! paragraph is built from the host's text children in content-walk order —
 //! so every conversion goes value byte → UTF-16 unit → layout byte and back
 //! through the paragraph's own source map ([`OffsetMap`]).
+//!
+//! A selectable element selected without focus has no value: its selection
+//! text is its paragraph's source text, every run of the flattened content
+//! and one U+FFFC per atomic inline box ([`Document::session_text`]), whose
+//! UTF-16 units are the source units by construction. The same conversions
+//! serve it, and its paragraph always counts as showing that text
+//! ([`Document::session_paragraph`]).
 
 use hughie::text::paragraph::OffsetMap;
 use parley::{Cursor, Layout, Selection};
@@ -43,10 +50,13 @@ pub(crate) struct EditableParagraph<'a> {
     pub(crate) map: OffsetMap<'a>,
     /// The paragraph's origin in the host's border-box space.
     pub(crate) origin: Point2D<f32>,
-    /// Whether the paragraph is built from the host's value and nothing
-    /// else: every child of the host is a text node, no generated `content`
-    /// replaces them, and every run of the paragraph is the host's own. Only
-    /// then are its source units the value's UTF-16 units.
+    /// Whether the paragraph's source units are the selection text's UTF-16
+    /// units. For an editing host, whether the paragraph is built from the
+    /// host's value and nothing else: every child of the host is a text
+    /// node, no generated `content` replaces them, and every run of the
+    /// paragraph is the host's own. For a selectable element selected
+    /// without focus, always: its selection text is the paragraph's source
+    /// text ([`Document::session_paragraph`]).
     pub(crate) shows_value: bool,
 }
 
@@ -175,6 +185,21 @@ impl<T> Document<T> {
             origin: self.paragraph_origin(host, node),
             shows_value,
         })
+    }
+
+    /// The committed paragraph the session's selection is held over: the
+    /// host's ([`Self::editable_paragraph`]), which for a selectable element
+    /// selected without focus always shows the selection text, since that
+    /// text is the paragraph's own source text ([`Self::session_text`]).
+    pub(crate) fn session_paragraph(
+        &self,
+        session: &super::Session,
+    ) -> Option<EditableParagraph<'_>> {
+        let mut paragraph = self.editable_paragraph(session.host)?;
+        if !session.focused {
+            paragraph.shows_value = true;
+        }
+        Some(paragraph)
     }
 
     /// Where the content box of `node` — the host, or the anonymous box of

@@ -1,6 +1,7 @@
 //! The `text` tag's attribute-to-CSS limits and defaults: what color a run wears,
-//! and what may generate a box inside one; and the `text` component, whose
-//! one UI method is `getTextBoundingRect` ([`text_bounding_rect`]).
+//! what may generate a box inside one, and whether a pointer can select it
+//! (`text-selection`, as `user-select`); and the `text` component, which
+//! answers three UI methods.
 //!
 //! The other half of Lynx text — how a run reaches the engine and where it
 //! lays out — is [`super::raw_text`], which owns the `raw-text` generated-content rule and
@@ -10,14 +11,29 @@
 //!
 //! The Lynx docs give `text` three (`lynxjs.org/api/elements/built-in/text`,
 //! the typings in `lynx/js_libraries/types/types/common/element/text.d.ts:220-258`,
-//! `@since 2.18`); web-core's `XText` has none of them.
+//! `@since 2.18`); web-core's `XText` has none of them. All three are built:
 //!
-//! - `getTextBoundingRect({start, end})` is built ([`text_bounding_rect`]), over
+//! - `getTextBoundingRect({start, end})` ([`text_bounding_rect`]), over
 //!   [`dom::Document::text_range_boxes`], with iOS's per-line answer
 //!   (`lynx/platform/darwin/ios/lynx/ui/text/LynxUIText.m:790-807`, `LynxTextView.m:205-235`).
-//! - `getSelectedText()` and `setTextSelection({startX, startY, endX, endY, ...})` are not built
-//!   and answer code 3: the engine has no text selection model, so there is nothing selected to
-//!   report and nothing a selection could be set on.
+//! - `getSelectedText()` ([`selected_text`]): the selected text of the document's selection when it
+//!   lies in this element, `""` otherwise (`UIText.java:417-427`, `LynxUIText.m:809-812`).
+//! - `setTextSelection({startX, startY, endX, endY, ...})` ([`set_text_selection`]): selects the
+//!   text between two points of the element and answers its boxes and the two handle positions
+//!   (`docs/editable-text-design.md`, "Read-only text selection").
+//!
+//! # `text-selection`
+//!
+//! A UA rule, as web-core's `x-text.css:147-181` writes it: every `text`, `inline-text` and
+//! `inline-truncation` is `user-select: none`, and a `text` whose `text-selection` is present and
+//! not an ASCII case-insensitive `"false"` is `user-select: auto` with the text elements inside it,
+//! the parent's used value, which css-ui-4 resolves to `text` under an ordinary page
+//! ([`UA_RULES`]). `dom` reads the used value off the computed style
+//! ([`dom::Document::is_user_selectable`]), so a pointer selects that text without focusing it
+//! (`crate::main::runtime`'s editing module), and an author's own `user-select` on any element does
+//! the same. Native parses the attribute as a boolean (`UIText.java:256`, `LynxUIText.m:719`);
+//! web-core's selector is `[text-selection]`, presence alone, so there `text-selection="false"`
+//! selects too, and the boolean reading is kept.
 //!
 //! # Events
 //!
@@ -45,26 +61,32 @@
 //!   sent only to an element whose last record was not empty: web-core's signature check.
 //! - Not bubbling, composed ([`ComponentEvents::queue_detailed`]).
 //!
-//! The document's selection exists only inside an editing host
-//! ([`dom::Document::selection`]): a `text` with `contenteditable`, or an
-//! element inside one. Its boundary points are offsets into the host's
-//! value, its direct text children, and [`text_selection_in`] maps each into
-//! an element's text content the way web-core's
-//! `range.selectNodeContents(root); range.setEnd(node, offset);
-//! range.toString().length` does, for the one place a boundary can be here.
-//! So a `text` around a host that is a nested `inline-text` reports offsets
-//! that count the text before the host. There is one difference from
-//! web-core: an `inline-text` *inside* the host never holds a boundary,
-//! because the host's value is its direct text children alone, so it reports
-//! the empty record; a browser's selection can enter that `inline-text`, and
-//! web-core fires offsets at it. The selection of read-only text — a
-//! `text-selection` `text` selected by a pointer — is not built.
+//! The document's selection lies in a focused editing host or in a
+//! selectable element ([`dom::Document::selection`]), and
+//! [`text_selection_in`] maps its two boundary points into an element's
+//! text content the way web-core's `range.selectNodeContents(root);
+//! range.setEnd(node, offset); range.toString().length` does:
+//!
+//! - In an editing host — a `text` with `contenteditable`, or an element inside one — the points
+//!   are offsets into the host's value, its direct text children. So a `text` around a host that is
+//!   a nested `inline-text` reports offsets that count the text before the host. There is one
+//!   difference from web-core: an `inline-text` *inside* the host never holds a boundary, because
+//!   the host's value is its direct text children alone, so it reports the empty record; a
+//!   browser's selection can enter that `inline-text`, and web-core fires offsets at it.
+//! - In a selectable element — a `text-selection` `text` selected by a pointer or by
+//!   `setTextSelection` — the points are source units of its paragraph, every text and generated
+//!   run counted and an atomic inline box counting one. The element's record counts its text
+//!   content, every run but no atom ([`dom::Document::text_content_offset`], web-core's
+//!   `range.toString().length`; native counts the placeholder character,
+//!   `AndroidText.java:482-490`). A `text` or `inline-text` inside it reports when both points lie
+//!   within its own source range ([`dom::Document::inline_source_range`]), as offsets into its own
+//!   content, and the empty record otherwise.
 //!
 //! The component holds no state and has no lifecycle callback; the last
 //! record sent to each element is the runtime's, in a table it passes to
 //! [`report_selection_changes`] ([`SelectionReports`]). Its definition, and
 //! the two behaviourless ones beside it for `inline-text` and
-//! `inline-truncation`, carry one fact besides the method: the three tags are
+//! `inline-truncation`, carry one fact besides those: the three tags are
 //! Lynx text elements ([`dom::CustomElement::is_lynx_text`]), which is what
 //! lays each out as a Lynx paragraph or a run of one. `:defined` already
 //! matches every element in `dom`, and the `raw-text` rules are selector rules
@@ -220,6 +242,8 @@ text > view, text > image { display: flex; }
 text > inline-truncation { --lynx-inline-truncation: 1; }
 text > text, text > wrapper > text { color: inherit; }
 text > image, text > wrapper > image, inline-text > image, inline-text > wrapper > image, text > inline-truncation > image, text > inline-truncation > wrapper > image { padding: 0 !important; }
+text, inline-text, inline-truncation { user-select: none; }
+text[text-selection]:not([text-selection="false" i]), text[text-selection]:not([text-selection="false" i]) :is(text, inline-text, inline-truncation) { user-select: auto; }
 "#;
 
 /// What `enableCSSInheritance: true` adds to the sheet, after [`UA_RULES`];
@@ -278,7 +302,7 @@ view > text, view > wrapper, view > wrapper > text { color: inherit; text-decora
 
 use std::ops::Range;
 
-use dom::editing::DocumentSelection;
+use dom::editing::{Command, Direction, DocumentSelection, Granularity};
 use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId};
 use rustc_hash::FxHashMap;
 use serde_json::{Map, Value};
@@ -330,8 +354,7 @@ impl CustomElement<()> for TextRun {
     }
 }
 
-/// The `text` component: `getTextBoundingRect` ([`text_bounding_rect`]).
-/// See the module documentation for the two methods it does not build.
+/// The `text` component: the three UI methods (module documentation).
 struct Text;
 
 impl CustomElement<()> for Text {
@@ -345,13 +368,15 @@ impl CustomElement<()> for Text {
         element: NodeId,
         call: MethodCall<'_>,
     ) -> MethodOutcome {
-        if call.name != "getTextBoundingRect" {
-            return MethodOutcome::NotFound;
-        }
-        match text_bounding_rect(document, element, call.params) {
-            Ok(Some(fields)) => MethodOutcome::Data(fields),
-            Ok(None) => MethodOutcome::Failed(MethodError::Operation),
-            Err(InvalidParams) => MethodOutcome::Failed(MethodError::InvalidParams),
+        match call.name {
+            "getTextBoundingRect" => match text_bounding_rect(document, element, call.params) {
+                Ok(Some(fields)) => MethodOutcome::Data(fields),
+                Ok(None) => MethodOutcome::Failed(MethodError::Operation),
+                Err(InvalidParams) => MethodOutcome::Failed(MethodError::InvalidParams),
+            },
+            "getSelectedText" => MethodOutcome::Data(selected_text(document, element)),
+            "setTextSelection" => set_text_selection(document, element, call.params),
+            _ => MethodOutcome::NotFound,
         }
     }
 }
@@ -380,11 +405,13 @@ fn reports_selection(node: &dom::Node<()>) -> bool {
 /// document node: queues the Lynx `selectionchange` on `events` at every
 /// `text` and `inline-text` whose record changed (module documentation).
 ///
-/// The elements asked are the ones the record can have changed for: the
-/// `text` and `inline-text` ancestors of the editing host, the host
-/// included, through `parent_id` — a UA shadow tree's host is not crossed,
-/// so a text field's editor reports to no text outside it — and every
-/// element `reports` holds, whose selection may have left it. An element
+/// The elements asked are the ones the record can have changed for: for a
+/// focused editing host, the `text` and `inline-text` ancestors of the
+/// host, the host included, through `parent_id` — a UA shadow tree's host
+/// is not crossed, so a text field's editor reports to no text outside it;
+/// for a selectable element, the element and every `text` and
+/// `inline-text` in its subtree, through `child_ids`; and every element
+/// `reports` holds, whose selection may have left it. An element
 /// nothing listens on is forgotten, as web-core forgets its signature when
 /// the event is unbound, so a listener added later starts from the empty
 /// record.
@@ -395,15 +422,34 @@ pub(crate) fn report_selection_changes(
 ) {
     let selection = document.selection();
     let mut candidates: SmallVec<[NodeId; 4]> = SmallVec::new();
-    let mut current = selection.map(|selection| selection.host);
-    while let Some(id) = current {
-        let Some(node) = document.get(id) else {
-            break;
-        };
-        if reports_selection(node) {
-            candidates.push(id);
+    match selection {
+        Some(selection) if document.focused() == Some(selection.host) => {
+            let mut current = Some(selection.host);
+            while let Some(id) = current {
+                let Some(node) = document.get(id) else {
+                    break;
+                };
+                if reports_selection(node) {
+                    candidates.push(id);
+                }
+                current = node.parent_id();
+            }
         }
-        current = node.parent_id();
+        Some(selection) => {
+            let mut stack: SmallVec<[NodeId; 16]> = SmallVec::new();
+            stack.push(selection.host);
+            while let Some(id) = stack.pop() {
+                let Some(node) = document.get(id) else {
+                    continue;
+                };
+                if reports_selection(node) {
+                    candidates.push(id);
+                }
+                // Children in reverse, so the first is taken next: tree order.
+                stack.extend(node.child_ids().iter().rev().copied());
+            }
+        }
+        None => {}
     }
     for &element in reports.0.keys() {
         if !candidates.contains(&element) {
@@ -452,25 +498,73 @@ pub(crate) fn report_selection_changes(
 /// range between its two boundary points as offsets into `element`'s text
 /// content, and whether it runs forward (anchor at or before focus); `None`,
 /// the empty record, when the selection is collapsed — web-core's
-/// `anchor !== focus` — or its host is neither `element` nor inside it, or
-/// a boundary cannot be placed in `element`'s text ([`text_offset`]).
+/// `anchor !== focus` — or a boundary cannot be placed in `element`'s text.
+///
+/// For a focused editing host, `element` must be the host or around it, and
+/// each boundary is placed by [`text_offset`]. For a selectable element,
+/// `element` must be that element or inside it ([`selectable_offsets`]).
 fn text_selection_in(
     document: &LynxDocument,
     element: NodeId,
     selection: DocumentSelection,
 ) -> Option<(Range<u32>, bool)> {
-    let mut current = Some(selection.host);
-    while current != Some(element) {
-        current = document.get(current?).and_then(dom::Node::parent_id);
-    }
     if selection.anchor == selection.focus {
         return None;
     }
-    let anchor = text_offset(document, element, selection.host, selection.anchor)?;
-    let focus = text_offset(document, element, selection.host, selection.focus)?;
+    let (anchor, focus) = if document.focused() == Some(selection.host) {
+        let mut current = Some(selection.host);
+        while current != Some(element) {
+            current = document.get(current?).and_then(dom::Node::parent_id);
+        }
+        (
+            text_offset(document, element, selection.host, selection.anchor)?,
+            text_offset(document, element, selection.host, selection.focus)?,
+        )
+    } else {
+        selectable_offsets(document, element, selection)?
+    };
     Some((
         anchor.min(focus)..anchor.max(focus),
         selection.anchor <= selection.focus,
+    ))
+}
+
+/// The two boundary points of a selectable element's selection — source
+/// units of its paragraph — as offsets into `element`'s text content, anchor
+/// first: every text and generated run counted, an atomic inline box
+/// counting none ([`dom::Document::text_content_offset`]), which is
+/// web-core's `range.toString().length`.
+///
+/// `element` is the selectable element itself, or a `text` or `inline-text`
+/// inside it whose own source range ([`dom::Document::inline_source_range`])
+/// holds both points, counted from the start of that range. `None` for an
+/// element outside the selectable element, one with no source range, or a
+/// point outside its range.
+fn selectable_offsets(
+    document: &LynxDocument,
+    element: NodeId,
+    selection: DocumentSelection,
+) -> Option<(u32, u32)> {
+    let root = selection.host;
+    let content = |unit| document.text_content_offset(root, unit);
+    if element == root {
+        return Some((content(selection.anchor)?, content(selection.focus)?));
+    }
+    let mut current = document.get(element)?.parent_id();
+    while current != Some(root) {
+        current = document.get(current?)?.parent_id();
+    }
+    let range = document.inline_source_range(element)?;
+    let start = u32::try_from(range.start).ok()?;
+    let end = u32::try_from(range.end).ok()?;
+    let inside = |unit: u32| (start..=end).contains(&unit);
+    if !inside(selection.anchor) || !inside(selection.focus) {
+        return None;
+    }
+    let base = content(start)?;
+    Some((
+        content(selection.anchor)?.saturating_sub(base),
+        content(selection.focus)?.saturating_sub(base),
     ))
 }
 
@@ -557,36 +651,187 @@ fn text_bounding_rect(
     if start > end {
         return Err(InvalidParams);
     }
-    let Some(element_box) = document.bounding_client_rect(text) else {
+    let Some(boxes) = viewport_boxes(document, text, start, end) else {
         return Ok(None);
     };
-    let Some(layout) = document.rounded_layout(text) else {
-        return Ok(None);
-    };
-    let Some(boxes) = document
+    let mut record = String::new();
+    write_boxes(&mut record, &boxes);
+    Ok(Some(record))
+}
+
+/// The boxes the source range `[start, end)` of `text`'s paragraph
+/// occupies ([`dom::Document::text_range_boxes`]), moved from the
+/// paragraph's own space into the space of `boundingClientRect`: plus the
+/// element's [`dom::Document::bounding_client_rect`] origin and its border
+/// and padding (see [`text_bounding_rect`]). `None` when the element has no
+/// box or no paragraph, the range is past the source, or it shows no
+/// content. From the last completed layout.
+fn viewport_boxes(
+    document: &LynxDocument,
+    text: NodeId,
+    start: u32,
+    end: u32,
+) -> Option<Vec<dom::Rect<f32>>> {
+    let element_box = document.bounding_client_rect(text)?;
+    let layout = document.rounded_layout(text)?;
+    let boxes = document
         .text_range_boxes(text, start, end)
-        .filter(|boxes| !boxes.is_empty())
-    else {
-        return Ok(None);
-    };
+        .filter(|boxes| !boxes.is_empty())?;
     let origin = dom::Vector2D::new(
         element_box.origin.x + layout.border.left + layout.padding.left,
         element_box.origin.y + layout.border.top + layout.padding.top,
     );
-    let mut record = String::new();
-    write_record_field(&mut record, &boxes.len().to_string());
+    Some(
+        boxes
+            .into_iter()
+            .map(|rect| rect.translate(origin))
+            .collect(),
+    )
+}
+
+/// Writes the box count and then `left`, `top`, `width`, `height` per box:
+/// what `element-papi.ts` reads `getTextBoundingRect`'s `boxes` from.
+fn write_boxes(record: &mut String, boxes: &[dom::Rect<f32>]) {
+    write_record_field(record, &boxes.len().to_string());
     for rect in boxes {
-        let rect = rect.translate(origin);
         for value in [
             rect.origin.x,
             rect.origin.y,
             rect.size.width,
             rect.size.height,
         ] {
-            write_record_field(&mut record, &value.to_string());
+            write_record_field(record, &value.to_string());
         }
     }
-    Ok(Some(record))
+}
+
+/// `getSelectedText()` on `text`: one record field, the selected text of
+/// the document's selection when it lies in this element
+/// ([`dom::Document::selected_text`], an atomic inline box as U+FFFC, iOS's
+/// attachment character), and `""` when it is collapsed or elsewhere — a
+/// nested `text`, which establishes no paragraph, never holds it. No params
+/// are read (`UIText.java:417-427`, `LynxUIText.m:809-812`).
+fn selected_text(document: &LynxDocument, text: NodeId) -> String {
+    let mut record = String::new();
+    write_record_field(
+        &mut record,
+        &document.selected_text(text).unwrap_or_default(),
+    );
+    record
+}
+
+/// Native Android's `RESPONSE_TOUCH_RADIUS`: the radius, in CSS px,
+/// `setTextSelection` answers for each handle.
+const HANDLE_RADIUS: f32 = 50.0;
+
+/// `setTextSelection({startX, startY, endX, endY, showStartHandle?,
+/// showEndHandle?})` on `text`, with `params` as the JSON text the realm
+/// serialized.
+///
+/// - `params` must be a JSON object and the four coordinates JSON numbers, CSS px from the
+///   element's border-box origin, else code 4. The two handle flags are not read: no handle is
+///   painted.
+/// - Any coordinate negative clears the document's selection when it lies in this element and
+///   answers success with no data, as both natives do.
+/// - Otherwise the selection is begun in this element ([`dom::Document::begin_selection`], which
+///   blurs a focused editing host), its anchor placed at the start point and its focus extended to
+///   the end point ([`Command::SelectFromPoint`]). A selection that collapses is widened to one
+///   character: forward, or backward when forward cannot move (the text's end), native's
+///   `startIndex == endIndex` rule. Code 8 when the element cannot hold the selection — its used
+///   `user-select` is `none` (no `text-selection`), it is not rendered, or it establishes no
+///   paragraph (a nested `text`) — or when the selected range shows no box.
+/// - The answer is [`text_bounding_rect`]'s fields over the selected range, then two handles, each
+///   `x`, `y` and radius: the first box's bottom-left and the last box's bottom-right, in viewport
+///   CSS px, with [`HANDLE_RADIUS`]. `element-papi.ts` builds `{boundingRect, boxes, handles}`.
+///
+/// Unlike every other UI method here this one lays out: the point commands
+/// measure against the current layout, so [`dom::Document::apply_editing`]
+/// runs a pass before each of them, and the boxes answered are that pass's.
+fn set_text_selection(document: &mut LynxDocument, text: NodeId, params: &str) -> MethodOutcome {
+    let Ok([start_x, start_y, end_x, end_y]) = selection_points(params) else {
+        return MethodOutcome::Failed(MethodError::InvalidParams);
+    };
+    if [start_x, start_y, end_x, end_y]
+        .iter()
+        .any(|&value| value < 0.0)
+    {
+        if document.selection_host() == Some(text) {
+            document.clear_selection();
+        }
+        return MethodOutcome::Done;
+    }
+    if !document.begin_selection(text) {
+        return MethodOutcome::Failed(MethodError::Operation);
+    }
+    document.apply_editing(Command::SelectFromPoint {
+        point: dom::Point2D::new(start_x, start_y),
+        extend: false,
+    });
+    document.apply_editing(Command::SelectFromPoint {
+        point: dom::Point2D::new(end_x, end_y),
+        extend: true,
+    });
+    for direction in [Direction::Forward, Direction::Backward] {
+        if document
+            .selection()
+            .is_none_or(|selection| selection.anchor != selection.focus)
+        {
+            break;
+        }
+        document.apply_editing(Command::Move {
+            granularity: Granularity::Character,
+            direction,
+            extend: true,
+        });
+    }
+    let Some(selection) = document
+        .selection()
+        .filter(|selection| selection.host == text)
+    else {
+        return MethodOutcome::Failed(MethodError::Operation);
+    };
+    let start = selection.anchor.min(selection.focus);
+    let end = selection.anchor.max(selection.focus);
+    let Some(boxes) = viewport_boxes(document, text, start, end) else {
+        return MethodOutcome::Failed(MethodError::Operation);
+    };
+    let (Some(first), Some(last)) = (boxes.first(), boxes.last()) else {
+        return MethodOutcome::Failed(MethodError::Operation);
+    };
+    let handles = [
+        first.min_x(),
+        first.max_y(),
+        HANDLE_RADIUS,
+        last.max_x(),
+        last.max_y(),
+        HANDLE_RADIUS,
+    ];
+    let mut record = String::new();
+    write_boxes(&mut record, &boxes);
+    for value in handles {
+        write_record_field(&mut record, &value.to_string());
+    }
+    MethodOutcome::Data(record)
+}
+
+/// `startX`, `startY`, `endX` and `endY` of `setTextSelection`'s params, in
+/// that order: each a JSON number, else code 4.
+fn selection_points(params: &str) -> Result<[f32; 4], InvalidParams> {
+    let params = object(params)?;
+    let mut points = [0.0; 4];
+    for (point, key) in points.iter_mut().zip(["startX", "startY", "endX", "endY"]) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a CSS px coordinate; f32 is the engine's geometry"
+        )]
+        {
+            *point = params
+                .get(key)
+                .and_then(Value::as_f64)
+                .ok_or(InvalidParams)? as f32;
+        }
+    }
+    Ok(points)
 }
 
 /// `start` or `end` of `getTextBoundingRect`'s params: a JSON number
@@ -1574,13 +1819,11 @@ mod tests {
             not_found,
             "a nested text is a run of its ancestor's paragraph and establishes none"
         );
-        for name in ["getSelectedText", "setTextSelection", "boundingClientRect"] {
-            assert_eq!(
-                invoke(&mut document, text, name, "{}"),
-                dom::MethodOutcome::NotFound,
-                "{name}: no selection model; the base set answers the rest"
-            );
-        }
+        assert_eq!(
+            invoke(&mut document, text, "boundingClientRect", "{}"),
+            dom::MethodOutcome::NotFound,
+            "the base set answers the rest"
+        );
         assert_eq!(
             invoke(
                 &mut document,
@@ -1740,5 +1983,360 @@ mod tests {
         document.add_listener(text, SELECTION_CHANGE, ListenerKinds::PATH_BUBBLE, realm);
         select(&mut document, text, 1, 3);
         assert_eq!(report(&document, &mut reports), queued(Some(1..3), true));
+    }
+
+    // --- read-only text selection --------------------------------------------
+
+    /// One record field `text`, as `getSelectedText` answers.
+    fn text_record(text: &str) -> dom::MethodOutcome {
+        let mut record = String::new();
+        crate::main::record::write_record_field(&mut record, text);
+        dom::MethodOutcome::Data(record)
+    }
+
+    /// Selects `anchor`..`focus`, in source units, of the selectable `root`.
+    fn select_in(document: &mut LynxDocument, root: dom::NodeId, anchor: usize, focus: usize) {
+        assert!(document.begin_selection(root));
+        assert!(
+            document
+                .apply_editing(dom::editing::Command::SetSelection {
+                    range: anchor..focus,
+                })
+                .applied
+        );
+    }
+
+    /// `<text text-selection>ab<inline-text>cd</inline-text><view/>ef</text>`,
+    /// every run a `raw-text` carrier's generated text, laid out in 20px
+    /// Ahem: source units `ab` 0–1, `cd` 2–3, the atom 4, `ef` 5–6. Answers
+    /// the document, the `text` and the `inline-text`.
+    fn selectable_paragraph(
+        mut document: LynxDocument,
+    ) -> (LynxDocument, dom::NodeId, dom::NodeId) {
+        const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
+        assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+        let text = child(
+            &mut document,
+            "text",
+            "width:400px;font-family:Ahem;font-size:20px;line-height:20px",
+        );
+        document.set_attribute(text, "text-selection", "true");
+        append_run(&mut document, text, "ab");
+        let inline = element_under(&mut document, text, "inline-text", "");
+        append_run(&mut document, inline, "cd");
+        element_under(&mut document, text, "view", "width:20px;height:20px");
+        append_run(&mut document, text, "ef");
+        document.layout();
+        (document, text, inline)
+    }
+
+    /// `text-selection` is `user-select` in the UA sheet: a `text` and the
+    /// text elements inside it compute `none`, or `auto` while the attribute
+    /// is present and not an ASCII case-insensitive `"false"`; a `view`
+    /// computes `auto` either way, and `dom` resolves `auto` to the parent's
+    /// used value, `text` at the page.
+    #[test]
+    fn text_selection_maps_onto_user_select() {
+        let mut document = document();
+        let text = child(&mut document, "text", "");
+        let inline = element_under(&mut document, text, "inline-text", "");
+        let run = element_under(&mut document, text, "raw-text", "");
+        document.set_attribute(run, "text", "abc");
+        let view = child(&mut document, "view", "");
+        for (value, expected) in [
+            (Some("true"), "auto"),
+            (Some("false"), "none"),
+            (Some(""), "auto"),
+            (Some("FALSE"), "none"),
+            (Some("1"), "auto"),
+            (None, "none"),
+        ] {
+            set_limit(&mut document, text, "text-selection", value);
+            set_limit(&mut document, view, "text-selection", value);
+            document.layout();
+            assert_eq!(
+                computed(&document, text, "user-select"),
+                expected,
+                "{value:?}"
+            );
+            assert_eq!(
+                computed(&document, inline, "user-select"),
+                expected,
+                "{value:?} on the inline-text inside"
+            );
+            assert_eq!(
+                computed(&document, view, "user-select"),
+                "auto",
+                "{value:?} on a view"
+            );
+            assert_eq!(
+                document.is_user_selectable(run),
+                expected == "auto",
+                "{value:?}: the used value"
+            );
+            assert!(
+                document.is_user_selectable(view),
+                "{value:?}: a view's auto"
+            );
+        }
+    }
+
+    /// A selectable `text`'s record counts every text and generated run of
+    /// its content and no atom; an `inline-text` inside it reports offsets
+    /// into its own content while both points lie in its source range, and
+    /// the empty record otherwise.
+    #[test]
+    fn a_selectable_text_s_record_counts_its_text_content_and_no_atom() {
+        let (mut document, text, inline) = selectable_paragraph(document());
+
+        // Unit 6 is past the atom: content offset 5.
+        select_in(&mut document, text, 1, 6);
+        assert_eq!(record_of(&document, text), Some((1..5, true)));
+        assert_eq!(record_of(&document, inline), None, "unit 1 is outside cd");
+
+        select_in(&mut document, text, 2, 3);
+        assert_eq!(record_of(&document, text), Some((2..3, true)));
+        assert_eq!(record_of(&document, inline), Some((0..1, true)));
+
+        select_in(&mut document, text, 4, 2);
+        assert_eq!(record_of(&document, text), Some((2..4, false)));
+        assert_eq!(
+            record_of(&document, inline),
+            Some((0..2, false)),
+            "the end of the inline-text's range is in it"
+        );
+
+        select_in(&mut document, text, 3, 5);
+        assert_eq!(record_of(&document, text), Some((3..4, true)));
+        assert_eq!(record_of(&document, inline), None);
+
+        select_in(&mut document, text, 3, 3);
+        assert_eq!(record_of(&document, text), None, "collapsed");
+
+        let view = child(&mut document, "view", "");
+        select_in(&mut document, text, 0, 2);
+        assert_eq!(record_of(&document, view), None, "outside the text");
+    }
+
+    /// The Lynx `selectionchange` of a selection in a selectable `text`
+    /// reaches a listened-to `inline-text` inside it; the `text` itself,
+    /// which nothing listens on, hears nothing.
+    #[test]
+    fn a_selectable_text_reports_to_an_inline_text_inside_it() {
+        use dom::event::{ListenerKey, ListenerKinds};
+
+        use super::super::test_support::with_component_events;
+        use super::super::{ComponentDetail, ComponentEvent, PageConfig};
+        use super::{SELECTION_CHANGE, SelectionReports, report_selection_changes};
+
+        let (document, events) = with_component_events(PageConfig::default());
+        let (mut document, text, inline) = selectable_paragraph(document);
+        document.add_listener(
+            inline,
+            SELECTION_CHANGE,
+            ListenerKinds::PATH_BUBBLE,
+            ListenerKey(1),
+        );
+        let mut reports = SelectionReports::default();
+        let mut report = |document: &LynxDocument| {
+            report_selection_changes(document, &mut reports, &events);
+            events.take()
+        };
+        let queued = |range, forward| {
+            vec![ComponentEvent::Detailed {
+                node: inline,
+                name: SELECTION_CHANGE,
+                detail: ComponentDetail::TextSelection { range, forward },
+            }]
+        };
+
+        select_in(&mut document, text, 2, 4);
+        assert_eq!(report(&document), queued(Some(0..2), true));
+        assert_eq!(report(&document), [], "the same record");
+        select_in(&mut document, text, 0, 4);
+        assert_eq!(report(&document), queued(None, true), "unit 0 is outside");
+        select_in(&mut document, text, 3, 2);
+        assert_eq!(report(&document), queued(Some(0..1), false));
+        assert!(document.clear_selection());
+        assert_eq!(report(&document), queued(None, true));
+    }
+
+    /// `getSelectedText` answers one field: the selected text of a
+    /// selection in this element, an atom as U+FFFC, and `""` for a
+    /// collapsed selection, one elsewhere, none, or a nested `text`.
+    #[test]
+    fn get_selected_text_answers_the_selection_in_this_text() {
+        let (mut document, text, _) = selectable_paragraph(document());
+        let other = child(&mut document, "text", "");
+        document.set_attribute(other, "text-selection", "");
+        append_run(&mut document, other, "xyz");
+        let nested = element_under(&mut document, text, "text", "");
+        append_run(&mut document, nested, "gh");
+        document.layout();
+
+        assert_eq!(
+            invoke(&mut document, text, "getSelectedText", "{}"),
+            text_record("")
+        );
+        select_in(&mut document, text, 1, 6);
+        assert_eq!(
+            invoke(&mut document, text, "getSelectedText", "null"),
+            text_record("bcd\u{fffc}e"),
+            "no params are read"
+        );
+        assert_eq!(
+            invoke(&mut document, other, "getSelectedText", "{}"),
+            text_record("")
+        );
+        assert_eq!(
+            invoke(&mut document, nested, "getSelectedText", "{}"),
+            text_record("")
+        );
+        select_in(&mut document, text, 2, 2);
+        assert_eq!(
+            invoke(&mut document, text, "getSelectedText", "{}"),
+            text_record("")
+        );
+        select_in(&mut document, other, 2, 0);
+        assert_eq!(
+            invoke(&mut document, other, "getSelectedText", "{}"),
+            text_record("xy")
+        );
+        assert_eq!(
+            invoke(&mut document, text, "getSelectedText", "{}"),
+            text_record("")
+        );
+    }
+
+    /// The record `setTextSelection` answers: [`boxes_record`]'s fields,
+    /// then `x`, `y` and the radius of each handle.
+    fn selection_record(boxes: &[[f32; 4]], handles: [[f32; 2]; 2]) -> dom::MethodOutcome {
+        let dom::MethodOutcome::Data(mut record) = boxes_record(boxes) else {
+            unreachable!("boxes_record answers data");
+        };
+        for [x, y] in handles {
+            for value in [x, y, 50.0] {
+                crate::main::record::write_record_field(&mut record, &value.to_string());
+            }
+        }
+        dom::MethodOutcome::Data(record)
+    }
+
+    /// `setTextSelection` selects between two border-box points and answers
+    /// the boxes and handles in viewport coordinates; a collapsed hit is
+    /// widened by one character, forward, or backward at the end; a negative
+    /// coordinate clears this element's selection; bad params are code 4 and
+    /// an element that cannot hold the selection code 8.
+    #[test]
+    fn set_text_selection_selects_between_two_points_and_answers_boxes_and_handles() {
+        const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
+        let mut document = document();
+        assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+        let text = child(
+            &mut document,
+            "text",
+            "position:absolute;left:20px;top:30px;padding:5px;border:2px solid;width:200px;\
+             font-family:Ahem;font-size:20px;line-height:21px",
+        );
+        document.set_attribute(text, "text-selection", "true");
+        append_run(&mut document, text, "abc def");
+        let nested = element_under(&mut document, text, "text", "");
+        document.set_attribute(nested, "text-selection", "true");
+        append_run(&mut document, nested, "gh");
+        let plain = child(&mut document, "text", "");
+        append_run(&mut document, plain, "plain");
+        document.layout();
+        let call = |document: &mut LynxDocument, element, [sx, sy, ex, ey]: [f32; 4]| {
+            invoke(
+                document,
+                element,
+                "setTextSelection",
+                &format!(r#"{{"startX":{sx},"startY":{sy},"endX":{ex},"endY":{ey}}}"#),
+            )
+        };
+        let selected = |document: &LynxDocument| {
+            document
+                .selection()
+                .map(|selection| (selection.host, selection.anchor, selection.focus))
+        };
+
+        // The content box is 7px into the border box and starts at (27, 37)
+        // in the viewport. 25px in is `b`'s left half, 85px `d`'s: units 1..4.
+        assert_eq!(
+            call(&mut document, text, [32.0, 17.0, 92.0, 17.0]),
+            selection_record(&[[47.0, 37.0, 60.0, 21.0]], [[47.0, 58.0], [107.0, 58.0]]),
+        );
+        assert_eq!(selected(&document), Some((text, 1, 4)));
+        assert_eq!(
+            invoke(&mut document, text, "getSelectedText", "{}"),
+            text_record("bc ")
+        );
+
+        // The same point twice is widened forward by one character.
+        assert_eq!(
+            call(&mut document, text, [32.0, 17.0, 32.0, 17.0]),
+            selection_record(&[[47.0, 37.0, 20.0, 21.0]], [[47.0, 58.0], [67.0, 58.0]]),
+        );
+        assert_eq!(selected(&document), Some((text, 1, 2)));
+        // Past the last character there is no forward: widened backward,
+        // over the nested text's `h`.
+        assert_eq!(
+            call(&mut document, text, [207.0, 17.0, 207.0, 17.0]),
+            selection_record(&[[187.0, 37.0, 20.0, 21.0]], [[187.0, 58.0], [207.0, 58.0]]),
+        );
+        assert_eq!(selected(&document), Some((text, 9, 8)));
+
+        // A negative coordinate clears the selection here, with no data,
+        // and leaves one elsewhere alone.
+        assert_eq!(
+            call(&mut document, text, [-1.0, 0.0, 10.0, 10.0]),
+            dom::MethodOutcome::Done
+        );
+        assert_eq!(selected(&document), None);
+        select_in(&mut document, text, 0, 2);
+        assert_eq!(
+            call(&mut document, plain, [0.0, 0.0, 0.0, -0.5]),
+            dom::MethodOutcome::Done
+        );
+        assert_eq!(selected(&document), Some((text, 0, 2)));
+
+        let invalid = dom::MethodOutcome::Failed(dom::MethodError::InvalidParams);
+        for params in [
+            "{}",
+            "null",
+            "[]",
+            r#"{"startX":1,"startY":1,"endX":1}"#,
+            r#"{"startX":"1","startY":1,"endX":1,"endY":1}"#,
+            "not json",
+        ] {
+            assert_eq!(
+                invoke(&mut document, text, "setTextSelection", params),
+                invalid,
+                "{params}"
+            );
+        }
+        assert!(
+            matches!(
+                invoke(
+                    &mut document,
+                    text,
+                    "setTextSelection",
+                    r#"{"startX":10,"startY":10,"endX":30,"endY":10,"showStartHandle":false,"showEndHandle":"x"}"#
+                ),
+                dom::MethodOutcome::Data(_)
+            ),
+            "the handle flags are not read"
+        );
+        let operation = dom::MethodOutcome::Failed(dom::MethodError::Operation);
+        assert_eq!(
+            call(&mut document, nested, [0.0, 0.0, 10.0, 10.0]),
+            operation,
+            "a nested text establishes no paragraph"
+        );
+        assert_eq!(
+            call(&mut document, plain, [0.0, 0.0, 10.0, 10.0]),
+            operation,
+            "a text without text-selection cannot hold the selection"
+        );
     }
 }

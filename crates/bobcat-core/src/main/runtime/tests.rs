@@ -4170,8 +4170,9 @@ fn a_markdown_answers_its_ui_methods_through_invoke() {
 /// selector-query `invoke`: a 10px Ahem paragraph at (20, 30) with 5px of
 /// padding answers its range's box in viewport CSS px, from the content
 /// box's origin, with `boundingRect` the union `element-papi.ts` builds. A
-/// reversed range is code 4, a range past the text's end code 8, the
-/// selection methods code 3, and the method on a `view` code 3.
+/// reversed range is code 4, a range past the text's end code 8, and the
+/// method on a `view` code 3. The text is `text-selection`, and
+/// `setTextSelection` and `getSelectedText` answer through both paths too.
 #[test]
 fn a_text_answers_get_text_bounding_rect_through_both_invoke_paths() {
     let (mut js_runtime, mut runtime, _elements) = text_runtime();
@@ -4183,6 +4184,7 @@ fn a_text_answers_get_text_bounding_rect_through_both_invoke_paths() {
                   const page = __CreatePage('card', 0);
                   const text = __CreateText(0);
                   __SetID(text, 'label');
+                  __SetAttribute(text, 'text-selection', 'true');
                   __SetInlineStyles(text,
                     'position:absolute;left:20px;top:30px;padding:5px;' +
                     'font-family:Ahem;font-size:10px');
@@ -4240,9 +4242,21 @@ fn a_text_answers_get_text_bounding_rect_through_both_invoke_paths() {
                 expectAnswer(viaPapi(held[1], 'getTextBoundingRect', {start: 0, end: 99}), 8,
                              undefined);
                 expectAnswer(viaQuery('getTextBoundingRect', {start: 0, end: 99}), 8, undefined);
-                expectAnswer(viaPapi(held[1], 'getSelectedText', {}), 3, undefined);
+                expectAnswer(viaPapi(held[1], 'getSelectedText', {}), 0, {selectedText: ''});
+                // Border-box points: 12px into the content is b's left half,
+                // 28px c's right half, so units 1..3 again.
+                const handles = [{x: 35, y: 45, radius: 50}, {x: 55, y: 45, radius: 50}];
                 expectAnswer(viaQuery('setTextSelection',
-                                      {startX: 0, startY: 0, endX: 10, endY: 10}), 3, undefined);
+                                      {startX: 17, startY: 10, endX: 33, endY: 10}), 0,
+                             {...found, handles});
+                expectAnswer(viaPapi(held[1], 'getSelectedText', {}), 0, {selectedText: 'bc'});
+                expectAnswer(viaPapi(held[1], 'setTextSelection',
+                                     {startX: 17, startY: 10, endX: 33, endY: 10}), 0,
+                             {...found, handles});
+                expectAnswer(viaPapi(held[1], 'setTextSelection',
+                                     {startX: -1, startY: 0, endX: 0, endY: 0}), 0, undefined);
+                expectAnswer(viaQuery('getSelectedText', {}), 0, {selectedText: ''});
+                expectAnswer(viaQuery('setTextSelection', {startX: 0}), 4, undefined);
                 expectAnswer(viaPapi(held[2], 'getTextBoundingRect', {start: 0, end: 1}), 3,
                              undefined);
                 ",
@@ -11419,12 +11433,12 @@ fn mouse(button: i16, buttons: u16) -> InputEventPayload {
     }
 }
 
-/// The editing account of the painter's name set routes by state: with an
-/// unfocused host only the press and the tap (`pointerdown`, `click`), the
-/// key while something is focused, and the drag's moves and release only
-/// while a mouse press that placed a caret is held. A name the realm listens
-/// for itself is never closed by it, and the last host going closes the
-/// rest.
+/// The press and the tap are routed on the editing account from the page's
+/// first epilogue, whether or not it has an editing host; the focus a press
+/// takes opens the key, the press itself opens the drag inside its own job,
+/// the release closes it, and the last host going closes the key with the
+/// focus it held. A name the realm registers for itself is never closed by
+/// a route.
 #[test]
 fn an_editing_host_routes_its_names_by_state() {
     let (mut js_runtime, mut runtime, elements, mut names) =
@@ -11447,7 +11461,11 @@ fn an_editing_host_routes_its_names_by_state() {
         )
         .expect("main-thread script");
     runtime.sync_editing_routes();
-    assert_eq!(routed(&mut names), ["pointercancel"], "no host yet");
+    assert_eq!(
+        routed(&mut names),
+        ["click", "pointercancel", "pointerdown"],
+        "the page routes the press and the tap with no host yet"
+    );
 
     runtime
         .evaluate_module(
@@ -11465,7 +11483,7 @@ fn an_editing_host_routes_its_names_by_state() {
     assert_eq!(
         routed(&mut names),
         ["click", "pointercancel", "pointerdown"],
-        "an unfocused host routes the press and the tap alone"
+        "an unfocused host adds nothing"
     );
 
     let host = elements
@@ -11523,7 +11541,7 @@ fn an_editing_host_routes_its_names_by_state() {
     runtime.sync_editing_routes();
     assert_eq!(
         routed(&mut names),
-        ["pointercancel"],
-        "the last host and the focus it held close the rest"
+        ["click", "pointercancel", "pointerdown"],
+        "the last host and the focus it held close the key alone"
     );
 }
