@@ -184,7 +184,11 @@ import { frameConnectionChanged, frameDataChanged, frameSourceChanged } from "bo
 // `scrollWidth`, `deltaX`, `deltaY` and `isDragging`, an `<x-markdown>`
 // `link`'s `url`, `content` and `contentId` (strings; a key the component had
 // no value for is not sent, so the `detail` has no such key). No rule here
-// knows an extra's name. With no extras, the `detail` is this file's default shaping
+// knows an extra's name, except for the two Lynx layout events, whose
+// `detail` is built from their extras by `layoutDetailOf`: `layoutchange`'s
+// `{id, dataset, width, height, left, top, right, bottom}` from four numbers
+// and the target, and a `text` `layout`'s `{lineCount, lines, size}` from
+// three numbers and the lines' JSON text. With no extras, the `detail` is this file's default shaping
 // of the payload: `{x, y}` for a pointer or touch event, `{}` for a wheel
 // (native's), the exposure object for `uiappear`/`uidisappear`, `{}`
 // otherwise. The Lynx-only events (`tap`, `longpress`, `uiappear`, the
@@ -3062,10 +3066,47 @@ interface DispatchedEvent {
  * one. A listener may write into this object; it is minted per dispatch,
  * like the event that carries it.
  */
-interface EventDetail extends Partial<ExposureDetail> {
+interface EventDetail
+  extends Partial<ExposureDetail>, Partial<LayoutChangeDetail>, Partial<TextLayoutDetail>
+{
   x?: number;
   y?: number;
 }
+
+/**
+ * `layoutchange`'s detail, native's `LayoutChangeDetailEvent`
+ * (`lynx/js_libraries/types/types/common/events.d.ts:419`;
+ * `LynxUI.m:3790-3802`, `LynxBaseUI.java:1023-1043`): the element's border
+ * box in the Lynx view's CSS px, with no transform applied, plus its `id` and
+ * `dataset`, which web-core's detail does not carry
+ * (`createCrossThreadEvent.ts:111-127`).
+ */
+interface LayoutChangeDetail {
+  id: string;
+  dataset: Record<string, unknown>;
+  width: number;
+  height: number;
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/**
+ * A `text`'s `layout` detail, native's `TextLayoutEventDetail`
+ * (`lynx/js_libraries/types/types/common/events.d.ts:385-398`): the lines
+ * its paragraph shows, each as a source range in UTF-16 units with the units
+ * a truncation cut removed, and its content box in CSS px.
+ */
+interface TextLayoutDetail {
+  lineCount: number;
+  lines: { start: number; end: number; ellipsisCount: number }[];
+  size: { width: number; height: number };
+}
+
+/** The two Lynx layout events whose `detail` `layoutDetailOf` builds. */
+const LAYOUT_CHANGE_EVENT = "layoutchange";
+const TEXT_LAYOUT_EVENT = "layout";
 
 /**
  * web-core's `ExposureEventDetail` (`ExposureServices.ts:202-208`): an
@@ -3132,6 +3173,59 @@ function extrasOf(pairs: unknown[]): EventDetail {
     extras[String(pairs[at])] = pairs[at + 1];
   }
   return extras as EventDetail;
+}
+
+/**
+ * The Lynx `detail` of a dispatch that carries extras: the extras
+ * themselves, except for the two Lynx layout events, whose detail has a
+ * shape the extras channel's one primitive per key cannot carry, so it is
+ * built here from what the host sent (`crates/bobcat-core/src/main/layout_change.rs`).
+ *
+ * - `layoutchange`: the host sends `left`, `top`, `width` and `height` of the
+ *   element's border box. `right` and `bottom` are their sums, derived here
+ *   as `boundingClientRect`'s answer derives them; `id` is the attribute,
+ *   `""` when the element carries none (native's `_idSelector ?: @""`), and
+ *   `dataset` the copy `__GetDataset` hands out, as `boundingClientRect`'s
+ *   answer carries it — `{}` in a realm that holds no handle for the target.
+ *   Read from the target at each dispatch, so a background handler receives
+ *   values only.
+ * - `layout`, a `text`'s: the host sends `lineCount`, `lines` — JSON text of
+ *   one flat array, `start, end, ellipsisCount` per line — and the content
+ *   box's `width` and `height`, which become `{lineCount, lines: [{start,
+ *   end, ellipsisCount}, ...], size: {width, height}}`.
+ */
+function layoutDetailOf(name: string, extras: EventDetail, nodeId: number): EventDetail {
+  const values = extras as Record<string, unknown>;
+  if (name === LAYOUT_CHANGE_EVENT) {
+    const left = Number(values["left"] ?? 0);
+    const top = Number(values["top"] ?? 0);
+    const width = Number(values["width"] ?? 0);
+    const height = Number(values["height"] ?? 0);
+    const handle = handleOf(nodeId);
+    return {
+      id: getAttribute(nodeId, "id") ?? "",
+      dataset: handle === undefined ? {} : __GetDataset(handle),
+      width,
+      height,
+      left,
+      top,
+      right: left + width,
+      bottom: top + height,
+    };
+  }
+  if (name === TEXT_LAYOUT_EVENT && typeof values["lines"] === "string") {
+    const flat = JSON.parse(values["lines"]) as number[];
+    const lines = [];
+    for (let at = 0; at + 2 < flat.length; at += 3) {
+      lines.push({ start: flat[at]!, end: flat[at + 1]!, ellipsisCount: flat[at + 2]! });
+    }
+    return {
+      lineCount: Number(values["lineCount"] ?? lines.length),
+      lines,
+      size: { width: Number(values["width"] ?? 0), height: Number(values["height"] ?? 0) },
+    };
+  }
+  return extras;
 }
 
 /**
@@ -3950,9 +4044,12 @@ function dispatchEvent(
   const kind = Number(detailKind);
   // Read once, and only for a dispatch with a position to shape.
   const origin = kind === DETAIL_POSITION ? pageOrigin() : VIEW_ORIGIN;
-  // The Lynx `detail`: the extras when the host sent any, the default
-  // shaping of the W3C payload otherwise.
-  const detail = extras ?? detailOf(kind, detailNumbers, targetNodeId, origin);
+  // The Lynx `detail`: the extras when the host sent any (built into the
+  // layout events' own shapes), the default shaping of the W3C payload
+  // otherwise.
+  const detail = extras === undefined
+    ? detailOf(kind, detailNumbers, targetNodeId, origin)
+    : layoutDetailOf(name, extras, targetNodeId);
   const event: DispatchedEvent = {
     type: name,
     eventPhase: NONE,

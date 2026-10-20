@@ -85,10 +85,19 @@ pub(crate) use self::base_methods::invoke_base_method;
 pub(crate) use self::frame::{MAX_FRAME_DEPTH, frame_depth, nested_page, reset_frame};
 pub(crate) use self::svg::is_svg;
 pub(crate) use self::swiper::Autoplays;
-pub(crate) use self::text::{SelectionReports, report_selection_changes};
+pub(crate) use self::text::{SelectionReports, is_text, report_selection_changes};
 pub(crate) use self::text_field::focus_delegate;
 pub use self::ua_sheet::PageConfig;
 pub(crate) use crate::view::Viewport;
+
+/// The node whose border box a `layoutchange` registration on `element`
+/// observes (`crate::main::layout_change`): web-core's `layoutChangeTarget`.
+/// For an `overlay` or `x-overlay-ng` host, which generates no box, its
+/// shadow `#dialog` (`XOverlayNg.ts:21-23`); for every other element, the
+/// element itself.
+pub(crate) fn layout_change_target(document: &LynxDocument, element: NodeId) -> NodeId {
+    overlay::dialog_of(document, element).unwrap_or(element)
+}
 
 /// The one document shape the runtime speaks.
 pub(crate) type LynxDocument = Document<()>;
@@ -261,6 +270,23 @@ pub(crate) enum ComponentEvent {
     /// `bobcat:frame`, which loads the frame's card on a connection and
     /// disposes of it on a disconnection.
     Frame { node: NodeId, connected: bool },
+    /// A reporting `text`'s paragraph was recomputed by a committing layout
+    /// run: its `layout` event (`crate::main::layout_change`), with what the
+    /// commit left — the lines it shows ([`dom::Document::text_lines`]) and
+    /// its content box (the border box less padding and border, in CSS px,
+    /// native's `GetContentBoxWidth`/`GetContentBoxHeight`,
+    /// `text_fragment_behavior.cc:86-87`) — read when the epilogue queued it.
+    ///
+    /// Not bubbling and not composed: native fires it as a custom event,
+    /// which does not bubble (`text_fragment_behavior.cc:65-124`,
+    /// `lynx/core/event/custom_event.h:17-23`), at the `text` itself, which is
+    /// outside every UA shadow tree.
+    TextLayout {
+        node: NodeId,
+        lines: Vec<dom::TextLineReport>,
+        width: f32,
+        height: f32,
+    },
 }
 
 /// The `detail` of a [`ComponentEvent::Detailed`]: one variant per *shape*
@@ -328,7 +354,8 @@ pub(crate) enum ComponentDetail {
 ///
 /// A handle rather than a field, because the producers are on both sides of
 /// the document: the `image` component, which is inside it and reaches nothing
-/// else; the runtime's own image report path, which is outside it; the
+/// else; the runtime's own image report path and its drain of the text
+/// layout reports, which are outside it; the
 /// `dialog` component's UI methods; and the `overlay` and `frame`
 /// components, inside the document like `image`, as is any component that
 /// queues a [`ComponentEvent::Detailed`].
@@ -382,6 +409,23 @@ impl ComponentEvents {
         self.0
             .borrow_mut()
             .push(ComponentEvent::Detailed { node, name, detail });
+    }
+
+    /// Queues a `text`'s `layout` with the lines and content box its last
+    /// commit left ([`ComponentEvent::TextLayout`]).
+    pub(crate) fn queue_text_layout(
+        &self,
+        node: NodeId,
+        lines: Vec<dom::TextLineReport>,
+        width: f32,
+        height: f32,
+    ) {
+        self.0.borrow_mut().push(ComponentEvent::TextLayout {
+            node,
+            lines,
+            width,
+            height,
+        });
     }
 
     /// Queues a `frame`'s connection (`connected`) or disconnection.

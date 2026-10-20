@@ -113,6 +113,7 @@ mod motion;
 mod oracle_tests;
 pub(crate) mod reach;
 pub(crate) mod relevance;
+pub(crate) mod resize;
 pub(crate) mod space;
 mod stacking;
 pub(crate) mod sticky;

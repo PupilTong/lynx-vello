@@ -353,9 +353,12 @@ under the borrows of the shared runtime and the realm, and then that
 operation's epilogue. The epilogue is one function;
 what only one role has is a hook of that owner's `RealmOwner` impl at a fixed
 step. For a page the order is: the timers that came due, the commit — then the
-intersection observations that commit or an adopted scroll moved, and the
-intersection, content-visibility and component-event deliveries it posts as
-entries of their own (the intersection delivery also drains the Lynx exposure
+`<text>` `layout` reports that commit left (queued as component events), the
+resize observations that commit moved, the intersection observations that
+commit or an adopted scroll moved, and the resize, intersection,
+content-visibility and component-event deliveries it posts as entries of
+their own (the resize delivery dispatches each resized element's
+`layoutchange`; the intersection delivery also drains the Lynx exposure
 changes — each `uiappear`/`uidisappear`, then each `bobcat:exposure` record
 event, out of which the realm's Lynx layer sends the `exposure` and
 `disexposure` lists — and is posted for them even when no observer crossed a
@@ -2223,6 +2226,42 @@ detection and `resumeExposure` re-observes (native's semantics, with
 timer. The defaults where the references differ are in
 `docs/tracking/deviations.md`.
 
+**Lynx layout events** (`crates/bobcat-core/src/main/layout_change.rs`,
+user-directed 2026-10-20, `docs/layout-observer-design.md` §5) are the
+second bucket-2 adapter, over two `dom` primitives. `layoutchange` is one
+document-wide `ResizeObserver` (created on the first registration) of which
+every element with a `layoutchange` row in the listener table, any realm and
+any form, is a `border-box` target — an `overlay`'s or `x-overlay-ng`'s
+shadow `#dialog` in place of the box-less host, web-core's
+`layoutChangeTarget` (`tree::layout_change_target`; `LayoutChangeObserver`
+keeps the dialog-to-host pairs and dispatches at the host with the dialog's
+rect). On each change of `has_listener(node, name)` for `"layoutchange"` or
+`"layout"`, `open_listener`/`close_listener` add or remove the node's
+`LayoutEventRegistration` (`layout_registration_follows`), as they tell
+exposure: `ResizeObservation` is `LayoutChangeObserver::observe`/`unobserve`
+of a live element, `TextLayoutReport` is
+`Document::set_text_layout_reporting` of a `text` element. Its handler, bound to no node, only records the targets; the
+epilogue runs `update_resize_observations` after its commit and posts the
+resize delivery entry (`Page::post_resize_notifications`, before the
+intersection one), which runs `dom`'s broadcast and then dispatches
+`layoutchange` at each recorded target, not bubbling, not composed, with the
+extras `left`, `top`, `width`, `height` of `bounding_client_rect` (all `0`
+for a target with no box); `bobcat:element` (`layoutDetailOf`) builds
+`{id, dataset, width, height, left, top, right, bottom}`. Size changes only,
+no transforms, no host origin subtracted, `dataset` included (rulings 1, 3, 4
+and 8). A freed target leaves through the primitive; a target whose last row
+left with a forgotten realm is unobserved by its next delivery. A `text`
+element's `layout` row turns its text layout report on (a `layout` row on
+any other element is ignored); after every commit the
+epilogue's `queue_text_layout_events` takes `take_text_layout_reports`, reads
+`text_lines` and the content box from `rounded_layout`, and queues one
+`ComponentEvent::TextLayout`, which the component-events entry dispatches at
+the `text`, not bubbling, not composed, with `lineCount`, `lines` (JSON text of
+a flat `start, end, ellipsisCount` array) and `width`/`height`; the realm
+builds `{lineCount, lines, size}`. A listener filed after the paragraph laid
+out hears nothing until the paragraph's next committing re-layout (iOS's
+per-renderer latch).
+
 `__SetCSSId` writes web-core's `l-css-id` attribute on each element (a
 non-zero id sets it, 0 or a nullish id removes it), and `bobcat-source`'s
 `lower_style` repeats every rule of a scoped `StyleInfo` fragment once per
@@ -3420,7 +3459,20 @@ Subsystems:
   `inline_source_range`, which the geometry APIs (`text_range_boxes`,
   `text_index_at_point`) answer from for either kind; `paragraph_kind` and
   `paragraph_line_count` say which kind a node established and how many
-  lines its last commit laid out.
+  lines its last commit laid out. The `<text>` `layout` event's `dom` half
+  (`docs/layout-observer-design.md` §3.3): `Document::set_text_layout_reporting`
+  puts a Lynx text element in `DocumentLayoutState::text_layout_reporters`
+  (a node-keyed set, empty and unallocated on a page without one; a
+  non-Lynx-text node panics); the committing branch of
+  `compute_text_block_layout`, reached only on a hughie cache miss, pushes a
+  reporting element onto `text_layout_reports`;
+  `Document::take_text_layout_reports` hands that list over deduplicated in
+  first-occurrence order (one `layout()` can commit a paragraph in several
+  passes), an empty `Vec` without allocating when there is none; a freed node
+  leaves both. `Document::text_lines` answers the last commit's lines as
+  `TextLineReport { start, end, ellipsis_count }` (source UTF-16 units, from
+  `TextBlock::lines`). The host side (listener gate, component event, detail)
+  is not built yet.
 - `visual/` — stacking contexts, CSS2 Appendix E paint order, transforms,
   `RenderLayer` group effects, reverse-paint-order hit testing, and
   `content-visibility: auto` relevance determination (`relevance.rs`), which
@@ -3600,8 +3652,9 @@ Rulings and limits to know before touching it:
   (`crates/dom/src/layout/remembered.rs`): the layout host records a box's
   content box after every committing run in which it had no size containment,
   and `StyleView` substitutes it into `CoreStyle::contain_intrinsic_{width,
-  height}` once the box is skipping. This engine has no ResizeObserver, so
-  that commit's layout run is the spec's recording moment, and csswg-drafts
+  height}` once the box is skipping. That commit's layout run is the spec's
+  recording moment (the resize observations gather after that same layout
+  and deliver later, from a posted entry), and csswg-drafts
   #8407 (`content-visibility: auto` implies the `auto` keyword) is folded in
   here because the fork's own adjuster is `#[cfg(feature = "gecko")]`.
   `hughie` is unchanged by either: it reads `AutoLength(l)` as `l` already.
@@ -3713,6 +3766,31 @@ Rulings and limits to know before touching it:
   never intersecting; `bounding_client_rect` keeps its transform-free walk.
   A page without observers pays one `is_empty` per freed node and one bool
   per render, moved scroll and epilogue.
+- A W3C **ResizeObserver primitive** (`crates/dom/src/visual/resize/`,
+  Rust-only, `docs/layout-observer-design.md` §3.1 and §5): observers carry a
+  `Box<dyn ResizeEventHandler<T>>` (the same `dyn` ruling) and the node it is
+  bound to, and registrations of a target, an `ObservedBox` (content, border
+  or device-pixel content box; horizontal writing mode only) and the spec's
+  `lastReportedSizes`, which starts at `-1 × -1` so the first update reports
+  every target once. `update_resize_observations` reads the rounded layout —
+  `0 × 0` for a target with no box (`display: none` on it or an ancestor,
+  detached, no layout) — and queues an entry carrying `contentRect` and all
+  three sizes wherever the watched size moved. A target whose contents an
+  ancestor skips (`content-visibility`) is left alone, neither compared nor
+  updated, so it reports only a size different from its last one once it is
+  laid out again: Chromium's `ResizeObservation::ObservationSizeOutOfSync`
+  returns false for a display-locked subtree (`resize_observation.cc`), which
+  is web-core's `layoutchange` behaviour on `content-visibility: auto` list
+  items. The update is gated by a stale bit that
+  only a layout pass that ran, `observe_resize` and a target's free set
+  (never a scroll or a render that laid nothing out), and it does nothing
+  before the first layout. `notify_resize_observers` is the spec's broadcast
+  with the intersection loop's re-lookup-by-id and handler-out discipline;
+  the host runs it from a posted entry after the frame (ruling 2), so the
+  spec's depth filter and loop error are not built. `disconnect` clears the
+  queue, as the spec clears `[[activeTargets]]`; `take_resize_records` is
+  an engine addition. A page without observers pays one `is_empty` per freed
+  node and per update and one bool per layout pass.
 - Stylo's per-element style data and its traversal/invalidation flags live
   inline on `Node` (bench-defended 2026-08-03: no traversal regression, a
   measurably faster no-op-commit fast path).

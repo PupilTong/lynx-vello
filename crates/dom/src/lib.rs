@@ -36,6 +36,7 @@ pub use stylo;
 pub use stylo_dom::ElementState;
 pub use vello;
 
+pub use crate::layout::TextLineReport;
 pub use crate::paint::compose::FilterGroup;
 pub use crate::render::image::{
     DocumentKind, DocumentRequest, FrameImages, ImageEvent, ImageInbox, ImageOutcome, ImageReports,
@@ -64,6 +65,9 @@ pub use crate::visual::intersection::{
     ElementHandler, IntersectionEventHandler, IntersectionGeometry, IntersectionMargin,
     IntersectionObserver, IntersectionObserverEntry, IntersectionObserverId,
     IntersectionObserverInit, IntersectionObserverRoot, MarginLength, RootGeometry,
+};
+pub use crate::visual::resize::{
+    ObservedBox, ResizeEventHandler, ResizeObserver, ResizeObserverEntry, ResizeObserverId,
 };
 pub use crate::visual::{
     AnimationSlot, CommittedFrame, ContentVisibilityChange, HitTarget, ScrollSlot, SnapSlot,

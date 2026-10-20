@@ -859,6 +859,100 @@ The first consumer is bobcat-core's Lynx exposure service
 with a handler type of its own that records transitions for the delivery
 entry to drain; `dom` holds nothing of it.
 
+## Resize observations
+
+The Resize Observer primitive lives in `visual/resize/mod.rs`: the
+registry, the spec's "gather active resize observations" (§3.4.1) with the
+entry creation of §3.4.4 folded in, and §3.4.5 "broadcast active resize
+observations". It is Rust-only, like the intersection primitive, and its
+design and rulings are `docs/layout-observer-design.md` §3.1 and §5; its
+first consumer is bobcat-core's `LayoutChangeObserver`
+(`crates/bobcat-core/src/main/layout_change.rs`): one document-wide observer
+whose `border-box` targets are the elements with a `layoutchange` listener.
+
+**Registry.** `Document.resizes` is a `Vec` of `ResizeObserver<T>`s in
+creation order, ascending by id, each with a handler
+(`Box<dyn ResizeEventHandler<T>>`, the same `dyn` ruling as the
+intersection primitive), the node that handler is bound to (cached at
+creation), a queue of `ResizeObserverEntry`s and its registrations: a
+target, its `ObservedBox` (`ContentBox`, the default, `BorderBox` or
+`DevicePixelContentBox`) and the spec's `lastReportedSizes`, which starts at
+`-1 × -1` (§3.1 constructor step 4, from csswg-drafts issue 3664; Chromium's
+`kInitialObservationSize` and `WebKit` bug 250836 start from the same
+impossible size), so the first update after `observe` reports every target
+once, a `0 × 0` one included. `observe_resize` on a target already observed
+through the same box changes nothing; through another box it replaces the
+registration with a new one at the end of the observe order, so the target
+is reported again (Chromium's `observeInternal`; the spec's text re-adds
+even for the same box). `unobserve_resize` keeps the queue, as the spec's
+steps leave `[[activeTargets]]`; `disconnect_resize_observer` clears the
+targets and the queue, as the spec's step 2 clears `[[activeTargets]]`.
+`take_resize_records` is an engine addition (the spec has no
+`takeRecords()`). Ids are monotone and never reissued.
+
+**Sizes.** Every size comes from the target's rounded layout. Horizontal
+writing mode only: `inlineSize` is the width and `blockSize` the height.
+The border box is the layout's `size`, the content box that size less the
+`padding` and `border` edges, `contentRect` the content box placed at
+`(padding.left, padding.top)`, and the device-pixel content box the
+content box times the device pixel ratio, rounded half up to whole device
+pixels as hughie's rounding tail rounds (`css_round_to_integer`). An entry
+carries all three sizes whichever box the registration watches.
+`Document::observed_box_state` sorts a target into one of three states with
+one walk up its box ancestors (one walk per registration, because an
+unlinked or reparented box keeps its last layout):
+**skipped** when an ancestor that has a box skips its contents
+(`content-visibility: hidden`, or `auto` while not relevant); **not
+rendered** (`0 × 0`, zero rect) for no live node, no style,
+`display: none`/`contents` on the target, a `display: none` ancestor or one
+with no layout, a detached subtree, or a hidden layout slot, the target's
+own half of that test being the intersection geometry's `own_box`
+(`visual/intersection/geometry.rs`); **rendered** otherwise. A skipped
+target's registration is left alone: not compared, `lastReportedSizes` not
+updated, nothing queued. Once the ancestor stops skipping and the target is
+laid out again, the next update compares its real size with the size it
+last reported, so a target that comes back at that size queues nothing.
+This follows Chromium: `ResizeObservation::ObservationSizeOutOfSync`
+(`third_party/blink/renderer/core/resize_observer/resize_observation.cc`)
+returns false for a target in a display-locked subtree
+(`DisplayLockUtilities::IsInLockedSubtreeCrossingFrames`), which is why
+web-core on Chrome fires no `layoutchange` for a skipped item of a
+`content-visibility: auto` list. The skipping element itself is observed
+normally, since its own box is laid out, and a `display: none` ancestor
+above it means it has no box and skips nothing.
+
+**The update** (`update_resize_observations`) runs no pass and invokes
+nothing. Per registration it compares the watched box's size with
+`lastReportedSizes`; where they differ it stores the size and queues one
+entry. It is gated by a stale bit set by every layout pass that ran (in
+`run_layout_once`, after `mark_layout_complete`; a `layout()` that finds
+nothing dirty runs no pass), by `observe_resize`, and by freeing an
+observed target, and it does nothing before the document's first
+completed layout. Scrolls and renders that laid nothing out do not set the
+bit, unlike the intersection stale bit: they move or repaint boxes and
+resize none.
+
+**Delivery.** `notify_resize_observers` is the broadcast without its
+returned depth, with the intersection loop's discipline: the ids with
+entries queued, in creation order, each looked up again when its turn
+comes; its queue and its handler are taken out, `notify(document, id,
+entries)` is called, and the handler goes back unless the observer was
+dropped meanwhile; a loop run from inside a notification skips the observer
+whose handler is out. The host runs it from a posted entry after the frame
+(ruling 2), so a handler's writes land in the next commit. The spec's
+depth filter, skipped observations and "loop completed with undelivered
+notifications" error belong to its in-rendering loop, which gathers again
+after a broadcast inside the same rendering update; with delivery outside
+the commit, every observation is delivered at the next entry and none is
+skipped, so they are not built.
+
+**Node lifetime.** `free_node` drops observers bound to the node, removes
+the node's registrations, and drops queued entries naming it. An unlinked
+but live target stays observed and reports `0 × 0` after the next layout.
+A document with no observers pays one `is_empty` test per freed node and
+per update, and one `bool` store per layout pass; `Node`, `LayoutSlot` and
+`NodeLayoutState` are unchanged.
+
 ## Scroll, input and event paths
 
 Its `scroll` module owns CSSOM-View scrolling — scrollport/scrolling-area
@@ -1065,6 +1159,27 @@ element whose flatten walk reaches a node), `paragraph_kind` (a Lynx
 paragraph or an inline formatting context) and `paragraph_line_count` (the
 lines the last commit laid out, the empty line a Lynx paragraph shows after a
 trailing break included).
+
+The `<text>` `layout` event's half in `dom` is a per-pass report list, built
+the way `content_visibility_changes` is (`docs/layout-observer-design.md`
+§3.3). `Document::set_text_layout_reporting(id, on)` adds or removes a Lynx
+text element in `DocumentLayoutState::text_layout_reporters`, a node-keyed set
+rather than a field of the `TextBlockStore`, because the store is replaced on
+every rebuild, dropped by relayout damage and absent before the first layout;
+a node that is not a Lynx text element panics. The committing branch of
+`compute_text_block_layout` (`layout/text_block.rs`), which hughie runs only
+when its layout cache for the element missed, pushes a reporting element's id
+onto `DocumentLayoutState::text_layout_reports`; an empty reporter set makes
+that one `is_empty` test. `Document::take_text_layout_reports` hands the list
+over with each node once, in first-occurrence order, since one `layout()` can
+commit a paragraph in more than one pass (the size-container loop, the anchor
+settle runs); an empty list returns an empty `Vec` without allocating.
+Freeing a node removes it from both (`DocumentLayoutState::remove`), and
+turning the report off drops its pending entries. `Document::text_lines(id)`
+answers the last commit's lines as `TextLineReport { start, end,
+ellipsis_count }` in source UTF-16 units, from hughie's `TextBlock::lines`,
+`None` for anything but a committed Lynx paragraph. The listener gate, the
+component event and the JavaScript detail are `bobcat-core`'s.
 
 ## The vendored stylo fork
 
