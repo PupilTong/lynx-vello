@@ -65,6 +65,9 @@ pub use crate::visual::intersection::{
     IntersectionObserver, IntersectionObserverEntry, IntersectionObserverId,
     IntersectionObserverInit, IntersectionObserverRoot, MarginLength, RootGeometry,
 };
+pub use crate::visual::resize::{
+    ObservedBox, ResizeEventHandler, ResizeObserver, ResizeObserverEntry, ResizeObserverId,
+};
 pub use crate::visual::{
     AnimationSlot, CommittedFrame, ContentVisibilityChange, HitTarget, ScrollSlot, SnapSlot,
     SnapSlotAxis,

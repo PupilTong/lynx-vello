@@ -3522,8 +3522,9 @@ Rulings and limits to know before touching it:
   (`crates/dom/src/layout/remembered.rs`): the layout host records a box's
   content box after every committing run in which it had no size containment,
   and `StyleView` substitutes it into `CoreStyle::contain_intrinsic_{width,
-  height}` once the box is skipping. This engine has no ResizeObserver, so
-  that commit's layout run is the spec's recording moment, and csswg-drafts
+  height}` once the box is skipping. That commit's layout run is the spec's
+  recording moment (the resize observations gather after that same layout
+  and deliver later, from a posted entry), and csswg-drafts
   #8407 (`content-visibility: auto` implies the `auto` keyword) is folded in
   here because the fork's own adjuster is `#[cfg(feature = "gecko")]`.
   `hughie` is unchanged by either: it reads `AutoLength(l)` as `l` already.
@@ -3635,6 +3636,31 @@ Rulings and limits to know before touching it:
   never intersecting; `bounding_client_rect` keeps its transform-free walk.
   A page without observers pays one `is_empty` per freed node and one bool
   per render, moved scroll and epilogue.
+- A W3C **ResizeObserver primitive** (`crates/dom/src/visual/resize/`,
+  Rust-only, `docs/layout-observer-design.md` §3.1 and §5): observers carry a
+  `Box<dyn ResizeEventHandler<T>>` (the same `dyn` ruling) and the node it is
+  bound to, and registrations of a target, an `ObservedBox` (content, border
+  or device-pixel content box; horizontal writing mode only) and the spec's
+  `lastReportedSizes`, which starts at `-1 × -1` so the first update reports
+  every target once. `update_resize_observations` reads the rounded layout —
+  `0 × 0` for a target with no box (`display: none` on it or an ancestor,
+  detached, no layout) — and queues an entry carrying `contentRect` and all
+  three sizes wherever the watched size moved. A target whose contents an
+  ancestor skips (`content-visibility`) is left alone, neither compared nor
+  updated, so it reports only a size different from its last one once it is
+  laid out again: Chromium's `ResizeObservation::ObservationSizeOutOfSync`
+  returns false for a display-locked subtree (`resize_observation.cc`), which
+  is web-core's `layoutchange` behaviour on `content-visibility: auto` list
+  items. The update is gated by a stale bit that
+  only a layout pass that ran, `observe_resize` and a target's free set
+  (never a scroll or a render that laid nothing out), and it does nothing
+  before the first layout. `notify_resize_observers` is the spec's broadcast
+  with the intersection loop's re-lookup-by-id and handler-out discipline;
+  the host runs it from a posted entry after the frame (ruling 2), so the
+  spec's depth filter and loop error are not built. `disconnect` clears the
+  queue, as the spec clears `[[activeTargets]]`; `take_resize_records` is
+  an engine addition. A page without observers pays one `is_empty` per freed
+  node and per update and one bool per layout pass.
 - Stylo's per-element style data and its traversal/invalidation flags live
   inline on `Node` (bench-defended 2026-08-03: no traversal regression, a
   measurably faster no-op-commit fast path).

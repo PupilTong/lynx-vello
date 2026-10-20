@@ -147,6 +147,11 @@ impl<T: Sync> Document<T> {
         self.arenas_mut().publish_committed_boxes(resized);
         self.clear_relayout_roots();
         self.mark_layout_complete(viewport, scale);
+        // A pass that ran may have resized any box, so the next resize
+        // observation update reads every registration again
+        // (`crate::visual::resize`, "The stale bit"). One store, observers
+        // or not; a `layout()` that ran no pass never reaches here.
+        self.resizes.note_layout();
     }
 
     /// The settle loop after a run that laid out anchor-positioned boxes: a
