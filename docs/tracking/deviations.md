@@ -2418,8 +2418,21 @@ consequential choice about whether to follow the spec or the quirk.
     says nothing about where `start` is; kept for parity rather than
     answering a caret position.
   - *Selection methods absent.* `getSelectedText` and `setTextSelection`
-    are code 3: there is no text selection model, nothing selects text, and
-    so there is nothing to read or set.
+    are code 3: read-only text has no selection model, nothing selects it,
+    and so there is nothing to read or set. The only selection is an
+    editing host's (see the next entry).
+
+- **`text` and `inline-text` `selectionchange` (2026-10-20): web-core's
+  `XTextSelectionEvents.ts` over the document's W3C `selectionchange`**
+  (`crates/bobcat-core/src/main/tree/text.rs`). The detail, the dedupe and
+  the empty record are web-core's. The document's selection exists only
+  inside a `contenteditable` host, and its boundary points are offsets into
+  the host's value — its direct text children — so one difference follows:
+  an `inline-text` *inside* the host never holds a boundary and reports the
+  empty record `{-1, -1, "forward"}`, where a browser's selection can enter
+  it and web-core reports offsets into it. A `text` around a host that is a
+  nested `inline-text` counts the text before the host, as web-core's
+  `range.toString().length` does.
 
 - **`x-swiper` (2026-10-06): a component with web-core's shadow `#content`
   scroll container and a dot strip, and its layouts are UA rules.** `crates/bobcat-core/src/main/tree/swiper.rs` translates

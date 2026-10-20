@@ -63,6 +63,40 @@
 //! being an editing host keeps its retained selection, as a read-only
 //! control keeps its own; freeing the host drops it.
 //!
+//! # The document's selection
+//!
+//! The Selection API gives a document one selection. Here it is the focused
+//! editing host's session selection, and nothing else: with nothing focused
+//! the document has no selection (a browser's `rangeCount` 0), and
+//! [`Document::selection`] answers `None`. Text outside an editing host
+//! cannot be selected, so the session is the only place a selection can be.
+//! This is a simplification of the standard: a browser keeps the
+//! document's ranges after a script's `blur()`, while here a session ending
+//! — a blur, focus moving to another host, the fixup rule — ends the
+//! document's selection too. The host's own retained selection
+//! ([`Document::host_selection`]) is a text control's
+//! `selectionStart`/`selectionEnd`, a different thing, and is not the
+//! document's.
+//!
+//! [`Document::selection`] reports the two boundary points apart, as UTF-16
+//! offsets into the host's value: `anchor` where the selection was started,
+//! `focus` where it was extended to, so `focus < anchor` is a backward
+//! selection.
+//!
+//! Every change of the document's selection sets one flag, the Selection
+//! API's "has scheduled selectionchange event" (HTML keeps the same flag on
+//! each document and text control): a session starting
+//! ([`Document::focus`]) or ending (a blur, the fixup rule), an applied
+//! command that changed the value or left a selection other than the one
+//! held ([`Document::commit_editing`]), and a value write to the focused
+//! host that changed the value or the selection
+//! ([`Document::set_host_value`]). A layout pass that places a pending
+//! selection in the new paragraph changes no offsets and sets nothing. The
+//! flag is a single bit, so any number of changes before the embedder takes
+//! it ([`Document::take_selectionchange`]) owe one `selectionchange`, which
+//! the embedder fires at the document node (not bubbling, not cancelable),
+//! as the standard queues one task per set flag. `dom` dispatches nothing.
+//!
 //! # Selection and composition
 //!
 //! The selection is a parley [`Selection`] over the host's committed
@@ -279,6 +313,29 @@ pub(crate) struct EditingState {
     /// id never keeps one. A focused host's entry is not read until its
     /// session ends and replaces it.
     retained: FxHashMap<NodeId, ByteSelection>,
+    /// Whether the document's selection ([`Document::selection`]) changed
+    /// since the embedder last took this ([`Document::take_selectionchange`]):
+    /// the Selection API's "has scheduled selectionchange event" flag. Set by
+    /// the session starting and ending and by every change of its offsets
+    /// (the module's "The document's selection"); cleared only by the take.
+    pub(crate) selectionchange_pending: bool,
+}
+
+/// The document's selection ([`Document::selection`]): the focused editing
+/// host's, as UTF-16 unit offsets into the host's value
+/// ([`Document::host_value`]). `anchor` and `focus` are the Selection API's
+/// two boundary points, so `focus < anchor` is a backward selection and
+/// `anchor == focus` a collapsed one (a caret).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DocumentSelection {
+    /// The focused editing host, whose direct text children hold both
+    /// boundary points.
+    pub host: NodeId,
+    /// Where the selection was started, in UTF-16 units of the host's value.
+    pub anchor: u32,
+    /// Where the selection was extended to, in UTF-16 units of the host's
+    /// value.
+    pub focus: u32,
 }
 
 /// Whether an attribute value makes its element an editing host: present
@@ -412,6 +469,9 @@ impl<T> Document<T> {
             None => ByteSelection::collapsed(0, Affinity::Downstream),
         };
         self.editing.session = Some(Session::new(node, selection));
+        // A session starting gives the document a selection where it had
+        // none, or another host's.
+        self.editing.selectionchange_pending = true;
         self.update_element_state(node, crate::ElementState::FOCUS, true);
         self.note_visual_mutation();
         self.editing.events.extend([
@@ -452,6 +512,53 @@ impl<T> Document<T> {
     /// formed.
     pub fn take_focus_events(&mut self) -> Vec<FocusEvent> {
         std::mem::take(&mut self.editing.events)
+    }
+
+    /// Whether the document's selection ([`Self::selection`]) changed since
+    /// the last [`Self::take_selectionchange`]: the Selection API's "has
+    /// scheduled selectionchange event" flag. One field read, for an
+    /// embedder that decides once per turn whether it owes a task that
+    /// fires `selectionchange`.
+    #[must_use]
+    pub const fn has_pending_selectionchange(&self) -> bool {
+        self.editing.selectionchange_pending
+    }
+
+    /// Takes the flag [`Self::has_pending_selectionchange`] reads, answering
+    /// whether it was set. The embedder fires `selectionchange` at the
+    /// document node when it was — not bubbling, not cancelable — once for
+    /// every change since the last take, as the standard's flag coalesces
+    /// them. A listener that changes the selection again sets the flag
+    /// again, for a later task.
+    pub fn take_selectionchange(&mut self) -> bool {
+        std::mem::take(&mut self.editing.selectionchange_pending)
+    }
+
+    /// The document's selection: the focused editing host's, its anchor and
+    /// focus as UTF-16 unit offsets into the host's value, or `None` while
+    /// nothing is focused (the module's "The document's selection").
+    ///
+    /// Read as [`Self::host_selection`] reads the focused host's: a selection
+    /// held in a paragraph that cannot read it back as value offsets is
+    /// reported collapsed at the value's end, as [`Self::text_input_state`]
+    /// reports it. The two points stay apart here, where `host_selection`
+    /// orders them, because a reader of the document's selection needs its
+    /// direction.
+    #[must_use]
+    pub fn selection(&self) -> Option<DocumentSelection> {
+        let session = self.editing.session.as_ref()?;
+        let host = session.host;
+        let value = self.host_value(host);
+        let bytes = session
+            .bytes(self.editable_paragraph(host).as_ref(), &value)
+            .unwrap_or_else(|| ByteSelection::collapsed(value.len(), Affinity::Downstream));
+        let to_units =
+            |byte: usize| u32::try_from(offsets::unit_of_byte(&value, byte)).unwrap_or(u32::MAX);
+        Some(DocumentSelection {
+            host,
+            anchor: to_units(bytes.anchor),
+            focus: to_units(bytes.focus),
+        })
     }
 
     /// The selection of `host` in UTF-16 units of its value, start ≤ end:
@@ -504,6 +611,8 @@ impl<T> Document<T> {
     fn unfocus(&mut self, element: NodeId, related_target: Option<NodeId>) {
         self.retain_selection();
         self.editing.session = None;
+        // The session's end is the document selection's.
+        self.editing.selectionchange_pending = true;
         self.update_element_state(element, crate::ElementState::FOCUS, false);
         self.note_visual_mutation();
         self.editing.events.extend([
@@ -539,6 +648,9 @@ impl<T> Document<T> {
     fn drop_focus(&mut self, host: NodeId) {
         self.retain_selection();
         self.editing.session = None;
+        // No focus event, but the document's selection is gone: the flag is
+        // set whatever ended the session.
+        self.editing.selectionchange_pending = true;
         if self.get(host).is_some_and(crate::Node::is_element) {
             self.update_element_state(host, crate::ElementState::FOCUS, false);
         }

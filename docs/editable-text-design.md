@@ -428,9 +428,9 @@ Public surface:
   the property being disabled under `lynx`), every 20px in a `<text>`.
 - **No transforms in geometry.** `TextInputState` geometry, like
   `bounding_client_rect`, ignores transforms.
-- **Not built yet:** caret blink, `::selection`, `selectionchange`,
-  clipboard, undo. (The realm wiring of the focus and edit events is E2,
-  below.)
+- **Not built yet:** caret blink, `::selection`, clipboard, undo. (The
+  realm wiring of the focus and edit events is E2, below; `selectionchange`
+  is built, see "Selection change events" below.)
 
 ## E2: what was built
 
@@ -1062,3 +1062,92 @@ Public surface:
   visible to script at the field's host (web-core lets `beforeinput` and the
   composition events through; no Lynx event names them).
 
+## Selection change events (2026-10-20)
+
+The Selection API's `selectionchange` at the document, and Lynx's `<text>`
+`selectionchange` (`bindselectionchange`) over it.
+
+### The document's selection and its flag (`dom`)
+
+- The document has one selection, the Selection API's, and it is the focused
+  editing host's session selection: `Document::selection()` answers
+  `DocumentSelection { host, anchor, focus }`, the two boundary points apart
+  as UTF-16 offsets into the host's value (`focus < anchor` is backward), and
+  `None` while nothing is focused. This is a simplification: a browser keeps
+  the document's ranges after a script's `blur()`, here a session ending ends
+  the document's selection. A host's retained selection (`host_selection`) is
+  a text control's own and is not the document's.
+- `EditingState::selectionchange_pending` is the "has scheduled
+  selectionchange event" flag. It is set when `focus` creates a session (not
+  when the host was already focused); when a session ends (`unfocus`,
+  `drop_focus` — a blur, focus moving on, the fixup rule); when
+  `commit_editing` applies an edit that changes the value or leaves a
+  selection other than the one held; and when `set_host_value` on the
+  focused host changes the value or leaves offsets other than its pending
+  ones. A `SetSelection` to the range already held sets nothing, whether the
+  session holds it as value offsets or, after a layout pass, in the
+  paragraph (read back through the paragraph's source map for the
+  comparison). A value write to a focused host whose selection is held in the
+  paragraph counts as a change. A layout pass that places pending offsets
+  changes none of them and sets nothing.
+- `has_pending_selectionchange()` reads the flag; `take_selectionchange()`
+  clears it and answers whether it was set.
+
+### The W3C event (`bobcat-core`)
+
+- `has_component_events` answers `true` while the flag is set, so the page's
+  epilogue posts the component-events entry: this engine's "queue a task".
+  Any number of changes before the entry runs owe one event.
+- `dispatch_component_events`, after the focus events and before the queued
+  component events, takes the flag and fires `selectionchange` at the
+  document node: not bubbling, not cancelable (no event is), not composed,
+  `EventDetail::None`. The document node has no element, so no component
+  runs at it. A listener that moves the selection again sets the flag again,
+  and the entry's epilogue posts another entry.
+- The engine-only `selectionchange` that `apply_edit` fires at the host after
+  every applied command is unchanged and separate: it runs components alone
+  (the text field reads its Lynx `selection` from it), and no realm hears it.
+
+### The realm surface (`bobcat-element`)
+
+- `createDocument` answers the document node's id, and `class Document` is
+  that node's handle: indexed in `handlesByNodeId` as the page handle is, and
+  never registered for collection (the boot module's export holds it for the
+  realm's life). It has `addEventListener` and `removeEventListener`, and
+  `__AddEventListener(document, …)` works on it as on any handle.
+- There is no `document` global: a script reaches the boot module's
+  `document` export, as web-core's main-thread Worker has no `document`
+  either. `targetInfo` and `datasetOf` answer the document node without the
+  host's attribute members, which accept elements alone; the element walks
+  that read a parent's handle (`SelectorQuery`'s `path` and `index`,
+  `adoptUnder`, query roots) stop at the page as before.
+
+### Lynx's `<text>` `selectionchange`
+
+- Fired at `text` and `inline-text` (web-core's `XText` and `InlineText`
+  both carry `XTextSelectionEvents.ts`; `inline-truncation` does not), only
+  while something listens for `selectionchange` on the element, with
+  web-core's detail `{start, end, direction}`: the smaller and larger
+  boundary offset into the element's whole text content (every text node of
+  its subtree, tree order, UTF-16 units), `"forward"` when anchor ≤ focus.
+  A collapsed selection, one outside the element, or none is the empty
+  record `{-1, -1, "forward"}`. Deduped as web-core does: a record equal to
+  the last one sent is not sent again, and the empty record only after a
+  non-empty one. Not bubbling, composed (`ComponentEvents::queue_detailed`).
+- `tree::text::report_selection_changes` runs right after the W3C event, in
+  the same entry, over the host's `text`/`inline-text` ancestors and every
+  element of `DocumentSlot::text_selection_reports`, the per-document table
+  of the last non-empty record per element (an entry leaves with the empty
+  record or when nothing listens any more).
+- One difference from web-core: the host's value is its direct text
+  children, so an `inline-text` *inside* the host never holds a boundary and
+  reports the empty record, where a browser's selection can enter it and
+  web-core fires offsets at it. A `text` around a host that is a nested
+  `inline-text` counts the text before the host, as web-core does.
+
+### Not built
+
+- Selection of read-only text: a `text-selection` `text` selected by a
+  pointer, selection handles, `::selection` painting, and the `text` methods
+  `getSelectedText`/`setTextSelection` (code 3). The document's selection
+  exists only inside an editing host today.

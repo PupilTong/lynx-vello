@@ -19,8 +19,51 @@
 //!   and answer code 3: the engine has no text selection model, so there is nothing selected to
 //!   report and nothing a selection could be set on.
 //!
-//! The component holds no state and has no lifecycle callback. Its
-//! definition, and the two behaviourless ones beside it for `inline-text` and
+//! # Events
+//!
+//! `text` and `inline-text` fire Lynx's `selectionchange` (`bindselectionchange`)
+//! with the detail `{start, end, direction}`, web-core's
+//! (`lynx-stack/packages/web-platform/web-elements/src/elements/XText/XTextSelectionEvents.ts`,
+//! on both `XText` and `InlineText`; `inline-truncation` has none), which
+//! native Android (`AndroidText.java:482-490`) and iOS
+//! (`LynxTextView.m:319-328`) share:
+//!
+//! - `start` and `end` are the smaller and the larger of the document selection's two boundary
+//!   points, as offsets into the element's whole text content — every text node of its subtree, in
+//!   tree order, in UTF-16 units — and `direction` is `"forward"` when the anchor is at or before
+//!   the focus, `"backward"` otherwise.
+//! - A collapsed selection, one with either end outside the element, and no selection at all are
+//!   the empty record `{start: -1, end: -1, direction: "forward"}`.
+//! - It is derived from the W3C `selectionchange`: the runtime fires that one at the document node
+//!   and then calls [`report_selection_changes`], which queues this one at each `text` and
+//!   `inline-text` whose record changed, for the same entry to deliver after the W3C one. web-core
+//!   listens for the document's `selectionchange` in the same way.
+//! - Only while something listens for `selectionchange` on the element
+//!   ([`dom::Document::would_reach_listener`]), as web-core attaches its document listener only
+//!   while the event is bound.
+//! - A record equal to the last one sent to the element is not sent again, and the empty record is
+//!   sent only to an element whose last record was not empty: web-core's signature check.
+//! - Not bubbling, composed ([`ComponentEvents::queue_detailed`]).
+//!
+//! The document's selection exists only inside an editing host
+//! ([`dom::Document::selection`]): a `text` with `contenteditable`, or an
+//! element inside one. Its boundary points are offsets into the host's
+//! value, its direct text children, and [`text_selection_in`] maps each into
+//! an element's text content the way web-core's
+//! `range.selectNodeContents(root); range.setEnd(node, offset);
+//! range.toString().length` does, for the one place a boundary can be here.
+//! So a `text` around a host that is a nested `inline-text` reports offsets
+//! that count the text before the host. There is one difference from
+//! web-core: an `inline-text` *inside* the host never holds a boundary,
+//! because the host's value is its direct text children alone, so it reports
+//! the empty record; a browser's selection can enter that `inline-text`, and
+//! web-core fires offsets at it. The selection of read-only text — a
+//! `text-selection` `text` selected by a pointer — is not built.
+//!
+//! The component holds no state and has no lifecycle callback; the last
+//! record sent to each element is the runtime's, in a table it passes to
+//! [`report_selection_changes`] ([`SelectionReports`]). Its definition, and
+//! the two behaviourless ones beside it for `inline-text` and
 //! `inline-truncation`, carry one fact besides the method: the three tags are
 //! Lynx text elements ([`dom::CustomElement::is_lynx_text`]), which is what
 //! lays each out as a Lynx paragraph or a run of one. `:defined` already
@@ -233,11 +276,16 @@ pub(super) const CSS_INHERITANCE_RULES: &str = "\
 view > text, view > wrapper, view > wrapper > text { color: inherit; text-decoration: inherit; }
 ";
 
+use std::ops::Range;
+
+use dom::editing::DocumentSelection;
 use dom::{CustomElement, MethodCall, MethodError, MethodOutcome, NodeId};
+use rustc_hash::FxHashMap;
 use serde_json::{Map, Value};
+use smallvec::SmallVec;
 
 use super::scroll_container::object;
-use super::{InvalidParams, LynxDocument};
+use super::{ComponentDetail, ComponentEvents, InvalidParams, LynxDocument, SELECTION_CHANGE};
 use crate::main::record::write_record_field;
 
 /// The paragraph tag the component is defined on. A nested `text` is a run
@@ -306,6 +354,163 @@ impl CustomElement<()> for Text {
             Err(InvalidParams) => MethodOutcome::Failed(MethodError::InvalidParams),
         }
     }
+}
+
+/// Per text element, the last non-empty `selectionchange` record sent to it
+/// — its range and whether it was forward — which [`report_selection_changes`]
+/// compares the next record against, as web-core's `#lastSelectionSignature`.
+///
+/// A side table rather than a field of the element, because no element
+/// component holds it: `text` is stateless, and `inline-text` has no
+/// behaviour at all. It is the runtime's, one per document (`DocumentSlot`).
+/// An entry exists only for an element that was sent a non-empty record,
+/// and leaves when the element is sent the empty one, when nothing listens
+/// for the event on it any more, or when it is freed, so the table holds
+/// the one or two text elements the one selection lies in.
+#[derive(Default)]
+pub(crate) struct SelectionReports(FxHashMap<NodeId, (Range<u32>, bool)>);
+
+/// Whether `node` fires Lynx's `selectionchange`: a `text` or an
+/// `inline-text` (module documentation).
+fn reports_selection(node: &dom::Node<()>) -> bool {
+    matches!(node.tag_name(), Some(TEXT_TAG | INLINE_TEXT_TAG))
+}
+
+/// Called by the runtime after it fired the W3C `selectionchange` at the
+/// document node: queues the Lynx `selectionchange` on `events` at every
+/// `text` and `inline-text` whose record changed (module documentation).
+///
+/// The elements asked are the ones the record can have changed for: the
+/// `text` and `inline-text` ancestors of the editing host, the host
+/// included, through `parent_id` — a UA shadow tree's host is not crossed,
+/// so a text field's editor reports to no text outside it — and every
+/// element `reports` holds, whose selection may have left it. An element
+/// nothing listens on is forgotten, as web-core forgets its signature when
+/// the event is unbound, so a listener added later starts from the empty
+/// record.
+pub(crate) fn report_selection_changes(
+    document: &LynxDocument,
+    reports: &mut SelectionReports,
+    events: &ComponentEvents,
+) {
+    let selection = document.selection();
+    let mut candidates: SmallVec<[NodeId; 4]> = SmallVec::new();
+    let mut current = selection.map(|selection| selection.host);
+    while let Some(id) = current {
+        let Some(node) = document.get(id) else {
+            break;
+        };
+        if reports_selection(node) {
+            candidates.push(id);
+        }
+        current = node.parent_id();
+    }
+    for &element in reports.0.keys() {
+        if !candidates.contains(&element) {
+            candidates.push(element);
+        }
+    }
+    for element in candidates {
+        if document.get(element).is_none()
+            || !document.would_reach_listener(element, SELECTION_CHANGE, false, true)
+        {
+            reports.0.remove(&element);
+            continue;
+        }
+        let record =
+            selection.and_then(|selection| text_selection_in(document, element, selection));
+        match (reports.0.get(&element), record) {
+            (None, None) => {}
+            (Some(last), Some(record)) if *last == record => {}
+            (_, Some((range, forward))) => {
+                reports.0.insert(element, (range.clone(), forward));
+                events.queue_detailed(
+                    element,
+                    SELECTION_CHANGE,
+                    ComponentDetail::TextSelection {
+                        range: Some(range),
+                        forward,
+                    },
+                );
+            }
+            (Some(_), None) => {
+                reports.0.remove(&element);
+                events.queue_detailed(
+                    element,
+                    SELECTION_CHANGE,
+                    ComponentDetail::TextSelection {
+                        range: None,
+                        forward: true,
+                    },
+                );
+            }
+        }
+    }
+}
+
+/// The document's selection as `element`'s `selectionchange` record: the
+/// range between its two boundary points as offsets into `element`'s text
+/// content, and whether it runs forward (anchor at or before focus); `None`,
+/// the empty record, when the selection is collapsed — web-core's
+/// `anchor !== focus` — or its host is neither `element` nor inside it, or
+/// a boundary cannot be placed in `element`'s text ([`text_offset`]).
+fn text_selection_in(
+    document: &LynxDocument,
+    element: NodeId,
+    selection: DocumentSelection,
+) -> Option<(Range<u32>, bool)> {
+    let mut current = Some(selection.host);
+    while current != Some(element) {
+        current = document.get(current?).and_then(dom::Node::parent_id);
+    }
+    if selection.anchor == selection.focus {
+        return None;
+    }
+    let anchor = text_offset(document, element, selection.host, selection.anchor)?;
+    let focus = text_offset(document, element, selection.host, selection.focus)?;
+    Some((
+        anchor.min(focus)..anchor.max(focus),
+        selection.anchor <= selection.focus,
+    ))
+}
+
+/// One boundary point — `unit` UTF-16 units into `host`'s value, which is
+/// its direct text children — as an offset into `root`'s text content:
+/// web-core's `range.selectNodeContents(root); range.setEnd(node, offset);
+/// range.toString().length`.
+///
+/// Walks `root`'s subtree in tree order, counting the UTF-16 length of every
+/// text node. A direct text child of `host` that holds the unit — it lies at
+/// or before the node's end — answers the count before it plus the unit;
+/// one that does not takes its length off the unit. A text node that is not
+/// a direct child of `host` only adds to the count. `None` when the walk
+/// ends with the unit not placed, where web-core's `setEnd` throws and its
+/// offset is `-1`.
+fn text_offset(document: &LynxDocument, root: NodeId, host: NodeId, unit: u32) -> Option<u32> {
+    let mut remaining = unit;
+    let mut count: u32 = 0;
+    let mut stack: SmallVec<[NodeId; 16]> = SmallVec::new();
+    stack.push(root);
+    while let Some(id) = stack.pop() {
+        let Some(node) = document.get(id) else {
+            continue;
+        };
+        if let Some(text) = node.text() {
+            let length =
+                u32::try_from(text.chars().map(char::len_utf16).sum::<usize>()).unwrap_or(u32::MAX);
+            if node.parent_id() == Some(host) {
+                if remaining <= length {
+                    return Some(count.saturating_add(remaining));
+                }
+                remaining -= length;
+            }
+            count = count.saturating_add(length);
+            continue;
+        }
+        // Children in reverse, so the first is taken next: tree order.
+        stack.extend(node.child_ids().iter().rev().copied());
+    }
+    None
 }
 
 /// `getTextBoundingRect({start, end})` on `text`, with `params` as the JSON
@@ -1386,5 +1591,154 @@ mod tests {
             dom::MethodOutcome::NotFound,
             "only `text` has the method"
         );
+    }
+
+    // --- `selectionchange` ---------------------------------------------------
+
+    /// A text node `content` appended to `parent`: a DOM text child, which
+    /// an editing host's value is made of (a `raw-text` carrier is not).
+    fn append_text(document: &mut LynxDocument, parent: dom::NodeId, content: &str) {
+        let node = document.create_text_node(content, ());
+        document.append_child(parent, node);
+    }
+
+    /// Focuses `host` and selects `anchor`..`focus` of its value, in UTF-16
+    /// units.
+    fn select(document: &mut LynxDocument, host: dom::NodeId, anchor: usize, focus: usize) {
+        if document.focused() != Some(host) {
+            assert!(document.focus(host));
+        }
+        assert!(
+            document
+                .apply_editing(dom::editing::Command::SetSelection {
+                    range: anchor..focus,
+                })
+                .applied
+        );
+    }
+
+    /// The record of `element` for the document's selection now.
+    fn record_of(
+        document: &LynxDocument,
+        element: dom::NodeId,
+    ) -> Option<(std::ops::Range<u32>, bool)> {
+        super::text_selection_in(document, element, document.selection()?)
+    }
+
+    /// `<text contenteditable>before<inline-text>inline</inline-text>after</text>`:
+    /// the host's value is its direct text children, `beforeafter`, and a
+    /// boundary in `after` is placed after the `inline-text`'s six units in
+    /// the `text`'s content. The `inline-text` inside the host holds no
+    /// boundary, so its record is the empty one.
+    #[test]
+    fn a_text_s_selection_counts_its_whole_text_content() {
+        let mut document = document();
+        let text = child(&mut document, "text", "");
+        document.set_attribute(text, "contenteditable", "");
+        append_text(&mut document, text, "before");
+        let inline = element_under(&mut document, text, "inline-text", "");
+        append_text(&mut document, inline, "inline");
+        append_text(&mut document, text, "after");
+        document.layout();
+
+        select(&mut document, text, 1, 4);
+        assert_eq!(record_of(&document, text), Some((1..4, true)));
+        assert_eq!(record_of(&document, inline), None);
+
+        // Value unit 8 is the third unit of `after`, 6 + 6 + 2 = 14 into the
+        // content; 7 is 13.
+        select(&mut document, text, 8, 7);
+        assert_eq!(record_of(&document, text), Some((13..14, false)));
+        assert_eq!(record_of(&document, inline), None);
+
+        select(&mut document, text, 3, 3);
+        assert_eq!(record_of(&document, text), None, "collapsed");
+
+        let mut other = super::super::test_support::document();
+        let plain = child(&mut other, "text", "");
+        other.set_attribute(plain, "contenteditable", "");
+        append_text(&mut other, plain, "abc");
+        other.layout();
+        select(&mut other, plain, 0, 2);
+        assert_eq!(record_of(&other, plain), Some((0..2, true)));
+    }
+
+    /// A `text` around a host that is a nested `inline-text` counts the text
+    /// before the host, and the host reports its own offsets.
+    #[test]
+    fn an_inline_text_host_s_selection_counts_from_its_text() {
+        let mut document = document();
+        let text = child(&mut document, "text", "");
+        append_text(&mut document, text, "ab");
+        let inline = element_under(&mut document, text, "inline-text", "");
+        document.set_attribute(inline, "contenteditable", "");
+        append_text(&mut document, inline, "cdef");
+        document.layout();
+
+        select(&mut document, inline, 1, 3);
+        assert_eq!(record_of(&document, inline), Some((1..3, true)));
+        assert_eq!(record_of(&document, text), Some((3..5, true)));
+        let view = child(&mut document, "view", "");
+        assert_eq!(record_of(&document, view), None, "outside the element");
+    }
+
+    /// The Lynx `selectionchange` is queued only for a listened-to element,
+    /// only when its record changed, and the empty record only after a
+    /// non-empty one; an element nobody listens on any more is forgotten.
+    #[test]
+    fn selection_reports_are_deduped_and_the_empty_record_follows_a_selection() {
+        use dom::event::{ListenerKey, ListenerKinds};
+
+        use super::super::test_support::with_component_events;
+        use super::super::{ComponentDetail, ComponentEvent, PageConfig};
+        use super::{SELECTION_CHANGE, SelectionReports, report_selection_changes};
+
+        let (mut document, events) = with_component_events(PageConfig::default());
+        let text = child(&mut document, "text", "");
+        document.set_attribute(text, "contenteditable", "");
+        append_text(&mut document, text, "abc");
+        document.layout();
+        let mut reports = SelectionReports::default();
+        let report = |document: &LynxDocument, reports: &mut SelectionReports| {
+            report_selection_changes(document, reports, &events);
+            events.take()
+        };
+        let queued = |range, forward| {
+            vec![ComponentEvent::Detailed {
+                node: text,
+                name: SELECTION_CHANGE,
+                detail: ComponentDetail::TextSelection { range, forward },
+            }]
+        };
+
+        select(&mut document, text, 0, 2);
+        assert_eq!(report(&document, &mut reports), [], "nothing listens");
+
+        let realm = ListenerKey(1);
+        document.add_listener(text, SELECTION_CHANGE, ListenerKinds::PATH_BUBBLE, realm);
+        assert_eq!(report(&document, &mut reports), queued(Some(0..2), true));
+        assert_eq!(report(&document, &mut reports), [], "the same record");
+        select(&mut document, text, 2, 0);
+        assert_eq!(report(&document, &mut reports), queued(Some(0..2), false));
+
+        assert!(document.blur());
+        assert_eq!(report(&document, &mut reports), queued(None, true));
+        assert_eq!(report(&document, &mut reports), [], "empty after empty");
+
+        // A collapsed selection is the empty record too, and is not sent to
+        // an element whose last record was empty.
+        select(&mut document, text, 1, 1);
+        assert_eq!(report(&document, &mut reports), []);
+        select(&mut document, text, 1, 3);
+        assert_eq!(report(&document, &mut reports), queued(Some(1..3), true));
+
+        // Unbound: forgotten, so a new listener starts from the empty
+        // record and hears the same range again.
+        document.remove_listener(text, SELECTION_CHANGE, realm);
+        assert!(document.blur());
+        assert_eq!(report(&document, &mut reports), []);
+        document.add_listener(text, SELECTION_CHANGE, ListenerKinds::PATH_BUBBLE, realm);
+        select(&mut document, text, 1, 3);
+        assert_eq!(report(&document, &mut reports), queued(Some(1..3), true));
     }
 }
